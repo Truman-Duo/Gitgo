@@ -5,23 +5,25 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
-from PySide6.QtGui import QAction, QIcon, QTextCursor
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -37,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config import Config, ConfigManager
+from config import Config, ConfigManager, ProjectConfig
 from core import (
     CommitInfo,
     FileEntry,
@@ -128,7 +131,6 @@ class WorkspaceCommitBox(CommitBox):
             )
 
     def set_merged(self):
-        """标记为已合并，变灰"""
         self.setStyleSheet(
             "WorkspaceCommitBox { background-color: #eeeeee; border: 1px solid #ccc; border-radius: 4px; }"
         )
@@ -170,28 +172,29 @@ class FormalCommitBox(CommitBox):
 
 
 class SyncWorker(QObject):
-    """在后台线程执行同步操作，通过信号汇报进度"""
+    """在后台线程执行同步操作"""
 
     progress = Signal(int, int, str)
     finished = Signal(bool, str)
-    status = Signal(str)
 
-    def __init__(self, config: Config, entries: list[FileEntry], msg: str):
+    def __init__(self, workspace_path: str, backup_path: str,
+                 config: Config, entries: list[FileEntry], msg: str):
         super().__init__()
+        self.workspace_path = workspace_path
+        self.backup_path = backup_path
         self.config = config
         self.entries = entries
         self.msg = msg
 
     @Slot()
     def run(self):
-        ws = Path.cwd().resolve()
-        bk = Path(self.config.backup_path)
-
         def _progress(current, total, text=""):
             self.progress.emit(current, total, text)
 
         success = sync_to_backup(
-            self.entries, self.msg, ws, bk, _progress
+            self.entries, self.msg,
+            self.workspace_path, self.backup_path,
+            _progress,
         )
         self.finished.emit(success, "同步完成" if success else "同步失败")
 
@@ -203,13 +206,15 @@ class ScanWorker(QObject):
     finished = Signal(list, str)
     files_scanned = Signal(int)
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, workspace_path: str, backup_path: str):
         super().__init__()
         self.config = config
+        self.workspace_path = workspace_path
+        self.backup_path = backup_path
 
     @Slot()
     def run(self):
-        ws = Path.cwd().resolve()
+        ws = Path(self.workspace_path).resolve()
         exclude = get_exclude_patterns(self.config, ws)
 
         def _progress(current, total, text=""):
@@ -222,11 +227,11 @@ class ScanWorker(QObject):
             self.finished.emit([], "工作区无文件")
             return
 
-        if not self.config.backup_path:
+        if not self.backup_path:
             self.finished.emit([], "未配置备份路径")
             return
 
-        entries = compare_files(ws, Path(self.config.backup_path), files, _progress)
+        entries = compare_files(ws, Path(self.backup_path), files, _progress)
         new = sum(1 for e in entries if e.status == "new")
         mod = sum(1 for e in entries if e.status == "modified")
         same = sum(1 for e in entries if e.status == "same")
@@ -254,32 +259,263 @@ class PushWorker(QObject):
         self.finished.emit(success, "Push 成功" if success else "Push 失败")
 
 
-# ── 主窗口 ────────────────────────────────────────────────
+# ── 项目列表面板 ────────────────────────────────────────────
 
 
-class MainWindow(QMainWindow):
-    def __init__(self, config: Config):
-        super().__init__()
+class ProjectListPanel(QWidget):
+    """项目列表首页 — 像微信好友列表，点击进入操作界面"""
+
+    project_selected = Signal(object)  # ProjectConfig
+
+    def __init__(self, config: Config, parent=None):
+        super().__init__(parent)
         self.config = config
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        title = QLabel("sync_tool — 项目列表")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(title)
+
+        sub = QLabel("选择一个项目进入同步操作界面，或添加新项目")
+        sub.setStyleSheet("color: gray; margin-bottom: 16px;")
+        layout.addWidget(sub)
+
+        # 项目表格
+        self.project_table = QTableWidget()
+        self.project_table.setColumnCount(4)
+        self.project_table.setHorizontalHeaderLabels(["项目名", "工作区路径", "备份路径", "操作"])
+        self.project_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.project_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.project_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.project_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.project_table.verticalHeader().setVisible(False)
+        self.project_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.project_table.cellDoubleClicked.connect(self._on_double_click)
+        layout.addWidget(self.project_table)
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        self.add_btn = QPushButton("+ 添加项目")
+        self.add_btn.clicked.connect(self._add_project)
+        self.edit_btn = QPushButton("编辑")
+        self.edit_btn.clicked.connect(self._edit_project)
+        self.edit_btn.setEnabled(False)
+        self.remove_btn = QPushButton("删除")
+        self.remove_btn.clicked.connect(self._remove_project)
+        self.remove_btn.setEnabled(False)
+        btn_row.addWidget(self.add_btn)
+        btn_row.addWidget(self.edit_btn)
+        btn_row.addWidget(self.remove_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # 选中行时启用编辑/删除按钮
+        self.project_table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        self._refresh_table()
+
+    def _refresh_table(self):
+        self.project_table.setRowCount(len(self.config.projects))
+        for i, p in enumerate(self.config.projects):
+            name_item = QTableWidgetItem(p.name or "(未命名)")
+            name_item.setData(Qt.UserRole, i)  # 存索引
+            self.project_table.setItem(i, 0, name_item)
+            self.project_table.setItem(i, 1, QTableWidgetItem(p.workspace_path or "(使用当前目录)"))
+            self.project_table.setItem(i, 2, QTableWidgetItem(p.backup_path or "未设置"))
+
+            enter_btn = QPushButton("进入")
+            enter_btn.clicked.connect(lambda checked, row=i: self._enter_project(row))
+            self.project_table.setCellWidget(i, 3, enter_btn)
+
+    def _on_selection_changed(self):
+        has_sel = len(self.project_table.selectedItems()) > 0
+        self.edit_btn.setEnabled(has_sel)
+        self.remove_btn.setEnabled(has_sel)
+
+    def _selected_row(self) -> int | None:
+        rows = set()
+        for item in self.project_table.selectedItems():
+            rows.add(item.row())
+        return next(iter(rows)) if rows else None
+
+    def _on_double_click(self, row: int, col: int):
+        self._enter_project(row)
+
+    def _enter_project(self, row: int):
+        if 0 <= row < len(self.config.projects):
+            self.project_selected.emit(self.config.projects[row])
+
+    def _add_project(self):
+        dlg = _ProjectEditDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            pc = dlg.get_project()
+            self.config.projects.append(pc)
+            ConfigManager.save(self.config)
+            self._refresh_table()
+
+    def _edit_project(self):
+        row = self._selected_row()
+        if row is None:
+            return
+        pc = self.config.projects[row]
+        dlg = _ProjectEditDialog(self, pc)
+        if dlg.exec() == QDialog.Accepted:
+            updated = dlg.get_project()
+            self.config.projects[row] = updated
+            ConfigManager.save(self.config)
+            self._refresh_table()
+
+    def _remove_project(self):
+        row = self._selected_row()
+        if row is None:
+            return
+        pc = self.config.projects[row]
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"删除项目「{pc.name}」？\n（仅移除配置记录，不影响目录文件）",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.config.projects.pop(row)
+            ConfigManager.save(self.config)
+            self._refresh_table()
+
+
+class _ProjectEditDialog(QDialog):
+    """添加/编辑项目的对话框"""
+
+    def __init__(self, parent=None, project: Optional[ProjectConfig] = None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑项目" if project else "添加项目")
+        self.setMinimumWidth(500)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("例如: MyApp")
+        form.addRow("项目名:", self.name_edit)
+
+        ws_layout = QHBoxLayout()
+        self.ws_edit = QLineEdit()
+        self.ws_edit.setPlaceholderText("工程版目录路径（留空使用当前目录）")
+        ws_btn = QPushButton("浏览...")
+        ws_btn.clicked.connect(lambda: self._browse(self.ws_edit))
+        ws_layout.addWidget(self.ws_edit)
+        ws_layout.addWidget(ws_btn)
+        form.addRow("工作区路径:", ws_layout)
+
+        bk_layout = QHBoxLayout()
+        self.bk_edit = QLineEdit()
+        self.bk_edit.setPlaceholderText("正式版备份仓库路径")
+        bk_btn = QPushButton("浏览...")
+        bk_btn.clicked.connect(lambda: self._browse(self.bk_edit))
+        bk_layout.addWidget(self.bk_edit)
+        bk_layout.addWidget(bk_btn)
+        form.addRow("备份路径:", bk_layout)
+
+        layout.addLayout(form)
+        layout.addSpacing(10)
+
+        btn_row = QHBoxLayout()
+        self.ok_btn = QPushButton("确认")
+        self.ok_btn.clicked.connect(self._on_ok)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(self.ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        if project:
+            self.name_edit.setText(project.name)
+            self.ws_edit.setText(project.workspace_path)
+            self.bk_edit.setText(project.backup_path)
+            self._original = project
+        else:
+            self._original = None
+
+    def _browse(self, edit: QLineEdit):
+        d = QFileDialog.getExistingDirectory(self, "选择目录")
+        if d:
+            edit.setText(d)
+
+    def _on_ok(self):
+        name = self.name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "项目名不能为空")
+            return
+        self.accept()
+
+    def get_project(self) -> ProjectConfig:
+        pc = ProjectConfig(
+            name=self.name_edit.text().strip(),
+            workspace_path=self.ws_edit.text().strip(),
+            backup_path=self.bk_edit.text().strip(),
+        )
+        # 保留原有项目的其他设置（commit_format, force_exclude, sync_base）
+        if self._original:
+            pc.commit_format = self._original.commit_format
+            pc.force_exclude = self._original.force_exclude
+            pc.sync_base = self._original.sync_base
+        return pc
+
+
+# ── 工作区操作面板 ────────────────────────────────────────────
+
+
+class WorkspacePanel(QWidget):
+    """项目的工作区操作界面 — 扫描/对比/commit/同步/push"""
+
+    back_requested = Signal()
+
+    def __init__(self, config: Config, project: ProjectConfig, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.project = project
         self.entries: list[FileEntry] = []
         self.commits: list[CommitInfo] = []
         self.formal_commits: list[FormalCommit] = []
         self.selected_workspace: set[int] = set()
         self.selected_formal: int | None = None
-        self.worker_thread: Optional[QThread] = None
 
         self._init_ui()
-        self._update_status_bar()
+
+    # ── 界面构建 ────────────────────────────────────────────
 
     def _init_ui(self):
-        self.setWindowTitle("同步工具 - Workspace <-> Backup")
-        self.setMinimumSize(1100, 700)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
+        # 顶部导航栏
+        nav = QHBoxLayout()
+        back_btn = QPushButton("← 返回项目列表")
+        back_btn.clicked.connect(self.back_requested.emit)
+        nav.addWidget(back_btn)
 
-        # ── 左右分割 ──
+        proj_label = QLabel(f"当前项目: {self.project.name}")
+        proj_label.setStyleSheet("font-weight: bold; font-size: 13px; margin-left: 10px;")
+        nav.addWidget(proj_label)
+
+        # 状态栏信息
+        ws_txt = self.project.workspace_path or str(Path.cwd())
+        bk_txt = self.project.backup_path or "未配置"
+        status_info = QLabel(f"  工作区: {ws_txt}  |  备份: {bk_txt}")
+        status_info.setStyleSheet("color: gray; font-size: 11px;")
+        nav.addWidget(status_info, 1)
+        layout.addLayout(nav)
+
+        # 分隔线
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #ddd;")
+        layout.addWidget(sep)
+
+        # 主内容区：左右分割
         splitter = QSplitter()
 
         # ===== 左侧: 文件列表 =====
@@ -331,11 +567,10 @@ class MainWindow(QMainWindow):
         scan_layout.addWidget(self.scan_status, 1)
         right_layout.addWidget(scan_group)
 
-        # 步骤 2: Commit 整合（Box 布局）
+        # 步骤 2: Commit 整合
         commit_group = QGroupBox("步骤 2: Commit 整合")
         commit_layout = QVBoxLayout(commit_group)
 
-        # -- Workspace Commits --
         ws_label = QLabel("工作区 Commits（点击选中，Ctrl/Shift 多选，然后合并）")
         ws_label.setStyleSheet("font-weight: bold; font-size: 11px;")
         commit_layout.addWidget(ws_label)
@@ -362,7 +597,6 @@ class MainWindow(QMainWindow):
         self.ws_scroll.setWidget(self.ws_container)
         commit_layout.addWidget(self.ws_scroll)
 
-        # -- Formal Commits --
         formal_label = QLabel("正式 Commits（选中后执行同步）")
         formal_label.setStyleSheet("font-weight: bold; font-size: 11px; margin-top: 6px;")
         commit_layout.addWidget(formal_label)
@@ -388,7 +622,7 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(commit_group)
 
-        # 步骤 3: 执行（Sync / Push 分离）
+        # 步骤 3: 执行
         exec_group = QGroupBox("步骤 3: 执行同步")
         exec_layout = QVBoxLayout(exec_group)
 
@@ -409,18 +643,14 @@ class MainWindow(QMainWindow):
         self.push_btn.setEnabled(False)
         exec_btn_row.addWidget(self.push_btn)
 
-        self.term_btn = QPushButton("终端模式")
-        self.term_btn.clicked.connect(self._open_terminal)
-        exec_btn_row.addWidget(self.term_btn)
-
-        self.config_btn = QPushButton("配置")
-        self.config_btn.clicked.connect(self._open_config)
+        self.config_btn = QPushButton("配置路径")
+        self.config_btn.clicked.connect(self._edit_paths)
         exec_btn_row.addWidget(self.config_btn)
 
         exec_layout.addLayout(exec_btn_row)
         right_layout.addWidget(exec_group)
 
-        # 日志输出
+        # 日志
         log_label = QLabel("日志输出:")
         log_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
         right_layout.addWidget(log_label)
@@ -433,18 +663,6 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right_widget)
         splitter.setSizes([450, 650])
         layout.addWidget(splitter)
-
-        self.status_bar = self.statusBar()
-
-    # ── 状态栏 ──────────────────────────────────────────────
-
-    def _update_status_bar(self):
-        ws = Path.cwd().resolve()
-        bk = self.config.backup_path or "未配置"
-        base = self.config.sync_base[:8] if self.config.sync_base else "无"
-        self.status_bar.showMessage(
-            f"工作区: {ws}  |  备份: {bk}  |  上次同步基点: {base}"
-        )
 
     # ── 日志 ─────────────────────────────────────────────
 
@@ -465,14 +683,11 @@ class MainWindow(QMainWindow):
             self.file_table.setCellWidget(i, 0, cb)
 
             status_colors = {
-                "new": "green",
-                "modified": "gold",
-                "same": "gray",
-                "renamed": "cyan",
+                "new": "green", "modified": "gold",
+                "same": "gray", "renamed": "cyan",
             }
             status_item = QTableWidgetItem(e.status.upper())
-            color = status_colors.get(e.status, "white")
-            status_item.setForeground(color)
+            status_item.setForeground(status_colors.get(e.status, "white"))
             self.file_table.setItem(i, 1, status_item)
 
             path_item = QTableWidgetItem(e.rel_path)
@@ -508,11 +723,11 @@ class MainWindow(QMainWindow):
 
     def _refresh_table_checks(self):
         for i, e in enumerate(self.entries):
-            widget = self.file_table.cellWidget(i, 0)
-            if widget and isinstance(widget, QCheckBox):
-                widget.blockSignals(True)
-                widget.setChecked(e.selected)
-                widget.blockSignals(False)
+            w = self.file_table.cellWidget(i, 0)
+            if w and isinstance(w, QCheckBox):
+                w.blockSignals(True)
+                w.setChecked(e.selected)
+                w.blockSignals(False)
 
     # ── 扫描 ─────────────────────────────────────────────
 
@@ -523,7 +738,10 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self._log("开始扫描工作区...")
 
-        self.scan_worker = ScanWorker(self.config)
+        ws = self.project.workspace_path or str(Path.cwd())
+        bk = self.project.backup_path
+
+        self.scan_worker = ScanWorker(self.config, ws, bk)
         self.scan_thread = QThread()
         self.scan_worker.moveToThread(self.scan_thread)
         self.scan_thread.started.connect(self.scan_worker.run)
@@ -536,8 +754,7 @@ class MainWindow(QMainWindow):
 
     def _on_scan_progress(self, current: int, total: int, msg: str):
         if total > 0:
-            pct = int(current / total * 100)
-            self.progress_bar.setValue(pct)
+            self.progress_bar.setValue(int(current / total * 100))
         self.scan_status.setText(f"扫描: {current}/{total}")
 
     def _on_scan_finished(self, entries: list[FileEntry], summary: str):
@@ -547,14 +764,11 @@ class MainWindow(QMainWindow):
         self.scan_btn.setEnabled(True)
         self._log(summary)
         self._log(f"待处理文件: {len(entries)}")
-
-        # 自动刷新 workspace commit 列表
         self._refresh_workspace_boxes()
 
-    # ── Workspace Box 管理 ──────────────────────────────────
+    # ── Workspace Box ────────────────────────────────────
 
     def _clear_box_layout(self, layout: QVBoxLayout):
-        """清空 layout 中所有 widget，保留末尾 stretch"""
         while layout.count() > 0:
             item = layout.takeAt(0)
             w = item.widget()
@@ -562,8 +776,8 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
 
     def _refresh_workspace_boxes(self):
-        ws = Path.cwd().resolve()
-        commits = get_git_log(ws, self.config.sync_base or None)
+        ws = Path(self.project.workspace_path or Path.cwd()).resolve()
+        commits = get_git_log(ws, self.project.sync_base or None)
         self.commits = commits
 
         self._clear_box_layout(self.ws_box_layout)
@@ -588,7 +802,6 @@ class MainWindow(QMainWindow):
 
     def _on_workspace_box_clicked(self, index: int):
         modifiers = QApplication.keyboardModifiers()
-
         if modifiers == Qt.ControlModifier:
             if index in self.selected_workspace:
                 self.selected_workspace.discard(index)
@@ -601,7 +814,6 @@ class MainWindow(QMainWindow):
                 self.selected_workspace.add(i)
         else:
             self.selected_workspace = {index}
-
         self._update_workspace_box_styles()
         self.merge_btn.setEnabled(len(self.selected_workspace) >= 2)
 
@@ -612,11 +824,10 @@ class MainWindow(QMainWindow):
             if isinstance(w, WorkspaceCommitBox):
                 w.selected = w._idx in self.selected_workspace
 
-    # ── Formal Box 管理 ────────────────────────────────────
+    # ── Formal Box ───────────────────────────────────────
 
     def _refresh_formal_boxes(self):
         self._clear_box_layout(self.formal_box_layout)
-
         if not self.formal_commits:
             label = QLabel("  暂无正式 commit")
             label.setStyleSheet("color: gray; padding: 8px;")
@@ -626,27 +837,21 @@ class MainWindow(QMainWindow):
                 header = fc.message.split("\n")[0]
                 synced_str = "已同步" if fc.synced else "未同步"
                 pushed_str = " 已推送" if fc.pushed else ""
-                subtitle = f"{synced_str}{pushed_str}"
-                box = FormalCommitBox(i, header, subtitle, self.formal_container)
+                box = FormalCommitBox(i, header, f"{synced_str}{pushed_str}", self.formal_container)
                 box.set_synced(fc.synced)
                 box.set_pushed(fc.pushed)
                 box.clicked.connect(self._on_formal_box_clicked)
                 self.formal_box_layout.addWidget(box)
             self._update_formal_box_styles()
-
         self.formal_box_layout.addStretch()
 
     def _on_formal_box_clicked(self, index: int):
-        # 单选 formal box
         if self.selected_formal == index:
             self.selected_formal = None
         else:
             self.selected_formal = index
-
         self._update_formal_box_styles()
         self.delete_formal_btn.setEnabled(self.selected_formal is not None)
-
-        # Sync 按钮：需要选中一个未 synced 的 formal box
         if self.selected_formal is not None:
             fc = self.formal_commits[self.selected_formal]
             self.sync_btn.setEnabled(not fc.synced)
@@ -678,7 +883,7 @@ class MainWindow(QMainWindow):
             self._refresh_formal_boxes()
             self._log("已删除正式 commit")
 
-    # ── 合并交互 ───────────────────────────────────────────
+    # ── 合并 ─────────────────────────────────────────────
 
     def _merge_selected(self):
         if len(self.selected_workspace) < 2:
@@ -686,23 +891,16 @@ class MainWindow(QMainWindow):
 
         selected_indices = sorted(self.selected_workspace)
         selected_commits = [self.commits[i] for i in selected_indices]
-
-        from datetime import datetime
-        import copy
-        # 临时 config 传给 build_commit_template（它读 config.commit_format.prefix）
         template = build_commit_template(selected_commits, self.config)
 
         dialog = QDialog(self)
         dialog.setWindowTitle("编辑正式 Commit Message")
         dialog.setMinimumSize(550, 350)
-
         dlg_layout = QVBoxLayout(dialog)
         dlg_layout.addWidget(QLabel("请编辑正式 commit message（首行格式: [PREFIX-N] type: subject）："))
-
         editor = QTextEdit()
         editor.setPlainText(template)
         dlg_layout.addWidget(editor)
-
         btn_layout = QHBoxLayout()
         ok_btn = QPushButton("确认")
         cancel_btn = QPushButton("取消")
@@ -710,7 +908,6 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
         dlg_layout.addLayout(btn_layout)
-
         ok_btn.clicked.connect(dialog.accept)
         cancel_btn.clicked.connect(dialog.reject)
 
@@ -721,21 +918,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "格式错误", err)
                 return
 
-            # 分配编号
-            prefix = self.config.commit_format.get("prefix", "PROJ")
-            number_start = self.config.commit_format.get("number_start", 0)
+            prefix = self.project.commit_format.get("prefix", "PROJ")
+            number_start = self.project.commit_format.get("number_start", 0)
             max_n = number_start
             for fc in self.formal_commits:
                 if fc.number > max_n:
                     max_n = fc.number
-            # 也查备份仓库
-            repo_max = _find_next_number(self.config.backup_path, prefix)
+            repo_max = _find_next_number(self.project.backup_path, prefix)
             next_n = max(max_n, repo_max)
 
             fc = FormalCommit(
-                message=msg,
-                number=next_n,
-                prefix=prefix,
+                message=msg, number=next_n, prefix=prefix,
                 created_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
             )
             self.formal_commits.append(fc)
@@ -744,18 +937,16 @@ class MainWindow(QMainWindow):
             self._on_formal_box_clicked(self.selected_formal)
             self._log(f"正式 commit 已创建: [{prefix}-{fc.number}]")
 
-            # 标记 workspace box 为已合并
             for i in range(self.ws_box_layout.count()):
                 item = self.ws_box_layout.itemAt(i)
                 w = item.widget()
                 if isinstance(w, WorkspaceCommitBox) and w._idx in self.selected_workspace:
                     w.set_merged()
                     w.selected = False
-
             self.selected_workspace = set()
             self.merge_btn.setEnabled(False)
 
-    # ── 同步（Sync）──────────────────────────────────────────
+    # ── Sync ─────────────────────────────────────────────
 
     def _start_sync(self):
         if self.selected_formal is None:
@@ -767,7 +958,8 @@ class MainWindow(QMainWindow):
             return
 
         fc = self.formal_commits[self.selected_formal]
-        msg = fc.message
+        ws = self.project.workspace_path or str(Path.cwd())
+        bk = self.project.backup_path
 
         self.sync_btn.setEnabled(False)
         self.push_btn.setEnabled(False)
@@ -775,7 +967,7 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("正在同步到备份仓库...")
         self._log("开始同步...")
 
-        self.sync_worker = SyncWorker(self.config, self.entries, msg)
+        self.sync_worker = SyncWorker(ws, bk, self.config, self.entries, fc.message)
         self.sync_thread = QThread()
         self.sync_worker.moveToThread(self.sync_thread)
         self.sync_thread.started.connect(self.sync_worker.run)
@@ -788,8 +980,7 @@ class MainWindow(QMainWindow):
 
     def _on_sync_progress(self, current: int, total: int, msg: str):
         if total > 0:
-            pct = int(current / total * 100)
-            self.progress_bar.setValue(pct)
+            self.progress_bar.setValue(int(current / total * 100))
         if msg:
             self.progress_label.setText(msg)
             self._log(msg)
@@ -803,27 +994,24 @@ class MainWindow(QMainWindow):
             fc.synced = True
 
             # 更新 sync_base
+            ws = Path(self.project.workspace_path or Path.cwd()).resolve()
             try:
                 result = subprocess.run(
-                    ["git", "-C", str(Path.cwd()), "rev-parse", "HEAD"],
+                    ["git", "-C", str(ws), "rev-parse", "HEAD"],
                     capture_output=True, text=True, encoding="utf-8", timeout=15,
                 )
                 if result.returncode == 0:
-                    self.config.sync_base = result.stdout.strip()
+                    self.project.sync_base = result.stdout.strip()
                     ConfigManager.save(self.config)
-                    self._update_status_bar()
             except (subprocess.TimeoutExpired, OSError):
                 pass
 
-            # 刷新 formal box 显示
             self._refresh_formal_boxes()
             self.selected_formal = len(self.formal_commits) - 1
             self._on_formal_box_clicked(self.selected_formal)
 
-            # Push 按钮在 sync 后可点
             if any(fc.synced for fc in self.formal_commits):
                 self.push_btn.setEnabled(True)
-
             self.progress_label.setText("同步成功！现在可以 Push 到 GitHub")
             QMessageBox.information(self, "同步成功", "同步完成！\n现在可以点击「Push 到 GitHub」推送远程。")
         else:
@@ -834,13 +1022,11 @@ class MainWindow(QMainWindow):
     # ── Push ─────────────────────────────────────────────
 
     def _start_push(self):
-        # 找到第一个 synced 但未 pushed 的 formal commit
         target = None
         for i, fc in enumerate(self.formal_commits):
             if fc.synced and not fc.pushed:
                 target = i
                 break
-
         if target is None:
             QMessageBox.information(self, "提示", "没有待 push 的正式 commit")
             return
@@ -851,7 +1037,7 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("正在 push 到远程...")
         self._log("开始 push...")
 
-        self.push_worker = PushWorker(self.config.backup_path)
+        self.push_worker = PushWorker(self.project.backup_path)
         self.push_thread = QThread()
         self.push_worker.moveToThread(self.push_thread)
         self.push_thread.started.connect(self.push_worker.run)
@@ -873,7 +1059,6 @@ class MainWindow(QMainWindow):
         self._log(msg)
 
         if success:
-            # 标记所有 synced formal commit 为 pushed
             for fc in self.formal_commits:
                 if fc.synced and not fc.pushed:
                     fc.pushed = True
@@ -884,48 +1069,67 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "Push 失败", "请检查网络连接或远程仓库权限")
 
-        self.sync_btn.setEnabled(self.selected_formal is not None
-                                 and not self.formal_commits[self.selected_formal].synced)
-        # 还有未 pushed 的就继续让 push 可点
+        self.sync_btn.setEnabled(
+            self.selected_formal is not None
+            and not self.formal_commits[self.selected_formal].synced
+        )
         has_pending = any(fc.synced and not fc.pushed for fc in self.formal_commits)
         self.push_btn.setEnabled(has_pending)
 
-    # ── 配置 ─────────────────────────────────────────────
+    # ── 编辑路径 ─────────────────────────────────────────
 
-    def _open_config(self):
-        dialog = QFileDialog.getExistingDirectory(
-            self, "选择备份仓库目录", self.config.backup_path or str(Path.home())
-        )
-        if dialog:
-            bp = Path(dialog).resolve()
-            if not (bp / ".git").exists():
-                reply = QMessageBox.question(
-                    self,
-                    "非 Git 仓库",
-                    "选择的目录不是 git 仓库，是否继续？",
-                    QMessageBox.Yes | QMessageBox.No,
-                )
-                if reply == QMessageBox.No:
-                    return
-            self.config.backup_path = str(bp)
+    def _edit_paths(self):
+        dlg = _ProjectEditDialog(self, self.project)
+        if dlg.exec() == QDialog.Accepted:
+            updated = dlg.get_project()
+            self.project.name = updated.name
+            self.project.workspace_path = updated.workspace_path
+            self.project.backup_path = updated.backup_path
+            self.project.commit_format = updated.commit_format
             ConfigManager.save(self.config)
-            self._update_status_bar()
-            self._log(f"备份路径已更新: {bp}")
+            self._log("项目配置已更新")
 
-    # ── 终端模式 ─────────────────────────────────────────
 
-    def _open_terminal(self):
-        exe = sys.executable
-        script = "-m sync_tool" if not getattr(sys, "frozen", False) else ""
-        try:
-            subprocess.Popen(
-                ["cmd.exe", "/k", f"{exe} {script} --mode cui".strip()],
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-            )
-            self.close()
-            QApplication.quit()
-        except OSError as e:
-            QMessageBox.warning(self, "错误", f"无法打开终端: {e}")
+# ── 主窗口 ────────────────────────────────────────────────
+
+
+class MainWindow(QMainWindow):
+    """主窗口 — 用 QStackedWidget 切项目列表 ↔ 工作区"""
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.config = config
+        self.workspace: WorkspacePanel | None = None
+
+        self.setWindowTitle("sync_tool — 同步工具")
+        self.setMinimumSize(1000, 650)
+
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        self.project_list = ProjectListPanel(self.config)
+        self.project_list.project_selected.connect(self._open_project)
+        self.stack.addWidget(self.project_list)  # index 0
+
+    def _open_project(self, project: ProjectConfig):
+        # 移除旧的 workspace（如果有）
+        if self.workspace:
+            self.stack.removeWidget(self.workspace)
+            self.workspace.deleteLater()
+
+        self.workspace = WorkspacePanel(self.config, project)
+        self.workspace.back_requested.connect(self._back_to_list)
+        self.stack.addWidget(self.workspace)  # index 1
+        self.stack.setCurrentIndex(1)
+
+    def _back_to_list(self):
+        if self.workspace:
+            self.stack.removeWidget(self.workspace)
+            self.workspace.deleteLater()
+            self.workspace = None
+        self.stack.setCurrentIndex(0)
+        # 刷新项目列表（可能配置被修改了）
+        self.project_list._refresh_table()
 
 
 # ── 应用入口 ──────────────────────────────────────────────
@@ -947,7 +1151,6 @@ def _fix_qt_env():
     if pyside_dir not in os.environ.get("PATH", ""):
         os.environ["PATH"] = pyside_dir + os.pathsep + os.environ.get("PATH", "")
 
-    # ANGLE (D3D11) 渲染后端 — 绕过 Win11 某些 GPU 驱动的 OpenGL segfault
     os.environ["QT_OPENGL"] = "angle"
     os.environ["QT_ANGLE_PLATFORM"] = "d3d11"
 
@@ -959,71 +1162,14 @@ def _fix_qt_env():
         pass
 
 
-def _first_run_dialog() -> str | None:
-    """首次运行：弹出引导对话框让用户选择备份目录"""
-    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFileDialog, QMessageBox
-
-    dlg = QDialog()
-    dlg.setWindowTitle("同步工具 - 首次运行")
-    dlg.setMinimumWidth(500)
-    layout = QVBoxLayout(dlg)
-
-    layout.addWidget(QLabel("欢迎使用同步工具！"))
-    layout.addWidget(QLabel("请选择备份仓库目录（Git 仓库）作为同步目标："))
-
-    path_label = QLabel("未选择")
-    path_label.setStyleSheet("color: gray;")
-
-    def browse():
-        d = QFileDialog.getExistingDirectory(dlg, "选择备份仓库目录")
-        if d:
-            path_label.setText(d)
-            path_label.setStyleSheet("")
-
-    btn_row = QHBoxLayout()
-    browse_btn = QPushButton("浏览...")
-    browse_btn.clicked.connect(browse)
-    btn_row.addWidget(browse_btn)
-    btn_row.addStretch()
-    layout.addLayout(btn_row)
-    layout.addWidget(path_label)
-
-    confirm_btn = QPushButton("确认并启动")
-    def confirm():
-        if path_label.text() == "未选择" or path_label.text().strip() == "":
-            QMessageBox.warning(dlg, "提示", "请先选择备份目录")
-            return
-        p = Path(path_label.text().strip())
-        if not (p / ".git").exists():
-            ret = QMessageBox.question(dlg, "非 Git 仓库",
-                                       "选择的目录不是 Git 仓库，是否继续？",
-                                       QMessageBox.Yes | QMessageBox.No)
-            if ret == QMessageBox.No:
-                return
-        dlg.accept()
-
-    confirm_btn.clicked.connect(confirm)
-    layout.addWidget(confirm_btn)
-
-    if dlg.exec() == QDialog.Accepted:
-        return path_label.text().strip()
-    return None
-
-
 def entry():
     _fix_qt_env()
 
     try:
         app = QApplication(sys.argv)
-        app.setApplicationName("同步工具")
+        app.setApplicationName("sync_tool")
 
         config = ConfigManager.load()
-        if not config.backup_path:
-            path = _first_run_dialog()
-            if not path:
-                return
-            config.backup_path = path
-            ConfigManager.save(config)
 
         window = MainWindow(config)
         window.show()
@@ -1032,13 +1178,13 @@ def entry():
         import traceback
         log = Path(os.environ.get("TEMP", ".")) / "sync_tool_crash.log"
         log.write_text(
-            f"sync_tool GUI crash at {__import__('datetime').datetime.now()}\n"
+            f"sync_tool GUI crash at {datetime.now()}\n"
             f"{traceback.format_exc()}",
             encoding="utf-8",
         )
         if getattr(sys, "frozen", False):
             try:
-                QMessageBox.critical(None, "同步工具 - 崩溃", str(e))
+                QMessageBox.critical(None, "sync_tool - 崩溃", str(e))
             except Exception:
                 pass
         raise

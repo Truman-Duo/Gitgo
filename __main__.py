@@ -45,17 +45,19 @@ def main():
             cui_entry()
         elif args.mode == "config":
             cfg = ConfigManager.load()
-            if cfg.backup_path:
-                print(f"当前配置:")
-                print(f"  备份路径: {cfg.backup_path}")
-                print(f"  项目名称: {cfg.project_name}")
-                print(f"  Commit前缀: {cfg.commit_format.get('prefix', '')}")
-                print(f"  Sync基点: {cfg.sync_base[:12] if cfg.sync_base else '无'}")
+            if cfg.projects:
+                print(f"共 {len(cfg.projects)} 个项目:\n")
+                for i, p in enumerate(cfg.projects, 1):
+                    ws = p.workspace_path or "(使用当前目录)"
+                    base = p.sync_base[:12] if p.sync_base else "无"
+                    prefix = p.commit_format.get("prefix", "")
+                    print(f"  [{i}] {p.name}")
+                    print(f"      工作区: {ws}")
+                    print(f"      备份库: {p.backup_path}")
+                    print(f"      Commit前缀: {prefix}  Sync基点: {base}")
+                    print()
             else:
-                print("未配置")
-            reset = input("\n重新配置？(y/N): ").strip().lower()
-            if reset == "y":
-                setup_wizard()
+                print("未配置任何项目")
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)

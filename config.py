@@ -31,19 +31,21 @@ DEFAULT_COMMIT_FORMAT = {
 
 
 @dataclass
-class Config:
+class ProjectConfig:
+    name: str = ""
+    workspace_path: str = ""
     backup_path: str = ""
-    project_name: str = "Vernier"
     commit_format: dict = field(default_factory=lambda: dict(DEFAULT_COMMIT_FORMAT))
     force_exclude: list = field(default_factory=lambda: list(DEFAULT_FORCE_EXCLUDE))
     sync_base: str = ""
 
     @classmethod
-    def from_dict(cls, d: dict) -> Config:
+    def from_dict(cls, d: dict) -> ProjectConfig:
         cf = d.get("commit_format", {})
         return cls(
+            name=d.get("name", d.get("project_name", "Unnamed")),
+            workspace_path=d.get("workspace_path", d.get("workspace", "")),
             backup_path=d.get("backup_path", ""),
-            project_name=d.get("project_name", "Vernier"),
             commit_format={
                 "prefix": cf.get("prefix", "ANBM"),
                 "number_start": cf.get("number_start", 0),
@@ -52,6 +54,21 @@ class Config:
             force_exclude=d.get("force_exclude", list(DEFAULT_FORCE_EXCLUDE)),
             sync_base=d.get("sync_base", ""),
         )
+
+
+@dataclass
+class Config:
+    projects: list[ProjectConfig] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Config:
+        # 新格式：projects 数组
+        if "projects" in d and isinstance(d["projects"], list):
+            return cls(projects=[ProjectConfig.from_dict(p) for p in d["projects"]])
+        # 旧格式（单项目，顶层字段）→ 自动迁移
+        if d.get("backup_path"):
+            return cls(projects=[ProjectConfig.from_dict(d)])
+        return cls()
 
 
 class ConfigManager:
@@ -85,7 +102,8 @@ class ConfigManager:
             return Config()
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            return Config.from_dict(data)
+            cfg = Config.from_dict(data)
+            return cfg
         except (json.JSONDecodeError, OSError):
             return Config()
 
@@ -98,10 +116,10 @@ class ConfigManager:
         return p
 
     @staticmethod
-    def get_backup_git_dir(config: Config) -> Optional[Path]:
+    def get_backup_git_dir(project: ProjectConfig) -> Optional[Path]:
         """验证备份目录是 git 仓库，返回 .git 路径"""
-        if not config.backup_path:
+        if not project.backup_path:
             return None
-        bp = Path(config.backup_path)
+        bp = Path(project.backup_path)
         git_dir = bp / ".git"
         return git_dir if git_dir.exists() else None
