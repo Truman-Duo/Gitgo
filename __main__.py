@@ -17,7 +17,7 @@ if _meipass and _meipass not in sys.path:
 
 # 使用绝对导入（兼容 -m 和直接运行两种方式）
 from config import Config, ConfigManager
-from cui_main import entry as cui_entry, setup_wizard
+from cui_main import entry as cui_entry
 from gui_main import entry as gui_entry
 
 
