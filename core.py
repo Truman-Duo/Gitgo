@@ -516,3 +516,44 @@ def get_exclude_patterns(config: Config, workspace: Path) -> list[str]:
     patterns = _read_gitignore(workspace)
     patterns.extend(config.force_exclude)
     return patterns
+
+
+def push_to_backup(
+    backup: str | Path,
+    remote: str = "origin",
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> bool:
+    """执行 git push 到远程仓库"""
+    bk = Path(backup).resolve()
+    if not (bk / ".git").exists():
+        if progress_callback:
+            progress_callback(0, 1, "备份目录不是 git 仓库")
+        return False
+
+    if progress_callback:
+        progress_callback(0, 1, f"正在 push 到 {remote}...")
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(bk), "push", remote],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        )
+        if result.returncode == 0:
+            if progress_callback:
+                progress_callback(1, 1, f"[OK] Push 成功:\n{result.stdout.strip()}")
+            return True
+        else:
+            if progress_callback:
+                progress_callback(0, 1, f"Push 失败: {result.stderr.strip()}")
+            return False
+    except subprocess.TimeoutExpired:
+        if progress_callback:
+            progress_callback(0, 1, "Push 超时（60s）")
+        return False
+    except OSError as e:
+        if progress_callback:
+            progress_callback(0, 1, f"Push 出错: {e}")
+        return False
