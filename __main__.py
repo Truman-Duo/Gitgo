@@ -1,5 +1,5 @@
-"""CLI 入口: python -m sync_tool [--mode gui|cui|config]
-   也可作为 PyInstaller 打包入口（使用静态导入确保分析器追踪到所有模块）"""
+"""CLI 入口: python -m gitgo [--mode gui|cui|config|list|sync|daemon|status|history]
+   PyInstaller 打包入口。headless 模式下不加载 Qt/Rich。"""
 from __future__ import annotations
 
 import argparse
@@ -16,9 +16,8 @@ if _meipass and _meipass not in sys.path:
     sys.path.insert(0, _meipass)
 
 # 使用绝对导入（兼容 -m 和直接运行两种方式）
-from config import Config, ConfigManager
-from cui_main import entry as cui_entry
-from gui_main import entry as gui_entry
+from backend.core.config import Config, ConfigManager
+from backend.core.i18n import available_languages, load_language
 
 
 def main():
@@ -27,49 +26,210 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["gui", "cui", "config"],
+        choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
+                 "status", "trial", "formalize", "scan", "push", "session"],
         default="gui",
-        help="启动模式: gui(默认) | cui(终端) | config(仅配置)",
+        help="启动模式",
+    )
+    parser.add_argument(
+        "--project", "-p",
+        default="",
+        help="项目名（与 --mode sync/daemon/status/trial/formalize/scan/push 配合使用）",
+    )
+    parser.add_argument(
+        "--message", "-m",
+        default=None,
+        help="commit message（与 --mode sync/daemon/formalize 配合使用）",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="输出结构化 JSON",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        default=False,
+        help="仅输出原始计数，不含 semantic 块（与 --mode status --json 配合使用）",
+    )
+    parser.add_argument(
+        "--semantic-only",
+        action="store_true",
+        default=False,
+        help="仅输出 semantic 块（与 --mode status 配合使用）",
+    )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        default=False,
+        help="流式输出 line-delimited JSON 进度（与 --mode scan/sync/push/daemon --json 配合使用）",
+    )
+    parser.add_argument(
+        "--op",
+        default=None,
+        help="过滤操作类型（与 --mode history 配合使用，如 --op formalize）",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=20,
+        help="历史记录条数限制（与 --mode history 配合使用，默认 20）",
+    )
+    parser.add_argument(
+        "--trial-action",
+        choices=["list", "accept", "promote", "discard"],
+        default="list",
+        help="Trial 操作类型（--mode trial 时使用）",
+    )
+    parser.add_argument(
+        "--index", type=int, default=None,
+        help="Trial incoming change 索引（--mode trial --trial-action accept/promote/discard 时使用）",
+    )
+    parser.add_argument(
+        "--indices",
+        default=None,
+        help="Workspace commit 索引，逗号分隔（--mode formalize 时使用，如 --indices 0,2,3）",
+    )
+    parser.add_argument(
+        "--skip-push",
+        action="store_true",
+        help="跳过 push 步骤（仅 daemon 模式有效）",
+    )
+    parser.add_argument(
+        "--force-on-warning",
+        action="store_true",
+        help="安全检查命中时自动强制推送（仅 daemon 模式有效）",
+    )
+    parser.add_argument(
+        "--skip-security",
+        action="store_true",
+        help="跳过安全检查（仅 push 模式有效）",
+    )
+    parser.add_argument(
+        "--daemon-action",
+        choices=["start", "stop", "status", "run"],
+        default="run",
+        help="Daemon 操作（--mode daemon 时使用，默认 run 为一次性全流程）",
+    )
+    parser.add_argument(
+        "--trial-interval",
+        type=float,
+        default=300.0,
+        help="Trial 轮询间隔秒数（--mode daemon --daemon-action start 时使用，默认 300）",
+    )
+    parser.add_argument(
+        "--debounce",
+        type=float,
+        default=2.0,
+        help="文件变更去抖秒数（--mode daemon --daemon-action start 时使用，默认 2.0）",
+    )
+    parser.add_argument(
+        "--session-action",
+        choices=["save", "status", "resume"],
+        default="status",
+        help="Session 操作（--mode session 时使用）",
     )
     args = parser.parse_args()
 
     try:
+        # 加载界面语言（非 GUI/CUI 模式不影响）
+        cfg = ConfigManager.load()
+        if cfg.language:
+            load_language(cfg.language)
+
         if args.mode == "gui":
-            # 在冻结模式写 crash log
+            from frontend.gui_main import entry as gui_entry
             if getattr(sys, "frozen", False):
                 import tempfile
-                _log = Path(tempfile.gettempdir()) / "sync_tool_startup.log"
+                _log = Path(tempfile.gettempdir()) / "gitgo_startup.log"
                 _log.write_text(f"Starting GUI mode at {__import__('datetime').datetime.now()}\n", encoding="utf-8")
             gui_entry()
         elif args.mode == "cui":
+            from cui.main import entry as cui_entry
             cui_entry()
         elif args.mode == "config":
-            cfg = ConfigManager.load()
-            if cfg.projects:
-                print(f"共 {len(cfg.projects)} 个项目:\n")
-                for i, p in enumerate(cfg.projects, 1):
-                    ws = p.workspace_path or "(使用当前目录)"
-                    base = p.sync_base[:12] if p.sync_base else "无"
-                    prefix = p.commit_format.get("prefix", "")
-                    print(f"  [{i}] {p.name}")
-                    print(f"      工作区: {ws}")
-                    print(f"      备份库: {p.backup_path}")
-                    print(f"      Commit前缀: {prefix}  Sync基点: {base}")
-                    print()
-            else:
-                print("未配置任何项目")
+            from cli import _cmd_list
+            _cmd_list(cfg)
+        elif args.mode == "list":
+            from cli import _cmd_list
+            _cmd_list(cfg)
+        elif args.mode == "history":
+            from cli import _cmd_history
+            _cmd_history(project_name=args.project, op=args.op,
+                         limit=args.limit, json_output=args.json)
+        elif args.mode == "sync":
+            if not args.project:
+                print("错误: --mode sync 需要 --project NAME 参数")
+                print("用法: python -m gitgo --mode sync --project MyApp")
+                sys.exit(1)
+            from cli import _cmd_sync
+            _cmd_sync(cfg, args.project, args.message, json_output=args.json,
+                      stream=args.stream)
+        elif args.mode == "daemon":
+            if not args.project:
+                print("错误: --mode daemon 需要 --project NAME 参数")
+                print("用法: python -m gitgo --mode daemon --project MyApp [--daemon-action start|stop|status|run] [--skip-push] [--force-on-warning]")
+                sys.exit(1)
+            from cli import _cmd_daemon
+            _cmd_daemon(cfg, args.project, args.message,
+                        skip_push=args.skip_push,
+                        force_on_warning=args.force_on_warning,
+                        json_output=args.json,
+                        stream=args.stream,
+                        daemon_action=args.daemon_action,
+                        trial_interval=args.trial_interval,
+                        debounce_sec=args.debounce)
+        elif args.mode == "status":
+            if not args.project:
+                print("错误: --mode status 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_status
+            _cmd_status(cfg, args.project, json_output=args.json,
+                        raw=args.raw, semantic_only=getattr(args, 'semantic_only', False))
+        elif args.mode == "trial":
+            if not args.project:
+                print("错误: --mode trial 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_trial
+            _cmd_trial(cfg, args.project, args.trial_action,
+                        index=args.index, json_output=args.json)
+        elif args.mode == "formalize":
+            if not args.project:
+                print("错误: --mode formalize 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_formalize
+            _cmd_formalize(cfg, args.project, indices=args.indices,
+                           message=args.message, json_output=args.json)
+        elif args.mode == "scan":
+            if not args.project:
+                print("错误: --mode scan 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_scan
+            _cmd_scan(cfg, args.project, json_output=args.json,
+                      stream=args.stream)
+        elif args.mode == "push":
+            if not args.project:
+                print("错误: --mode push 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_push
+            _cmd_push(cfg, args.project, skip_security=args.skip_security,
+                       json_output=args.json, stream=args.stream)
+        elif args.mode == "session":
+            if not args.project:
+                print("错误: --mode session 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_session
+            _cmd_session(cfg, args.project, args.session_action,
+                          json_output=args.json)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)
-        # 写入日志文件
         import tempfile
-        (Path(tempfile.gettempdir()) / "sync_tool_crash.log").write_text(msg, encoding="utf-8")
-        # 冻结模式弹错误框
+        (Path(tempfile.gettempdir()) / "gitgo_crash.log").write_text(msg, encoding="utf-8")
         if getattr(sys, "frozen", False):
             try:
                 from PySide6.QtWidgets import QApplication, QMessageBox
                 app = QApplication(sys.argv)
-                QMessageBox.critical(None, "同步工具 - 错误", msg)
+                QMessageBox.critical(None, "gitgo - 错误", msg)
             except Exception:
                 pass
         sys.exit(1)
