@@ -1,6 +1,41 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.venv/
+.env
+
+# Build artifacts
 build/
 dist/
 *.exe
 *.spec
+
+# Runtime (session, daemon PID, etc.)
+.gitgo/
+gitgo_config.json
+gitgo_history.json
+
+# Build cache
+.build_deps_hash
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/

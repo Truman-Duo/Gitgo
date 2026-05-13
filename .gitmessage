@@ -1,0 +1,14 @@
+
+# [GITGO-XXX] <type>(<scope>): <subject>
+#
+# type:   feat / fix / docs / style / refactor / perf / test / chore
+# scope:  core / adapter / frontend / cui / cli / mcp / trial / sync
+#         theme / plugin / daemon / remote / security / i18n
+#         tests / docs / scripts / config
+#
+# subject: max 60 chars, imperative mood, no period at end
+#
+# Body (optional, wrap at 72 chars):
+# - What changed and why
+# - Breaking changes / migration notes
+#

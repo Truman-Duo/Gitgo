@@ -1,69 +1,109 @@
-# sync_tool — 工作区 ↔ 备份仓库同步工具
+# gitgo
 
-通用 git 工作区同步工具，将开发工作区的变更整合后同步到发布用备份仓库。
+**本地运行的 Git 工作流管理工具** — 为开发者在 workspace/trial/release 三个仓库角色之间编排同步、审核和发布流程。同时提供 GUI 和命令行界面。
 
-## 工作流
+## 核心理念
 
-- **Workspace（工程版）** — 本地开发目录，每个项目有自己的 git（从不 push）
-- **Backup repo（正式版）** — 另一个文件夹，是真正会 push 到 GitHub 的
+Gitgo 不是另一个 Git GUI。它是一个 **workflow runtime** — 在 workspace（工程区）、trial（试用区）和 release（正式区）三个 Git 仓库之间建立结构化的变更通道。所有操作都可脱离 GUI，通过 CLI 完成，为 agent 和自动化预留接口。
 
-sync_tool 的作用：当 workspace 里的项目开发到差不多了的时候，把它同步到 backup repo，生成规范的正式 commit，后续手动 push 到 GitHub。
-
-## 功能
-
-- **多项目管理** — 同时管理多个项目的工程版↔正式版配对
-- **文件智能对比** — SHA256 哈希对比，区分新增/修改/相同/重命名
-- **Box 选择合并** — 可视化卡片选择 workspace commit，手动合并为正式 commit
-- **Sync/Push 分离** — 同步到备份仓库和推送到 GitHub 分为两步
-- **双界面** — 默认 Windows 桌面 GUI（PySide6），支持切换到终端 CUI（rich）
-
-## 使用
-
-### 直接运行（开发期）
-
-```bash
-# GUI 模式（默认）
-python -m sync_tool
-
-# 终端 CUI 模式
-python -m sync_tool --mode cui
-
-# 查看项目配置
-python -m sync_tool --mode config
+```
+workspace ──→ trial ──→ release
+  (高熵)     (审核层)    (正式线)
 ```
 
-### 打包为独立 exe
+## 安装
 
 ```bash
 pip install -r requirements.txt
+```
+
+依赖：Python 3.12+, PySide6, Rich, Paramiko, HTTPX, Watchdog
+
+## 启动方式
+
+```bash
+# GUI 模式（默认）
+python -m gitgo
+
+# 终端交互界面（CUI）
+python -m gitgo --mode cui
+
+# 命令行操作
+python -m gitgo --mode list            # 列出所有项目
+python -m gitgo --mode scan            # 扫描工作区变更
+python -m gitgo --mode formalize       # 创建正式 commit
+python -m gitgo --mode sync            # 同步到备份仓库
+python -m gitgo --mode push            # 推送到远程
+python -m gitgo --mode trial           # 查看 trial 新提交
+python -m gitgo --mode status --json   # 机器可读状态
+```
+
+## 架构
+
+```
+gitgo/
+├── backend/          # 纯 Python 核心 — 零 Qt 依赖
+│   ├── core/         # SyncSession 状态机、operations、config
+│   ├── adapters/     # 文件/Git 适配器（local, SSH）
+│   ├── models/       # RepoNode、FileAccess 数据模型
+│   └── remote/       # GitHub/GitLab 连接器
+├── frontend/         # PySide6 GUI
+│   └── workspace/    # WorkspacePanel + 各功能 Mixin
+├── cui/              # 终端交互界面（Rich）
+├── cli/              # 无头命令行（JSON 输出）
+├── themes/           # 主题系统（QSS token 驱动）
+└── tests/            # pytest 测试
+```
+
+**关键分离：** `backend/` 不包含任何 Qt import。GUI 和 CUI 共用同一个 `SyncSession` 状态机，通过工作时 `step_*()` 方法驱动。
+
+## 三节点模型
+
+| 节点 | 角色 | 特点 |
+|---|---|---|
+| **Workspace** | 工程开发区 | 高熵、频繁变更、允许多个未整理 commit |
+| **Trial** | 审核暂存层 | incoming commit 在此等待人工三叉决策 |
+| **Release** | 正式发布线 | 只接受 formal commit，历史保持 curated |
+
+## 核心工作流
+
+1. **Scan** — 对比 workspace 和 release 的文件差异
+2. **Select** — 选择要同步的文件
+3. **Formalize** — 将选中的 workspace commits 合并为 formal commit（带编号前缀和语义化 message）
+4. **Sync** — 将文件同步到 release 仓库
+5. **Push** — 推送到远程（含安全检查：敏感信息扫描）
+
+## Trial 三叉决策
+
+Trial 仓库的 incoming commit 提供三种处置：
+
+- **Accept** — 接受并合并到 trial
+- **Promote** — 提升为 formal commit 纳入 release
+- **Discard** — 丢弃
+
+## 开发
+
+```bash
+# 运行测试
+pytest
+
+# 查看可用模式
+python -m gitgo --help
+
+# 构建可执行文件
 python build.py
 ```
 
-产物: `dist/sync_tool.exe`（单文件，双击运行，无需 Python 环境）
+## 路线图
 
-## 配置
+| 阶段 | 目标 | 状态 |
+|---|---|---|
+| **Stage 1** — Runtime 抽离 | backend 完全独立于 GUI，数据结构化 | 🚧 进行中 |
+| **Stage 2** — CUI/CLI 成熟 | 全 workflow 可脱离 GUI 脚本化运行 | 基础完成 |
+| **Stage 3** — Agent Integration | agent 可理解 workflow，提出 formal commit 建议 | 规划中 |
+| **Stage 4** — Governance Layer | AI 工程语义治理 | 远期 |
+| **Stage 5** — Protocol / Ecosystem | Agent SDK，远程编排，第三方集成 | 远期 |
 
-配置文件 `sync_config.json`（搜索 exe 同目录或 `~/.vernier/`）。
+## 许可
 
-多项目格式：
-
-```json
-{
-  "projects": [
-    {
-      "name": "MyApp",
-      "workspace_path": "D:/Workspace/MyApp",
-      "backup_path": "D:/Backup/MyApp",
-      "commit_format": { "prefix": "MYAPP", "number_start": 0, "padding": false },
-      "force_exclude": ["CLAUDE.md", ".git/", "__pycache__/", "*.pyc"],
-      "sync_base": "abc123def..."
-    }
-  ]
-}
-```
-
-旧格式（单项目顶层字段）会自动迁移。
-
-## 版本
-
-详见 `VERSION.md`。
+Apache-2.0

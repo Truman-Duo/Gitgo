@@ -1,0 +1,745 @@
+# 版本记录
+
+> 格式: v主版本.次版本 (日期)
+
+---
+
+## v0.14 (2026-05-13)
+
+**项目文件重组 + PanelState 显式化 + 技术债消除**
+
+### 项目文件重组（两层架构）
+
+根目录 18 个 `.py` 文件 + 10 个子目录 → 引擎层 / 接口层分离：
+
+| 移动 | 源 → 目标 |
+|------|-----------|
+| 8 文件 | 根目录 `config.py`/`i18n.py`/`history.py`/`plugin.py`/`plugin_loader.py`/`migrate.py` → `backend/core/` |
+| 2 目录 | `core/` → `backend/core/`（sync_session + daemon + operations） |
+| 3 目录 | `adapters/` / `models/` / `remote/` → `backend/adapters/` / `backend/models/` / `backend/remote/` |
+| 2 文件 | `gui_main.py` / `debug_entry.py` → `frontend/` |
+| 1 文件 | `cui_main.py` → `cui/main.py` |
+| 1 文件 | `debug_launcher.py` → `scripts/` |
+
+根目录保留 5 文件：`__init__.py` / `__main__.py` / `build.py` / `mcp_server.py` / `requirements.txt`
+
+导入全统一为 `from backend.xxx import`，~45 文件受影响的 import 全部更新。旧 `backend/` 目录已溶解到新 `backend/core/` 中。
+
+### PanelState 显式化（UI 交接）
+
+**动机**：WorkspacePanel 10 个 Mixin 间通过 `self.xxx` 隐式共享 39+ 个属性，新开发者无法判断属性的 Producer/Consumer。
+
+**方案**：提取 `frontend/workspace/panel_state.py` — `PanelState` 类，所有跨 Mixin 属性集中定义并标注 P/C：
+
+```python
+self.state.config: Config | None = None        # P: panel, C: all
+self.state.selected_formal: int | None = None  # P: panel.init, C: commits/syncpush/trial
+self.state._merging: bool = False              # P: commits, C: commits
+# ... 39+ attributes total
+```
+
+访问规范：Mixin 内通过 `self.state.xxx` 访问共享属性，局部属性仍用 `self._xxx`。
+
+### 技术债消除
+
+| 问题 | 修复 |
+|------|------|
+| `__main__.py` line 140/147 旧路径 import | `from frontend.gui_main import` / `from cui.main import` |
+| `cli/commands.py` `_cmd_sync` 绕过 SyncSession | 委托 `SyncSession.run_full_workflow(skip_push=True)` |
+| `backend/core/sync_session.py` `datetime` 影子变量 | 删除 `discard` 路径内的 `from datetime import datetime`（模块级已导入） |
+| `docs/VERSION.md` 旧路径引用 | 全部更新为 `backend/core/` 等新路径 |
+| `frontend/workspace/commits.py` 错误 import | `from backend import submit_commit_message` → `from backend.core.submitter import` |
+
+### 认证
+
+- pytest: 97/97 passed, 1 skipped
+- headless: `verify_headless.sh` 11/13 passed（2 个为测试环境 pre-existing）
+- build: `python build.py` → `dist/gitgo.exe` (54.3 MB)
+- import: `from frontend.workspace import WorkspacePanel` OK
+
+### 修改文件
+
+- `backend/core/sync_session.py` — 移除 datetime 影子导入
+- `cli/commands.py` — `_cmd_sync` 重写（113→43 行）
+- `frontend/workspace/panel_state.py` — **新建**（39+ 属性 PanelState 类）
+- `frontend/workspace/panel.py` — `self.state = PanelState()`，全部方法更新
+- `frontend/workspace/*.py` — 10 个 Mixin 文件全部 `self.xxx` → `self.state.xxx`
+- `docs/VERSION.md` — 更新旧路径引用
+- `docs/HANDOFF.md` — 更新文件地图 + 新增 PanelState 章节
+- `docs/CLAUDE.md` — 更新模块布局
+
+---
+
+## v0.13 (2026-05-13)
+
+**Phase 2 Agent-Ready Runtime — P2-A + P2-B + P2-C 完成**
+
+### P2-A: Semantic State + Streaming
+
+**`status_dict()` 扩展：**
+- 新增 `semantic` 参数（默认 `True`），控制是否附加语义块
+- 新增 `_build_semantic_layer()` 方法，计算 `workspace_entropy` / `suggested_next_action` / `action_queue` / `blocked_reason`
+- `semantic=False`（`--raw`）与 Phase 1 完全兼容
+
+**新 CLI 标志：**
+- `--raw` — 仅输出原始计数（不含 semantic 块）
+- `--semantic-only` — 仅输出 semantic 块
+- `--stream` — 流式输出 line-delimited JSON 进度（支持 scan/sync/push/daemon）
+
+**附带修复：**
+- `save_session()` 持久化 `is_incoming` + `sources_cleared`
+- `load_session()` 恢复 `is_incoming` + `sources_cleared`
+
+**修改：** `backend/core/sync_session.py` (+60行) / `cli/commands.py` (+40行) / `__main__.py` (+20行)
+
+### P2-B: Unified Operation History
+
+**HistoryManager 重构：**
+- `HistoryEntry` 新增 `operation` / `status` / `detail` 字段（旧字段保留向后兼容）
+- `add_operation()` 新 API — 记录任意操作类型，带结构化 detail
+- `add_entry()` 委托到 `add_operation("sync", ...)` — 旧调用点零改动
+- 记录上限从 100 扩展到 200 条
+
+**9 种操作类型全部覆盖：** scan / formalize / sync / push / triage_accept / triage_promote / triage_discard / delete_formal / dissolve_formal
+
+**历史写入点：** `step_scan()` / `step_create_formal_commit()` / `step_sync()` / `step_push()` / `step_triage_incoming()` / `step_delete_formal()` / `step_dissolve_formal()`
+
+**CLI 扩展：** `--mode history --json` / `--project` / `--op` / `--limit` 过滤器 + 人类可读中文模式
+
+**修改：** `backend/core/history.py` (重写, 110行) / `backend/core/sync_session.py` (+30行) / `cli/commands.py` (+80行) / `cli/__init__.py` / `__main__.py`
+
+### P2-C: Persistent Daemon Core
+
+**架构：** 纯线程 (3 后台线程 + 主循环)，`queue.Queue` 事件分发
+
+| 组件 | 位置 | 功能 |
+|------|------|------|
+| WorkspaceWatcher | `backend/core/daemon/watcher.py` | watchdog 文件监控 + 2s 去抖 |
+| TrialPoller | `backend/core/daemon/poller.py` | 定时轮询 trial 仓库 (默认 300s) |
+| CommandReader | `backend/core/daemon/commands.py` | stdin 逐行 JSON 命令读取 |
+| Main Loop | `backend/core/daemon/__init__.py` | `run_daemon()` 事件循环 + 调度 |
+
+**Daemon CLI 子命令：**
+- `--daemon-action start` — 启动持久守护进程，stdout 输出 line-delimited JSON 事件流
+- `--daemon-action stop` — 发送 SIGTERM 停止
+- `--daemon-action status` — 查询运行状态 (running/pid)
+- `--daemon-action run` — (默认) 保留旧一次性全流程
+
+**stdin 命令协议：** status / scan / formalize / sync / push / trial / session / shutdown
+
+**进程管理：**
+- PID 文件 `.gitgo/daemon.pid` — 双启动防护
+- Stale PID 检测 — `os.kill(pid, 0)` + `ProcessLookupError` 自动清理
+- `atexit` + `finally` 双重确保 PID 文件清理
+- SIGTERM/SIGINT 优雅退出
+- stdin EOF 自动触发 shutdown
+
+**新增依赖：** `watchdog>=6.0`
+
+**新建文件：** `backend/core/daemon/__init__.py` (~260行) / `backend/core/daemon/watcher.py` (60行) / `backend/core/daemon/poller.py` (28行) / `backend/core/daemon/commands.py` (33行)
+
+**修改文件：** `cli/commands.py` (+60行) / `__main__.py` (+20行) / `requirements.txt` (+1行)
+
+**认证：** `verify_headless.sh` 13/13 通过 | `python build.py` OK
+
+### P2-D: Agent Interface (MCP Server)
+
+**MCP Server (`mcp_server.py`)：**
+- FastMCP stdio server — Claude Desktop 可直连
+- 9 个 tool 覆盖完整 Gitgo 工作流
+- 每个 tool 为无状态 one-shot 调用（直接 import SyncSession，无 subprocess 开销）
+
+**9 个 MCP Tools：**
+
+| Tool | 功能 |
+|------|------|
+| `gitgo_list_projects` | 列出所有已配置项目 |
+| `gitgo_status` | 完整项目状态 + semantic 语义分析 |
+| `gitgo_scan` | 扫描工作区文件变更 |
+| `gitgo_formalize` | 从 workspace commits 创建 formal commit |
+| `gitgo_sync` | 同步 formal commits 到备份仓库 |
+| `gitgo_push` | 推送 formal commits 到远程 |
+| `gitgo_trial_list` | 列出 Trial incoming changes |
+| `gitgo_trial_triage` | 三叉决策（accept/promote/discard） |
+| `gitgo_run_workflow` | 一键全流程（scan→formalize→sync→push） |
+
+**Claude Desktop 配置：**
+```json
+{"mcpServers": {"gitgo": {"command": "python", "args": ["mcp_server.py"], "cwd": "/path/to/gitgo"}}}
+```
+
+**新增依赖：** `mcp>=1.0`
+
+**新建文件：** `mcp_server.py` (~250行)
+
+**修改文件：** `requirements.txt` (+1行)
+
+### Phase 2: Agent-Ready Runtime — 全阶段完成
+
+| Stage | 名称 | 核心产出 | 状态 |
+|-------|------|---------|------|
+| P2-A | Semantic State + Streaming | `semantic` 块 + `--stream` 流式输出 | ✅ 完成 |
+| P2-B | Unified Operation History | HistoryManager 覆盖 9 种操作类型 | ✅ 完成 |
+| P2-C | Persistent Daemon Core | watchdog + trial 轮询 + stdin 命令（纯线程） | ✅ 完成 |
+| P2-D | Agent Interface | MCP Server 9 tools + daemon JSON 事件流 | ✅ 完成 |
+
+**里程碑达成：** Agent 可通过两种模式使用 Gitgo：
+1. **One-shot CLI** — `gitgo status --json --semantic-only` 等（P2-A/B）
+2. **Persistent Daemon** — `gitgo daemon start` + stdin JSON 命令（P2-C）
+3. **MCP Protocol** — Claude Desktop 直连 `mcp_server.py`（P2-D）
+
+**认证：** `verify_headless.sh` 13/13 通过 | `python build.py` OK
+
+### 源码审计发现
+
+- `status_dict()` (`sync_session.py:140-165`) 仅输出原始计数，无语义判断
+- `HistoryManager` (`history.py:60-81`) 只记录 sync 操作，`action_type` 字段未使用
+- `run_full_workflow()` (`sync_session.py:761-802`) 一次性执行，非持续守护进程
+- `save_session()` 遗漏 `is_incoming` / `sources_cleared` 字段持久化
+- 当前 `--mode daemon` 实为一次性全流程 runner，非后台服务
+
+### 审阅调整
+
+- `--stream` 从 P2-D 移至 P2-A（低风险，独立于守护进程）
+- P2-C 从 asyncio 改为纯线程（Windows 兼容性 + 已知模式一致性）
+- P2-B 操作类型从 7 种扩展到 9 种（含 v0.12 新增的 delete_formal / dissolve_formal）
+- `add_entry()` 委托到 `add_operation()` 保持向后兼容
+- MCP server 预估从 ~100 行修正为 ~300-500 行
+
+### 文件
+
+- `docs/iterations/Phase2_AgentReadyRuntime.md` — Phase 2 完整计划（含源码审计、审阅记录）
+- `docs/iterations/README.md` — 更新当前状态和待启动列表
+- `docs/HANDOFF.md` — 更新必读文件列表和执行优先级
+
+---
+
+## v0.12 (2026-05-13)
+
+**状态驱动闭环 — 所有 core 数据变异收口到 SyncSession step 方法**
+
+### 动机
+
+P1 完成架构解耦后，分析发现前端 12 处直接变异 core 数据结构（`formal_commits.pop/append`、`fc.message =`、`selected_workspace.add/discard`），绕过状态机。UI 改动可能破坏 core 完整性。
+
+### 闭合的四个缺口
+
+| 缺口 | 修复 |
+|------|------|
+| formal_commits 直接 mutation | 7 个新 step 方法（delete / edit_message / edit_number / dissolve / clear_sources / add_incoming / toggle_selection） |
+| Push 路径分裂 | `PushWorker` 统一走 `step_push()`，删除直接调 `push_to_backup()` 分支 |
+| `on_stage_changed` 未使用 | 接线 + 线程安全（`QTimer.singleShot(0)`）+ `_refresh_button_states()` 集中推导 |
+| `submit_commit_message` 绕过 | 委托 `step_create_formal_commit(selected_indices=set())` |
+
+### 修改文件
+
+- `backend/core/sync_session.py` — +180 行（7 新 step 方法 + `FormalCommit.sources_cleared` 字段 + `step_create_formal_commit` 支持直接提交）
+- `frontend/workers.py` — PushWorker 统一路径（-20 行，删除 `push_to_backup` import）
+- `frontend/workspace/commits.py` — 7 处直接变异 → step 调用
+- `frontend/workspace/trial.py` — incoming accept → `step_add_incoming_formal`
+- `frontend/workspace/syncpush.py` — ~10 处手动 setEnabled → `_refresh_button_states()`
+- `frontend/workspace/panel.py` — `_on_stage_changed` / `_apply_stage` / `_refresh_button_states`
+- `backend/submitter.py` — 委托 `step_create_formal_commit`
+
+### 认证
+
+```
+scripts/verify_headless.sh: 13/13 PASSED
+python build.py: OK (54.1 MB, 167s)
+```
+
+---
+## v0.11 (2026-05-13)
+
+**Phase 1 Runtime Foundation 完成 + 代码模块化拆分**
+
+### Phase 1 完成（全 5 阶段）
+
+- **P1-A Import 解耦**：`__main__.py` 延迟 import gui/cui entry，headless 模式零 Qt/Rich 加载。`SyncSession.status_dict()` 机器可读状态输出。`--mode status --json` 结构化项目状态查询。
+- **P1-B CLI Verb 矩阵**：`_init_session()` 工厂函数 + 9 个 CLI verb（list/status/sync/daemon/trial/formalize/scan/push/session），每个支持 `--json`。Agent 可通过 CLI 完全操作 Gitgo 工作流。
+- **P1-C Governance 状态机**：`docs/GOVERNANCE_STATE.md` 定义 6 governance states（workspace/trial/curated/formalized/release_ready/published）+ 非法转移显式拒绝 + 错误码。
+- **P1-D Session 持久化**：`.gitgo/session.json` checkpoint 策略（只持久化 formal_commits），4 个自动保存时机。`--mode session save/status/resume` CLI。
+- **P1-E Headless 集成验证**：`scripts/verify_headless.sh` 13 项检查全部通过。
+
+### 代码模块化拆分
+
+按耦合度分析拆分 3 个超长文件：
+
+| 源 | 前 | 后 | 新建 |
+|----|----|----|------|
+| `__main__.py` | 643行 | ~180行 | `cli/commands.py` (400行) + `cli/__init__.py` |
+| `backend/core/operations/sync.py` | 324行 | ~195行 | `backend/core/operations/security.py` (120行) |
+| `frontend/project_list.py` | 543行 | ~310行 | `frontend/project_edit_dialog.py` (210行) |
+
+### 修改文件
+
+- `__main__.py` — 重写（删除所有内联 `_cmd_*` 函数，改为 `from cli import ...` 延迟导入）
+- `cli/commands.py` — **新建**（所有 CLI verb 实现 + `_init_session`）
+- `cli/__init__.py` — **新建**（门面 re-export）
+- `backend/core/operations/sync.py` — 移除安全扫描代码块（`DEFAULT_SECURITY_PATTERNS`/`_get_push_diff`/`_security_scan`），改为从 `.security` 导入
+- `backend/core/operations/security.py` — **新建**（独立安全检查模块）
+- `backend/core/operations/__init__.py` — 新增 `DEFAULT_SECURITY_PATTERNS` 导出
+- `frontend/project_list.py` — 移除 `_ProjectEditDialog` 类及未使用的 Qt import
+- `frontend/project_edit_dialog.py` — **新建**（`_ProjectEditDialog` 独立模块）
+- `frontend/workspace/panel.py` — 更新 import 路径
+- `scripts/verify_headless.sh` — **新建**（Phase 1 一键验证脚本）
+
+### 认证结果
+
+```
+=== P1-E: Summary ===
+  Passed: 13
+  Failed: 0
+=== VERIFICATION PASSED ===
+```
+
+---
+## v0.10 (2026-05-12)
+
+**CommitBox / CommitCanvas v2 重构 — 消除三层样式冲突，一揽子修复 6 个 UI Bug**
+
+### 重构动机
+
+v0.x 的 CommitBox 存在三层样式系统冲突：
+
+```
+Layer 1: app.setStyleSheet()       ← themes/qss.py 全局 QSS
+Layer 2: widget.setStyleSheet()    ← _apply_style() 每状态变化调用
+Layer 3: QPainter paintEvent()     ← fillRect 绘制竖线，不参与 QSS 层级
+```
+
+每 box 调 `setStyleSheet()` → Qt 触发级联样式重算 → Canvas paintEvent 被反复触发 → 可见闪烁。
+
+### 修复的 6 个 Bug
+
+| # | Bug | 根因 | 修复 |
+|---|-----|------|------|
+| 1 | Canvas 闪烁 | `setStyleSheet` 级联重算 | box 不再调 setStyleSheet，状态切换用 setProperty+polish（Qt 内部优化的增量重算） |
+| 2 | WS box 文字被遮盖 | 默认态缺 `padding-right` | QSS 统一设 `padding-right: 22px`，所有状态一致 |
+| 3 | 标题与 box 不对齐 | **4 轮返工** (见下) | 最终: setFixedWidth(148) 替代 setMinimumWidth(148) |
+| 4 | Formal box 高亮残留 | enterEvent 写死 QFrame-only stylesheet | 删除所有 enterEvent/leaveEvent，QSS :hover + [selected] 接管 |
+| 5 | 主题切换后颜色残留 | `_apply_style()` 未覆盖 enterEvent 临时样式 | 无 enterEvent 临时样式，主题切换只需 unpolish/polish |
+| 6 | Formal 竖线异步 | QPainter fillRect 不参与 QSS 渲染管线 | 改为 QSS `border-left: 3px solid`，与背景/边框同步渲染 |
+
+### 标题对齐 Bug — 4 轮返工（最顽固 Bug）
+
+| 轮 | 尝试 | 结果 |
+|----|------|------|
+| 1 | `addSpacing` vs `setSpacing` 语义不同 | ❌ 102px 间距 |
+| 2 | 标题行移入 Canvas 内部（同一 widget 树） | ⚠️ 改善但 resize 仍有偏差 |
+| 3 | fm_hdr padding-left 调整: 10→13→16px (margin + border-left 占用) | ⚠️ 初始对齐, resize 后偏差 |
+| 4 | **`setMinimumWidth(148)` → `setFixedWidth(148)`** | ✅ 根因解决 |
+
+**根因**：`setMinimumWidth` 只设下限，stretch=0 时 QHBoxLayout 按 sizeHint() 分配实际宽度。QLabel vs QWidget 的 sizeHint 不同 → 动态宽度偏差。
+
+### 关键架构决策
+
+1. **单一 QSS 源**：删除所有 `_apply_style()` 和动态 `setStyleSheet()` 调用，状态全部通过 `setProperty` + `unpolish/polish` 驱动
+2. **标题行内移**：从 workshop_tab.py 移入 CommitCanvas 内部（共享 widget 树，天然对齐）
+3. **QSS border-left 替代 QPainter**：FormalCommitBox 删除 paintEvent，竖线由 QSS `border-left: 3px solid` 渲染
+4. **`:hover` 替代 enterEvent/leaveEvent**：Qt 内置伪状态更高效
+5. **删除 `_set_active_formal`**：不再需要 QGraphicsOpacityEffect
+6. **批量刷新包裹 `setUpdatesEnabled(False/True)`**：防中间态渲染闪烁
+7. **16ms 防抖 QTimer**：scroll 事件去抖，避免重复计算贝塞尔线坐标
+
+### QSS 优先级陷阱
+
+Qt QSS 不支持 CSS specificity——相同 specificity 的选择器按源码顺序决定优先级。`[selected="true"]` 必须写在 QSS 文件最末尾（在 synced/pushed/incoming 之后），否则会被后续规则覆盖。这与 CSS "最后匹配 wins" 不同——Qt 是 "后定义 wins"。
+
+### 修改文件 (8 files)
+
+- `frontend/commit_box.py` — 完全重写（删除基类 / enterEvent / leaveEvent / paintEvent / _apply_style）
+- `frontend/commit_canvas.py` — 结构重写（标题行内移 + setFixedWidth + resizeEvent 联动）
+- `themes/qss.py` — 大幅扩展（删除全局 QScrollArea border + 新增 #ws_card / #fm_card 全部 QSS 规则）
+- `frontend/workspace/workshop_tab.py` — 简化（删除标题行创建 → Canvas 管理 + 防抖 timer）
+- `frontend/workspace/commits.py` — 简化（删除 _set_active_formal + setUpdatesEnabled 包裹）
+- `frontend/workspace/theme.py` — 简化（删除 _apply_style 调用 → unpolish/polish 循环）
+- `frontend/workspace/panel.py` — 1 行（scan finished 增加 _refresh_formal_boxes）
+- `frontend/widgets.py` — 清理（删除 CommitBox re-export）
+
+**后端 B-2/3/4 全部落地 + 主题刷新集中化 + 7 个代码审查修复**
+
+### B-4: processed_incoming 持久化
+
+- `_record_processed(hash, action)` — triage 成功后写入 `project.processed_incoming` + `ConfigManager.save()`
+- `step_check_trial()` 中过滤已处理的 hash，重启后不再重复显示
+- `step_triage_incoming()` 每个成功分支自动调用 `_record_processed`
+
+### B-3: INCOMING_CONFIRMING 状态机
+
+- `SessionStage` 新增 `INCOMING_CONFIRMING` 枚举
+- `step_start_accept_confirm(change)` — TRIAL_REVIEWING → INCOMING_CONFIRMING
+- `step_confirm_accept()` — INCOMING_CONFIRMING → IDLE，返回暂存的 change
+- `step_cancel_accept()` — INCOMING_CONFIRMING → TRIAL_REVIEWING
+
+### B-2: Dissolve vs Clear Sources 语义区分
+
+| 操作 | Formal commit | Workspace commits | 连接线 |
+|------|--------------|-------------------|--------|
+| Dissolve | 删除(pop) | 刷新为新卡片 | 消失 |
+| Clear Sources | 保留(sources_cleared) | opacity 0.3 + setEnabled(False) | 消失 |
+
+### 代码审查修复（7 项）
+
+| # | 问题 | 修复 |
+|---|------|------|
+| 1 | IncomingChangeCard 缺 objectName | `setObjectName("inc_card")` |
+| 2 | 主题切换后 Formal opacity 丢失 | `_apply_theme_colors()` 末尾重调 `_set_active_formal()` |
+| 3 | Incoming Tab 多处 inline 样式主题不更新 | 新建 `_refresh_incoming_styles()` 集中管理，`_apply_theme_colors()` 调用 |
+| 4 | `_merge_selected` double return | 删多余 `return` |
+| 5 | inccoming_dot/widge_from/widge_to 等 inline 样式 | 全部移入 `_refresh_incoming_styles()` |
+
+---
+
+## v0.8 (2026-05-11)
+
+**UI 修复 + Accept 两阶段 + 模块化重构 + 文档整理**
+
+### 返工最多的 Bug 记录
+
+以下按时间顺序列出反复出现、需要多次迭代才解决的关键 Bug：
+
+#### Bug 1：返回崩溃（0xC0000409，6 次迭代）
+
+| 迭代 | 方案 | 结果 |
+|------|------|------|
+| 1 | `deleteLater()` → Qt 事件循环自然清理 | 崩溃依然 |
+| 2 | linkActivated lambda 加 url 参数 | 无效 |
+| 3 | QTimer.singleShot 加 guard lambda | 无效 |
+| 4 | `shiboken6.delete()` 同步删除 | 崩溃依然 |
+| 5 | QTimer.singleShot(0) 延迟删除 | 崩溃依然 |
+| 6 | 不主动删除 C++ 对象：`setParent(None)` + `hide()` | ✅ 成功 |
+
+**根因**：Qt 事件链重入。在 click/key event 处理中同步 `shiboken6.delete()` + `processEvents()` → 已删 widget 的残留事件触发 `STATUS_STACK_BUFFER_OVERRUN`。
+
+**最终方案**：`setCurrentIndex(0)` → `removeWidget(ws)` → `ws.setParent(None)`。不调 `deleteLater()` / `shiboken6.delete()`，Python GC 自然回收。
+
+#### Bug 2：`_on_breadcrumb_click` 缩进错误（2 小时损失）
+
+**现象**：进入项目后返回按钮无反应，整个 toolbar/sidebar/stack 从未创建。
+
+**根因**：把 `lambda` 改为独立方法 `_on_breadcrumb_click` 时，`def` 后面的整个 `__init__`（约 150 行）缩进出函数内——不是类的方法，而是 `__init__` 内的局部函数。所有 widget（toolbar、sidebar、stack、log_bar、status_bar）从未执行创建代码。
+
+**教训**：在 `__init__` 内 `def` 新方法时，确认后续代码的缩进级别。`def` 在 Python 中会创建作用域边界，之后的非缩进代码才属于原作用域。
+
+#### Bug 3：breadcrumb "所有项目"不可点击（同样问题 2 次各自出现）
+
+**现象**：面包屑文字可见但点击无反应。
+
+**根因**：`_open_project` 中 `breadcrumb.setText()` 设置的是纯文本 `<span>`（无 `<a>` 标签），而设置可点击 `<a>` 版本代码在 `_apply_theme_colors()` 内，但 `_apply_theme_colors()` 被调用时 `self.workspace` 为 `None`，`if self.workspace:` 守卫跳过了面包屑更新。
+
+**最终方案**：`_apply_theme_colors()` 移到 `WorkspacePanel(...)` 创建之后执行。
+
+#### Bug 4：debug_logger.py `Invalid format string`
+
+**现象**：logger 的 f-string 在某些 Python 版本/系统 locale 下抛 `ValueError: Invalid format string`，阻断项目打开。
+
+**最终方案**：删除整个 `debug_logger.py` 模块，所有日志改为 `print("[LOG] ...", file=sys.stderr, flush=True)` 纯字符串拼接。
+
+#### Bug 5：`QPushButton` 缺失导入
+
+**现象**：`commit_box.py` 加 ⋯ 按钮时用了 `QPushButton` 但忘了加 import，导致 `_refresh_formal_boxes` 时报 `NameError`，commit box 消失。
+
+**教训**：每改动 import 列表后立即 `python -c "from ... import ..."` 验证，避免提交后才发现。
+
+#### Bug 6：`FileAccess.SSH` 不存在
+
+**现象**：`_refresh_incoming_info_bar` 使用了 `FileAccess.SSH`，正确的枚举是 `FileAccessKind.SSH`。导致 `WorkspacePanel.__init__` → `_init_ui` → `_build_incoming_tab` → `_refresh_incoming_info_bar` 整条链路崩溃。
+
+**教训**：使用枚举类型时先 grep 确认类定义的位置和值。`FileAccess` 是数据类，`FileAccessKind` 才是枚举。
+
+### Builder 按 Tab 拆分（653→4文件）
+
+- `explorer.py` — `_BranchLineStyle` + `ExplorerMixin`（文件树/Diff/Node）
+- `workshop_tab.py` — `WorkshopTabMixin`（Workshop Tab + 底部操作行）
+- `incoming_tab.py` — `IncomingTabMixin`（Incoming Tab）
+- `builder.py` → 162行核心（`BuilderMixin(Explorer, Workshop, Incoming)` + ActionBar + Remotes/History）
+
+### CUI 拆分为子包（636→`cui/` 4文件+门面）
+
+- `cui/projects.py` — 项目 CRUD
+- `cui/display.py` — Rich 表格渲染
+- `cui/workflow.py` — 工作流步骤
+- `cui/main_flow.py` — 主流程编排 + 入口
+- `cui/main.py` → 15行门面
+
+### Themes 拆 QSS（279→93+186）
+
+- `themes/qss.py` — `build_qss(t)` 独立（186行）
+- `themes/__init__.py` → 93行（令牌+门面）
+
+### Widgets 拆 CommitBox/Canvas（265→3行门面）
+
+- `commit_box.py` — `CommitBox` + `WorkspaceCommitBox` + `FormalCommitBox`
+- `commit_canvas.py` — `CommitCanvas`
+- `widgets.py` → 3行 re-export 门面
+- `CommitConnector` 已废弃类删除
+
+### 文档整理
+
+- 全部文档（HANDOFF / VERSION / README / CLAUDE / iterations）移入 `docs/`
+
+---
+
+## v0.7 (2026-05-11)
+
+**提交区统一 Canvas 重构 + 返回崩溃修复 + 全面 bug 修复**
+
+### 提交区重构 — CommitCanvas
+
+删除两个独立 QScrollArea + CommitConnector，替换为**统一 CommitCanvas**：
+- 单个 QScrollArea 内含 `CommitCanvas(QWidget)`
+- 内部 QHBoxLayout(spacing=52)：`ws_column`(左, minWidth=148) + `fm_column`(右, stretch=1)
+- paintEvent 从 `ws_column.right()` 到 `fm_column.left()` 绘制贝塞尔连接线（x0→x1 间距 52px）
+- `setBrush(NoBrush)` 防止 path 被 fill 导致弧形阴影
+- `_refresh_commit_lines()` 遍历 `formal_commits[].source_indices` 计算坐标，`mapTo(canvas, ...)` 映射
+- scrollBar.valueChanged 联动刷新
+
+### 返回崩溃 — 完整修复链
+
+**根因**：Qt 事件链重入。在 link click / Escape key event 处理中同步 `shiboken6.delete()` + `processEvents()` → 已删 widget 的残留事件触发 → `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409)
+
+**最终解法**（经历 6 轮迭代验证）：
+1. 信号 disconnect → 消除 paint 回调
+2. **先 `setCurrentIndex(0)` 再 `removeWidget`** — 关键顺序
+3. `hide()` + `setParent(None)` — 彻底脱离 widget 树
+4. **不调用 `deleteLater()` / `shiboken6.delete()`** — 交由 Python GC 自然回收，完全避开 Qt 事件链中销毁 C++ 对象的重入问题
+5. Esc 快捷键移出 WorkspacePanel → MainWindow 注册（避免 key event 处理中 workspace 被删）
+
+**其他崩溃相关修复**：
+- `QPointF` 导入（QtCore 非 QtGui）→ 消除 paintEvent NameError
+- `QPainter.end()` try/finally → 防止 Qt backing store 报 active painter
+- `showEvent` 的 `QTimer.singleShot(0)` → 直接调用 `_update_action_bar()`
+- `COMMIT_NO_WINDOW` → subprocess 闪窗修复
+
+### UI 修复
+
+- **侧边栏折叠**：`sidebar_wrap.setMinimumWidth(16)` + `sidebar_toggle.setFixedWidth(24)`
+- **树引导线**：`State_Open` → `widget.itemAt().isExpanded()`；颜色改用 `get_theme()["bdr2"]`；删除 6 条 `::branch` QSS 规则
+- **合并弹窗**：删除 QDialog → 模板直接填入 `msg_box.setPlainText()`，`_merging` 标志区分合并/直接提交
+- **主题颜色残留**：`_apply_theme_colors()` 遍历全部 CommitBox 调 `_apply_style()`
+- **边距/QSS**：status_bar `(10,3,10,3)`；secondary hover border-color；explorer_panel QSS；overflow:hidden 删除
+- **贝塞尔线**：spacing=52 解决 gap=1 不可见；`setBrush(NoBrush)` 消除弧形阴影
+
+### Debug 基础设施
+
+- `debug_entry.py`：Python 异常保活 + `input("按 Enter...")` 
+- `run_debug.bat`：bat 包裹启动，即使 C++ segfault 控制台也不消失
+- 全链路调试日志（已清理为生产版）
+
+### 已确认残留问题
+
+- 进程退出时偶发 segfault（无 Python frame，纯 C++ 清理阶段，不影响功能）
+- Action Bar 首次渲染偶有不到位
+
+
+
+---
+
+## v0.6 (2026-05-10)
+
+**崩溃修复 + 构建流程改进 + 文档全面更新**
+
+### 已修复
+
+- **`QWidget.foreground()` → `foregroundRole()` — 崩溃根本原因**：`_BranchLineStyle.drawPrimitive()` 中 `widget.foreground()` 在 Qt6/PySide6 中不存在，导致 `AttributeError` 在 C++ 层反复传播后 segfault。修复后进入项目不再闪退。
+- **`_restyle()` unpolish access violation**：Qt 的 `unpolish/polish` 在 widget 未完全初始化时调用会触发 access violation。移除 `_restyle` 调用（QSS 全局样式已足够）。
+- **全局异常捕获**：`sys.excepthook` + `_open_project` 时间戳日志双重保障，崩溃信息写入 `%TEMP%\gitgo_crash.log`。
+
+### 构建流程改进
+
+- **两阶段打包**：`python build.py --debug` 先打带控制台的调试版（`dist/gitgo_debug.exe`），测试通过后再 `python build.py` 打正式版（`dist/gitgo.exe`，无控制台）。
+- **`--debug` 标志**：调试版保留 `--noconsole` 的开关，可见 Qt/Python stderr 输出。
+- **文件已占用处理**：`PermissionError` 时跳过被占用文件而非崩溃。
+
+### 文档更新
+
+- 前端设计报告：补充右侧栏架构(rsb)、弹出设置面板(spop)、详细 QSS 令牌表、完整交互序列、构建/部署说明
+- CLAUDE.md：更新 Qt 开发指南（`foregroundRole()` / 构建流程 / 文档规范）
+- HANDOFF.md：同步当前进度
+- VERSION.md：新增 v0.6 记录
+
+---
+
+**前端架构重构 + P6 全局功能 + 全面 bug 修复**
+
+### P6 全局功能
+
+- **Action Bar（操作栏）**：Tab 栏与内容区之间 28px 操作栏，每个 Tab 独立按钮配置（Workshop: Undo merge/Save draft/Export tasks/Re-scan；Incoming: Undo last decision/Export list/Re-fetch；Remotes: Refresh all；History: Export history/Filter），`QTabBar.currentChanged` 驱动 `_update_action_bar()` 动态重建
+- **QTabBar + QStackedWidget 替代 QTabWidget**：操作栏需要"Tab 栏 → 操作栏 → 内容"三层布局，QTabWidget 无法在 Tab 和内容间插入 widget
+- **键盘快捷键**：Ctrl+Shift+S(扫描)/Ctrl+Shift+M(合并)/Ctrl+S(Sync)/Ctrl+Shift+P(Push)/Ctrl+Return(提交)/Escape(返回)
+- **QProxyStyle 引导线**：`_BranchLineStyle` 拦截 `drawPrimitive(PE_IndicatorBranch)` 绘制树引导线
+- **QSS 动态生成**：`themes/__init__.py` 的 `_build_qss(t)` 运行时插值生成完整样式表，替代静态 QSS 字符串
+
+### Mixin 架构落地
+
+- **WorkspacePanel 聚合 7 个 Mixin**：`BuilderMixin(UI构建) + CommitMixin(commit操作) + SyncPushMixin(同步/推送) + TrialMixin(三叉决策) + RemotesMixin(远程仓库) + HistoryMixin(历史记录) + ThemeMixin(主题刷新)`
+- **`frontend/workspace/` 子包**：从单一 `workspace.py`（3000+行）拆分为 9 个文件按职责隔离
+- **ThemeMixin 单点刷新**：`_apply_theme_colors()` 覆盖 22+ widget，`_restyle(widget)` 的 `unpolish/polish` 强制 Qt 重计算 QSS
+
+### 已修复
+
+- **空白面板 BUG**：`splitter.addWidget(left_widget)` 误删（已加回）+ `_animate_page()` 动画 GC 导致 opacity 卡 0（anim 存为 `self._page_anim`）
+- **右侧 splitter 拖拽跳动**：右侧步骤面板改回扁平 QVBoxLayout + QScrollArea
+- **内层 splitter 跳变**：`left_splitter` / `right_splitter` 的 `setChildrenCollapsible(True)` → `False`
+- **主题切换颜色残留**：`_apply_theme_colors()` 单点刷新覆盖 19 个 widget（explorer/diff/commit/incoming/trial），`_open_settings` 调 `workspace._apply_theme_colors()` 连锁刷新。根因定位：Python 脚本字符串替换静默失败导致 4 个 widget 刷新代码缺失
+- **嵌套 QSplitter 水平拖拽跳变**：`setMinimumWidth/Height` 替代 `setFixedWidth/Height`，对称保护各层子对象
+- **程序卡死（冻结）**：`_setup_shortcuts()` 引用已删除按钮（`self.scan_btn`/`self.merge_btn`/`self.sync_btn`/`self.push_btn`）导致 `AttributeError`。修复：Workshop tab 底部恢复操作行 + 删除无效引用
+- **项目列表"反主题颜色"**：`_style_project_row()` 硬编码浅色背景（`#f0faf5` 等）→ 半透明 `QColor(r,g,b,alpha)` 兼容暗/亮双主题
+- **`trial.py` 残留 self.tabs**：旧 `self.tabs.setCurrentIndex(0)` → `self.tab_bar.setCurrentIndex(0)`
+
+### 已完成的 UI 重构
+
+- **Tab 驱动工作区**：进入项目后 4 Tab（提交工作区/传入/远程/历史），Explorer 文件树嵌入 Workshop Tab 内
+- **前端/后端包分离**：`frontend/`（main_window / workspace/ / project_list / widgets / workers / settings）+ `backend/`（scanner），gui_main.py 薄入口
+- **主题系统模块化**：`themes/` 包（light.py/dark.py/__init__.py），ThemeColors 类支持属性访问（`t.bg`/`t.txt`），QSS 集中管理
+- **项目列表**：三列"项目名""备注""状态"，列宽可拖拽；"+"添加行；右键菜单编辑/删除；Last sync 列 + 定时 30s 刷新
+- **备注系统**：ProjectConfig 新增 `note` 字段，双击表格直接编辑
+- **自动隐藏滚动条**：鼠标移入/滚轮显示，离开 2s 隐藏
+- **节点远程配置**：每个 RepoNode 独立选择本地/SSH，对话框动态切换输入组
+- **中文本地化**：zh.json 覆盖 ~30 个翻译键
+- **文件浏览器**：进入项目自动加载 workspace 目录树，扫描对比后更新 N/M badge
+
+---
+
+### 专项：嵌套 QSplitter 水平拖拽跳变修复
+
+**场景**：Workshop Tab 水平三列（Explorer | Center | Diff），Center 内含垂直 QSplitter（提交区 | 消息区）。
+
+```python
+# 控件树
+ws_hsplitter (QSplitter, Horizontal)
+├── [0] explorer_panel    stretchFactor=0
+├── [1] ctr_widget        stretchFactor=1
+│   └── center_splitter (QSplitter, Vertical)
+│       ├── commit_frame   setMinimumHeight(100)
+│       └── msg_frame      第 262 行，缺最小高度！
+└── [2] diff_panel        stretchFactor=0
+```
+
+**失败方案 1**：外层用 QHBoxLayout 固定宽度，完全删除水平拖拽。用户拒绝——要求保留拖拽功能。
+
+**失败方案 2**：仅给 commit_frame 设 minHeight，msg_frame 无保护。拖拽手柄 → ctr_widget resize → center_splitter 连锁重算高度 → msg_frame 无 minHeight 被压缩到接近 0 → 弹回 → 跳变。
+
+**成功方案**：三步组合
+
+1. **对称最小高度**：`commit_frame.setMinimumHeight(100)` + `msg_frame.setMinimumHeight(54)`，确保两个子面板都不会在 resize 连锁反应中被压到消失。
+
+2. **移除 setFixedWidth**：explorer / ws_scroll / diff_panel 全部从 `setFixedWidth` 改为 `setMinimumWidth`。`setFixedWidth` 与 QSplitter 拖拽逻辑冲突——QSplitter 试图调整子对象宽度时遇到不可改变的固定宽度，handle 位置计算与视觉渲染不一致，导致反复跳变（Qt 内部 layout 循环：尝试分配 → 固定宽度阻挡 → 重新计算 → 分配冲突 → 循环）。
+
+3. **setSizes 设初始比例**：`ws_hsplitter.setSizes([138, 800, 150])` 给三列合理的初始像素分配，之后手柄自由拖拽不受固定宽度干扰。
+
+**泛化规则**：
+- QSplitter 子对象用 `setMinimumWidth/Height` 设下限，不用 `setFixedWidth/Height`
+- 嵌套 QSplitter 中，每一层的所有子对象都要设最小尺寸保护
+- 初始比例用 `setSizes()` 而非依赖 `sizeHint`
+
+---
+
+### 未解决
+
+- **workspace 滚动条**：自动隐藏/显示偶有不到位，待优化（非阻塞）
+- **QTreeWidget 引导线**：`QProxyStyle` 方案基本可用但颜色适配待完善
+- **Daemon 模式**：单次执行，非持续守护进程（无轮询/调度/FS 监控）
+
+### 架构设计：异构开发
+
+见 v0.4 记录，策略不变。
+├── file_scanner   ← 文件扫描（已足够快，最后考虑）
+└── git_ops        ← libgit2 封装，替代 subprocess
+
+Python 胶水层
+
+**实施顺序**：
+
+| 步   | 模块         | 语言                      | 预期收益                        | 复杂度 |
+| ---- | ------------ | ------------------------- | ------------------------------- | ------ |
+| 1    | diff_engine  | C++ pybind11 或 Rust PyO3 | 大文件 diff 100ms→5ms，10-50x   | 低     |
+| 2    | git_ops      | C++ libgit2 或 Rust git2  | 消除进程 fork 开销，5-10ms/次   | 中     |
+| 3    | file_scanner | 暂不考虑                  | 收益最小，os.walk 已够快        | —      |
+| —    | GUI 重写     | C++ Qt 原生               | 55MB→~15-20MB，但需数周全量重写 | 极高   |
+
+---
+
+## 各阶段实施状态总览 (2026-05-10)
+
+| 阶段                               | 承诺内容                           | 状态     | 完成度 |
+| ---------------------------------- | ---------------------------------- | -------- | ------ |
+| **Phase 0.5** — 插件系统           | Hook 接口 + 发现/加载              | ✅ 已完成 | 100%   |
+| **Phase 1** — 数据模型             | RepoNode / ProjectConfig / migrate | ✅ 已完成 | 100%   |
+| **Phase 2** — SyncSession + Daemon | 状态机 + Daemon CLI                | ⚠️ 部分   | 80%    |
+| **Phase 3** — SSH 适配器           | paramiko SFTP + exec               | ✅ 已完成 | 100%   |
+| **Phase 4** — Trial 三叉           | IncomingChange 三叉决策            | ✅ 已完成 | 100%   |
+| **Phase 5** — RemoteConnector      | GitHub/GitLab API                  | ❌ 未开始 | 0%     |
+| **Phase 6** — 可选增强             | Action Bar / 快捷键 / 动态QSS      | ✅ 已完成 | 100%   |
+
+### 详细
+
+- **Phase 0.5**：SyncPlugin 基类 7 个钩子、PluginOrchestrator 发现/加载、auto_merge 示例插件、sync/push 中已接入钩子调用
+- **Phase 1**：RepoNode + FileAccess + FileAccessKind(LOCAL/SSH/SMB)、旧格式自动迁移
+- **Phase 2**：SyncSession 全状态机 (IDLE→TRIAL→SCAN→SELECT→COMMIT→SYNC→PUSH)、GUI/CUI/Daemon 三前端驱动。⚠️ **Daemon 模式是单次执行，非持续守护进程**（无轮询/调度/FS 监控）
+- **Phase 3**：SSHFileAdapter (14 方法)、SSHGitRunner (10 方法)、create_adapters_for_node() 工厂
+- **Phase 4**：TrialAction/IncomingChange、step_check_trial()/step_triage_incoming()、GUI 三按钮 + CUI 命令、全部通过
+- **Phase 5**：RemoteTarget 模型已定义但未被使用，无 GitHub/GitLab API 代码
+- **Phase 6**：i18n 完成 (zh/en)、SMB 适配器缺失 (FileAccessKind.SMB 已定义)、无 UPX 压缩
+
+### 下一阶段建议优先级
+
+1. **Phase 5 RemoteConnector** — 按计划推进 GitHub/GitLab API
+2. **Daemon 模式完善** — 将单次执行改为持续监控（FS watch + 定时轮询）
+3. **异构开发 Phase 1** — diff_engine C++/Rust 扩展
+
+---
+
+## v0.4 (2026-05-09)
+
+**Phase 3 SSH + Phase 4 Trial + 测试套件 + UI 全面优化**
+
+- **Phase 3 SSH 适配器**：SSHFileAdapter（paramiko SFTP 14 个方法）、SSHGitRunner（paramiko exec 全部 git 操作）、工厂函数 `create_adapters_for_node()`
+- **Phase 4 Trial 三叉工作流**：TrialAction/IncomingChange 数据模型、`get_trial_log()`、SyncSession TRIAL_CHECKING/TRIAL_REVIEWING 状态、accept/promote/discard 三叉决策
+- **完整测试套件**：98 个测试覆盖 models/adapters/factory/config/operations/sync_session，含 SSH mock 测试
+- **UI 重命名**：工作区(workspace node)、发布备份区(release backup node)、试验区(trial node)
+- **跟随系统主题**：注册表检测 Windows 主题、浅色/深色/跟随系统三档
+- **设置面板重构**：删除"其他"分区、新增"动画"开关、新增"版本"分区
+- **UI 细节修复**：Splitter 拖拽平滑、项目列表光标 BUG、工具栏紧凑布局
+- **国际化更新**：中英文各新增 ~10 个翻译键
+
+---
+
+## v0.3 (2026-05-08)
+
+**项目重命名 + Push 安全检查 + GUI 界面优化 + 同步前差异预览 + 程序国际化 + CLI 模式增强 + 同步历史日志 + 插件系统 + 数据模型重构 (RepoNode)**
+
+- 项目正式命名 gitgo：目录重命名、配置文件名迁移、窗口标题/文档全部更新
+- Push 前安全检查：9 条内置规则（API key、密码、私钥、token、AWS key 等）扫描待推送 commit，命中后用户确认是否强制推送
+- 支持行尾 `gitgo-ignore-sensitive` 豁免、规则级禁用、自定义扩展规则
+- 可配置 `severity_threshold` 控制告警灵敏度
+- GUI 界面优化: SettingsDialog 设置面板（主题切换 + 语言预留 + 扩展位）、QSplitter 自由调整、应用图标蓝色圆形"G"、CommitBox 悬停高亮、窗口默认 1200×750
+- 程序国际化：locales/zh.json + locales/en.json 双语言文件，i18n.py 翻译模块，SettingsDialog 语言切换下拉菜单，Config 存储语言设置，GUI/CUI 界面全部字符串可翻译
+- CLI 模式增强：新增 --mode list（列出项目）、--mode sync --project NAME（无 UI 直接同步）、--mode history（查看同步历史）、--help 参数更新
+- 同步历史日志：HistoryManager 记录每次同步的时间、项目、文件数、commit hash（最多 100 条），GUI/CUI/CLI 三端均可查看
+- 插件系统（Phase 0.5）：SyncPlugin 基类 + 7 个钩子点
+- 数据模型重构（Phase 1）：引入 RepoNode 三角色模型（workspace/release/trial），新增 models/ 包（FileAccessKind、SyncStatus、RemoteTarget、FileAccess、RepoNode），旧配置自动迁移，向后兼容 property 确保零中断，修复 3 个潜伏类型错误（scan_complete/commit_select/commit_message/sync_start/sync_complete/push_start/push_complete），PluginOrchestrator 发现/加载/编排，支持 3 级搜索路径（exe/plugins/、~/.vernier/plugins/、项目级 .gitgo/plugins/），内置 auto-merge 示例插件
+
+---
+
+## v0.2 (2026-05-08)
+
+**CUI 同步** — 终端界面功能等效于 GUI
+
+- CUI 支持多项目管理（项目列表 → 选择 → 操作）
+- CUI 支持 box commit 合并 + Sync/Push 分离
+- 修复 `--mode config` 适配多项目输出
+
+---
+
+## v0.1 (2026-05-08)
+
+**初始版本**
+
+- GUI 和 CUI 双界面
+- 文件 SHA256 对比扫描
+- Commit 整合：多 workspace commit 合并为正式 commit
+- Sync 到备份仓库 + Push 到 GitHub（分离操作）
+- 多项目管理：ProjectConfig + 项目列表首页
+- 旧配置自动迁移

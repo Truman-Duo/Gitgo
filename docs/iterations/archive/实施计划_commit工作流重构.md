@@ -173,7 +173,7 @@ CUI 当前迭代不动，仅保证导入不报错。
 
 ## 验证方式
 
-1. `python -m sync_tool` 启动正常，无回溯
+1. `python -m gitgo` 启动正常，无回溯
 2. 扫描后"刷新 Commit" → workspace box 列表按时间倒序显示
 3. 点击 box 切换选中态（视觉反馈）
 4. Ctrl+点击 多选 → "合并选中" 可点
