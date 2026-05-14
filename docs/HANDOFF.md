@@ -1,28 +1,27 @@
-# gitgo v0.13 交接文档
+# gitgo v0.15 交接文档
 
 > 日期：2026-05-13
 
 ---
 
-## ⚠️ 下次开始前必读：架构重心已转移
+## ⚠️ 下次开始前必读：P3 AI 建议层已就绪
 
-**Gitgo 已从"Git GUI 桌面工具" pivot 为"AI-native software engineering workflow runtime"。**
-
-Phase 1（Runtime Foundation）已完成——headless runtime（SyncSession + Operations + Adapters）已暴露为 agent 可用的 CLI 接口。Phase 2（Agent-Ready Runtime）计划已就绪，目标是从 "agent 调用 Gitgo" 到 "agent 连接到 Gitgo"。
+**Phase 1-3 全部完成。** Gitgo 现在拥有完整的 AI 建议层——agent 可以获取结构化 context，自行调用 LLM 分析分组/triage/message，人确认后执行。
 
 **必读文件：**
-- `docs/iterations/Phase2_AgentReadyRuntime.md` — **Phase 2 完整计划**（P2-A → P2-D），含源码审计、审阅调整、认证标准
-- `docs/iterations/README.md` — 迭代总览，含当前状态和 P2 待启动列表
-- `docs/Phase1_RuntimeFoundation.md` — Phase 1 完整计划（已完成参考）
+- `docs/iterations/Phase3_AIAugmentedWorkflow.md` — **Phase 3 完整设计**（P3-A → P3-D），含审阅调整
+- `docs/P3执行计划.md` — P3 分阶段执行任务
+- `docs/AI_Protocol.md` — Gitgo ↔ Agent JSON schema 规范
+- `docs/iterations/Phase2_AgentReadyRuntime.md` — Phase 2 参考
 
 **执行优先级：**
-1. **Phase 5 RemoteConnector** — GitHub/GitLab API 集成（下一个里程碑）
-2. **P0（GUI Track）** — 并行推进，不受后端影响
+1. **P4 Governance Layer** — 用户即将提供计划
+2. **P0（GUI Track）** — B-1 + F-1 架构调整，并行推进
 3. **Older iterations** — 已归档至 `docs/iterations/archive/`
 
 ---
 
-## 当前进度总览（v0.13）
+## 当前进度总览（v0.15）
 
 | 区域 | 完成度 | 状态 |
 |------|--------|------|
@@ -33,10 +32,12 @@ Phase 1（Runtime Foundation）已完成——headless runtime（SyncSession + O
 | History | 60% | 右侧 Diff+Node 面板已加。action_type 顏色编码 ✅ |
 | 后端 | 90% | SyncSession 全 step 方法覆盖 + Operations + Adapters + 状态驱动闭环 ✅ |
 | 主题刷新 | 70% | `_refresh_incoming_styles()` 集中管理已做，F-8 剩余背景分层/0.5px 未做 |
-| Runtime | 100% | Phase 1 + Phase 2 全部完成 — 13/13 headless checks + P2-A/B/C/D 全部认证 ✅ |
-| Phase 2 | 100% | ✅ 全部完成 — P2-A (semantic+streaming) + P2-B (9 op types history) + P2-C (persistent daemon) + P2-D (MCP Server 9 tools) |
-| 文件重组 | 100% | ✅ 项目结构按"引擎层/接口层"重组 — backend/core/ 统一后端，frontend/ / cui/ 独立 |
-| PanelState | 100% | ✅ PanelState 显式共享状态容器 — 39+ 属性标注 Producer/Consumer，Mixin 间契约由隐式变显式 |
+| Runtime | 100% | Phase 1 + Phase 2 全部完成 ✅ |
+| Phase 2 | 100% | P2-A (semantic+streaming) + P2-B (9 op types history) + P2-C (persistent daemon) + P2-D (MCP Server) ✅ |
+| Phase 5 | 100% | GitHub/GitLab 连接器 + `--mode release` CLI + SyncSession.step_create_release + 28 测试 ✅ |
+| Phase 3 | 100% | P3-A (triage hook + suggest CLI + AI_Protocol) + P3-B (Commit Proposal + diff_summary) + P3-C (Triage context) + P3-D (Summary) ✅ |
+| 文件重组 | 100% | 引擎层/接口层两层架构 — backend/core/ 统一后端，frontend/ / cui/ 独立 ✅ |
+| PanelState | 100% | 显式共享状态容器 — 39+ 属性标注 Producer/Consumer ✅ |
 
 ---
 

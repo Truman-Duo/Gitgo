@@ -4,6 +4,53 @@
 
 ---
 
+## v0.15 (2026-05-13)
+
+**Phase 5 RemoteConnector + Phase 3 AI-Augmented Workflow**
+
+### Phase 5：RemoteConnector（GitHub/GitLab API）
+
+- `backend/remote/gitlab.py` — GitLab REST API v4 连接器（`get_repo_info` / `create_release`）
+- `backend/remote/github.py` — URL regex 修复（前缀锚定防误匹配）
+- `backend/remote/__init__.py` — `create_connector` 工厂支持 `kind="gitlab"` + `GITLAB_TOKEN` 环境变量
+- `backend/core/sync_session.py` — `step_create_release()` 从最新 pushed formal commit 自动生成 tag
+- `cli/commands.py` — `_cmd_release` CLI verb（get-info / create-release）
+- `__main__.py` — `--mode release` + `--release-action`/`--tag`/`--release-name`/`--release-body`
+- `tests/test_remote.py` — 28 个测试（URL 解析 + 工厂 + mock API）
+
+### Phase 3：AI-Augmented Workflow（P3-A → P3-D）
+
+**P3-A：基础设施**
+- `backend/core/plugin.py` — 第 8 个 hook `on_triage_recommend`
+- `backend/core/plugin_loader.py` — `on_triage_recommend` 分发（合并去重）
+- `backend/core/history.py` — `add_suggestion()` 记录 ai_proposal vs human_decision
+- `cli/commands.py` — `_cmd_suggest` + 3 个 context builder（formalize/triage/summary）
+- `__main__.py` — `--mode suggest --suggest-type formalize|triage|summary`
+- `docs/AI_Protocol.md` — context / suggest / error 三种 JSON schema 规范
+- `mcp_server.py` — 3 个 suggest MCP tool（12 tools 总计）
+
+**P3-B：Commit Proposal**
+- `backend/core/operations/diff.py` — `get_diff_summary()` 文件级轻量统计（行数+顶层符号，不含行级 diff）
+- `tests/test_diff.py` — 5 个测试（新文件/修改/多文件/空仓库/符号上限）
+
+**P3-C：Triage Recommendation**
+- `_build_triage_context` 含 `files_changed` diff 统计 + `release_context`
+
+**P3-D：Change Summary**
+- `_build_summary_context` workspace/trial/release 三段统计
+
+### 设计文档
+- `docs/iterations/Phase3_AIAugmentedWorkflow.md` — 修订版 P3 设计（合并 P3-B/C，明确定义 diff_summary，增加 rejection 记录）
+- `docs/iterations/Phase3_AI_Augmented_Workflow.md` — 原始 P3 参考
+- `docs/P3执行计划.md` — 分阶段执行任务
+
+### 认证
+- pytest: 130 passed, 1 skipped
+- build: 54.3 MB
+- 现有 7 个 hook + `auto_merge` 插件行为不变
+
+---
+
 ## v0.14 (2026-05-13)
 
 **项目文件重组 + PanelState 显式化 + 技术债消除**
