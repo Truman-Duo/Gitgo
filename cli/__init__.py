@@ -13,6 +13,7 @@ from .commands import (
     _cmd_release,
     _cmd_suggest,
     _cmd_governance,
+    _cmd_export,
     _init_session,
 )
 
@@ -30,5 +31,6 @@ __all__ = [
     "_cmd_release",
     "_cmd_suggest",
     "_cmd_governance",
+    "_cmd_export",
     "_init_session",
 ]

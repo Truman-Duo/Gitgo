@@ -1,23 +1,25 @@
-# gitgo v0.20 交接文档
+# gitgo v0.21 交接文档
 
 > 日期：2026-05-16
 
 ---
 
-## ⚠️ 下次开始前必读：P4 全部完成
+## ⚠️ 下次开始前必读：P5 全部完成
 
-**P4-Pre + P4-A + P4-B + P4-C + P4-D 全部完成。** Gitgo 具备完整的治理自省能力。
+**P5 Protocol & Ecosystem 完成。** Gitgo 具备正式版本化接口契约：Protocol v1.0 + Reference Agent + Plugin API + State Bundle。
 
 **必读文件：**
-- `docs/iterations/Phase4_GovernanceLayer.md` — **P4 完整设计**（审阅修订版）
-- `docs/P4执行计划.md` — P4 分阶段执行任务
+- `docs/Gitgo_Protocol_v1.0.md` — **第三方集成唯一入口**（六种 schema 统一规范）
+- `docs/Plugin_API.md` — 插件开发完整 API 参考
+- `docs/P5执行计划.md` — P5 分阶段执行任务
+- `docs/iterations/Phase5_ProtocolEcosystem.md` — P5 设计文档
 
 **执行优先级：**
 1. **P0（GUI Track）** — B-1 + F-1 架构调整
 
 ---
 
-## 当前进度总览（v0.20）
+## 当前进度总览（v0.21）
 
 | 区域 | 完成度 | 状态 |
 |------|--------|------|
@@ -30,11 +32,12 @@
 | 主题刷新 | 70% | `_refresh_incoming_styles()` 集中管理已做，F-8 剩余背景分层/0.5px 未做 |
 | Runtime | 100% | Phase 1 + Phase 2 全部完成 ✅ |
 | Phase 2 | 100% | P2-A (semantic+streaming) + P2-B (9 op types history) + P2-C (persistent daemon) + P2-D (MCP Server) ✅ |
-| Phase 5 | 100% | GitHub/GitLab 连接器 + `--mode release` CLI + SyncSession.step_create_release + 28 测试 ✅ |
-| Phase 3 | 100% | P3-A (triage hook + suggest CLI + AI_Protocol) + P3-B (Commit Proposal + diff_summary) + P3-C (Triage context) + P3-D (Summary) ✅ |
-| Phase 4 | 100% | **P4-Pre** + **P4-A** (quality 20t) + **P4-B** (patterns 16t) + **P4-C** (graph 13t) + **P4-D** (releases 10t) ✅ |
-| 文件重组 | 100% | 引擎层/接口层两层架构 — backend/core/ 统一后端，frontend/ / cui/ 独立 ✅ |
-| PanelState | 100% | 显式共享状态容器 — 39+ 属性标注 Producer/Consumer ✅ |
+| Remote | 100% | GitHub/GitLab 连接器 + `--mode release` CLI ✅ |
+| Phase 3 | 100% | P3-A/B/C/D — AI-Augmented Workflow ✅ |
+| Phase 4 | 100% | P4-Pre/A/B/C/D — Governance Layer (quality/patterns/graph/releases) ✅ |
+| Phase 5 | 100% | **P5-A.0/A/A.1/B/C/D — Protocol & Ecosystem** ✅ |
+| 文件重组 | 100% | 引擎层/接口层两层架构 ✅ |
+| PanelState | 100% | 显式共享状态容器 ✅ |
 
 ---
 

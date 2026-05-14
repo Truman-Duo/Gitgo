@@ -4,6 +4,51 @@
 
 ---
 
+## v0.21 (2026-05-16)
+
+**P5：Protocol & Ecosystem**
+
+### P5-A.0: 事件名归一化
+- `cli/commands.py` — `sync`/`scan`/`push` 流式事件统一为 `operation_started` / `operation_complete`
+- 修改 6 处事件名字符串
+
+### P5-A: Protocol Specification
+- `docs/Gitgo_Protocol_v1.0.md` — **新建** — 六种 schema 的统一协议规范
+  - State / Operation / Stream / Daemon / Suggestion / Governance
+  - 覆盖全部 17 MCP tools + 16 CLI modes + daemon 8 command/10 event
+  - 版本化策略（additive = 不 bump，removal = major bump）
+- `docs/AI_Protocol.md` — 内容迁移，替换为链接
+
+### P5-A.1: Protocol Schema 校验测试
+- `tests/test_protocol_schema.py` — 11 个 schema 校验测试（status/quality/patterns/graph/releases/stream/errors）
+
+### P5-B: Reference Agent
+- `examples/agent_loop.py` — ~200 行参考 agent，subprocess CLI 调用，Human-in-the-Loop
+
+### P5-C: Plugin API Formalization
+- `docs/Plugin_API.md` — 8 个 hook 完整 API 文档 + 2 层搜索路径 + 开发约定
+- `plugins/slack_notify.py` — Slack 通知参考插件（`on_sync_complete` / `on_push_complete`）
+- `plugins/jira_link.py` — Jira 关联参考插件（`on_commit_select`）
+
+### P5-D: State Bundle
+- `backend/core/governance/state_bundle.py` — `collect_state_bundle()` collector 函数
+- `cli/commands.py` — `_cmd_export` verb + `state-bundle` 子动作
+- `__main__.py` — `--mode export --export-type state-bundle --minimal`
+- `tests/test_state_bundle.py` — 6 个测试
+- `docs/Gitgo_Protocol_v1.0.md` — State Bundle 附录
+
+### 认证
+- pytest: 206 passed, 1 skipped (17 new)
+
+### P5 完成
+- Gitgo 从 "可被 agent 调用的工具" 升级为 "有正式接口契约的运行时标准"
+- 协议规范是第三方集成的唯一入口 — 不需要读代码
+- agent_loop.py 证明协议完整性 — 任何语言都能实现同样循环
+- Plugin API 文档 + 3 个参考插件让第三方可扩展 Gitgo
+- State Bundle 让治理状态可脱离 Gitgo 实例存在
+
+---
+
 ## v0.20 (2026-05-16)
 
 **P4-D：发布推理**

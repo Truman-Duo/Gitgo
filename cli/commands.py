@@ -123,7 +123,7 @@ def _cmd_sync(cfg: Config, project_name: str, message: str | None, json_output: 
     if stream:
         session.on_log = lambda m: print(json.dumps({"event": "log", "message": m}), flush=True)
         session.on_progress = _stream_progress("sync")
-        print(json.dumps({"event": "started", "op": "sync", "project": project_name}))
+        print(json.dumps({"event": "operation_started", "op": "sync", "project": project_name}))
     else:
         session.on_log = print
         session.on_progress = lambda c, t, m: print(f"  [{c}/{t}] {m}") if m else None
@@ -135,12 +135,12 @@ def _cmd_sync(cfg: Config, project_name: str, message: str | None, json_output: 
     success = session.run_full_workflow(commit_message=message, skip_push=True)
     if success:
         if stream:
-            print(json.dumps({"event": "complete", "op": "sync", "status": "success"}))
+            print(json.dumps({"event": "operation_complete", "op": "sync", "status": "success"}))
         elif json_output:
             print(json.dumps({"result": "ok", "project": project_name}))
     else:
         if stream:
-            print(json.dumps({"event": "complete", "op": "sync", "status": "failed"}))
+            print(json.dumps({"event": "operation_complete", "op": "sync", "status": "failed"}))
         elif json_output:
             print(json.dumps({"result": "failed", "project": project_name}))
         else:
@@ -360,7 +360,7 @@ def _cmd_scan(cfg: Config, project_name: str, json_output: bool = False,
     if stream:
         entries = [{"path": e.path, "status": e.status, "selected": e.selected}
                    for e in session.entries]
-        print(json.dumps({"event": "complete", "op": "scan",
+        print(json.dumps({"event": "operation_complete", "op": "scan",
                           "entries": entries, "total": len(session.entries)}))
     elif json_output:
         entries = []
@@ -393,7 +393,7 @@ def _cmd_push(cfg: Config, project_name: str, skip_security: bool = False,
     ready = [fc for fc in session.formal_commits if fc.synced and not fc.pushed]
     if not ready:
         if stream:
-            print(json.dumps({"event": "complete", "op": "push", "status": "skipped",
+            print(json.dumps({"event": "operation_complete", "op": "push", "status": "skipped",
                               "reason": "no synced commits"}))
         elif json_output:
             print(json.dumps({"error": "NO_SYNCED_COMMITS",
@@ -404,7 +404,7 @@ def _cmd_push(cfg: Config, project_name: str, skip_security: bool = False,
 
     success, warnings = session.step_push(skip_scan=skip_security)
     if stream:
-        print(json.dumps({"event": "complete", "op": "push",
+        print(json.dumps({"event": "operation_complete", "op": "push",
                           "status": "success" if success else "fail",
                           "warnings": warnings}))
     elif json_output:
@@ -975,6 +975,50 @@ def _print_releases(data: dict):
         if reason:
             print(f"      理由: {reason}")
         print()
+
+
+def _cmd_export(cfg: Config, project_name: str, export_type: str,
+                minimal: bool = False, json_output: bool = False):
+    """--mode export: 导出治理状态。
+
+    --export-type state-bundle: 完整状态快照
+    """
+    from backend.core.governance import collect_state_bundle
+
+    if export_type == "state-bundle":
+        session = _init_session(cfg, project_name, json_output=json_output)
+        bundle = collect_state_bundle(session, minimal=minimal)
+        if json_output:
+            import json
+            print(json.dumps(bundle, indent=2, ensure_ascii=False))
+        else:
+            print(f"State Bundle: {project_name}")
+            print(f"  Protocol: {bundle['gitgo_protocol_version']}")
+            print(f"  Exported: {bundle['exported_at'][:19]}")
+            state = bundle["current_state"]
+            print(f"  Stage: {state.get('stage', '?')}")
+            ws = state.get("workspace", {})
+            cm = state.get("commits", {})
+            print(f"  Workspace: {ws.get('entries_changed', 0)}/{ws.get('entries_total', 0)} changed")
+            print(f"  Commits: {cm.get('formal_total', 0)} formal, "
+                  f"{cm.get('formal_synced', 0)} synced, {cm.get('formal_pushed', 0)} pushed")
+            gs = bundle.get("governance_summary", {})
+            q = gs.get("quality", {})
+            print(f"  Suggestions: {q.get('suggestion_count', 0)}")
+            hist = bundle.get("recent_history", [])
+            sugg = bundle.get("recent_suggestions", [])
+            if hist:
+                print(f"  History: {len(hist)} entries")
+            if sugg:
+                print(f"  Suggestions: {len(sugg)} entries")
+    else:
+        if json_output:
+            import json
+            print(json.dumps({"error": "UNKNOWN_EXPORT_TYPE", "export_type": export_type}))
+        else:
+            print(f"错误: 未知 export 类型: {export_type}")
+            print("支持: state-bundle")
+        sys.exit(1)
 
 
 def _build_summary_context(session: "SyncSession") -> dict:

@@ -13,6 +13,7 @@ from backend.core.governance.patterns import (
 )
 from backend.core.governance.graph import build_graph
 from backend.core.governance.releases import add_release_note, list_releases
+from backend.core.governance.state_bundle import collect_state_bundle
 
 __all__ = [
     "load_suggestion_pairs",
@@ -26,4 +27,5 @@ __all__ = [
     "build_graph",
     "list_releases",
     "add_release_note",
+    "collect_state_bundle",
 ]

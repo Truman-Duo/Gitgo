@@ -28,7 +28,7 @@ def main():
         "--mode",
         choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
                  "status", "trial", "formalize", "scan", "push", "session", "release",
-                 "suggest", "governance"],
+                 "suggest", "governance", "export"],
         default="gui",
         help="启动模式",
     )
@@ -162,6 +162,18 @@ def main():
         default="quality",
         help="Governance 子动作（--mode governance 时使用）",
     )
+    parser.add_argument(
+        "--export-type",
+        choices=["state-bundle"],
+        default="state-bundle",
+        help="Export 子动作（--mode export 时使用）",
+    )
+    parser.add_argument(
+        "--minimal",
+        action="store_true",
+        default=False,
+        help="仅导出状态快照，不含 history（--mode export --export-type state-bundle 时使用）",
+    )
     args = parser.parse_args()
 
     try:
@@ -276,6 +288,13 @@ def main():
             from cli import _cmd_governance
             _cmd_governance(cfg, args.project, args.governance_type,
                            message=args.message or "", json_output=args.json)
+        elif args.mode == "export":
+            if not args.project:
+                print("错误: --mode export 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_export
+            _cmd_export(cfg, args.project, args.export_type,
+                       minimal=args.minimal, json_output=args.json)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)
