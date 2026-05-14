@@ -297,6 +297,50 @@ def gitgo_suggest_summary(project: str) -> dict:
     return _build_suggest_result(project, "summary")
 
 
+# ── P4 Governance Tools ────────────────────────────────────────
+
+@mcp.tool(
+    description="获取 AI 建议质量度量：采纳率/修改率/拒绝率，按类型、commit type、模块切片。仅用 indices Jaccard 重叠度，不做 message 文本比较。"
+)
+def gitgo_governance_quality(project: str) -> dict:
+    from backend.core.governance import load_suggestion_pairs, compute_quality_metrics
+    pairs = load_suggestion_pairs(project)
+    return compute_quality_metrics(pairs)
+
+
+@mcp.tool(
+    description="检测变更模式：共变模块（哪些目录总是一起变更）、commit 类型聚类（formalize 的类型分布和多源合并率）、trial 后续影响（accept 后触发 workspace 变更的概率）。"
+)
+def gitgo_governance_patterns(project: str) -> dict:
+    from backend.core.governance import build_patterns_report
+    return build_patterns_report(project)
+
+
+@mcp.tool(
+    description="构建语义变更图：formal commit 节点 + file_overlap（文件重叠 Jaccard≥0.3）/ same_push（同次推送）/ trial_source（来自 trial accept）三种边。"
+)
+def gitgo_governance_graph(project: str) -> dict:
+    from backend.core.governance import build_graph
+    return build_graph(project)
+
+
+@mcp.tool(
+    description="列出项目的发布历史：从所有 push 记录提取推送时间、包含的 commits 列表、以及 release note（如有）。发布按时间倒序排列。"
+)
+def gitgo_governance_releases(project: str) -> dict:
+    from backend.core.governance import list_releases
+    return list_releases(project)
+
+
+@mcp.tool(
+    description="为项目的最新一次 push 记录添加 release note（发布理由/说明）。用于 agent 发布后记录本次发布的背景和目的。message 为必填。"
+)
+def gitgo_governance_release_note(project: str, message: str) -> dict:
+    from backend.core.governance import add_release_note
+    ok = add_release_note(project, message)
+    return {"ok": ok, "message": message}
+
+
 # ── Entry Point ────────────────────────────────────────────────
 
 if __name__ == "__main__":

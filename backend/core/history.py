@@ -20,6 +20,7 @@ class HistoryEntry:
                                   # | "delete_formal" | "dissolve_formal"
     status: str = "success"       # "success" | "failed" | "cancelled"
     detail: dict = field(default_factory=dict)  # 操作特定数据
+    correlation_id: str = ""      # session 级关联 ID，同一次工作流的所有记录共享
     # 保留旧字段向后兼容（add_entry 委托到 add_operation 内部填充）
     file_count: int = 0
     commit_hash: str = ""
@@ -62,7 +63,8 @@ class HistoryManager:
 
     @classmethod
     def add_operation(cls, project_name: str, operation: str,
-                      status: str = "success", detail: dict | None = None) -> None:
+                      status: str = "success", detail: dict | None = None,
+                      correlation_id: str = "") -> None:
         """记录一条操作历史。
 
         operation: "scan" | "formalize" | "sync" | "push"
@@ -76,6 +78,7 @@ class HistoryManager:
             operation=operation,
             status=status,
             detail=detail or {},
+            correlation_id=correlation_id,
         ))
         if len(entries) > 200:
             entries = entries[-200:]
@@ -83,7 +86,8 @@ class HistoryManager:
 
     @classmethod
     def add_suggestion(cls, project_name: str, suggest_type: str,
-                       ai_proposal: dict, human_decision: dict) -> None:
+                       ai_proposal: dict, human_decision: dict,
+                       correlation_id: str = "") -> None:
         """记录 AI 建议与人的最终决策差异，供 P4 质量度量使用。
 
         - ``suggest_type``: "formalize" | "triage" | "summary"
@@ -100,6 +104,7 @@ class HistoryManager:
                 "ai_proposal": ai_proposal,
                 "human_decision": human_decision,
             },
+            correlation_id=correlation_id,
         ))
         if len(entries) > 200:
             entries = entries[-200:]
@@ -113,6 +118,7 @@ class HistoryManager:
                   commit_message: str,
                   workspace: str,
                   backup: str,
+                  correlation_id: str = "",
                   ) -> None:
         """旧 API — 记录 sync 操作。委托到 add_operation 保持向后兼容。"""
         cls.add_operation(project_name, "sync", "success", {
@@ -121,4 +127,4 @@ class HistoryManager:
             "commit_message": commit_message.split("\n")[0][:80],
             "workspace": workspace,
             "backup": backup,
-        })
+        }, correlation_id=correlation_id)

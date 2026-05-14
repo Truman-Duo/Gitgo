@@ -4,6 +4,138 @@
 
 ---
 
+## v0.20 (2026-05-16)
+
+**P4-D：发布推理**
+
+### 新模块
+- `backend/core/governance/releases.py` — 发布推理引擎
+  - `list_releases(project_name)` — 从 push 记录构建发布列表（按时间倒序），每项含 pushed_at / commits / reason
+  - `add_release_note(project_name, message)` — 为最新 push 记录写入 release_note
+- `tests/test_releases.py` — 10 个测试
+
+### CLI
+- `cli/commands.py` — `_cmd_governance` 新增 `releases` + `release-note` 子动作 + `_print_releases`
+- `release-note` 要求 `--message`，缺失时报错 exit(1)
+
+### MCP
+- `mcp_server.py` — `gitgo_governance_releases(project)` + `gitgo_governance_release_note(project, message)` tools（17 tools 总计）
+
+### 认证
+- pytest: 189 passed, 1 skipped (10 new)
+
+### P4 完成
+- P4 (Governance Layer) — P4-Pre/A/B/C/D 全部完成
+- 治理层具备完整能力：质量度量 + 模式检测 + 语义变更图 + 发布推理
+- MCP 17 tools, CLI 4 governance sub-actions
+
+---
+
+## v0.19 (2026-05-14)
+
+**P4-C：语义变更图**
+
+### 新模块
+- `backend/core/governance/graph.py` — 语义变更图构建器
+  - `build_graph(project_name)` — 从 formalize/triage_accept/push 记录构建 nodes + edges
+  - 节点：formal（来自 formalize，含 files_changed）+ incoming（来自 triage_accept）
+  - 边：file_overlap (Jaccard≥0.3) / same_push (batch push commits) / trial_source (correlation_id 匹配)
+- `tests/test_graph.py` — 13 个测试
+
+### CLI
+- `cli/commands.py` — `_cmd_governance` 新增 `graph` 子动作 + `_print_graph`
+
+### MCP
+- `mcp_server.py` — `gitgo_governance_graph(project)` tool（15 tools 总计）
+
+### 认证
+- pytest: 179 passed, 1 skipped (13 new)
+
+---
+
+## v0.18 (2026-05-14)
+
+**P4-B：变更模式检测**
+
+### 新模块
+- `backend/core/governance/patterns.py` — 变更模式检测引擎
+  - `detect_co_changing()` — 共变模块（从 formalize files_changed 提取跨目录配对）
+  - `detect_type_clusters()` — commit 类型聚类（类型分布 + 多源合并率）
+  - `detect_trial_impact()` — trial 后续影响（accept 后触发 workspace 变更概率，按 correlation_id 关联）
+  - `build_patterns_report()` — 聚合三种检测器
+- `tests/test_patterns.py` — 16 个测试
+
+### CLI
+- `cli/commands.py` — `_cmd_governance` 新增 `patterns` 子动作 + `_print_patterns`
+
+### MCP
+- `mcp_server.py` — `gitgo_governance_patterns(project)` tool（14 tools 总计）
+
+### 认证
+- pytest: 166 passed, 1 skipped (16 new)
+
+---
+
+## v0.17 (2026-05-13)
+
+**P4-A：建议质量度量**
+
+### 新模块
+- `backend/core/governance/__init__.py` — 治理层门面
+- `backend/core/governance/quality.py` — 建议质量度量引擎
+  - `load_suggestion_pairs()` — 提取 suggest_* 条目，按 correlation_id 匹配执行记录
+  - `compute_quality_metrics()` — 采纳率/修改率/拒绝率（仅 indices Jaccard）
+  - `group_by_commit_type()` / `group_by_module()` — 维度切片
+- `tests/test_quality.py` — 20 个测试
+
+### CLI
+- `cli/commands.py` — `_cmd_governance` verb + quality 子动作
+- `__main__.py` — `--mode governance` + `--governance-type` (quality/patterns/graph/releases/release-note)
+- `cli/__init__.py` — export `_cmd_governance`
+
+### MCP
+- `mcp_server.py` — `gitgo_governance_quality(project)` tool（13 tools 总计）
+
+### 设计决策
+- 仅用 indices Jaccard 重叠度（≥0.8 accepted, ≥0.3 modified, <0.3 rejected）
+- 不做 message 文本相似度比较
+- correlation_id 匹配 + add_suggestion 直存两种模式
+
+### 认证
+- pytest: 150 passed, 1 skipped (20 new)
+
+---
+
+## v0.16 (2026-05-13)
+
+**P4-Pre：数据基础增强**
+
+为 P4 Governance Layer 的分析功能补齐数据基础：
+
+### correlation_id
+- `backend/core/history.py` — `HistoryEntry` 新增 `correlation_id: str = ""` 字段（向后兼容）
+- `HistoryManager.add_operation()` / `add_suggestion()` / `add_entry()` 新增 `correlation_id` 参数
+- `backend/core/sync_session.py` — `__init__` 生成 `self._correlation_id = str(uuid.uuid4())`；全部 9 处 history 调用传入
+
+### Batch Push
+- `step_push()` 改为批量推送：一次推送所有 `synced=True, pushed=False` 的 formal commit
+- push history detail 格式变更：`{"commit": "..."}` → `{"commits": ["[PREFIX-1]", "[PREFIX-2]"]}`
+- 支持 P4-C same_push 边和 P4-D 多 commit 发布单元
+
+### files_changed in formalize detail
+- `step_create_formal_commit()` 的 history detail 新增 `files_changed` 列表
+- P4-C graph builder 可直接读取变更文件，无需反查 scan 记录
+
+### 设计文档
+- `docs/iterations/Phase4_GovernanceLayer.md` — **审阅修订版** P4 设计（去掉 `_messages_similar`、新增 P4-Pre、batch push、correlation_id、P4-D 命名修正）
+- `docs/P4执行计划.md` — P4 分阶段执行任务（P4-Pre → P4-D）
+
+### 认证
+- pytest: 130 passed, 1 skipped
+- 全部向后兼容
+
+---
+
 ## v0.15 (2026-05-13)
 
 **Phase 5 RemoteConnector + Phase 3 AI-Augmented Workflow**

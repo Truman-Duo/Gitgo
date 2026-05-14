@@ -28,7 +28,7 @@ def main():
         "--mode",
         choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
                  "status", "trial", "formalize", "scan", "push", "session", "release",
-                 "suggest"],
+                 "suggest", "governance"],
         default="gui",
         help="启动模式",
     )
@@ -156,6 +156,12 @@ def main():
         default="formalize",
         help="Suggest 子动作（--mode suggest 时使用）",
     )
+    parser.add_argument(
+        "--governance-type",
+        choices=["quality", "patterns", "graph", "releases", "release-note"],
+        default="quality",
+        help="Governance 子动作（--mode governance 时使用）",
+    )
     args = parser.parse_args()
 
     try:
@@ -263,6 +269,13 @@ def main():
             from cli import _cmd_suggest
             _cmd_suggest(cfg, args.project, args.suggest_type,
                          indices=args.indices, json_output=args.json)
+        elif args.mode == "governance":
+            if not args.project:
+                print("错误: --mode governance 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_governance
+            _cmd_governance(cfg, args.project, args.governance_type,
+                           message=args.message or "", json_output=args.json)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)

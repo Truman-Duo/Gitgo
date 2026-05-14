@@ -769,6 +769,214 @@ def _build_triage_context(session: "SyncSession") -> dict:
     }
 
 
+def _cmd_governance(cfg: Config, project_name: str, governance_type: str,
+                    message: str = "", json_output: bool = False):
+    """--mode governance: 治理度量与自省。
+
+    --governance-type quality: 建议采纳率/修改率/拒绝率
+    """
+    if governance_type == "quality":
+        from backend.core.governance import load_suggestion_pairs, compute_quality_metrics
+
+        pairs = load_suggestion_pairs(project_name)
+        metrics = compute_quality_metrics(pairs)
+        if json_output:
+            import json
+            print(json.dumps(metrics, indent=2, ensure_ascii=False))
+        else:
+            _print_quality(metrics)
+
+    elif governance_type == "patterns":
+        from backend.core.governance import build_patterns_report
+
+        report = build_patterns_report(project_name)
+        if json_output:
+            import json
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            _print_patterns(report)
+
+    elif governance_type == "graph":
+        from backend.core.governance import build_graph
+
+        graph = build_graph(project_name)
+        if json_output:
+            import json
+            print(json.dumps(graph, indent=2, ensure_ascii=False))
+        else:
+            _print_graph(graph)
+
+    elif governance_type == "releases":
+        from backend.core.governance import list_releases
+
+        data = list_releases(project_name)
+        if json_output:
+            import json
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+        else:
+            _print_releases(data)
+
+    elif governance_type == "release-note":
+        from backend.core.governance import add_release_note
+
+        if not message:
+            if json_output:
+                import json
+                print(json.dumps({"error": "MISSING_MESSAGE",
+                                  "detail": "release-note requires --message"}))
+            else:
+                print("错误: release-note 需要 --message 参数")
+            sys.exit(1)
+
+        ok = add_release_note(project_name, message)
+        if json_output:
+            import json
+            print(json.dumps({"ok": ok, "message": message}))
+        else:
+            if ok:
+                print(f"已为 {project_name} 最新发布记录 release note")
+            else:
+                print(f"未找到 {project_name} 的 push 记录")
+
+    else:
+        if json_output:
+            import json
+            print(json.dumps({"error": "UNKNOWN_GOVERNANCE_TYPE",
+                              "governance_type": governance_type}))
+        else:
+            print(f"错误: 未知 governance 类型: {governance_type}")
+            print("支持: quality, patterns, graph, releases, release-note")
+        sys.exit(1)
+
+
+def _print_quality(metrics: dict):
+    """人类可读的 quality 输出。"""
+    if metrics["suggestion_count"] == 0:
+        print("暂无 AI 建议记录")
+        return
+
+    print(f"\nAI 建议质量度量 ({metrics['suggestion_count']} 条):\n")
+
+    for stype, data in metrics.get("by_type", {}).items():
+        type_name = {"formalize": "分组建议", "triage": "审查建议"}.get(stype, stype)
+        print(f"  [{type_name}] 共 {data['total']} 条")
+        print(f"    采纳: {data['accepted']} ({data['acceptance_rate']:.0%})")
+        print(f"    修改: {data['modified']} ({data['modification_rate']:.0%})")
+        print(f"    拒绝: {data['rejected']} ({data['rejection_rate']:.0%})")
+        if data.get("avg_index_jaccard") is not None:
+            print(f"    平均 Jaccard: {data['avg_index_jaccard']:.3f}")
+        print()
+
+    if metrics.get("by_commit_type"):
+        print("  按 Commit 类型:")
+        for ct, d in sorted(metrics["by_commit_type"].items()):
+            print(f"    {ct}: {d['total']} 条, 采纳率 {d['acceptance_rate']:.0%}")
+        print()
+
+    if metrics.get("by_module"):
+        print("  按模块:")
+        for mod, d in sorted(metrics["by_module"].items()):
+            print(f"    {mod}/: {d['total']} 条, 采纳率 {d['acceptance_rate']:.0%}")
+        print()
+
+
+def _print_patterns(report: dict):
+    """人类可读的 patterns 输出。"""
+    co = report.get("co_changing_modules", [])
+    tc = report.get("commit_type_clusters", [])
+    ti = report.get("trial_impact", {})
+
+    if not co and not tc:
+        print("暂无足够数据检测变更模式")
+        return
+
+    if co:
+        print(f"\n共变模块 (Top {len(co)}):\n")
+        for p in co:
+            m = p["modules"]
+            print(f"  {m[0]} ⇄ {m[1]}  "
+                  f"({p['co_occurrence']}/{p['total_formal']} formal commits)")
+
+    if tc:
+        print(f"\nCommit 类型聚类:\n")
+        for c in tc:
+            print(f"  {c['type']}: {c['count']} 次 formalize, "
+                  f"平均 {c['avg_sources']} 个源 commit, "
+                  f"多源合并率 {c['multi_source_ratio']:.0%}")
+
+    if ti and ti.get("total_accepted", 0) > 0:
+        print(f"\nTrial 后续影响:\n"
+              f"  总 accept: {ti['total_accepted']}\n"
+              f"  触发 workspace 变更: {ti['triggered_workspace_change']}\n"
+              f"  触发率: {ti['avg_trigger_rate']:.0%}")
+    print()
+
+
+def _print_graph(graph: dict):
+    """人类可读的 graph 输出。"""
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+
+    if not nodes:
+        print("暂无 formal commit 记录")
+        return
+
+    print(f"\n语义变更图 ({len(nodes)} nodes, {len(edges)} edges):\n")
+
+    formal_nodes = [n for n in nodes if n["type"] == "formal"]
+    incoming_nodes = [n for n in nodes if n["type"] == "incoming"]
+    print(f"  Formal commits: {len(formal_nodes)}")
+    print(f"  Incoming (trial accept): {len(incoming_nodes)}")
+
+    if formal_nodes:
+        print("\n  Formal nodes:")
+        for n in formal_nodes:
+            files = n.get("files_changed", [])
+            print(f"    {n['id']}  ({n['source_commits']} sources, "
+                  f"{len(files)} files)")
+
+    if incoming_nodes:
+        print("\n  Incoming nodes:")
+        for n in incoming_nodes:
+            msg = n.get("message", "")[:60]
+            print(f"    {n['id']}  {msg}")
+
+    if edges:
+        print(f"\n  Edges:")
+        for e in edges:
+            if e["type"] == "file_overlap":
+                print(f"    {e['from']} → {e['to']}  "
+                      f"file_overlap ({e['overlap_ratio']:.2f}) "
+                      f"[{', '.join(e.get('overlap_files', []))}]")
+            elif e["type"] == "same_push":
+                print(f"    {e['from']} → {e['to']}  "
+                      f"same_push ({e.get('pushed_at', '')[:19]})")
+            elif e["type"] == "trial_source":
+                print(f"    {e['from']} → {e['to']}  trial_source")
+    print()
+
+
+def _print_releases(data: dict):
+    """人类可读的 releases 输出。"""
+    releases = data.get("releases", [])
+    if not releases:
+        print("暂无发布记录")
+        return
+
+    print(f"\n发布历史 ({len(releases)} 次):\n")
+    for i, r in enumerate(releases):
+        pushed = r["pushed_at"][:19]
+        commits = r.get("commits", [])
+        reason = r.get("reason")
+        print(f"  [{i+1}] {pushed}  ({len(commits)} commits)")
+        if commits:
+            for c in commits:
+                print(f"      {c}")
+        if reason:
+            print(f"      理由: {reason}")
+        print()
+
+
 def _build_summary_context(session: "SyncSession") -> dict:
     """收集 summary context：workspace/trial/release 三段统计。"""
     from collections import Counter

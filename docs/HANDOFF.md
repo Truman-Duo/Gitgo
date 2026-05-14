@@ -1,27 +1,23 @@
-# gitgo v0.15 交接文档
+# gitgo v0.20 交接文档
 
-> 日期：2026-05-13
+> 日期：2026-05-16
 
 ---
 
-## ⚠️ 下次开始前必读：P3 AI 建议层已就绪
+## ⚠️ 下次开始前必读：P4 全部完成
 
-**Phase 1-3 全部完成。** Gitgo 现在拥有完整的 AI 建议层——agent 可以获取结构化 context，自行调用 LLM 分析分组/triage/message，人确认后执行。
+**P4-Pre + P4-A + P4-B + P4-C + P4-D 全部完成。** Gitgo 具备完整的治理自省能力。
 
 **必读文件：**
-- `docs/iterations/Phase3_AIAugmentedWorkflow.md` — **Phase 3 完整设计**（P3-A → P3-D），含审阅调整
-- `docs/P3执行计划.md` — P3 分阶段执行任务
-- `docs/AI_Protocol.md` — Gitgo ↔ Agent JSON schema 规范
-- `docs/iterations/Phase2_AgentReadyRuntime.md` — Phase 2 参考
+- `docs/iterations/Phase4_GovernanceLayer.md` — **P4 完整设计**（审阅修订版）
+- `docs/P4执行计划.md` — P4 分阶段执行任务
 
 **执行优先级：**
-1. **P4 Governance Layer** — 用户即将提供计划
-2. **P0（GUI Track）** — B-1 + F-1 架构调整，并行推进
-3. **Older iterations** — 已归档至 `docs/iterations/archive/`
+1. **P0（GUI Track）** — B-1 + F-1 架构调整
 
 ---
 
-## 当前进度总览（v0.15）
+## 当前进度总览（v0.20）
 
 | 区域 | 完成度 | 状态 |
 |------|--------|------|
@@ -36,8 +32,158 @@
 | Phase 2 | 100% | P2-A (semantic+streaming) + P2-B (9 op types history) + P2-C (persistent daemon) + P2-D (MCP Server) ✅ |
 | Phase 5 | 100% | GitHub/GitLab 连接器 + `--mode release` CLI + SyncSession.step_create_release + 28 测试 ✅ |
 | Phase 3 | 100% | P3-A (triage hook + suggest CLI + AI_Protocol) + P3-B (Commit Proposal + diff_summary) + P3-C (Triage context) + P3-D (Summary) ✅ |
+| Phase 4 | 100% | **P4-Pre** + **P4-A** (quality 20t) + **P4-B** (patterns 16t) + **P4-C** (graph 13t) + **P4-D** (releases 10t) ✅ |
 | 文件重组 | 100% | 引擎层/接口层两层架构 — backend/core/ 统一后端，frontend/ / cui/ 独立 ✅ |
 | PanelState | 100% | 显式共享状态容器 — 39+ 属性标注 Producer/Consumer ✅ |
+
+---
+
+## P4-Pre：数据基础增强（v0.16）
+
+为 P4-A/B/C/D 治理分析功能补齐三项数据基础：
+
+### Pre-1: correlation_id
+
+- `backend/core/history.py` — `HistoryEntry` 新增 `correlation_id: str = ""` 字段
+- `HistoryManager.add_operation()` / `add_suggestion()` / `add_entry()` 新增 `correlation_id` 参数
+- `backend/core/sync_session.py` — `__init__` 生成 `self._correlation_id = str(uuid.uuid4())`
+- 全部 9 处 `add_operation`/`add_entry` 调用传入 `correlation_id=self._correlation_id`
+- 向后兼容：默认空字符串，旧历史记录加载不受影响
+
+### Pre-2: Batch Push
+
+- `step_push()` 改为收集**所有** `synced=True, pushed=False` 的 formal commit，一次推送，全部标记 pushed
+- push history detail 从 `{"commit": "..."}` 改为 `{"commits": ["[PREFIX-1]", "[PREFIX-2]"]}`
+- 支持 P4-C 的 same_push 边和 P4-D 的多 commit 发布单元
+
+### Pre-3: files_changed in formalize detail
+
+- `step_create_formal_commit()` 的 history detail 新增 `files_changed` 列表
+- 格式：`[{"path": "adapters/ssh.py", "status": "new"}, ...]`
+- P4-C graph builder 可直接读取，无需反查 scan 记录
+
+### 波及文件
+
+| 文件 | 改动 |
+|------|------|
+| `backend/core/history.py` | `HistoryEntry` + `correlation_id`；`add_operation`/`add_suggestion`/`add_entry` 签名 |
+| `backend/core/sync_session.py` | `import uuid`；`self._correlation_id`；9 处 history 调用；`step_push` 批量推送；formalize detail 含 `files_changed` |
+
+### P4-C：语义变更图（v0.19）
+
+**核心文件：**
+- `backend/core/governance/graph.py` — 图构建器（~100行）
+- `tests/test_graph.py` — 13 个测试
+
+**节点与边：**
+
+| 节点类型 | 来源 | 字段 |
+|----------|------|------|
+| formal | formalize history 条目 | id, files_changed, source_commits |
+| incoming | triage_accept history 条目 | id (incoming:<hash>), trial_hash, message |
+
+| 边类型 | 检测方式 | 阈值 |
+|--------|---------|------|
+| file_overlap | Jaccard(files_changed_a, files_changed_b) ≥ 0.3 | overlap_files + overlap_ratio |
+| same_push | batch push 的 commits 列表 | pushed_at |
+| trial_source | triage_accept 与 formalize 同 correlation_id | — |
+
+**CLI：**
+```bash
+gitgo --mode governance --governance-type graph --project X --json
+```
+
+**MCP：** `gitgo_governance_graph(project)` — 15 tools 总计
+
+**认证：** pytest 179 passed, 1 skipped (13 new)
+
+---
+
+### P4-D：发布推理（v0.20）
+
+**核心文件：**
+- `backend/core/governance/releases.py` — 发布推理引擎（~50行）
+- `tests/test_releases.py` — 10 个测试
+
+**两个函数：**
+
+| 函数 | 数据源 | 输出 |
+|------|--------|------|
+| `list_releases` | push history 条目 | releases 列表（pushed_at / commits / reason） |
+| `add_release_note` | 最新 push 条目 | 写入 detail.release_note，返回 bool |
+
+**CLI：**
+```bash
+gitgo --mode governance --governance-type releases --project X --json
+gitgo --mode governance --governance-type release-note --project X --message "..."
+```
+
+**MCP：** `gitgo_governance_releases(project)` + `gitgo_governance_release_note(project, message)` — 17 tools 总计
+
+**认证：** pytest 189 passed, 1 skipped (10 new)
+
+### P4 完成总结
+
+| 阶段 | 内容 | 测试 |
+|------|------|------|
+| P4-Pre | correlation_id + batch push + files_changed | 0 new (foundation) |
+| P4-A | Suggestion Quality Metrics | 20 new |
+| P4-B | Change Pattern Detection | 16 new |
+| P4-C | Semantic Change Graph | 13 new |
+| P4-D | Release Reasoning | 10 new |
+| **总计** | **4 治理模块 + 1 数据基础** | **59 new tests** |
+
+**MCP tools 总数：** 17（+4 governance tools over baseline）
+**后端:** backend/core/governance/ — 5 files, ~500 lines
+
+---
+
+### P4-B：变更模式检测（v0.18）
+
+**核心文件：**
+- `backend/core/governance/patterns.py` — 模式检测引擎（~140行）
+- `tests/test_patterns.py` — 16 个测试
+
+**三个检测器：**
+
+| 检测器 | 数据源 | 输出 |
+|--------|--------|------|
+| `detect_co_changing` | formalize detail 的 `files_changed` | 跨目录共变配对 (adapters/ ⇄ tests/) |
+| `detect_type_clusters` | formalize detail 的 `commit` + `source_indices` | 类型分布 + 多源合并率 |
+| `detect_trial_impact` | triage_accept + 同 correlation_id 后续 scan | accept 后触发 workspace 变更的概率 |
+
+**CLI：**
+```bash
+gitgo --mode governance --governance-type patterns --project X --json
+```
+
+**MCP：** `gitgo_governance_patterns(project)` — 14 tools 总计
+
+**认证：** pytest 166 passed, 1 skipped (16 new)
+
+---
+
+### P4-A：建议质量度量（v0.17）
+
+**核心文件：**
+- `backend/core/governance/__init__.py` — 门面 re-export
+- `backend/core/governance/quality.py` — 度量引擎（~160行）
+- `tests/test_quality.py` — 20 个测试
+
+**CLI：**
+```bash
+gitgo --mode governance --governance-type quality --project X --json
+```
+
+**MCP：** `gitgo_governance_quality(project)` — 13 tools 总计
+
+**关键设计决策：**
+- 仅用 indices Jaccard 重叠度，不做 message 文本比较
+- 通过 `correlation_id` 匹配 suggest 记录与执行记录
+- 支持 `add_suggestion()` 直存模式（ai_proposal + human_decision 在同一记录）
+- 空历史返回空报告而非报错
+
+**认证：** pytest 150 passed, 1 skipped (20 new)
 
 ---
 
