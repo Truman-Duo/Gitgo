@@ -62,8 +62,9 @@ python build.py
 | `backend/core/daemon/` | P2-C 持久守护进程（watchdog + trial 轮询 + stdin 命令） |
 | `backend/adapters/` | 文件/Git 适配器：Local/SSH 双实现 |
 | `backend/models/` | 数据模型：RepoNode/FileAccess/SyncStatus/IncomingChange |
-| `backend/remote/` | 远程连接器（GitHub API 等，Phase 5） |
-| `cli/` | CLI verb 实现（headless，零 Qt/Rich 依赖） |
+| `backend/core/governance/` | **P4** 治理层：quality/patterns/graph/releases/state_bundle（5 模块，~500行） |
+| `backend/remote/` | 远程连接器（GitHub/GitLab API） |
+| `cli/` | CLI verb 实现（headless，零 Qt/Rich 依赖，17 个 mode） |
 | `frontend/gui_main.py` | GUI 薄入口 |
 | `frontend/main_window.py` | PySide6 桌面主窗口，QStackedWidget 导航项目列表↔工作区 |
 | `frontend/workspace/` | 项目工作区子包，10 Mixin 组合 + PanelState 显式状态容器 |
@@ -71,6 +72,8 @@ python build.py
 | `frontend/project_list.py` | 项目列表首页，表格+同步状态+定时刷新+右键菜单 |
 | `frontend/widgets.py` | 可复用控件门面 re-export（CommitCanvas 等） |
 | `frontend/workers.py` | 5 种后台 Worker（Scan/Sync/Push/TrialCheck/Triage） |
+| `mcp_server.py` | **P2-D** MCP Server (FastMCP, 17 tools) |
+| `examples/agent_loop.py` | **P5-B** Reference Agent — suggest→confirm→execute 完整循环 |
 | `cui/main.py` | CUI 门面（原 cui_main.py），Rich 终端界面入口 |
 | `themes/` | 主题系统：`ThemeColors` 类 + `build_qss(t)` 动态 QSS |
 | `build.py` | PyInstaller 打包脚本，`--onefile --noconsole` |
@@ -110,13 +113,9 @@ python build.py
 
 ---
 
-## gitgo 远期架构愿景
-
-> 当前代码库仍为 `gitgo` v0.2，以下为规划中的 **gitgo** 架构。逐步实现，不阻塞当前迭代。
+## gitgo 当前架构（v0.21）
 
 ### 核心概念：三维模型
-
-从当前「workspace → backup」二维升级为**三维**：
 
 | 角色 | 代号 | 说明 |
 |---|---|---|
@@ -161,60 +160,62 @@ FileAdapter (ABC)          GitRunner (ABC)
 - **FileAdapter**：文件级操作（walk、copy、compare、read/write）
 - **GitRunner**：git 操作（clone、fetch、push、cherry-pick、log）
 
-### 插件系统（Phase 0.5）
+### 插件系统
 
-在同步工作流的关键节点开放 **Hook 接口**，允许第三方挂载自定义逻辑：
+在同步工作流的关键节点开放 **8 个 Hook 接口**，允许第三方挂载自定义逻辑（详见 `docs/Plugin_API.md`）：
 
-```
-  on_scan_complete(entries) → 过滤/排序/标注文件
-  on_commit_select(commits) → 推荐合并哪些 commit
-  on_commit_message(selected) → 自动生成正式 commit message
-  on_sync_start(entries, msg) → 同步前校验
-  on_sync_complete(result) → 同步后回调
-```
+| Hook | 阶段 | 说明 |
+|------|------|------|
+| `on_scan_complete` | Scan | 过滤/排序/标注文件 |
+| `on_commit_select` | Commit | 推荐合并哪些 commit |
+| `on_commit_message` | Commit | 自动生成正式 commit message |
+| `on_sync_start` | Sync | 同步前校验（返回非空则中断） |
+| `on_sync_complete` | Sync | 同步后回调 |
+| `on_push_start` | Push | Push 前校验 |
+| `on_push_complete` | Push | Push 后回调 |
+| `on_triage_recommend` | Trial | 推荐三叉决策 |
 
-- 扫描 `plugins/`（exe 同目录）+ `~/.vernier/plugins/` 发现插件
-- 每个插件是 Python 文件/包，通过约定入口类 `SyncPlugin` 注册
-- 非 Python 插件可通过子进程 JSON 协议接入
-- 每个项目通过 `config.plugins: list[str]` 指定启用的插件列表
+- **2 层搜索路径**：`{exe}/plugins/` + `~/.vernier/plugins/`
+- 每个插件是 Python 文件/包，暴露 `plugin_class` 全局变量（`SyncPlugin` 子类）
+- 每个项目通过 `commit_format.plugins: list[str]` 指定启用的插件列表
+- **3 个参考插件**：`auto_merge` / `slack_notify` / `jira_link`
 
-设计目标：插件系统与主流程解耦，SyncSession 状态机原生支持钩子调用。**用户故事**——第三方开发者写一个插件，在 commit 选择阶段自动推荐相关 commit 合并，或根据 diff 自动生成 Conventional Commits 格式的 message。
-
-### 远程连接器
+### 远程连接器（已实现）
 
 ```
 RemoteConnector (ABC)
- ├── BareConnector       # 裸仓库（仅 git 操作，无文件级访问）
- ├── GitHubConnector     # GitHub API 交互（PR、Issue、Release）
- └── GitLabConnector     # GitLab API 交互（PR、Issue、Release）
+ ├── BareConnector       # 裸仓库
+ ├── GitHubConnector     # GitHub API（PR、Issue、Release）
+ └── GitLabConnector     # GitLab API（PR、Issue、Release）
 ```
 
-放 Phase 5 实现。Release 和 Trial 节点可选绑定 RemoteConnector。
+Release 和 Trial 节点可选绑定 RemoteConnector。CLI：`gitgo --mode release --release-action create-release --project X`。
 
-### SyncSession 状态机
+### SyncSession 状态机（已实现）
 
-共享状态机，驱动 GUI / CUI / Daemon 三种前端：
+共享状态机，驱动 GUI / CUI / Daemon / CLI 四种前端：
 
 ```
-IDLE → SCANNING → SELECTING → COMMITTING → SYNCING → PUSHING → IDLE
-                                                    └→ FAILED → IDLE
+IDLE → SCANNING → FORMALIZING → SYNCING → PUSHING → IDLE
+                      └→ TRIAGE_CHECKING → TRIAGE_ACTION → IDLE
 ```
 
-当前代码中 GUI/CUI 的工作流逻辑已趋近此模式，未来可提取为独立模块。
+**完整 step 方法覆盖**：`step_scan() / step_load_commits() / step_check_trial() / step_triage_accept() / step_triage_promote() / step_triage_discard() / step_create_formal_commit() / step_sync() / step_push() / step_delete_formal() / step_dissolve_formal() / step_create_release()` 等 24 个方法。<br>
+**状态驱动闭环（v0.12）**：所有前端必须通过 step 方法操作 core 状态，不得直接 mutation。
 
-### 6 阶段实施计划
+### 阶段完成状态
 
-| 阶段 | 内容 | 影响范围 |
-|---|---|---|
-| **Phase 0.5** | 插件系统：Hook 接口 + 插件发现/加载机制 | core.py + 新增 plugins/ |
-| **Phase 1** | 数据模型重构：RepoNode / ProjectConfig 新模型 + migrate.py | config.py + 新增 models/ |
-| **Phase 2** | SyncSession 提取 + Daemon CLI 模式 | 新增 core/sync_session.py |
-| **Phase 3** | SSH 节点支持（paramiko 依赖） | 新增 adapters/ |
-| **Phase 4** | Trial 试用 + IncomingChange 三叉流程 | 新增 trial/ 流程 |
-| **Phase 5** | RemoteConnector（GitHub/GitLab API） | 新增 remote/ |
-| **Phase 6** | 可选增强（SMB、FS 监控、i18n、UPX） | 按需 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| **P1** | Runtime Foundation — 数据模型 3 角色 + SyncSession 状态机 + FileScanner | ✅ v0.10 |
+| **P2** | Semantic + Persistence — streaming JSON + 9 op types history + persistent daemon + MCP Server | ✅ v0.12 |
+| **P3** | AI-Augmented — triage hook + suggest CLI + AI_Protocol + Commit Proposal + diff_summary | ✅ v0.15 |
+| **P4** | Governance Layer — quality metrics + change patterns + semantic graph + release reasoning | ✅ v0.20 |
+| **P5** | Protocol & Ecosystem — Protocol v1.0 + Reference Agent + Plugin API + State Bundle | ✅ v0.21 |
+| **Remote** | GitHub/GitLab 连接器 + `--mode release` CLI | ✅ v0.14 |
+| **P0** | GUI Track — B-1 + F-1 架构调整 | ⬜ 待执行 |
 
-详见 `iterations/README.md`。
+详见 `docs/iterations/` 和 `docs/HANDOFF.md`。
 
 ---
 
