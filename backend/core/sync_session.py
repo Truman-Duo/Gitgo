@@ -6,6 +6,7 @@ GUI / CUI / Daemon 三种前端共用此状态机。
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
@@ -134,6 +135,9 @@ class SyncSession:
 
         # B-3: Accept 两步确认暂存
         self._pending_accept: IncomingChange | None = None
+
+        # P4-Pre: session 级关联 ID，同一次工作流的所有 history 记录共享
+        self._correlation_id: str = str(uuid.uuid4())
 
     # ── 状态查询 ────────────────────────────────────────────
 
@@ -385,6 +389,7 @@ class SyncSession:
             self.project.name, f"triage_{action}", "success",
             {"trial_hash": change.hash,
              "trial_message": change.message.split('\n')[0][:80]},
+            correlation_id=self._correlation_id,
         )
         self.save_session()
 
@@ -438,6 +443,7 @@ class SyncSession:
             self.project.name, "scan", "success",
             {"entries_total": len(entries),
              "entries_changed": sum(1 for e in entries if e.status != "same")},
+            correlation_id=self._correlation_id,
         )
         return entries
 
@@ -537,7 +543,12 @@ class SyncSession:
         HistoryManager.add_operation(
             self.project.name, "formalize", "success",
             {"commit": f"[{prefix}-{fc.number}]",
-             "source_indices": list(selected_indices)},
+             "source_indices": list(selected_indices),
+             "files_changed": [
+                 {"path": e.rel_path, "status": e.status}
+                 for e in self.entries if e.selected
+             ]},
+            correlation_id=self._correlation_id,
         )
         self.save_session()
         return fc
@@ -577,6 +588,7 @@ class SyncSession:
         HistoryManager.add_operation(
             self.project.name, "delete_formal", "success",
             {"commit": f"[{fc.prefix}-{fc.number}]"},
+            correlation_id=self._correlation_id,
         )
         self.save_session()
         return True
@@ -634,6 +646,7 @@ class SyncSession:
         HistoryManager.add_operation(
             self.project.name, "dissolve_formal", "success",
             {"commit": f"[{fc.prefix}-{fc.number}]"},
+            correlation_id=self._correlation_id,
         )
         self.save_session()
         return True
@@ -731,6 +744,7 @@ class SyncSession:
                 commit_message=fc.message,
                 workspace=str(self.workspace_path),
                 backup=str(self.backup_path) if self.backup_path else "",
+                correlation_id=self._correlation_id,
             )
             self._last_op = {"op": "sync", "status": "success",
                              "timestamp": datetime.now().isoformat()}
@@ -745,7 +759,10 @@ class SyncSession:
     # ── 步骤 5: Push ────────────────────────────────────────
 
     def step_push(self, skip_scan: bool = False) -> tuple[bool, list[dict]]:
-        """推送到远程仓库。返回 (success, warnings)。"""
+        """推送到远程仓库（批量推送所有 synced+unpushed 的 formal commit）。
+
+        返回 (success, warnings)。
+        """
         self.stage = SessionStage.PUSHING
         self.on_stage_changed(self.stage)
 
@@ -753,16 +770,13 @@ class SyncSession:
             self.on_log("备份目录不是 git 仓库")
             return False, []
 
-        target = None
-        for fc in self.formal_commits:
-            if fc.synced and not fc.pushed:
-                target = fc
-                break
-        if target is None:
+        targets = [fc for fc in self.formal_commits if fc.synced and not fc.pushed]
+        if not targets:
             self.on_log("没有待 push 的正式 Commit")
             return False, []
 
-        self.on_log(f"推送到远程仓库: {target.message.split(chr(10))[0]}")
+        commit_refs = [f"[{fc.prefix}-{fc.number}]" for fc in targets]
+        self.on_log(f"推送到远程仓库: {', '.join(commit_refs)}")
 
         success, warnings = push_to_backup(
             self.backup_path,
@@ -783,17 +797,18 @@ class SyncSession:
             return False, warnings
 
         if success:
-            if target:
-                target.pushed = True
+            for fc in targets:
+                fc.pushed = True
             self._last_op = {"op": "push", "status": "success",
                              "timestamp": datetime.now().isoformat()}
             from backend.core.history import HistoryManager
             HistoryManager.add_operation(
                 self.project.name, "push", "success",
-                {"commit": f"[{target.prefix}-{target.number}]"},
+                {"commits": commit_refs},
+                correlation_id=self._correlation_id,
             )
             self.save_session()
-            self.on_log("Push 成功！")
+            self.on_log(f"Push 成功！({len(targets)} commits)")
             return True, []
         else:
             self.stage = SessionStage.FAILED
@@ -841,6 +856,62 @@ class SyncSession:
             "time": datetime.now().isoformat(),
         }
         ConfigManager.save(self.config)
+
+    # ── 步骤 6: Create Release ────────────────────────────────
+
+    def step_create_release(self, tag: str = "", name: str = "",
+                            body: str = "") -> tuple[bool, str]:
+        """在远程仓库创建 Release（GitHub/GitLab）。
+
+        若无显式参数，则从最新 pushed formal commit 自动生成 tag/name/body。
+        返回 (success, message)。
+        """
+        from backend.remote import create_connector
+
+        release_node = self.project.release
+        if not release_node or not release_node.remote:
+            self.on_log("未配置远程仓库")
+            return False, "未配置远程仓库"
+
+        remote = release_node.remote
+        connector = create_connector(remote)
+        if not connector:
+            self.on_log(f"不支持的远程仓库类型: {remote.kind}")
+            return False, f"不支持的远程仓库类型: {remote.kind}"
+
+        if not connector.is_configured():
+            self.on_log(f"未配置 {remote.kind} 访问令牌")
+            return False, f"未配置 {remote.kind} 访问令牌"
+
+        # 自动从最新 pushed formal commit 生成参数
+        if not tag or not body:
+            pushed = [fc for fc in self.formal_commits if fc.pushed]
+            if pushed:
+                latest = pushed[-1]
+                auto_tag = f"{latest.prefix}-{latest.number}"
+                if not tag:
+                    tag = auto_tag
+                if not name:
+                    name = auto_tag
+                if not body:
+                    body = latest.message
+            elif not tag:
+                self.on_log("没有可用的 pushed formal commit，且未指定 --tag")
+                return False, "缺少 tag 参数"
+
+        self.on_log(f"创建 Release: {tag}")
+        ok, msg = connector.create_release(tag, name, body)
+        if ok:
+            self.on_log(f"Release 已创建: {msg}")
+            from backend.core.history import HistoryManager
+            HistoryManager.add_operation(
+                self.project.name, "release", "success",
+                {"tag": tag, "name": name},
+                correlation_id=self._correlation_id,
+            )
+        else:
+            self.on_log(f"Release 创建失败: {msg}")
+        return ok, msg
 
     # ── 全自动流程（Daemon 模式） ────────────────────────────
 

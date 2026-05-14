@@ -27,7 +27,8 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
-                 "status", "trial", "formalize", "scan", "push", "session"],
+                 "status", "trial", "formalize", "scan", "push", "session", "release",
+                 "suggest", "governance", "export"],
         default="gui",
         help="启动模式",
     )
@@ -128,6 +129,51 @@ def main():
         default="status",
         help="Session 操作（--mode session 时使用）",
     )
+    parser.add_argument(
+        "--release-action",
+        choices=["get-info", "create-release"],
+        default="get-info",
+        help="Release 操作类型（--mode release 时使用）",
+    )
+    parser.add_argument(
+        "--tag",
+        default=None,
+        help="Release tag（--mode release --release-action create-release 时使用）",
+    )
+    parser.add_argument(
+        "--release-name",
+        default="",
+        help="Release 名称（--mode release --release-action create-release 时使用）",
+    )
+    parser.add_argument(
+        "--release-body",
+        default="",
+        help="Release 说明（--mode release --release-action create-release 时使用）",
+    )
+    parser.add_argument(
+        "--suggest-type",
+        choices=["formalize", "triage", "summary"],
+        default="formalize",
+        help="Suggest 子动作（--mode suggest 时使用）",
+    )
+    parser.add_argument(
+        "--governance-type",
+        choices=["quality", "patterns", "graph", "releases", "release-note"],
+        default="quality",
+        help="Governance 子动作（--mode governance 时使用）",
+    )
+    parser.add_argument(
+        "--export-type",
+        choices=["state-bundle"],
+        default="state-bundle",
+        help="Export 子动作（--mode export 时使用）",
+    )
+    parser.add_argument(
+        "--minimal",
+        action="store_true",
+        default=False,
+        help="仅导出状态快照，不含 history（--mode export --export-type state-bundle 时使用）",
+    )
     args = parser.parse_args()
 
     try:
@@ -220,6 +266,35 @@ def main():
             from cli import _cmd_session
             _cmd_session(cfg, args.project, args.session_action,
                           json_output=args.json)
+        elif args.mode == "release":
+            if not args.project:
+                print("错误: --mode release 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_release
+            _cmd_release(cfg, args.project, args.release_action,
+                         tag=args.tag, name=args.release_name,
+                         body=args.release_body, json_output=args.json)
+        elif args.mode == "suggest":
+            if not args.project:
+                print("错误: --mode suggest 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_suggest
+            _cmd_suggest(cfg, args.project, args.suggest_type,
+                         indices=args.indices, json_output=args.json)
+        elif args.mode == "governance":
+            if not args.project:
+                print("错误: --mode governance 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_governance
+            _cmd_governance(cfg, args.project, args.governance_type,
+                           message=args.message or "", json_output=args.json)
+        elif args.mode == "export":
+            if not args.project:
+                print("错误: --mode export 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_export
+            _cmd_export(cfg, args.project, args.export_type,
+                       minimal=args.minimal, json_output=args.json)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)

@@ -18,7 +18,7 @@ class GitHubConnector(RemoteConnector):
         支持: https://github.com/owner/repo.git 或 git@github.com:owner/repo.git
         """
         url = self.target.url
-        m = re.search(r"github\.com[:/](.+?)/(.+?)(?:\.git)?$", url)
+        m = re.search(r"(?:https?://|git@)github\.com[:/](.+?)/(.+?)(?:\.git)?$", url)
         if not m:
             return None
         return m.group(1), m.group(2).rstrip("/")

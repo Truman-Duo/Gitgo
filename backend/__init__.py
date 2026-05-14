@@ -11,10 +11,12 @@ from backend.core.config import Config, ConfigManager, ProjectConfig
 from backend.core.history import HistoryManager, HistoryEntry
 from backend.core.i18n import _tr, load_language, available_languages
 from backend.core.sync_session import SyncSession, SessionStage
+from backend.remote import RemoteConnector, GitHubConnector, GitLabConnector, create_connector
 
 __all__ = [
     "Config", "ConfigManager", "ProjectConfig",
     "HistoryManager", "HistoryEntry",
     "_tr", "load_language", "available_languages",
     "SyncSession", "SessionStage",
+    "RemoteConnector", "GitHubConnector", "GitLabConnector", "create_connector",
 ]

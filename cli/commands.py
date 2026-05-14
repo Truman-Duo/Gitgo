@@ -123,7 +123,7 @@ def _cmd_sync(cfg: Config, project_name: str, message: str | None, json_output: 
     if stream:
         session.on_log = lambda m: print(json.dumps({"event": "log", "message": m}), flush=True)
         session.on_progress = _stream_progress("sync")
-        print(json.dumps({"event": "started", "op": "sync", "project": project_name}))
+        print(json.dumps({"event": "operation_started", "op": "sync", "project": project_name}))
     else:
         session.on_log = print
         session.on_progress = lambda c, t, m: print(f"  [{c}/{t}] {m}") if m else None
@@ -135,12 +135,12 @@ def _cmd_sync(cfg: Config, project_name: str, message: str | None, json_output: 
     success = session.run_full_workflow(commit_message=message, skip_push=True)
     if success:
         if stream:
-            print(json.dumps({"event": "complete", "op": "sync", "status": "success"}))
+            print(json.dumps({"event": "operation_complete", "op": "sync", "status": "success"}))
         elif json_output:
             print(json.dumps({"result": "ok", "project": project_name}))
     else:
         if stream:
-            print(json.dumps({"event": "complete", "op": "sync", "status": "failed"}))
+            print(json.dumps({"event": "operation_complete", "op": "sync", "status": "failed"}))
         elif json_output:
             print(json.dumps({"result": "failed", "project": project_name}))
         else:
@@ -360,7 +360,7 @@ def _cmd_scan(cfg: Config, project_name: str, json_output: bool = False,
     if stream:
         entries = [{"path": e.path, "status": e.status, "selected": e.selected}
                    for e in session.entries]
-        print(json.dumps({"event": "complete", "op": "scan",
+        print(json.dumps({"event": "operation_complete", "op": "scan",
                           "entries": entries, "total": len(session.entries)}))
     elif json_output:
         entries = []
@@ -393,7 +393,7 @@ def _cmd_push(cfg: Config, project_name: str, skip_security: bool = False,
     ready = [fc for fc in session.formal_commits if fc.synced and not fc.pushed]
     if not ready:
         if stream:
-            print(json.dumps({"event": "complete", "op": "push", "status": "skipped",
+            print(json.dumps({"event": "operation_complete", "op": "push", "status": "skipped",
                               "reason": "no synced commits"}))
         elif json_output:
             print(json.dumps({"error": "NO_SYNCED_COMMITS",
@@ -404,7 +404,7 @@ def _cmd_push(cfg: Config, project_name: str, skip_security: bool = False,
 
     success, warnings = session.step_push(skip_scan=skip_security)
     if stream:
-        print(json.dumps({"event": "complete", "op": "push",
+        print(json.dumps({"event": "operation_complete", "op": "push",
                           "status": "success" if success else "fail",
                           "warnings": warnings}))
     elif json_output:
@@ -561,3 +561,510 @@ def _cmd_history(project_name: str = "", op: str | None = None,
             elif e.commit_message:
                 print(f"       信息: {e.commit_message}")
             print()
+
+
+def _cmd_release(cfg: Config, project_name: str, action: str,
+                 tag: str = "", name: str = "", body: str = "",
+                 json_output: bool = False):
+    """--mode release: 管理远程仓库 Release（GitHub/GitLab）。
+
+    --release-action create-release: 创建 Release（需要 --tag）
+    --release-action get-info: 获取远程仓库基本信息
+    """
+    from backend.remote import create_connector
+
+    matched = [p for p in cfg.projects if p.name == project_name]
+    if not matched:
+        if json_output:
+            print(json.dumps({"error": "PROJECT_NOT_FOUND", "name": project_name}))
+        else:
+            print(f"错误: 未找到项目「{project_name}」")
+        sys.exit(1)
+
+    project = matched[0]
+    node = project.release
+    if not node or not node.remote:
+        if json_output:
+            print(json.dumps({"error": "NO_REMOTE_CONFIGURED",
+                              "message": "release node 未配置 remote 目标"}))
+        else:
+            print("错误: release node 未配置 remote 目标（在 sync_config.json 中设置 release.remote）")
+        sys.exit(1)
+
+    connector = create_connector(node.remote)
+    if connector is None:
+        if json_output:
+            print(json.dumps({"error": "UNSUPPORTED_REMOTE_KIND",
+                              "kind": node.remote.kind}))
+        else:
+            print(f"错误: 不支持的 remote 类型「{node.remote.kind}」，或缺少 token（设置 GITHUB_TOKEN / GITLAB_TOKEN 环境变量）")
+        sys.exit(1)
+
+    if action == "get-info":
+        info = connector.get_repo_info()
+        if "error" in info:
+            if json_output:
+                print(json.dumps({"error": "API_ERROR", "detail": info}))
+            else:
+                print(f"错误: {info['error']} — {info.get('message', '')}")
+            sys.exit(1)
+        if json_output:
+            print(json.dumps({"result": "ok", "repo": info}, indent=2, ensure_ascii=False))
+        else:
+            print(f"[OK] {info.get('full_name', info.get('path_with_namespace', '?'))}")
+            print(f"  描述: {info.get('description', '—')}")
+            print(f"  URL: {info.get('html_url', info.get('web_url', '—'))}")
+
+    elif action == "create-release":
+        if not tag:
+            if json_output:
+                print(json.dumps({"error": "MISSING_TAG", "message": "--tag 参数必填"}))
+            else:
+                print("错误: --release-action create-release 需要 --tag 参数")
+            sys.exit(1)
+        release_name = name or tag
+        success, msg = connector.create_release(tag, release_name, body)
+        if json_output:
+            print(json.dumps({
+                "result": "ok" if success else "fail",
+                "message": msg,
+            }))
+        else:
+            if success:
+                print(f"[OK] Release 已创建: {msg}")
+            else:
+                print(f"[FAIL] 创建 Release 失败: {msg}")
+        if not success:
+            sys.exit(1)
+
+    else:
+        print(f"错误: 未知 release 操作: {action}")
+        print("支持: get-info, create-release")
+        sys.exit(1)
+
+
+# ── _cmd_suggest ───────────────────────────────────────────────
+
+def _cmd_suggest(cfg: Config, project_name: str, suggest_type: str,
+                 indices: str = "", json_output: bool = False):
+    """--mode suggest: 输出 AI 建议 context JSON。
+
+    suggest_type: "formalize" | "triage" | "summary"
+    indices: 逗号分隔的 commit 索引（仅 formalize 子动作使用）
+    """
+    import json
+
+    project = cfg.get_project(project_name)
+    if not project:
+        output = {"error": "PROJECT_NOT_FOUND", "name": project_name}
+        print(json.dumps(output, ensure_ascii=False) if json_output
+              else f"错误: 项目 {project_name} 未找到")
+        if not json_output:
+            sys.exit(1)
+        return
+
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(project, cfg)
+
+    if suggest_type == "formalize":
+        session.step_scan()
+        session.step_load_commits()
+        context = _build_formalize_context(session, indices)
+
+    elif suggest_type == "triage":
+        session.step_check_trial()
+        context = _build_triage_context(session)
+
+    elif suggest_type == "summary":
+        context = _build_summary_context(session)
+
+    else:
+        output = {"error": "UNKNOWN_SUGGEST_TYPE", "suggest_type": suggest_type}
+        if not json_output:
+            print(f"错误: 未知 suggest 类型: {suggest_type}")
+            print("支持: formalize, triage, summary")
+            sys.exit(1)
+        return
+
+    output = {"suggest": suggest_type, "project": project_name,
+              "context": context}
+    print(json.dumps(output, ensure_ascii=False, indent=2))
+
+
+def _build_formalize_context(session: "SyncSession", indices_str: str = "") -> dict:
+    """收集 commit proposal context：commits + diff 统计 + 编号信息。"""
+    commits = session.commits
+    if indices_str:
+        selected_idx = {int(i.strip()) for i in indices_str.split(",") if i.strip()}
+        commits = [c for i, c in enumerate(commits) if i in selected_idx]
+
+    prefix = session.project.commit_format.get("prefix", "PROJ")
+    number_start = session.project.commit_format.get("number_start", 0)
+    max_n = number_start
+    for fc in session.formal_commits:
+        if fc.number > max_n:
+            max_n = fc.number
+    next_number = max_n + 1
+
+    commit_contexts = []
+    git_runner = session.ws_git_runner
+    from backend.core.operations.diff import get_diff_summary
+    for ci, commit in enumerate(commits):
+        if git_runner and git_runner.is_git_repo():
+            files_info = get_diff_summary(commit.hash, git_runner)
+        else:
+            files_info = []
+
+        commit_contexts.append({
+            "index": ci if not indices_str else
+                     next((i for i in range(len(session.commits))
+                           if session.commits[i].hash == commit.hash), ci),
+            "hash": commit.hash,
+            "type": commit.commit_type,
+            "subject": commit.subject,
+            "body": commit.body[:500] if commit.body else "",
+            "files_changed": files_info,
+        })
+
+    return {
+        "commits": commit_contexts,
+        "prefix": prefix,
+        "next_number": next_number,
+    }
+
+
+def _build_triage_context(session: "SyncSession") -> dict:
+    """收集 triage context：incoming changes + diff 统计 + release 上下文。"""
+    from backend.core.operations.diff import get_diff_summary
+
+    incoming = []
+    for i, ch in enumerate(session.incoming_changes):
+        # 获取每个 incoming change 的 diff 统计
+        trial_runner = session.trial_git_runner
+        if trial_runner and trial_runner.is_git_repo():
+            files_info = get_diff_summary(ch.hash, trial_runner)
+        else:
+            files_info = []
+
+        incoming.append({
+            "index": i,
+            "hash": ch.hash,
+            "message": ch.message,
+            "author": ch.author,
+            "date": ch.timestamp,
+            "body": ch.body[:500] if ch.body else "",
+            "files_changed": files_info,
+        })
+
+    release_context = {
+        "recent_formal_commits": [
+            f"[{fc.prefix}-{fc.number}] {fc.message.split(chr(10))[0][:80]}"
+            for fc in session.formal_commits[-5:]
+        ],
+    }
+
+    return {
+        "incoming_changes": incoming,
+        "release_context": release_context,
+    }
+
+
+def _cmd_governance(cfg: Config, project_name: str, governance_type: str,
+                    message: str = "", json_output: bool = False):
+    """--mode governance: 治理度量与自省。
+
+    --governance-type quality: 建议采纳率/修改率/拒绝率
+    """
+    if governance_type == "quality":
+        from backend.core.governance import load_suggestion_pairs, compute_quality_metrics
+
+        pairs = load_suggestion_pairs(project_name)
+        metrics = compute_quality_metrics(pairs)
+        if json_output:
+            import json
+            print(json.dumps(metrics, indent=2, ensure_ascii=False))
+        else:
+            _print_quality(metrics)
+
+    elif governance_type == "patterns":
+        from backend.core.governance import build_patterns_report
+
+        report = build_patterns_report(project_name)
+        if json_output:
+            import json
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            _print_patterns(report)
+
+    elif governance_type == "graph":
+        from backend.core.governance import build_graph
+
+        graph = build_graph(project_name)
+        if json_output:
+            import json
+            print(json.dumps(graph, indent=2, ensure_ascii=False))
+        else:
+            _print_graph(graph)
+
+    elif governance_type == "releases":
+        from backend.core.governance import list_releases
+
+        data = list_releases(project_name)
+        if json_output:
+            import json
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+        else:
+            _print_releases(data)
+
+    elif governance_type == "release-note":
+        from backend.core.governance import add_release_note
+
+        if not message:
+            if json_output:
+                import json
+                print(json.dumps({"error": "MISSING_MESSAGE",
+                                  "detail": "release-note requires --message"}))
+            else:
+                print("错误: release-note 需要 --message 参数")
+            sys.exit(1)
+
+        ok = add_release_note(project_name, message)
+        if json_output:
+            import json
+            print(json.dumps({"ok": ok, "message": message}))
+        else:
+            if ok:
+                print(f"已为 {project_name} 最新发布记录 release note")
+            else:
+                print(f"未找到 {project_name} 的 push 记录")
+
+    else:
+        if json_output:
+            import json
+            print(json.dumps({"error": "UNKNOWN_GOVERNANCE_TYPE",
+                              "governance_type": governance_type}))
+        else:
+            print(f"错误: 未知 governance 类型: {governance_type}")
+            print("支持: quality, patterns, graph, releases, release-note")
+        sys.exit(1)
+
+
+def _print_quality(metrics: dict):
+    """人类可读的 quality 输出。"""
+    if metrics["suggestion_count"] == 0:
+        print("暂无 AI 建议记录")
+        return
+
+    print(f"\nAI 建议质量度量 ({metrics['suggestion_count']} 条):\n")
+
+    for stype, data in metrics.get("by_type", {}).items():
+        type_name = {"formalize": "分组建议", "triage": "审查建议"}.get(stype, stype)
+        print(f"  [{type_name}] 共 {data['total']} 条")
+        print(f"    采纳: {data['accepted']} ({data['acceptance_rate']:.0%})")
+        print(f"    修改: {data['modified']} ({data['modification_rate']:.0%})")
+        print(f"    拒绝: {data['rejected']} ({data['rejection_rate']:.0%})")
+        if data.get("avg_index_jaccard") is not None:
+            print(f"    平均 Jaccard: {data['avg_index_jaccard']:.3f}")
+        print()
+
+    if metrics.get("by_commit_type"):
+        print("  按 Commit 类型:")
+        for ct, d in sorted(metrics["by_commit_type"].items()):
+            print(f"    {ct}: {d['total']} 条, 采纳率 {d['acceptance_rate']:.0%}")
+        print()
+
+    if metrics.get("by_module"):
+        print("  按模块:")
+        for mod, d in sorted(metrics["by_module"].items()):
+            print(f"    {mod}/: {d['total']} 条, 采纳率 {d['acceptance_rate']:.0%}")
+        print()
+
+
+def _print_patterns(report: dict):
+    """人类可读的 patterns 输出。"""
+    co = report.get("co_changing_modules", [])
+    tc = report.get("commit_type_clusters", [])
+    ti = report.get("trial_impact", {})
+
+    if not co and not tc:
+        print("暂无足够数据检测变更模式")
+        return
+
+    if co:
+        print(f"\n共变模块 (Top {len(co)}):\n")
+        for p in co:
+            m = p["modules"]
+            print(f"  {m[0]} ⇄ {m[1]}  "
+                  f"({p['co_occurrence']}/{p['total_formal']} formal commits)")
+
+    if tc:
+        print(f"\nCommit 类型聚类:\n")
+        for c in tc:
+            print(f"  {c['type']}: {c['count']} 次 formalize, "
+                  f"平均 {c['avg_sources']} 个源 commit, "
+                  f"多源合并率 {c['multi_source_ratio']:.0%}")
+
+    if ti and ti.get("total_accepted", 0) > 0:
+        print(f"\nTrial 后续影响:\n"
+              f"  总 accept: {ti['total_accepted']}\n"
+              f"  触发 workspace 变更: {ti['triggered_workspace_change']}\n"
+              f"  触发率: {ti['avg_trigger_rate']:.0%}")
+    print()
+
+
+def _print_graph(graph: dict):
+    """人类可读的 graph 输出。"""
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+
+    if not nodes:
+        print("暂无 formal commit 记录")
+        return
+
+    print(f"\n语义变更图 ({len(nodes)} nodes, {len(edges)} edges):\n")
+
+    formal_nodes = [n for n in nodes if n["type"] == "formal"]
+    incoming_nodes = [n for n in nodes if n["type"] == "incoming"]
+    print(f"  Formal commits: {len(formal_nodes)}")
+    print(f"  Incoming (trial accept): {len(incoming_nodes)}")
+
+    if formal_nodes:
+        print("\n  Formal nodes:")
+        for n in formal_nodes:
+            files = n.get("files_changed", [])
+            print(f"    {n['id']}  ({n['source_commits']} sources, "
+                  f"{len(files)} files)")
+
+    if incoming_nodes:
+        print("\n  Incoming nodes:")
+        for n in incoming_nodes:
+            msg = n.get("message", "")[:60]
+            print(f"    {n['id']}  {msg}")
+
+    if edges:
+        print(f"\n  Edges:")
+        for e in edges:
+            if e["type"] == "file_overlap":
+                print(f"    {e['from']} → {e['to']}  "
+                      f"file_overlap ({e['overlap_ratio']:.2f}) "
+                      f"[{', '.join(e.get('overlap_files', []))}]")
+            elif e["type"] == "same_push":
+                print(f"    {e['from']} → {e['to']}  "
+                      f"same_push ({e.get('pushed_at', '')[:19]})")
+            elif e["type"] == "trial_source":
+                print(f"    {e['from']} → {e['to']}  trial_source")
+    print()
+
+
+def _print_releases(data: dict):
+    """人类可读的 releases 输出。"""
+    releases = data.get("releases", [])
+    if not releases:
+        print("暂无发布记录")
+        return
+
+    print(f"\n发布历史 ({len(releases)} 次):\n")
+    for i, r in enumerate(releases):
+        pushed = r["pushed_at"][:19]
+        commits = r.get("commits", [])
+        reason = r.get("reason")
+        print(f"  [{i+1}] {pushed}  ({len(commits)} commits)")
+        if commits:
+            for c in commits:
+                print(f"      {c}")
+        if reason:
+            print(f"      理由: {reason}")
+        print()
+
+
+def _cmd_export(cfg: Config, project_name: str, export_type: str,
+                minimal: bool = False, json_output: bool = False):
+    """--mode export: 导出治理状态。
+
+    --export-type state-bundle: 完整状态快照
+    """
+    from backend.core.governance import collect_state_bundle
+
+    if export_type == "state-bundle":
+        session = _init_session(cfg, project_name, json_output=json_output)
+        bundle = collect_state_bundle(session, minimal=minimal)
+        if json_output:
+            import json
+            print(json.dumps(bundle, indent=2, ensure_ascii=False))
+        else:
+            print(f"State Bundle: {project_name}")
+            print(f"  Protocol: {bundle['gitgo_protocol_version']}")
+            print(f"  Exported: {bundle['exported_at'][:19]}")
+            state = bundle["current_state"]
+            print(f"  Stage: {state.get('stage', '?')}")
+            ws = state.get("workspace", {})
+            cm = state.get("commits", {})
+            print(f"  Workspace: {ws.get('entries_changed', 0)}/{ws.get('entries_total', 0)} changed")
+            print(f"  Commits: {cm.get('formal_total', 0)} formal, "
+                  f"{cm.get('formal_synced', 0)} synced, {cm.get('formal_pushed', 0)} pushed")
+            gs = bundle.get("governance_summary", {})
+            q = gs.get("quality", {})
+            print(f"  Suggestions: {q.get('suggestion_count', 0)}")
+            hist = bundle.get("recent_history", [])
+            sugg = bundle.get("recent_suggestions", [])
+            if hist:
+                print(f"  History: {len(hist)} entries")
+            if sugg:
+                print(f"  Suggestions: {len(sugg)} entries")
+    else:
+        if json_output:
+            import json
+            print(json.dumps({"error": "UNKNOWN_EXPORT_TYPE", "export_type": export_type}))
+        else:
+            print(f"错误: 未知 export 类型: {export_type}")
+            print("支持: state-bundle")
+        sys.exit(1)
+
+
+def _build_summary_context(session: "SyncSession") -> dict:
+    """收集 summary context：workspace/trial/release 三段统计。"""
+    from collections import Counter
+
+    session.step_scan()
+    session.step_load_commits()
+    session.step_check_trial()
+
+    # workspace
+    changed_entries = [e for e in session.entries if e.status != "same"]
+    dir_counter = Counter()
+    for e in changed_entries:
+        parts = e.rel_path.replace("\\", "/").split("/")
+        if len(parts) > 1:
+            dir_counter[parts[0]] += 1
+        else:
+            dir_counter["(root)"] += 1
+
+    # trial
+    trial_summary = [
+        {"hash": ch.hash, "subject": ch.message.split(chr(10))[0][:80],
+         "author": ch.author}
+        for ch in session.incoming_changes
+    ]
+
+    # release
+    pushed = [fc for fc in session.formal_commits if fc.pushed]
+    unpushed = [fc for fc in session.formal_commits if fc.synced and not fc.pushed]
+
+    return {
+        "workspace": {
+            "entries_changed": len(changed_entries),
+            "commits_since_base": len(session.commits),
+            "top_changed_dirs": [d for d, _ in dir_counter.most_common(5)],
+        },
+        "trial": {
+            "pending": sum(1 for ch in session.incoming_changes
+                           if ch.triage.value == "pending"),
+            "incoming_summary": trial_summary,
+        },
+        "release": {
+            "formal_commits_waiting_push": len(unpushed),
+            "recent_tags": [
+                f"[{fc.prefix}-{fc.number}]" for fc in pushed[-5:]
+            ],
+        },
+    }

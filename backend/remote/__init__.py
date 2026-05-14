@@ -2,6 +2,14 @@
 
 from .connector import RemoteConnector
 from .github import GitHubConnector
+from .gitlab import GitLabConnector
+
+__all__ = [
+    "RemoteConnector",
+    "GitHubConnector",
+    "GitLabConnector",
+    "create_connector",
+]
 
 
 def create_connector(target, token: str = ""):
@@ -11,7 +19,13 @@ def create_connector(target, token: str = ""):
     import os
     if not target or not target.kind or target.kind == "bare":
         return None
-    resolved_token = token or os.environ.get("GITHUB_TOKEN", "")
-    if target.kind == "github":
+
+    kind = target.kind
+    if kind == "github":
+        resolved_token = token or os.environ.get("GITHUB_TOKEN", "")
         return GitHubConnector(target, resolved_token)
+    elif kind == "gitlab":
+        resolved_token = token or os.environ.get("GITLAB_TOKEN", "")
+        return GitLabConnector(target, resolved_token)
+
     return None
