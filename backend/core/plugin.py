@@ -87,3 +87,18 @@ class SyncPlugin:
         - ``result``: ``{"success": bool, "remote": str}``
         """
         pass
+
+    # ── Trial / Triage 阶段 ──
+
+    def on_triage_recommend(
+        self, incoming_changes: list[dict], project_config: dict
+    ) -> list[dict] | None:
+        """对 trial incoming changes 推荐三叉决策。
+
+        - ``incoming_changes``: IncomingChange 的 dict 列表
+          ``{"index", "hash", "message", "author", "date", "body"}``
+        - ``project_config``: ProjectConfig 的 dict 表示
+        - 返回值: ``[{"index": 0, "action": "accept", "reason": "..."}, ...]``
+        - 返回 None = 不干预
+        """
+        return None

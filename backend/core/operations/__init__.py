@@ -1,4 +1,5 @@
 """核心操作 — 文件扫描 / 哈希对比 / git 操作 / 同步推送 / 安全检查"""
+from backend.core.operations.diff import get_diff_summary
 from backend.core.operations.models import CommitInfo, FileEntry
 from backend.core.operations.scan import (compare_files, get_exclude_patterns,
                                            get_file_diff, scan_workspace)
@@ -23,4 +24,5 @@ __all__ = [
     "sync_to_backup",
     "push_to_backup",
     "DEFAULT_SECURITY_PATTERNS",
+    "get_diff_summary",
 ]

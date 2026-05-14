@@ -246,6 +246,57 @@ def gitgo_run_workflow(
     }
 
 
+# ── P3 Suggest Tools ───────────────────────────────────────────
+
+def _build_suggest_result(project_name: str, suggest_type: str) -> dict:
+    """Shared helper: init session, build suggest context, return full result dict."""
+    import json
+    cfg, proj = _get_project(project_name)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project_name}
+    from backend.core.sync_session import SyncSession
+    from cli.commands import (
+        _build_formalize_context,
+        _build_triage_context,
+        _build_summary_context,
+    )
+    session = SyncSession(proj, cfg)
+    if suggest_type == "formalize":
+        session.step_scan()
+        session.step_load_commits()
+        context = _build_formalize_context(session)
+    elif suggest_type == "triage":
+        session.step_check_trial()
+        context = _build_triage_context(session)
+    elif suggest_type == "summary":
+        context = _build_summary_context(session)
+    else:
+        return {"error": "UNKNOWN_SUGGEST_TYPE", "suggest_type": suggest_type}
+    return {"suggest": suggest_type, "project": project_name,
+            "context": context}
+
+
+@mcp.tool(
+    description="获取 AI commit 分组和 message 建议的 context。包含 workspace commits 列表、diff 统计（新增/删除行数+顶层符号）、编号信息。Agent 拿到 context 后自行调用 LLM 分析，生成分组+message 建议，人确认后通过 formalize 逐组执行。"
+)
+def gitgo_suggest_formalize(project: str) -> dict:
+    return _build_suggest_result(project, "formalize")
+
+
+@mcp.tool(
+    description="获取 trial triage 建议的 context。包含 incoming changes 列表、diff 统计、release 仓库上下文。Agent 分析后建议 accept/promote/discard，含 confidence 和 reason，人确认后通过 gitgo_trial_triage 逐项执行。"
+)
+def gitgo_suggest_triage(project: str) -> dict:
+    return _build_suggest_result(project, "triage")
+
+
+@mcp.tool(
+    description="获取变更语义摘要的 context。包含 workspace/trial/release 三段统计信息。Agent 基于 context 生成自然语言变更叙述，供状态展示用。"
+)
+def gitgo_suggest_summary(project: str) -> dict:
+    return _build_suggest_result(project, "summary")
+
+
 # ── Entry Point ────────────────────────────────────────────────
 
 if __name__ == "__main__":

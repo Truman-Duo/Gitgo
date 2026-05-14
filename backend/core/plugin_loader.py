@@ -303,6 +303,22 @@ class PluginOrchestrator:
             except Exception:
                 logger.warning("插件 %s on_push_complete 异常", p.name, exc_info=True)
 
+    def on_triage_recommend(
+        self, plugin_ids: list[str],
+        incoming_changes: list[dict], project_config: dict,
+    ) -> list[dict]:
+        """合并所有插件的 triage 推荐，去重（同 index 以后者为准）。"""
+        merged: dict[int, dict] = {}
+        for p in self.get_enabled_instances(plugin_ids):
+            try:
+                ret = p.on_triage_recommend(incoming_changes, project_config)
+                if ret:
+                    for rec in ret:
+                        merged[rec["index"]] = rec
+            except Exception:
+                logger.warning("插件 %s on_triage_recommend 异常", p.name, exc_info=True)
+        return list(merged.values())
+
 
 # ── 全局单例 ────────────────────────────────────────────────
 

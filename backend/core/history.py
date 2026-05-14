@@ -82,6 +82,30 @@ class HistoryManager:
         cls.save(entries)
 
     @classmethod
+    def add_suggestion(cls, project_name: str, suggest_type: str,
+                       ai_proposal: dict, human_decision: dict) -> None:
+        """记录 AI 建议与人的最终决策差异，供 P4 质量度量使用。
+
+        - ``suggest_type``: "formalize" | "triage" | "summary"
+        - ``ai_proposal``: agent 返回的完整建议 JSON
+        - ``human_decision``: 人最终执行时的参数
+        """
+        entries = cls.load()
+        entries.append(HistoryEntry(
+            timestamp=datetime.now().isoformat(),
+            project_name=project_name,
+            operation=f"suggest_{suggest_type}",
+            status="recorded",
+            detail={
+                "ai_proposal": ai_proposal,
+                "human_decision": human_decision,
+            },
+        ))
+        if len(entries) > 200:
+            entries = entries[-200:]
+        cls.save(entries)
+
+    @classmethod
     def add_entry(cls,
                   project_name: str,
                   file_count: int,
