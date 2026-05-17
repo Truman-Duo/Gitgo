@@ -69,6 +69,7 @@ class IncomingTabMixin:
         hdr.setContentsMargins(12, 8, 12, 8)
         hdr.addWidget(QLabel(f"<h3 style='font-size:13px;font-weight:500;margin:0'>{_tr('tab.incoming', 'Incoming')}</h3>"))
         self.state.trial_check_btn = QPushButton(_tr("trial.fetch", "Fetch"))
+        self.state.trial_check_btn.setProperty("variant", "ghost")
         self.state.trial_check_btn.setStyleSheet("font-size:10px;")
         self.state.trial_check_btn.clicked.connect(self._check_trial)
         hdr.addWidget(self.state.trial_check_btn)

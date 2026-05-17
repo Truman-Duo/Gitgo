@@ -29,7 +29,7 @@ QPushButton[variant="secondary"] {{
     background: {t.bg2}; border: 0.5px solid {t.bdr2};
     color: {t.txt2}; padding: 4px 11px; border-radius: 5px; font-size: 12px;
 }}
-QPushButton[variant="secondary"]:hover {{ background: {t.bg3}; border-color: {t.bdr2}; color: {t.txt}; }}
+QPushButton[variant="secondary"]:hover {{ background: {t.blue_bg}; border-color: {t.blue}; color: {t.blue_txt}; }}
 QPushButton[variant="secondary"]:disabled {{ opacity: 0.35; }}
 
 /* ── Buttons: primary ───────────────────────────────── */
@@ -54,6 +54,13 @@ QPushButton[variant="danger"] {{
     background: {t.danger_bg}; border: .5px solid {t.danger};
     color: {t.danger_txt}; font-weight: 500;
     border-radius: 8px; padding: 8px; font-size: 11px;
+}}
+
+QPushButton[variant="danger"][objectName="delete_btn"] {{
+    font-size: 13px; padding: 2px 4px; border-radius: 4px;
+}}
+QPushButton[variant="danger"][objectName="delete_btn"]:hover {{
+    background: {t.danger_bg}; border-color: {t.danger}; color: {t.danger_txt};
 }}
 
 /* ── Tab bar ────────────────────────────────────────── */
