@@ -114,12 +114,13 @@ def gitgo_scan(project: str) -> dict:
 
 
 @mcp.tool(
-    description="从选中的 workspace commits 创建 formal commit。不指定 indices 时使用当前 selected_workspace。"
+    description="从选中的 workspace commits 创建 formal commit。支持可选 template 参数选择模板。不指定 indices 时使用当前 selected_workspace。"
 )
 def gitgo_formalize(
     project: str,
     indices: list[int] | None = None,
     message: str | None = None,
+    template: str | None = None,
 ) -> dict:
     cfg, proj = _get_project(project)
     if proj is None:
@@ -132,7 +133,7 @@ def gitgo_formalize(
     if indices is not None:
         session.selected_workspace = set(indices)
 
-    fc = session.step_create_formal_commit(message=message)
+    fc = session.step_create_formal_commit(message=message, template_name=template)
     if fc:
         return {
             "commit": f"[{fc.prefix}-{fc.number}]",
@@ -232,6 +233,7 @@ def gitgo_trial_triage(project: str, index: int, action: str) -> dict:
 def gitgo_run_workflow(
     project: str,
     message: str | None = None,
+    template: str | None = None,
     skip_push: bool = False,
 ) -> dict:
     cfg, proj = _get_project(project)
@@ -339,6 +341,319 @@ def gitgo_governance_release_note(project: str, message: str) -> dict:
     from backend.core.governance import add_release_note
     ok = add_release_note(project, message)
     return {"ok": ok, "message": message}
+
+
+# ── Template Tools ───────────────────────────────────────────────
+
+@mcp.tool(
+    description="列出所有可用的 commit message 模板（含默认模板）。"
+)
+def gitgo_template_list() -> list[dict]:
+    from backend.core.template_manager import TemplateManager
+    templates = TemplateManager.load()
+    return [
+        {
+            "name": t.name,
+            "description": t.description,
+            "header_format": t.header_format,
+            "body_format": t.body_format,
+            "prefix_override": t.prefix_override,
+        }
+        for t in templates
+    ]
+
+
+@mcp.tool(
+    description="添加新的 commit message 模板。header_format/body_format 使用 {prefix}/{number}/{type_str}/{scope_str}/{subject}/{project_name}/{commit_count}/{commit_list} 变量。"
+)
+def gitgo_template_add(
+    name: str,
+    description: str,
+    header_format: str,
+    body_format: str,
+    prefix_override: str | None = None,
+) -> dict:
+    from backend.core.template_manager import TemplateManager, CommitTemplate
+    templates = TemplateManager.load()
+    if any(t.name == name for t in templates):
+        return {"error": "TEMPLATE_EXISTS", "name": name}
+    tpl = CommitTemplate(
+        name=name,
+        description=description,
+        header_format=header_format,
+        body_format=body_format,
+        prefix_override=prefix_override,
+    )
+    templates.append(tpl)
+    TemplateManager.save(templates)
+    return {"added": name}
+
+
+@mcp.tool(
+    description="更新已有模板的字段。只需传要更新的字段。"
+)
+def gitgo_template_edit(
+    name: str,
+    description: str | None = None,
+    header_format: str | None = None,
+    body_format: str | None = None,
+    prefix_override: str | None = None,
+) -> dict:
+    from backend.core.template_manager import TemplateManager
+    templates = TemplateManager.load()
+    idx = next((i for i, t in enumerate(templates) if t.name == name), None)
+    if idx is None:
+        return {"error": "TEMPLATE_NOT_FOUND", "name": name}
+    t = templates[idx]
+    if description is not None:
+        t.description = description
+    if header_format is not None:
+        t.header_format = header_format
+    if body_format is not None:
+        t.body_format = body_format
+    if prefix_override is not None:
+        t.prefix_override = prefix_override
+    TemplateManager.save(templates)
+    return {"updated": name}
+
+
+@mcp.tool(
+    description="删除模板（不可删除 'default'）。"
+)
+def gitgo_template_delete(name: str) -> dict:
+    if name == "default":
+        return {"error": "CANNOT_DELETE_DEFAULT"}
+    from backend.core.template_manager import TemplateManager
+    templates = TemplateManager.load()
+    idx = next((i for i, t in enumerate(templates) if t.name == name), None)
+    if idx is None:
+        return {"error": "TEMPLATE_NOT_FOUND", "name": name}
+    templates.pop(idx)
+    TemplateManager.save(templates)
+    return {"deleted": name}
+
+
+# ── Formal Management Tools ──────────────────────────────────────
+
+def _init_session_with_scan(project_name: str):
+    """Initialize SyncSession with scan + load commits + trial check."""
+    from cli.commands import _init_session as cli_init
+    cfg = _get_config()
+    return cli_init(cfg, project_name, with_scan=True)
+
+
+@mcp.tool(
+    description="列出项目的所有 formal commits（含索引、状态、来源）。"
+)
+def gitgo_formal_list(project: str) -> list[dict]:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return [{"error": "PROJECT_NOT_FOUND", "project": project}]
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    session.step_scan()
+    session.step_load_commits()
+    return [
+        {
+            "index": i,
+            "prefix": fc.prefix,
+            "number": fc.number,
+            "message": fc.message,
+            "synced": fc.synced,
+            "pushed": fc.pushed,
+            "is_incoming": fc.is_incoming,
+            "sources_cleared": fc.sources_cleared,
+            "source_indices": sorted(fc.source_indices),
+            "created_at": fc.created_at,
+        }
+        for i, fc in enumerate(session.formal_commits)
+    ]
+
+
+@mcp.tool(
+    description="删除指定索引的 formal commit。"
+)
+def gitgo_formal_delete(project: str, index: int) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    session.step_scan()
+    session.step_load_commits()
+    ok = session.step_delete_formal(index)
+    return {"deleted": ok, "index": index}
+
+
+@mcp.tool(
+    description="编辑 formal commit 的 message 文本。"
+)
+def gitgo_formal_edit_message(project: str, index: int, message: str) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    session.step_scan()
+    session.step_load_commits()
+    ok = session.step_edit_formal_message(index, message)
+    return {"updated": ok, "index": index}
+
+
+@mcp.tool(
+    description="重新编号 formal commit。更新 message 中的 [PREFIX-N] 标签。"
+)
+def gitgo_formal_edit_number(project: str, index: int, new_number: int) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    session.step_scan()
+    session.step_load_commits()
+    ok = session.step_edit_formal_number(index, new_number)
+    return {"updated": ok, "index": index, "new_number": new_number}
+
+
+@mcp.tool(
+    description="Dissolve formal commit — 删除 formal commit 并恢复 workspace commit 可选状态。"
+)
+def gitgo_formal_dissolve(project: str, index: int) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    session.step_scan()
+    session.step_load_commits()
+    ok = session.step_dissolve_formal(index)
+    return {"dissolved": ok, "index": index}
+
+
+@mcp.tool(
+    description="清除 formal commit 的 workspace 来源引用（解除 source_indices 关联）。"
+)
+def gitgo_formal_clear_sources(project: str, index: int) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    session.step_scan()
+    session.step_load_commits()
+    ok = session.step_clear_formal_sources(index)
+    return {"sources_cleared": ok, "index": index}
+
+
+# ── Release / History / Session / Export Tools ───────────────────
+
+@mcp.tool(
+    description="获取远程仓库基本信息（GitHub/GitLab）。需要项目配置了 remote 和 token。"
+)
+def gitgo_release_info(project: str) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.remote import create_connector
+    node = proj.release
+    if not node or not node.remote:
+        return {"error": "NO_REMOTE_CONFIGURED", "project": project}
+    connector = create_connector(node.remote)
+    if connector is None:
+        return {"error": "REMOTE_NOT_SUPPORTED", "kind": node.remote.kind}
+    return connector.get_repo_info()
+
+
+@mcp.tool(
+    description="在远程仓库创建 Release（GitHub/GitLab）。自动从最新 pushed formal commit 生成 tag。"
+)
+def gitgo_release_create(
+    project: str,
+    tag: str = "",
+    name: str = "",
+    body: str = "",
+) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    ok, msg = session.step_create_release(tag=tag, name=name, body=body)
+    return {"created": ok, "message": msg}
+
+
+@mcp.tool(
+    description="查询项目操作历史（scan/formalize/sync/push/triage 等）。可按 project 和 operation 过滤。"
+)
+def gitgo_history(
+    project: str = "",
+    op: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    from backend.core.history import HistoryManager
+    from dataclasses import asdict
+    entries = HistoryManager.load()
+    if project:
+        entries = [e for e in entries if e.project_name == project]
+    if op:
+        entries = [e for e in entries if e.operation == op]
+    entries = entries[-limit:]
+    return [asdict(e) for e in entries]
+
+
+@mcp.tool(
+    description="管理 session 状态：保存当前 session、查看状态、恢复 session。"
+)
+def gitgo_session(project: str, action: str = "status") -> dict:
+    if action not in ("status", "save", "resume"):
+        return {"error": "INVALID_ACTION", "action": action, "valid": ["status", "save", "resume"]}
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    if action == "save":
+        path = session.save_session()
+        return {"saved": True, "path": str(path)}
+    elif action == "resume":
+        restored = session.load_session()
+        fc_count = len(session.formal_commits) if restored else 0
+        return {"resumed": restored, "formal_commits_restored": fc_count}
+    else:
+        return session.status_dict(semantic=True)
+
+
+@mcp.tool(
+    description="导出项目完整状态快照（State Bundle），含 governance summary 和最近历史。minimal=True 时不含 history。"
+)
+def gitgo_export(project: str, minimal: bool = False) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    from backend.core.governance import collect_state_bundle
+    session = SyncSession(proj, cfg)
+    session.step_scan()
+    session.step_load_commits()
+    session.step_check_trial()
+    return collect_state_bundle(session, minimal=minimal)
+
+
+@mcp.tool(
+    description="列出远程仓库的 Issues（GitHub/GitLab）。需要项目配置了 remote 和 token（或环境变量 GITHUB_TOKEN/GITLAB_TOKEN）。"
+)
+def gitgo_remote_issues(project: str, state: str = "open") -> list[dict]:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return [{"error": "PROJECT_NOT_FOUND", "project": project}]
+    from backend.remote import create_connector
+    node = proj.release
+    if not node or not node.remote:
+        return [{"error": "NO_REMOTE_CONFIGURED", "project": project}]
+    connector = create_connector(node.remote)
+    if connector is None:
+        return [{"error": "REMOTE_NOT_SUPPORTED", "kind": node.remote.kind}]
+    return connector.list_issues(state=state)
 
 
 # ── Entry Point ────────────────────────────────────────────────

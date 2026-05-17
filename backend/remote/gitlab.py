@@ -70,11 +70,44 @@ class GitLabConnector(RemoteConnector):
         except Exception as e:
             return False, str(e)
 
-    # ── Phase 5.2 预留 ──────────────────────────────────────
+    # ── Issue / MR ─────────────────────────────────────────
 
     def list_issues(self, state: str = "opened") -> list:
-        raise NotImplementedError
+        proj = self._parse_project_path()
+        if not proj:
+            return [{"error": "无法从 URL 解析 GitLab project path"}]
+        try:
+            r = httpx.get(
+                f"{self.API_BASE}/projects/{proj}/issues",
+                headers=self._headers(), timeout=15.0,
+                params={"state": state, "per_page": 30},
+            )
+            if r.status_code == 200:
+                return r.json()
+            return [{"error": f"HTTP {r.status_code}", "message": r.text[:200]}]
+        except Exception as e:
+            return [{"error": str(e)}]
 
-    def create_pr(self, title: str, body: str, head: str, base: str = "main") -> tuple[bool, str]:
+    def create_pr(self, title: str, body: str, head: str,
+                  base: str = "main") -> tuple[bool, str]:
         """GitLab 称为 Merge Request (MR)。"""
-        raise NotImplementedError
+        proj = self._parse_project_path()
+        if not proj:
+            return False, "无法从 URL 解析 GitLab project path"
+        try:
+            r = httpx.post(
+                f"{self.API_BASE}/projects/{proj}/merge_requests",
+                headers=self._headers(), timeout=30.0,
+                json={
+                    "title": title,
+                    "description": body,
+                    "source_branch": head,
+                    "target_branch": base,
+                },
+            )
+            if r.status_code in (200, 201):
+                data = r.json()
+                return True, data.get("web_url", "MR 已创建")
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            return False, str(e)

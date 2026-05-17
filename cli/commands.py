@@ -313,7 +313,8 @@ def _cmd_trial(cfg: Config, project_name: str, action: str,
 
 
 def _cmd_formalize(cfg: Config, project_name: str, indices: str | None = None,
-                   message: str | None = None, json_output: bool = False):
+                   message: str | None = None, template_name: str | None = None,
+                   json_output: bool = False):
     """--mode formalize: 从 workspace commit 创建 formal commit"""
     session = _init_session(cfg, project_name, json_output=json_output,
                             with_scan=True)
@@ -322,7 +323,8 @@ def _cmd_formalize(cfg: Config, project_name: str, indices: str | None = None,
     if indices:
         selected = set(int(i.strip()) for i in indices.split(",") if i.strip())
 
-    fc = session.step_create_formal_commit(selected_indices=selected, message=message)
+    fc = session.step_create_formal_commit(selected_indices=selected, message=message,
+                                           template_name=template_name)
     if fc is None:
         if json_output:
             print(json.dumps({"result": "fail", "reason": "no_commit_created"}))
@@ -1068,3 +1070,181 @@ def _build_summary_context(session: "SyncSession") -> dict:
             ],
         },
     }
+
+
+# ── Template 管理 ──────────────────────────────────────────
+
+def _cmd_template(cfg: Config, action: str,
+                  name: str | None = None,
+                  description: str = "",
+                  header_format: str = "",
+                  body_format: str = "",
+                  prefix_override: str | None = None,
+                  json_output: bool = False):
+    """--mode template: 管理 commit message 模板"""
+    from backend.core.template_manager import TemplateManager, CommitTemplate
+
+    templates = TemplateManager.load()
+
+    if action == "list":
+        if json_output:
+            result = [
+                {
+                    "name": t.name, "description": t.description,
+                    "header_format": t.header_format, "body_format": t.body_format,
+                    "prefix_override": t.prefix_override,
+                }
+                for t in templates
+            ]
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            for t in templates:
+                print(f"  [{t.name}] {t.description}")
+                print(f"    header: {t.header_format}")
+                if t.prefix_override:
+                    print(f"    prefix_override: {t.prefix_override}")
+
+    elif action == "add":
+        if not name:
+            print("错误: --template-name 不能为空")
+            sys.exit(1)
+        if any(t.name == name for t in templates):
+            print(f"错误: 模板 '{name}' 已存在")
+            sys.exit(1)
+        default_tpl = TemplateManager.get_default()
+        new_tpl = CommitTemplate(
+            name=name,
+            description=description,
+            header_format=header_format or default_tpl.header_format,
+            body_format=body_format or default_tpl.body_format,
+            prefix_override=prefix_override,
+        )
+        templates.append(new_tpl)
+        path = TemplateManager.save(templates)
+        if json_output:
+            print(json.dumps({"result": "ok", "name": name, "path": str(path)}))
+        else:
+            print(f"[OK] 模板 '{name}' 已保存 → {path}")
+
+    elif action == "edit":
+        if not name:
+            print("错误: --template-name 不能为空")
+            sys.exit(1)
+        idx = next((i for i, t in enumerate(templates) if t.name == name), None)
+        if idx is None:
+            print(f"错误: 未找到模板 '{name}'")
+            sys.exit(1)
+        t = templates[idx]
+        if description:
+            t.description = description
+        if header_format:
+            t.header_format = header_format
+        if body_format:
+            t.body_format = body_format
+        if prefix_override is not None:
+            t.prefix_override = prefix_override
+        path = TemplateManager.save(templates)
+        if json_output:
+            print(json.dumps({"result": "ok", "name": name, "path": str(path)}))
+        else:
+            print(f"[OK] 模板 '{name}' 已更新 → {path}")
+
+    elif action == "delete":
+        if not name:
+            print("错误: --template-name 不能为空")
+            sys.exit(1)
+        if name == "default":
+            print("错误: 不能删除 'default' 模板")
+            sys.exit(1)
+        idx = next((i for i, t in enumerate(templates) if t.name == name), None)
+        if idx is None:
+            print(f"错误: 未找到模板 '{name}'")
+            sys.exit(1)
+        templates.pop(idx)
+        path = TemplateManager.save(templates)
+        if json_output:
+            print(json.dumps({"result": "ok", "name": name, "path": str(path)}))
+        else:
+            print(f"[OK] 模板 '{name}' 已删除")
+
+
+# ── Formal 管理 ────────────────────────────────────────────
+
+def _cmd_formal(cfg: Config, project_name: str, action: str,
+                formal_index: int | None = None,
+                message: str | None = None,
+                new_number: int | None = None,
+                json_output: bool = False):
+    """--mode formal: 管理 formal commits（list/delete/edit/dissolve/clear-sources）"""
+    session = _init_session(cfg, project_name, json_output=json_output)
+
+    if action == "list":
+        if not session.formal_commits:
+            if json_output:
+                print(json.dumps([]))
+            else:
+                print("（无 formal commits）")
+            return
+        if json_output:
+            result = [
+                {
+                    "index": i,
+                    "prefix": fc.prefix,
+                    "number": fc.number,
+                    "message": fc.message,
+                    "synced": fc.synced,
+                    "pushed": fc.pushed,
+                    "is_incoming": fc.is_incoming,
+                    "sources_cleared": fc.sources_cleared,
+                    "source_indices": sorted(fc.source_indices),
+                    "created_at": fc.created_at,
+                }
+                for i, fc in enumerate(session.formal_commits)
+            ]
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            for i, fc in enumerate(session.formal_commits):
+                status = []
+                if fc.synced:
+                    status.append("synced")
+                if fc.pushed:
+                    status.append("pushed")
+                if fc.is_incoming:
+                    status.append("incoming")
+                st = ",".join(status) if status else "draft"
+                print(f"  [{i}] [{fc.prefix}-{fc.number}] ({st})")
+                print(f"      {fc.message.split(chr(10))[0][:80]}")
+        return
+
+    # 写操作需要索引
+    if formal_index is None:
+        msg = f"错误: --formal-index 不能为空（action={action}）"
+        if json_output:
+            print(json.dumps({"result": "fail", "error": msg}))
+        else:
+            print(msg)
+        sys.exit(1)
+
+    ok = False
+    if action == "delete":
+        ok = session.step_delete_formal(formal_index)
+    elif action == "edit-message":
+        if not message:
+            print("错误: --message 不能为空（action=edit-message）")
+            sys.exit(1)
+        ok = session.step_edit_formal_message(formal_index, message)
+    elif action == "edit-number":
+        if new_number is None:
+            print("错误: --new-number 不能为空（action=edit-number）")
+            sys.exit(1)
+        ok = session.step_edit_formal_number(formal_index, new_number)
+    elif action == "dissolve":
+        ok = session.step_dissolve_formal(formal_index)
+    elif action == "clear-sources":
+        ok = session.step_clear_formal_sources(formal_index)
+
+    if json_output:
+        print(json.dumps({"result": "ok" if ok else "fail", "action": action,
+                          "index": formal_index}))
+    else:
+        print(f"[{'OK' if ok else 'FAIL'}] {action} formal[{formal_index}]")

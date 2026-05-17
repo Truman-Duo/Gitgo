@@ -134,11 +134,28 @@ def build_commit_template(
     commits: list[CommitInfo],
     project: ProjectConfig,
     *,
+    template_name: str | None = None,
     git_runner: GitRunner | None = None,
 ) -> str:
-    """根据选中的 commit 生成正式 commit message 模板"""
+    """根据选中的 commit 生成正式 commit message 模板。
+
+    若指定 template_name，从 commit-config.json 加载对应模板；
+    否则使用项目默认模板（commit_format.template_name）。
+    无匹配模板时回退到内置默认格式（向后兼容）。
+    """
+    from backend.core.template_manager import TemplateManager, _BUILTIN_DEFAULT
+
     prefix = project.commit_format.get("prefix", "PROJ")
     number_start = project.commit_format.get("number_start", 0)
+
+    # 解析模板
+    tpl_name = template_name or project.commit_format.get("template_name", "default")
+    template = TemplateManager.get_template(tpl_name)
+    if template is None:
+        template = _BUILTIN_DEFAULT
+
+    # 有效前缀（模板可覆盖）
+    effective_prefix = template.prefix_override or prefix
 
     types = set(c.type for c in commits)
     scopes = set(c.scope for c in commits if c.scope)
@@ -155,26 +172,32 @@ def build_commit_template(
         if len(agg_subject) > 50:
             agg_subject = agg_subject[:47] + "..."
 
-    max_n = _find_next_number(project.backup_path, prefix, git_runner=git_runner)
+    max_n = _find_next_number(project.backup_path, effective_prefix, git_runner=git_runner)
     n = max(max_n, number_start)
 
-    header = f"[{prefix}-{n}] {type_str}{scope_str}: {agg_subject}"
-
-    lines = [header, ""]
-    lines.append(f"Project: {project.name}")
-    lines.append("")
-    lines.append(f"Synced from {len(commits)} workspace commit(s):")
+    # 格式变量
+    commit_lines = []
     for i, c in enumerate(commits, 1):
         scope_part = f"({c.scope})" if c.scope else ""
         subj = c.subject[:60] + ("..." if len(c.subject) > 60 else "")
-        lines.append(f"  {i}. {c.type}{scope_part}: {subj}")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-    lines.append("# 请编辑正式 commit message（以上为模板，删除此说明行）")
-    lines.append("")
+        commit_lines.append(f"  {i}. {c.type}{scope_part}: {subj}")
+    commit_list = "\n".join(commit_lines)
 
-    return "\n".join(lines)
+    vars_dict = {
+        "prefix": effective_prefix,
+        "number": n,
+        "type_str": type_str,
+        "scope_str": scope_str,
+        "subject": agg_subject,
+        "project_name": project.name,
+        "commit_count": str(len(commits)),
+        "commit_list": commit_list,
+    }
+
+    header = template.header_format.format(**vars_dict)
+    body = template.body_format.format(**vars_dict)
+
+    return header + "\n\n" + body
 
 
 def validate_commit_message(msg: str) -> Optional[str]:

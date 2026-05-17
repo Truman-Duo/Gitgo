@@ -32,6 +32,7 @@ DEFAULT_COMMIT_FORMAT = {
     "number_start": 0,
     "padding": False,
     "plugins": [],
+    "template_name": "default",
 }
 
 DEFAULT_SECURITY_SCAN = {
@@ -126,6 +127,7 @@ class ProjectConfig:
                 "number_start": cf.get("number_start", 0),
                 "padding": cf.get("padding", False),
                 "plugins": cf.get("plugins", []),
+                "template_name": cf.get("template_name", "default"),
             },
             force_exclude=d.get("force_exclude", list(DEFAULT_FORCE_EXCLUDE)),
             security_scan=ss if ss else dict(DEFAULT_SECURITY_SCAN),

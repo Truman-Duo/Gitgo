@@ -468,6 +468,7 @@ class SyncSession:
         self,
         selected_indices: Optional[set[int]] = None,
         message: Optional[str] = None,
+        template_name: str | None = None,
     ) -> Optional[FormalCommit]:
         """从选中的 workspace commit 创建正式 commit。
 
@@ -497,7 +498,8 @@ class SyncSession:
             template = message or ""
         else:
             selected_commits = [self.commits[i] for i in sorted(selected_indices)]
-            template = build_commit_template(selected_commits, self.project)
+            template = build_commit_template(selected_commits, self.project,
+                                             template_name=template_name)
 
         prefix = self.project.commit_format.get("prefix", "PROJ")
         number_start = self.project.commit_format.get("number_start", 0)

@@ -40,6 +40,20 @@ def create_adapters_for_node(
         )
         return fa, gr
 
+    if access.kind == FileAccessKind.SMB:
+        from backend.adapters.smb_file_adapter import SMBFileAdapter
+
+        share = access.share or access.host
+        fa = SMBFileAdapter(
+            host=access.host,
+            share=share,
+            root=path,
+            username=access.username,
+            port=access.port or 445,
+        )
+        gr: GitRunner = LocalGitRunner(Path(fa.unc_path))
+        return fa, gr
+
     # LOCAL（默认）
     resolved = Path(path).resolve()
     return LocalFileAdapter(resolved), LocalGitRunner(resolved)

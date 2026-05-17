@@ -1,43 +1,36 @@
-# gitgo v0.21 交接文档
+# gitgo v0.22 交接文档
 
-> 日期：2026-05-16
-
----
-
-## ⚠️ 下次开始前必读：P5 全部完成
-
-**P5 Protocol & Ecosystem 完成。** Gitgo 具备正式版本化接口契约：Protocol v1.0 + Reference Agent + Plugin API + State Bundle。
-
-**必读文件：**
-- `docs/Gitgo_Protocol_v1.0.md` — **第三方集成唯一入口**（六种 schema 统一规范）
-- `docs/Plugin_API.md` — 插件开发完整 API 参考
-- `docs/P5执行计划.md` — P5 分阶段执行任务
-- `docs/iterations/Phase5_ProtocolEcosystem.md` — P5 设计文档
-
-**执行优先级：**
-1. **P0（GUI Track）** — B-1 + F-1 架构调整
+> 日期：2026-05-17
 
 ---
 
-## 当前进度总览（v0.21）
+## 本次更新（v0.22）
+
+**Phase 6 + Phase 5.2 完结。** 模板系统、CLI 补齐、MCP 补齐全部完成。
+
+- **模板系统**: `commit-config.json` 多套命名模板，`str.format()` 变量填充，CLI + MCP 管理
+- **CLI**: 19 modes（+template +formal），6 formal 管理操作
+- **MCP**: 33 tools（+16），覆盖全部 SyncSession 方法
+- **SMB 适配器**: UNC 路径，工厂接线
+- **GitHub/GitLab**: `list_issues` / `create_pr` 完整实现
+
+### 执行优先级
+1. **P0（GUI Track）** — 前端架构调整（B-1 + F-1）
+
+---
+
+## 当前进度总览（v0.22）
 
 | 区域 | 完成度 | 状态 |
 |------|--------|------|
-| 项目列表 | 85% | 基本可用。红色错误态未做 |
-| Commit Workshop | 90% | CommitCanvas + F-2 三层卡片 + F-3/F-4 虚线/opacity + B-2 dissolve/clear ✅ |
-| Incoming | 80% | 三叉决策 + F-7 Bridge + B-3 兩步确认 + B-4 持久化 + F-6 IncomingChangeCard ✅ |
-| Remotes | 50% | 远程状态正常。右侧 Node 面板已加。独立 Push 未做 |
-| History | 60% | 右侧 Diff+Node 面板已加。action_type 顏色编码 ✅ |
-| 后端 | 90% | SyncSession 全 step 方法覆盖 + Operations + Adapters + 状态驱动闭环 ✅ |
-| 主题刷新 | 70% | `_refresh_incoming_styles()` 集中管理已做，F-8 剩余背景分层/0.5px 未做 |
-| Runtime | 100% | Phase 1 + Phase 2 全部完成 ✅ |
-| Phase 2 | 100% | P2-A (semantic+streaming) + P2-B (9 op types history) + P2-C (persistent daemon) + P2-D (MCP Server) ✅ |
-| Remote | 100% | GitHub/GitLab 连接器 + `--mode release` CLI ✅ |
-| Phase 3 | 100% | P3-A/B/C/D — AI-Augmented Workflow ✅ |
-| Phase 4 | 100% | P4-Pre/A/B/C/D — Governance Layer (quality/patterns/graph/releases) ✅ |
-| Phase 5 | 100% | **P5-A.0/A/A.1/B/C/D — Protocol & Ecosystem** ✅ |
-| 文件重组 | 100% | 引擎层/接口层两层架构 ✅ |
-| PanelState | 100% | 显式共享状态容器 ✅ |
+| 项目列表 | 85% | 基本可用 |
+| Commit Workshop | 90% | CommitCanvas + 三层卡片 ✅ |
+| 后端 | 100% | 全部 SyncSession step + Adapters + Remote + Template ✅ |
+| Runtime | 100% | P1-P6 全部完成 ✅ |
+| Phase 5 | 100% | Protocol & Ecosystem ✅ |
+| Phase 6 | 100% | **Template + SMB + Issue/PR + CLI/MCP 补齐** ✅ |
+| MCP | 100% | 33 tools，零缺失 ✅ |
+| CLI | 100% | 19 modes，全部 SyncSession 方法可 CLI 调用 ✅ |
 
 ---
 

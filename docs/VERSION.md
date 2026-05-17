@@ -4,6 +4,49 @@
 
 ---
 
+## v0.22 (2026-05-17)
+
+**模板系统 + CLI/MCP 补齐 — Phase 6 + Phase 5.2 完结**
+
+### 模板系统（Phase 6 核心）
+- `backend/core/template_manager.py` — **新建** — `CommitTemplate` 数据类 + `TemplateManager` 持久化到 `commit-config.json`
+  - 格式变量: `{prefix}` `{number}` `{type_str}` `{scope_str}` `{subject}` `{project_name}` `{commit_count}` `{commit_list}`
+  - `prefix_override` 支持模板覆盖项目 prefix
+  - 内置默认模板与旧硬编码输出逐字一致（向后兼容）
+- `backend/core/config.py` — `commit_format` 新增 `template_name: "default"` 键
+- `backend/core/operations/git.py` — `build_commit_template()` 接受 `template_name` 参数，用 `str.format()` 填充
+- `backend/core/sync_session.py` — `step_create_formal_commit()` 透传 `template_name`
+- CLI: `--mode template` + `--template-action list/add/edit/delete`
+- CLI: `--mode formalize --template <name>` 选择模板
+- MCP: 4 个模板工具（list/add/edit/delete）+ template 参数 on formalize/run_workflow
+
+### CLI 补齐（6 个 formal 管理操作）
+- `--mode formal --formal-action list/delete/edit-message/edit-number/dissolve/clear-sources`
+- `cli/commands.py` — `_cmd_formal()` + `_cmd_template()`
+- CLI modes: 17 → **19**
+
+### MCP 补齐（16 个新工具）
+- Formal 管理: `gitgo_formal_list/delete/edit_message/edit_number/dissolve/clear_sources`（6）
+- Release: `gitgo_release_info` / `gitgo_release_create`（2）
+- `gitgo_history` / `gitgo_session` / `gitgo_export`（3）
+- `gitgo_remote_issues`（1）
+- Template: `gitgo_template_list/add/edit/delete`（4）
+- MCP tools: 17 → **33**
+
+### SMB 适配器 + GitHub/GitLab Issue/PR（Phase 6 补齐）
+- `backend/adapters/smb_file_adapter.py` — **新建** — UNC 路径访问，工厂接线
+- `backend/remote/github.py` — `list_issues()` / `create_pr()` 实现
+- `backend/remote/gitlab.py` — `list_issues()` / `create_pr(MR)` 实现
+- `backend/remote/connector.py` — ABC 改为抽象方法
+
+### 测试
+- `tests/test_template_manager.py` — 13 个测试
+- `tests/test_smb_adapter.py` — 13 个测试
+- `tests/test_remote.py` — +15 个测试（issue/PR/ABC）
+- pytest: 247 passed, 1 skipped (+41 over v0.21)
+
+---
+
 ## v0.21 (2026-05-16)
 
 **P5：Protocol & Ecosystem**

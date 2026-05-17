@@ -28,7 +28,7 @@ def main():
         "--mode",
         choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
                  "status", "trial", "formalize", "scan", "push", "session", "release",
-                 "suggest", "governance", "export"],
+                 "suggest", "governance", "export", "template", "formal"],
         default="gui",
         help="启动模式",
     )
@@ -174,6 +174,56 @@ def main():
         default=False,
         help="仅导出状态快照，不含 history（--mode export --export-type state-bundle 时使用）",
     )
+    parser.add_argument(
+        "--template",
+        default=None,
+        help="Template 名称（--mode formalize 时使用，覆盖项目默认模板）",
+    )
+    parser.add_argument(
+        "--template-action",
+        choices=["list", "add", "edit", "delete"],
+        default="list",
+        help="Template 操作类型（--mode template 时使用）",
+    )
+    parser.add_argument(
+        "--template-name",
+        default=None,
+        help="Template 名称（--mode template --template-action add/edit/delete 时使用）",
+    )
+    parser.add_argument(
+        "--template-desc",
+        default="",
+        help="Template 描述（--mode template --template-action add/edit 时使用）",
+    )
+    parser.add_argument(
+        "--template-header",
+        default="",
+        help="header_format（--mode template --template-action add/edit 时使用）",
+    )
+    parser.add_argument(
+        "--template-body",
+        default="",
+        help="body_format（--mode template --template-action add/edit 时使用）",
+    )
+    parser.add_argument(
+        "--template-prefix",
+        default=None,
+        help="prefix_override（--mode template --template-action add/edit 时使用）",
+    )
+    parser.add_argument(
+        "--formal-action",
+        choices=["list", "delete", "edit-message", "edit-number", "dissolve", "clear-sources"],
+        default="list",
+        help="Formal 管理操作（--mode formal 时使用）",
+    )
+    parser.add_argument(
+        "--formal-index", type=int, default=None,
+        help="Formal commit 索引（--mode formal --formal-action delete/edit-message/edit-number/dissolve/clear-sources 时使用）",
+    )
+    parser.add_argument(
+        "--new-number", type=int, default=None,
+        help="新编号（--mode formal --formal-action edit-number 时使用）",
+    )
     args = parser.parse_args()
 
     try:
@@ -244,7 +294,8 @@ def main():
                 sys.exit(1)
             from cli import _cmd_formalize
             _cmd_formalize(cfg, args.project, indices=args.indices,
-                           message=args.message, json_output=args.json)
+                           message=args.message, template_name=args.template,
+                           json_output=args.json)
         elif args.mode == "scan":
             if not args.project:
                 print("错误: --mode scan 需要 --project NAME 参数")
@@ -295,6 +346,25 @@ def main():
             from cli import _cmd_export
             _cmd_export(cfg, args.project, args.export_type,
                        minimal=args.minimal, json_output=args.json)
+        elif args.mode == "template":
+            from cli import _cmd_template
+            _cmd_template(cfg, args.template_action,
+                         name=args.template_name,
+                         description=args.template_desc,
+                         header_format=args.template_header,
+                         body_format=args.template_body,
+                         prefix_override=args.template_prefix,
+                         json_output=args.json)
+        elif args.mode == "formal":
+            if not args.project:
+                print("错误: --mode formal 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_formal
+            _cmd_formal(cfg, args.project, args.formal_action,
+                       formal_index=args.formal_index,
+                       message=args.message,
+                       new_number=args.new_number,
+                       json_output=args.json)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)

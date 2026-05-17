@@ -246,3 +246,193 @@ def test_gitlab_get_repo_info_success(mock_get):
     c = GitLabConnector(t, "tok")
     result = c.get_repo_info()
     assert result["path_with_namespace"] == "group/proj"
+
+
+# ── GitHub list_issues ──────────────────────────────────────
+
+@patch("backend.remote.github.httpx.get")
+def test_github_list_issues_success(mock_get):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [
+        {"number": 1, "title": "Fix login bug", "state": "open"},
+        {"number": 2, "title": "Add dark mode", "state": "closed"},
+    ]
+    mock_get.return_value = mock_resp
+
+    t = RemoteTarget(url="https://github.com/owner/repo.git", kind="github")
+    c = GitHubConnector(t, "tok")
+    result = c.list_issues(state="all")
+    assert len(result) == 2
+    assert result[0]["number"] == 1
+    assert result[1]["title"] == "Add dark mode"
+
+
+def test_github_list_issues_invalid_url():
+    t = RemoteTarget(url="bad-url", kind="github")
+    c = GitHubConnector(t, "tok")
+    result = c.list_issues()
+    assert len(result) == 1
+    assert "error" in result[0]
+
+
+@patch("backend.remote.github.httpx.get")
+def test_github_list_issues_api_error(mock_get):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 403
+    mock_resp.text = '{"message":"Rate limit exceeded"}'
+    mock_get.return_value = mock_resp
+
+    t = RemoteTarget(url="https://github.com/owner/repo.git", kind="github")
+    c = GitHubConnector(t, "tok")
+    result = c.list_issues()
+    assert len(result) == 1
+    assert "403" in result[0]["error"]
+
+
+# ── GitHub create_pr ────────────────────────────────────────
+
+@patch("backend.remote.github.httpx.post")
+def test_github_create_pr_success(mock_post):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 201
+    mock_resp.json.return_value = {"html_url": "https://github.com/owner/repo/pull/42"}
+    mock_post.return_value = mock_resp
+
+    t = RemoteTarget(url="https://github.com/owner/repo.git", kind="github")
+    c = GitHubConnector(t, "tok")
+    ok, msg = c.create_pr("feat: new feature", "Description here", "feature-branch")
+    assert ok
+    assert "pull/42" in msg
+
+
+def test_github_create_pr_invalid_url():
+    t = RemoteTarget(url="bad-url", kind="github")
+    c = GitHubConnector(t, "tok")
+    ok, msg = c.create_pr("title", "body", "head")
+    assert not ok
+    assert "解析" in msg
+
+
+@patch("backend.remote.github.httpx.post")
+def test_github_create_pr_api_error(mock_post):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 422
+    mock_resp.text = '{"message":"No commits between main and feature-branch"}'
+    mock_post.return_value = mock_resp
+
+    t = RemoteTarget(url="https://github.com/owner/repo.git", kind="github")
+    c = GitHubConnector(t, "tok")
+    ok, msg = c.create_pr("title", "body", "head")
+    assert not ok
+    assert "422" in msg
+
+
+# ── GitLab list_issues ──────────────────────────────────────
+
+@patch("backend.remote.gitlab.httpx.get")
+def test_gitlab_list_issues_success(mock_get):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [
+        {"iid": 1, "title": "Memory leak", "state": "opened"},
+        {"iid": 2, "title": "Update docs", "state": "closed"},
+    ]
+    mock_get.return_value = mock_resp
+
+    t = RemoteTarget(url="https://gitlab.com/group/proj.git", kind="gitlab")
+    c = GitLabConnector(t, "tok")
+    result = c.list_issues(state="opened")
+    assert len(result) == 2
+    assert result[0]["iid"] == 1
+    assert result[1]["title"] == "Update docs"
+
+
+def test_gitlab_list_issues_invalid_url():
+    t = RemoteTarget(url="bad-url", kind="gitlab")
+    c = GitLabConnector(t, "tok")
+    result = c.list_issues()
+    assert len(result) == 1
+    assert "error" in result[0]
+
+
+@patch("backend.remote.gitlab.httpx.get")
+def test_gitlab_list_issues_api_error(mock_get):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    mock_resp.text = '{"message":"Unauthorized"}'
+    mock_get.return_value = mock_resp
+
+    t = RemoteTarget(url="https://gitlab.com/group/proj.git", kind="gitlab")
+    c = GitLabConnector(t, "tok")
+    result = c.list_issues()
+    assert len(result) == 1
+    assert "401" in result[0]["error"]
+
+
+# ── GitLab create_pr ────────────────────────────────────────
+
+@patch("backend.remote.gitlab.httpx.post")
+def test_gitlab_create_pr_success(mock_post):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 201
+    mock_resp.json.return_value = {"web_url": "https://gitlab.com/group/proj/-/merge_requests/7"}
+    mock_post.return_value = mock_resp
+
+    t = RemoteTarget(url="https://gitlab.com/group/proj.git", kind="gitlab")
+    c = GitLabConnector(t, "tok")
+    ok, msg = c.create_pr("feat: MR test", "MR body", "dev")
+    assert ok
+    assert "merge_requests/7" in msg
+
+
+def test_gitlab_create_pr_invalid_url():
+    t = RemoteTarget(url="bad-url", kind="gitlab")
+    c = GitLabConnector(t, "tok")
+    ok, msg = c.create_pr("title", "body", "head")
+    assert not ok
+    assert "解析" in msg
+
+
+@patch("backend.remote.gitlab.httpx.post")
+def test_gitlab_create_pr_api_error(mock_post):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 409
+    mock_resp.text = '{"message":"MR already exists"}'
+    mock_post.return_value = mock_resp
+
+    t = RemoteTarget(url="https://gitlab.com/group/proj.git", kind="gitlab")
+    c = GitLabConnector(t, "tok")
+    ok, msg = c.create_pr("dup", "dup", "dup")
+    assert not ok
+    assert "409" in msg
+
+
+# ── RemoteConnector ABC — 新抽象方法 ──────────────────────
+
+def test_remote_connector_abc_enforces_list_issues():
+    from backend.remote.connector import RemoteConnector
+    # 验证 list_issues 是抽象方法
+    assert hasattr(RemoteConnector, "list_issues")
+    assert hasattr(RemoteConnector, "create_pr")
+
+
+def test_github_implements_all_abstract_methods():
+    t = RemoteTarget(url="https://github.com/a/b", kind="github")
+    c = GitHubConnector(t, "tok")
+    # 所有 RemoteConnector 抽象方法必须可调用
+    assert callable(c.is_configured)
+    assert callable(c.create_release)
+    assert callable(c.get_repo_info)
+    assert callable(c.list_issues)
+    assert callable(c.create_pr)
+
+
+def test_gitlab_implements_all_abstract_methods():
+    t = RemoteTarget(url="https://gitlab.com/a/b", kind="gitlab")
+    c = GitLabConnector(t, "tok")
+    assert callable(c.is_configured)
+    assert callable(c.create_release)
+    assert callable(c.get_repo_info)
+    assert callable(c.list_issues)
+    assert callable(c.create_pr)

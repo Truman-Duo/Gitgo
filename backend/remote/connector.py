@@ -27,12 +27,15 @@ class RemoteConnector(ABC):
         """获取仓库基本信息"""
         ...
 
-    # ── 远期预留 ─────────────────────────────────────────
+    # ── Issue / PR ─────────────────────────────────────────
 
+    @abstractmethod
     def list_issues(self, state: str = "open") -> list:
-        """获取 Issue 列表（Phase 5.2）"""
-        raise NotImplementedError
+        """获取 Issue 列表"""
+        ...
 
-    def create_pr(self, title: str, body: str, head: str, base: str = "main") -> tuple[bool, str]:
-        """创建 Pull Request（Phase 5.2）"""
-        raise NotImplementedError
+    @abstractmethod
+    def create_pr(self, title: str, body: str, head: str,
+                  base: str = "main") -> tuple[bool, str]:
+        """创建 Pull Request / Merge Request，返回 (success, url_or_error)"""
+        ...

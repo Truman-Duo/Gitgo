@@ -47,6 +47,47 @@ class GitHubConnector(RemoteConnector):
         except Exception as e:
             return {"error": str(e)}
 
+    def list_issues(self, state: str = "open") -> list:
+        parsed = self._parse_owner_repo()
+        if not parsed:
+            return [{"error": "无法从 URL 解析 owner/repo"}]
+        owner, repo = parsed
+        try:
+            r = httpx.get(
+                f"{self.API_BASE}/repos/{owner}/{repo}/issues",
+                headers=self._headers(), timeout=15.0,
+                params={"state": state, "per_page": 30},
+            )
+            if r.status_code == 200:
+                return r.json()
+            return [{"error": f"HTTP {r.status_code}", "message": r.text[:200]}]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    def create_pr(self, title: str, body: str, head: str,
+                  base: str = "main") -> tuple[bool, str]:
+        parsed = self._parse_owner_repo()
+        if not parsed:
+            return False, "无法从 URL 解析 owner/repo"
+        owner, repo = parsed
+        try:
+            r = httpx.post(
+                f"{self.API_BASE}/repos/{owner}/{repo}/pulls",
+                headers=self._headers(), timeout=30.0,
+                json={
+                    "title": title,
+                    "body": body,
+                    "head": head,
+                    "base": base,
+                },
+            )
+            if r.status_code in (200, 201):
+                data = r.json()
+                return True, data.get("html_url", "PR 已创建")
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            return False, str(e)
+
     def create_release(self, tag: str, name: str, body: str) -> tuple[bool, str]:
         parsed = self._parse_owner_repo()
         if not parsed:
