@@ -190,10 +190,6 @@ class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin):
         node_scroll.setWidget(nc)
         nl2.addWidget(node_scroll, 1)
         splitter.addWidget(np)
-        if store_refs:
-            self.state.diff_panel = dp
-            self.state.diff_header = dh
-            self.state.diff_preview = prev
         # 所有 Tab 的节点面板都存入列表，供 _update_node_status 统一刷新
         if not hasattr(self.state, '_node_layouts'):
             self.state._node_layouts = []

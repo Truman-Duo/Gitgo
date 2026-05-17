@@ -2,6 +2,7 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QLabel, QMenu, QPushButton, QSizePolicy, QVBoxLayout
 from themes import get_theme
+from backend.core.i18n import _tr
 
 
 class WorkspaceCommitBox(QFrame):
@@ -128,11 +129,11 @@ class FormalCommitBox(QFrame):
 
     def _show_menu_from_btn(self):
         menu = QMenu(self)
-        menu.addAction("编辑消息", lambda: self.context_menu.emit(self._idx, "edit_message"))
-        menu.addAction("编辑编号", lambda: self.context_menu.emit(self._idx, "edit_number"))
+        menu.addAction(_tr("commit.edit_message", "编辑消息"), lambda: self.context_menu.emit(self._idx, "edit_message"))
+        menu.addAction(_tr("commit.edit_number", "编辑编号"), lambda: self.context_menu.emit(self._idx, "edit_number"))
         menu.addSeparator()
-        menu.addAction("Dissolve", lambda: self.context_menu.emit(self._idx, "dissolve"))
-        menu.addAction("Clear sources", lambda: self.context_menu.emit(self._idx, "clear_sources"))
+        menu.addAction(_tr("commit.dissolve", "Dissolve"), lambda: self.context_menu.emit(self._idx, "dissolve"))
+        menu.addAction(_tr("commit.clear_sources", "Clear sources"), lambda: self.context_menu.emit(self._idx, "clear_sources"))
         menu.exec(self.menu_btn.mapToGlobal(self.menu_btn.rect().bottomLeft()))
 
     def _polish_all(self):
@@ -166,11 +167,11 @@ class FormalCommitBox(QFrame):
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        act_edit_msg = menu.addAction("编辑消息")
-        act_edit_num = menu.addAction("编辑编号")
+        act_edit_msg = menu.addAction(_tr("commit.edit_message", "编辑消息"))
+        act_edit_num = menu.addAction(_tr("commit.edit_number", "编辑编号"))
         menu.addSeparator()
-        act_dissolve = menu.addAction("Dissolve（恢复 Workspace commits）")
-        act_clear = menu.addAction("Clear sources（保留 Formal，清除来源）")
+        act_dissolve = menu.addAction(_tr("commit.dissolve_long", "Dissolve（恢复 Workspace commits）"))
+        act_clear = menu.addAction(_tr("commit.clear_sources_long", "Clear sources（保留 Formal，清除来源）"))
         action = menu.exec(event.globalPos())
         if action == act_edit_msg:
             self.context_menu.emit(self._idx, "edit_message")

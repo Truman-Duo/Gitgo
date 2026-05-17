@@ -8,22 +8,6 @@ class ThemeMixin:
     def _refresh_workshop_styles(self):
         """集中刷新 Workshop 底部按钮样式"""
         t = get_theme()
-        btn_ss = (
-            f"QPushButton{{font-size:11px;padding:3px 10px;border-radius:4px;"
-            f"background:{t.bg2};border:.5px solid {t.bdr2};color:{t.txt2};}}"
-            f"QPushButton:hover{{background:{t.blue_bg};border-color:{t.blue};color:{t.blue_txt};}}"
-            f"QPushButton:disabled{{background:{t.bg3};color:{t.txt3};border-color:{t.bdr};}}"
-        )
-        del_btn_ss = (
-            f"QPushButton{{font-size:13px;padding:2px 4px;border-radius:4px;"
-            f"background:{t.bg2};border:.5px solid {t.bdr2};color:{t.txt3};}}"
-            f"QPushButton:hover{{background:#3a1a1a;border-color:#d32f2f;color:#ef5350;}}"
-            f"QPushButton:disabled{{background:{t.bg3};color:{t.txt3};border-color:{t.bdr};}}"
-        )
-        if hasattr(self.state, 'merge_btn'):       self.state.merge_btn.setStyleSheet(btn_ss)
-        if hasattr(self.state, 'sync_btn'):        self.state.sync_btn.setStyleSheet(btn_ss)
-        if hasattr(self.state, 'push_btn'):        self.state.push_btn.setStyleSheet(btn_ss)
-        if hasattr(self.state, 'delete_formal_btn'): self.state.delete_formal_btn.setStyleSheet(del_btn_ss)
         if hasattr(self.state, 'progress_bar'):
             self.state.progress_bar.setStyleSheet(
                 f"QProgressBar{{border:.5px solid {t.bdr2};border-radius:4px;background:{t.bg3};}}"

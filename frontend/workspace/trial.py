@@ -175,54 +175,6 @@ class TrialMixin:
         last_idx = len(self.state.session.formal_commits) - 1
         QTimer.singleShot(100, lambda: self._on_formal_box_clicked(last_idx))
 
-    def _confirm_accept(self, index: int):
-        ic = self.state.session.incoming_changes[index]
-        dlg = QDialog(self)
-        dlg.setWindowTitle(_tr("trial.confirm_accept", "确认 Accept"))
-        dlg.setMinimumSize(520, 360)
-        layout = QVBoxLayout(dlg)
-        layout.setSpacing(12)
-
-        bridge = self._build_bridge_widget(
-            "trial", "release",
-            "#c98b2a", "#1d9e75",
-        )
-        layout.addWidget(bridge)
-
-        msg_label = QLabel(_tr("trial.commit_msg", "Commit message:"))
-        msg_label.setStyleSheet(f"font-size:10px;font-weight:500;color:{get_theme().txt3};")
-        layout.addWidget(msg_label)
-        msg_edit = QTextEdit()
-        msg_edit.setPlainText(ic.message)
-        msg_edit.setReadOnly(True)
-        msg_edit.setMaximumHeight(140)
-        msg_edit.setStyleSheet(f"font-size:11px;color:{get_theme().txt2};background:{get_theme().bg};border:.5px solid {get_theme().bdr};")
-        layout.addWidget(msg_edit)
-
-        meta = QLabel(
-            _tr("trial.detail_meta", "{author} · {date}").format(
-                author=ic.author, date=ic.timestamp[:10]))
-        meta.setStyleSheet(f"font-size:10px;color:{get_theme().txt3};")
-        layout.addWidget(meta)
-
-        layout.addStretch()
-
-        btn_row = QHBoxLayout()
-        cancel_btn = QPushButton(_tr("settings.cancel", "取消"))
-        cancel_btn.clicked.connect(dlg.reject)
-        confirm_btn = QPushButton(_tr("trial.confirm_accept_btn", "✓ 确认 Accept"))
-        confirm_btn.setStyleSheet(
-            "QPushButton{background:#1d9e75;color:white;border:none;"
-            "border-radius:4px;padding:8px 20px;font-weight:bold;}")
-        confirm_btn.clicked.connect(dlg.accept)
-        btn_row.addStretch()
-        btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(confirm_btn)
-        layout.addLayout(btn_row)
-
-        if dlg.exec() == QDialog.Accepted:
-            self._do_triage(index, "accept")
-
     # ── 三叉决策 ──────────────────────────────────────────
 
     def _do_triage(self, index: int, action: str):
