@@ -64,8 +64,9 @@ python build.py
 | `backend/models/` | 数据模型：RepoNode/FileAccess/SyncStatus/IncomingChange |
 | `backend/core/governance/` | **P4** 治理层：quality/patterns/graph/releases/state_bundle（5 模块，~500行） |
 | `backend/core/template_manager.py` | **P6** 模板系统：CommitTemplate + TemplateManager 读写 `commit-config.json` |
+| `backend/core/identity/` | **P6** Identity Guard：guard.py（完整性检测）+ snapshot.py（记忆快照） |
 | `backend/remote/` | 远程连接器：GitHub/GitLab API（含 Issue/PR） |
-| `cli/` | CLI verb 实现（headless，零 Qt/Rich 依赖，19 个 mode） |
+| `cli/` | CLI verb 实现（headless，零 Qt/Rich 依赖，20 个 mode） |
 | `frontend/gui_main.py` | GUI 薄入口 |
 | `frontend/main_window.py` | PySide6 桌面主窗口，QStackedWidget 导航项目列表↔工作区 |
 | `frontend/workspace/` | 项目工作区子包，10 Mixin 组合 + PanelState 显式状态容器 |
@@ -114,7 +115,7 @@ python build.py
 
 ---
 
-## gitgo 当前架构（v0.22）
+## gitgo 当前架构（v0.23）
 
 ### 核心概念：三维模型
 
@@ -213,7 +214,7 @@ IDLE → SCANNING → FORMALIZING → SYNCING → PUSHING → IDLE
 | **P3** | AI-Augmented — triage hook + suggest CLI + AI_Protocol + Commit Proposal + diff_summary | ✅ v0.15 |
 | **P4** | Governance Layer — quality metrics + change patterns + semantic graph + release reasoning | ✅ v0.20 |
 | **P5** | Protocol & Ecosystem — Protocol v1.0 + Reference Agent + Plugin API + State Bundle | ✅ v0.21 |
-| **P6** | Template System + SMB + Issue/PR + CLI/MCP 补齐 — 19 CLI modes / 33 MCP tools | ✅ v0.22 |
+| **P6** | Identity Guard + Template + SMB + Issue/PR + CLI/MCP 补齐 — 20 CLI modes / 36 MCP tools | ✅ v0.23 |
 | **Remote** | GitHub/GitLab 连接器 + `--mode release` CLI | ✅ v0.14 |
 | **P0** | GUI Track — B-1 + F-1 架构调整 | ⬜ 待执行 |
 

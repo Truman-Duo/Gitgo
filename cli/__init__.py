@@ -16,6 +16,7 @@ from .commands import (
     _cmd_export,
     _cmd_template,
     _cmd_formal,
+    _cmd_memory,
     _init_session,
 )
 
@@ -36,5 +37,6 @@ __all__ = [
     "_cmd_export",
     "_cmd_template",
     "_cmd_formal",
+    "_cmd_memory",
     "_init_session",
 ]

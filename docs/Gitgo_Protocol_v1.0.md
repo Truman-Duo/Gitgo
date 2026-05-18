@@ -871,6 +871,45 @@ MCP Server 暴露 17 个工具。所有工具通过 FastMCP 注册，Python 类�
 | `gitgo_governance_releases` | `project: str` | `dict` (releases) | `governance releases --json` |
 | `gitgo_governance_release_note` | `project: str`, `message: str` | `dict` (result) | `governance release-note --json` |
 
+### 7.6 Template
+
+| 工具名 | 参数 | 返回 | 对应 CLI |
+|--------|------|------|---------|
+| `gitgo_template_list` | — | `list[dict]` | `template list --json` |
+| `gitgo_template_add` | `name, description, header_format, body_format, prefix_override` | `dict` | `template add --json` |
+| `gitgo_template_edit` | `name, description?, header_format?, body_format?, prefix_override?` | `dict` | `template edit --json` |
+| `gitgo_template_delete` | `name: str` | `dict` | `template delete --json` |
+
+### 7.7 Formal Management
+
+| 工具名 | 参数 | 返回 | 对应 CLI |
+|--------|------|------|---------|
+| `gitgo_formal_list` | `project: str` | `list[dict]` | `formal list --json` |
+| `gitgo_formal_delete` | `project: str`, `index: int` | `dict` | `formal delete --json` |
+| `gitgo_formal_edit_message` | `project: str`, `index: int`, `message: str` | `dict` | `formal edit-message --json` |
+| `gitgo_formal_edit_number` | `project: str`, `index: int`, `new_number: int` | `dict` | `formal edit-number --json` |
+| `gitgo_formal_dissolve` | `project: str`, `index: int` | `dict` | `formal dissolve --json` |
+| `gitgo_formal_clear_sources` | `project: str`, `index: int` | `dict` | `formal clear-sources --json` |
+
+### 7.8 Release / History / Session / Export / Remote
+
+| 工具名 | 参数 | 返回 | 对应 CLI |
+|--------|------|------|---------|
+| `gitgo_release_create` | `project: str`, `tag?: str`, `name?: str`, `body?: str` | `dict` | `release create-release --json` |
+| `gitgo_release_info` | `project: str` | `dict` | `release get-info --json` |
+| `gitgo_history` | `project?: str`, `op?: str`, `limit?: int` | `list[dict]` | `history --json` |
+| `gitgo_session` | `project: str`, `action?: str` | `dict` | `session --json` |
+| `gitgo_export` | `project: str`, `minimal?: bool`, `include_identity?: bool` | `dict` | `export state-bundle --json` |
+| `gitgo_remote_issues` | `project: str`, `state?: str` | `list[dict]` | — |
+
+### 7.9 Memory
+
+| 工具名 | 参数 | 返回 | 对应 CLI |
+|--------|------|------|---------|
+| `gitgo_memory_snapshot` | `project: str` | `dict` | `memory snapshot --json` |
+| `gitgo_memory_restore` | `project: str`, `ts?: str` | `dict` | `memory restore --json` |
+| `gitgo_memory_list` | `project: str` | `list[dict]` | `memory list --json` |
+
 ---
 
 ## 附录 A: CLI Mode 完整列表
@@ -893,6 +932,10 @@ MCP Server 暴露 17 个工具。所有工具通过 FastMCP 注册，Python 类�
 | `release` | 是 | — | Release |
 | `suggest` | 是 | — | Suggest |
 | `governance` | 是 | — | Governance |
+| `export` | 是 | — | Export |
+| `template` | 是 | — | Template |
+| `formal` | 是 | — | Formal Mgmt |
+| `memory` | 是 | — | Memory |
 
 ---
 

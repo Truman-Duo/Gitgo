@@ -42,6 +42,20 @@ DEFAULT_SECURITY_SCAN = {
     "extra_patterns": [],
 }
 
+DEFAULT_INTEGRITY_CONFIG = {
+    "enabled": True,
+    "mass_override_threshold": 0.80,
+    "identity_files": [
+        "CLAUDE.md",
+        ".claude/",
+        ".codex/",
+        ".codebuddy/",
+        ".gitignore",
+        "gitgo_config.json",
+        "sync_config.json",
+    ],
+}
+
 
 @dataclass
 class ProjectConfig:
@@ -53,6 +67,7 @@ class ProjectConfig:
     commit_format: dict = field(default_factory=lambda: dict(DEFAULT_COMMIT_FORMAT))
     force_exclude: list = field(default_factory=lambda: list(DEFAULT_FORCE_EXCLUDE))
     security_scan: dict = field(default_factory=lambda: dict(DEFAULT_SECURITY_SCAN))
+    integrity: dict = field(default_factory=lambda: dict(DEFAULT_INTEGRITY_CONFIG))
 
     # ── 向后兼容 property ─────────────────────────────────
 
@@ -131,6 +146,7 @@ class ProjectConfig:
             },
             force_exclude=d.get("force_exclude", list(DEFAULT_FORCE_EXCLUDE)),
             security_scan=ss if ss else dict(DEFAULT_SECURITY_SCAN),
+            integrity=d.get("integrity", dict(DEFAULT_INTEGRITY_CONFIG)),
         )
 
 

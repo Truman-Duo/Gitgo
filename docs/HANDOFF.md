@@ -1,36 +1,35 @@
-# gitgo v0.22 交接文档
+# gitgo v0.23 交接文档
 
-> 日期：2026-05-17
+> 日期：2026-05-19
 
 ---
 
-## 本次更新（v0.22）
+## 本次更新（v0.23）
 
-**Phase 6 + Phase 5.2 完结。** 模板系统、CLI 补齐、MCP 补齐全部完成。
+**Identity Guard — 项目环境完整性保护。** 事故驱动：CC 覆盖项目文件夹 → LLM 看不到"项目身份" → 需要 runtime 层约束。
 
-- **模板系统**: `commit-config.json` 多套命名模板，`str.format()` 变量填充，CLI + MCP 管理
-- **CLI**: 19 modes（+template +formal），6 formal 管理操作
-- **MCP**: 33 tools（+16），覆盖全部 SyncSession 方法
-- **SMB 适配器**: UNC 路径，工厂接线
-- **GitHub/GitLab**: `list_issues` / `create_pr` 完整实现
+三层防御：
+- **Layer 1**: Integrity Detection — scan 时检测全量覆盖/身份文件删除/目录骨架崩塌
+- **Layer 2**: Memory Snapshot — sync 时自动快照工具记忆（.claude/.codex/.codebuddy）到 backup
+- **Layer 3**: Identity Bundle — export 时导出完整项目身份
 
 ### 执行优先级
 1. **P0（GUI Track）** — 前端架构调整（B-1 + F-1）
 
 ---
 
-## 当前进度总览（v0.22）
+## 当前进度总览（v0.23）
 
 | 区域 | 完成度 | 状态 |
 |------|--------|------|
 | 项目列表 | 85% | 基本可用 |
 | Commit Workshop | 90% | CommitCanvas + 三层卡片 ✅ |
-| 后端 | 100% | 全部 SyncSession step + Adapters + Remote + Template ✅ |
+| 后端 | 100% | SyncSession + Adapters + Remote + Template + Identity Guard ✅ |
 | Runtime | 100% | P1-P6 全部完成 ✅ |
 | Phase 5 | 100% | Protocol & Ecosystem ✅ |
-| Phase 6 | 100% | **Template + SMB + Issue/PR + CLI/MCP 补齐** ✅ |
-| MCP | 100% | 33 tools，零缺失 ✅ |
-| CLI | 100% | 19 modes，全部 SyncSession 方法可 CLI 调用 ✅ |
+| Phase 6 | 100% | Template + SMB + Issue/PR + CLI/MCP + Identity Guard ✅ |
+| MCP | 100% | 36 tools，零缺失 ✅ |
+| CLI | 100% | 20 modes，全部 SyncSession 方法可 CLI 调用 ✅ |
 
 ---
 

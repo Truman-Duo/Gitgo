@@ -434,6 +434,20 @@ class SyncSession:
         )
         entries = self.on_file_selection(entries)
 
+        # ── Integrity Detection ──
+        if getattr(self.project, "integrity", {}).get("enabled", True):
+            from backend.core.identity import _run_integrity_checks
+            warnings_list = _run_integrity_checks(
+                entries, self.workspace_path, self.project,
+            )
+            for w in warnings_list:
+                self.on_log(f"[INTEGRITY] {w['level'].upper()}: {w['message']}")
+                from backend.core.history import HistoryManager as _HM
+                _HM.add_operation(
+                    self.project.name, "integrity_warning", w["level"],
+                    w, correlation_id=self._correlation_id,
+                )
+
         self.on_log(f"对比完成: {len(entries)} 个文件变更")
         self.entries = entries
         self.stage = SessionStage.SELECTING
@@ -728,6 +742,19 @@ class SyncSession:
 
         if success:
             fc.synced = True
+
+            # ── Memory Snapshot + Skeleton ──
+            if self.backup_path:
+                try:
+                    from backend.core.identity.snapshot import snapshot_tool_memories
+                    snapshot_tool_memories(
+                        self.workspace_path, self.backup_path, self.project,
+                    )
+                    from backend.core.identity.guard import _save_directory_skeleton
+                    _save_directory_skeleton(self.workspace_path)
+                except OSError:
+                    pass
+
             commit_hash = ""
             try:
                 ch = self.ws_git_runner.rev_parse("HEAD", timeout=15)

@@ -4,6 +4,42 @@
 
 ---
 
+## v0.23 (2026-05-19)
+
+**Identity Guard — 项目环境完整性保护**
+
+事故驱动设计：CC 覆盖项目文件夹 → LLM 看不到"项目身份" → 需要 runtime 层约束。
+
+### Layer 1: Integrity Detection
+- `backend/core/identity/guard.py` — **新建** — 三条检测规则
+  - `_detect_mass_override` — 全量覆盖检测（阈值 0.80，可配置）
+  - `_detect_identity_file_deletion` — 身份文件删除告警（CLAUDE.md/.claude/.codex 等）
+  - `_detect_structure_collapse` — 目录骨架崩塌检测（Jaccard < 0.3）
+  - `_save_directory_skeleton` — sync 成功后自动写入基线
+- `backend/core/config.py` — `DEFAULT_INTEGRITY_CONFIG` + `integrity` 字段（项目级可配置）
+- `sync_session.py:step_scan()` — 插入 integrity checks，警告写入 HistoryManager
+- `sync_session.py:step_sync()` — 成功后自动 snapshot + skeleton save
+
+### Layer 2: Memory Snapshot
+- `backend/core/identity/snapshot.py` — **新建**
+  - `snapshot_tool_memories` — .claude/.codex/.codebuddy 增量快照到 backup
+  - 首次全量 copytree，之后 filecmp 增量拷贝
+  - 保留最近 5 次，旧快照自动清理
+- CLI: `--mode memory --memory-action snapshot/restore/list`
+- MCP: `gitgo_memory_snapshot/restore/list`（3 tools）
+
+### Layer 3: Identity Bundle
+- `state_bundle.py` — `collect_state_bundle()` 新增 `include_identity=True`
+  - 目录骨架 + 身份文件状态 + 工具记忆摘要
+- CLI: `--mode export --include-identity`
+- MCP: `gitgo_export` 新增 `include_identity` 参数
+
+### 测试
+- `tests/test_identity_guard.py` — 18 个测试
+- pytest: 265 passed, 1 skipped (+18 over v0.22)
+
+---
+
 ## v0.22 (2026-05-17)
 
 **模板系统 + CLI/MCP 补齐 — Phase 6 + Phase 5.2 完结**

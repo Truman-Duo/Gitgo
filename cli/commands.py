@@ -980,7 +980,8 @@ def _print_releases(data: dict):
 
 
 def _cmd_export(cfg: Config, project_name: str, export_type: str,
-                minimal: bool = False, json_output: bool = False):
+                minimal: bool = False, include_identity: bool = False,
+                json_output: bool = False):
     """--mode export: 导出治理状态。
 
     --export-type state-bundle: 完整状态快照
@@ -989,7 +990,8 @@ def _cmd_export(cfg: Config, project_name: str, export_type: str,
 
     if export_type == "state-bundle":
         session = _init_session(cfg, project_name, json_output=json_output)
-        bundle = collect_state_bundle(session, minimal=minimal)
+        bundle = collect_state_bundle(session, minimal=minimal,
+                                      include_identity=include_identity)
         if json_output:
             import json
             print(json.dumps(bundle, indent=2, ensure_ascii=False))
@@ -1248,3 +1250,56 @@ def _cmd_formal(cfg: Config, project_name: str, action: str,
                           "index": formal_index}))
     else:
         print(f"[{'OK' if ok else 'FAIL'}] {action} formal[{formal_index}]")
+
+
+# ── Memory 快照管理 ───────────────────────────────────────
+
+def _cmd_memory(cfg: Config, project_name: str, action: str,
+                snapshot_ts: str | None = None,
+                json_output: bool = False):
+    """--mode memory: 管理工具记忆快照（snapshot/restore/list）"""
+    session = _init_session(cfg, project_name, json_output=json_output)
+    bp = session.backup_path
+    if not bp:
+        if json_output:
+            print(json.dumps({"error": "NO_BACKUP_CONFIGURED"}))
+        else:
+            print("错误: 未配置 release 仓库")
+        sys.exit(1)
+
+    from backend.core.identity.snapshot import (
+        snapshot_tool_memories, restore_tool_memories, list_memory_snapshots,
+    )
+
+    if action == "list":
+        snapshots = list_memory_snapshots(bp)
+        if json_output:
+            print(json.dumps(snapshots, indent=2, ensure_ascii=False))
+        else:
+            if not snapshots:
+                print("（无可用快照）")
+            else:
+                for s in snapshots:
+                    print(f"  [{s['source']}] {s['timestamp']} "
+                          f"({'dir' if s['is_dir'] else 'file'})")
+
+    elif action == "snapshot":
+        result = snapshot_tool_memories(
+            session.workspace_path, bp, session.project,
+        )
+        if json_output:
+            print(json.dumps({"result": "ok", **result}))
+        else:
+            print(f"[OK] 已快照 {len(result['snapped'])} 个记忆源 → {result['dest']}")
+
+    elif action == "restore":
+        result = restore_tool_memories(
+            bp, session.workspace_path, snapshot_timestamp=snapshot_ts,
+        )
+        if json_output:
+            print(json.dumps(result))
+        else:
+            if result.get("error"):
+                print(f"[FAIL] {result['error']}")
+            else:
+                print(f"[OK] 已恢复 {len(result.get('restored', []))} 个记忆源")

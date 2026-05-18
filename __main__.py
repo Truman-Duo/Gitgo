@@ -28,7 +28,7 @@ def main():
         "--mode",
         choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
                  "status", "trial", "formalize", "scan", "push", "session", "release",
-                 "suggest", "governance", "export", "template", "formal"],
+                 "suggest", "governance", "export", "template", "formal", "memory"],
         default="gui",
         help="启动模式",
     )
@@ -224,6 +224,23 @@ def main():
         "--new-number", type=int, default=None,
         help="新编号（--mode formal --formal-action edit-number 时使用）",
     )
+    parser.add_argument(
+        "--memory-action",
+        choices=["snapshot", "restore", "list"],
+        default="list",
+        help="Memory 操作类型（--mode memory 时使用）",
+    )
+    parser.add_argument(
+        "--ts",
+        default=None,
+        help="快照时间戳（--mode memory --memory-action restore 时使用，默认最新）",
+    )
+    parser.add_argument(
+        "--include-identity",
+        action="store_true",
+        default=False,
+        help="导出含项目身份信息（--mode export --export-type state-bundle 时使用）",
+    )
     args = parser.parse_args()
 
     try:
@@ -345,7 +362,8 @@ def main():
                 sys.exit(1)
             from cli import _cmd_export
             _cmd_export(cfg, args.project, args.export_type,
-                       minimal=args.minimal, json_output=args.json)
+                       minimal=args.minimal, include_identity=args.include_identity,
+                       json_output=args.json)
         elif args.mode == "template":
             from cli import _cmd_template
             _cmd_template(cfg, args.template_action,
@@ -365,6 +383,13 @@ def main():
                        message=args.message,
                        new_number=args.new_number,
                        json_output=args.json)
+        elif args.mode == "memory":
+            if not args.project:
+                print("错误: --mode memory 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_memory
+            _cmd_memory(cfg, args.project, args.memory_action,
+                       snapshot_ts=args.ts, json_output=args.json)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)
