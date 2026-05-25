@@ -42,6 +42,15 @@ DEFAULT_SECURITY_SCAN = {
     "extra_patterns": [],
 }
 
+DEFAULT_AUTHORSHIP_CONFIG = {
+    "mode": "mixed",
+    "strip_commit_coauthors": True,
+    "strip_code_comments": False,
+    "exclude_tool_configs": [
+        "CLAUDE.md", ".claude/", ".codex/", ".codebuddy/", ".cursor/", ".windsurf/",
+    ],
+}
+
 DEFAULT_INTEGRITY_CONFIG = {
     "enabled": True,
     "mass_override_threshold": 0.80,
@@ -68,6 +77,7 @@ class ProjectConfig:
     force_exclude: list = field(default_factory=lambda: list(DEFAULT_FORCE_EXCLUDE))
     security_scan: dict = field(default_factory=lambda: dict(DEFAULT_SECURITY_SCAN))
     integrity: dict = field(default_factory=lambda: dict(DEFAULT_INTEGRITY_CONFIG))
+    authorship: dict = field(default_factory=lambda: dict(DEFAULT_AUTHORSHIP_CONFIG))
 
     # ── 向后兼容 property ─────────────────────────────────
 
@@ -147,6 +157,7 @@ class ProjectConfig:
             force_exclude=d.get("force_exclude", list(DEFAULT_FORCE_EXCLUDE)),
             security_scan=ss if ss else dict(DEFAULT_SECURITY_SCAN),
             integrity=d.get("integrity", dict(DEFAULT_INTEGRITY_CONFIG)),
+            authorship=d.get("authorship", dict(DEFAULT_AUTHORSHIP_CONFIG)),
         )
 
 

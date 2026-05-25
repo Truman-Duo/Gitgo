@@ -28,7 +28,8 @@ def main():
         "--mode",
         choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
                  "status", "trial", "formalize", "scan", "push", "session", "release",
-                 "suggest", "governance", "export", "template", "formal", "memory"],
+                 "suggest", "governance", "export", "template", "formal", "memory",
+                 "contract", "lesson"],
         default="gui",
         help="启动模式",
     )
@@ -241,6 +242,18 @@ def main():
         default=False,
         help="导出含项目身份信息（--mode export --export-type state-bundle 时使用）",
     )
+    parser.add_argument(
+        "--strip-authorship",
+        action="store_true",
+        default=False,
+        help="推送前清除 AI 合作痕迹（--mode push 时使用）",
+    )
+    parser.add_argument(
+        "--aggressive",
+        action="store_true",
+        default=False,
+        help="激进清洗（含代码注释中的 AI 声明），需配合 --strip-authorship 使用",
+    )
     args = parser.parse_args()
 
     try:
@@ -326,6 +339,8 @@ def main():
                 sys.exit(1)
             from cli import _cmd_push
             _cmd_push(cfg, args.project, skip_security=args.skip_security,
+                       strip_authorship=args.strip_authorship,
+                       aggressive=args.aggressive,
                        json_output=args.json, stream=args.stream)
         elif args.mode == "session":
             if not args.project:
@@ -390,6 +405,18 @@ def main():
             from cli import _cmd_memory
             _cmd_memory(cfg, args.project, args.memory_action,
                        snapshot_ts=args.ts, json_output=args.json)
+        elif args.mode == "contract":
+            if not args.project:
+                print("错误: --mode contract 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_contract
+            _cmd_contract(cfg, args.project, json_output=args.json)
+        elif args.mode == "lesson":
+            if not args.project:
+                print("错误: --mode lesson 需要 --project NAME 参数")
+                sys.exit(1)
+            from cli import _cmd_lesson
+            _cmd_lesson(cfg, args.project, json_output=args.json)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)

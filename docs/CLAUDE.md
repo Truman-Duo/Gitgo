@@ -65,6 +65,9 @@ python build.py
 | `backend/core/governance/` | **P4** 治理层：quality/patterns/graph/releases/state_bundle（5 模块，~500行） |
 | `backend/core/template_manager.py` | **P6** 模板系统：CommitTemplate + TemplateManager 读写 `commit-config.json` |
 | `backend/core/identity/` | **P6** Identity Guard：guard.py（完整性检测）+ snapshot.py（记忆快照） |
+| `backend/core/authorship.py` | **P6** Authorship 过滤：push 前 AI 痕迹清洗 |
+| `backend/core/contract.py` | **P6** Project Contract：合约 + 漂移检测 |
+| `backend/core/knowledge/` | **P6** Lesson 系统：知识传承（抽象层+实例层） |
 | `backend/remote/` | 远程连接器：GitHub/GitLab API（含 Issue/PR） |
 | `cli/` | CLI verb 实现（headless，零 Qt/Rich 依赖，20 个 mode） |
 | `frontend/gui_main.py` | GUI 薄入口 |
@@ -115,7 +118,7 @@ python build.py
 
 ---
 
-## gitgo 当前架构（v0.23）
+## gitgo 当前架构（v0.24）
 
 ### 核心概念：三维模型
 
@@ -214,7 +217,7 @@ IDLE → SCANNING → FORMALIZING → SYNCING → PUSHING → IDLE
 | **P3** | AI-Augmented — triage hook + suggest CLI + AI_Protocol + Commit Proposal + diff_summary | ✅ v0.15 |
 | **P4** | Governance Layer — quality metrics + change patterns + semantic graph + release reasoning | ✅ v0.20 |
 | **P5** | Protocol & Ecosystem — Protocol v1.0 + Reference Agent + Plugin API + State Bundle | ✅ v0.21 |
-| **P6** | Identity Guard + Template + SMB + Issue/PR + CLI/MCP 补齐 — 20 CLI modes / 36 MCP tools | ✅ v0.23 |
+| **P6** | Identity + Authorship + Contract + Lesson — 22 CLI modes / 42 MCP tools | ✅ v0.24 |
 | **Remote** | GitHub/GitLab 连接器 + `--mode release` CLI | ✅ v0.14 |
 | **P0** | GUI Track — B-1 + F-1 架构调整 | ⬜ 待执行 |
 

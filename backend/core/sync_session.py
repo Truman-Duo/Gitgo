@@ -421,11 +421,15 @@ class SyncSession:
         if not self.backup_path or not self.bk_adapter.exists(""):
             self.on_log("未配置有效的备份路径")
             self.entries = []
+            self.stage = SessionStage.FAILED
+            self.on_stage_changed(self.stage)
             return self.entries
 
         if not self.bk_git_runner.is_git_repo():
             self.on_log("备份路径不是 git 仓库")
             self.entries = []
+            self.stage = SessionStage.FAILED
+            self.on_stage_changed(self.stage)
             return self.entries
 
         entries = compare_files(
@@ -752,6 +756,20 @@ class SyncSession:
                     )
                     from backend.core.identity.guard import _save_directory_skeleton
                     _save_directory_skeleton(self.workspace_path)
+                    # 自动更新项目合约（记录本次 sync 确认的 feature）
+                    from backend.core.contract import ContractManager
+                    msg_first_line = fc.message.split("\n")[0] if fc.message else ""
+                    feature_name = msg_first_line[:60] if msg_first_line else "sync"
+                    ContractManager.update_feature(
+                        self.workspace_path, self.project.name,
+                        feature_name=feature_name,
+                        location="",
+                    )
+                    # 自动收割教训（反复修改→成功的模式）
+                    from backend.core.knowledge.lesson import harvest_lessons
+                    ts = self.project.commit_format.get("prefix", "")
+                    harvest_lessons(self.workspace_path, self.project.name,
+                                    tech_stack=ts)
                 except OSError:
                     pass
 
@@ -849,16 +867,18 @@ class SyncSession:
 
     def step_start_accept_confirm(self, change: IncomingChange):
         """第一步：显示 Bridge，等待二次确认"""
-        assert self.stage == SessionStage.TRIAL_REVIEWING, \
-            f"expected TRIAL_REVIEWING, got {self.stage}"
+        if self.stage != SessionStage.TRIAL_REVIEWING:
+            self.on_log(f"[WARN] step_start_accept_confirm 需要 TRIAL_REVIEWING 阶段，当前为 {self.stage}")
+            return
         self._pending_accept = change
         self.stage = SessionStage.INCOMING_CONFIRMING
         self.on_stage_changed(self.stage)
 
     def step_confirm_accept(self) -> IncomingChange | None:
         """第二步：用户确认，返回待处理的 change"""
-        assert self.stage == SessionStage.INCOMING_CONFIRMING, \
-            f"expected INCOMING_CONFIRMING, got {self.stage}"
+        if self.stage != SessionStage.INCOMING_CONFIRMING:
+            self.on_log(f"[WARN] step_confirm_accept 需要 INCOMING_CONFIRMING 阶段，当前为 {self.stage}")
+            return None
         change = self._pending_accept
         self._pending_accept = None
         self.stage = SessionStage.IDLE
@@ -867,8 +887,9 @@ class SyncSession:
 
     def step_cancel_accept(self):
         """用户取消，回到 REVIEWING"""
-        assert self.stage == SessionStage.INCOMING_CONFIRMING, \
-            f"expected INCOMING_CONFIRMING, got {self.stage}"
+        if self.stage != SessionStage.INCOMING_CONFIRMING:
+            self.on_log(f"[WARN] step_cancel_accept 需要 INCOMING_CONFIRMING 阶段，当前为 {self.stage}")
+            return
         self._pending_accept = None
         self.stage = SessionStage.TRIAL_REVIEWING
         self.on_stage_changed(self.stage)

@@ -167,9 +167,11 @@ def gitgo_sync(project: str) -> dict:
 
 
 @mcp.tool(
-    description="将已同步的 formal commits 推送到远程仓库。可选跳过安全检查。"
+    description="将已同步的 formal commits 推送到远程仓库。可选跳过安全检查。strip_authorship=True 时清除 AI 合作痕迹。"
 )
-def gitgo_push(project: str, skip_security: bool = False) -> dict:
+def gitgo_push(project: str, skip_security: bool = False,
+               strip_authorship: bool = False,
+               aggressive: bool = False) -> dict:
     cfg, proj = _get_project(project)
     if proj is None:
         return {"error": "PROJECT_NOT_FOUND", "project": project}
@@ -177,6 +179,12 @@ def gitgo_push(project: str, skip_security: bool = False) -> dict:
     session = SyncSession(proj, cfg)
     session.step_scan()
     session.step_load_commits()
+
+    # Authorship 过滤
+    if strip_authorship:
+        from backend.core.authorship import apply_authorship_filter
+        stats = apply_authorship_filter(session, aggressive=aggressive)
+
     ok, warning = session.step_push(skip_scan=True)
     return {
         "pushed": ok,
@@ -616,9 +624,9 @@ def gitgo_session(project: str, action: str = "status") -> dict:
         path = session.save_session()
         return {"saved": True, "path": str(path)}
     elif action == "resume":
-        restored = session.load_session()
-        fc_count = len(session.formal_commits) if restored else 0
-        return {"resumed": restored, "formal_commits_restored": fc_count}
+        restored = SyncSession.load_session(proj, cfg)
+        fc_count = len(restored.formal_commits) if restored else 0
+        return {"resumed": restored is not None, "formal_commits_restored": fc_count}
     else:
         return session.status_dict(semantic=True)
 
@@ -708,6 +716,133 @@ def gitgo_memory_list(project: str) -> list[dict]:
     if not session.backup_path:
         return [{"error": "NO_BACKUP_CONFIGURED"}]
     return list_memory_snapshots(session.backup_path)
+
+
+# ── Contract Tools ─────────────────────────────────────────────
+
+@mcp.tool(
+    description="查看项目合约：技术栈、已确认功能、架构约束。可选附漂移检测结果。"
+)
+def gitgo_contract_show(project: str) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    from backend.core.contract import ContractManager, detect_drift
+    from pathlib import Path
+    session = SyncSession(proj, cfg)
+    ws = Path(session.workspace_path)
+    contract = ContractManager.load(ws)
+    if contract is None:
+        return {"contract": None}
+    result = {
+        "project": contract.project,
+        "updated": contract.updated,
+        "tech_stack": contract.tech_stack,
+        "decided_features": [
+            {"name": f.name, "location": f.location,
+             "signature": f.signature, "confirmed_count": f.confirmed_count}
+            for f in contract.decided_features
+        ],
+        "architecture_constraints": contract.architecture_constraints,
+    }
+    entry_files = [e.rel_path for e in (session.entries or []) if e.status != "same"]
+    if entry_files:
+        result["drift_alerts"] = detect_drift(ws, entry_files, contract)
+    return result
+
+
+@mcp.tool(
+    description="更新项目合约：新增或确认 decided feature。"
+)
+def gitgo_contract_update(project: str, feature_name: str,
+                          location: str = "",
+                          signature: str = "") -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    from backend.core.contract import ContractManager
+    from pathlib import Path
+    session = SyncSession(proj, cfg)
+    ws = Path(session.workspace_path)
+    contract = ContractManager.update_feature(
+        ws, proj.name, feature_name=feature_name,
+        location=location, signature=signature,
+    )
+    return {"updated": feature_name, "confirmed_count": next(
+        (f.confirmed_count for f in contract.decided_features
+         if f.name == feature_name), 0)}
+
+
+# ── Lesson Tools ──────────────────────────────────────────────
+
+@mcp.tool(description="列出项目的所有知识教训（含抽象层、实例层、待确认草稿）。")
+def gitgo_lesson_list(project: str) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    from backend.core.knowledge.lesson import LessonManager
+    from pathlib import Path
+    session = SyncSession(proj, cfg)
+    ws = Path(session.workspace_path)
+    return {
+        "abstract": [l.to_dict() for l in LessonManager.load_abstract(ws)],
+        "instances": [l.to_dict() for l in LessonManager.load_instance(ws, project)],
+        "pending": [l.to_dict() for l in LessonManager.load_pending(ws, project)],
+    }
+
+
+@mcp.tool(description="确认一条知识教训（从 pending 转为正式，或增加 verified_count）。")
+def gitgo_lesson_verify(project: str, lesson_id: str) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    from backend.core.knowledge.lesson import LessonManager
+    from pathlib import Path
+    session = SyncSession(proj, cfg)
+    ws = Path(session.workspace_path)
+    result = LessonManager.verify(ws, lesson_id, project_name=project)
+    if result:
+        return {"verified": lesson_id, "verified_count": result.verified_count}
+    return {"error": "LESSON_NOT_FOUND", "lesson_id": lesson_id}
+
+
+@mcp.tool(description="搜索知识教训（在抽象层和实例层中全文搜索）。")
+def gitgo_lesson_search(project: str, query: str,
+                        tech_stack: str = "") -> list[dict]:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return [{"error": "PROJECT_NOT_FOUND", "project": project}]
+    from backend.core.sync_session import SyncSession
+    from backend.core.knowledge.lesson import LessonManager
+    from pathlib import Path
+    session = SyncSession(proj, cfg)
+    ws = Path(session.workspace_path)
+    results = LessonManager.search(ws, query, project_name=project,
+                                   tech_stack=tech_stack)
+    return [l.to_dict() for l in results]
+
+
+@mcp.tool(description="将实例层知识提升为抽象层（跨项目通用）。")
+def gitgo_lesson_promote(project: str, lesson_id: str,
+                         tech_stack: str) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    from backend.core.knowledge.lesson import LessonManager
+    from pathlib import Path
+    session = SyncSession(proj, cfg)
+    ws = Path(session.workspace_path)
+    result = LessonManager.promote_to_abstract(
+        ws, lesson_id, project_name=project, tech_stack=tech_stack,
+    )
+    if result:
+        return {"promoted": lesson_id, "tech_stack": tech_stack}
+    return {"error": "LESSON_NOT_FOUND", "lesson_id": lesson_id}
 
 
 # ── Entry Point ────────────────────────────────────────────────

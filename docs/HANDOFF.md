@@ -1,28 +1,32 @@
-# gitgo v0.23 交接文档
+# gitgo v0.24 交接文档
 
 > 日期：2026-05-19
 
 ---
 
-## 本次更新（v0.23）
+## 本次更新（v0.24）
 
-**Identity Guard — 项目环境完整性保护。** 事故驱动：CC 覆盖项目文件夹 → LLM 看不到"项目身份" → 需要 runtime 层约束。
+**v0.24 设计全部实现。** Authorship + Drift Detection + Lesson System + Bug修复。
 
-三层防御：
-- **Layer 1**: Integrity Detection — scan 时检测全量覆盖/身份文件删除/目录骨架崩塌
-- **Layer 2**: Memory Snapshot — sync 时自动快照工具记忆（.claude/.codex/.codebuddy）到 backup
-- **Layer 3**: Identity Bundle — export 时导出完整项目身份
+- **Authorship**: push 前 AI 痕迹清洗（commit message + 代码注释 + AI 配置文件排除）
+- **Drift Detection**: 项目合约自动维护 + push 前漂移检测（功能删除/技术栈漂移/架构违反）
+- **Lesson System**: 抽象层+实例层知识传承，JSONL 格式，sync 后自动收割
+- **Bug 修复**: MCP resume 崩溃 + suggest 静默失败 + assert 守卫 + 阶段卡住
+- **CLI 拆分**: commands.py 1397→863行 + commands_ext.py
 
 ### 执行优先级
 1. **P0（GUI Track）** — 前端架构调整（B-1 + F-1）
 
 ---
 
-## 当前进度总览（v0.23）
+## 当前进度总览（v0.24）
 
 | 区域 | 完成度 | 状态 |
 |------|--------|------|
-| 项目列表 | 85% | 基本可用 |
+| 后端 | 100% | SyncSession + Adapters + Remote + Template + Identity + Authorship + Contract + Lesson |
+| MCP | 100% | 42 tools，零缺失 ✅ |
+| CLI | 100% | 22 modes，全部 SyncSession 方法可 CLI 调用 ✅ |
+| Runtime | 100% | P1-P6 全部完成 ✅ |
 | Commit Workshop | 90% | CommitCanvas + 三层卡片 ✅ |
 | 后端 | 100% | SyncSession + Adapters + Remote + Template + Identity Guard ✅ |
 | Runtime | 100% | P1-P6 全部完成 ✅ |

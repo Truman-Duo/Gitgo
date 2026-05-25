@@ -12,12 +12,16 @@ from .commands import (
     _cmd_history,
     _cmd_release,
     _cmd_suggest,
+    _init_session,
+)
+from .commands_ext import (
     _cmd_governance,
     _cmd_export,
     _cmd_template,
     _cmd_formal,
     _cmd_memory,
-    _init_session,
+    _cmd_contract,
+    _cmd_lesson,
 )
 
 __all__ = [
@@ -38,5 +42,7 @@ __all__ = [
     "_cmd_template",
     "_cmd_formal",
     "_cmd_memory",
+    "_cmd_contract",
+    "_cmd_lesson",
     "_init_session",
 ]

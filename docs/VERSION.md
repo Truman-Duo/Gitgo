@@ -4,6 +4,51 @@
 
 ---
 
+## v0.24 (2026-05-19)
+
+**Authorship + Drift Detection + Lesson System — v0.24 设计全部实现**
+
+### Authorship 过滤（著作权管理）
+- `backend/core/authorship.py` — push 前 AI 痕迹清洗
+  - commit message: 去除 Co-authored-by / Generated with 等模式
+  - 激进模式: 去除代码中的 AI 生成注释
+  - AI 配置文件排除: CLAUDE.md / .claude/ / .codex/ / .cursor/ 等
+- CLI: `--mode push --strip-authorship [--aggressive]`
+- MCP: `gitgo_push` 新增 strip_authorship / aggressive 参数
+- 配置: `authorship.mode` / `strip_commit_coauthors` / `exclude_tool_configs`
+
+### Drift Detection（漂移检测 + Project Contract）
+- `backend/core/contract.py` — ProjectContract + ContractManager + detect_drift
+  - 功能删除检测: decided_feature 文件消失或签名丢失
+  - 技术栈漂移: 新增未声明 import
+  - 架构违反: architecture_constraints 被新代码打破
+- sync 成功后自动更新合约（confirmed_count +1）
+- push 前自动漂移检测（展示告警）
+- CLI: `--mode contract`
+- MCP: `gitgo_contract_show` / `gitgo_contract_update`
+
+### Lesson 系统（知识传承）
+- `backend/core/knowledge/lesson.py` — Lesson 数据类 + LessonManager + harvest_lessons
+  - 抽象层（跨项目通用）+ 实例层（单项目具体）
+  - JSONL 格式，一行一条
+  - sync 成功后自动收割（同一文件反复修改3+次 → pending lesson）
+  - verify / search / promote_to_abstract
+- CLI: `--mode lesson`
+- MCP: `gitgo_lesson_list/verify/search/promote`（4 tools）
+
+### CLI 拆分
+- `cli/commands.py` 1397行 → 863行（核心工作流）
+- `cli/commands_ext.py` 新建 573行（扩展功能）
+- CLI modes: 20 → 22
+
+### 测试
+- tests/test_authorship.py — 21 个
+- tests/test_contract.py — 15 个
+- tests/test_lesson.py — 13 个
+- pytest: 314 passed, 1 skipped (+49 over v0.23)
+
+---
+
 ## v0.23 (2026-05-19)
 
 **Identity Guard — 项目环境完整性保护**

@@ -282,11 +282,13 @@ def test_error_format_consistency():
     """验证所有 CLI 错误输出使用统一格式。"""
     from pathlib import Path
 
-    commands_path = Path(__file__).parent.parent / "cli" / "commands.py"
-    source = commands_path.read_text(encoding="utf-8")
+    cli_dir = Path(__file__).parent.parent / "cli"
+    source = ""
+    for fname in ["commands.py", "commands_ext.py"]:
+        fp = cli_dir / fname
+        if fp.exists():
+            source += fp.read_text(encoding="utf-8")
 
-    # 所有 json_output 错误路径应使用 {"error": ...} 格式
-    # 不应混用 {"result": "fail"} 作为错误响应（那是操作结果，不是协议错误）
     # 验证关键错误码存在
     assert "PROJECT_NOT_FOUND" in source
     assert "UNKNOWN_GOVERNANCE_TYPE" in source
