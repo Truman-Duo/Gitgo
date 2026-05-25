@@ -77,14 +77,20 @@ class FileAdapter(ABC):
         ...
 
 
-def _hash_file(filepath: str | Path) -> str:
-    """计算文件的 SHA-256 哈希（8MB 分块读取避免内存爆炸）。"""
+def _hash_file(filepath: str | Path, normalize_eol: bool = False) -> str:
+    """计算文件的 SHA-256 哈希（8MB 分块读取避免内存爆炸）。
+
+    normalize_eol=True 时先将 \\r\\n 替换为 \\n 再计算哈希，
+    避免 Windows/Linux 换行符差异导致误报。
+    """
     h = hashlib.sha256()
     with open(filepath, "rb") as f:
         while True:
             chunk = f.read(8192 * 1024)
             if not chunk:
                 break
+            if normalize_eol:
+                chunk = chunk.replace(b"\r\n", b"\n")
             h.update(chunk)
     return h.hexdigest()
 

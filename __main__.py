@@ -29,7 +29,7 @@ def main():
         choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
                  "status", "trial", "formalize", "scan", "push", "session", "release",
                  "suggest", "governance", "export", "template", "formal", "memory",
-                 "contract", "lesson"],
+                 "contract", "lesson", "bootstrap"],
         default="gui",
         help="启动模式",
     )
@@ -417,6 +417,9 @@ def main():
                 sys.exit(1)
             from cli import _cmd_lesson
             _cmd_lesson(cfg, args.project, json_output=args.json)
+        elif args.mode == "bootstrap":
+            from cli import _cmd_bootstrap
+            _cmd_bootstrap(cfg, json_output=args.json)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)

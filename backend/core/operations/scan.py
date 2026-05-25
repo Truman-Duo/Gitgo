@@ -46,8 +46,21 @@ def compare_files(
     *,
     ws_adapter: FileAdapter | None = None,
     bk_adapter: FileAdapter | None = None,
+    normalize_eol: bool = False,
 ) -> list[FileEntry]:
-    """对比工作区和备份仓库的文件，返回带状态的文件列表"""
+    """对比工作区和备份仓库的文件，返回带状态的文件列表
+
+    normalize_eol=True 时将 \\r\\n 替换为 \\n 再比较，
+    避免 Windows/Linux 换行符差异导致误报。
+    """
+    def _hash(adapter: FileAdapter, path: str) -> str:
+        if not normalize_eol:
+            return adapter.hash_file(path)
+        data = adapter.read_bytes(path)
+        data = data.replace(b"\r\n", b"\n")
+        import hashlib
+        return hashlib.sha256(data).hexdigest()
+
     if ws_adapter is None:
         ws_adapter = LocalFileAdapter(Path(workspace).resolve())
     if bk_adapter is None:
@@ -71,7 +84,7 @@ def compare_files(
                 rel = _normalize_path(rel_path)
                 if not rel.startswith(".git/"):
                     backup_by_hash.setdefault(
-                        bk_adapter.hash_file(rel_path), []
+                        _hash(bk_adapter, rel_path), []
                     ).append(rel)
             except (ValueError, OSError):
                 continue
@@ -86,7 +99,7 @@ def compare_files(
         if ws_adapter.is_binary(rel):
             continue
 
-        ws_hash = ws_adapter.hash_file(rel)
+        ws_hash = _hash(ws_adapter, rel)
         bk_exists = bk_adapter.exists(rel)
 
         if not bk_exists:
@@ -99,7 +112,7 @@ def compare_files(
                 )
             )
         else:
-            bk_hash = bk_adapter.hash_file(rel)
+            bk_hash = _hash(bk_adapter, rel)
             if ws_hash == bk_hash:
                 entries.append(
                     FileEntry(

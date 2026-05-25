@@ -4,6 +4,42 @@
 
 ---
 
+## v0.24.1 (2026-05-26)
+
+**全量 Bug 修复 + 回归测试 + 三仓集成验证**
+
+### Bug 修复（6个，全量回归）
+- B1: `IncomingChange.date` → `.timestamp`（`cli/commands.py`）
+- B2: `Config.get_project()` 不存在 → 手动遍历（`cli/commands.py`）
+- B3: `CommitInfo.commit_type` → `.type`（`cli/commands.py`）
+- B4: `_cmd_push` 跨进程 session 丢失 → `load_session` 恢复（`cli/commands.py`）
+- B5: Trial accept cherry-pick 冲突 → `-X theirs` 自动重试（`sync_session.py`）
+- B6: `_find_next_number` 编号不递增 → `\[PREFIX-\d+\]` 模式修复（`git.py`）
+
+### 新增测试
+- `tests/test_regression.py` — 12 个回归测试（B1-B6 + 字段名审计）
+- `tests/test_self_referential.py` — 8 个自指流程测试（EOL / hash / compare_files）
+- 总测试: 334 passed, 1 skipped (+12 over v0.24)
+
+### Bootstrap 自举命令
+- `--mode bootstrap` — 一键注册 gitgo 自身项目配置
+- 自动检测 workspace/release 路径 + 推断下一个编号
+
+### 换行符归一化
+- `compare_files(normalize_eol=True)` — CRLF/LF 不再误报 modified
+- `_hash_file(normalize_eol=True)` — 流式替换 `\r\n` → `\n`
+
+### 三仓集成测试
+- 真实 GitHub 私有仓库 `Truman-Duo/gitgo-integration-test`
+- workspace → release → trial 完整流程验证
+- 测试报告: `Desktop/gitgo_test_ws/TEST_REPORT.md`
+
+### 测试日志
+- `docs/bootstrap_test.log` — 自指流程详细日志
+- 记录每一步的命令、输出、问题、修复
+
+---
+
 ## v0.24 (2026-05-19)
 
 **Authorship + Drift Detection + Lesson System — v0.24 设计全部实现**

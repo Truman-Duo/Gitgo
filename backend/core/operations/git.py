@@ -118,7 +118,7 @@ def _find_next_number(
         git_runner = LocalGitRunner(Path(backup_path).resolve())
     if not git_runner.is_git_repo():
         return 0
-    lines = git_runner.log(grep=f"^{prefix}-\\d+", fmt="%s", max_count=50)
+    lines = git_runner.log(grep=f"\\[{prefix}-\\d+\\]", fmt="%s", max_count=50)
     max_n = -1
     pat = re.compile(rf"\[{prefix}-(\d+)\]")
     for line in lines:

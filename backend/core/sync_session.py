@@ -331,12 +331,19 @@ class SyncSession:
                 self.on_log(f"Fetch 失败: {e1}")
                 self.bk_git_runner.run(["remote", "remove", "trial"])
                 return False
+            # cherry-pick with auto-resolve for modify/delete conflicts
             ok2, e2 = self.bk_git_runner.cherry_pick(change.hash)
             if not ok2:
-                self.on_log(f"Cherry-pick 失败: {e2}")
+                # Retry with theirs strategy for modify/delete conflicts
                 self.bk_git_runner.run(["cherry-pick", "--abort"])
-                self.bk_git_runner.run(["remote", "remove", "trial"])
-                return False
+                r2 = self.bk_git_runner.run(
+                    ["cherry-pick", "-X", "theirs", change.hash]
+                )
+                if r2.returncode != 0:
+                    self.on_log(f"Cherry-pick 失败: {r2.stderr}")
+                    self.bk_git_runner.run(["cherry-pick", "--abort"])
+                    self.bk_git_runner.run(["remote", "remove", "trial"])
+                    return False
             self.bk_git_runner.run(["remote", "remove", "trial"])
             prefix = self.project.commit_format.get("prefix", "PROJ")
             fc = FormalCommit(
@@ -435,6 +442,7 @@ class SyncSession:
         entries = compare_files(
             self.workspace_path, self.backup_path, files, self.on_progress,
             ws_adapter=self.ws_adapter, bk_adapter=self.bk_adapter,
+            normalize_eol=True,
         )
         entries = self.on_file_selection(entries)
 

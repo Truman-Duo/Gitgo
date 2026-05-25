@@ -1,33 +1,40 @@
-# gitgo v0.24 交接文档
+# gitgo v0.24.1 交接文档
 
-> 日期：2026-05-19
+> 日期：2026-05-26
 
 ---
 
-## 本次更新（v0.24）
+## 本次更新（v0.24.1）
 
-**v0.24 设计全部实现。** Authorship + Drift Detection + Lesson System + Bug修复。
+**全量 Bug 修复 + 回归测试 + 三仓集成验证 + 自举命令。**
 
-- **Authorship**: push 前 AI 痕迹清洗（commit message + 代码注释 + AI 配置文件排除）
-- **Drift Detection**: 项目合约自动维护 + push 前漂移检测（功能删除/技术栈漂移/架构违反）
-- **Lesson System**: 抽象层+实例层知识传承，JSONL 格式，sync 后自动收割
-- **Bug 修复**: MCP resume 崩溃 + suggest 静默失败 + assert 守卫 + 阶段卡住
-- **CLI 拆分**: commands.py 1397→863行 + commands_ext.py
+- **6 Bug 全修**: 字段名不匹配 ×3 / session restore / cherry-pick 冲突 / 编号不递增
+- **回归测试**: test_regression.py (12) + test_self_referential.py (8) = 334 passed
+- **Bootstrap**: `--mode bootstrap` 一键自举
+- **换行符归一化**: `compare_files(normalize_eol=True)` 消除 CRLF/LF 误报
+- **三仓集成**: GitHub 私有仓库完整验证，12/14→14/14 全通过
+
+### 必读文件
+- `docs/VERSION.md` — 完整版本历史
+- `docs/bootstrap_test.log` — 自指流程详细日志
+- `docs/iterations/v0.24_Knowledge_Authorship_Drift.md` — v0.24 设计文档
+- `Desktop/gitgo_test_ws/TEST_REPORT.md` — 三仓集成测试报告
 
 ### 执行优先级
 1. **P0（GUI Track）** — 前端架构调整（B-1 + F-1）
 
 ---
 
-## 当前进度总览（v0.24）
+## 当前进度总览（v0.24.1）
 
 | 区域 | 完成度 | 状态 |
 |------|--------|------|
-| 后端 | 100% | SyncSession + Adapters + Remote + Template + Identity + Authorship + Contract + Lesson |
+| 后端 | 100% | 50 模块，~8,000 行，零存根 |
 | MCP | 100% | 42 tools，零缺失 ✅ |
-| CLI | 100% | 22 modes，全部 SyncSession 方法可 CLI 调用 ✅ |
+| CLI | 100% | 22 modes，全 SyncSession 方法可 CLI 调用 ✅ |
+| 测试 | 100% | 334 passed / 1 skipped / 24 测试文件 ✅ |
+| 集成验证 | 100% | 三仓 GitHub 真实环境全通过 ✅ |
 | Runtime | 100% | P1-P6 全部完成 ✅ |
-| Commit Workshop | 90% | CommitCanvas + 三层卡片 ✅ |
 | 后端 | 100% | SyncSession + Adapters + Remote + Template + Identity Guard ✅ |
 | Runtime | 100% | P1-P6 全部完成 ✅ |
 | Phase 5 | 100% | Protocol & Ecosystem ✅ |

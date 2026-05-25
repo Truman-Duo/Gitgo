@@ -279,7 +279,7 @@ def _cmd_trial(cfg: Config, project_name: str, action: str,
                     "hash": c.hash,
                     "message": c.message,
                     "author": c.author,
-                    "date": c.date,
+                    "date": c.timestamp,
                     "triage": c.triage.value,
                 })
             print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -289,7 +289,7 @@ def _cmd_trial(cfg: Config, project_name: str, action: str,
                 tag = {"ACCEPTED": "[✓]", "PROMOTED": "[↑]", "DISCARDED": "[✗]"}
                 status = tag.get(c.triage.name, "[ ]")
                 print(f"  [{i}] {status} {c.hash[:12]}  {c.message.split(chr(10))[0][:60]}")
-                print(f"      author: {c.author}  date: {c.date}")
+                print(f"      author: {c.author}  date: {c.timestamp}")
             print()
 
     elif action in ("accept", "promote", "discard"):
@@ -360,7 +360,7 @@ def _cmd_scan(cfg: Config, project_name: str, json_output: bool = False,
     session.step_scan()
 
     if stream:
-        entries = [{"path": e.path, "status": e.status, "selected": e.selected}
+        entries = [{"path": e.rel_path, "status": e.status, "selected": e.selected}
                    for e in session.entries]
         print(json.dumps({"event": "operation_complete", "op": "scan",
                           "entries": entries, "total": len(session.entries)}))
@@ -368,7 +368,7 @@ def _cmd_scan(cfg: Config, project_name: str, json_output: bool = False,
         entries = []
         for e in session.entries:
             entries.append({
-                "path": e.path,
+                "path": e.rel_path,
                 "status": e.status,
                 "selected": e.selected,
             })
@@ -380,14 +380,21 @@ def _cmd_scan(cfg: Config, project_name: str, json_output: bool = False,
             print("  无变更")
             return
         for e in changed:
-            print(f"  [{e.status}] {e.path}")
+            print(f"  [{e.status}] {e.rel_path}")
 
 
 def _cmd_push(cfg: Config, project_name: str, skip_security: bool = False,
               strip_authorship: bool = False, aggressive: bool = False,
               json_output: bool = False, stream: bool = False):
     """--mode push: 推送已 synced 的 formal commit"""
-    session = _init_session(cfg, project_name, json_output=json_output)
+    matched = [p for p in cfg.projects if p.name == project_name]
+    if not matched:
+        print(json.dumps({"error": "PROJECT_NOT_FOUND", "name": project_name}) if json_output
+              else f"错误: 未找到项目「{project_name}」")
+        sys.exit(1)
+    from backend.core.sync_session import SyncSession
+    session = SyncSession.load_session(matched[0], cfg) or SyncSession(matched[0], cfg)
+    session.step_check_trial()
 
     # ── Authorship 过滤 ──
     if strip_authorship:
@@ -694,7 +701,11 @@ def _cmd_suggest(cfg: Config, project_name: str, suggest_type: str,
     """
     import json
 
-    project = cfg.get_project(project_name)
+    project = None
+    for p in cfg.projects:
+        if p.name == project_name:
+            project = p
+            break
     if not project:
         if json_output:
             print(json.dumps({"error": "PROJECT_NOT_FOUND", "name": project_name}))
@@ -760,7 +771,7 @@ def _build_formalize_context(session: "SyncSession", indices_str: str = "") -> d
                      next((i for i in range(len(session.commits))
                            if session.commits[i].hash == commit.hash), ci),
             "hash": commit.hash,
-            "type": commit.commit_type,
+            "type": commit.type,
             "subject": commit.subject,
             "body": commit.body[:500] if commit.body else "",
             "files_changed": files_info,
@@ -859,5 +870,99 @@ def _build_summary_context(session: "SyncSession") -> dict:
     }
 
 
-# ── Template 管理 ──────────────────────────────────────────
+# ── Bootstrap ──────────────────────────────────────────────
+
+def _cmd_bootstrap(cfg: Config, json_output: bool = False):
+    """--mode bootstrap: 一键注册 gitgo 自己的项目配置（自举）。
+
+    自动检测 release repo 中现有最大 GITGO-N 编号，
+    在 gitgo_config.json 中添加 gitgo 项目条目。
+    """
+    import sys
+    from pathlib import Path
+    from backend.core.config import ConfigManager, ProjectConfig
+    from backend.models import RepoNode, FileAccess, FileAccessKind
+
+    # 自动推断路径
+    ws = Path.cwd()
+    # 尝试常见 release 路径
+    candidates = [
+        Path.home() / "Desktop" / "Truman" / "documents" / "Git" / "gitgo",
+        Path.home() / "documents" / "Git" / "gitgo",
+    ]
+    release_path = None
+    for c in candidates:
+        if (c / ".git").exists():
+            release_path = str(c.resolve())
+            break
+
+    if release_path is None:
+        release_path = str(Path.home() / "documents" / "Git" / "gitgo")
+
+    # auto-detect 最大编号
+    import subprocess
+    next_n = 0
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "--all"],
+            cwd=release_path, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            creationflags=0x08000000 if sys.platform == "win32" else 0,
+        )
+        import re
+        nums = re.findall(r'\[GITGO-(\d+)\]', result.stdout)
+        if nums:
+            next_n = max(int(n) for n in nums) + 1
+    except Exception:
+        next_n = 1
+
+    # 添加项目
+    existing = [p for p in cfg.projects if p.name == "gitgo"]
+    if existing:
+        if json_output:
+            import json
+            print(json.dumps({"result": "already_exists", "name": "gitgo"}))
+        else:
+            print("gitgo 项目已存在于配置中，跳过")
+        return
+
+    project = ProjectConfig(
+        name="gitgo",
+        note="gitgo 自举项目",
+        workspace=RepoNode(file_access=FileAccess(
+            kind=FileAccessKind.LOCAL, path=str(ws.resolve()),
+        )),
+        release=RepoNode(file_access=FileAccess(
+            kind=FileAccessKind.LOCAL, path=release_path,
+        )),
+        commit_format={
+            "prefix": "GITGO",
+            "number_start": next_n,
+            "padding": False,
+            "plugins": [],
+            "template_name": "default",
+        },
+        force_exclude=[
+            "__pycache__/", "*.pyc", ".pytest_cache/",
+            "dist/", ".venv/", ".env",
+        ],
+    )
+    cfg.projects.append(project)
+    ConfigManager.save(cfg)
+
+    if json_output:
+        import json
+        print(json.dumps({
+            "result": "ok",
+            "name": "gitgo",
+            "workspace": str(ws.resolve()),
+            "release": release_path,
+            "next_number": next_n,
+        }))
+    else:
+        print(f"[OK] gitgo 自举配置完成")
+        print(f"  workspace: {ws.resolve()}")
+        print(f"  release:   {release_path}")
+        print(f"  下一个编号: GITGO-{next_n}")
+        print(f"  现在可以运行: gitgo scan --project gitgo")
 
