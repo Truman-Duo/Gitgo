@@ -63,7 +63,8 @@ def _cmd_list(cfg: Config):
 
 
 def _cmd_status(cfg: Config, project_name: str, json_output: bool = False,
-                 raw: bool = False, semantic_only: bool = False):
+                 raw: bool = False, semantic_only: bool = False,
+                 layered: bool = False):
     """--mode status --project NAME: 查询项目状态"""
     matched = [p for p in cfg.projects if p.name == project_name]
     if not matched:
@@ -78,10 +79,11 @@ def _cmd_status(cfg: Config, project_name: str, json_output: bool = False,
     session.step_check_trial()
 
     if semantic_only:
-        d = session.status_dict(semantic=True)
+        d = session.status_dict(semantic=True, layered=layered)
         print(json.dumps(d.get("semantic", {}), indent=2, ensure_ascii=False))
     elif json_output:
-        print(json.dumps(session.status_dict(semantic=not raw), indent=2, ensure_ascii=False))
+        print(json.dumps(session.status_dict(semantic=not raw, layered=layered),
+                         indent=2, ensure_ascii=False))
     else:
         d = session.status_dict()
         print(f"项目: {d['project']}")
@@ -448,6 +450,14 @@ def _cmd_push(cfg: Config, project_name: str, skip_security: bool = False,
                 for a in drift_alerts:
                     print(f"  [{a['rule'].upper()}] {a['message'][:120]}")
                 print("  (使用 --force 跳过，或先修复偏差)\n")
+
+            from backend.core.history import HistoryManager as _HM
+            _HM.add_operation(
+                project_name, "governance_drift", "warning",
+                {"alert_count": len(drift_alerts),
+                 "rules": [a["rule"] for a in drift_alerts]},
+                correlation_id=session._correlation_id if hasattr(session, '_correlation_id') else "",
+            )
 
     success, warnings = session.step_push(skip_scan=skip_security)
     if stream:

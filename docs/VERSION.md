@@ -4,6 +4,41 @@
 
 ---
 
+## v0.25 (2026-05-29)
+
+**State Convergence — 全局 Runtime 化。不扩功能，只收拢。**
+
+### C1: Governance Event Completeness
+- `sync_session.py` — 9 个 governance event 写入点
+  - `governance_synced` / `governance_pushed` / `governance_dissolved`
+  - `governance_edited` / `governance_renumbered`
+  - `governance_drift` / `governance_contract_updated`
+  - `governance_lesson` / `governance_memory_snapshot`
+- 所有 governance state 变更现在有不可变 event log 记录
+
+### C2: Three-Layer State Distinction
+- `status_dict(layered=True)` — 三层显式输出
+  - `operational`: stage / entries
+  - `governance`: formal counts / trial / contract
+  - `semantic`: entropy / next_action / action_queue
+- CLI: `--mode status --json --layered`
+- MCP: `gitgo_status(project, layered=True)`
+- 旧 `--json` 输出格式不变
+
+### C3: Unified State Query
+- `backend/core/state_reader.py` — StateReader 统一查询接口
+  - `get_formal_commits` / `get_contract` / `get_lessons`
+  - `get_integrity_warnings` / `get_memory_snapshots`
+  - `get_governance_events`
+- 6 个方法，零新依赖
+
+### 认证
+- 334 passed, 1 skipped（零回归）
+- GitHub 私有仓库 `gitgo-integration-test` 三仓验证通过
+- governance/quality + governance/patterns 从 event log 完整推导
+
+---
+
 ## v0.24.1 (2026-05-26)
 
 **全量 Bug 修复 + 回归测试 + 三仓集成验证**

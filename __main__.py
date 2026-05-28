@@ -254,6 +254,12 @@ def main():
         default=False,
         help="激进清洗（含代码注释中的 AI 声明），需配合 --strip-authorship 使用",
     )
+    parser.add_argument(
+        "--layered",
+        action="store_true",
+        default=False,
+        help="状态输出使用三层显式结构（operational/governance/semantic），配合 --mode status --json 使用",
+    )
     args = parser.parse_args()
 
     try:
@@ -310,7 +316,8 @@ def main():
                 sys.exit(1)
             from cli import _cmd_status
             _cmd_status(cfg, args.project, json_output=args.json,
-                        raw=args.raw, semantic_only=getattr(args, 'semantic_only', False))
+                        raw=args.raw, semantic_only=getattr(args, 'semantic_only', False),
+                        layered=args.layered)
         elif args.mode == "trial":
             if not args.project:
                 print("错误: --mode trial 需要 --project NAME 参数")

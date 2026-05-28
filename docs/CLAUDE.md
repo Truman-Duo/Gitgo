@@ -119,7 +119,7 @@ python build.py
 
 ---
 
-## gitgo 当前架构（v0.24.1）
+## gitgo 当前架构（v0.25）
 
 ### 核心概念：三维模型
 
@@ -218,7 +218,7 @@ IDLE → SCANNING → FORMALIZING → SYNCING → PUSHING → IDLE
 | **P3** | AI-Augmented — triage hook + suggest CLI + AI_Protocol + Commit Proposal + diff_summary | ✅ v0.15 |
 | **P4** | Governance Layer — quality metrics + change patterns + semantic graph + release reasoning | ✅ v0.20 |
 | **P5** | Protocol & Ecosystem — Protocol v1.0 + Reference Agent + Plugin API + State Bundle | ✅ v0.21 |
-| **P6** | Identity + Authorship + Contract + Lesson + Bootstrap + EOL 归一化 — 334 tests / 42 MCP tools | ✅ v0.24.1 |
+| **P6** | Identity + Authorship + Contract + Lesson + Bootstrap + State Convergence — 334 tests / 42 MCP tools | ✅ v0.25 |
 | **Remote** | GitHub/GitLab 连接器 + `--mode release` CLI | ✅ v0.14 |
 | **P0** | GUI Track — B-1 + F-1 架构调整 | ⬜ 待执行 |
 

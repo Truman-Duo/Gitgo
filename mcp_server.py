@@ -77,9 +77,9 @@ def gitgo_list_projects() -> list[dict]:
 
 
 @mcp.tool(
-    description="获取项目完整状态，包含语义分析（workspace_entropy / suggested_next_action / action_queue / blocked_reason）"
+    description="获取项目完整状态，包含语义分析。layered=True 时使用三层显式结构（operational/governance/semantic）。"
 )
-def gitgo_status(project: str) -> dict:
+def gitgo_status(project: str, layered: bool = False) -> dict:
     cfg, proj = _get_project(project)
     if proj is None:
         return {"error": "PROJECT_NOT_FOUND", "project": project}
@@ -88,7 +88,7 @@ def gitgo_status(project: str) -> dict:
     session.step_scan()
     session.step_load_commits()
     session.step_check_trial()
-    return session.status_dict(semantic=True)
+    return session.status_dict(semantic=True, layered=layered)
 
 
 @mcp.tool(

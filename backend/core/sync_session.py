@@ -141,11 +141,12 @@ class SyncSession:
 
     # ── 状态查询 ────────────────────────────────────────────
 
-    def status_dict(self, semantic: bool = True) -> dict:
+    def status_dict(self, semantic: bool = True, layered: bool = False) -> dict:
         """返回机器可读的当前项目状态。
 
         semantic=True 时附加 semantic 子块（agent 可直接消费的判断）。
-        semantic=False 时仅输出原始计数（Phase 1 兼容）。
+        layered=True 时输出三层显式结构（operational / governance / semantic）。
+        旧格式（layered=False）向后兼容。
         """
         trial_pending = sum(1 for c in self.incoming_changes
                             if c.triage == TrialAction.PENDING)
@@ -155,6 +156,40 @@ class SyncSession:
         formal_synced = sum(1 for fc in self.formal_commits if fc.synced)
         formal_pushed = sum(1 for fc in self.formal_commits if fc.pushed)
 
+        if layered:
+            semantic_block = self._build_semantic_layer(
+                trial_pending, entries_changed, formal_total,
+                formal_synced, formal_pushed,
+            ) if semantic else None
+
+            result = {
+                "project": self.project.name,
+                "layers": {
+                    "operational": {
+                        "stage": self.stage.name,
+                        "entries_total": len(self.entries),
+                        "entries_changed": entries_changed,
+                        "workspace_path": str(self.workspace_path),
+                    },
+                    "governance": {
+                        "formal_total": formal_total,
+                        "formal_synced": formal_synced,
+                        "formal_pushed": formal_pushed,
+                        "workspace_commits": len(self.commits),
+                        "trial_configured": (
+                            self.project.trial is not None
+                            and bool(self.project.trial.file_access.path)
+                        ),
+                        "trial_pending": trial_pending,
+                        "trial_total": len(self.incoming_changes),
+                    },
+                },
+            }
+            if semantic_block:
+                result["layers"]["semantic"] = semantic_block
+            return result
+
+        # 旧格式（向后兼容）
         result = {
             "project": self.project.name,
             "stage": self.stage.name,
@@ -633,6 +668,13 @@ class SyncSession:
         self.on_log("Formal commit message 已更新")
         self._last_op = {"op": "edit_message", "status": "success",
                          "timestamp": datetime.now().isoformat()}
+        from backend.core.history import HistoryManager as _HM
+        _HM.add_operation(
+            self.project.name, "governance_edited", "success",
+            {"index": index, "prefix": self.formal_commits[index].prefix,
+             "number": self.formal_commits[index].number},
+            correlation_id=self._correlation_id,
+        )
         self.save_session()
         return True
 
@@ -649,11 +691,19 @@ class SyncSession:
                 return False
         old_tag = f"[{fc.prefix}-{fc.number}]"
         new_tag = f"[{fc.prefix}-{new_number}]"
+        old_number = fc.number
         fc.message = fc.message.replace(old_tag, new_tag, 1)
         fc.number = new_number
         self.on_log(f"编号已更新: [{fc.prefix}-{fc.number}]")
         self._last_op = {"op": "edit_number", "status": "success",
                          "timestamp": datetime.now().isoformat()}
+        from backend.core.history import HistoryManager as _HM
+        _HM.add_operation(
+            self.project.name, "governance_renumbered", "success",
+            {"index": index, "prefix": fc.prefix,
+             "old_number": old_number, "new_number": new_number},
+            correlation_id=self._correlation_id,
+        )
         self.save_session()
         return True
 
@@ -674,6 +724,12 @@ class SyncSession:
         HistoryManager.add_operation(
             self.project.name, "dissolve_formal", "success",
             {"commit": f"[{fc.prefix}-{fc.number}]"},
+            correlation_id=self._correlation_id,
+        )
+        HistoryManager.add_operation(
+            self.project.name, "governance_dissolved", "success",
+            {"commit": f"[{fc.prefix}-{fc.number}]",
+             "source_indices": sorted(fc.source_indices)},
             correlation_id=self._correlation_id,
         )
         self.save_session()
@@ -755,12 +811,24 @@ class SyncSession:
         if success:
             fc.synced = True
 
+            from backend.core.history import HistoryManager as _HM
+            _HM.add_operation(
+                self.project.name, "governance_synced", "success",
+                {"commit": f"[{fc.prefix}-{fc.number}]"},
+                correlation_id=self._correlation_id,
+            )
+
             # ── Memory Snapshot + Skeleton ──
             if self.backup_path:
                 try:
                     from backend.core.identity.snapshot import snapshot_tool_memories
-                    snapshot_tool_memories(
+                    result = snapshot_tool_memories(
                         self.workspace_path, self.backup_path, self.project,
+                    )
+                    _HM.add_operation(
+                        self.project.name, "governance_memory_snapshot", "success",
+                        {"sources": result.get("snapped", [])},
+                        correlation_id=self._correlation_id,
                     )
                     from backend.core.identity.guard import _save_directory_skeleton
                     _save_directory_skeleton(self.workspace_path)
@@ -773,11 +841,22 @@ class SyncSession:
                         feature_name=feature_name,
                         location="",
                     )
+                    _HM.add_operation(
+                        self.project.name, "governance_contract_updated", "success",
+                        {"feature": feature_name},
+                        correlation_id=self._correlation_id,
+                    )
                     # 自动收割教训（反复修改→成功的模式）
                     from backend.core.knowledge.lesson import harvest_lessons
                     ts = self.project.commit_format.get("prefix", "")
-                    harvest_lessons(self.workspace_path, self.project.name,
-                                    tech_stack=ts)
+                    harvested = harvest_lessons(self.workspace_path, self.project.name,
+                                               tech_stack=ts)
+                    if harvested:
+                        _HM.add_operation(
+                            self.project.name, "governance_lesson", "success",
+                            {"harvested_count": len(harvested)},
+                            correlation_id=self._correlation_id,
+                        )
                 except OSError:
                     pass
 
@@ -860,6 +939,11 @@ class SyncSession:
             HistoryManager.add_operation(
                 self.project.name, "push", "success",
                 {"commits": commit_refs},
+                correlation_id=self._correlation_id,
+            )
+            HistoryManager.add_operation(
+                self.project.name, "governance_pushed", "success",
+                {"commits": commit_refs, "count": len(targets)},
                 correlation_id=self._correlation_id,
             )
             self.save_session()
