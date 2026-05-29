@@ -1,109 +1,247 @@
-# gitgo
+# Gitgo
 
-**本地运行的 Git 工作流管理工具** — 为开发者在 workspace/trial/release 三个仓库角色之间编排同步、审核和发布流程。同时提供 GUI 和命令行界面。
+**Development Semantic Runtime** — AI 协作开发过程中的项目状态治理系统。
 
-## 核心理念
+334 个测试 | 43 个 MCP 工具 | 22 个 CLI 模式 | v0.27
 
-Gitgo 不是另一个 Git GUI。它是一个 **workflow runtime** — 在 workspace（工程区）、trial（试用区）和 release（正式区）三个 Git 仓库之间建立结构化的变更通道。所有操作都可脱离 GUI，通过 CLI 完成，为 agent 和自动化预留接口。
+---
 
-```
-workspace ──→ trial ──→ release
-  (高熵)     (审核层)    (正式线)
-```
+## 不是什么
 
-## 安装
+不是一个 Git GUI。不是一个 CI/CD。不是一个 agent 外挂。
 
-```bash
-pip install -r requirements.txt
-```
+**是一个运行在 workspace 内部的状态治理层**——在 Agent 写完代码和代码被发布之间，提供不可跳过的合法性边界。
 
-依赖：Python 3.12+, PySide6, Rich, Paramiko, HTTPX, Watchdog
-
-## 启动方式
-
-```bash
-# GUI 模式（默认）
-python -m gitgo
-
-# 终端交互界面（CUI）
-python -m gitgo --mode cui
-
-# 命令行操作
-python -m gitgo --mode list            # 列出所有项目
-python -m gitgo --mode scan            # 扫描工作区变更
-python -m gitgo --mode formalize       # 创建正式 commit
-python -m gitgo --mode sync            # 同步到备份仓库
-python -m gitgo --mode push            # 推送到远程
-python -m gitgo --mode trial           # 查看 trial 新提交
-python -m gitgo --mode status --json   # 机器可读状态
-```
+---
 
 ## 架构
 
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {
+  'primaryTextColor':'#000',
+  'primaryColor':'#f0f0f0',
+  'lineColor':'#000000',
+  'secondaryColor':'#e0e0e0',
+  'tertiaryColor':'#fff',
+  'clusterBkg':'#f9f9f9',
+  'clusterBorder':'#000',
+  'edgeLabelBackground':'#ffffff'
+}}}%%
+flowchart TB
+    subgraph RuntimeKernel["Runtime Kernel (调度层)"]
+        Kernel["SyncSession / step orchestration<br>state transition / lifecycle control"]
+        Scheduler["Semantic Scheduler<br>next_action / action_queue"]
+    end
+
+    subgraph EventBus["Event Bus (信号层)"]
+        HistoryManager["HistoryManager<br>append-only governance event log"]
+        Events["pre_scan | post_sync | drift_detected<br>governance_synced | governance_pushed"]
+    end
+
+    subgraph StateStore["State Store (状态层)"]
+        RuntimeState["RuntimeState<br>operational / governance / semantic<br>integrity / memory / lessons / releases"]
+        Persistent["session.json | contract.yaml<br>lessons.jsonl | formal commits"]
+    end
+
+    subgraph PolicyEngine["Policy Engine (规则层)"]
+        Contract["contract validation"]
+        Identity["identity guard"]
+        Authorship["authorship cleanup"]
+        Lesson["lesson inheritance"]
+        Drift["drift detection"]
+        Privacy["privacy scan / secret detection"]
+    end
+
+    subgraph External["外部世界"]
+        GitHub[("GitHub / GitLab")]
+        Human["用户 / Reviewer"]
+    end
+
+    subgraph Trial["Trial Space (物理测试区)"]
+        Incoming["incoming/*<br>外部代码唯一入口"]
+        Triage{"triage()"}
+        Discard["discard (标记已读)"]
+    end
+
+    subgraph Workspace["Mutable Workspace (工作区)"]
+        AgentDev["Agent 日常开发<br>自由 commit / 实验"]
+        GateA{"Gate A<br>语义合法性边界"}
+        GateA_fail["不通过 → Agent 原地改"]
+        UserGateA["用户审查 / 更新检查集"]
+        UserPublish["用户确认发布"]
+    end
+
+    subgraph Validated["Validated State (逻辑边界内)"]
+        direction LR
+        AfterGateA["已通过 Gate A 的状态"]
+    end
+
+    subgraph GateB_Check["Gate B 发布合法性"]
+        GateB{"Gate B<br>发布合法性边界"}
+        GateB_fail["发布拒绝 → 返回 Workspace"]
+        UserConfirm["用户确认发布摘要"]
+    end
+
+    subgraph Release["Canonical Release Space (物理备份区)"]
+        CanonicalState[("Canonical State<br>formal commits / immutable<br>event log / contract / lessons")]
+        PublishToGitHub["发布到 GitHub"]
+    end
+
+    %% 外部 → Trial
+    GitHub --> Incoming
+    Human -- PR/接手项目 --> Incoming
+    Incoming --> Triage
+    Triage -- discard --> Discard
+    Triage -- accept --> GateB
+    Triage -- promote --> AgentDev
+
+    %% Workspace → Gate A → Validated
+    AgentDev --> GateA
+    GateA -- 不通过 --> GateA_fail
+    GateA_fail --> AgentDev
+    GateA -- 通过 --> AfterGateA
+    AfterGateA --> UserGateA
+    UserGateA -- 需要修改 --> AgentDev
+    UserGateA -- 满意准备发布 --> UserPublish
+
+    %% Validated → Gate B
+    UserPublish --> GateB
+    GateB -- 通过 --> UserConfirm
+    GateB -- 不通过 --> GateB_fail
+    GateB_fail --> AgentDev
+    UserConfirm --> CanonicalState
+
+    %% Canonical → 外部
+    CanonicalState --> PublishToGitHub
+    PublishToGitHub --> GitHub
+
+    %% 治理信号闭环
+    GateA -.-> Events
+    GateB -.-> Events
+    Events -.-> HistoryManager
+    HistoryManager -.-> RuntimeState
+    RuntimeState -.-> Kernel
+
+    %% Policy Engine 接入
+    PolicyEngine -.-> GateA
+    PolicyEngine -.-> GateB
+
+    %% Scheduler
+    Scheduler -.-> AgentDev
+
+    %% 用户反馈
+    Human -- 更新 contract / lesson --> PolicyEngine
+
+    classDef boundary fill:#FFF9C4,stroke:#FBC02D,stroke-width:2px,stroke-dasharray:5 5,color:#000
+    classDef kernel fill:#E1F5FE,stroke:#0277BD,color:#000
+    classDef physical fill:#E8F5E9,stroke:#388E3C,color:#000
+    classDef external fill:#F5F5F5,stroke:#9E9E9E,color:#000
+    classDef gate fill:#FFE0B2,stroke:#F57C00,color:#000
+    classDef event fill:#D1C4E9,stroke:#512DA8,color:#000
+    class Workspace,Validated,GateB_Check boundary
+    class RuntimeKernel,EventBus,StateStore,PolicyEngine kernel
+    class Trial,Workspace,Release physical
+    class External,Human,GitHub external
+    class GateA,GateB gate
+    class Events,HistoryManager event
 ```
-gitgo/
-├── backend/          # 纯 Python 核心 — 零 Qt 依赖
-│   ├── core/         # SyncSession 状态机、operations、config
-│   ├── adapters/     # 文件/Git 适配器（local, SSH）
-│   ├── models/       # RepoNode、FileAccess 数据模型
-│   └── remote/       # GitHub/GitLab 连接器
-├── frontend/         # PySide6 GUI
-│   └── workspace/    # WorkspacePanel + 各功能 Mixin
-├── cui/              # 终端交互界面（Rich）
-├── cli/              # 无头命令行（JSON 输出）
-├── themes/           # 主题系统（QSS token 驱动）
-└── tests/            # pytest 测试
-```
 
-**关键分离：** `backend/` 不包含任何 Qt import。GUI 和 CUI 共用同一个 `SyncSession` 状态机，通过工作时 `step_*()` 方法驱动。
+---
 
-## 三节点模型
+## 能力
 
-| 节点 | 角色 | 特点 |
-|---|---|---|
-| **Workspace** | 工程开发区 | 高熵、频繁变更、允许多个未整理 commit |
-| **Trial** | 审核暂存层 | incoming commit 在此等待人工三叉决策 |
-| **Release** | 正式发布线 | 只接受 formal commit，历史保持 curated |
+### 工作流
 
-## 核心工作流
+| 功能 | CLI | MCP |
+|------|-----|-----|
+| `scan` — 文件变更扫描（SHA256 + EOL 归一化） | ✅ | ✅ |
+| `formalize` — workspace commit → formal commit 聚合 | ✅ | ✅ |
+| `sync` — 同步到 release 仓库（Gate A 拦截） | ✅ | ✅ |
+| `push` — 推送至 GitHub（Gate B） | ✅ | ✅ |
+| `trial` — 外部代码 triage（accept/promote/discard） | ✅ | ✅ |
+| `daemon` — 持久守护进程（watchdog + trial 轮询 + Policy Engine） | ✅ | — |
+| `dashboard` — 实时项目状态面板 | ✅ | — |
 
-1. **Scan** — 对比 workspace 和 release 的文件差异
-2. **Select** — 选择要同步的文件
-3. **Formalize** — 将选中的 workspace commits 合并为 formal commit（带编号前缀和语义化 message）
-4. **Sync** — 将文件同步到 release 仓库
-5. **Push** — 推送到远程（含安全检查：敏感信息扫描）
+### 治理
 
-## Trial 三叉决策
+| 系统 | 说明 |
+|------|------|
+| **Identity Guard** | 全量覆盖检测 / 身份文件删除告警 / 目录骨架崩塌检测 |
+| **Memory Snapshot** | sync 时自动快照 `.claude/` `.codex/` `.codebuddy/` → backup |
+| **Project Contract** | 项目合约自动维护 + push 前漂移检测（功能删除/技术栈漂移/架构违反） |
+| **Lesson System** | 抽象层+实例层知识传承，sync 后自动收割（CLAUDE.md + git log + governance signals） |
+| **Authorship** | push 前 AI 痕迹清洗（commit message + 代码注释 + AI 配置文件排除） |
+| **Template System** | 多套命名 commit message 模板，`str.format()` 8 变量填充 |
+| **Discipline** | 8 条 Runtime Constitution 规则 + 三层状态机 |
 
-Trial 仓库的 incoming commit 提供三种处置：
+### 9 种 Governance Event
 
-- **Accept** — 接受并合并到 trial
-- **Promote** — 提升为 formal commit 纳入 release
-- **Discard** — 丢弃
+`governance_synced` / `governance_pushed` / `governance_dissolved` / `governance_edited` / `governance_renumbered` / `governance_drift` / `governance_contract_updated` / `governance_lesson` / `governance_memory_snapshot`
 
-## 开发
+全部写入 append-only HistoryManager。
+
+---
+
+## 快速开始
 
 ```bash
-# 运行测试
-pytest
+pip install -r requirements.txt
 
-# 查看可用模式
-python -m gitgo --help
+# 自举配置（把 gitgo 自己注册为项目）
+python -m gitgo --mode bootstrap
 
-# 构建可执行文件
-python build.py
+# 实时 dashboard
+python -m gitgo --mode dashboard --refresh 5
+
+# Agent 交付检查
+# MCP: gitgo_round_complete(project="myproject")
+
+# 发布
+python -m gitgo --mode push --project myproject --strip-authorship
 ```
 
-## 路线图
+---
 
-| 阶段 | 目标 | 状态 |
-|---|---|---|
-| **Stage 1** — Runtime 抽离 | backend 完全独立于 GUI，数据结构化 | 🚧 进行中 |
-| **Stage 2** — CUI/CLI 成熟 | 全 workflow 可脱离 GUI 脚本化运行 | 基础完成 |
-| **Stage 3** — Agent Integration | agent 可理解 workflow，提出 formal commit 建议 | 规划中 |
-| **Stage 4** — Governance Layer | AI 工程语义治理 | 远期 |
-| **Stage 5** — Protocol / Ecosystem | Agent SDK，远程编排，第三方集成 | 远期 |
+## 项目结构
 
-## 许可
+```
+gitgo/
+├── backend/                   # 引擎层
+│   ├── core/                  #   Runtime Kernel + State Store + Policy Engine
+│   │   ├── sync_session.py    #   状态机（18 step_* 方法）
+│   │   ├── state_reader.py    #   统一状态查询
+│   │   ├── config.py          #   项目配置
+│   │   ├── history.py         #   HistoryManager (append-only event log)
+│   │   ├── governance/        #   quality / patterns / graph / releases
+│   │   ├── identity/          #   guard (完整性检测) + snapshot (记忆快照)
+│   │   ├── knowledge/         #   lesson (知识传承)
+│   │   ├── operations/        #   scan / git / sync / security / diff
+│   │   ├── daemon/            #   持久守护进程
+│   │   ├── contract.py        #   项目合约 + 漂移检测
+│   │   ├── authorship.py      #   AI 痕迹清洗
+│   │   └── template_manager.py #  commit 模板系统
+│   ├── adapters/              #   Local / SSH / SMB 三实现
+│   ├── models/                #   数据模型
+│   └── remote/                #   GitHub / GitLab API
+├── cli/                       # CLI verbs + dashboard
+├── mcp_server.py              # FastMCP server (43 tools)
+├── frontend/                  # Qt GUI
+├── cui/                       # Rich 终端界面
+├── tests/                     # 334 测试 + 1 skip
+└── docs/                      # RuntimeConstitution / HANDOFF / VERSION
+```
 
-Apache-2.0
+---
+
+## 版本
+
+| 版本 | 里程碑 |
+|------|--------|
+| v0.10–v0.20 | P1–P4: Foundation + Governance |
+| v0.21 | P5: Protocol & Ecosystem |
+| v0.22 | P6: Template + SMB + CLI/MCP |
+| v0.23 | Identity Guard |
+| v0.24 | Authorship + Contract + Lesson |
+| v0.25 | State Convergence (C1–C3) |
+| v0.26 | Runtime Discipline |
+| **v0.27** | **Constitution + Policy Engine daemon + Dashboard + MCP gate** |

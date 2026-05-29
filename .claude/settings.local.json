@@ -46,7 +46,8 @@
       "Bash(python -c \"from cli.dashboard import cmd_dashboard; print\\('dashboard import OK'\\)\")",
       "Bash(PYTHONPATH=\"C:\\\\Users\\\\Duo\\\\Desktop\\\\Truman\\\\ClaudeCode_WorkSpace\" python -m gitgo --mode dashboard --refresh 0)",
       "Bash(rm -f docs/Gitgo_Next_Phase.md)",
-      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('Projects:', len\\(d.get\\('projects',[]\\)\\)\\)\")"
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('Projects:', len\\(d.get\\('projects',[]\\)\\)\\)\")",
+      "Bash(PYTHONPATH=\"C:\\\\Users\\\\Duo\\\\Desktop\\\\Truman\\\\ClaudeCode_WorkSpace\" python -m gitgo --mode push --project gitgo --json)"
     ]
   }
 }
