@@ -82,8 +82,15 @@ def _cmd_status(cfg: Config, project_name: str, json_output: bool = False,
         d = session.status_dict(semantic=True, layered=layered)
         print(json.dumps(d.get("semantic", {}), indent=2, ensure_ascii=False))
     elif json_output:
-        print(json.dumps(session.status_dict(semantic=not raw, layered=layered),
-                         indent=2, ensure_ascii=False))
+        result = session.status_dict(semantic=not raw, layered=layered)
+        if layered:
+            from backend.core.state_reader import _validate_discipline, validate_semantic_consistency
+            disc = _validate_discipline()
+            sem = validate_semantic_consistency(result)
+            all_warnings = disc + sem
+            if all_warnings:
+                result["_discipline_warnings"] = all_warnings
+        print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         d = session.status_dict()
         print(f"项目: {d['project']}")
@@ -450,14 +457,6 @@ def _cmd_push(cfg: Config, project_name: str, skip_security: bool = False,
                 for a in drift_alerts:
                     print(f"  [{a['rule'].upper()}] {a['message'][:120]}")
                 print("  (使用 --force 跳过，或先修复偏差)\n")
-
-            from backend.core.history import HistoryManager as _HM
-            _HM.add_operation(
-                project_name, "governance_drift", "warning",
-                {"alert_count": len(drift_alerts),
-                 "rules": [a["rule"] for a in drift_alerts]},
-                correlation_id=session._correlation_id if hasattr(session, '_correlation_id') else "",
-            )
 
     success, warnings = session.step_push(skip_scan=skip_security)
     if stream:

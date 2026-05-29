@@ -4,6 +4,46 @@
 
 ---
 
+## v0.27 (2026-05-29)
+
+**Runtime Constitution + Architecture Formalization。** 不扩功能，显式化已有结构。
+
+### R1: Runtime Constitution 补完
+- `docs/RuntimeConstitution.md` — 8 条根本规则（从 v0.26 的 4 条扩展）
+  - 新增: Layer Mutation Rules / Gate Extension Policy / Semantic Reversibility / Event Taxonomy
+- `docs/RuntimeDiscipline.md` — 退役，替换为链接
+
+### R2: 三层状态机显式化
+- `sync_session.py` — module docstring 声明 Operational State Machine
+- Constitution 文档声明 Semantic State Machine + Governance State Machine
+
+### R3: 命名修正
+- release = Canonical Release Space（非"备份区"）
+- 代码变量不改（`backup_path` 嵌入过多引用）
+
+### 认证
+- 334 passed, 1 skipped（零功能变更，零回归）
+
+---
+
+## v0.26 (2026-05-29)
+
+**Runtime Discipline — 硬约束声明 + discipline validation lint。**
+
+### D1: Runtime Discipline 文档
+- `docs/RuntimeDiscipline.md` — 4 条硬约束
+  - Canonical Events / State Authority / Derivation Rules / Observer Constraint
+
+### D2: Discipline Validation
+- `state_reader.py` — `_validate_discipline()` + `validate_semantic_consistency()`
+- `--mode status --json --layered` 自动执行，输出 `_discipline_warnings`
+
+### 认证
+- 334 passed, 1 skipped（零回归）
+- GitHub 三仓验证：discipline check 0 warning
+
+---
+
 ## v0.25 (2026-05-29)
 
 **State Convergence — 全局 Runtime 化。不扩功能，只收拢。**

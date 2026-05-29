@@ -114,3 +114,84 @@ class StateReader:
                 "correlation_id": e.correlation_id,
             })
         return result[-limit:]
+
+
+# ── Discipline Validation ────────────────────────────────────
+
+def _validate_discipline() -> list[str]:
+    """验证 Runtime Discipline 约束是否被违反。作为 warning 返回，不阻塞。
+
+    三条检查：
+    1. governance event 类型名在 canonical 集合内
+    2. Semantic 层字段可从 governance 层独立推导（交叉验证）
+    3. 无未知的 governance event 类型
+    """
+    warnings = []
+
+    # Rule 1: canonical governance event types
+    canonical = {
+        "governance_synced", "governance_pushed", "governance_dissolved",
+        "governance_edited", "governance_renumbered", "governance_drift",
+        "governance_contract_updated", "governance_lesson",
+        "governance_memory_snapshot",
+    }
+    entries = HistoryManager.load()
+    for e in entries:
+        if e.operation.startswith("governance_") and e.operation not in canonical:
+            warnings.append(f"Unknown governance event: {e.operation}")
+
+    return warnings
+
+
+def validate_semantic_consistency(layered: dict) -> list[str]:
+    """Rule 2/3: 独立从 governance 层推导 semantic 字段，与 status_dict 输出交叉验证。
+
+    不持久化，不阻塞，仅返回不一致的 warning 列表。
+    """
+    warnings = []
+
+    # 无 governance 层数据时跳过
+    gov = layered.get("layers", {}).get("governance", {})
+    op = layered.get("layers", {}).get("operational", {})
+    sem = layered.get("layers", {}).get("semantic", {})
+    if not gov:
+        return warnings
+
+    entries_changed = op.get("entries_changed", 0)
+
+    # ── 按 _build_semantic_layer 的精确逻辑推导 expected ──
+    action_queue = []
+    if gov.get("trial_pending", 0) > 0:
+        action_queue.append("triage")
+    if entries_changed > 0:
+        action_queue.append("formalize")
+    if gov.get("formal_synced", 0) > gov.get("formal_pushed", 0):
+        action_queue.append("push")
+    expected_action = action_queue[0] if action_queue else "idle"
+
+    if sem.get("suggested_next_action") != expected_action:
+        warnings.append(
+            f"Semantic inconsistency: suggested_next_action="
+            f"{sem.get('suggested_next_action')}, expected={expected_action}"
+        )
+
+    if sem.get("action_queue") != action_queue:
+        warnings.append(
+            f"Semantic inconsistency: action_queue mismatch"
+        )
+
+    # entropy
+    if entries_changed == 0:
+        expected_entropy = "low"
+    elif entries_changed <= 10:
+        expected_entropy = "medium"
+    else:
+        expected_entropy = "high"
+    if sem.get("workspace_entropy") != expected_entropy:
+        warnings.append(
+            f"Semantic inconsistency: workspace_entropy="
+            f"{sem.get('workspace_entropy')}, expected={expected_entropy}"
+        )
+
+    return warnings
+

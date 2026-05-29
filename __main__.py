@@ -29,7 +29,7 @@ def main():
         choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
                  "status", "trial", "formalize", "scan", "push", "session", "release",
                  "suggest", "governance", "export", "template", "formal", "memory",
-                 "contract", "lesson", "bootstrap"],
+                 "contract", "lesson", "bootstrap", "dashboard"],
         default="gui",
         help="启动模式",
     )
@@ -255,6 +255,10 @@ def main():
         help="激进清洗（含代码注释中的 AI 声明），需配合 --strip-authorship 使用",
     )
     parser.add_argument(
+        "--refresh", type=int, default=10,
+        help="Dashboard 刷新间隔秒数（--mode dashboard 时使用，0= 只刷新一次，默认 10）",
+    )
+    parser.add_argument(
         "--layered",
         action="store_true",
         default=False,
@@ -427,6 +431,9 @@ def main():
         elif args.mode == "bootstrap":
             from cli import _cmd_bootstrap
             _cmd_bootstrap(cfg, json_output=args.json)
+        elif args.mode == "dashboard":
+            from cli.dashboard import cmd_dashboard
+            cmd_dashboard(cfg, refresh=args.refresh)
     except Exception as e:
         msg = f"启动失败:\n{traceback.format_exc()}"
         print(msg, file=sys.stderr)

@@ -845,6 +845,32 @@ def gitgo_lesson_promote(project: str, lesson_id: str,
     return {"error": "LESSON_NOT_FOUND", "lesson_id": lesson_id}
 
 
+# ── Gate Tools ──────────────────────────────────────────────────
+
+@mcp.tool(
+    description="完成本轮开发。Gate A 检查：scan → formalize → sync（含 contract/drift/lesson 全部政策）。"
+    "通过返回 passed=true + commit 编号，不通过返回 passed=false + 原因。"
+    "Agent 必须收到 passed=true 才算本轮完成。"
+)
+def gitgo_round_complete(project: str) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"passed": False, "error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    session = SyncSession(proj, cfg)
+    session.step_scan()
+    session.step_load_commits()
+    if not session.commits:
+        return {"passed": True, "skipped": True, "reason": "no workspace commits"}
+    fc = session.step_create_formal_commit()
+    if not fc:
+        return {"passed": False, "reason": "no commits to formalize — agent may need to git commit first"}
+    ok = session.step_sync()
+    if ok:
+        return {"passed": True, "commit": f"[{fc.prefix}-{fc.number}]"}
+    return {"passed": False, "reason": "Gate A blocked — check governance_drift and integrity_warning events for details", "commit": f"[{fc.prefix}-{fc.number}]"}
+
+
 # ── Entry Point ────────────────────────────────────────────────
 
 if __name__ == "__main__":

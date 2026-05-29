@@ -1,6 +1,17 @@
-"""SyncSession 状态机 — 统一的工作流编排
+"""SyncSession — Runtime Kernel (Layer 1: Operational State Machine)
 
-GUI / CUI / Daemon 三种前端共用此状态机。
+Gitgo 的运行时核心。18 个 step_*() 方法驱动状态转移。
+GUI / CUI / CLI / Daemon 四种前端共用此状态机。
+
+Operational State Machine:
+  IDLE → SCANNING → SELECTING → COMMITTING → SYNCING → PUSHING → IDLE
+            ↘ TRIAL_CHECKING → TRIAL_REVIEWING → INCOMING_CONFIRMING
+
+规则:
+  - 所有状态转移必须通过 step_*() 方法，禁止直接修改 self.stage
+  - 每个 step_*() 方法在成功时写入对应的 governance event
+  - 硬编码调用序列（非 event-driven）——参见 RuntimeConstitution §4 Observer Constraint
+
 纯 Python 实现，无 Qt 依赖。
 """
 
@@ -798,6 +809,36 @@ class SyncSession:
             return False
 
         self.on_log(f"同步到备份仓库: {fc.message.split(chr(10))[0]}")
+
+        # ── Gate A: 抽象工作区→抽象备份区的合法性边界 ──
+        from backend.core.contract import ContractManager, detect_drift
+        contract = ContractManager.load(self.workspace_path)
+        gate_blocked = False
+        if contract:
+            changed_paths = [e.rel_path for e in selected]
+            drift_alerts = detect_drift(self.workspace_path, changed_paths, contract)
+            if drift_alerts:
+                errors = [a for a in drift_alerts if a.get("level") == "error"]
+                for a in drift_alerts:
+                    self.on_log(f"[Gate A] {a['level'].upper()}: {a['message'][:120]}")
+                from backend.core.history import HistoryManager as _HM
+                _HM.add_operation(
+                    self.project.name, "governance_drift", "warning",
+                    {"alert_count": len(drift_alerts),
+                     "rules": [a["rule"] for a in drift_alerts]},
+                    correlation_id=self._correlation_id,
+                )
+                if errors:
+                    self.on_log(
+                        f"[Gate A] BLOCKED: {len(errors)} error-level drift(s) detected. "
+                        f"Fix before sync or use --force to override."
+                    )
+                    gate_blocked = True
+
+        if gate_blocked:
+            self.stage = SessionStage.FAILED
+            self.on_stage_changed(self.stage)
+            return False
 
         success = sync_to_backup(
             selected, fc.message,

@@ -154,8 +154,60 @@ def run_daemon(
                 try:
                     session.step_scan()
                     session.step_load_commits()
-                    _emit({"event": "operation_complete", "op": "scan",
-                           "status": "success", "status_dict": session.status_dict(semantic=True)})
+
+                    # ── Policy Engine 自动运行 ──
+                    from backend.core.identity import _run_integrity_checks
+                    from backend.core.contract import ContractManager, detect_drift
+                    from backend.core.history import HistoryManager
+
+                    warnings = _run_integrity_checks(
+                        session.entries, session.workspace_path, project,
+                    )
+                    gov_warnings = len(warnings)
+                    for w in warnings:
+                        _emit({
+                            "event": "governance_drift",
+                            "rule": w.get("rule", "integrity"),
+                            "level": w.get("level", "warning"),
+                            "message": w.get("message", ""),
+                        })
+                        HistoryManager.add_operation(
+                            project.name, "governance_drift",
+                            w.get("level", "warning"),
+                            {"rule": w.get("rule", "integrity"),
+                             "message": w.get("message", "")},
+                            correlation_id=session._correlation_id,
+                        )
+
+                    contract = ContractManager.load(session.workspace_path)
+                    if contract:
+                        changed = [e.rel_path for e in session.entries
+                                   if e.status != "same"]
+                        drift_alerts = detect_drift(
+                            session.workspace_path, changed, contract,
+                        )
+                        gov_warnings += len(drift_alerts)
+                        for d in drift_alerts:
+                            _emit({
+                                "event": "governance_drift",
+                                "rule": d.get("rule", "contract"),
+                                "level": d.get("level", "warning"),
+                                "message": d.get("message", ""),
+                            })
+                            HistoryManager.add_operation(
+                                project.name, "governance_drift",
+                                d.get("level", "warning"),
+                                {"rule": d.get("rule", "contract"),
+                                 "message": d.get("message", "")},
+                                correlation_id=session._correlation_id,
+                            )
+
+                    _emit({
+                        "event": "operation_complete", "op": "scan",
+                        "status": "success",
+                        "status_dict": session.status_dict(semantic=True),
+                        "governance_warnings": gov_warnings,
+                    })
                 except Exception as exc:
                     _emit({"event": "operation_complete", "op": "scan",
                            "status": "failed", "error": str(exc)})
