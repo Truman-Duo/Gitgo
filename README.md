@@ -35,6 +35,8 @@ Gitgo 的强制力模型依赖于一个前提：**Agent 的所有输出最终必
 
 **当前实际效果**：Gitgo 在 release pipeline 入口（sync）提供不可跳过的检查。在 workspace 内部，Policy Engine 提供实时信号但不强制 Agent 响应。完全实时拦截需要 Agent 框架开放进程内的 hook 接口——这是 gitgo 自身无法解决的依赖。
 
+---
+
 ## 架构
 
 ```mermaid
@@ -52,8 +54,8 @@ Gitgo 的强制力模型依赖于一个前提：**Agent 的所有输出最终必
     'nodeBorder':          '#6B7280'
   },
   'flowchart': {
-    'curve': 'basis',      // 使用平滑曲线替代折线，让连线更自然
-    'padding': 15,         // 增加节点间距，减少连线拥挤
+    'curve': 'basis',
+    'padding': 15,
     'nodeSpacing': 50,
     'rankSpacing': 80
   }
