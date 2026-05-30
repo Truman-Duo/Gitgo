@@ -30,15 +30,16 @@ def _get_last_gate_result(project_name: str, workspace_path: str) -> dict:
     last_sync = None
     last_drift = None
     for e in reversed(project_entries):
-        if e.operation == "governance_synced" and last_sync is None:
-            detail = e.detail if isinstance(e.detail, dict) else {}
+        op = e.get("operation", "")
+        if op == "governance_synced" and last_sync is None:
+            detail = e.get("detail", {}) if isinstance(e.get("detail"), dict) else {}
             last_sync = {"status": "passed", "commit": detail.get("commit", "?"),
-                         "time": e.timestamp[:19]}
-        if e.operation == "governance_drift" and last_drift is None:
-            detail = e.detail if isinstance(e.detail, dict) else {}
+                         "time": e.get("timestamp", "")[:19]}
+        if op == "governance_drift" and last_drift is None:
+            detail = e.get("detail", {}) if isinstance(e.get("detail"), dict) else {}
             last_drift = {"status": "blocked",
                           "rules": detail.get("rules", []),
-                          "time": e.timestamp[:19]}
+                          "time": e.get("timestamp", "")[:19]}
         if last_sync and last_drift:
             break
 
