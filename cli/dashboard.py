@@ -6,6 +6,7 @@ from __future__ import annotations
 import json, sys, time
 from pathlib import Path
 from backend.core.config import Config
+ ([GITGO-30] chore/docs/feat/fix/refactor/test(all,backend,cli,config,core,cui,dashboard,docs,frontend,governance,identity,knowledge,protocol,readme,remote,runtime,security,state,sync,template,tests): 工作区→备份仓库同步工具初始提交 +29 more)
 
 # ── Data helpers ──────────────────────────────────────────
 def _load_history(ws: str) -> list[dict]:
@@ -23,7 +24,7 @@ def _last_gate(name: str, ws: str) -> dict:
         if s and d: break
     if not s and not d: return {"status":"idle"}
     if s and d: return s if s["time"]>d["time"] else d
-    return s or d
+    return s or d ([GITGO-30] chore/docs/feat/fix/refactor/test(all,backend,cli,config,core,cui,dashboard,docs,frontend,governance,identity,knowledge,protocol,readme,remote,runtime,security,state,sync,template,tests): 工作区→备份仓库同步工具初始提交 +29 more)
 
 def _pending_count(ws: str, name: str) -> int:
     try: fp=Path(ws)/".gitgo"/"knowledge"/"instances"/name/"pending.jsonl"; return sum(1 for l in fp.read_text(encoding="utf-8").splitlines() if l.strip()) if fp.exists() else 0
@@ -183,7 +184,7 @@ def cmd_dashboard(cfg: Config, refresh: int = 5) -> None:
             lines.append(f" {marker} {_fmt_sev(sev)}[{sev[:3]}][/] [{l.get('category','?')}] {trigger}")
         if len(lessons) > 10:
             lines.append(f" [dim]... and {len(lessons)-10} more[/dim]")
-        return "\n".join(lines)
+        return "\n".join(lines) ([GITGO-30] chore/docs/feat/fix/refactor/test(all,backend,cli,config,core,cui,dashboard,docs,frontend,governance,identity,knowledge,protocol,readme,remote,runtime,security,state,sync,template,tests): 工作区→备份仓库同步工具初始提交 +29 more)
 
     def _view_detail_contract():
         if not cfg.projects: return "[dim]No projects[/dim]"
