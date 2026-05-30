@@ -8,14 +8,23 @@ import time
 from pathlib import Path
 
 from backend.core.config import Config
-from backend.core.history import HistoryManager
+def _load_project_history(workspace_path: str) -> list[dict]:
+    """从项目 workspace 的 history 文件读取条目。"""
+    hp = Path(workspace_path) / "gitgo_history.json"
+    if not hp.exists():
+        return []
+    try:
+        data = json.loads(hp.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else data.get("entries", [])
+    except (json.JSONDecodeError, OSError):
+        return []
 from backend.core.state_reader import StateReader
 
 
 def _get_last_gate_result(project_name: str, workspace_path: str) -> dict:
-    """读取最近一次 Gate A 结果。"""
-    entries = HistoryManager.load()
-    project_entries = [e for e in entries if e.project_name == project_name]
+    """读取最近一次 Gate A 结果。从项目自己的 history 文件读取。"""
+    entries = _load_project_history(workspace_path)
+    project_entries = [e for e in entries if e.get("project_name") == project_name]
 
     # 找最近的 governance_synced（成功）或 governance_drift（blocked）
     last_sync = None
@@ -114,13 +123,22 @@ def cmd_dashboard(cfg: Config, refresh: int = 10) -> None:
 
     def _build_recent_events() -> str:
         lines = []
-        entries = HistoryManager.load()[-10:]
-        for e in reversed(entries):
-            op = getattr(e, 'operation', '')
+        all_events = []
+        for proj in cfg.projects:
+            ws = proj.workspace_path
+            if not ws:
+                continue
+            for e in _load_project_history(ws):
+                e["_project"] = proj.name
+                all_events.append(e)
+        all_events.sort(key=lambda e: e.get("timestamp", ""))
+        for e in all_events[-10:]:
+            op = e.get("operation", "")
             if op.startswith("governance_"):
                 op = op.replace("governance_", "")
-            ts = getattr(e, 'timestamp', '')[:19] if hasattr(e, 'timestamp') else ""
-            lines.append(f"[dim]{ts}[/dim] [cyan]{op}[/cyan] {e.status}")
+            ts = e.get("timestamp", "")[:19]
+            pn = e.get("_project", "")
+            lines.append(f"[dim]{ts}[/dim] [cyan]{pn}[/cyan] {op} {e.get('status','')}")
         return "\n".join(lines) if lines else "(no events)"
 
     layout = Layout()
