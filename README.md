@@ -8,7 +8,7 @@
 
 ## 是什么
 
-**Gitgo 是一个 Development Semantic Runtime**——运行在 workspace 内部，治理 AI 协作开发过程中项目状态的合法性演化。
+**Gitgo 是一个 Development Semantic Runtime**——运行在 workspace 内部，治理 AI 协作开发过程中项目状态。
 
 ### 机制层
 
