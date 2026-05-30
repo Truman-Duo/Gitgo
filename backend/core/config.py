@@ -235,6 +235,14 @@ class ConfigManager:
         # 如果加载的是旧文件名，迁移到新文件名
         if p.name == ConfigManager.LEGACY_CONFIG_FILE:
             p = p.with_name(ConfigManager.CONFIG_FILE)
+        # 保护：如果当前文件有项目但 config 对象是空的，不覆盖
+        if not config.projects and p.exists():
+            try:
+                existing = json.loads(p.read_text(encoding="utf-8"))
+                if existing.get("projects"):
+                    return p  # 保护已有项目不被空 config 覆盖
+            except (json.JSONDecodeError, OSError):
+                pass
         p.parent.mkdir(parents=True, exist_ok=True)
         data = _serialize_config(config)
         p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
