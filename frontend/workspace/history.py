@@ -45,9 +45,39 @@ def _format_time(iso_ts: str) -> str:
 class HistoryMixin:
     """同步历史 — 时间线展示 + 颜色编码 + 点击跳转"""
 
+    _GOV_EVENT_COLORS = {
+        "sync":              "#22C55E",
+        "governance_synced": "#22C55E",
+        "push":              "#3B82F6",
+        "governance_pushed": "#06B6D4",
+        "governance_drift":  "#EF4444",
+        "governance_contract_updated": "#F59E0B",
+        "governance_lesson": "#8B5CF6",
+        "governance_memory_snapshot": "#64748B",
+        "governance_edited": "#A78BFA",
+        "governance_renumbered": "#A78BFA",
+        "governance_dissolved": "#EF4444",
+    }
+
     def _populate_history(self):
         self._clear_box_layout(self.state.hist_layout)
         t = get_theme()
+
+        # ── 切换器 ──
+        if not hasattr(self.state, 'hist_filter_combo'):
+            from PySide6.QtWidgets import QComboBox
+            self.state.hist_filter_combo = QComboBox()
+            self.state.hist_filter_combo.addItem(
+                _tr("history.filter_commits", "Commits"), "commits")
+            self.state.hist_filter_combo.addItem(
+                _tr("history.filter_governance", "Governance Events"), "governance")
+            self.state.hist_filter_combo.currentIndexChanged.connect(
+                self._populate_history)
+        filter_mode = self.state.hist_filter_combo.currentData()
+
+        # 切换器控件作为固定顶部
+        if self.state.hist_layout.indexOf(self.state.hist_filter_combo) == -1:
+            self.state.hist_layout.insertWidget(0, self.state.hist_filter_combo)
 
         try:
             from backend.core.history import HistoryManager
@@ -57,79 +87,149 @@ class HistoryMixin:
                 self._hist_no_data(t)
                 return
 
-            entries = entries[-50:]  # 最多 50 条
-            last_date = ""
-
-            for he in reversed(entries):
-                date = _format_date(he.timestamp)
-
-                # ── 日期分隔头 ──
-                if date != last_date:
-                    last_date = date
-                    sep = QLabel(f"  {date}")
-                    sep.setStyleSheet(
-                        f"font-size:11px;font-weight:600;color:{t.txt3};"
-                        f"padding:10px 6px 4px;")
-                    self.state.hist_layout.insertWidget(
-                        self.state.hist_layout.count() - 1, sep)
-
-                # ── 条目卡片 ──
-                # 颜色：按 action_type 优先，fallback 到项目色
-                if he.action_type and he.action_type in _ACTION_COLORS:
-                    p_color = _ACTION_COLORS[he.action_type](t)
-                else:
-                    p_color = _project_color(he.project_name)
-                card = QFrame()
-                card.setCursor(Qt.PointingHandCursor)
-                card.setStyleSheet(
-                    f"QFrame{{background:{t.bg};border:.5px solid {t.bdr};"
-                    f"border-left:3px solid {p_color};border-radius:5px;"
-                    f"margin:2px 0;}}"
-                    f"QFrame:hover{{background:{t.bg2};}}")
-                cl = QVBoxLayout(card)
-                cl.setContentsMargins(10, 8, 10, 8)
-                cl.setSpacing(2)
-
-                # 标题行
-                hdr = QHBoxLayout()
-                hdr.setSpacing(6)
-                dot = QLabel("●")
-                dot.setStyleSheet(f"color:{p_color};font-size:8px;")
-                hdr.addWidget(dot)
-
-                msg = he.commit_message or he.project_name
-                msg_lbl = QLabel(f"<b>{msg[:70]}</b>")
-                msg_lbl.setStyleSheet(f"font-size:11px;color:{t.txt};")
-                hdr.addWidget(msg_lbl, 1)
-                cl.addLayout(hdr)
-
-                # 元数据行
-                meta_parts = []
-                meta_parts.append(
-                    _tr("history.project", "{name}").format(name=he.project_name))
-                if he.file_count:
-                    meta_parts.append(
-                        _tr("history.files", "{n} files").format(n=he.file_count))
-                if he.commit_hash:
-                    meta_parts.append(he.commit_hash[:8])
-                time_str = _format_time(he.timestamp)
-                if time_str:
-                    meta_parts.append(time_str)
-
-                meta_lbl = QLabel(" · ".join(meta_parts))
-                meta_lbl.setStyleSheet(
-                    f"font-size:10px;color:{t.txt3};padding-left:14px;")
-                cl.addWidget(meta_lbl)
-
-                # 点击跳转
-                card.mousePressEvent = lambda event, pn=he.project_name: \
-                    self._on_history_click(pn)
-
-                self.state.hist_layout.insertWidget(
-                    self.state.hist_layout.count() - 1, card)
+            if filter_mode == "governance":
+                self._populate_governance_events(entries, t)
+            else:
+                self._populate_commit_history(entries, t)
 
         except Exception as e:
             self._hist_no_data(t, str(e))
+
+    def _populate_commit_history(self, entries, t):
+        entries = entries[-50:]  # 最多 50 条
+        last_date = ""
+
+        for he in reversed(entries):
+            if not he.commit_message:
+                continue
+            date = _format_date(he.timestamp)
+
+            # ── 日期分隔头 ──
+            if date != last_date:
+                last_date = date
+                sep = QLabel(f"  {date}")
+                sep.setStyleSheet(
+                    f"font-size:11px;font-weight:600;color:{t.txt3};"
+                    f"padding:10px 6px 4px;")
+                self.state.hist_layout.insertWidget(
+                    self.state.hist_layout.count() - 1, sep)
+
+            # ── 条目卡片 ──
+            # 颜色：按 action_type 优先，fallback 到项目色
+            if he.action_type and he.action_type in _ACTION_COLORS:
+                p_color = _ACTION_COLORS[he.action_type](t)
+            else:
+                p_color = _project_color(he.project_name)
+            card = QFrame()
+            card.setCursor(Qt.PointingHandCursor)
+            card.setStyleSheet(
+                f"QFrame{{background:{t.bg};border:.5px solid {t.bdr};"
+                f"border-left:3px solid {p_color};border-radius:5px;"
+                f"margin:2px 0;}}"
+                f"QFrame:hover{{background:{t.bg2};}}")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(10, 8, 10, 8)
+            cl.setSpacing(2)
+
+            # 标题行
+            hdr = QHBoxLayout()
+            hdr.setSpacing(6)
+            dot = QLabel("●")
+            dot.setStyleSheet(f"color:{p_color};font-size:8px;")
+            hdr.addWidget(dot)
+
+            msg = he.commit_message or he.project_name
+            msg_lbl = QLabel(f"<b>{msg[:70]}</b>")
+            msg_lbl.setStyleSheet(f"font-size:11px;color:{t.txt};")
+            hdr.addWidget(msg_lbl, 1)
+            cl.addLayout(hdr)
+
+            # 元数据行
+            meta_parts = []
+            meta_parts.append(
+                _tr("history.project", "{name}").format(name=he.project_name))
+            if he.file_count:
+                meta_parts.append(
+                    _tr("history.files", "{n} files").format(n=he.file_count))
+            if he.commit_hash:
+                meta_parts.append(he.commit_hash[:8])
+            time_str = _format_time(he.timestamp)
+            if time_str:
+                meta_parts.append(time_str)
+
+            meta_lbl = QLabel(" · ".join(meta_parts))
+            meta_lbl.setStyleSheet(
+                f"font-size:10px;color:{t.txt3};padding-left:14px;")
+            cl.addWidget(meta_lbl)
+
+            # 点击跳转
+            card.mousePressEvent = lambda event, pn=he.project_name: \
+                self._on_history_click(pn)
+
+            self.state.hist_layout.insertWidget(
+                self.state.hist_layout.count() - 1, card)
+
+    def _populate_governance_events(self, entries, t):
+        last_date = ""
+        shown = 0
+        for he in reversed(entries):
+            if shown >= 50:
+                break
+            date = _format_date(he.timestamp)
+            if date != last_date:
+                last_date = date
+                sep = QLabel(f"  {date}")
+                sep.setStyleSheet(
+                    f"font-size:11px;font-weight:600;color:{t.txt3};"
+                    f"padding:10px 6px 4px;")
+                self.state.hist_layout.insertWidget(
+                    self.state.hist_layout.count() - 1, sep)
+
+            color = self._GOV_EVENT_COLORS.get(
+                he.operation, "#64748B")
+            card = QFrame()
+            card.setCursor(Qt.PointingHandCursor)
+            card.setStyleSheet(
+                f"QFrame{{background:{t.bg};border:.5px solid {t.bdr};"
+                f"border-left:3px solid {color};border-radius:5px;"
+                f"margin:2px 0;}}"
+                f"QFrame:hover{{background:{t.bg2};}}")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(10, 6, 10, 6)
+            cl.setSpacing(2)
+
+            # 时间 + 类型 pill + 项目名
+            hdr = QHBoxLayout()
+            time_lbl = QLabel(_format_time(he.timestamp))
+            time_lbl.setStyleSheet(
+                f"font-size:10px;color:{t.txt3};font-family:'Courier New';")
+            hdr.addWidget(time_lbl)
+
+            pill = QLabel(he.operation)
+            pill.setStyleSheet(
+                f"font-size:9px;font-weight:500;padding:1px 8px;"
+                f"border-radius:8px;background:{color}20;color:{color};")
+            hdr.addWidget(pill)
+
+            proj = QLabel(
+                f'<span style="font-size:11px;font-weight:500;color:{t.txt};">'
+                f'{he.project_name}</span>')
+            hdr.addWidget(proj)
+            hdr.addStretch()
+            cl.addLayout(hdr)
+
+            # 详情
+            if he.commit_message:
+                detail = QLabel(he.commit_message[:100])
+                detail.setStyleSheet(
+                    f"font-size:10px;color:{t.txt2};padding-left:4px;")
+                cl.addWidget(detail)
+
+            card.mousePressEvent = lambda event, pn=he.project_name: \
+                self._on_history_click(pn)
+            self.state.hist_layout.insertWidget(
+                self.state.hist_layout.count() - 1, card)
+            shown += 1
 
     def _hist_no_data(self, t, detail: str = ""):
         msg = _tr("history.no_history", "No sync history")

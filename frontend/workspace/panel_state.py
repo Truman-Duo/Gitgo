@@ -136,3 +136,8 @@ class PanelState:
 
         # ── Misc (P: workshop_tab, C: commits) ───────────────
         self._line_timer = None        # QTimer
+
+        # ── Governance Tab 数据 (P: governance, C: governance) ──
+        self.contract_data: dict = {}        # ContractManager.load().to_dict()
+        self.integrity_status: dict = {}     # {"score": 82, "warnings": [...]}
+        self.lesson_data: dict = {}          # {"abstract": 0, "instance": 0, "pending": 0, "recent": []}

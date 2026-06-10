@@ -1,6 +1,6 @@
 """WorkshopTabMixin — Workshop Tab + 底部操作行"""
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QProgressBar,
                                QPushButton, QScrollArea, QSplitter,
                                QTextEdit, QVBoxLayout, QWidget)
 from backend.core.i18n import _tr
@@ -130,6 +130,33 @@ class WorkshopTabMixin:
         self.state.push_btn.setProperty("variant", "secondary")
         self.state.push_btn.clicked.connect(self._start_push)
         lo.addWidget(self.state.push_btn)
+
+        # ── Authorship toggle ──
+        self.state.authorship_cb = QCheckBox(
+            _tr("action.strip_authorship", "清洗 AI 痕迹"))
+        self.state.authorship_cb.setChecked(True)
+        self.state.authorship_cb.setToolTip(
+            _tr("action.strip_authorship_tt",
+                "Push 前清除 commit message 和代码注释中的 AI 协作痕迹"))
+        lo.addWidget(self.state.authorship_cb)
+
+        # ── Template selector ──
+        from backend.core.template_manager import TemplateManager
+        tmpl_label = QLabel(_tr("action.template", "Template:"))
+        tmpl_label.setStyleSheet(f"font-size:11px;color:{get_theme().txt3};")
+        lo.addWidget(tmpl_label)
+        self.state.template_combo = QComboBox()
+        templates = TemplateManager.list_templates()
+        self.state.template_combo.addItems(templates)
+        current = self.state.project.commit_format.get("template_name", "default")
+        if current in templates:
+            self.state.template_combo.setCurrentText(current)
+        self.state.template_combo.setToolTip(
+            _tr("action.template_tt", "选择 commit message 模板"))
+        self.state.template_combo.currentTextChanged.connect(
+            lambda name: self.state.project.commit_format.update(
+                {"template_name": name}))
+        lo.addWidget(self.state.template_combo)
 
         self.state.delete_formal_btn = QPushButton("✕")
         self.state.delete_formal_btn.setFixedWidth(26)

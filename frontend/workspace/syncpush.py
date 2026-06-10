@@ -91,6 +91,14 @@ class SyncPushMixin:
         self.state.progress_label.setText(_tr("exec.pushing", "正在 push 到远程..."))
         self._log(_tr("exec.pushing_log", "开始 push..."))
 
+        # Authorship 清洗
+        if getattr(self.state, 'authorship_cb', None) \
+           and self.state.authorship_cb.isChecked():
+            from backend.core.authorship import apply_authorship_filter
+            stats = apply_authorship_filter(self.state.session, aggressive=False)
+            self._log(_tr("authorship.stripped",
+                         "AI 痕迹已清洗 ({n} 处)").format(n=stats.get("total", 0)))
+
         self.state.push_worker = PushWorker(self.state.session)
         self.state.push_thread = QThread()
         self.state.push_worker.moveToThread(self.state.push_thread)
@@ -140,6 +148,14 @@ class SyncPushMixin:
         self.state.progress_bar.setValue(0)
         self.state.progress_label.setText(_tr("exec.force_pushing", "正在强制 push..."))
         self._log(_tr("exec.force_pushing_log", "强制 push 中..."))
+
+        # Authorship 清洗
+        if getattr(self.state, 'authorship_cb', None) \
+           and self.state.authorship_cb.isChecked():
+            from backend.core.authorship import apply_authorship_filter
+            stats = apply_authorship_filter(self.state.session, aggressive=False)
+            self._log(_tr("authorship.stripped",
+                         "AI 痕迹已清洗 ({n} 处)").format(n=stats.get("total", 0)))
 
         self.state.push_worker = PushWorker(self.state.session, skip_scan=True)
         self.state.push_thread = QThread()

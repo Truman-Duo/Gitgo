@@ -9,9 +9,10 @@ from themes import get_theme
 from .explorer import ExplorerMixin, _BranchLineStyle  # noqa: F401
 from .workshop_tab import WorkshopTabMixin
 from .incoming_tab import IncomingTabMixin
+from .governance import GovernanceMixin
 
 
-class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin):
+class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin, GovernanceMixin):
     """UI 构建 — 继承 Explorer/Workshop/Incoming 三个子 Mixin"""
 
     def _init_ui(self):
@@ -25,6 +26,7 @@ class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin):
         self._setup_incoming_tab_button()
         self.state.tab_bar.addTab(_tr("tab.remotes", "Remotes"))
         self.state.tab_bar.addTab(_tr("tab.history", "History"))
+        self.state.tab_bar.addTab(_tr("tab.governance", "Governance"))
         layout.addWidget(self.state.tab_bar)
 
         self._build_action_bar(layout)
@@ -34,6 +36,7 @@ class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin):
         self.state.tab_stack.addWidget(self._build_incoming_tab())
         self.state.tab_stack.addWidget(self._build_remotes_tab())
         self.state.tab_stack.addWidget(self._build_history_tab())
+        self.state.tab_stack.addWidget(self._build_governance_tab())
         layout.addWidget(self.state.tab_stack, 1)
 
         self.state.tab_bar.currentChanged.connect(self._on_tab_changed)
@@ -43,7 +46,7 @@ class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin):
 
     def _on_tab_changed(self, idx: int):
         import sys
-        tabs = ["Workshop", "Incoming", "Remotes", "History"]
+        tabs = ["Workshop", "Incoming", "Remotes", "History", "Governance"]
         print("[LOG] Tab.switch to=" + (tabs[idx] if idx < len(tabs) else str(idx)), file=sys.stderr, flush=True)
         self.state.tab_stack.setCurrentIndex(idx)
         self._update_action_bar()
@@ -64,6 +67,7 @@ class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin):
             {"undo": "action.undo_decision", "save": None,        "export": "action.export_list", "extra": ("action.re_fetch", "↻")},
             {"undo": None,          "save": None,              "export": None,           "extra": ("action.refresh_all", "↻")},
             {"undo": None,          "save": None,              "export": "action.export_history", "extra": ("action.filter", "△")},
+            {"undo": None,          "save": None,              "export": None,           "extra": ("action.refresh", "↻")},
         ][idx]
 
         while self.state.action_lo.count():
@@ -108,7 +112,10 @@ class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin):
     def _on_action_undo(self):
         idx = self.state.tab_bar.currentIndex()
         if idx == 0:
-            self._log(_tr("action.undo_merge", "Undo: dissolve formal commit — not implemented in UI"))
+            if self.state.selected_formal is not None:
+                self._dissolve_formal_commit(self.state.selected_formal)
+            else:
+                self._log(_tr("action.undo_none", "没有可撤销的正式 commit"))
         elif idx == 1:
             self._log(_tr("action.undo_decision", "Undo last trial decision"))
 
@@ -133,6 +140,8 @@ class BuilderMixin(ExplorerMixin, WorkshopTabMixin, IncomingTabMixin):
             self._populate_remotes()
         elif idx == 3:
             self._log(_tr("action.filter", "Filter — not implemented in UI"))
+        elif idx == 4:
+            self._load_governance_data()
 
     # ── 共享右侧面板（Diff + Node）────────────────────────
 
