@@ -162,9 +162,14 @@ def get_exclude_patterns(
     *,
     file_adapter: FileAdapter | None = None,
 ) -> list[str]:
-    """合并 .gitignore 规则 + force_exclude 规则"""
+    """合并 .gitignore 规则 + force_exclude + 硬编码保护的规则"""
     patterns = _read_gitignore(workspace, file_adapter=file_adapter)
     patterns.extend(project.force_exclude)
+    # 硬编码保护：这些目录在任何项目中都不能被 sync
+    patterns.extend([
+        ".git/", ".claude/", ".codex/", ".codebuddy/", ".cursor/",
+        ".gitgo/", "gitgo_config.json", "gitgo_history.json",
+    ])
     return patterns
 
 

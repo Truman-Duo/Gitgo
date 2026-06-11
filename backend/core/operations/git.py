@@ -31,7 +31,7 @@ def get_git_log(
     )
 
     commits: list[CommitInfo] = []
-    prefix_pattern = re.compile(r"^\[[A-Z]+-\d+\]\s*")
+    prefix_pattern = re.compile(r"^\[[A-Z0-9]+-\d+\]\s*")
     type_pattern = re.compile(
         r"^(feat|fix|docs|style|refactor|perf|test|chore)"
         r"(?:\(([^)]*)\))?:\s*(.*)"
@@ -206,7 +206,7 @@ def validate_commit_message(msg: str) -> Optional[str]:
     if not lines:
         return "Commit message 不能为空"
     first = lines[0]
-    pattern = re.compile(r"^\[[A-Z]+-\d+\]\s+\w+")
+    pattern = re.compile(r"^\[[A-Z0-9]+-\d+\]\s+\w+")
     if not pattern.match(first):
         return "首行格式必须为 [PREFIX-N] type: subject"
     return None
