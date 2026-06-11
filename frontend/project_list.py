@@ -105,6 +105,7 @@ class ProjectListPanel(QWidget):
         self.project_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.project_table.customContextMenuRequested.connect(self._on_context_menu)
         self.project_table.cellDoubleClicked.connect(self._on_double_click)
+        self.project_table.cellClicked.connect(lambda r, c: self._enter_project(r))
         self.project_table.cellChanged.connect(self._on_note_changed)
         layout.addWidget(self.project_table)
 

@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Gitgo UI Design Mockups</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+    background: #0F172A;
+    color: #E2E8F0;
+    padding: 40px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    color: #F8FAFC;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #94A3B8;
+    font-size: 14px;
+    margin-bottom: 48px;
+  }
+  .phase-label {
+    display: inline-block;
+    background: #1E3A5F;
+    color: #60A5FA;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 4px;
+    margin-bottom: 12px;
+    letter-spacing: 1px;
+  }
+  .phase-title {
+    font-size: 20px;
+    color: #F1F5F9;
+    margin-bottom: 6px;
+  }
+  .phase-desc {
+    color: #94A3B8;
+    font-size: 13px;
+    margin-bottom: 20px;
+  }
+  .mockup-container {
+    background: #1E293B;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 48px;
+  }
+  .title-bar {
+    background: #0F172A;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid #334155;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.red { background: #EF4444; }
+  .dot.yellow { background: #F59E0B; }
+  .dot.green { background: #22C55E; }
+  .title-bar span { color: #94A3B8; font-size: 12px; margin-left: 8px; }
+
+  /* ── Tab Bar ── */
+  .tab-bar {
+    display: flex;
+    background: #0F172A;
+    border-bottom: 1px solid #334155;
+    padding: 0 12px;
+  }
+  .tab {
+    padding: 10px 20px;
+    font-size: 13px;
+    color: #64748B;
+    border-bottom: 2px solid transparent;
+    cursor: default;
+  }
+  .tab.active {
+    color: #60A5FA;
+    border-bottom-color: #3B82F6;
+  }
+  .tab.new {
+    color: #F59E0B;
+    border-bottom-color: #F59E0B;
+    position: relative;
+  }
+  .tab.new::after {
+    content: 'NEW';
+    font-size: 9px;
+    background: #F59E0B;
+    color: #0F172A;
+    padding: 1px 4px;
+    border-radius: 2px;
+    margin-left: 6px;
+    font-weight: 700;
+    vertical-align: top;
+  }
+
+  /* ── Mockup 1: Workshop with Authorship ── */
+  .workspace-content {
+    padding: 20px;
+  }
+  .commit-area {
+    display: flex;
+    gap: 52px;
+    margin-bottom: 20px;
+  }
+  .commit-col { flex: 1; }
+  .commit-col-header {
+    font-size: 11px;
+    color: #64748B;
+    font-weight: 600;
+    margin-bottom: 8px;
+    letter-spacing: 1px;
+  }
+  .commit-box {
+    background: #0F172A;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    border-left: 3px solid #3B82F6;
+  }
+  .commit-box .hash {
+    color: #60A5FA;
+    font-family: 'Consolas', monospace;
+    font-size: 11px;
+  }
+  .commit-box .msg {
+    color: #CBD5E1;
+    margin-top: 4px;
+    word-wrap: break-word;
+  }
+  .commit-box.formal {
+    border-left-color: #22C55E;
+  }
+  .commit-box .meta {
+    color: #64748B;
+    font-size: 11px;
+    margin-top: 4px;
+  }
+  /* Arrow between columns */
+  .commit-area-wrapper {
+    position: relative;
+  }
+  .arrow-svg {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 2;
+  }
+
+  /* Push bar */
+  .push-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #0F172A;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 10px 16px;
+    margin-top: 16px;
+  }
+  .btn {
+    padding: 6px 16px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid transparent;
+    cursor: default;
+  }
+  .btn-primary {
+    background: #3B82F6;
+    color: #FFFFFF;
+  }
+  .btn-secondary {
+    background: transparent;
+    border-color: #475569;
+    color: #94A3B8;
+  }
+  .btn-danger {
+    background: #DC2626;
+    color: #FFFFFF;
+  }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #94A3B8;
+  }
+  .checkbox {
+    width: 14px; height: 14px;
+    border: 1.5px solid #475569;
+    border-radius: 3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #1E293B;
+  }
+  .checkbox.checked {
+    background: #3B82F6;
+    border-color: #3B82F6;
+  }
+  .checkbox.checked::after {
+    content: '\2713';
+    color: white;
+    font-size: 10px;
+  }
+  .template-select {
+    background: #1E293B;
+    border: 1px solid #475569;
+    border-radius: 4px;
+    padding: 4px 10px;
+    color: #94A3B8;
+    font-size: 12px;
+  }
+  .spacer { flex: 1; }
+
+  /* ── File Tree ── */
+  .file-tree-section {
+    margin-bottom: 16px;
+  }
+  .section-header {
+    font-size: 12px;
+    color: #64748B;
+    font-weight: 600;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-header .badge {
+    background: #334155;
+    color: #94A3B8;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 8px;
+  }
+  .file-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: #CBD5E1;
+    border-radius: 4px;
+  }
+  .file-item:hover { background: #334155; }
+  .file-icon { color: #64748B; font-size: 14px; }
+  .file-status {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-weight: 600;
+    margin-left: auto;
+  }
+  .file-status.modified { background: #422006; color: #F59E0B; }
+  .file-status.new { background: #052E16; color: #22C55E; }
+
+  /* ── Mockup 2: Governance Tab ── */
+  .governance-content {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .gov-card {
+    background: #0F172A;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 16px 20px;
+  }
+  .gov-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .gov-card-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #F1F5F9;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .gov-card-title .icon {
+    width: 20px; height: 20px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+  }
+  .icon-contract { background: #1E3A5F; color: #60A5FA; }
+  .icon-identity { background: #451A03; color: #F59E0B; }
+  .icon-lesson { background: #052E16; color: #22C55E; }
+
+  .status-row {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 12px;
+  }
+  .status-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+  }
+  .status-dot.green { background: #22C55E; }
+  .status-dot.red { background: #EF4444; }
+  .status-dot.yellow { background: #F59E0B; }
+
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .pill-ok { background: #052E16; color: #22C55E; }
+  .pill-warn { background: #422006; color: #F59E0B; }
+  .pill-danger { background: #450A0A; color: #EF4444; }
+
+  .progress-bar-bg {
+    background: #334155;
+    border-radius: 4px;
+    height: 8px;
+    overflow: hidden;
+    width: 200px;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .progress-bar-fill.green { background: #22C55E; }
+  .progress-bar-fill.yellow { background: #F59E0B; }
+  .progress-bar-fill.red { background: #EF4444; }
+
+  .gov-btn-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  /* Integrity meter */
+  .integrity-meter {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .integrity-score {
+    font-size: 28px;
+    font-weight: 700;
+    color: #F59E0B;
+  }
+  .integrity-detail {
+    font-size: 12px;
+    color: #94A3B8;
+    line-height: 1.6;
+  }
+
+  /* Lesson list */
+  .lesson-stats {
+    display: flex;
+    gap: 32px;
+    margin-bottom: 12px;
+  }
+  .lesson-stat {
+    text-align: center;
+  }
+  .lesson-stat .num {
+    font-size: 24px;
+    font-weight: 700;
+    color: #22C55E;
+  }
+  .lesson-stat .label {
+    font-size: 11px;
+    color: #64748B;
+    margin-top: 2px;
+  }
+  .lesson-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid #1E293B;
+    font-size: 12px;
+    color: #CBD5E1;
+  }
+  .lesson-tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+  .lesson-tag.abstract { background: #1E3A5F; color: #60A5FA; }
+  .lesson-tag.instance { background: #334155; color: #94A3B8; }
+
+  /* ── Mockup 3: Dashboard Cards ── */
+  .project-list-container {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .project-card {
+    background: #0F172A;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    transition: border-color 0.15s;
+    cursor: default;
+  }
+  .project-card:hover {
+    border-color: #3B82F6;
+  }
+  .project-card-info { flex: 1; }
+  .project-card-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: #F1F5F9;
+  }
+  .project-card-meta {
+    font-size: 12px;
+    color: #64748B;
+    margin-top: 4px;
+    display: flex;
+    gap: 16px;
+  }
+  .project-card-stats {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+  }
+  .stat-pill {
+    text-align: center;
+  }
+  .stat-pill .val {
+    font-size: 16px;
+    font-weight: 700;
+    color: #E2E8F0;
+  }
+  .stat-pill .lbl {
+    font-size: 10px;
+    color: #64748B;
+  }
+  .health-bar {
+    width: 100px;
+  }
+  .health-label {
+    font-size: 10px;
+    color: #64748B;
+    margin-bottom: 3px;
+  }
+  .project-card-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .btn-sm {
+    padding: 4px 12px;
+    font-size: 11px;
+    border-radius: 4px;
+  }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid #334155;
+    color: #94A3B8;
+  }
+
+  /* Governance event log */
+  .event-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid #1E293B;
+    font-size: 12px;
+  }
+  .event-time {
+    color: #64748B;
+    font-family: 'Consolas', monospace;
+    font-size: 11px;
+    min-width: 70px;
+  }
+  .event-pill {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 500;
+  }
+  .event-pill.synced { background: #052E16; color: #22C55E; }
+  .event-pill.pushed { background: #042F2E; color: #06B6D4; }
+  .event-pill.drift { background: #450A0A; color: #EF4444; }
+  .event-pill.contract { background: #422006; color: #F59E0B; }
+  .event-pill.lesson { background: #1E3A5F; color: #60A5FA; }
+  .event-msg { color: #CBD5E1; }
+
+  /* Callout annotation */
+  .annotation {
+    position: relative;
+    margin: 20px 0;
+  }
+  .annotation-box {
+    background: #1E3A5F;
+    border: 1px solid #3B82F6;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #93C5FD;
+    line-height: 1.5;
+  }
+  .annotation-box .label {
+    font-weight: 700;
+    color: #60A5FA;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+
+  /* Divider */
+  .section-divider {
+    border: none;
+    border-top: 1px solid #334155;
+    margin: 48px 0;
+  }
+
+  /* Two-col layout for mockups */
+  .two-col {
+    display: flex;
+    gap: 24px;
+  }
+  .two-col ><think>
+    flex: 1;
+  }
+
+  /* History sub-tabs */
+  .sub-tab-bar {
+    display: flex;
+    gap: 0;
+    margin-bottom: 12px;
+    border-bottom: 1px solid #334155;
+  }
+  .sub-tab {
+    padding: 6px 16px;
+    font-size: 12px;
+    color: #64748B;
+    border-bottom: 2px solid transparent;
+    cursor: default;
+  }
+  .sub-tab.active {
+    color: #A78BFA;
+    border-bottom-color: #8B5CF6;
+  }
+</style>
+</head>
+<body>
+
+<h1>Gitgo UI Design Mockups</h1>
+<p class="subtitle">Phase 1-3 Frontend Design Proposal &mdash; Dark Theme &middot; PySide6 Style &middot; v0.27</p>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- PHASE 1: Workshop Tab Enhancement -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="phase-label">PHASE 1</div>
+<div class="phase-title">Workshop Tab &mdash; Authorship Toggle + Commit Box Fix</div>
+<div class="phase-desc">In-place enhancement of existing Workshop tab. No new tabs or Mixins beyond AuthorshipMixin.</div>
+
+<div class="mockup-container">
+  <div class="title-bar">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+    <span>Gitgo &mdash; MyProject</span>
+  </div>
+  <div class="tab-bar">
+    <div class="tab active">Workshop</div>
+    <div class="tab">Incoming</div>
+    <div class="tab">Remotes</div>
+    <div class="tab">History</div>
+  </div>
+  <div class="workspace-content">
+
+    <!-- File Tree -->
+    <div class="file-tree-section">
+      <div class="section-header">
+        FILES <span class="badge">3 modified</span>
+      </div>
+      <div class="file-item">
+        <span class="file-icon">&#128193;</span>
+        <span>backend/core/</span>
+      </div>
+      <div class="file-item" style="padding-left: 28px;">
+        <span class="file-icon">&#128196;</span>
+        <span>sync_session.py</span>
+        <span class="file-status modified">M</span>
+      </div>
+      <div class="file-item" style="padding-left: 28px;">
+        <span class="file-icon">&#128196;</span>
+        <span>authorship.py</span>
+        <span class="file-status new">NEW</span>
+      </div>
+      <div class="file-item">
+        <span class="file-icon">&#128196;</span>
+        <span>mcp_server.py</span>
+        <span class="file-status modified">M</span>
+      </div>
+    </div>
+
+    <!-- Commit Canvas -->
+    <div class="section-header">COMMITS</div>
+    <div class="commit-area">
+      <div class="commit-col" style="max-width: 200px;">
+        <div class="commit-col-header">WS</div>
+        <div class="commit-box">
+          <div class="hash">a3f7c21</div>
+          <div class="msg">feat: add authorship strip toggle to push pipeline</div>
+          <div class="meta">2 min ago</div>
+        </div>
+        <div class="commit-box">
+          <div class="hash">e104b9d</div>
+          <div class="msg">fix: resolve text overflow in summary label when commit message exceeds 48px height limit</div>
+          <div class="meta">15 min ago</div>
+        </div>
+        <div class="commit-box">
+          <div class="hash">9c82fa4</div>
+          <div class="msg">refactor: extract governance mixin</div>
+          <div class="meta">1 hour ago</div>
+        </div>
+      </div>
+      <div class="commit-col">
+        <div class="commit-col-header">FM</div>
+        <div class="commit-box formal">
+          <div class="hash">[ANBM-14]</div>
+          <div class="msg">feat: authorship pipeline + push toggle</div>
+          <div class="meta">aggregated from 2 commits</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Push Bar with Authorship Toggle -->
+    <div class="push-bar">
+      <div class="btn btn-primary">Sync</div>
+      <div class="btn btn-primary">Push</div>
+      <div style="width: 1px; height: 20px; background: #334155;"></div>
+      <div class="checkbox-row">
+        <div class="checkbox checked"></div>
+        <span>Strip AI authorship</span>
+      </div>
+      <div class="spacer"></div>
+      <div class="checkbox-row">
+        <span>Template:</span>
+        <div class="template-select">default &#9662;</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="annotation">
+  <div class="annotation-box">
+    <div class="label">DESIGN NOTES &mdash; Phase 1</div>
+    <strong>1. Commit Box Fix:</strong> Long messages like <code>e104b9d</code> now wrap naturally instead of being clipped at 48px. Remove <code>setMaximumHeight(48)</code>, use <code>setWordWrap(True)</code>.<br>
+    <strong>2. Authorship Toggle:</strong> New checkbox in push bar, backed by <code>PanelState.strip_authorship: bool</code>. Producer: AuthorshipMixin, Consumer: SyncPushMixin.<br>
+    <strong>3. Template Selector:</strong> Exposes <code>commit_format.template_name</code> to GUI. Reads available templates from <code>TemplateManager.list_templates()</code>.
+  </div>
+</div>
+
+<hr class="section-divider">
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- PHASE 1.5: History Tab - Governance Events -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="phase-label">PHASE 1.5</div>
+<div class="phase-title">History Tab &mdash; Governance Event Sub-tab</div>
+<div class="phase-desc">Add a sub-tab to History for viewing the 9 governance event types from append-only HistoryManager.</div>
+
+<div class="mockup-container">
+  <div class="title-bar">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+    <span>Gitgo &mdash; MyProject</span>
+  </div>
+  <div class="tab-bar">
+    <div class="tab">Workshop</div>
+    <div class="tab">Incoming</div>
+    <div class="tab">Remotes</div>
+    <div class="tab active">History</div>
+  </div>
+  <div class="workspace-content">
+    <div class="sub-tab-bar">
+      <div class="sub-tab active">Commits</div>
+      <div class="sub-tab">Governance Events</div>
+    </div>
+
+    <div class="event-row">
+      <span class="event-time">14:32:07</span>
+      <span class="event-pill synced">synced</span>
+      <span class="event-msg">Sync #14 completed &mdash; 3 files, 2 commits aggregated</span>
+    </div>
+    <div class="event-row">
+      <span class="event-time">14:32:08</span>
+      <span class="event-pill contract">contract</span>
+      <span class="event-msg">Contract check passed &mdash; 0 drifts detected</span>
+    </div>
+    <div class="event-row">
+      <span class="event-time">14:35:21</span>
+      <span class="event-pill pushed">pushed</span>
+      <span class="event-msg">Push #14 to origin/main &mdash; authorship stripped</span>
+    </div>
+    <div class="event-row">
+      <span class="event-time">15:01:44</span>
+      <span class="event-pill lesson">lesson</span>
+      <span class="event-msg">Harvested 2 new lessons from CLAUDE.md + git log</span>
+    </div>
+    <div class="event-row">
+      <span class="event-time">16:12:03</span>
+      <span class="event-pill drift">drift</span>
+      <span class="event-msg">Drift detected: removed feature "trial auto-accept" not in contract</span>
+    </div>
+    <div class="event-row">
+      <span class="event-time">16:12:04</span>
+      <span class="event-pill contract">contract</span>
+      <span class="event-msg">Contract updated to v2026-06-08 &mdash; added "governance tab"</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="annotation">
+  <div class="annotation-box">
+    <div class="label">DESIGN NOTES &mdash; Phase 1.5</div>
+    <strong>Sub-tab pattern:</strong> QTabBar inside History panel, not a new top-level tab. Uses <code>QStackedWidget</code> to switch between commit list and governance event list.<br>
+    <strong>Event pills:</strong> Color-coded per event type. <code>governance_synced</code> = green, <code>governance_pushed</code> = cyan, <code>governance_drift</code> = red, <code>governance_contract_updated</code> = yellow, <code>governance_lesson</code> = blue.<br>
+    <strong>Data source:</strong> <code>HistoryManager.read_events(limit=50)</code> &mdash; append-only, no mutation.
+  </div>
+</div>
+
+<hr class="section-divider">
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- PHASE 2: Governance Tab -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="phase-label">PHASE 2</div>
+<div class="phase-title">Governance Tab &mdash; Contract + Identity + Lessons</div>
+<div class="phase-desc">New top-level tab. Exposes the P6 governance subsystems (Contract, Identity Guard, Lesson System) as first-class GUI citizens.</div>
+
+<div class="mockup-container">
+  <div class="title-bar">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+    <span>Gitgo &mdash; MyProject</span>
+  </div>
+  <div class="tab-bar">
+    <div class="tab">Workshop</div>
+    <div class="tab">Incoming</div>
+    <div class="tab">Remotes</div>
+    <div class="tab">History</div>
+    <div class="tab new">Governance</div>
+  </div>
+  <div class="governance-content">
+
+    <!-- Contract Card -->
+    <div class="gov-card">
+      <div class="gov-card-header">
+        <div class="gov-card-title">
+          <div class="icon icon-contract">C</div>
+          Project Contract
+        </div>
+        <span class="pill pill-ok">v2026-06-08 &middot; No Drift</span>
+      </div>
+      <div class="status-row">
+        <div class="status-item">
+          <div class="status-dot green"></div>
+          <span>Feature set intact</span>
+        </div>
+        <div class="status-item">
+          <div class="status-dot green"></div>
+          <span>Tech stack: stable</span>
+        </div>
+        <div class="status-item">
+          <div class="status-dot green"></div>
+          <span>Architecture: 0 violations</span>
+        </div>
+      </div>
+      <div class="gov-btn-row">
+        <div class="btn btn-secondary btn-sm">View Contract</div>
+        <div class="btn btn-secondary btn-sm">Force Update</div>
+      </div>
+    </div>
+
+    <!-- Identity Guard Card -->
+    <div class="gov-card">
+      <div class="gov-card-header">
+        <div class="gov-card-title">
+          <div class="icon icon-identity">ID</div>
+          Identity Guard
+        </div>
+        <span class="pill pill-warn">82% &middot; 2 Warnings</span>
+      </div>
+      <div class="integrity-meter">
+        <div class="integrity-score">82%</div>
+        <div style="flex: 1;">
+          <div class="progress-bar-bg" style="width: 100%; margin-bottom: 8px;">
+            <div class="progress-bar-fill yellow" style="width: 82%;"></div>
+          </div>
+          <div class="integrity-detail">
+            <span style="color: #F59E0B;">&#9888;</span> <code>CLAUDE.md</code> modified since last snapshot<br>
+            <span style="color: #F59E0B;">&#9888;</span> <code>.gitignore</code> removed 3 entries<br>
+            <span style="color: #22C55E;">&#10003;</span> Directory skeleton: intact<br>
+            <span style="color: #22C55E;">&#10003;</span> Config files: valid
+          </div>
+        </div>
+      </div>
+      <div class="gov-btn-row">
+        <div class="btn btn-secondary btn-sm">View Diff</div>
+        <div class="btn btn-secondary btn-sm">Restore Snapshot</div>
+      </div>
+    </div>
+
+    <!-- Lesson System Card -->
+    <div class="gov-card">
+      <div class="gov-card-header">
+        <div class="gov-card-title">
+          <div class="icon icon-lesson">L</div>
+          Lesson System
+        </div>
+        <span style="font-size: 11px; color: #64748B;">Last harvest: 2h ago (sync #14)</span>
+      </div>
+      <div class="lesson-stats">
+        <div class="lesson-stat">
+          <div class="num">12</div>
+          <div class="label">Abstract Lessons</div>
+        </div>
+        <div class="lesson-stat">
+          <div class="num">47</div>
+          <div class="label">Instance Lessons</div>
+        </div>
+        <div class="lesson-stat">
+          <div class="num" style="color: #60A5FA;">3</div>
+          <div class="label">Since Last Push</div>
+        </div>
+      </div>
+      <div style="border-top: 1px solid #1E293B; padding-top: 10px;">
+        <div class="lesson-item">
+          <span class="lesson-tag abstract">ABSTRACT</span>
+          <span>Always validate config before sync to prevent empty-project overwrite</span>
+        </div>
+        <div class="lesson-item">
+          <span class="lesson-tag instance">INSTANCE</span>
+          <span>PyInstaller hidden import needed for backend.core.scanner</span>
+        </div>
+        <div class="lesson-item">
+          <span class="lesson-tag abstract">ABSTRACT</span>
+          <span>QSS border-left-width affects content rect &mdash; account in padding</span>
+        </div>
+      </div>
+      <div class="gov-btn-row">
+        <div class="btn btn-secondary btn-sm">View All</div>
+        <div class="btn btn-secondary btn-sm">Force Harvest</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="annotation">
+  <div class="annotation-box">
+    <div class="label">DESIGN NOTES &mdash; Phase 2</div>
+    <strong>Architecture:</strong> New <code>GovernanceMixin</code> registered in <code>TAB_CLASSES</code>. PanelState adds: <code>contract_status: dict</code>, <code>integrity_score: float</code>, <code>lesson_count: int</code>. All Producer: GovernanceMixin.<br>
+    <strong>Data flow:</strong> GovernanceMixin calls <code>contract.check_drift()</code>, <code>guard.check_integrity()</code>, <code>lesson.list_lessons()</code> on tab open. Results stored in PanelState, consumed by the card widgets.<br>
+    <strong>Severity states via QSS:</strong> Card border uses <code>setProperty("severity", "warning"|"danger"|"ok")</code> + <code>unpolish/polish</code>. No hardcoded colors in Python.<br>
+    <strong>Threshold logic:</strong> Integrity < 80% = red border, < 95% = yellow border, >= 95% = green border. Configurable via <code>integrity.mass_override_threshold</code>.
+  </div>
+</div>
+
+<hr class="section-divider">
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- PHASE 3: Dashboard Project Cards -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="phase-label">PHASE 3</div>
+<div class="phase-title">Dashboard &mdash; Enhanced Project List</div>
+<div class="phase-desc">Replace flat QTableWidget project list with rich cards embedding mini-dashboard stats from state_reader.py.</div>
+
+<div class="mockup-container">
+  <div class="title-bar">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+    <span>Gitgo &mdash; Project Dashboard</span>
+  </div>
+  <div style="padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155;">
+    <span style="font-size: 16px; font-weight: 600;">Projects</span>
+    <div style="display: flex; gap: 8px;">
+      <div class="btn btn-secondary btn-sm">+ Add Project</div>
+      <div class="btn btn-ghost btn-sm">&#8635; Refresh</div>
+    </div>
+  </div>
+  <div class="project-list-container">
+
+    <!-- Project Card 1 -->
+    <div class="project-card">
+      <div class="project-card-info">
+        <div class="project-card-name">Gitgo</div>
+        <div class="project-card-meta">
+          <span>last sync: 2h ago</span>
+          <span>sync #14</span>
+          <span style="color: #22C55E;">&#9679; healthy</span>
+        </div>
+      </div>
+      <div class="project-card-stats">
+        <div class="stat-pill">
+          <div class="val">14</div>
+          <div class="lbl">syncs</div>
+        </div>
+        <div class="stat-pill">
+          <div class="val">9</div>
+          <div class="lbl">pushes</div>
+        </div>
+        <div class="stat-pill">
+          <div class="val" style="color: #22C55E;">0</div>
+          <div class="lbl">drifts</div>
+        </div>
+        <div class="health-bar">
+          <div class="health-label">integrity</div>
+          <div class="progress-bar-bg" style="width: 100%;">
+            <div class="progress-bar-fill green" style="width: 97%;"></div>
+          </div>
+        </div>
+      </div>
+      <div class="project-card-actions">
+        <div class="btn btn-primary btn-sm">Open</div>
+        <div class="btn btn-ghost btn-sm">Sync</div>
+        <div class="btn btn-ghost btn-sm">Push</div>
+      </div>
+    </div>
+
+    <!-- Project Card 2 -->
+    <div class="project-card">
+      <div class="project-card-info">
+        <div class="project-card-name">WebApp-Frontend</div>
+        <div class="project-card-meta">
+          <span>last sync: 1d ago</span>
+          <span>sync #38</span>
+          <span style="color: #F59E0B;">&#9679; 1 warning</span>
+        </div>
+      </div>
+      <div class="project-card-stats">
+        <div class="stat-pill">
+          <div class="val">38</div>
+          <div class="lbl">syncs</div>
+        </div>
+        <div class="stat-pill">
+          <div class="val">35</div>
+          <div class="lbl">pushes</div>
+        </div>
+        <div class="stat-pill">
+          <div class="val" style="color: #F59E0B;">1</div>
+          <div class="lbl">drifts</div>
+        </div>
+        <div class="health-bar">
+          <div class="health-label">integrity</div>
+          <div class="progress-bar-bg" style="width: 100%;">
+            <div class="progress-bar-fill yellow" style="width: 74%;"></div>
+          </div>
+        </div>
+      </div>
+      <div class="project-card-actions">
+        <div class="btn btn-primary btn-sm">Open</div>
+        <div class="btn btn-ghost btn-sm">Sync</div>
+        <div class="btn btn-ghost btn-sm">Push</div>
+      </div>
+    </div>
+
+    <!-- Project Card 3 -->
+    <div class="project-card" style="border-color: #7F1D1D;">
+      <div class="project-card-info">
+        <div class="project-card-name">Legacy-API</div>
+        <div class="project-card-meta">
+          <span>last sync: 5d ago</span>
+          <span>sync #7</span>
+          <span style="color: #EF4444;">&#9679; drift detected</span>
+        </div>
+      </div>
+      <div class="project-card-stats">
+        <div class="stat-pill">
+          <div class="val">7</div>
+          <div class="lbl">syncs</div>
+        </div>
+        <div class="stat-pill">
+          <div class="val">5</div>
+          <div class="lbl">pushes</div>
+        </div>
+        <div class="stat-pill">
+          <div class="val" style="color: #EF4444;">3</div>
+          <div class="lbl">drifts</div>
+        </div>
+        <div class="health-bar">
+          <div class="health-label">integrity</div>
+          <div class="progress-bar-bg" style="width: 100%;">
+            <div class="progress-bar-fill red" style="width: 41%;"></div>
+          </div>
+        </div>
+      </div>
+      <div class="project-card-actions">
+        <div class="btn btn-primary btn-sm">Open</div>
+        <div class="btn btn-ghost btn-sm">Sync</div>
+        <div class="btn btn-danger btn-sm">Review</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="annotation">
+  <div class="annotation-box">
+    <div class="label">DESIGN NOTES &mdash; Phase 3</div>
+    <strong>Data source:</strong> <code>state_reader.get_project_state(project)</code> returns aggregated stats (sync count, push count, drift count, integrity score). No new Worker needed &mdash; reuse existing <code>QTimer</code> refresh in <code>project_list.py</code>.<br>
+    <strong>Health color:</strong> integrity >= 95% = green bar, >= 70% = yellow, < 70% = red. Card border also changes: <code>setProperty("health", "danger")</code> for the red-border variant.<br>
+    <strong>Click behavior:</strong> Card click = open project (same as current <code>_enter_project(row)</code>). Buttons use event filter to prevent card-click propagation.<br>
+    <strong>Layout:</strong> <code>QScrollArea</code> + <code>QVBoxLayout</code> with card widgets. No <code>QTableWidget</code>. Each card is a <code>ProjectCardWidget(QWidget)</code> with signals: <code>opened</code>, <code>syncRequested</code>, <code>pushRequested</code>.
+  </div>
+</div>
+
+<hr class="section-divider">
+
+<!-- ════════════════════════════════════════════════════════ -->
+<!-- Architecture Summary -->
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="phase-label">REFERENCE</div>
+<div class="phase-title">PanelState &amp; Mixin Architecture Map</div>
+<div class="phase-desc">How new features integrate with existing architecture.</div>
+
+<div class="mockup-container" style="padding: 24px;">
+  <pre style="font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; line-height: 1.8; color: #CBD5E1; overflow-x: auto;">
+<span style="color: #60A5FA; font-weight: bold;">PanelState</span> (explicit shared state container)
+├── <span style="color: #22C55E;">project: ProjectConfig</span>          <span style="color: #64748B;"># P: main_window → C: all</span>
+├── <span style="color: #22C55E;">file_tree: list[FileTreeEntry]</span>   <span style="color: #64748B;"># P: BuilderMixin → C: CommitMixin</span>
+├── <span style="color: #22C55E;">ws_commits: list[dict]</span>           <span style="color: #64748B;"># P: CommitMixin → C: SyncPushMixin</span>
+├── <span style="color: #22C55E;">formal_commits: list[dict]</span>       <span style="color: #64748B;"># P: CommitMixin → C: SyncPushMixin</span>
+├── <span style="color: #22C55E;">scan_result: dict</span>                <span style="color: #64748B;"># P: BuilderMixin → C: all</span>
+├── <span style="color: #F59E0B;">strip_authorship: bool = True</span>    <span style="color: #64748B;"># P: AuthorshipMixin → C: SyncPushMixin</span>  <span style="color: #F59E0B;">← NEW</span>
+├── <span style="color: #F59E0B;">template_name: str = "default"</span>   <span style="color: #64748B;"># P: AuthorshipMixin → C: CommitMixin</span>  <span style="color: #F59E0B;">← NEW</span>
+├── <span style="color: #F59E0B;">contract_status: dict</span>            <span style="color: #64748B;"># P: GovernanceMixin → C: GovernanceMixin</span> <span style="color: #F59E0B;">← NEW</span>
+├── <span style="color: #F59E0B;">integrity_score: float</span>           <span style="color: #64748B;"># P: GovernanceMixin → C: GovernanceMixin</span> <span style="color: #F59E0B;">← NEW</span>
+├── <span style="color: #F59E0B;">lessons: list[dict]</span>              <span style="color: #64748B;"># P: GovernanceMixin → C: GovernanceMixin</span> <span style="color: #F59E0B;">← NEW</span>
+└── <span style="color: #F59E0B;">governance_events: list[dict]</span>    <span style="color: #64748B;"># P: HistoryMixin → C: HistoryMixin</span>    <span style="color: #F59E0B;">← NEW</span>
+
+<span style="color: #60A5FA; font-weight: bold;">Tab / Mixin Registry</span>
+┌────────────┬───────────────────────────────────────────────────────┐
+│ Tab        │ Mixins                                                │
+├────────────┼───────────────────────────────────────────────────────┤
+│ Workshop   │ BuilderMixin, CommitMixin, SyncPushMixin,             │
+│            │ <span style="color: #F59E0B;">AuthorshipMixin ← NEW</span>, ThemeMixin                      │
+│ Incoming   │ TrialMixin                                            │
+│ Remotes    │ RemotesMixin                                          │
+│ History    │ HistoryMixin, <span style="color: #F59E0B;">GovernanceHistorySubTab ← NEW</span>            │
+│ <span style="color: #F59E0B;">Governance ← NEW</span> │ <span style="color: #F59E0B;">GovernanceMixin ← NEW</span>                            │
+└────────────┴───────────────────────────────────────────────────────┘
+  </pre>
+</div>
+
+<div style="text-align: center; color: #475569; font-size: 12px; margin-top: 48px; padding-bottom: 24px;">
+  Gitgo UI Design Mockups &mdash; Generated 2026-06-08 &mdash; Dark Theme &middot; Contrast Light Tokens &middot; Phase 1-3
+</div>
+
+</body>
+</html>

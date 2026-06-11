@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
 from backend.core.config import ProjectConfig
 from backend.core import get_file_diff
 from backend.core.i18n import _tr
+from backend.core.scanner import FileScanner
 from themes import get_theme
 
 
@@ -49,6 +50,16 @@ class _BranchLineStyle(QProxyStyle):
 
 class ExplorerMixin:
     """文件树 + Diff 预览 + 节点状态面板"""
+
+    def _active_tree(self):
+        """返回当前活跃的文件树（内嵌或全局 LSB）"""
+        return (self.state.file_tree
+                or getattr(self.state, 'global_lsb_file_tree', None))
+
+    def _active_diff_preview(self):
+        """返回当前活跃的差异预览控件"""
+        return (self.state.diff_preview
+                or getattr(self.state, 'global_lsb_diff_preview', None))
 
     def _build_explorer_panel(self) -> QWidget:
         t = get_theme()
@@ -96,16 +107,23 @@ class ExplorerMixin:
 
     def _auto_load_file_tree(self):
         try:
-            from backend import FileScanner
             scanner = FileScanner(self.state.project)
             tree = scanner.scan_tree()
+            import sys
+            print(f"[LOG] auto_load: found {len(tree)} top-level items, ws_path={self.state.project.workspace_path}", file=sys.stderr, flush=True)
             self._populate_file_tree_from_scanner(tree)
         except Exception as e:
             import sys
             print("[LOG] Explorer._auto_load_file_tree failed: " + str(e), file=sys.stderr, flush=True)
+            import traceback
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(None, "auto_load 失败", f"{e}\n\n{traceback.format_exc()}")
 
     def _populate_file_tree_from_scanner(self, tree: list):
-        self.state.file_tree.clear()
+        file_tree = self._active_tree()
+        if not file_tree:
+            return
+        file_tree.clear()
 
         def add_nodes(parent, entries):
             for entry in entries:
@@ -113,18 +131,21 @@ class ExplorerMixin:
                 item.setData(0, Qt.UserRole, entry.rel_path)
                 if entry.is_dir:
                     item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
-                if parent is self.state.file_tree:
-                    self.state.file_tree.addTopLevelItem(item)
+                if parent is file_tree:
+                    file_tree.addTopLevelItem(item)
                 else:
                     parent.addChild(item)
                 add_nodes(item, entry.children)
 
-        add_nodes(self.state.file_tree, tree)
+        add_nodes(file_tree, tree)
 
     def _make_section_header(self, title: str, badge_text: str = "",
                               badge_bg: str = "", badge_fg: str = "") -> QTreeWidgetItem:
         """创建带角标的 section header item"""
         t = get_theme()
+        file_tree = self._active_tree()
+        if not file_tree:
+            return QTreeWidgetItem()
         item = QTreeWidgetItem([title])
         item.setData(0, Qt.UserRole, "section_header")
         item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
@@ -134,7 +155,7 @@ class ExplorerMixin:
             badge.setStyleSheet(
                 f"font-size:9px; font-weight:500; padding:1px 5px; border-radius:3px; "
                 f"background:{badge_bg or t.bg3}; color:{badge_fg or t.txt3};")
-            self.state.file_tree.setItemWidget(item, 0, self._make_header_row(title, badge))
+            file_tree.setItemWidget(item, 0, self._make_header_row(title, badge))
         return item
 
     def _make_header_row(self, title: str, badge: QLabel) -> QWidget:
@@ -154,11 +175,14 @@ class ExplorerMixin:
     def add_incoming_section(self, change):
         """Accept 后追加 Incoming 文件区段到文件树"""
         t = get_theme()
+        file_tree = self._active_tree()
+        if not file_tree:
+            return
         hdr = self._make_section_header(
             "Incoming", "trial",
             badge_bg=t.blue_bg, badge_fg=t.blue_txt,
         )
-        self.state.file_tree.addTopLevelItem(hdr)
+        file_tree.addTopLevelItem(hdr)
         # 填充文件标记
         item = QTreeWidgetItem(hdr, ["cherry-pick pending"])
         item.setData(0, Qt.UserRole, f"incoming:{change.hash[:7]}")
@@ -166,11 +190,14 @@ class ExplorerMixin:
         badge.setStyleSheet(
             f"font-size:9px; font-weight:500; padding:1px 4px; border-radius:3px; "
             f"background:{t.blue_bg}; color:{t.blue_txt};")
-        self.state.file_tree.setItemWidget(item, 0, badge)
+        file_tree.setItemWidget(item, 0, badge)
         item.setBackground(0, QColor(t.blue_bg))
         hdr.setExpanded(True)
 
     def _populate_file_tree(self):
+        file_tree = self._active_tree()
+        if not file_tree:
+            return
         entries = self.state.session.entries
         if not entries:
             return
@@ -189,8 +216,8 @@ class ExplorerMixin:
             for i in range(item.childCount()):
                 update_node(item.child(i))
 
-        for i in range(self.state.file_tree.topLevelItemCount()):
-            update_node(self.state.file_tree.topLevelItem(i))
+        for i in range(file_tree.topLevelItemCount()):
+            update_node(file_tree.topLevelItem(i))
 
     def _on_tree_item_clicked(self, item, col):
         path = item.data(0, Qt.UserRole)
@@ -198,15 +225,18 @@ class ExplorerMixin:
             self._show_diff_by_path(path)
 
     def _show_diff_by_path(self, rel_path: str):
+        diff_preview = self._active_diff_preview()
+        if not diff_preview:
+            return
         entry = next((e for e in self.state.session.entries if e.rel_path == rel_path), None)
         if not entry or not self.state.project.backup_path:
-            self.state.diff_preview.setPlainText(
+            diff_preview.setPlainText(
                 _tr("file.diff_no_backup", "未配置备份路径") if not self.state.project.backup_path
                 else _tr("file.no_diff", "（无差异）"))
             return
         diff_text = get_file_diff(entry, Path(self.state.project.workspace_path),
                                   Path(self.state.project.backup_path))
-        self.state.diff_preview.setPlainText(diff_text or _tr("file.no_diff", "（无差异）"))
+        diff_preview.setPlainText(diff_text or _tr("file.no_diff", "（无差异）"))
 
     def _update_node_status(self, project: ProjectConfig):
         t = get_theme()
