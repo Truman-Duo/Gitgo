@@ -143,3 +143,119 @@ def strip_authorship_from_code(content: str, aggressive: bool = False) -> str:
     if aggressive:
         return strip_code_comments(content)
     return content
+
+
+# ── Privacy Scan ─────────────────────────────────────────────
+
+# Level 2: 内容模式匹配默认正则
+_DEFAULT_PRIVACY_PATTERNS = {
+    "email": re.compile(r'[\w.\-+]+@[\w.\-]+\.\w+'),
+    "ip": re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
+    "apikey": re.compile(r'(?:sk-[A-Za-z0-9]{20,})|(?:ghp_[A-Za-z0-9]{30,})|(?:xox[baprs]-[A-Za-z0-9-]+)'),
+    "private_key": re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'),
+    "internal_path": re.compile(r'(?:\\\\[\w.-]+\\[\w.-]+)|(?:\b/home/\w+)|(?:\b/Users/\w+)'),
+}
+
+# Level 3: 结构分析阈值
+_STRUCTURAL_THRESHOLDS = {
+    "table_columns": 5,      # 超过此列数的对齐表格
+    "numeric_density": 0.3,  # 数字字符占比超过此值
+}
+
+
+def scan_privacy(
+    file_path: str,
+    content: str,
+    level: int = 2,
+    patterns: list[str] | None = None,
+    deep_scan: bool = False,
+) -> list[dict]:
+    """对单个文件内容执行分级隐私扫描。返回告警列表。
+
+    Level 1: 文件名匹配（由 force_exclude 处理，此处不重复）
+    Level 2: 内容正则模式匹配
+    Level 3: 结构分析（deep_scan=True 时）
+    """
+    alerts = []
+
+    if level >= 2:
+        active = patterns or list(_DEFAULT_PRIVACY_PATTERNS.keys())
+        for name in active:
+            pat = _DEFAULT_PRIVACY_PATTERNS.get(name)
+            if pat is None:
+                continue
+            matches = pat.findall(content)
+            if matches:
+                # 取不重复的前 5 个匹配
+                unique = list(dict.fromkeys(matches))[:5]
+                alerts.append({
+                    "level": "error",
+                    "rule": f"privacy_{name}",
+                    "message": f"Privacy violation: {len(matches)} {name} pattern(s) found in {file_path}",
+                    "matches": unique,
+                })
+
+    if level >= 3 and deep_scan:
+        # 表格检测：含 | 分隔符且对齐
+        lines = content.split("\n")
+        table_lines = [l for l in lines if l.strip().startswith("|") and l.count("|") >= _STRUCTURAL_THRESHOLDS["table_columns"] + 1]
+        if len(table_lines) >= 2:
+            alerts.append({
+                "level": "warning",
+                "rule": "privacy_tabular_data",
+                "message": f"Possible tabular data in {file_path}: {len(table_lines)} table rows detected",
+            })
+
+        # 数值密度
+        alpha_chars = sum(1 for c in content if c.isalpha())
+        digit_chars = sum(1 for c in content if c.isdigit())
+        total = max(alpha_chars + digit_chars, 1)
+        density = digit_chars / total
+        if density >= _STRUCTURAL_THRESHOLDS["numeric_density"] and total > 200:
+            alerts.append({
+                "level": "warning",
+                "rule": "privacy_numeric_density",
+                "message": f"High numeric density in {file_path}: {density:.0%}",
+            })
+
+        # JSON/CSV 嵌入 markdown
+        json_blocks = content.count("```json") + content.count('"summary"') + content.count('"results"')
+        csv_blocks = content.count("```csv")
+        if json_blocks >= 1 or csv_blocks >= 1:
+            alerts.append({
+                "level": "warning",
+                "rule": "privacy_embedded_data",
+                "message": f"Embedded data block in {file_path}: json={json_blocks} csv={csv_blocks}",
+            })
+
+    return alerts
+
+
+def scan_files_privacy(
+    workspace_path: str,
+    file_list: list[str],
+    level: int = 2,
+    deep_scan: bool = False,
+) -> list[dict]:
+    """扫描变更文件列表的隐私风险。返回所有告警。"""
+    from pathlib import Path
+    ws = Path(workspace_path)
+    all_alerts = []
+
+    # 只检查文本文件
+    for rel_path in file_list:
+        fpath = ws / rel_path
+        if not fpath.exists():
+            continue
+        # 跳过二进制
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except (OSError, UnicodeDecodeError):
+            continue
+        # 跳过超大文件（>1MB）
+        if len(content) > 1024 * 1024:
+            continue
+        alerts = scan_privacy(rel_path, content, level=level, deep_scan=deep_scan)
+        all_alerts.extend(alerts)
+
+    return all_alerts

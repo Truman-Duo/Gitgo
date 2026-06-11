@@ -324,3 +324,42 @@ def _check_architecture_constraint(
 def _match_glob(path: str, pattern: str) -> bool:
     from fnmatch import fnmatch
     return fnmatch(path.replace("\\", "/"), pattern)
+
+
+def check_feature_signatures(
+    workspace_path: Path,
+    changed_files: list[str],
+    contract: ProjectContract,
+) -> list[dict]:
+    """检查 decided_features 的签名是否仍存在于变更文件中。
+
+    当变更文件列表包含某个 decided_feature 的 location 时，
+    验证其 signature 仍然可以被找到。签名消失 → 依赖断裂告警。
+    """
+    alerts = []
+    for feat in contract.decided_features:
+        if not feat.location or not feat.signature:
+            continue
+        if feat.location not in changed_files:
+            continue
+        fpath = workspace_path / feat.location
+        if not fpath.exists():
+            continue
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if feat.signature not in content:
+            alerts.append({
+                "rule": "feature_signature_lost",
+                "level": "error",
+                "message": (
+                    f"Dependency break: '{feat.signature}' of feature "
+                    f"'{feat.name}' not found in '{feat.location}' "
+                    f"after modification."
+                ),
+                "feature": feat.name,
+                "signature": feat.signature,
+                "location": feat.location,
+            })
+    return alerts

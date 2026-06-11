@@ -817,15 +817,21 @@ class SyncSession:
         if contract:
             changed_paths = [e.rel_path for e in selected]
             drift_alerts = detect_drift(self.workspace_path, changed_paths, contract)
-            if drift_alerts:
-                errors = [a for a in drift_alerts if a.get("level") == "error"]
-                for a in drift_alerts:
+            # 依赖签名检测
+            from backend.core.contract import check_feature_signatures
+            dep_alerts = check_feature_signatures(
+                self.workspace_path, changed_paths, contract,
+            )
+            all_alerts = drift_alerts + dep_alerts
+            if all_alerts:
+                errors = [a for a in all_alerts if a.get("level") == "error"]
+                for a in all_alerts:
                     self.on_log(f"[Gate A] {a['level'].upper()}: {a['message'][:120]}")
                 from backend.core.history import HistoryManager as _HM
                 _HM.add_operation(
                     self.project.name, "governance_drift", "warning",
-                    {"alert_count": len(drift_alerts),
-                     "rules": [a["rule"] for a in drift_alerts]},
+                    {"alert_count": len(all_alerts),
+                     "rules": [a["rule"] for a in all_alerts]},
                     correlation_id=self._correlation_id,
                 )
                 if errors:
@@ -952,6 +958,30 @@ class SyncSession:
 
         commit_refs = [f"[{fc.prefix}-{fc.number}]" for fc in targets]
         self.on_log(f"推送到远程仓库: {', '.join(commit_refs)}")
+
+        # ── Gate B: Privacy Scan ──
+        push_files = []
+        for fc in targets:
+            push_files.extend([e.rel_path for e in self.entries
+                               if e.status != "same" and e.selected])
+        if push_files:
+            from backend.core.authorship import scan_files_privacy
+            cfg = getattr(self.project, 'authorship', {}) or {}
+            privacy_cfg = cfg.get("privacy", {})
+            privacy_alerts = scan_files_privacy(
+                str(self.workspace_path),
+                list(set(push_files)),
+                level=privacy_cfg.get("level", 2),
+                deep_scan=privacy_cfg.get("deep_scan", False),
+            )
+            if privacy_alerts:
+                errors = [a for a in privacy_alerts if a.get("level") == "error"]
+                self.on_log(f"[Gate B] Privacy scan: {len(privacy_alerts)} alerts ({len(errors)} errors)")
+                for a in privacy_alerts:
+                    self.on_log(f"  [{a['rule']}] {a['message'][:100]}")
+                if errors:
+                    self.on_log("[Gate B] BLOCKED: privacy violations detected")
+                    return False, [a["message"] for a in errors]
 
         success, warnings = push_to_backup(
             self.backup_path,

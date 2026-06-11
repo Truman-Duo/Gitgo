@@ -70,6 +70,14 @@ def _match_glob(pattern: str, path: str) -> bool:
         prefix = pattern[:-3]
         return path.startswith(prefix) or fnmatch.fnmatch(path, pattern)
 
+    # 如果模式含 /，表示是一个目录前缀 → 匹配路径开头
+    if "/" in pattern:
+        if fnmatch.fnmatch(path, pattern):
+            return True
+        # 也匹配以该目录开头的所有子路径
+        normalized = path.replace("\\", "/")
+        return normalized.startswith(pattern + "/") or normalized.startswith(pattern)
+
     parts = path.split("/")
     return any(fnmatch.fnmatch(p, pattern) for p in parts) or fnmatch.fnmatch(path, pattern)
 

@@ -190,7 +190,7 @@ class ConfigManager:
 
     @staticmethod
     def default_path() -> Path:
-        """优先 exe/脚本同目录，其次用户目录"""
+        """优先 exe/脚本同目录，其次用户目录，再其次模块自身目录"""
         if getattr(sys, "frozen", False):
             base = Path(sys.executable).parent
         else:
@@ -209,6 +209,11 @@ class ConfigManager:
         user_legacy = Path.home() / ".vernier" / ConfigManager.LEGACY_CONFIG_FILE
         if user_legacy.exists():
             return user_legacy
+        # 模块自身目录（gitgo 安装目录）
+        pkg_dir = Path(__file__).parent.parent.parent
+        pkg_candidate = pkg_dir / ConfigManager.CONFIG_FILE
+        if pkg_candidate.exists():
+            return pkg_candidate
         # 都不存在 → 默认写新文件名到 exe/脚本同目录
         return candidate
 
@@ -235,6 +240,14 @@ class ConfigManager:
         # 如果加载的是旧文件名，迁移到新文件名
         if p.name == ConfigManager.LEGACY_CONFIG_FILE:
             p = p.with_name(ConfigManager.CONFIG_FILE)
+        # 保护：如果当前文件有项目但 config 对象是空的，不覆盖
+        if not config.projects and p.exists():
+            try:
+                existing = json.loads(p.read_text(encoding="utf-8"))
+                if existing.get("projects"):
+                    return p  # 保护已有项目不被空 config 覆盖
+            except (json.JSONDecodeError, OSError):
+                pass
         p.parent.mkdir(parents=True, exist_ok=True)
         data = _serialize_config(config)
         p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
