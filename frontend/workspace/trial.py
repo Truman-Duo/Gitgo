@@ -181,6 +181,7 @@ class TrialMixin:
         if index < 0 or index >= len(self.state.session.incoming_changes):
             return
         self.state._last_triage_action = action
+        self.state._last_triaged_change = index
         change = self.state.session.incoming_changes[index]
         self._log(_tr("trial.triaging", "处理: {hash} → {action}").format(hash=change.hash[:12], action=action))
         self.state.triage_worker = TriageWorker(self.state.session, index, action)
@@ -205,3 +206,25 @@ class TrialMixin:
                 else:
                     self._log(_tr("trial.promote_auto", "Promote 完成，已自动切换到 Commit Workshop"))
         self._refresh_button_states()
+
+    def _undo_last_triage(self):
+        """撤销最近一次 triage 决策，恢复 IncomingChange 为 PENDING 状态"""
+        idx = getattr(self.state, '_last_triaged_change', None)
+        if idx is None:
+            self._log(_tr("trial.no_undo", "没有可撤销的决策"))
+            return
+        changes = self.state.session.incoming_changes
+        if idx < 0 or idx >= len(changes):
+            self._log(_tr("trial.no_undo", "没有可撤销的决策"))
+            return
+        from backend.models import TrialAction
+        change = changes[idx]
+        old_action = change.triage
+        change.triage = TrialAction.PENDING
+        self.state._last_triage_action = ""
+        self.state._last_triaged_change = None
+        self._refresh_trial_boxes()
+        self._refresh_formal_boxes()
+        self._log(_tr("trial.undone",
+                      "已撤销: {action} → pending").format(
+                          action=old_action.value))

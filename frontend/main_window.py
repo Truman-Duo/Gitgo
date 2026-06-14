@@ -36,6 +36,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.workspace = None
+        self.global_lsb = None
+        self._lsb_body = None
         self._sidebar_open = True
         self._page_anim = None
 
@@ -54,7 +56,9 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
 
         # ── Toolbar ──
-        toolbar = QHBoxLayout()
+        toolbar_area = QWidget()
+        toolbar_area.setObjectName("toolbar_area")
+        toolbar = QHBoxLayout(toolbar_area)
         toolbar.setContentsMargins(10, 4, 10, 4)
         self.breadcrumb = QLabel('<span style="font-weight:500;font-size:13px">gitgo</span>')
         self.breadcrumb.setTextFormat(Qt.RichText)
@@ -65,7 +69,7 @@ class MainWindow(QMainWindow):
         self.state_pill = QLabel()
         self.state_pill.setVisible(False)
         toolbar.addWidget(self.state_pill)
-        root.addLayout(toolbar)
+        root.addWidget(toolbar_area)
 
         # ── separator ──
         sep = QFrame()
@@ -193,14 +197,15 @@ class MainWindow(QMainWindow):
 
     def _apply_theme_colors(self):
         t = get_theme()
+        self.centralWidget().setStyleSheet(f"background:{t.bg3};")
         self.log_bar.setStyleSheet(
             f"background:{t.bg2};padding:4px 12px;font-size:11px;"
             f"font-family:'Courier New',monospace;color:{t.txt2};")
         self.status_bar.setStyleSheet(
-            f"QWidget#status_bar{{background:{t.bg};border-top:.5px solid {t.bdr};"
+            f"QWidget#status_bar{{background:{t.bg2};border-top:.5px solid {t.bdr};"
             f"padding:3px 12px;font-size:11px;color:{t.txt2};}}")
         if self.workspace:
-            name = self.workspace.project.name
+            name = self.workspace.state.project.name
             self.breadcrumb.setText(
                 f'<a style="color:{t.accent};text-decoration:none" href="back">'
                 f'{_tr("bc.all_projects", "所有项目")}</a>'
@@ -277,9 +282,19 @@ class MainWindow(QMainWindow):
                     self.workspace.back_requested.disconnect(self._back_to_list)
                 except (TypeError, RuntimeError):
                     pass
-                self.stack.removeWidget(self.workspace)
+                # 先 setCurrentIndex(0) 再 remove
+                self.stack.setCurrentIndex(0)
+                if hasattr(self, '_lsb_body') and self._lsb_body:
+                    self.stack.removeWidget(self._lsb_body)
+                    self._lsb_body.hide()
+                    self._lsb_body.setParent(None)
+                    self._lsb_body = None
+                else:
+                    self.stack.removeWidget(self.workspace)
                 self.workspace.hide()
                 self.workspace.setParent(None)
+                self.workspace = None
+                self.global_lsb = None
                 _p("old workspace cleaned")
 
             t = get_theme()
@@ -293,18 +308,39 @@ class MainWindow(QMainWindow):
             self.status_bar.setVisible(True)
             self._update_status_bar(project)
 
+            # ── 创建全局 LSB ──
+            from .global_lsb import GlobalLSB
+            self.global_lsb = GlobalLSB()
+            self.global_lsb.load_workspace_tree(project)
+
             self.workspace = WorkspacePanel(self.config, project, self)
-            self._apply_theme_colors()  # after workspace creation, sets clickable breadcrumb
+            # 传递 LSB 引用给 workspace
+            self.workspace.state.global_lsb = self.global_lsb
+            self.workspace.state.global_lsb_file_tree = self.global_lsb.file_tree
+            self.workspace.state.global_lsb_diff_panel = self.global_lsb.diff_preview  # QPlainTextEdit
+            self.workspace.state.global_lsb_diff_preview = self.global_lsb.diff_preview
+
+            # ── LSB + Workspace 包裹为一个 body ──
+            body = QWidget()
+            body_row = QHBoxLayout(body)
+            body_row.setContentsMargins(0, 0, 0, 0)
+            body_row.setSpacing(0)
+            body_row.addWidget(self.global_lsb)
+            body_row.addWidget(self.workspace, 1)
+            self._lsb_body = body
+
+            self._apply_theme_colors()
             self.workspace.back_requested.connect(self._back_to_list)
-            self.stack.addWidget(self.workspace)
+            self.stack.addWidget(body)
             self.stack.setCurrentIndex(1)
-            self._animate_page(self.workspace)
+            self._animate_page(body)
             ws = self.workspace
             QTimer.singleShot(0, lambda w=ws: w and w._update_action_bar())
             print("[LOG] MainWindow._open_project: SUCCESS", file=sys.stderr, flush=True)
         except Exception:
             import traceback
             traceback.print_exc(file=sys.stderr)
+            QMessageBox.critical(None, "错误", f"无法打开项目 {project.name}:\n{traceback.format_exc()}")
             try:
                 err_log.write_text(
                     f"[open_project] Error at {_dt.datetime.now()}:\n"
@@ -326,8 +362,12 @@ class MainWindow(QMainWindow):
         _p("anim_ok")
         if self.workspace:
             ws_ref = self.workspace
+            lsb_ref = self.global_lsb if hasattr(self, 'global_lsb') else None
+            body_ref = self._lsb_body if hasattr(self, '_lsb_body') else None
             self.workspace = None
-            _p("got_ws_ref")
+            self.global_lsb = None
+            self._lsb_body = None
+            _p("got_refs")
             if hasattr(ws_ref, 'commit_scroll'):
                 try:
                     ws_ref.commit_scroll.verticalScrollBar().valueChanged.disconnect()
@@ -336,11 +376,20 @@ class MainWindow(QMainWindow):
             _p("signals_disconnected")
             self.stack.setCurrentIndex(0)
             _p("setCurrentIndex_0")
-            self.stack.removeWidget(ws_ref)
-            _p("removeWidget_ok")
+            # 先移除 body，再清理子 widget
+            if body_ref:
+                self.stack.removeWidget(body_ref)
+                _p("removeWidget_body_ok")
+                body_ref.hide()
+                body_ref.setParent(None)
+                _p("body_unparented")
             ws_ref.hide()
             ws_ref.setParent(None)
-            _p("hidden_unparented")
+            _p("ws_unparented")
+            if lsb_ref:
+                lsb_ref.hide()
+                lsb_ref.setParent(None)
+                _p("lsb_unparented")
         try:
             t = get_theme()
             self.breadcrumb.setText(

@@ -55,6 +55,7 @@ class IncomingTabMixin:
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(4)
         w = QWidget()
+        w.setObjectName("incoming_tab_bg")
         lo = QHBoxLayout(w)
         lo.setContentsMargins(0, 0, 0, 0)
         lo.setSpacing(0)

@@ -31,9 +31,7 @@ class RemotesMixin:
             dot_color = "#c98b2a" if is_trial else "#3b6d11"
 
             card = QFrame()
-            card.setStyleSheet(
-                f"QFrame{{background:{t.bg};border:.5px solid {t.bdr};"
-                f"border-radius:8px;}}")
+            card.setObjectName("remotes_card")
             cl = QVBoxLayout(card)
             cl.setContentsMargins(0, 0, 0, 0)
             cl.setSpacing(0)

@@ -1,66 +1,66 @@
-"""Contrast Light — 2026-05-13 确认基准主题
+"""Saturated Bold Light — 2026-06-11
 
 核心原则：
-- 两个 UI 区域需看起来不同 → 至少 8 L* 点差距或明显色相偏移
-- 白色内容区 vs 蓝灰镶边：9 L* 点差距
-- 边框可见：bdr 比 bg 深 16 点，bdr2 深 35 点
-- 语义色使用 Tailwind 100 级别，明显可识别
+- 基底暖杏色系，有色彩感不灰暗
+- 语义背景色全部提到 300 级，真正看得出颜色
+- 边框加深，元素边界锐利
+- 文本纯黑灰高对比
 """
 
 LIGHT_COLORS = {
-    # ── 基底 ──
-    "bg": "#ffffff",          # L* 100 — 纯白内容区
-    "bg2": "#e2e8f0",         # L* 91  — 蓝灰镶边（action bar, sidebar, log bar）
-    "bg3": "#cbd5e1",         # L* 84  — 深蓝灰（pressed, merged, disabled）
+    # ── 基底（暖杏色系，层间色差 >= 10 L* 点）──
+    "bg": "#ffffff",          # 纯白内容区
+    "bg2": "#e8ddd0",         # 暖杏色（action bar, sidebar, toolbar）
+    "bg3": "#d9cbbb",         # 深杏色（pressed, merged, 最外层框架）
+    "bg_input": "#ffffff",    # 输入框纯白
 
-    # ── 文本 ──
-    "txt": "#0f172a",         # L* 9   — 近乎黑主文本
-    "txt2": "#475569",        # L* 36  — 深灰蓝次要文本
-    "txt3": "#64748b",        # L* 48  — 中灰三级文本
+    # ── 文本（纯黑灰）──
+    "txt": "#0f172a",         # 主文字，接近纯黑
+    "txt2": "#334155",        # 次要文字
+    "txt3": "#475569",        # 三级文字
 
-    # ── 边框 ──
-    "bdr": "#cbd5e1",         # L* 84  — 卡片边框、面板接缝（= bg3）
-    "bdr2": "#94a3b8",        # L* 65  — 输入框轮廓、悬停边框
+    # ── 边框（深色可见）──
+    "bdr": "#ccc0b0",         # 卡片边框（比 bg3 深，边界可见）
+    "bdr2": "#a0988c",        # 输入框/悬停边框，深灰褐
 
     # ── 强调 ──
-    "accent": "#2563eb",
-    "bg_input": "#ffffff",
+    "accent": "#2563eb",      # blue-600
 
     # ── 别名（共享色值）──
-    "sidebar_bg": "#e2e8f0",   # = bg2
-    "sidebar_bdr": "#cbd5e1",  # = bg3
-    "btn_bg": "#f1f5f9",
-    "btn_bdr": "#cbd5e1",      # = bdr
+    "sidebar_bg": "#e8ddd0",   # = bg2
+    "sidebar_bdr": "#ccc0b0",  # = bdr
+    "btn_bg": "#e8ddd0",       # = bg2
+    "btn_bdr": "#a0988c",      # = bdr2
 
-    # ── 蓝色系 ──
-    "blue_bg": "#dbeafe",      # blue-100
-    "blue": "#2563eb",         # = accent
-    "blue_txt": "#1d4ed8",
-    "blue_bdr": "#93bbfd",
+    # ── 蓝色系（300 级背景，一眼看得出是蓝色）──
+    "blue_bg": "#93c5fd",      # blue-300
+    "blue": "#2563eb",         # blue-600
+    "blue_txt": "#1e40af",     # blue-800
+    "blue_bdr": "#60a5fa",     # blue-400
 
-    # ── 绿色系 ──
-    "success_bg": "#dcfce7",   # green-100
-    "success": "#16a34a",
-    "success_txt": "#15803d",
+    # ── 绿色系（300 级背景，鲜绿色）──
+    "success_bg": "#86efac",   # green-300
+    "success": "#16a34a",      # green-600
+    "success_txt": "#14532d",  # green-900
 
-    # ── 红色系 ──
-    "danger_bg": "#fee2e2",    # red-100
-    "danger": "#ef4444",
-    "danger_txt": "#b91c1c",
+    # ── 红色系（300 级背景，明显的红色）──
+    "danger_bg": "#fca5a5",    # red-300
+    "danger": "#dc2626",       # red-600
+    "danger_txt": "#7f1d1d",   # red-900
 
-    # ── 青绿系（release 节点）──
-    "teal": "#0d9488",
-    "teal_bg": "#ccfbf1",      # teal-100
-    "teal_txt": "#0f766e",
+    # ── 青绿系（release 节点，300 级背景）──
+    "teal": "#0d9488",         # teal-600
+    "teal_bg": "#5eead4",      # teal-300
+    "teal_txt": "#134e4a",     # teal-900
 
-    # ── 琥珀系（trial 节点）──
-    "amber": "#f59e0b",
-    "amber_bg": "#fef3c7",     # amber-100
-    "amber_txt": "#92400e",
+    # ── 琥珀系（trial 节点，300 级背景）──
+    "amber": "#d97706",        # amber-600
+    "amber_bg": "#fcd34d",     # amber-300
+    "amber_txt": "#78350f",    # amber-900
 
     # ── 药丸（pill）──
-    "pill_idle_bg": "#dcfce7",  # = success_bg
-    "pill_idle_fg": "#15803d",  # = success_txt
-    "pill_busy_bg": "#dbeafe",  # = blue_bg
-    "pill_busy_fg": "#1d4ed8",  # = blue_txt
+    "pill_idle_bg": "#86efac",  # = success_bg
+    "pill_idle_fg": "#14532d",  # = success_txt
+    "pill_busy_bg": "#93c5fd",  # = blue_bg
+    "pill_busy_fg": "#1e40af",  # = blue_txt
 }

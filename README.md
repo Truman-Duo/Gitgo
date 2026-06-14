@@ -52,8 +52,8 @@ Gitgo 的强制力模型依赖于一个前提：**Agent 的所有输出最终必
     'nodeBorder':          '#6B7280'
   },
   'flowchart': {
-    'curve': 'basis',      // 使用平滑曲线替代折线，让连线更自然
-    'padding': 15,         // 增加节点间距，减少连线拥挤
+    'curve': 'basis',
+    'padding': 15,
     'nodeSpacing': 50,
     'rankSpacing': 80
   }

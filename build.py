@@ -47,7 +47,7 @@ _HIDDEN_IMPORTS = [
     "backend.core", "backend.core.config", "backend.core.sync_session",
     "backend.core.i18n", "backend.core.history", "backend.core.plugin",
     "backend.core.plugin_loader", "backend.core.migrate",
-    "backend.core.operations", "backend.core.daemon",
+    "backend.core.operations", "backend.core.scanner", "backend.core.daemon",
     "backend.models",
     "backend.adapters.file_adapter", "backend.adapters.git_runner",
     "backend.adapters.local_file_adapter", "backend.adapters.local_git_runner",
@@ -55,7 +55,8 @@ _HIDDEN_IMPORTS = [
     "backend.adapters.factory",
     "backend.remote",
     "cli", "cli.commands",
-    "frontend", "frontend.gui_main",
+    "frontend", "frontend.gui_main", "frontend.lesson_dialog",
+    "frontend.global_lsb",
     "cui", "cui.main",
     "httpx",
     "paramiko",
@@ -236,12 +237,12 @@ def main():
         if is_debug:
             _clean_build_dirs(build_dir, ["gitgo_core", "gitgo_debug"])
         else:
-            _clean_build_dirs(build_dir, ["gitgo"])
+            _clean_build_dirs(build_dir, ["gitgo", "gitgo_core"])
     # 始终清理目标 exe（PyInstaller 覆盖写入有时不刷新时间戳）
     if is_debug:
         _clean_old_exes(dist_dir, ["gitgo_debug", "gitgo_core"])
     else:
-        _clean_old_exes(dist_dir, ["gitgo"])
+        _clean_old_exes(dist_dir, ["gitgo", "gitgo_core"])
 
     # ── Step 3: 构建 ────────────────────────────────────────────────
     if is_debug:
@@ -292,6 +293,11 @@ def main():
             print("\n=== Build FAILED ===")
             sys.exit(1)
     else:
+        core = _build_exe(
+            script_dir, dist_dir, build_dir / "gitgo_core",
+            "gitgo_core", script_dir / "__main__.py",
+            noconsole=False, fast=is_fast, jobs=jobs,
+        )
         exe = _build_exe(
             script_dir, dist_dir, build_dir / "gitgo",
             "gitgo", script_dir / "__main__.py",
@@ -302,6 +308,8 @@ def main():
             print(f"\n{'='*50}")
             print(f"  [OK] Release build complete ({t1 - t0:.1f}s)")
             print(f"  {exe} ({exe.stat().st_size/1024/1024:.1f} MB)")
+            if core:
+                print(f"  Core: {core} ({core.stat().st_size/1024/1024:.1f} MB)")
             print(f"{'='*50}")
         else:
             print("\n=== Build FAILED ===")

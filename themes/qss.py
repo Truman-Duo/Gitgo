@@ -5,8 +5,12 @@ def build_qss(t) -> str:
     """根据 ThemeColors 实例生成完整 QSS 字符串"""
     return f"""
 /* ── Root ───────────────────────────────────────────── */
-QMainWindow, QWidget {{ background-color: {t.bg}; color: {t.txt}; }}
+QMainWindow {{ background-color: {t.bg3}; }}
 QStackedWidget#content_area {{ background-color: {t.bg}; }}
+QScrollArea {{ background-color: transparent; }}
+
+/* ── Toolbar ────────────────────────────────────────── */
+QWidget#toolbar_area {{ background-color: {t.bg2}; }}
 
 /* ── Buttons: base = ghost ──────────────────────────── */
 QPushButton {{
@@ -271,5 +275,22 @@ QLabel#trial_detail_meta {{
 }}
 QLabel#trial_detail_title {{
     font-size: 13px; font-weight: 500;
+}}
+
+/* ── Governance cards ──────────────────────────────── */
+QWidget#governance_container {{
+    background-color: {t.bg2};
+}}
+
+/* ── Remotes cards ─────────────────────────────────── */
+QFrame#remotes_card {{
+    background: {t.bg};
+    border: 0.5px solid {t.bdr2};
+    border-radius: 8px;
+}}
+
+/* ── Incoming left panel ───────────────────────────── */
+QWidget#incoming_tab_bg {{
+    background-color: {t.bg2};
 }}
 """

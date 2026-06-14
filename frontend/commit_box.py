@@ -19,7 +19,7 @@ class WorkspaceCommitBox(QFrame):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(64)
+        self.setMinimumHeight(80)
 
         lo = QVBoxLayout(self)
         lo.setContentsMargins(10, 6, 28, 6)
@@ -32,7 +32,6 @@ class WorkspaceCommitBox(QFrame):
         self.summary_lbl = QLabel(summary)
         self.summary_lbl.setObjectName("ws_summary")
         self.summary_lbl.setWordWrap(True)
-        self.summary_lbl.setMaximumHeight(48)
         lo.addWidget(self.summary_lbl)
 
         self.meta_lbl = QLabel(meta)

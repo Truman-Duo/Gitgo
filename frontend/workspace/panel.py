@@ -51,6 +51,7 @@ class WorkspacePanel(BuilderMixin, CommitMixin, SyncPushMixin, TrialMixin, Remot
         self._init_ui()
         self._update_node_status(s.project)
         self._auto_load_file_tree()
+        QTimer.singleShot(100, self._start_scan)
         self._setup_shortcuts()
 
     # ── 信号映射表（集中文档，便于追踪）─────────────────────
