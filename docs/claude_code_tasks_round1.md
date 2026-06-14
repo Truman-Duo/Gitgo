@@ -165,7 +165,7 @@ locales/en.json：
 
 ```
 frontend/workspace/workshop_tab.py       — _build_workshop_bottom_row()
-backend/core/template_manager.py         — TemplateManager.list_templates()
+backend/core/template_manager.py         — TemplateManager.load()
 frontend/workspace/commits.py            — _merge_selected() 调用 build_commit_template()
 ```
 
@@ -181,8 +181,8 @@ frontend/workspace/commits.py            — _merge_selected() 调用 build_comm
         tmpl_label.setStyleSheet(f"font-size:11px;color:{get_theme().txt3};")
         lo.addWidget(tmpl_label)
         self.state.template_combo = QComboBox()
-        templates = TemplateManager.list_templates()
-        self.state.template_combo.addItems(templates)
+        templates = TemplateManager.load()
+        self.state.template_combo.addItems([t.name for t in templates])
         current = self.state.project.commit_format.get("template_name", "default")
         if current in templates:
             self.state.template_combo.setCurrentText(current)

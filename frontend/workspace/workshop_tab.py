@@ -146,10 +146,11 @@ class WorkshopTabMixin:
         tmpl_label.setStyleSheet(f"font-size:11px;color:{get_theme().txt3};")
         lo.addWidget(tmpl_label)
         self.state.template_combo = QComboBox()
-        templates = TemplateManager.list_templates()
-        self.state.template_combo.addItems(templates)
+        templates = TemplateManager.load()
+        template_names = [t.name for t in templates]
+        self.state.template_combo.addItems(template_names)
         current = self.state.project.commit_format.get("template_name", "default")
-        if current in templates:
+        if current in template_names:
             self.state.template_combo.setCurrentText(current)
         self.state.template_combo.setToolTip(
             _tr("action.template_tt", "选择 commit message 模板"))

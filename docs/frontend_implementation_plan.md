@@ -78,7 +78,7 @@ workshop_tab.py — _build_workshop_bottom_row():
   在 Authorship checkbox 旁插入：
   ├── QLabel("Template:")
   └── QComboBox()
-      ├── 填充: TemplateManager.list_templates()
+      ├── 填充: TemplateManager.load()
       ├── 默认选中: project.commit_format.template_name
       └── currentTextChanged → 更新 project.commit_format.template_name
 

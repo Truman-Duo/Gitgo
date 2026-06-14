@@ -675,7 +675,7 @@
     <div class="label">DESIGN NOTES &mdash; Phase 1</div>
     <strong>1. Commit Box Fix:</strong> Long messages like <code>e104b9d</code> now wrap naturally instead of being clipped at 48px. Remove <code>setMaximumHeight(48)</code>, use <code>setWordWrap(True)</code>.<br>
     <strong>2. Authorship Toggle:</strong> New checkbox in push bar, backed by <code>PanelState.strip_authorship: bool</code>. Producer: AuthorshipMixin, Consumer: SyncPushMixin.<br>
-    <strong>3. Template Selector:</strong> Exposes <code>commit_format.template_name</code> to GUI. Reads available templates from <code>TemplateManager.list_templates()</code>.
+    <strong>3. Template Selector:</strong> Exposes <code>commit_format.template_name</code> to GUI. Reads available templates from <code>TemplateManager.load()</code>.
   </div>
 </div>
 
