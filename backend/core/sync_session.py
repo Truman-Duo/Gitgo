@@ -598,9 +598,17 @@ class SyncSession:
             if fc.number > max_n:
                 max_n = fc.number
         repo_max = _find_next_number(
-            self.project.backup_path, prefix, git_runner=self.bk_git_runner,
+            self.project.backup_path, prefix,
+            git_runner=self.bk_git_runner,
+            workspace_path=self.workspace_path,
         )
         next_n = max(max_n, repo_max)
+
+        # Update local counter
+        if self.workspace_path:
+            counter_file = Path(self.workspace_path) / ".gitgo" / "next_number"
+            counter_file.parent.mkdir(parents=True, exist_ok=True)
+            counter_file.write_text(str(next_n))
 
         fc = FormalCommit(
             message=message,
@@ -804,6 +812,27 @@ class SyncSession:
         if not selected:
             self.on_log("未选择任何文件")
             return False
+
+        # ── 外来 commit 检测 ──
+        if self.backup_path and self.bk_git_runner.is_git_repo():
+            current_head = self.bk_git_runner.rev_parse("HEAD")
+            if current_head:
+                release_node = self.project.release
+                recorded = release_node.last_known_head if release_node else ""
+                if recorded and current_head != recorded:
+                    self.on_log(
+                        f"[WARN] Release repo 有外来 commit\n"
+                        f"  recorded: {recorded[:12]}\n"
+                        f"  current:  {current_head[:12]}"
+                    )
+                    HistoryManager.add_operation(
+                        self.project.name, "integrity_warning", "warning",
+                        {"rule": "foreign_commit_detected",
+                         "recorded_head": recorded,
+                         "current_head": current_head},
+                        correlation_id=self._correlation_id,
+                    )
+
         if not self.backup_path:
             self.on_log("未配置备份路径")
             return False

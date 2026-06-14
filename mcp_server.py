@@ -77,6 +77,27 @@ def gitgo_list_projects() -> list[dict]:
 
 
 @mcp.tool(
+    description="轻量级项目概览。不触发完整 SHA256 扫描，适合 Dashboard 快速检查。"
+)
+def gitgo_overview(project: str) -> dict:
+    cfg, proj = _get_project(project)
+    if proj is None:
+        return {"error": "PROJECT_NOT_FOUND", "project": project}
+    from backend.core.sync_session import SyncSession
+    from backend.core.state_reader import StateReader
+    session = SyncSession(proj, cfg)
+    session.step_load_commits()
+    session.step_check_trial()
+    ws = proj.workspace.file_access.path if proj.workspace else ""
+    fcs = StateReader.get_formal_commits(project, workspace_path=ws) if ws else []
+    return {
+        "project": project,
+        "status": session.status_dict(semantic=True),
+        "formal_commits": fcs,
+    }
+
+
+@mcp.tool(
     description="获取项目完整状态，包含语义分析。layered=True 时使用三层显式结构（operational/governance/semantic）。"
 )
 def gitgo_status(project: str, layered: bool = False) -> dict:
@@ -607,6 +628,23 @@ def gitgo_history(
         entries = [e for e in entries if e.operation == op]
     entries = entries[-limit:]
     return [asdict(e) for e in entries]
+
+
+@mcp.tool(
+    description="获取项目最近的治理事件流（policy check / drift / snapshot / rejection / lesson），适合 Dashboard 实时展示。"
+)
+def gitgo_governance_feed(project: str, limit: int = 20) -> list[dict]:
+    from backend.core.history import HistoryManager
+    from dataclasses import asdict
+    entries = HistoryManager.load()
+    gov_types = {
+        "policy_check_result", "governance_drift", "governance_lesson",
+        "workspace_state_snapshot", "rejection", "integrity_warning",
+        "governance_synced", "governance_pushed", "governance_dissolved",
+    }
+    filtered = [e for e in entries
+                if e.project_name == project and e.operation in gov_types]
+    return [asdict(e) for e in filtered[-limit:]]
 
 
 @mcp.tool(

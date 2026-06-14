@@ -17,6 +17,8 @@ import queue
 import signal
 import sys
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +63,175 @@ def _release_pid_file(project: ProjectConfig) -> None:
         pid_path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+# ── Policy Engine helpers ──────────────────────────────────
+
+def _check_lesson_triggers(session: SyncSession) -> list[dict]:
+    """读所有 lesson，匹配当前 workspace 变更文件的 trigger。"""
+    from backend.core.knowledge.lesson import LessonManager
+    import re
+
+    matched = []
+    ws = session.workspace_path
+
+    changed_files = [e.rel_path for e in session.entries if e.status != "same"]
+    changed_content = ""
+    for e in session.entries:
+        if e.status != "same":
+            try:
+                content = (Path(ws) / e.rel_path).read_text(encoding="utf-8", errors="ignore")
+                changed_content += content[:2000]
+            except OSError:
+                pass
+
+    lessons = LessonManager.load_abstract(Path(ws))
+    if session.project.name:
+        lessons += LessonManager.load_instance(Path(ws), session.project.name)
+        lessons += LessonManager.load_pending(Path(ws), session.project.name)
+
+    for lesson in lessons:
+        trigger = getattr(lesson, 'trigger', '')
+        if not trigger:
+            continue
+        matched_trigger = False
+        check = getattr(lesson, 'check', None)
+
+        if check and isinstance(check, dict) and check.get("pattern"):
+            if re.search(check["pattern"], changed_content):
+                matched_trigger = True
+        else:
+            for f in changed_files:
+                if trigger.lower() in f.lower():
+                    matched_trigger = True
+                    break
+            if not matched_trigger and trigger.lower() in changed_content.lower():
+                matched_trigger = True
+
+        if matched_trigger:
+            matched.append({
+                "lesson_id": getattr(lesson, 'id', ''),
+                "trigger": trigger,
+                "rule": getattr(lesson, 'rule', ''),
+                "severity": getattr(lesson, 'severity', 'medium'),
+                "category": getattr(lesson, 'category', ''),
+                "has_check": bool(check and check.get("pattern")),
+            })
+
+    return matched
+
+
+def _check_contract_drift(session: SyncSession) -> list[dict]:
+    """对比当前变更与 contract，检测漂移。"""
+    from backend.core.contract import ContractManager, detect_drift
+
+    contract = ContractManager.load(Path(session.workspace_path))
+    if not contract:
+        return []
+    changed = [e.rel_path for e in session.entries if e.status != "same"]
+    alerts = detect_drift(Path(session.workspace_path), changed, contract)
+    if alerts:
+        return [{"rule": d.get("rule", "contract"), "message": d.get("message", ""),
+                 "alert_count": len(alerts)} for d in alerts]
+    return []
+
+
+def _check_identity(session: SyncSession, project: ProjectConfig) -> list[dict]:
+    """检查身份文件是否被误删/覆盖。"""
+    from backend.core.identity import _run_integrity_checks
+    return _run_integrity_checks(session.entries, session.workspace_path, project)
+
+
+def _build_policy_message(results: dict) -> str:
+    """构建给 agent 看的修正需求消息。"""
+    parts = []
+    for l in results.get("matched_lessons", []):
+        parts.append(f"[{l['severity']}] lesson[{l['lesson_id']}]: {l['rule']}")
+    for d in results.get("drift_warnings", []):
+        parts.append(f"[warning] contract drift: {d['message']}")
+    for i in results.get("integrity_warnings", []):
+        parts.append(f"[{i.get('level','warning')}] integrity: {i.get('message','')}")
+    if parts:
+        return "本轮变更匹配到以下治理规则，请先修正：\n" + "\n".join(parts)
+    return ""
+
+
+def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[str] | None:
+    """每轮结束时在 workspace 做 git commit 快照。"""
+    import subprocess
+
+    ws = str(session.workspace_path)
+    changed = [e.rel_path for e in session.entries if e.status != "same"]
+
+    try:
+        creationflags = 0x08000000 if sys.platform == "win32" else 0
+        subprocess.run(["git", "add", "-A"], cwd=ws,
+                       capture_output=True, text=True,
+                       creationflags=creationflags, timeout=30)
+
+        msg = f"gitgo: round snapshot [{datetime.now().strftime('%H:%M:%S')}]\n\n"
+        msg += f"变更文件: {len(changed)}\n"
+        if changed:
+            msg += "\n".join(f"  {f}" for f in changed[:20])
+            if len(changed) > 20:
+                msg += f"\n  ... 还有 {len(changed) - 20} 个文件"
+
+        result = subprocess.run(["git", "commit", "-m", msg], cwd=ws,
+                                capture_output=True, text=True,
+                                creationflags=creationflags, timeout=30)
+
+        if result.returncode == 0:
+            from backend.core.history import HistoryManager
+            HistoryManager.add_operation(
+                project.name, "workspace_state_snapshot", "success",
+                {"files_changed": changed,
+                 "round_time": datetime.now().isoformat()},
+                correlation_id=session._correlation_id,
+            )
+            _emit({"event": "workspace_snapshot", "files": len(changed)})
+            return changed
+        return []  # no changes to commit
+    except (subprocess.SubprocessError, OSError) as e:
+        _emit({"event": "snapshot_error", "error": str(e)})
+        return None
+
+
+def _harvest_from_rejection_chain(
+    project_name: str, rejections: list, session: SyncSession
+) -> None:
+    """从连续 rejection 中提取 pending lesson。"""
+    from backend.core.knowledge.lesson import LessonManager
+    from backend.core.knowledge.models import Lesson
+    from backend.core.history import HistoryManager
+
+    recent_3 = rejections[-3:]
+    reasons = []
+    for r in recent_3:
+        d = r.detail if isinstance(r.detail, dict) else {}
+        reasons.append(d.get("reason", ""))
+
+    last_detail = recent_3[-1].detail if isinstance(recent_3[-1].detail, dict) else {}
+    final_rule = last_detail.get("instruction", "")
+
+    lesson = Lesson(
+        tech_stack="",
+        category="process",
+        severity="high",
+        trigger=f"连续 3 次被人否定: {'; '.join(reasons[-2:])}",
+        rule=final_rule or "人连续纠正了多次方向性错误，最终方案需要被记录。",
+    )
+    lesson.id = f"rejection_{project_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    ws = Path(session.workspace_path)
+    LessonManager.save_pending(ws, lesson)
+
+    HistoryManager.add_operation(
+        project_name, "governance_lesson", "success",
+        {"harvested_count": 1, "lesson_id": lesson.id, "trigger": "rejection_chain"},
+        correlation_id=session._correlation_id,
+    )
+    _emit({"event": "lesson_harvested", "lesson_id": lesson.id,
+           "trigger": "rejection_chain"})
 
 
 def run_daemon(
@@ -149,22 +320,48 @@ def run_daemon(
             event_type = ev.get("event", "")
 
             if event_type == "workspace_dirty":
+                # ── Debounce: skip if too soon after last check ──
+                now = time.time()
+                last_check = getattr(run_daemon, '_last_policy_check', 0.0)
+                if now - last_check < debounce_sec:
+                    continue
+                run_daemon._last_policy_check = now
                 _emit({"event": "workspace_dirty", "project": project.name})
                 _emit({"event": "operation_started", "op": "scan"})
                 try:
                     session.step_scan()
                     session.step_load_commits()
 
-                    # ── Policy Engine 自动运行 ──
-                    from backend.core.identity import _run_integrity_checks
-                    from backend.core.contract import ContractManager, detect_drift
+                    # ── Policy Engine 三步检查 ──
                     from backend.core.history import HistoryManager
 
-                    warnings = _run_integrity_checks(
-                        session.entries, session.workspace_path, project,
-                    )
-                    gov_warnings = len(warnings)
-                    for w in warnings:
+                    matched_lessons = _check_lesson_triggers(session)
+                    drift = _check_contract_drift(session)
+                    identity = _check_identity(session, project)
+
+                    gov_warnings = len(matched_lessons) + len(drift) + len(identity)
+
+                    for l in matched_lessons:
+                        _emit({
+                            "event": "lesson_matched",
+                            "lesson_id": l["lesson_id"],
+                            "severity": l["severity"],
+                            "rule": l["rule"],
+                        })
+                    for d in drift:
+                        _emit({
+                            "event": "governance_drift",
+                            "rule": d.get("rule", "contract"),
+                            "level": "warning",
+                            "message": d.get("message", ""),
+                        })
+                        HistoryManager.add_operation(
+                            project.name, "governance_drift", "warning",
+                            {"rule": d.get("rule", "contract"),
+                             "message": d.get("message", "")},
+                            correlation_id=session._correlation_id,
+                        )
+                    for w in identity:
                         _emit({
                             "event": "governance_drift",
                             "rule": w.get("rule", "integrity"),
@@ -179,28 +376,21 @@ def run_daemon(
                             correlation_id=session._correlation_id,
                         )
 
-                    contract = ContractManager.load(session.workspace_path)
-                    if contract:
-                        changed = [e.rel_path for e in session.entries
-                                   if e.status != "same"]
-                        drift_alerts = detect_drift(
-                            session.workspace_path, changed, contract,
-                        )
-                        gov_warnings += len(drift_alerts)
-                        for d in drift_alerts:
-                            _emit({
-                                "event": "governance_drift",
-                                "rule": d.get("rule", "contract"),
-                                "level": d.get("level", "warning"),
-                                "message": d.get("message", ""),
-                            })
-                            HistoryManager.add_operation(
-                                project.name, "governance_drift",
-                                d.get("level", "warning"),
-                                {"rule": d.get("rule", "contract"),
-                                 "message": d.get("message", "")},
-                                correlation_id=session._correlation_id,
-                            )
+                    policy = {
+                        "matched_lessons": matched_lessons,
+                        "drift_warnings": drift,
+                        "integrity_warnings": identity,
+                    }
+                    HistoryManager.add_operation(
+                        project.name, "policy_check_result",
+                        "warning" if gov_warnings else "success",
+                        policy,
+                        correlation_id=session._correlation_id,
+                    )
+                    msg = _build_policy_message(policy)
+                    if msg:
+                        _emit({"event": "policy_results",
+                               "governance_warnings": gov_warnings, "message": msg})
 
                     _emit({
                         "event": "operation_complete", "op": "scan",
@@ -339,6 +529,42 @@ def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
             loaded = SyncSession.load_session(project, ConfigManager.load())
             _emit({"event": "command_result", "cmd": "session",
                    "result": {"resumed": loaded is not None}})
+
+    elif cmd_name == "round_complete":
+        changed = _snapshot_workspace(session, project)
+        _emit({"event": "command_result", "cmd": "round_complete",
+               "result": {"snapshot": changed is not None,
+                          "files": len(changed) if changed else 0}})
+
+    elif cmd_name == "reject":
+        reason = cmd.get("reason", "")
+        instruction = cmd.get("instruction", "")
+        from backend.core.history import HistoryManager
+        HistoryManager.add_operation(
+            project.name, "rejection", "recorded",
+            {"round": cmd.get("round", 0),
+             "reason": reason,
+             "instruction": instruction,
+             "timestamp": datetime.now().isoformat()},
+            correlation_id=session._correlation_id,
+        )
+        entries = HistoryManager.load()
+        project_entries = [e for e in entries if e.project_name == project.name]
+        rejections = [e for e in project_entries if e.operation == "rejection"]
+        if len(rejections) >= 3:
+            recent = project_entries[-20:]
+            last_rej_idx = max(
+                (i for i, e in enumerate(recent) if e.operation == "rejection"),
+                default=-1,
+            )
+            if last_rej_idx >= 0:
+                post_rej = [e for i, e in enumerate(recent) if i > last_rej_idx
+                            and e.operation == "policy_check_result"
+                            and e.status == "success"]
+                if post_rej:
+                    _harvest_from_rejection_chain(project.name, rejections, session)
+        _emit({"event": "command_result", "cmd": "reject",
+               "result": {"rejection_count": len(rejections)}})
 
     else:
         _emit({"event": "command_result", "cmd": cmd_name,

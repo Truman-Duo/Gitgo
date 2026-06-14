@@ -1,133 +1,194 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
 
-## 工作流背景
+## 项目定位
 
-我的开发工作流有两个目录：
+gitgo 是一个**项目治理操作系统**。它的核心不是 git 管理，而是围绕开发工作区的实时治理循环——监测变更、匹配规则、拦截错误、记录决策、编译发布。
 
-- **Workspace（工程版）** — 本地开发目录，放着很多项目。每个项目有自己的 git 仓库做本地版本管理，**从不 push**
-- **Backup repo（正式版）** — 另一个文件夹，每个项目对应一个正式仓库，是真正会 commit 并 push 到 GitHub 的
+## 架构
 
-gitgo 的作用：当 workspace 里的项目开发到"差不多了"的时候，把它同步到 backup repo，生成一个规范的正式 commit，后续手动 push 到 GitHub。
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       gitgo 治理层                           │
+│  Daemon + Policy Engine + Gate A/B + Lesson + Contract      │
+│  HistoryManager (StateLog) ←── 治理事件中枢                  │
+└──────────────┬──────────────┬──────────────┬────────────────┘
+               │              │              │
+          workspace/     release/        trial/
+       (Agent 编辑区)  (正式仓库+GitHub) (外部试验/PR)
+               │              │              │
+               │   sync/push  │   accept/    │
+               │◄────────────►│◄──promote───►│
+               │              │   discard    │
+               ▼              ▼              ▼
+          Dashboard CLI ─── MCP Server ─── State Reader
+```
+
+**三角色模型**：
+
+| 角色 | 代号 | 说明 |
+|---|---|---|
+| Workspace | w | Agent 本地开发目录，有 git 但从不 push。Daemon 持续监控。 |
+| Release | r | 正式仓库，推送到 GitHub。Gate A/B 在此生效。 |
+| Trial | t | 外部试验仓库（他人 PR、接手开发）。三叉决策：accept（入 release）/ promote（入 workspace）/ discard（忽略）。 |
+
+**Trial 三叉决策**（`step_triage_incoming`）：
+- **accept** → cherry-pick 到 release，生成正式 commit
+- **promote** → git fetch 到 workspace，创建 `incoming/*` 分支继续开发
+- **discard** → 标记已读，下次不提示
+
+Trial 目前功能完备（poller 轮询 + triage 三叉 + MCP tools），但尚未在 Dashboard 中展示 Trial 状态（P2 待做）。
+
+### 治理介入点
+
+**Daemon 实时（v0.29）**：Agent 改文件 → watchdog 检测 → Policy Engine 三步检查（lesson trigger 匹配 + contract drift + identity integrity）→ 写入 `policy_check_result` → Agent 查 Dashboard 或调 MCP 获取反馈。
+
+**Sync 事后（v0.27 及之前）**：人触发 sync → step_scan → step_sync（Gate A：drift + integrity）→ step_push（Gate B：privacy）→ lesson harvest。这是旧流程，v0.29 后作为最后防线保留。
+
+### Module layout
+
+| Module | Lines | Responsibility |
+|---|---|---|
+| `mcp_server.py` | ~900 | MCP Server：42+2 tools，stdin/stdout JSON-RPC |
+| `backend/core/sync_session.py` | ~1200 | 状态机：scan→formalize→sync→push + Gate A/B |
+| `backend/core/daemon/__init__.py` | ~500 | Daemon 主循环 + Policy Engine + snapshot + rejection |
+| `backend/core/history.py` | ~130 | HistoryManager：append-only event log（StateLog 存储层）|
+| `backend/core/contract.py` | ~200 | ContractManager：feature 合约 + drift 检测 |
+| `backend/core/knowledge/` | ~750 | Lesson 系统：harvest（4模式）+ manager + models |
+| `backend/core/config.py` | ~200 | Config + ProjectConfig + ConfigManager |
+| `backend/core/operations/git.py` | ~200 | `_find_next_number` + formal commit 构建 |
+| `backend/core/operations/scan.py` | ~200 | 文件扫描 + SHA256 对比 |
+| `backend/core/operations/utils.py` | ~100 | glob 匹配 + 排除规则 |
+| `backend/core/authorship.py` | ~120 | AI 痕迹清洗 + 隐私扫描 |
+| `backend/core/identity/` | ~200 | Identity Guard：完整性检测 + memory snapshot |
+| `backend/core/governance/` | ~500 | 质量度量 + 模式检测 + 语义变更图 + 发布推理 |
+| `backend/core/state_reader.py` | ~100 | StateReader：统一查询接口 |
+| `backend/core/template_manager.py` | ~200 | Commit 模板系统 |
+| `backend/adapters/` | ~300 | GitRunner + FileAdapter（Local/SSH/SMB）|
+| `backend/models/` | ~100 | RepoNode + FileAccess + SyncStatus |
+| `backend/remote/` | ~400 | GitHub/GitLab API 连接器 |
+| `cli/` | ~1400 | CLI 命令矩阵（commands + commands_ext）|
+| `frontend/` | ~7000 | PySide6 Qt GUI（搁置）|
+| `themes/` | ~200 | QSS 主题系统 |
+| `gitgo-dashboard/` | 独立项目 | TypeScript + Bun + Ink CLI Dashboard |
 
 ## Commands
 
 ```bash
-# GUI 模式（默认）
-python -m gitgo
+# MCP Server（CC 连接用）
+python mcp_server.py
 
-# 终端 CUI 模式
-python -m gitgo --mode cui
+# 一键同步（scan → formalize → sync → push）
+python -m gitgo --mode sync --project <name>
 
-# 配置管理
-python -m gitgo --mode config
+# 状态查看
+python -m gitgo --mode status --project <name>
 
-# 安装依赖
-pip install -r requirements.txt
+# CLI Dashboard（独立项目）
+cd ../gitgo-dashboard && bun run src/main.tsx
 
-# 调试打包（带控制台，可见 stderr 输出）
-python build.py --debug
-
-# 正式打包（无控制台，交付用）
-python build.py
+# 运行测试
+pytest tests/ -q
 ```
 
-### 构建"先测再打"工作流
+## StateLog = HistoryManager + Governance Loop
+
+**StateLog 不是新的 class 或存储。** 它是 HistoryManager（`backend/core/history.py`）在治理循环中的角色名。
+
+HistoryManager 是 append-only event log，写入 `gitgo_history.json`。Event 类型：
+
+| 来源 | operation 类型 | 写入时机 |
+|---|---|---|
+| 操作 step | scan / formalize / sync / push / triage_* / delete_formal / dissolve_formal | 操作发生时 |
+| Governance | governance_synced / pushed / dissolved / edited / renumbered / drift / contract_updated / lesson / memory_snapshot | 治理状态变更时 |
+| Policy Engine | **policy_check_result** (v0.29) | daemon 检测后 |
+| Snapshot | **workspace_state_snapshot** (v0.29) | round_complete 时 |
+| Rejection | **rejection** (v0.29) | 人否定后 |
+
+HistoryEntry 结构：`timestamp / project_name / operation / status / detail / correlation_id`
+
+**Writer**：step_*() 方法、daemon Policy Engine、daemon rejection handler、lesson harvest
+**Reader**：Gate A/B（sync/push 时）、Dashboard Governance Tab、governance analysis、MCP tools
+
+**Event 密度 ≠ Commit 密度**：daemon 每次 workspace_dirty 记录一条 policy_check_result（高频）。git commit 只在 round_complete 和 sync 时产生（低频）。
+
+## Daemon（v0.29 核心）
+
+**入口**：`backend/core/daemon/__init__.py:run_daemon()`
+
+三线程架构（watcher / poller / reader）+ 单线程主循环（event queue）。
+
+**Phase 1 — 监测**：watchdog 检测文件变更 → 去抖 2s → `workspace_dirty` 事件入队
+**Phase 2 — 检查**：主循环处理 `workspace_dirty` → step_scan + step_load_commits → Policy Engine 三步：
+1. `_check_lesson_triggers()` — 遍历所有 lesson，对变更文件做 trigger substring 匹配。有 `check.pattern` 的 lesson 用正则匹配代码内容。
+2. `_check_contract_drift()` — detect_drift + ContractManager
+3. `_check_identity()` — _run_integrity_checks
+**Phase 3 — 写入**：结果聚合为 `policy_check_result` → HistoryManager。有 warning 时 emit policy_results 消息。
+**Phase 4 — 交付**：人/Agent 调 `round_complete` stdin 命令 → `_snapshot_workspace()` → git commit → `workspace_state_snapshot` event。
+**Phase 5 — 审查**：人调 `reject` stdin 命令 → `rejection` event → rejection_count ≥ 3 且最终通过 → `_harvest_from_rejection_chain()` → 生成 pending lesson。
+
+## CLI Dashboard（gitgo-dashboard/）
+
+独立项目，技术栈 TypeScript + Bun + @anthropic/ink。通过 MCP stdio 与 gitgo 通信。
+
+**数据流**：`mcp_server.py` → JSON-RPC → `src/mcp/client.ts` → React state → Ink 渲染
+
+**三级导航**：Overview（项目列表）→ Detail（Tab 页：Contract/Lessons/Events/Governance）→ L3（单条详情）
+
+**命令系统**：`:` 进入命令模式，Tab 补全，支持 lesson/contract/status/verify/project/refresh/help
+
+**MCP tools 使用**：概览用快速读取（list_projects / lesson_list / contract_show），不用 `gitgo_status`（含全量 SHA256 扫描）。
+
+## 关键设计约束
+
+### 不可改的
+- HistoryEntry dataclass 字段不能删除（append-only schema）
+- SyncSession step_*() 签名不能在没有 governance review 的情况下修改
+- Gate A/B 检查逻辑不变（v0.29 只在 daemon 端加，不删 sync 端）
+
+### 必须注意的
+- `_find_next_number()` 同时读 `.gitgo/next_number` 本地计数器和 release repo git log（取 max）
+- HistoryManager 路径目前是 `Path.cwd()`，需要迁移到项目 `.gitgo/` 目录（偏差 1）
+- contract.yaml 的 feature name 是 formal commit 的 `[PREFIX-N]` 格式，不是自由文本
+
+### 安全
+- 禁止 `git push`——推送由 gitgo MCP server 接管
+- 不碰 `.mcp.json` 中的 gitgo 配置
+- `git reset --hard` 在 workspace 绝对禁止（Policy Engine 未来版本应拦截）
+
+## Git 历史教训
+
+- **聚合 sync 吞 PR**：每次 sync 把 N 个 workspace commit 打成 1 个巨型 formal commit → 外部 PR 署名消失。解决：sync 前检测 release repo 外来 commit（v0.29 P5）→ 警告 + 二次确认。
+- **编号自引用锁死**：`_find_next_number` 扫 release repo 取 max N → sync 永远生成同一个号 → GITGO-33 ×22。解决：本地计数器（v0.29 P0）。
+- **直接 git commit 到 release**：裸 `fix:` 无 `[PREFIX-N]` 前缀，破坏编号体系。pre-commit hook 或 Policy Engine 检测。
+- **contract 数据是历史记录**：feature name 保留 formalize 时的原始编号——那是历史事实，不应事后篡改。只清理 release 的 git 历史，不伪造 contract 数据。
+
+## 测试
 
 ```bash
-# Step 1: 打调试版 → dist/gitgo_debug.exe
-python build.py --debug
-
-# Step 2: 双击 gitgo_debug.exe 测试功能（控制台会显示 Qt/Python 错误）
-
-# Step 3: 测试通过后打正式版
-python build.py
+pytest tests/ -q    # 334 passed, 1 skipped
 ```
 
-产物：`dist/gitgo.exe`（单文件，双击运行，无需 Python 环境）
-调试产物：`dist/gitgo_debug.exe`（带控制台窗口）
+## 相关文档
 
-## Architecture
-
-### Module layout
-
-| Module | Responsibility |
-|---|---|
-| `__main__.py` | CLI 入口，`--mode gui\|cui\|config` 参数分发，crash 日志 |
-| `backend/core/` | 引擎层：SyncSession 状态机 + Config/I18n/History/Plugin 全部后端逻辑 |
-| `backend/core/sync_session.py` | 工作流状态机 SyncSession（全 step 方法覆盖） |
-| `backend/core/config.py` | `Config` dataclass + `ConfigManager` 读写 JSON（`sync_config.json`） |
-| `backend/core/operations/` | 底层 git 操作：scan/sync/git/security/utils |
-| `backend/core/daemon/` | P2-C 持久守护进程（watchdog + trial 轮询 + stdin 命令） |
-| `backend/adapters/` | 文件/Git 适配器：Local/SSH/SMB 三实现 |
-| `backend/models/` | 数据模型：RepoNode/FileAccess/SyncStatus/IncomingChange |
-| `backend/core/governance/` | **P4** 治理层：quality/patterns/graph/releases/state_bundle（5 模块，~500行） |
-| `backend/core/template_manager.py` | **P6** 模板系统：CommitTemplate + TemplateManager 读写 `commit-config.json` |
-| `backend/core/identity/` | **P6** Identity Guard：guard.py（完整性检测）+ snapshot.py（记忆快照） |
-| `backend/core/authorship.py` | **P6** Authorship：push 前 AI 痕迹清洗 |
-| `backend/core/contract.py` | **P6** Project Contract：合约 + 漂移检测 |
-| `backend/core/knowledge/` | **P6** Lesson 系统：知识传承（抽象层+实例层） |
-| `backend/remote/` | 远程连接器：GitHub/GitLab API（含 Issue/PR） |
-| `cli/commands.py` | CLI 核心 verb（968行，scan/sync/push/suggest 等） |
-| `cli/commands_ext.py` | CLI 扩展 verb（582行，template/formal/memory/contract/lesson/governance/export） |
-| `frontend/gui_main.py` | GUI 薄入口 |
-| `frontend/main_window.py` | PySide6 桌面主窗口，QStackedWidget 导航项目列表↔工作区 |
-| `frontend/workspace/` | 项目工作区子包，10 Mixin 组合 + PanelState 显式状态容器 |
-| `frontend/workspace/panel_state.py` | ★ PanelState — 跨 Mixin 共享状态显式容器（39+ 属性，标注 P/C） |
-| `frontend/project_list.py` | 项目列表首页，表格+同步状态+定时刷新+右键菜单 |
-| `frontend/widgets.py` | 可复用控件门面 re-export（CommitCanvas 等） |
-| `frontend/workers.py` | 5 种后台 Worker（Scan/Sync/Push/TrialCheck/Triage） |
-| `mcp_server.py` | **P2-D** MCP Server (FastMCP, 17 tools) |
-| `examples/agent_loop.py` | **P5-B** Reference Agent — suggest→confirm→execute 完整循环 |
-| `cui/main.py` | CUI 门面（原 cui_main.py），Rich 终端界面入口 |
-| `themes/` | 主题系统：`ThemeColors` 类 + `build_qss(t)` 动态 QSS |
-| `build.py` | PyInstaller 打包脚本，`--onefile --noconsole` |
-
-### Key design decisions
-
-- **文件对比**：基于 SHA256 哈希，支持大文件流式读取（8MB chunk），额外通过 hash 映射检测重命名
-- **排除规则**：合并 `.gitignore` + `config.force_exclude`，支持 `**/xxx`、`xxx/**`、`/xxx` 等 glob 模式
-- **Commit 整合**：解析 workspace 的 git log（自上次 sync 基点之后），剥离 `[PREFIX-N]` 前缀后按 Conventional Commits 分类（feat/fix/docs/...），聚合多个本地 commit 为一个正式 commit 模板，打开系统编辑器供用户编辑确认
-- **同步编号**：从 backup repo 的 git log 中正则匹配 `[PREFIX-N]` 找到最大编号后自增
-- **Push 安全检查**：push 前自动扫描待推送 commit 中的敏感信息（API key、密码、私钥、token 等正则模式），命中则弹出警告列表让用户确认或取消，降低敏感信息泄露风险
-- **线程模型**（GUI）：`ScanWorker` + `SyncWorker` 通过 Qt Signal/Slot 汇报进度，避免 UI 冻结
-- **首次运行**：CUI 走配置向导，GUI 弹出 `QDialog` 目录选择器
-- **同步基点**：成功后记录 workspace 的 HEAD hash 到 `config.sync_base`，下次只读取此 hash 之后的 commit
-- **Mixin 状态管理**：WorkspacePanel 聚合 10 个 Mixin，共享状态通过 `PanelState` 对象（`frontend/workspace/panel_state.py`）显式管理。每个属性标注 Producer/Consumer，新增跨 Mixin 属性必须先在 `PanelState.__init__` 定义。Mixin 内通过 `self.state.xxx` 访问。
-
-### Configuration (`sync_config.json`)
-
-存放于 exe 同目录或 `~/.vernier/` 下，多项目格式：
-
-```json
-{
-  "projects": [
-    {
-      "name": "MyProject",
-      "note": "可选备注",
-      "workspace": { "file_access": { "kind": "local", "path": "D:/Workspace/MyProject" } },
-      "release": { "file_access": { "kind": "local", "path": "D:/Backup/MyProject" } },
-      "trial": { "file_access": { "kind": "local", "path": "D:/Trial/MyProject" } },
-      "commit_format": { "prefix": "MYAPP", "number_start": 0, "padding": false },
-      "force_exclude": ["CLAUDE.md", ".git/", "__pycache__/", "*.pyc"],
-      "sync_base": "abc123def..."
-    }
-  ]
-}
-```
+- `docs/StateLog_Design_Discussion.md` — StateLog 完整设计与治理循环
+- `docs/VERSION.md` — 版本历史
+- `docs/HANDOFF.md` — 交接 + 待执行优先级
+- `gitgo-dashboard/docs/PROJECT.md` — Dashboard CLI 项目文档
+- `memory/ink-dashboard-pitfalls.md` — Dashboard 重写踩坑记录
+- `memory/git-history-cleanup-lessons.md` — Git 历史清洗得失
+- `memory/dashboard-tab-scroll-fix.md` — **Tab 跳底 80+次尝试**：Ink `fullResetSequence` + Yoga `marginBottom` 2× 隐形膨胀
 
 ---
 
-## gitgo 当前架构（v0.25）
+## 开发教训（Dashboard Tab 跳底）
 
-### 核心概念：三维模型
+**问题**：Detail 四个 Tab 切换时终端跳底，高度约束导致内容裁剪。
 
-| 角色 | 代号 | 说明 |
-|---|---|---|
-| **Workspace（工程版）** | `w` | 本地开发目录，有 git 但从不 push |
-| **Release（正式版）** | `r` | 真正 push 到 GitHub 的正式仓库 |
-| **Trial（试用版）** | `t` | 第三方试用仓库，只读拉取、只接受 cherry-pick |
+**根因**（都不是布局问题）：
+1. Ink `log-update.ts:215` 的 `fullResetSequence_CAUSES_FLICKER` — `screen.height >= viewport.height` 时触发全屏重置
+2. Yoga `marginBottom={1}` 导致每行高度被计算为 1+1=2，所有数值 2× 失真
 
 每个角色背后是一个 **RepoNode**，包裹两个访问层：
 
@@ -534,3 +595,12 @@ center_splitter.addWidget(msg_frame)     # setMinimumHeight(54) ← 必须对称
 - ❌ 修改 UI 前不确认主题模式就写死颜色
 - ❌ `setStretchFactor` 在 `addWidget` 之前调用
 - ❌ 内层 splitter 使用 `setChildrenCollapsible(True)`（会导致拖拽时折叠归零）
+**正确解法**：
+1. L2 容器 `height={固定值}` → `screen.height` 恒定，永不触发 `isGrowing`/`isShrinking`
+2. 条件渲染 Tab → 容器内切换，容器高度不变
+3. 去掉所有 `marginBottom` → 行高 = 1（准确）
+
+**教训**：
+- 布局层调参前先做**极简复现**（`test-scroll.tsx` 30行，2分钟确认根因在 Ink）
+- 先排查**隐形计算偏差**（`marginBottom` 让所有计算失真）
+- 渲染问题 ≠ 布局问题——80 次全在调 Yoga 参数，根因在 Ink 渲染管线

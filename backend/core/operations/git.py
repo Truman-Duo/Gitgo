@@ -110,14 +110,28 @@ def _find_next_number(
     prefix: str = "ANBM",
     *,
     git_runner: GitRunner | None = None,
+    workspace_path: str = "",
 ) -> int:
-    """从备份仓库的 commit 历史中找到下一个可用的编号"""
+    """从本地计数器或备份仓库的 commit 历史中确定下一个可用编号。
+
+    优先读 workspace .gitgo/next_number 本地计数器（单调递增）；
+    回退到扫 release repo git log（向后兼容已有项目）。
+    """
+    local_n = -1
+    if workspace_path:
+        counter_file = Path(workspace_path) / ".gitgo" / "next_number"
+        if counter_file.exists():
+            try:
+                local_n = int(counter_file.read_text().strip())
+            except (ValueError, OSError):
+                local_n = -1
+
     if git_runner is None:
         if not backup_path:
-            return 0
+            return max(0, local_n + 1)
         git_runner = LocalGitRunner(Path(backup_path).resolve())
     if not git_runner.is_git_repo():
-        return 0
+        return max(0, local_n + 1)
     lines = git_runner.log(grep=f"\\[{prefix}-\\d+\\]", fmt="%s", max_count=50)
     max_n = -1
     pat = re.compile(rf"\[{prefix}-(\d+)\]")
@@ -127,7 +141,9 @@ def _find_next_number(
             n = int(m.group(1))
             if n > max_n:
                 max_n = n
-    return max_n + 1 if max_n >= 0 else 0
+    repo_max = max_n + 1 if max_n >= 0 else 0
+    next_n = max(repo_max, local_n + 1)
+    return min(next_n, 9999)
 
 
 def build_commit_template(

@@ -4,6 +4,38 @@
 
 ---
 
+## v0.28 (进行中)
+
+**Dashboard 异构重写 — Python Rich → TypeScript Ink。**
+
+### D1: gitgo-dashboard 新建
+- 技术栈：TypeScript + Bun + @anthropic/ink (React for terminals) + MCP stdio
+- 目录：`gitgo-dashboard/` 独立项目，7 源文件 + 1 构建脚本，~600 行
+- 构建产物：`dist/cli.js` 548KB 单文件
+- 运行：`bun run src/main.tsx [refresh_seconds]`
+
+### D2: 架构对比
+
+| 维度 | 旧 (Python Rich) | 新 (TypeScript Ink) |
+|---|---|---|
+| 渲染方式 | Rich Live 整屏重写 | Ink React reconciler 逐行 diff |
+| 键盘输入 | msvcrt 轮询/阻塞 | Node.js event-driven 非阻塞 |
+| stdin/stdout | 同一线程竞争 → 卡死 | event loop 自然解耦 → 零竞争 |
+| 布局 | Rich Panel/Layout | Yoga FlexBox |
+| 数据获取 | 直接读本地 JSON 文件 | MCP stdio 协议（无文件锁冲突） |
+
+### D3: 命令栏
+- 光标编辑：← → Home End Backspace Delete + 任意位置插入
+- 粘贴支持：bracketed paste 一次插入全部字符
+- 历史翻页：↑↓ 翻历史命令，到头按↑退出命令模式
+- 焦点模型：table ↔ command 双向焦点切换（↓到底 → 命令栏，↑到顶 → 表格）
+- 反馈内嵌：命令执行结果显示在命令栏边框内
+
+### P0 待执行（仅记录，不执行代码）
+- **Git 记录清洗**：整理 git 历史 + GitHub 提交记录重新梳理（2026-06-11 记录，明日执行）
+
+---
+
 ## v0.27 (2026-05-29)
 
 **Runtime Constitution + Architecture Formalization。** 不扩功能，显式化已有结构。

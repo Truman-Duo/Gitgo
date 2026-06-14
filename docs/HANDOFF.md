@@ -30,6 +30,7 @@ Agent 框架（Claude Code、Codex 等）不提供进程内 hook 接口。Gitgo 
 
 ### 执行优先级
 1. **P0（GUI Track）** — 前端架构调整（B-1 + F-1）
+2. **P0（Git 记录清洗）** — 整理 git 历史 + GitHub 提交记录重新梳理（2026-06-11 记录，明日执行，仅记录不执行代码）
 
 ---
 
