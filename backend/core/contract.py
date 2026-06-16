@@ -363,3 +363,61 @@ def check_feature_signatures(
                 "location": feat.location,
             })
     return alerts
+
+
+# ── Dependency Graph ──────────────────────────────────────
+
+_DEP_GRAPH_FILE = "dep_graph.json"
+
+
+def build_dep_graph(workspace_path: Path) -> dict[str, list[str]]:
+    """扫描 .py 文件构建反向依赖图 {被引用模块名: [引用者文件路径...]}。
+
+    存入 .gitgo/dep_graph.json。
+    """
+    graph: dict[str, list[str]] = {}
+    for py_file in workspace_path.rglob("*.py"):
+        pstr = str(py_file)
+        if any(x in pstr for x in ["__pycache__", ".venv", ".git", "build", "dist", "out"]):
+            continue
+        try:
+            content = py_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        imports = re.findall(r'^(?:from|import)\s+([\w.]+)', content, re.M)
+        rel = str(py_file.relative_to(workspace_path)).replace("\\", "/")
+        for mod_raw in imports:
+            # 取顶层模块名: "lexi.classifier" → "classifier", "os.path" → "os"
+            mod = mod_raw.split(".")[-1] if "." in mod_raw else mod_raw
+            graph.setdefault(mod, []).append(rel)
+    # Deduplicate
+    for k in graph:
+        graph[k] = sorted(set(graph[k]))
+    # Save
+    dep_path = workspace_path / ".gitgo" / _DEP_GRAPH_FILE
+    dep_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    dep_path.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding="utf-8")
+    return graph
+
+
+def load_dep_graph(workspace_path: Path) -> dict[str, list[str]]:
+    """加载已缓存的依赖图。不存在则构建。"""
+    dep_path = workspace_path / ".gitgo" / _DEP_GRAPH_FILE
+    if dep_path.exists():
+        import json
+        try:
+            return json.loads(dep_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return build_dep_graph(workspace_path)
+
+
+def get_dependents(workspace_path: Path, file_path: str) -> list[str]:
+    """查询一个文件被哪些其他文件 import。
+
+    file_path: 相对于 workspace 的路径，如 'lexi/classifier.py'
+    """
+    graph = load_dep_graph(workspace_path)
+    mod = file_path.replace("\\", "/").replace(".py", "").split("/")[-1]
+    return graph.get(mod, [])

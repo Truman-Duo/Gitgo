@@ -31,6 +31,7 @@ class WorkspaceWatcher(FileSystemEventHandler):
         self._on_dirty = on_dirty
         self._debounce = debounce_sec
         self._timer: threading.Timer | None = None
+        self._changed: set[str] = set()
         self._observer = Observer()
         self._observer.schedule(self, self._path, recursive=True)
 
@@ -40,13 +41,22 @@ class WorkspaceWatcher(FileSystemEventHandler):
         src = getattr(event, "src_path", "")
         if self._is_excluded(src):
             return
+        # Track changed file
+        rel = str(Path(src).relative_to(self._path)).replace("\\", "/")
+        self._changed.add(rel)
         if self._timer:
             self._timer.cancel()
         self._timer = threading.Timer(self._debounce, self._fire)
         self._timer.start()
 
     def _fire(self):
-        self._on_dirty()
+        changed = list(self._changed)
+        self._changed.clear()
+        # Try to pass changed files if callback accepts argument
+        try:
+            self._on_dirty(changed)
+        except TypeError:
+            self._on_dirty()
 
     def _is_excluded(self, path: str) -> bool:
         import fnmatch

@@ -30,12 +30,23 @@ class HistoryEntry:
 
 
 class HistoryManager:
-    """管理操作历史日志的读写"""
+    """管理操作历史日志的读写。可通过 set_workspace 切换到项目级路径。"""
+
+    _workspace_path: str | None = None
+
+    @classmethod
+    def set_workspace(cls, path: str) -> None:
+        """设置当前工作项目路径。后续读写使用 .gitgo/gitgo_history.json。"""
+        cls._workspace_path = path
 
     @staticmethod
     def _path() -> Path:
-        """返回历史文件路径（exe/脚本同目录）"""
         import sys
+        ws = HistoryManager._workspace_path
+        if ws:
+            p = Path(ws) / ".gitgo" / HISTORY_FILE
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return p
         if getattr(sys, "frozen", False):
             base = Path(sys.executable).parent
         else:
