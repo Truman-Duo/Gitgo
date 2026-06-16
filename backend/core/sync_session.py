@@ -519,6 +519,30 @@ class SyncSession:
         )
         return entries
 
+    def step_scan_files(self, changed_files: list[str]) -> list[FileEntry]:
+        """增量扫描——只对比指定文件列表。"""
+        self.stage = SessionStage.SCANNING
+        self.on_stage_changed(self.stage)
+        if not self.backup_path or not self.bk_adapter.exists(""):
+            self.entries = []; self.stage = SessionStage.FAILED; return self.entries
+        if not self.bk_git_runner.is_git_repo():
+            self.entries = []; self.stage = SessionStage.FAILED; return self.entries
+        entries = compare_files(
+            self.workspace_path, self.backup_path, changed_files, self.on_progress,
+            ws_adapter=self.ws_adapter, bk_adapter=self.bk_adapter, normalize_eol=True,
+        )
+        self.entries = entries
+        self.stage = SessionStage.SELECTING
+        self.on_stage_changed(self.stage)
+        from backend.core.history import HistoryManager
+        HistoryManager.add_operation(
+            self.project.name, "scan", "success",
+            {"entries_total": len(entries),
+             "entries_changed": sum(1 for e in entries if e.status != "same")},
+            correlation_id=self._correlation_id,
+        )
+        return entries
+
     # ── 步骤 2: 加载 commit 列表 ────────────────────────────
 
     def step_load_commits(self) -> list[CommitInfo]:
@@ -893,6 +917,13 @@ class SyncSession:
                 {"commit": f"[{fc.prefix}-{fc.number}]"},
                 correlation_id=self._correlation_id,
             )
+
+            # ── Dependency Graph Update ──
+            try:
+                from backend.core.contract import build_dep_graph
+                build_dep_graph(Path(self.workspace_path))
+            except Exception:
+                pass
 
             # ── Memory Snapshot + Skeleton ──
             if self.backup_path:

@@ -142,6 +142,32 @@ def _check_identity(session: SyncSession, project: ProjectConfig) -> list[dict]:
     return _run_integrity_checks(session.entries, session.workspace_path, project)
 
 
+def _check_dependency_chain(session: SyncSession) -> list[dict]:
+    """检测变更文件的依赖链影响：改 A → 找所有 import A 的 B → 提示。"""
+    from backend.core.contract import get_dependents
+    alerts = []
+    changed = [e.rel_path for e in session.entries if e.status != "same"]
+    if not changed:
+        return alerts
+    seen = set()
+    for f in changed:
+        deps = get_dependents(Path(session.workspace_path), f)
+        for dep in deps:
+            if dep in seen or dep in changed:
+                continue
+            seen.add(dep)
+            dep_path = Path(session.workspace_path) / dep
+            if dep_path.exists():
+                alerts.append({
+                    "rule": "dependency_chain",
+                    "level": "info",
+                    "message": f"'{f}' changed → may affect '{dep}' (imports it)",
+                    "changed_file": f,
+                    "dependent": dep,
+                })
+    return alerts
+
+
 def _build_policy_message(results: dict) -> str:
     """构建给 agent 看的修正需求消息。"""
     parts = []
@@ -151,6 +177,8 @@ def _build_policy_message(results: dict) -> str:
         parts.append(f"[warning] contract drift: {d['message']}")
     for i in results.get("integrity_warnings", []):
         parts.append(f"[{i.get('level','warning')}] integrity: {i.get('message','')}")
+    for dc in results.get("dependency_chain", []):
+        parts.append(f"[info] dep-chain: {dc['message']}")
     if parts:
         return "本轮变更匹配到以下治理规则，请先修正：\n" + "\n".join(parts)
     return ""
@@ -268,6 +296,9 @@ def run_daemon(
     session.step_load_commits()
     session.step_check_trial()
 
+    from backend.core.history import HistoryManager
+    HistoryManager.set_workspace(str(session.workspace_path))
+
     _emit({
         "event": "daemon_started",
         "project": project.name,
@@ -283,7 +314,7 @@ def run_daemon(
     watcher = WorkspaceWatcher(
         workspace_path=session.workspace_path,
         exclude_patterns=exclude,
-        on_dirty=lambda: evq.put({"event": "workspace_dirty"}),
+        on_dirty=lambda changed=None: evq.put({"event": "workspace_dirty", "changed_files": changed or []}),
         debounce_sec=debounce_sec,
     )
 
@@ -320,7 +351,7 @@ def run_daemon(
             event_type = ev.get("event", "")
 
             if event_type == "workspace_dirty":
-                # ── Debounce: skip if too soon after last check ──
+                # ── Debounce ──
                 now = time.time()
                 last_check = getattr(run_daemon, '_last_policy_check', 0.0)
                 if now - last_check < debounce_sec:
@@ -329,7 +360,12 @@ def run_daemon(
                 _emit({"event": "workspace_dirty", "project": project.name})
                 _emit({"event": "operation_started", "op": "scan"})
                 try:
-                    session.step_scan()
+                    # Incremental scan if watchdog provides changed files
+                    changed = ev.get("changed_files", [])
+                    if changed:
+                        session.step_scan_files(changed)
+                    else:
+                        session.step_scan()
                     session.step_load_commits()
 
                     # ── Policy Engine 三步检查 ──
@@ -338,6 +374,7 @@ def run_daemon(
                     matched_lessons = _check_lesson_triggers(session)
                     drift = _check_contract_drift(session)
                     identity = _check_identity(session, project)
+                    dep_chain = _check_dependency_chain(session)
 
                     gov_warnings = len(matched_lessons) + len(drift) + len(identity)
 
@@ -380,6 +417,7 @@ def run_daemon(
                         "matched_lessons": matched_lessons,
                         "drift_warnings": drift,
                         "integrity_warnings": identity,
+                        "dependency_chain": dep_chain,
                     }
                     HistoryManager.add_operation(
                         project.name, "policy_check_result",
