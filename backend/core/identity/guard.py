@@ -61,14 +61,14 @@ def _detect_mass_override(
     entries 来自 compare_files()，已排除 force_exclude 文件。
     正常开发: 5-30%  覆盖事故: 80%+
     """
-    if not entries:
+    if not entries or len(entries) < 3:
         return None
     cfg = getattr(project, "integrity", {}) or {}
     threshold = cfg.get("mass_override_threshold", 0.80)
     changed = sum(1 for e in entries if e.status in ("new", "modified"))
     ratio = changed / len(entries)
 
-    if ratio >= threshold:
+    if ratio >= threshold and changed >= 3:
         return {
             "rule": "mass_override",
             "level": "warning",
@@ -137,8 +137,8 @@ def _detect_structure_collapse(
         if len(parts) >= 1 and parts[0]:
             current_dirs.add(parts[0])
 
-    if not old_dirs:
-        return None
+    if not old_dirs or len(current_dirs) < 2:
+        return None  # too few dirs for meaningful comparison (incremental scan)
 
     union = old_dirs | current_dirs
     intersection = old_dirs & current_dirs

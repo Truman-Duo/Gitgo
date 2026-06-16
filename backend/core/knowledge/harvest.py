@@ -36,6 +36,11 @@ def harvest_lessons(
     # ── Phase 3: Governance signals → lesson bridge ──
     harvested.extend(_harvest_from_governance_signals(workspace_path, project_name, tech_stack))
 
+    # ── Dedup: skip triggers already in pending ──
+    existing = LessonManager.load_pending(workspace_path, project_name)
+    existing_triggers = {getattr(e, 'trigger', '') for e in existing}
+    harvested = [h for h in harvested if getattr(h, 'trigger', '') not in existing_triggers]
+
     return harvested
 
 
@@ -299,8 +304,15 @@ def _harvest_from_git_log(
                 # file line
                 file_commits.setdefault(line, []).append(current_subject)
 
+        # Exclude build artifacts and version logs — not code, not knowledge
+        _NOISE_EXTS = {".spec", ".json", ".txt", ".toml", ".cfg", ".ini", ".lock", ".pyc"}
+        _NOISE_FILES = {"version.md", "pyproject.toml", "requirements.txt"}
         for path, subjects in file_commits.items():
             if len(subjects) >= 3:
+                ext = Path(path).suffix.lower()
+                fname = Path(path).name.lower()
+                if ext in _NOISE_EXTS or fname in _NOISE_FILES:
+                    continue
                 lesson = Lesson(
                     tech_stack=tech_stack,
                     category="process",
