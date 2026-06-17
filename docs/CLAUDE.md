@@ -50,13 +50,16 @@ Trial 目前功能完备（poller 轮询 + triage 三叉 + MCP tools），但尚
 
 | Module | Lines | Responsibility |
 |---|---|---|
-| `mcp_server.py` | ~900 | MCP Server：42+2 tools，stdin/stdout JSON-RPC |
-| `backend/core/sync_session.py` | ~1200 | 状态机：scan→formalize→sync→push + Gate A/B |
-| `backend/core/daemon/__init__.py` | ~500 | Daemon 主循环 + Policy Engine + snapshot + rejection |
-| `backend/core/history.py` | ~130 | HistoryManager：append-only event log（StateLog 存储层）|
-| `backend/core/contract.py` | ~200 | ContractManager：feature 合约 + drift 检测 |
-| `backend/core/knowledge/` | ~750 | Lesson 系统：harvest（4模式）+ manager + models |
-| `backend/core/config.py` | ~200 | Config + ProjectConfig + ConfigManager |
+| `backend/core/policy/` | ~330 | **Policy Engine**：可插拔策略（lesson/contract/identity/dep-chain）+ registry + 条件 harvest |
+| `backend/core/steps/` | ~200 | **纯函数管线**：scan / commits / sync / push，零依赖 SyncSession |
+| `backend/core/sync_session.py` | ~1300 | 状态机：编排层，委托 steps 纯函数 |
+| `backend/core/daemon/` | ~610 | Daemon 主循环 + workspace snapshot + rejection handler |
+| `backend/core/history.py` | ~140 | HistoryManager：append-only event log（per-project 隔离）|
+| `backend/core/contract.py` | ~420 | ContractManager：feature 合约 + drift 检测 + 依赖图 |
+| `backend/core/knowledge/` | ~760 | Lesson 系统：harvest（5 模式）+ manager + models |
+| `backend/core/identity/` | ~340 | Identity Guard：完整性 + memory snapshot |
+| `backend/core/governance/` | ~690 | 质量度量 + 模式检测 + 语义变更图 + 发布推理 |
+| `mcp_server.py` | ~920 | MCP Server：42 tools，stdin/stdout JSON-RPC |
 | `backend/core/operations/git.py` | ~200 | `_find_next_number` + formal commit 构建 |
 | `backend/core/operations/scan.py` | ~200 | 文件扫描 + SHA256 对比 |
 | `backend/core/operations/utils.py` | ~100 | glob 匹配 + 排除规则 |

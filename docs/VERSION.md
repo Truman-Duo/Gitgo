@@ -4,6 +4,68 @@
 
 ---
 
+## v0.29 (2026-06-12 ~ 2026-06-17)
+
+**StateLog Governance Loop — Policy Engine 可插拔 + Dashboard Governance Tab + 链式依赖 + 增量扫描 + 全链路解耦**
+
+### P1: Policy Engine 可插拔架构
+- `backend/core/policy/` — 7 文件，330 行
+  - `PolicyCheck` ABC + 4 策略：LessonTrigger / ContractDrift / IdentityIntegrity / DependencyChain
+  - `PolicyEngine.run(session, project)` — loop 唯一入口
+  - `registry.py` — 项目级策略配置（contract.yaml `policy_checks`）+ `register_check()` 自定义扩展
+  - 条件 harvest：`should_harvest()` + `run_harvest_if_needed()`
+- Daemon 从 4 个硬编码函数调用改为 `engine.run()`，删 ~200 行
+
+### P2: Steps 纯函数管线
+- `backend/core/steps/` — 4 文件，200 行
+  - `scan_and_compare()` / `scan_incremental()` / `load_workspace_commits()` / `create_formal_commit()` / `sync_files()` / `push_to_remote()`
+  - 零依赖 SyncSession 对象，loop 可直接调用
+
+### P3: Daemon 治理链路
+- Policy Engine 三步检查（lesson trigger 匹配 + contract drift + identity integrity）+ 第四步 dependency chain
+- workspace_dirty 去抖 + 增量扫描（watchdog 传 changed_files → `step_scan_files`）
+- `workspace_state_snapshot` git commit（`round_complete` stdin 命令）
+- Rejection 系统：`reject` stdin 命令 → rejection_count ≥ 3 → lesson harvest
+- HistoryManager per-project 隔离（`.gitgo/gitgo_history.json`）
+
+### P4: Dashboard CLI 升级
+- Governance Tab（第 4 Tab）— 实时展示 policy_check_result / drift / snapshot / rejection
+- Tab 跳底修复（L2 容器固定高度 + margin 移除）
+- 命令补全（↑↓ 选 + Tab 填）
+- 三级导航（Overview → Tab → 条目详情）
+- CC Skill `/gitgo-check`（`.claude/skills/gitgo-check.md`）
+
+### P5: 链式依赖检测
+- `build_dep_graph()` — 正则提取 Python import 构建反向依赖图
+- `get_dependents()` — 查文件被哪些文件引用
+- Policy Engine `DependencyChainCheck` — 自动标记受影响文件
+
+### P6: 修复 + 清理
+- `_find_next_number` 本地计数器（`.gitgo/next_number`）
+- Lesson harvest 文件类型过滤（排除 .spec/.json/.txt/version.md 等噪音文件）
+- Lesson harvest 去重（生成前检查已有 pending trigger）
+- Identity guard 误报修复（mass_override ≥3 / structure_collapse ≥2）
+- Contract 数据清理（27→4 features + 4 constraints + tech_stack）
+- MCP `gitgo_overview` + `gitgo_governance_feed`
+- 外来 commit 检测（`step_sync` 前对比 release HEAD）
+- `daemon.bat` 一键启动
+
+### 认证
+- 334 passed, 1 skipped（零回归）
+- lexi workspace daemon 端到端验证通过
+- Dashboard Governance Tab 实时展示通过
+
+### 解耦状态
+| 模块 | 行数 | 耦合度 | loop 可用 |
+|---|---|---|---|
+| `policy/` | 330 | 低 | ✅ 直接调 |
+| `steps/` | 200 | 低 | ✅ 直接调 |
+| `daemon/` | 610 | 中 | ⚠️ |
+| `sync_session.py` | 1315 | 中 | ⚠️ |
+| `mcp_server.py` | 920 | 中 | ⚠️ |
+
+---
+
 ## v0.28 (进行中)
 
 **Dashboard 异构重写 — Python Rich → TypeScript Ink。**
