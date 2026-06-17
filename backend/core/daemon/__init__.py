@@ -65,123 +65,9 @@ def _release_pid_file(project: ProjectConfig) -> None:
         pass
 
 
-# ── Policy Engine helpers ──────────────────────────────────
+# ── Policy Engine ─────────────────────────────────────────
 
-def _check_lesson_triggers(session: SyncSession) -> list[dict]:
-    """读所有 lesson，匹配当前 workspace 变更文件的 trigger。"""
-    from backend.core.knowledge.lesson import LessonManager
-    import re
-
-    matched = []
-    ws = session.workspace_path
-
-    changed_files = [e.rel_path for e in session.entries if e.status != "same"]
-    changed_content = ""
-    for e in session.entries:
-        if e.status != "same":
-            try:
-                content = (Path(ws) / e.rel_path).read_text(encoding="utf-8", errors="ignore")
-                changed_content += content[:2000]
-            except OSError:
-                pass
-
-    lessons = LessonManager.load_abstract(Path(ws))
-    if session.project.name:
-        lessons += LessonManager.load_instance(Path(ws), session.project.name)
-        lessons += LessonManager.load_pending(Path(ws), session.project.name)
-
-    for lesson in lessons:
-        trigger = getattr(lesson, 'trigger', '')
-        if not trigger:
-            continue
-        matched_trigger = False
-        check = getattr(lesson, 'check', None)
-
-        if check and isinstance(check, dict) and check.get("pattern"):
-            if re.search(check["pattern"], changed_content):
-                matched_trigger = True
-        else:
-            for f in changed_files:
-                if trigger.lower() in f.lower():
-                    matched_trigger = True
-                    break
-            if not matched_trigger and trigger.lower() in changed_content.lower():
-                matched_trigger = True
-
-        if matched_trigger:
-            matched.append({
-                "lesson_id": getattr(lesson, 'id', ''),
-                "trigger": trigger,
-                "rule": getattr(lesson, 'rule', ''),
-                "severity": getattr(lesson, 'severity', 'medium'),
-                "category": getattr(lesson, 'category', ''),
-                "has_check": bool(check and check.get("pattern")),
-            })
-
-    return matched
-
-
-def _check_contract_drift(session: SyncSession) -> list[dict]:
-    """对比当前变更与 contract，检测漂移。"""
-    from backend.core.contract import ContractManager, detect_drift
-
-    contract = ContractManager.load(Path(session.workspace_path))
-    if not contract:
-        return []
-    changed = [e.rel_path for e in session.entries if e.status != "same"]
-    alerts = detect_drift(Path(session.workspace_path), changed, contract)
-    if alerts:
-        return [{"rule": d.get("rule", "contract"), "message": d.get("message", ""),
-                 "alert_count": len(alerts)} for d in alerts]
-    return []
-
-
-def _check_identity(session: SyncSession, project: ProjectConfig) -> list[dict]:
-    """检查身份文件是否被误删/覆盖。"""
-    from backend.core.identity import _run_integrity_checks
-    return _run_integrity_checks(session.entries, session.workspace_path, project)
-
-
-def _check_dependency_chain(session: SyncSession) -> list[dict]:
-    """检测变更文件的依赖链影响：改 A → 找所有 import A 的 B → 提示。"""
-    from backend.core.contract import get_dependents
-    alerts = []
-    changed = [e.rel_path for e in session.entries if e.status != "same"]
-    if not changed:
-        return alerts
-    seen = set()
-    for f in changed:
-        deps = get_dependents(Path(session.workspace_path), f)
-        for dep in deps:
-            if dep in seen or dep in changed:
-                continue
-            seen.add(dep)
-            dep_path = Path(session.workspace_path) / dep
-            if dep_path.exists():
-                alerts.append({
-                    "rule": "dependency_chain",
-                    "level": "info",
-                    "message": f"'{f}' changed → may affect '{dep}' (imports it)",
-                    "changed_file": f,
-                    "dependent": dep,
-                })
-    return alerts
-
-
-def _build_policy_message(results: dict) -> str:
-    """构建给 agent 看的修正需求消息。"""
-    parts = []
-    for l in results.get("matched_lessons", []):
-        parts.append(f"[{l['severity']}] lesson[{l['lesson_id']}]: {l['rule']}")
-    for d in results.get("drift_warnings", []):
-        parts.append(f"[warning] contract drift: {d['message']}")
-    for i in results.get("integrity_warnings", []):
-        parts.append(f"[{i.get('level','warning')}] integrity: {i.get('message','')}")
-    for dc in results.get("dependency_chain", []):
-        parts.append(f"[info] dep-chain: {dc['message']}")
-    if parts:
-        return "本轮变更匹配到以下治理规则，请先修正：\n" + "\n".join(parts)
-    return ""
+from backend.core.policy import PolicyEngine, build_policy_message
 
 
 def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[str] | None:
@@ -371,61 +257,33 @@ def run_daemon(
                     # ── Policy Engine 三步检查 ──
                     from backend.core.history import HistoryManager
 
-                    matched_lessons = _check_lesson_triggers(session)
-                    drift = _check_contract_drift(session)
-                    identity = _check_identity(session, project)
-                    dep_chain = _check_dependency_chain(session)
+                    engine = PolicyEngine()
+                    results = engine.run(session, project)
+                    gov_warnings = sum(len(v) for v in results.values())
 
-                    gov_warnings = len(matched_lessons) + len(drift) + len(identity)
-
-                    for l in matched_lessons:
-                        _emit({
-                            "event": "lesson_matched",
-                            "lesson_id": l["lesson_id"],
-                            "severity": l["severity"],
-                            "rule": l["rule"],
-                        })
-                    for d in drift:
-                        _emit({
-                            "event": "governance_drift",
-                            "rule": d.get("rule", "contract"),
-                            "level": "warning",
-                            "message": d.get("message", ""),
-                        })
+                    for l in results.get("lesson_triggers", []):
+                        _emit({"event": "lesson_matched", "lesson_id": l["lesson_id"],
+                               "severity": l["severity"], "rule": l["rule"]})
+                    for d in results.get("contract_drift", []):
+                        _emit({"event": "governance_drift", "rule": d.get("rule", "contract"),
+                               "level": "warning", "message": d.get("message", "")})
                         HistoryManager.add_operation(
                             project.name, "governance_drift", "warning",
-                            {"rule": d.get("rule", "contract"),
-                             "message": d.get("message", "")},
-                            correlation_id=session._correlation_id,
-                        )
-                    for w in identity:
-                        _emit({
-                            "event": "governance_drift",
-                            "rule": w.get("rule", "integrity"),
-                            "level": w.get("level", "warning"),
-                            "message": w.get("message", ""),
-                        })
+                            {"rule": d.get("rule", "contract"), "message": d.get("message", "")},
+                            correlation_id=session._correlation_id)
+                    for w in results.get("identity_integrity", []):
+                        _emit({"event": "governance_drift", "rule": w.get("rule", "integrity"),
+                               "level": w.get("level", "warning"), "message": w.get("message", "")})
                         HistoryManager.add_operation(
-                            project.name, "governance_drift",
-                            w.get("level", "warning"),
-                            {"rule": w.get("rule", "integrity"),
-                             "message": w.get("message", "")},
-                            correlation_id=session._correlation_id,
-                        )
+                            project.name, "governance_drift", w.get("level", "warning"),
+                            {"rule": w.get("rule", "integrity"), "message": w.get("message", "")},
+                            correlation_id=session._correlation_id)
 
-                    policy = {
-                        "matched_lessons": matched_lessons,
-                        "drift_warnings": drift,
-                        "integrity_warnings": identity,
-                        "dependency_chain": dep_chain,
-                    }
                     HistoryManager.add_operation(
                         project.name, "policy_check_result",
                         "warning" if gov_warnings else "success",
-                        policy,
-                        correlation_id=session._correlation_id,
-                    )
-                    msg = _build_policy_message(policy)
+                        results, correlation_id=session._correlation_id)
+                    msg = build_policy_message(results)
                     if msg:
                         _emit({"event": "policy_results",
                                "governance_warnings": gov_warnings, "message": msg})
