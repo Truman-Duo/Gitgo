@@ -2,7 +2,7 @@
 
 **Development Semantic Runtime** — AI 协作开发过程中的项目状态治理系统。
 
-334 个测试 | 43 个 MCP 工具 | 22 个 CLI 模式 | v0.27
+334 个测试 | 47 个 MCP 工具 | 22 个 CLI 模式 | v0.30
 
 ---
 
@@ -209,7 +209,9 @@ flowchart TB
 | `push` — 推送至 GitHub（Gate B） | ✅ | ✅ |
 | `trial` — 外部代码 triage（accept/promote/discard） | ✅ | ✅ |
 | `daemon` — 持久守护进程（watchdog + trial 轮询 + Policy Engine） | ✅ | — |
-| `dashboard` — 实时项目状态面板 | ✅ | — |
+| `dashboard` — 实时项目状态面板（Ink 终端 UI） | ✅ | — |
+| `agent` — A→B Agent 循环（fork + dispatch + LLM call） | — | ✅ |
+| `llm_config` — LLM Provider 多路管理 + 切换（Ink 终端面板） | ✅ | ✅ |
 
 ### 治理
 
@@ -261,23 +263,32 @@ gitgo/
 │   │   ├── state_reader.py    #   统一状态查询
 │   │   ├── config.py          #   项目配置
 │   │   ├── history.py         #   HistoryManager (append-only event log)
+│   │   ├── llm_config.py      #   LLMConfigManager（多 Provider CRUD + 切换）
 │   │   ├── governance/        #   quality / patterns / graph / releases
 │   │   ├── identity/          #   guard (完整性检测) + snapshot (记忆快照)
 │   │   ├── knowledge/         #   lesson (知识传承)
 │   │   ├── operations/        #   scan / git / sync / security / diff
-│   │   ├── daemon/            #   持久守护进程
+│   │   ├── daemon/            #   持久守护进程 + DaemonClient（subprocess 通信）
+│   │   ├── loop/              #   Agent 循环（context/gate/llm/manager）
+│   │   ├── dispatch/          #   ToolDispatcher（MCP→Daemon 命令路由）
+│   │   ├── policy/            #   Policy Engine 可插拔策略
+│   │   ├── steps/             #   纯函数管线（scan/commits/sync）
+│   │   ├── fact/              #   模式匹配（contract/file/workflow）
+│   │   ├── cache/             #   文件哈希缓存
 │   │   ├── contract.py        #   项目合约 + 漂移检测
 │   │   ├── authorship.py      #   AI 痕迹清洗
 │   │   └── template_manager.py #  commit 模板系统
 │   ├── adapters/              #   Local / SSH / SMB 三实现
 │   ├── models/                #   数据模型
 │   └── remote/                #   GitHub / GitLab API
-├── cli/                       # CLI verbs + dashboard
-├── mcp_server.py              # FastMCP server (43 tools)
-├── frontend/                  # Qt GUI
+├── cli/                       # CLI verbs
+│   └── dashboard/             #   Ink 终端 Dashboard（TypeScript + Bun）
+├── mcp_server.py              # FastMCP server (47 tools)
+├── mcp_tools/                 # MCP 工具实现（loop / llm_config / daemon_registry ...）
+├── frontend/                  # Qt GUI（搁置）
 ├── cui/                       # Rich 终端界面
 ├── tests/                     # 334 测试 + 1 skip
-└── docs/                      # RuntimeConstitution / HANDOFF / VERSION
+└── docs/                      # RuntimeConstitution / HANDOFF / VERSION / iterations
 ```
 
 ---
@@ -293,4 +304,7 @@ gitgo/
 | v0.24 | Authorship + Contract + Lesson |
 | v0.25 | State Convergence (C1–C3) |
 | v0.26 | Runtime Discipline |
-| **v0.27** | **Constitution + Policy Engine daemon + Dashboard + MCP gate** |
+| v0.27 | Constitution + Policy Engine daemon + Dashboard + MCP gate |
+| v0.28 | Dashboard 异构重写（Python Rich → TypeScript Ink） |
+| v0.29 | Policy Engine 可插拔 + Dashboard Governance Tab + 链式依赖 |
+| **v0.30** | **Dispatch Layer + LLM Provider 配置面板 + Agent Loop A→B 通路** |

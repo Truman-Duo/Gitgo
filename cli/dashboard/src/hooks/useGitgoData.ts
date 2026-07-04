@@ -14,6 +14,8 @@ export type ProjectRow = ProjectInfo & {
   features: number;
   constraints: number;
   techStack: string;
+  daemonOnline: boolean;
+  activeProcessCount: number;
 };
 
 export function useGitgoData(
@@ -36,10 +38,16 @@ export function useGitgoData(
       for (const p of projectList) {
         try {
           // Only call fast tools (disk reads, no file scanning)
-          const [lessons, contract] = await Promise.all([
+          const [lessons, contract, loopStatus] = await Promise.all([
             client.callTool("gitgo_lesson_list", { project: p.name }).catch(() => ({ pending: [] })),
             client.callTool("gitgo_contract_show", { project: p.name }).catch(() => null),
+            client.callTool("gitgo_loop_status", { project: p.name }).catch(() => null),
           ]);
+
+          const procs = loopStatus?.processes || {};
+          const activeCount = Object.values(procs).filter(
+            (x: any) => x.status === "running"
+          ).length;
 
           rows.push({
             ...p,
@@ -47,9 +55,11 @@ export function useGitgoData(
             features: contract?.decided_features?.length || 0,
             constraints: contract?.architecture_constraints?.length || 0,
             techStack: contract?.tech_stack?.join(", ") || "-",
+            daemonOnline: loopStatus?.daemon_online ?? false,
+            activeProcessCount: activeCount,
           });
         } catch {
-          rows.push({ ...p, pendingLessons: 0, features: 0, constraints: 0, techStack: "?" });
+          rows.push({ ...p, pendingLessons: 0, features: 0, constraints: 0, techStack: "?", daemonOnline: false, activeProcessCount: 0 });
         }
       }
 

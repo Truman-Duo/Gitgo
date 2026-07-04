@@ -47,6 +47,7 @@ def compare_files(
     ws_adapter: FileAdapter | None = None,
     bk_adapter: FileAdapter | None = None,
     normalize_eol: bool = False,
+    hash_cache: "FileHashCache | None" = None,
 ) -> list[FileEntry]:
     """对比工作区和备份仓库的文件，返回带状态的文件列表
 
@@ -54,12 +55,46 @@ def compare_files(
     避免 Windows/Linux 换行符差异导致误报。
     """
     def _hash(adapter: FileAdapter, path: str) -> str:
+        # Cache lookup: stat mtime+size → check cache for sha256
+        cached_sha = None
+        if hash_cache is not None and not normalize_eol:
+            import os
+            try:
+                full = Path(_resolve_adapter_root(adapter, workspace, backup)) / path
+                st = os.stat(full)
+                cached_sha = hash_cache.lookup(path, st.st_mtime, st.st_size)
+            except OSError:
+                pass
+        if cached_sha is not None:
+            return cached_sha
+
         if not normalize_eol:
-            return adapter.hash_file(path)
-        data = adapter.read_bytes(path)
-        data = data.replace(b"\r\n", b"\n")
-        import hashlib
-        return hashlib.sha256(data).hexdigest()
+            h = adapter.hash_file(path)
+        else:
+            data = adapter.read_bytes(path)
+            data = data.replace(b"\r\n", b"\n")
+            import hashlib
+            h = hashlib.sha256(data).hexdigest()
+
+        # Store in cache
+        if hash_cache is not None and not normalize_eol:
+            try:
+                hash_cache.store(path, st.st_mtime, st.st_size, h)
+            except (OSError, UnboundLocalError):
+                pass
+
+        return h
+
+    def _resolve_adapter_root(adapter: FileAdapter, ws: str | Path,
+                               bk: str | Path) -> Path:
+        """从 adapter 获取根目录路径，用于 os.stat。"""
+        root = getattr(adapter, "_root", None)
+        if root:
+            return Path(root)
+        # Fallback: guess by checking if adapter's root matches workspace or backup
+        if adapter is ws_adapter:
+            return Path(ws).resolve()
+        return Path(bk).resolve()
 
     if ws_adapter is None:
         ws_adapter = LocalFileAdapter(Path(workspace).resolve())

@@ -50,31 +50,33 @@ Trial 目前功能完备（poller 轮询 + triage 三叉 + MCP tools），但尚
 
 | Module | Lines | Responsibility |
 |---|---|---|
+| `backend/core/daemon/` | ~810 | Daemon 主循环 + DaemonClient（subprocess 通信）+ workspace snapshot + rejection handler |
+| `backend/core/loop/` | ~250 | **Agent Loop**：context builder + gate + LLM wrapper + AgentProcessManager + models |
+| `backend/core/dispatch/` | ~120 | **ToolDispatcher**：MCP→Daemon 命令分发 + RingGate 路由 |
 | `backend/core/policy/` | ~330 | **Policy Engine**：可插拔策略（lesson/contract/identity/dep-chain）+ registry + 条件 harvest |
 | `backend/core/steps/` | ~200 | **纯函数管线**：scan / commits / sync / push，零依赖 SyncSession |
+| `backend/core/fact/` | ~150 | 模式匹配：contract / file / workflow patterns |
+| `backend/core/cache/` | ~100 | 文件哈希缓存（file_hash） |
 | `backend/core/sync_session.py` | ~1300 | 状态机：编排层，委托 steps 纯函数 |
-| `backend/core/daemon/` | ~610 | Daemon 主循环 + workspace snapshot + rejection handler |
-| `backend/core/history.py` | ~140 | HistoryManager：append-only event log（per-project 隔离）|
+| `backend/core/llm_config.py` | ~130 | **LLMConfigManager**：多 Provider CRUD + active switch（`.gitgo/llm_config.json`） |
+| `backend/core/history.py` | ~140 | HistoryManager：append-only event log（per-project 隔离） |
 | `backend/core/contract.py` | ~420 | ContractManager：feature 合约 + drift 检测 + 依赖图 |
 | `backend/core/knowledge/` | ~760 | Lesson 系统：harvest（5 模式）+ manager + models |
 | `backend/core/identity/` | ~340 | Identity Guard：完整性 + memory snapshot |
 | `backend/core/governance/` | ~690 | 质量度量 + 模式检测 + 语义变更图 + 发布推理 |
-| `mcp_server.py` | ~920 | MCP Server：42 tools，stdin/stdout JSON-RPC |
-| `backend/core/operations/git.py` | ~200 | `_find_next_number` + formal commit 构建 |
-| `backend/core/operations/scan.py` | ~200 | 文件扫描 + SHA256 对比 |
-| `backend/core/operations/utils.py` | ~100 | glob 匹配 + 排除规则 |
+| `mcp_server.py` | ~200 | MCP Server：47 tools，stdin/stdout JSON-RPC |
+| `mcp_tools/` | ~1800 | MCP 工具实现：loop / llm_config / daemon_registry / scan / sync / push 等 |
+| `backend/core/operations/` | ~500 | git / scan / sync / security / utils |
 | `backend/core/authorship.py` | ~120 | AI 痕迹清洗 + 隐私扫描 |
-| `backend/core/identity/` | ~200 | Identity Guard：完整性检测 + memory snapshot |
-| `backend/core/governance/` | ~500 | 质量度量 + 模式检测 + 语义变更图 + 发布推理 |
 | `backend/core/state_reader.py` | ~100 | StateReader：统一查询接口 |
 | `backend/core/template_manager.py` | ~200 | Commit 模板系统 |
-| `backend/adapters/` | ~300 | GitRunner + FileAdapter（Local/SSH/SMB）|
+| `backend/adapters/` | ~300 | GitRunner + FileAdapter（Local/SSH/SMB） |
 | `backend/models/` | ~100 | RepoNode + FileAccess + SyncStatus |
 | `backend/remote/` | ~400 | GitHub/GitLab API 连接器 |
-| `cli/` | ~1400 | CLI 命令矩阵（commands + commands_ext）|
-| `frontend/` | ~7000 | PySide6 Qt GUI（搁置）|
+| `cli/` | ~1400 | CLI 命令矩阵（commands + commands_ext） |
+| `cli/dashboard/` | ~2500 | TypeScript + Bun + Ink CLI Dashboard（独立项目） |
+| `frontend/` | ~7000 | PySide6 Qt GUI（搁置） |
 | `themes/` | ~200 | QSS 主题系统 |
-| `gitgo-dashboard/` | 独立项目 | TypeScript + Bun + Ink CLI Dashboard |
 
 ## Commands
 
@@ -88,8 +90,8 @@ python -m gitgo --mode sync --project <name>
 # 状态查看
 python -m gitgo --mode status --project <name>
 
-# CLI Dashboard（独立项目）
-cd ../gitgo-dashboard && bun run src/main.tsx
+# CLI Dashboard（Ink 终端 UI）
+cd cli/dashboard && bun run src/main.tsx
 
 # 运行测试
 pytest tests/ -q
@@ -116,11 +118,11 @@ HistoryEntry 结构：`timestamp / project_name / operation / status / detail / 
 
 **Event 密度 ≠ Commit 密度**：daemon 每次 workspace_dirty 记录一条 policy_check_result（高频）。git commit 只在 round_complete 和 sync 时产生（低频）。
 
-## Daemon（v0.29 核心）
+## Daemon + Dispatch（v0.30）
 
 **入口**：`backend/core/daemon/__init__.py:run_daemon()`
 
-三线程架构（watcher / poller / reader）+ 单线程主循环（event queue）。
+三线程架构（watcher / poller / reader）+ 单线程主循环（event queue）。通过 stdin/stdout line-delimited JSON 与外部通信。
 
 **Phase 1 — 监测**：watchdog 检测文件变更 → 去抖 2s → `workspace_dirty` 事件入队
 **Phase 2 — 检查**：主循环处理 `workspace_dirty` → step_scan + step_load_commits → Policy Engine 三步：
@@ -131,15 +133,67 @@ HistoryEntry 结构：`timestamp / project_name / operation / status / detail / 
 **Phase 4 — 交付**：人/Agent 调 `round_complete` stdin 命令 → `_snapshot_workspace()` → git commit → `workspace_state_snapshot` event。
 **Phase 5 — 审查**：人调 `reject` stdin 命令 → `rejection` event → rejection_count ≥ 3 且最终通过 → `_harvest_from_rejection_chain()` → 生成 pending lesson。
 
-## CLI Dashboard（gitgo-dashboard/）
+### Dispatch Layer（v0.30 新增）
+
+**DaemonClient**（`backend/core/daemon/client.py`）— subprocess-based daemon 通信客户端：
+
+```
+MCP Tool → DaemonClient.send_command(cmd) → daemon stdin JSON
+                                              ↓
+MCP Tool ← command_result ← daemon stdout JSON
+```
+
+- `subprocess.Popen` 启动 daemon 子进程，stdin/stdout pipe 通信
+- 后台 reader 线程持续读取 daemon stdout，`threading.Event` 做 response routing
+- `send_command()` 发同步命令（fork_agent / dispatch_tool / round_complete）
+- `send_llm_call()` 发异步 LLM 调用，等待 `llm_response` 事件
+- 自动检测 stale PID 并清理，CWD = project_root.parent
+
+**DaemonRegistry**（`mcp_tools/daemon_registry.py`）— 单例缓存，每个 project 一个 DaemonClient 实例。atexit 自动 shutdown 所有 daemon。
+
+**ToolDispatcher**（`backend/core/dispatch/dispatcher.py`）— daemon 内部命令→Tool 路由，含 RingGate 权限检查。
+
+## Agent Loop（v0.30）
+
+**A→B Agent 通路**：MCP 工具 `gitgo_fork_agent` → daemon `fork_agent` 命令 → AgentProcessManager 创建 B-level Agent → `dispatch_tool` 执行具体操作 → `llm_call` 调 LLM。
+
+```
+MCP Tool (A-level)
+  → DaemonClient.send_command("fork_agent")
+    → daemon 主循环 → AgentProcessManager.fork()
+      → subprocess B-level Agent
+        → stdin: dispatch_tool (scan/sync/push)
+        → stdin: llm_call (messages) → LLM API
+        → stdout: llm_response → DaemonClient.send_llm_call() → MCP Tool
+```
+
+**关键模块**：
+- `backend/core/loop/manager.py` — AgentProcessManager：B-level Agent 生命周期
+- `backend/core/loop/context_builder.py` — 为 B-level Agent 构建上下文
+- `backend/core/loop/gate.py` — Gate A/B 检查嵌入 Agent 循环
+- `backend/core/loop/llm.py` — LLMProvider：OpenAI-compatible chat completions 封装
+
+**LLM 配置优先级**：环境变量 `GITGO_LLM_*` > `.gitgo/llm_config.json` active_provider > Mock fallback
+
+## LLM Provider 配置（v0.30）
+
+**后端**：
+- `backend/core/llm_config.py` — LLMConfigManager：JSON 文件 CRUD（`.gitgo/llm_config.json`），支持多 Provider + active 切换
+- `mcp_tools/llm_config.py` — 4 个 MCP 工具：`gitgo_llm_status` / `gitgo_llm_save` / `gitgo_llm_switch` / `gitgo_llm_delete`
+
+**前端**（Ink 终端 UI）：
+- `cli/dashboard/src/components/LLMConfigPanel.tsx` — 列表模式（Provider 卡片 + ●/○ 激活标记）+ 编辑模式（内联表单 + Tab 切换字段）+ 连接测试
+- 快捷键：`L` 键或 `:llm` 命令打开面板，↑↓ 选择，Enter 切换激活，N/E/D/T 新建/编辑/删除/测试
+
+## CLI Dashboard（cli/dashboard/）
 
 独立项目，技术栈 TypeScript + Bun + @anthropic/ink。通过 MCP stdio 与 gitgo 通信。
 
 **数据流**：`mcp_server.py` → JSON-RPC → `src/mcp/client.ts` → React state → Ink 渲染
 
-**三级导航**：Overview（项目列表）→ Detail（Tab 页：Contract/Lessons/Events/Governance）→ L3（单条详情）
+**场景导航**：Overview（项目列表）→ ProjectWorkspace（Tab 页：Contract/Lessons/Events/Governance）→ AgentDetail / LLMConfigPanel
 
-**命令系统**：`:` 进入命令模式，Tab 补全，支持 lesson/contract/status/verify/project/refresh/help
+**命令系统**：`:` 进入命令模式，Tab 补全，支持 lesson/contract/status/verify/project/refresh/help/llm
 
 **MCP tools 使用**：概览用快速读取（list_projects / lesson_list / contract_show），不用 `gitgo_status`（含全量 SHA256 扫描）。
 
@@ -178,7 +232,10 @@ pytest tests/ -q    # 334 passed, 1 skipped
 - `docs/StateLog_Design_Discussion.md` — StateLog 完整设计与治理循环
 - `docs/VERSION.md` — 版本历史
 - `docs/HANDOFF.md` — 交接 + 待执行优先级
-- `gitgo-dashboard/docs/PROJECT.md` — Dashboard CLI 项目文档
+- `docs/iterations/v0.30_Implementation_Plan.md` — v0.30 Dispatch + LLM Config 实施计划
+- `docs/iterations/v0.30_Loop_Research.md` — Agent Loop 调研笔记
+- `docs/iterations/v0.30_AgentProcessManager_Design.md` — AgentProcessManager 设计
+- `cli/dashboard/docs/PROJECT.md` — Dashboard CLI 项目文档
 - `memory/ink-dashboard-pitfalls.md` — Dashboard 重写踩坑记录
 - `memory/git-history-cleanup-lessons.md` — Git 历史清洗得失
 - `memory/dashboard-tab-scroll-fix.md` — **Tab 跳底 80+次尝试**：Ink `fullResetSequence` + Yoga `marginBottom` 2× 隐形膨胀

@@ -457,7 +457,7 @@ class SyncSession:
 
     # ── 步骤 1: 扫描 ────────────────────────────────────────
 
-    def step_scan(self) -> list[FileEntry]:
+    def step_scan(self, hash_cache: "FileHashCache | None" = None) -> list[FileEntry]:
         """扫描工作区并对比备份仓库"""
         self.stage = SessionStage.SCANNING
         self.on_stage_changed(self.stage)
@@ -488,7 +488,7 @@ class SyncSession:
         entries = compare_files(
             self.workspace_path, self.backup_path, files, self.on_progress,
             ws_adapter=self.ws_adapter, bk_adapter=self.bk_adapter,
-            normalize_eol=True,
+            normalize_eol=True, hash_cache=hash_cache,
         )
         entries = self.on_file_selection(entries)
 
@@ -519,7 +519,8 @@ class SyncSession:
         )
         return entries
 
-    def step_scan_files(self, changed_files: list[str]) -> list[FileEntry]:
+    def step_scan_files(self, changed_files: list[str],
+                        hash_cache: "FileHashCache | None" = None) -> list[FileEntry]:
         """增量扫描——只对比指定文件列表。"""
         self.stage = SessionStage.SCANNING
         self.on_stage_changed(self.stage)
@@ -530,6 +531,7 @@ class SyncSession:
         entries = compare_files(
             self.workspace_path, self.backup_path, changed_files, self.on_progress,
             ws_adapter=self.ws_adapter, bk_adapter=self.bk_adapter, normalize_eol=True,
+            hash_cache=hash_cache,
         )
         self.entries = entries
         self.stage = SessionStage.SELECTING

@@ -4,7 +4,57 @@
 
 ---
 
-## v0.29 (2026-06-12 ~ 2026-06-17)
+## v0.30 (2026-07-05)
+
+**Dispatch Layer + LLM Provider 配置面板 — A→B Agent 通路真实化 + Ink 终端 Provider 管理**
+
+### D1: Dispatch Layer（MCP → Daemon 真实通路）
+- `backend/core/daemon/client.py` — **新建** (~200 行) DaemonClient：subprocess-based daemon 通信
+  - `subprocess.Popen` stdin/stdout pipe，后台 reader 线程
+  - `threading.Event` response routing，支持 command + async llm_call
+  - CWD = project_root.parent 确保 `python -m gitgo` 可发现模块
+- `mcp_tools/daemon_registry.py` — **新建** (~40 行) 单例 DaemonClient 缓存 + atexit shutdown
+- `mcp_tools/loop.py` — **重写** (~280 行) 三个 A→B 工具全部走 daemon 真实通路
+  - `_chat_via_daemon` + `_resolve_llm_config` 配置优先级链
+  - `_chat_fallback` Mock 保留作为最后兜底
+- `mcp_server.py` — 新增 SIGTERM/SIGINT signal handler 清理 daemon
+
+### D2: LLM Provider 配置系统
+- `backend/core/llm_config.py` — **新建** (~130 行) LLMConfigManager：JSON 文件 CRUD
+  - `.gitgo/llm_config.json` 存储，支持多 Provider + active_provider 切换
+  - API key 在 MCP 响应中自动 mask（前 4 + *** + 后 4）
+- `mcp_tools/llm_config.py` — **新建** (~130 行) 4 个 MCP 工具
+  - `gitgo_llm_status` / `gitgo_llm_save` / `gitgo_llm_switch` / `gitgo_llm_delete`
+- `mcp_tools/__init__.py` — 注册 llm_config 模块 + atexit daemon 清理
+
+### D3: Ink Dashboard LLM 配置面板
+- `cli/dashboard/src/hooks/useLLMConfig.ts` — **新建** (~90 行) React hook 封装 MCP 调用
+- `cli/dashboard/src/components/LLMConfigPanel.tsx` — **新建** (~290 行) Ink 终端 UI
+  - 列表模式：Provider 卡片 + ●/○ 激活标记 + API key 遮罩
+  - 编辑模式：内联表单 + Tab/Shift+Tab 字段切换 + Enter 保存
+  - 连接测试：调 gitgo_agent_chat 验证连通性
+- `cli/dashboard/src/components/App.tsx` — 新增 `llm_config` scene + L 键快捷入口 + `:llm` 命令
+- `cli/dashboard/src/state/store.ts` — 新增 `previousScene` 状态（返回导航）
+- `cli/dashboard/src/commands.ts` — 新增 `llm` 命令
+
+### D4: 模块结构优化
+- `backend/core/cache/` — 文件哈希缓存（file_hash.py）
+- `backend/core/dispatch/` — ToolDispatcher 命令分发（dispatcher.py）
+- `backend/core/fact/` — 模式匹配（contract/file/workflow patterns）
+- `backend/core/loop/` — Agent 循环（context_builder / gate / llm / manager / models / tools）
+- `backend/core/policy/` — Policy Engine 可插拔（base / contract / dependency / identity / lessons / registry）
+- `backend/core/steps/` — 纯函数管线（commits / scan / sync）
+
+### Bug 修复
+- `daemon/__init__.py`: UnboundLocalError — `evq` 初始化移至 `daemon_ctx` 引用之前
+- DaemonClient CWD: `project_root` → `project_root.parent` 修复 "No module named gitgo"
+
+### 认证
+- 334 passed, 1 skipped（零回归）
+
+---
+
+## v0.29 ( 2026-06-17)
 
 **StateLog Governance Loop — Policy Engine 可插拔 + Dashboard Governance Tab + 链式依赖 + 增量扫描 + 全链路解耦**
 
@@ -66,7 +116,7 @@
 
 ---
 
-## v0.28 (进行中)
+## v0.28 (2026-06-13)
 
 **Dashboard 异构重写 — Python Rich → TypeScript Ink。**
 

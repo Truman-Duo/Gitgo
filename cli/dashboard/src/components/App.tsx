@@ -1,46 +1,42 @@
-// src/components/App.tsx
-import React, { useState, useCallback, useMemo } from "react";
+// src/components/App.tsx — Three-scene routing with createStore
+import React, { useCallback, useMemo } from "react";
 import { Box, Text, useInput, useApp, useTerminalSize } from "@anthropic/ink";
 import { McpClient } from "../mcp/client.js";
 import { useGitgoData } from "../hooks/useGitgoData.js";
+import { createStore, useStore, initialAppState, type AppState } from "../state/store.js";
+import { executeCommand, COMMANDS, type CommandContext } from "../commands.js";
 import { Overview } from "./Overview.js";
-import { Detail } from "./Detail.js";
+import { ProjectWorkspace } from "./ProjectWorkspace.js";
+import { AgentDetail, AgentDetailScene } from "./AgentDetail.js";
+import { LLMConfigPanel } from "./LLMConfigPanel.js";
 import { CommandBar, type Suggestion } from "./CommandBar.js";
 import { HelpPanel } from "./HelpPanel.js";
 
 type Props = { client: McpClient; refreshSec?: number };
-type FocusTarget = "table" | "command";
 
-const COMMANDS: Suggestion[] = [
-  { label: "lesson",   description: "list pending lessons" },
-  { label: "contract", description: "show contract summary" },
-  { label: "status",   description: "show project status" },
-  { label: "verify",   description: "verify a lesson by ID" },
-  { label: "project",  description: "jump to a project" },
-  { label: "refresh",  description: "force refresh data" },
-  { label: "help",     description: "show help panel" },
-];
+const appStore = createStore<AppState>(initialAppState());
 
 export function App({ client, refreshSec = 5 }: Props) {
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
-  const { projects, loading, error, refresh } = useGitgoData(
-    client,
-    refreshSec
-  );
-  const [sel, setSel] = useState(0);
-  const [detail, setDetail] = useState(false);
-  const [focus, setFocus] = useState<FocusTarget>("table");
-  const [cmdBuf, setCmdBuf] = useState("");
-  const [cmdCursor, setCmdCursor] = useState(0);
-  const [cmdResult, setCmdResult] = useState("");
-  const [showHelp, setShowHelp] = useState(false);
-  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
-  const [cmdHistoryIdx, setCmdHistoryIdx] = useState(-1);
-  const [suggestionIdx, setSuggestionIdx] = useState(0);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
 
-  // Show matching commands based on text after ":"
+  const scene = useStore(appStore, (s) => s.scene);
+  const previousScene = useStore(appStore, (s) => s.previousScene);
+  const activeProject = useStore(appStore, (s) => s.activeProject);
+  const activeAgentId = useStore(appStore, (s) => s.activeAgentId);
+  const sel = useStore(appStore, (s) => s.sel);
+  const focus = useStore(appStore, (s) => s.focus);
+  const cmdBuf = useStore(appStore, (s) => s.cmdBuf);
+  const cmdCursor = useStore(appStore, (s) => s.cmdCursor);
+  const cmdResult = useStore(appStore, (s) => s.cmdResult);
+  const showHelp = useStore(appStore, (s) => s.showHelp);
+  const suggestionIdx = useStore(appStore, (s) => s.suggestionIdx);
+  const refreshKey = useStore(appStore, (s) => s.refreshKey);
+
+  const setState = appStore.setState;
+
+  // ── Suggestions ─────────────────────────────────────────
   const isCommand = cmdBuf.startsWith(":");
   const suggestions = useMemo(() => {
     if (focus !== "command" || !isCommand) return [];
@@ -54,217 +50,114 @@ export function App({ client, refreshSec = 5 }: Props) {
     });
   }, [focus, cmdBuf, isCommand]);
 
-  const handleDismissHelp = useCallback(() => setShowHelp(false), []);
-  const handleBackFromDetail = useCallback(() => setDetail(false), []);
+  // ── Command context (inject deps) ───────────────────────
+  const cmdCtx: CommandContext = useMemo(() => ({
+    client,
+    projects,
+    sel,
+    refresh,
+  }), [client, projects, sel, refresh]);
 
-  const enterCommandMode = useCallback(() => {
-    setFocus("command");
-    setCmdBuf("");
-    setCmdCursor(0);
-    setCmdResult("");
-    setSuggestionIdx(0);
-  }, []);
-
-  const exitCommandMode = useCallback(() => {
-    setFocus("table");
-    setCmdBuf("");
-    setCmdCursor(0);
-    setCmdHistoryIdx(-1);
-    setSuggestionIdx(0);
-  }, []);
-
-  const executeCommand = useCallback(
-    async (cmd: string) => {
-      setCmdHistory((prev) => [...prev, cmd]);
-      setCmdHistoryIdx(-1);
-      // Strip leading ":" and whitespace
-      const clean = cmd.replace(/^:\s*/, "");
-      const parts = clean.split(/\s+/);
-      const action = parts[0]?.toLowerCase();
-      const target = parts[1];
-      try {
-        switch (action) {
-          case "l":
-          case "lesson": {
-            const name = target || projects[sel]?.name;
-            if (!name) { setCmdResult("No project selected"); return; }
-            const result: any = await client.callTool("gitgo_lesson_list", { project: name });
-            const pending = result?.pending || [];
-            if (!pending.length) { setCmdResult(`${name}: no pending lessons`); return; }
-            const lines = pending.slice(0, 5).map((l: any) =>
-              `[${(l.severity||"?")[0]?.toUpperCase()}] ${l.id?.slice(0,8)||"?"} ${l.trigger?.slice(0,40)}`
-            );
-            setCmdResult(`${name}: ${pending.length} pending  |  ${lines.join("  |  ")}${pending.length>5?" ...":""}`);
-            break;
-          }
-          case "c":
-          case "contract": {
-            const name = target || projects[sel]?.name;
-            if (!name) { setCmdResult("No project selected"); return; }
-            const contract: any = await client.callTool("gitgo_contract_show", { project: name });
-            if (!contract || contract.error) { setCmdResult(`${name}: no contract`); return; }
-            const f = contract.decided_features?.length || 0;
-            const c = contract.architecture_constraints?.length || 0;
-            const ts = contract.tech_stack?.join(",") || "?";
-            setCmdResult(`${name}: ${f}f/${c}c  tech:${ts}  updated:${contract.updated_at?.slice(0,10)||"?"}`);
-            break;
-          }
-          case "s":
-          case "status": {
-            const name = target || projects[sel]?.name;
-            if (!name) { setCmdResult("No project selected"); return; }
-            const status: any = await client.callTool("gitgo_status", { project: name });
-            const ws = status?.workspace || {};
-            const commits = status?.commits || {};
-            setCmdResult(
-              `${name}  stage:${status?.stage||"?"}  ` +
-              `changed:${ws.entries_changed||0}/${ws.entries_total||0}  ` +
-              `formal:${commits.formal_synced||0}/${commits.formal_total||0}  ` +
-              `next:${status?.semantic?.suggested_next_action||"?"}`
-            );
-            break;
-          }
-          case "v":
-          case "verify": {
-            if (!target) { setCmdResult(":v <lesson_id> — verify a lesson"); return; }
-            const name = projects[sel]?.name;
-            if (!name) { setCmdResult("No project selected"); return; }
-            const result: any = await client.callTool("gitgo_lesson_verify", {
-              project: name, lesson_id: target,
-            });
-            if (result?.error) { setCmdResult(`Verify failed: ${result.error}`); }
-            else { setCmdResult(`Verified ${target.slice(0,12)} (count:${result?.verified_count||0})`); }
-            break;
-          }
-          case "p":
-          case "project": {
-            if (!target) { setCmdResult(":p <name> — jump to project"); return; }
-            const idx = projects.findIndex((p) =>
-              p.name.toLowerCase() === target.toLowerCase()
-            );
-            if (idx >= 0) { setSel(idx); setCmdResult(`Jumped to ${projects[idx].name}`); }
-            else { setCmdResult(`Project not found: ${target}`); }
-            break;
-          }
-          case "r":
-          case "refresh":
-            await refresh();
-            setRefreshKey((k) => k + 1);
-            setCmdResult("Refreshed");
-            break;
-          case "h":
-          case "help":
-            setShowHelp(true);
-            setCmdResult("");
-            break;
-          default:
-            setCmdResult(`Unknown: ${cmd}  (:h for help)`);
-        }
-      } catch (e: any) {
-        setCmdResult(`Error: ${e.message}`);
-      }
-      setFocus("table");
+  // ── Scene navigation callbacks ──────────────────────────
+  const enterScene = useCallback(
+    (s: AppState["scene"], project: string | null = null) => {
+      setState((prev) => ({ ...prev, scene: s, activeProject: project, activeAgentId: null }));
     },
-    [projects, sel, client, refresh]
+    [setState],
   );
 
+  const handleEnterProject = useCallback(() => {
+    if (projects[sel]) enterScene("workspace", projects[sel].name);
+  }, [projects, sel, enterScene]);
+
+  const handleBackToProjects = useCallback(() => enterScene("projects"), [enterScene]);
+
+  const handleEnterAgent = useCallback(
+    (processId: string) => {
+      setState((prev) => ({ ...prev, scene: "agent_detail", activeAgentId: processId }));
+    },
+    [setState],
+  );
+
+  const handleBackFromAgent = useCallback(() => {
+    setState((prev) => ({ ...prev, scene: "workspace", activeAgentId: null }));
+  }, [setState]);
+
+  const openLLMConfig = useCallback(() => {
+    setState((prev) => ({ ...prev, previousScene: prev.scene, scene: "llm_config" }));
+  }, [setState]);
+
+  const handleBackFromLLM = useCallback(() => {
+    setState((prev) => ({ ...prev, scene: prev.previousScene }));
+  }, [setState]);
+
+  // ── Command execution ────────────────────────────────────
+  const runCommand = useCallback(async (cmd: string) => {
+    setState((prev) => ({ ...prev, cmdHistory: [...prev.cmdHistory, cmd], cmdHistoryIdx: -1 }));
+    // Handle :llm / :config locally (opens LLM config panel)
+    const clean = cmd.replace(/^:\s*/, "").split(/\s+/)[0]?.toLowerCase();
+    if (clean === "llm" || clean === "config" || clean === "lcfg") {
+      setState((prev) => ({ ...prev, previousScene: prev.scene, scene: "llm_config", focus: "table", cmdBuf: "", cmdCursor: 0 }));
+      return;
+    }
+    const outcome = await executeCommand(cmd, cmdCtx);
+    const updates: Partial<AppState> = { focus: "table", cmdResult: outcome.resultText };
+    if (outcome.showHelp) updates.showHelp = true;
+    if (outcome.refreshTrigger) updates.refreshKey = refreshKey + 1;
+    if (outcome.jumpToProject !== undefined) updates.sel = outcome.jumpToProject;
+    setState((prev) => ({ ...prev, ...updates }));
+  }, [cmdCtx, setState, refreshKey]);
+
+  // ── Keyboard dispatch (global) ───────────────────────────
   useInput((input: string, key: any) => {
-    // ── Command mode ──────────────────────────────────────
-    if (focus === "command") {
-      if (key.return) {
-        const cmd = cmdBuf.trim();
-        if (cmd) executeCommand(cmd);
-        else exitCommandMode();
-        return;
-      }
-      if (key.escape) { exitCommandMode(); return; }
-
-      // Cursor movement
-      if (key.leftArrow)  { setCmdCursor((c) => Math.max(0, c - 1)); return; }
-      if (key.rightArrow) { setCmdCursor((c) => Math.min(cmdBuf.length, c + 1)); return; }
-      if (key.home)       { setCmdCursor(0); return; }
-      if (key.end)        { setCmdCursor(cmdBuf.length); return; }
-
-      // Deletion
-      if (key.backspace) {
-        if (cmdCursor > 0) {
-          setCmdBuf((prev) => prev.slice(0, cmdCursor - 1) + prev.slice(cmdCursor));
-          setCmdCursor((c) => c - 1);
-        }
-        return;
-      }
-      if (key.delete) {
-        if (cmdCursor < cmdBuf.length) {
-          setCmdBuf((prev) => prev.slice(0, cmdCursor) + prev.slice(cmdCursor + 1));
-        }
-        return;
-      }
-
-      // Up arrow in empty buffer → exit; with suggestions → cycle selection
-      if (key.upArrow) {
-        if (!cmdBuf.trim()) { exitCommandMode(); return; }
-        if (suggestions.length > 0) {
-          setSuggestionIdx((p) => (p - 1 + suggestions.length) % suggestions.length);
-          return;
-        }
-        exitCommandMode();
-        return;
-      }
-      if (key.downArrow && suggestions.length > 0) {
-        setSuggestionIdx((p) => (p + 1) % suggestions.length);
-        return;
-      }
-
-      // Tab — cycle through suggestions and fill (keeps ":" prefix)
-      if (key.tab && suggestions.length > 0) {
-        const s = suggestions[suggestionIdx % suggestions.length];
-        if (s) {
-          setCmdBuf(":" + s.label + " ");
-          setCmdCursor(s.label.length + 2);
-        }
-        setSuggestionIdx((prev) => (prev + 1) % suggestions.length);
-        return;
-      }
-
-      // Character insertion (handles paste — multi-char input)
-      if (input && input.length >= 1 && !key.ctrl && !key.meta) {
-        setCmdBuf((prev) => prev.slice(0, cmdCursor) + input + prev.slice(cmdCursor));
-        setCmdCursor((c) => c + input.length);
-        return;
-      }
-      return;
-    }
-
-    // ── Help mode ─────────────────────────────────────────
+    if (focus === "command") return handleCommandInput(input, key, cmdBuf, cmdCursor, suggestions, suggestionIdx, runCommand, setState);
     if (showHelp) {
-      if (key.escape || input === "h" || input === "q") { setShowHelp(false); }
+      if (key.escape || input === "h" || input === "q") setState((p) => ({ ...p, showHelp: false }));
       return;
     }
-
-    // ── Detail mode ───────────────────────────────────────
-    if (detail) {
-      if (input === "q") { setDetail(false); return; }
-      // Esc handled by Detail component (L3→L2→exit)
+    if (scene === "llm_config") {
+      if (key.escape || input === "q") { handleBackFromLLM(); return; }
       return;
     }
-
-    // ── Overview (table focus) ────────────────────────────
+    if (scene === "agent_detail") {
+      if (key.escape || input === "q") { handleBackFromAgent(); return; }
+      return;
+    }
+    if (scene === "workspace") {
+      if (key.escape || input === "q") { handleBackToProjects(); return; }
+      if (input === ":") { enterCommandMode(setState); return; }
+      if (input === "L" || input === "l") { openLLMConfig(); return; }
+      return;
+    }
+    // Projects scene
     if (input === "q") { exit(); return; }
-    if (input === ":") { enterCommandMode(); return; }
-    if (input === "h") { setShowHelp((prev) => !prev); return; }
-    if (key.return && projects.length > 0) { setDetail(true); return; }
+    if (input === ":") { enterCommandMode(setState); return; }
+    if (input === "h") { setState((p) => ({ ...p, showHelp: !p.showHelp })); return; }
+    if (input === "L" || input === "l") { openLLMConfig(); return; }
+    if (key.return && projects.length > 0) { handleEnterProject(); return; }
     if (key.upArrow) {
-      if (sel === 0) { enterCommandMode(); }
-      else { setSel((prev) => Math.max(0, prev - 1)); }
+      setState((p) => ({
+        ...p,
+        sel: p.sel === 0 ? 0 : p.sel - 1,
+        focus: p.sel === 0 ? "command" : p.focus,
+        cmdBuf: p.sel === 0 ? "" : p.cmdBuf,
+        cmdCursor: 0,
+      }));
       return;
     }
     if (key.downArrow) {
-      if (sel >= projects.length - 1) { enterCommandMode(); }
-      else { setSel((prev) => Math.min(projects.length - 1, prev + 1)); }
+      setState((p) => ({
+        ...p,
+        sel: p.sel >= projects.length - 1 ? projects.length - 1 : p.sel + 1,
+        focus: p.sel >= projects.length - 1 ? "command" : p.focus,
+        cmdBuf: p.sel >= projects.length - 1 ? "" : p.cmdBuf,
+        cmdCursor: 0,
+      }));
       return;
     }
   });
 
+  // ── Render ───────────────────────────────────────────────
   if (loading) {
     return (
       <Box flexDirection="column" padding={1}>
@@ -273,32 +166,47 @@ export function App({ client, refreshSec = 5 }: Props) {
     );
   }
 
-  const responsiveWidth = Math.max(60, termCols || 80);
+  const w = Math.max(60, termCols || 80);
+  const h = termRows || 24;
 
   return (
-    <Box flexDirection="column" width={responsiveWidth}>
+    <Box flexDirection="column" width={w}>
       {error ? (
-        <Box paddingLeft={1}>
-          <Text color="red">Error: {error}</Text>
-        </Box>
+        <Box paddingLeft={1}><Text color="red">Error: {error}</Text></Box>
       ) : null}
 
       {showHelp ? (
-        <HelpPanel onDismiss={handleDismissHelp} />
-      ) : detail && projects[sel] ? (
-        <Detail
-          projectName={projects[sel].name}
+        <HelpPanel onDismiss={() => setState((p) => ({ ...p, showHelp: false }))} />
+      ) : scene === "llm_config" && activeProject ? (
+        <LLMConfigPanel
           client={client}
-          onBack={handleBackFromDetail}
-          cols={responsiveWidth}
-          rows={termRows || 24}
+          project={activeProject}
+          cols={w}
+          rows={h}
+          onBack={handleBackFromLLM}
+        />
+      ) : scene === "agent_detail" ? (
+        <AgentDetailScene
+          client={client}
+          activeProject={activeProject}
+          activeAgentId={activeAgentId}
+          cols={w}
+          rows={h}
+        />
+      ) : scene === "workspace" && activeProject ? (
+        <ProjectWorkspace
+          project={activeProject}
+          client={client}
+          cols={w}
+          rows={h}
+          onBack={handleBackToProjects}
+          onEnterAgent={handleEnterAgent}
           refreshKey={refreshKey}
         />
       ) : (
-        <Overview projects={projects} sel={sel} focus={focus} cols={responsiveWidth} />
+        <Overview projects={projects} sel={sel} focus={focus} cols={w} />
       )}
 
-      {/* Spacer */}
       <Box flexGrow={1} />
 
       <Box marginTop={1}>
@@ -308,9 +216,77 @@ export function App({ client, refreshSec = 5 }: Props) {
           result={cmdResult}
           suggestions={suggestions}
           suggestionIdx={suggestionIdx}
-          cols={responsiveWidth}
+          cols={w}
         />
       </Box>
     </Box>
   );
+}
+
+// ── Helpers ─────────────────────────────────────────────────
+
+function enterCommandMode(setState: (updater: (prev: AppState) => AppState) => void) {
+  setState((p) => ({ ...p, focus: "command", cmdBuf: "", cmdCursor: 0, cmdResult: "", suggestionIdx: 0 }));
+}
+
+function handleCommandInput(
+  input: string,
+  key: any,
+  cmdBuf: string,
+  cmdCursor: number,
+  suggestions: Suggestion[],
+  suggestionIdx: number,
+  runCommand: (cmd: string) => Promise<void>,
+  setState: (updater: (prev: AppState) => AppState) => void,
+) {
+  if (key.return) {
+    const cmd = cmdBuf.trim();
+    if (cmd) runCommand(cmd);
+    else setState((p) => ({ ...p, focus: "table", cmdBuf: "", cmdCursor: 0, suggestionIdx: 0 }));
+    return;
+  }
+  if (key.escape) {
+    setState((p) => ({ ...p, focus: "table", cmdBuf: "", cmdCursor: 0, cmdHistoryIdx: -1, suggestionIdx: 0 }));
+    return;
+  }
+  if (key.leftArrow)  { setState((p) => ({ ...p, cmdCursor: Math.max(0, p.cmdCursor - 1) })); return; }
+  if (key.rightArrow) { setState((p) => ({ ...p, cmdCursor: Math.min(cmdBuf.length, p.cmdCursor + 1) })); return; }
+  if (key.home)       { setState((p) => ({ ...p, cmdCursor: 0 })); return; }
+  if (key.end)        { setState((p) => ({ ...p, cmdCursor: cmdBuf.length })); return; }
+  if (key.backspace) {
+    if (cmdCursor > 0) {
+      setState((p) => ({ ...p, cmdBuf: cmdBuf.slice(0, cmdCursor - 1) + cmdBuf.slice(cmdCursor), cmdCursor: p.cmdCursor - 1 }));
+    }
+    return;
+  }
+  if (key.delete) {
+    if (cmdCursor < cmdBuf.length) {
+      setState((p) => ({ ...p, cmdBuf: cmdBuf.slice(0, cmdCursor) + cmdBuf.slice(cmdCursor + 1) }));
+    }
+    return;
+  }
+  if (key.upArrow) {
+    if (!cmdBuf.trim()) { setState((p) => ({ ...p, focus: "table", cmdBuf: "", cmdCursor: 0, suggestionIdx: 0 })); return; }
+    if (suggestions.length > 0) {
+      setState((p) => ({ ...p, suggestionIdx: (p.suggestionIdx - 1 + suggestions.length) % suggestions.length }));
+      return;
+    }
+    setState((p) => ({ ...p, focus: "table", cmdBuf: "", cmdCursor: 0, suggestionIdx: 0 }));
+    return;
+  }
+  if (key.downArrow && suggestions.length > 0) {
+    setState((p) => ({ ...p, suggestionIdx: (p.suggestionIdx + 1) % suggestions.length }));
+    return;
+  }
+  if (key.tab && suggestions.length > 0) {
+    const s = suggestions[suggestionIdx % suggestions.length];
+    if (s) {
+      setState((p) => ({ ...p, cmdBuf: ":" + s.label + " ", cmdCursor: s.label.length + 2, suggestionIdx: p.suggestionIdx + 1 }));
+    }
+    return;
+  }
+  if (input && input.length >= 1 && !key.ctrl && !key.meta) {
+    setState((p) => ({ ...p, cmdBuf: cmdBuf.slice(0, cmdCursor) + input + cmdBuf.slice(cmdCursor), cmdCursor: p.cmdCursor + input.length }));
+    return;
+  }
 }

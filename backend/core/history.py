@@ -21,6 +21,15 @@ class HistoryEntry:
     status: str = "success"       # "success" | "failed" | "cancelled"
     detail: dict = field(default_factory=dict)  # 操作特定数据
     correlation_id: str = ""      # session 级关联 ID，同一次工作流的所有记录共享
+
+    # ── L0: StateLog 2.0 关联字段 ──
+    fact_refs: list[str] = field(default_factory=list)
+    # 本 event 触发了哪些 fact 的派生。例：["fact_frequent_mod_dashboard_py"]
+    tags: list[str] = field(default_factory=list)
+    # 语义标签。例：["exploration", "abandoned", "rejected", "lesson_applied"]
+    parent_event_id: str = ""
+    # 前驱 event 的 correlation_id。例：rejection 的 parent 是被拒绝的 formalize
+
     # 保留旧字段向后兼容（add_entry 委托到 add_operation 内部填充）
     file_count: int = 0
     commit_hash: str = ""
