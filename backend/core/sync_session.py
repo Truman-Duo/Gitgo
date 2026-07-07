@@ -839,62 +839,44 @@ class SyncSession:
             self.on_log("未选择任何文件")
             return False
 
-        # ── 外来 commit 检测 ──
-        if self.backup_path and self.bk_git_runner.is_git_repo():
-            current_head = self.bk_git_runner.rev_parse("HEAD")
-            if current_head:
-                release_node = self.project.release
-                recorded = release_node.last_known_head if release_node else ""
-                if recorded and current_head != recorded:
-                    self.on_log(
-                        f"[WARN] Release repo 有外来 commit\n"
-                        f"  recorded: {recorded[:12]}\n"
-                        f"  current:  {current_head[:12]}"
-                    )
-                    HistoryManager.add_operation(
-                        self.project.name, "integrity_warning", "warning",
-                        {"rule": "foreign_commit_detected",
-                         "recorded_head": recorded,
-                         "current_head": current_head},
-                        correlation_id=self._correlation_id,
-                    )
-
         if not self.backup_path:
             self.on_log("未配置备份路径")
             return False
 
         self.on_log(f"同步到备份仓库: {fc.message.split(chr(10))[0]}")
 
-        # ── Gate A: 抽象工作区→抽象备份区的合法性边界 ──
-        from backend.core.contract import ContractManager, detect_drift
-        contract = ContractManager.load(self.workspace_path)
+        # ── Gate A: 可插拔 Gate 检查（通过 contract.yaml gates.sync 配置）──
+        from backend.core.policy.gates import load_gates
+
         gate_blocked = False
-        if contract:
-            changed_paths = [e.rel_path for e in selected]
-            drift_alerts = detect_drift(self.workspace_path, changed_paths, contract)
-            # 依赖签名检测
-            from backend.core.contract import check_feature_signatures
-            dep_alerts = check_feature_signatures(
-                self.workspace_path, changed_paths, contract,
-            )
-            all_alerts = drift_alerts + dep_alerts
-            if all_alerts:
-                errors = [a for a in all_alerts if a.get("level") == "error"]
-                for a in all_alerts:
-                    self.on_log(f"[Gate A] {a['level'].upper()}: {a['message'][:120]}")
-                from backend.core.history import HistoryManager as _HM
-                _HM.add_operation(
+        for gate in load_gates("sync", str(self.workspace_path)):
+            result = gate.check(self, self.project, fc, selected)
+            prefix = f"[Gate A/{gate.name}]"
+
+            if result.message:
+                level_tag = result.level.upper()
+                self.on_log(f"{prefix} {level_tag}: {result.message}")
+
+            # 记录告警到 HistoryManager
+            if result.alerts:
+                HistoryManager.add_operation(
                     self.project.name, "governance_drift", "warning",
-                    {"alert_count": len(all_alerts),
-                     "rules": [a["rule"] for a in all_alerts]},
+                    {"alert_count": len(result.alerts),
+                     "rules": [a.get("rule", gate.name) for a in result.alerts]},
                     correlation_id=self._correlation_id,
                 )
-                if errors:
-                    self.on_log(
-                        f"[Gate A] BLOCKED: {len(errors)} error-level drift(s) detected. "
-                        f"Fix before sync or use --force to override."
-                    )
-                    gate_blocked = True
+            elif result.rule and result.rule != "contract_drift":
+                # 非 drift 类告警也记录（如 foreign_commit）
+                HistoryManager.add_operation(
+                    self.project.name, "governance_drift", result.level,
+                    {"rule": result.rule, "message": result.message},
+                    correlation_id=self._correlation_id,
+                )
+
+            if result.blocked and gate.fail_action == "block":
+                self.on_log(f"{prefix} BLOCKED: {result.message}")
+                gate_blocked = True
+                break
 
         if gate_blocked:
             self.stage = SessionStage.FAILED
@@ -1021,29 +1003,28 @@ class SyncSession:
         commit_refs = [f"[{fc.prefix}-{fc.number}]" for fc in targets]
         self.on_log(f"推送到远程仓库: {', '.join(commit_refs)}")
 
-        # ── Gate B: Privacy Scan ──
+        # ── Gate B: 可插拔 Gate 检查（通过 contract.yaml gates.push 配置）──
+        from backend.core.policy.gates import load_gates
+
         push_files = []
         for fc in targets:
             push_files.extend([e.rel_path for e in self.entries
                                if e.status != "same" and e.selected])
-        if push_files:
-            from backend.core.authorship import scan_files_privacy
-            cfg = getattr(self.project, 'authorship', {}) or {}
-            privacy_cfg = cfg.get("privacy", {})
-            privacy_alerts = scan_files_privacy(
-                str(self.workspace_path),
-                list(set(push_files)),
-                level=privacy_cfg.get("level", 2),
-                deep_scan=privacy_cfg.get("deep_scan", False),
-            )
-            if privacy_alerts:
-                errors = [a for a in privacy_alerts if a.get("level") == "error"]
-                self.on_log(f"[Gate B] Privacy scan: {len(privacy_alerts)} alerts ({len(errors)} errors)")
-                for a in privacy_alerts:
-                    self.on_log(f"  [{a['rule']}] {a['message'][:100]}")
-                if errors:
-                    self.on_log("[Gate B] BLOCKED: privacy violations detected")
-                    return False, [a["message"] for a in errors]
+        selected_for_push = [e for e in self.entries
+                            if e.status != "same" and e.selected]
+
+        for gate in load_gates("push", str(self.workspace_path)):
+            result = gate.check(self, self.project, targets[0], selected_for_push)
+            prefix = f"[Gate B/{gate.name}]"
+
+            if result.message:
+                self.on_log(f"{prefix}: {result.message}")
+            for a in result.alerts:
+                self.on_log(f"  [{a.get('rule', gate.name)}] {a.get('message', '')[:100]}")
+
+            if result.blocked and gate.fail_action == "block":
+                self.on_log(f"{prefix} BLOCKED: {result.message}")
+                return False, [a.get("message", "") for a in result.alerts]
 
         success, warnings = push_to_backup(
             self.backup_path,
