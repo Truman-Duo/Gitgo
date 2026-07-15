@@ -6,7 +6,8 @@ class ToolRegistry:
 
     # 默认 ring 0 工具——可通过 contract.yaml policy.ring_0_tools 覆盖
     DEFAULT_RING_0_TOOLS = {"sync", "push", "accept_trial",
-                             "promote_lesson", "modify_contract"}
+                             "promote_lesson", "verify_lesson",
+                             "modify_contract"}
 
     def __init__(self, tool_names: list[str],
                  ring_0_tools: set[str] | None = None):

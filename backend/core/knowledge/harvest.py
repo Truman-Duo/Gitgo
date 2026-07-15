@@ -469,3 +469,181 @@ def _harvest_from_scan_history(
             harvested.append(lesson)
 
     return harvested
+
+
+# ── v0.35: 信号捕获 + 调度 + LLM 总结 ──────────────────────
+
+MIN_BATCH_SIZE = 5
+DENSITY_WINDOW = 50
+DENSITY_THRESHOLD = 2.0
+MIN_SOURCES = 2
+COOLDOWN_SECONDS = 300
+LLM_BATCH_MAX = 30
+MAX_HARVEST_RETRY = 5
+
+_last_harvest_time: dict[str, float] = {}
+
+
+def capture_signal(signal_type: str, detail: dict, project_name: str) -> None:
+    """捕获一条未处理信号 → HistoryManager (operation='unprocessed_signal')。"""
+    HistoryManager.add_operation(
+        project_name, "unprocessed_signal", "recorded",
+        {"signal_type": signal_type, **detail},
+    )
+
+
+def get_unprocessed_signals(project_name: str,
+                            signal_type: str | None = None) -> list[dict]:
+    """获取未处理信号。signal_type=None → 全部类型。"""
+    entries = HistoryManager.load()
+    signals = []
+    for e in entries:
+        if e.operation != "unprocessed_signal":
+            continue
+        if e.project_name != project_name:
+            continue
+        d = e.detail if isinstance(e.detail, dict) else {}
+        if signal_type and d.get("signal_type") != signal_type:
+            continue
+        signals.append({"timestamp": e.timestamp,
+                        "correlation_id": e.correlation_id, **d})
+    return signals
+
+
+def get_signal_baseline(signal_type: str, project_name: str) -> float:
+    """滚动 100 个事件的某类信号密度基线。"""
+    entries = HistoryManager.load()
+    recent = [e for e in entries[-100:]
+              if e.project_name == project_name]
+    if not recent:
+        return 0.0
+    matching = sum(
+        1 for e in recent
+        if e.operation == "unprocessed_signal"
+        and (e.detail or {}).get("signal_type") == signal_type
+    )
+    return matching / len(recent)
+
+
+def signal_density(project_name: str, signal_type: str | None = None,
+                   window: int = 50) -> float:
+    """最近 window 个事件中未处理信号的占比。"""
+    entries = HistoryManager.load()
+    recent = [e for e in entries[-window:]
+              if e.project_name == project_name]
+    if not recent:
+        return 0.0
+    matching = sum(
+        1 for e in recent
+        if e.operation == "unprocessed_signal"
+        and (signal_type is None
+             or (e.detail or {}).get("signal_type") == signal_type)
+    )
+    return matching / len(recent)
+
+
+def source_diversity(signals: list[dict]) -> int:
+    """统计信号不同的来源类型数。"""
+    return len(set(s.get("signal_type", "unknown") for s in signals))
+
+
+def should_trigger_harvest(signal_type: str, project_name: str) -> bool:
+    """多维条件调度算法。事件驱动的，不是时间驱动的。"""
+    signals = get_unprocessed_signals(project_name, signal_type)
+    if len(signals) < MIN_BATCH_SIZE:
+        return False
+    baseline = get_signal_baseline(signal_type, project_name)
+    density = signal_density(project_name, signal_type, DENSITY_WINDOW)
+    if density <= baseline * DENSITY_THRESHOLD:
+        return False
+    if source_diversity(signals) < MIN_SOURCES:
+        return False
+    now = time.time()
+    last = _last_harvest_time.get(signal_type, 0)
+    if now - last < COOLDOWN_SECONDS:
+        return False
+    return True
+
+
+def mark_harvest_triggered(signal_type: str) -> None:
+    """记录 harvest 时间（冷却期用）。"""
+    _last_harvest_time[signal_type] = time.time()
+
+
+def is_testable_proposition(rule: str) -> bool:
+    """LLM 输出门禁。不合规直接丢弃，不写入 pending。"""
+    if len(rule) < 20:
+        return False
+    keywords = ["if", "when", "must", "should",
+                "禁止", "必须", "需要先", "不能直接", "前需先"]
+    return any(kw in rule.lower() for kw in keywords)
+
+
+def harvest_llm_summary(signals: list[dict], llm_provider,
+                        workspace_path: str, project_name: str) -> list[Lesson]:
+    """LLM 总结未处理信号 → lesson。降级：失败→重试→退避→废弃。"""
+    if not signals:
+        return []
+
+    batch = signals[:LLM_BATCH_MAX]
+    signal_text = []
+    for i, s in enumerate(batch):
+        signal_text.append(
+            f"信号{i+1}: type={s.get('signal_type')} "
+            f"trigger={s.get('trigger','')} detail={s.get('detail',{})}"
+        )
+
+    prompt = (
+        "你是项目知识收割 Agent。根据以下信号提取教训。\n\n"
+        "严格要求:\n"
+        "1. rule 必须是 'if X, then must/should/should not Y' 格式\n"
+        "2. 不接受纯描述性 lesson\n"
+        "3. trigger 必须能被子字符串匹配\n"
+        "4. 信号不足以形成 actionable lesson → 返回 []\n"
+        "5. 每条默认写入 pending\n\n"
+        "返回 JSON: "
+        '[{"trigger":"...","rule":"if X, then must Y",'
+        '"severity":"high|medium|low","category":"process|...",'
+        '"dangerous_tools":[],"prerequisite_tools":[],"required_tools":[]}]\n\n'
+        f"信号 ({len(batch)} 条):\n" + "\n".join(signal_text)
+    )
+
+    try:
+        response = llm_provider.chat(
+            [{"role": "user", "content": prompt}],
+            max_tokens=4096, timeout=30,
+        )
+        text = response.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.endswith("```"):
+            text = text[:-3]
+        lessons_data = json.loads(text.strip())
+    except Exception:
+        for s in batch:
+            s["harvest_retry_count"] = s.get("harvest_retry_count", 0) + 1
+        viable = [s for s in batch
+                  if s.get("harvest_retry_count", 0) < MAX_HARVEST_RETRY]
+        for s in viable:
+            capture_signal(s.get("signal_type", "unknown"),
+                           {k: v for k, v in s.items()
+                            if k not in ("timestamp", "correlation_id")},
+                           project_name)
+        return []
+
+    lessons = []
+    for data in lessons_data if isinstance(lessons_data, list) else []:
+        rule = data.get("rule", "")
+        if not is_testable_proposition(rule):
+            continue
+        lessons.append(Lesson(
+            trigger=data.get("trigger", ""), rule=rule,
+            severity=data.get("severity", "medium"),
+            category=data.get("category", "process"),
+            dangerous_tools=data.get("dangerous_tools", []),
+            prerequisite_tools=data.get("prerequisite_tools", []),
+            required_tools=data.get("required_tools", []),
+            source="auto_harvested", origin="harvest",
+            project_name=project_name,
+        ))
+    return lessons

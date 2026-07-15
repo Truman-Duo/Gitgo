@@ -240,10 +240,43 @@ def run_daemon(
             return {"commit": f"[{fc.prefix}-{fc.number}]", "message": fc.message}
         return {"error": "FORMALIZE_FAILED"}
 
+    # v0.35: Knowledge recall tools
+    def _exec_recall_grep(args: dict) -> dict:
+        from backend.core.knowledge.recall import recall_grep
+        return recall_grep(
+            query=args.get("query", ""),
+            project=project.name,
+            top_k=args.get("top_k", 10),
+            agent_context=args.get("agent_context"),
+            workspace=str(session.workspace_path),
+        )
+
+    def _exec_recall_semantic(args: dict) -> dict:
+        from backend.core.knowledge.recall import recall_semantic
+        return recall_semantic(
+            query=args.get("query", ""),
+            project=project.name,
+            top_k=args.get("top_k", 10),
+            agent_context=args.get("agent_context"),
+            workspace=str(session.workspace_path),
+        )
+
+    def _exec_recall_rag(args: dict) -> dict:
+        from backend.core.knowledge.recall import recall_rag
+        return recall_rag(
+            query=args.get("query", ""),
+            project=project.name,
+            agent_context=args.get("agent_context"),
+            workspace=str(session.workspace_path),
+        )
+
     tool_executors = {
         "scan": _exec_scan,
         "status": _exec_status,
         "formalize": _exec_formalize,
+        "recall_grep": _exec_recall_grep,
+        "recall_semantic": _exec_recall_semantic,
+        "recall_rag": _exec_recall_rag,
     }
 
     from backend.core.loop.gate import RingGate
@@ -314,6 +347,35 @@ def run_daemon(
 
             # Reap orphaned agent processes each cycle
             apm.reap()
+
+            # ── v0.35: Pending Digest 定时检查（独立于 harvest 事件）──
+            now_ts = time.time()
+            last_digest = getattr(run_daemon, '_last_pending_digest', 0.0)
+            if now_ts - last_digest >= 3600:  # 每小时
+                run_daemon._last_pending_digest = now_ts
+                try:
+                    from backend.core.knowledge.lesson import LessonManager as _LM
+                    from backend.core.knowledge.harvest import (
+                        auto_discard_invalid, auto_verify_high_confidence,
+                    )
+                    ws = Path(session.workspace_path)
+                    pending_n = _LM.pending_count(ws, project.name)
+                    if pending_n >= 50:
+                        n = auto_discard_invalid(ws, project.name)
+                        if n:
+                            _emit({"event": "lessons_discarded",
+                                   "count": n, "reason": "auto_invalid"})
+                    if pending_n >= 100:
+                        n = auto_verify_high_confidence(ws, project.name)
+                        if n:
+                            _emit({"event": "lessons_verified",
+                                   "count": n, "reason": "auto_verify"})
+                    if pending_n >= 200:
+                        _emit({"event": "pending_overflow",
+                               "count": pending_n,
+                               "message": "Pending 已满，阻塞新 harvest。请 verify 或 discard。"})
+                except Exception:
+                    pass
 
             if event_type == "workspace_dirty":
                 # ── Debounce ──
@@ -434,6 +496,55 @@ def run_daemon(
                             "block_count": block_count,
                             "sources": list(set(s.source for s in signals)),
                         })
+
+                    # ── v0.35: Harvest 信号捕获 ──
+                    from backend.core.knowledge.harvest import (
+                        capture_signal, should_trigger_harvest,
+                        mark_harvest_triggered, harvest_llm_summary,
+                    )
+                    from backend.core.knowledge.lesson import LessonManager as _LM
+
+                    # 捕获 lesson trigger 信号
+                    for lt in results.get("lesson_triggers", []):
+                        capture_signal("lesson_trigger", {
+                            "trigger": lt.get("file", ""),
+                            "rule": lt.get("rule", ""),
+                            "severity": lt.get("severity", "medium"),
+                            "detail": lt,
+                        }, project.name)
+
+                    # 捕获 contract drift 信号
+                    for drift in results.get("contract_drift", []):
+                        capture_signal("contract_drift", {
+                            "trigger": drift.get("file", ""),
+                            "rule": drift.get("rule", "contract drift"),
+                            "detail": drift,
+                        }, project.name)
+
+                    # 检查是否触发 LLM 总结
+                    for sig_type in ("lesson_trigger", "contract_drift"):
+                        if should_trigger_harvest(sig_type, project.name):
+                            mark_harvest_triggered(sig_type)
+                            signals_batch = get_unprocessed_signals(
+                                project.name, sig_type,
+                            )
+                            if signals_batch and daemon_ctx.get("llm"):
+                                try:
+                                    new_lessons = harvest_llm_summary(
+                                        signals_batch, daemon_ctx["llm"],
+                                        str(session.workspace_path), project.name,
+                                    )
+                                    ws = Path(session.workspace_path)
+                                    for lesson in new_lessons:
+                                        _LM.save_pending(ws, lesson)
+                                    if new_lessons:
+                                        _emit({
+                                            "event": "lessons_harvested",
+                                            "count": len(new_lessons),
+                                            "signal_type": sig_type,
+                                        })
+                                except Exception:
+                                    pass
 
                     _emit({
                         "event": "operation_complete", "op": "scan",
@@ -679,6 +790,32 @@ def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
 
     elif cmd_name == "round_complete":
         changed = _snapshot_workspace(session, project)
+
+        # ── v0.35 Phase 3: 回收 —— round_complete 时从上下文撤出知识 ──
+        try:
+            from backend.core.knowledge.models import (
+                classify_lesson_heat, get_sticky_lessons,
+            )
+            from backend.core.knowledge.lesson import LessonManager
+
+            ws = Path(session.workspace_path)
+            all_lessons = (
+                LessonManager.load_instance(ws, project.name)
+                + LessonManager.load_pending(ws, project.name)
+            )
+            sticky_ids = set(get_sticky_lessons(all_lessons))
+
+            # 遍历 A Agent session（如果存在），标记非 sticky 的 recall 结果
+            # 注意：此 worktree 版没有 ContextWindow；主动 prunes 留给未来
+            _emit({
+                "event": "recycle_check",
+                "total_lessons": len(all_lessons),
+                "sticky_count": len(sticky_ids),
+                "hot_lesson_ids": list(sticky_ids)[:5],
+            })
+        except Exception:
+            pass
+
         _emit({"event": "command_result", "cmd": "round_complete",
                "result": {"snapshot": changed is not None,
                           "files": len(changed) if changed else 0}})

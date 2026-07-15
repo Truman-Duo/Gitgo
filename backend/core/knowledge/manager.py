@@ -112,26 +112,34 @@ class LessonManager:
 
     @staticmethod
     def save_pending(workspace_path: Path, lesson: Lesson) -> Path:
-        """保存自动收割草稿（去重：相同 id 不重复写入）。"""
+        """保存自动收割草稿。去重：内容哈希 (trigger+rule) 精确去重。
+
+        允许相似模式重复存在（不做语义去重，为联想留数据）。
+        """
         fp = LessonManager._pending_path(workspace_path, lesson.project_name)
         fp.parent.mkdir(parents=True, exist_ok=True)
         if not lesson.id:
-            lesson.id = f"pending_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            from backend.core.knowledge.models import lesson_content_hash
+            lesson.id = lesson_content_hash(lesson.trigger, lesson.rule)[:12]
         if not lesson.created_at:
             lesson.created_at = datetime.now().isoformat()
         lesson.source = "auto_harvested"
 
-        # 去重：检查相同 id 是否已存在
-        existing_ids = set()
+        # 去重：内容哈希精确匹配
+        from backend.core.knowledge.models import lesson_content_hash
+        new_hash = lesson_content_hash(lesson.trigger, lesson.rule)
         if fp.exists():
             for line in fp.read_text(encoding="utf-8").splitlines():
                 try:
                     existing = json.loads(line.strip())
-                    existing_ids.add(existing.get("id", ""))
+                    existing_hash = lesson_content_hash(
+                        existing.get("trigger", ""),
+                        existing.get("rule", ""),
+                    )
+                    if new_hash == existing_hash:
+                        return fp  # 精确重复，跳过
                 except json.JSONDecodeError:
                     continue
-        if lesson.id in existing_ids:
-            return fp  # 跳过重复
 
         with open(fp, "a", encoding="utf-8") as f:
             f.write(json.dumps(lesson.to_dict(), ensure_ascii=False) + "\n")
@@ -219,4 +227,69 @@ class LessonManager:
                 if q in text:
                     results.append(l)
         return results
+
+    # ── v0.35: 回收与清理 ──────────────────────────────────
+
+    @staticmethod
+    def discard_lesson(workspace_path: Path, lesson_id: str,
+                       project_name: str = "") -> bool:
+        """删除一条 lesson（从 pending 或 instance 中移除）。"""
+        if project_name:
+            fp = LessonManager._pending_path(workspace_path, project_name)
+            if fp.exists():
+                lines = fp.read_text(encoding="utf-8").splitlines()
+                kept = [l for l in lines
+                        if json.loads(l.strip()).get("id") != lesson_id]
+                fp.write_text("\n".join(kept) + ("\n" if kept else ""),
+                              encoding="utf-8")
+                if len(kept) < len(lines):
+                    return True
+
+            fp = LessonManager._instance_path(workspace_path, project_name)
+            if fp.exists():
+                lines = fp.read_text(encoding="utf-8").splitlines()
+                kept = [l for l in lines
+                        if json.loads(l.strip()).get("id") != lesson_id]
+                fp.write_text("\n".join(kept) + ("\n" if kept else ""),
+                              encoding="utf-8")
+                return len(kept) < len(lines)
+        return False
+
+    @staticmethod
+    def revert_to_pending(workspace_path: Path, lesson_id: str,
+                          project_name: str) -> Lesson | None:
+        """将 auto_verify 的 lesson 从 instance 回退到 pending。
+
+        只有 origin="auto_verify" 的 lesson 可以 revert。
+        """
+        fp = LessonManager._instance_path(workspace_path, project_name)
+        if not fp.exists():
+            return None
+
+        lines = fp.read_text(encoding="utf-8").splitlines()
+        target = None
+        kept = []
+        for line in lines:
+            data = json.loads(line.strip())
+            if data.get("id") == lesson_id and data.get("origin") == "auto_verify":
+                target = Lesson.from_dict(data)
+            else:
+                kept.append(line)
+
+        if target is None:
+            return None
+
+        fp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        target.verified = False
+        target.origin = "auto_verify_reverted"
+        LessonManager.save_pending(workspace_path, target)
+        return target
+
+    @staticmethod
+    def pending_count(workspace_path: Path, project_name: str) -> int:
+        """返回 pending lesson 数量。"""
+        fp = LessonManager._pending_path(workspace_path, project_name)
+        if not fp.exists():
+            return 0
+        return sum(1 for _ in fp.read_text(encoding="utf-8").splitlines() if _.strip())
 
