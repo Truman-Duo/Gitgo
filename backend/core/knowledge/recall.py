@@ -92,11 +92,21 @@ def filter_by_relevance(
     return [l for l, _ in relevant]
 
 
-def record_retrieval(lesson: Lesson) -> None:
-    """记录检索时间戳（热/温/冷分层数据源）。"""
+def record_retrieval(lesson: Lesson, workspace: str = "",
+                    project: str = "") -> None:
+    """记录检索时间戳 + 持久化（热/温/冷分层数据源）。"""
     lesson.recent_retrievals.append(datetime.now().isoformat())
     if len(lesson.recent_retrievals) > 10:
         lesson.recent_retrievals = lesson.recent_retrievals[-10:]
+
+    # 持久化：重新写入 JSONL（替换同 ID 的旧行）
+    if workspace and project and lesson.id:
+        try:
+            LessonManager._save_with_retrieval_update(
+                Path(workspace), lesson, project,
+            )
+        except Exception:
+            pass  # 持久化失败不影响检索结果
 
 
 def recall_grep(
@@ -138,9 +148,9 @@ def recall_grep(
     matches.sort(key=_sort_key)
     result = matches[:top_k]
 
-    # 记录检索（热/温/冷）
+    # 记录检索（热/温/冷）+ 持久化
     for l in result:
-        record_retrieval(l)
+        record_retrieval(l, workspace=str(ws), project=project)
 
     # 格式化输出
     lines = []
@@ -212,7 +222,7 @@ def recall_semantic(
     result = [l for l, _ in scored[:top_k]]
 
     for l in result:
-        record_retrieval(l)
+        record_retrieval(l, workspace=str(ws), project=project)
 
     lines = []
     for i, (l, score) in enumerate(scored[:top_k]):

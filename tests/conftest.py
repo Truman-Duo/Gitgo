@@ -69,3 +69,13 @@ def config_json_str() -> str:
     ],
     "language": "zh"
 }"""
+
+
+# ── v0.35: TestDataFactory fixtures ──────────────────────
+
+@pytest.fixture
+def factory():
+    """固定种子 factory（CI 确定性测试）。"""
+    from tests.factory import TestDataFactory
+    return TestDataFactory(seed=42)
+

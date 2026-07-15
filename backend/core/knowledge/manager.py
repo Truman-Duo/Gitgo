@@ -286,6 +286,38 @@ class LessonManager:
         return target
 
     @staticmethod
+    def _save_with_retrieval_update(
+        workspace_path: Path, lesson: Lesson, project_name: str,
+    ) -> None:
+        """内部：更新 instance 或 pending 文件中同 ID lesson 的检索日志。
+
+        先查 instance，再查 pending。
+        """
+        for fp in [
+            LessonManager._instance_path(workspace_path, project_name),
+            LessonManager._pending_path(workspace_path, project_name),
+        ]:
+            if not fp.exists():
+                continue
+            lines = fp.read_text(encoding="utf-8").splitlines()
+            new_lines = []
+            found = False
+            for line in lines:
+                try:
+                    data = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    new_lines.append(line)
+                    continue
+                if data.get("id") == lesson.id:
+                    new_lines.append(json.dumps(lesson.to_dict(), ensure_ascii=False))
+                    found = True
+                else:
+                    new_lines.append(line)
+            if found:
+                fp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                return
+
+    @staticmethod
     def pending_count(workspace_path: Path, project_name: str) -> int:
         """返回 pending lesson 数量。"""
         fp = LessonManager._pending_path(workspace_path, project_name)

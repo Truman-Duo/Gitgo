@@ -647,3 +647,37 @@ def harvest_llm_summary(signals: list[dict], llm_provider,
             project_name=project_name,
         ))
     return lessons
+
+
+# ── v0.35: Pending 消化 ─────────────────────────────────────
+
+def auto_discard_invalid(workspace_path: Path, project_name: str) -> int:
+    """L1 Digest: 扫描 pending，自动 discard 明显无效的 lesson。
+
+    判据: trigger 文件不存在 / rule 过短。
+    """
+    pending = LessonManager.load_pending(workspace_path, project_name)
+    discarded = 0
+    for lesson in pending:
+        if lesson.trigger and "/" in lesson.trigger:
+            if not (Path(workspace_path) / lesson.trigger).exists():
+                LessonManager.discard_lesson(
+                    workspace_path, lesson.id, project_name,
+                )
+                discarded += 1
+                continue
+        if len(lesson.rule) < 15:
+            LessonManager.discard_lesson(
+                workspace_path, lesson.id, project_name,
+            )
+            discarded += 1
+    return discarded
+
+
+def auto_verify_high_confidence(workspace_path: Path, project_name: str) -> int:
+    """L2 Digest: LLM 自动 verify 高置信度 pending。
+
+    只在 pending >= medium_threshold 时由 daemon 调用。
+    目前为 stub（需要 LLM provider 注入），返回 0。
+    """
+    return 0
