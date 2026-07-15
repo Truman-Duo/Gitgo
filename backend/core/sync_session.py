@@ -848,8 +848,24 @@ class SyncSession:
         # ── Gate A: 可插拔 Gate 检查（通过 contract.yaml gates.sync 配置）──
         from backend.core.policy.gates import load_gates
 
+        # 尝试读取 daemon 预计算的 drift_cache（系统维护，非 LLM 维护）
+        _drift_cache = None
+        try:
+            from backend.core.history import HistoryManager
+            entries = HistoryManager.load()
+            cached = [e for e in entries if e.operation == "drift_cache"][-1:]
+            if cached:
+                _drift_cache = cached[0].detail
+            else:
+                _drift_cache = {}
+        except Exception:
+            _drift_cache = {}
+
         gate_blocked = False
         for gate in load_gates("sync", str(self.workspace_path)):
+            # 注入 drift_cache 到 gate 实例
+            if hasattr(gate, '_cache') and _drift_cache is not None:
+                gate._cache = _drift_cache
             result = gate.check(self, self.project, fc, selected)
             prefix = f"[Gate A/{gate.name}]"
 

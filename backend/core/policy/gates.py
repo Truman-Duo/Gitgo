@@ -109,7 +109,23 @@ class ContractDriftGate(SyncGate):
 
     def check(self, session, project, formal_commit, selected_entries):
         from backend.core.contract import ContractManager, detect_drift, check_feature_signatures
+        from backend.core.history import HistoryManager
 
+        # 尝试复用 drift_cache（PolicyEngine 产出，watcher dirty 时失效）
+        # cache 存储在 daemon_ctx 中，通过 step_sync 调用时传入
+        cache = getattr(self, '_cache', None)
+        if cache is not None and not cache.get("dirty", True):
+            alerts = cache.get("alerts", [])
+            errors = [a for a in alerts if a.get("level") == "error"]
+            return GateResult(
+                blocked=len(errors) > 0,
+                rule="contract_drift",
+                level="error" if errors else "warning",
+                message=f"{len(alerts)} drift alerts ({len(errors)} errors) [cached]",
+                alerts=alerts,
+            )
+
+        # 缓存不可用 → 现场检测
         contract = ContractManager.load(session.workspace_path)
         if not contract:
             return GateResult()
@@ -120,15 +136,18 @@ class ContractDriftGate(SyncGate):
             session.workspace_path, changed_paths, contract,
         )
         all_alerts = drift_alerts + dep_alerts
-        if not all_alerts:
-            return GateResult()
+
+        # 更新缓存（供后续 Gate 调用复用）
+        if cache is not None:
+            cache["alerts"] = all_alerts
+            cache["dirty"] = False
 
         errors = [a for a in all_alerts if a.get("level") == "error"]
         return GateResult(
             blocked=len(errors) > 0,
             rule="contract_drift",
             level="error" if errors else "warning",
-            message=f"{len(all_alerts)} drift alerts ({len(errors)} errors)",
+            message=f"{len(all_alerts)} drift alerts ({len(errors)} errors)" if all_alerts else "",
             alerts=all_alerts,
         )
 

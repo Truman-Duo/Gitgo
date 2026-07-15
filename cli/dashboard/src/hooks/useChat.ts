@@ -1,28 +1,27 @@
-// src/hooks/useChat.ts — Chat message state + send to A agent
+// src/hooks/useChat.ts — Chat message state + send to agent
 import { useState, useCallback } from "react";
 import type { McpClient } from "../mcp/client.js";
-import type { ChatMessage } from "../components/ChatPanel.js";
+import { getDaemonClient } from "../clients.js";
 
 export function useChat(client: McpClient, project: string) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<{role:string,content:string,timestamp:string,pending?:boolean}[]>([]);
 
   const send = useCallback(async (text: string) => {
     if (!text.trim()) return;
-    const userMsg: ChatMessage = {
-      role: "user", content: text,
-      timestamp: new Date().toISOString(),
-    };
-    // Unsent bubble: show pending immediately (DeepSeek pattern)
-    const pendingMsg: ChatMessage = {
-      role: "assistant", content: "...",
-      timestamp: new Date().toISOString(), pending: true,
-    };
+    const userMsg = { role: "user" as const, content: text, timestamp: new Date().toISOString() };
+    const pendingMsg = { role: "assistant" as const, content: "...", timestamp: new Date().toISOString(), pending: true };
     setMessages((prev) => [...prev, userMsg, pendingMsg]);
 
     try {
-      const result: any = await client.callTool("gitgo_agent_chat", {
-        project, message: text,
-      });
+      // Prefer native daemon for agent_chat; fall back to MCP
+      const daemon = getDaemonClient();
+      let result: any;
+      if (daemon?.ready) {
+        result = await daemon.callTool("gitgo_agent_chat", { project, message: text });
+      } else {
+        result = await client.callTool("gitgo_agent_chat", { project, message: text });
+      }
+
       setMessages((prev) => {
         const copy = [...prev];
         copy[copy.length - 1] = {

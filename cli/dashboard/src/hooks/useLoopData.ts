@@ -1,8 +1,10 @@
 // src/hooks/useLoopData.ts
-// Polls gitgo_loop_status every 5s with 16ms event batching (borrowed from OpenCode sdk.tsx)
+// Polls gitgo_loop_status every 5s with 16ms event batching.
+// Prefers native daemon client when available; falls back to MCP.
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { McpClient } from "../mcp/client.js";
+import { getDaemonClient } from "../clients.js";
 
 export type ProcessInfo = {
   process_id: string;
@@ -64,7 +66,10 @@ export function useLoopData(
   const fetchData = useCallback(async () => {
     if (!client || !project) return;
     try {
-      const result: any = await client.callTool("gitgo_loop_status", {
+      // Prefer native daemon; fall back to MCP
+      const daemon = getDaemonClient();
+      const caller = (daemon?.ready ? daemon : client) as McpClient;
+      const result: any = await caller.callTool("gitgo_loop_status", {
         project,
       });
       const procs: Record<string, ProcessInfo> = {};

@@ -152,6 +152,27 @@ def _harvest_from_rejection_chain(
            "trigger": "rejection_chain"})
 
 
+def _resolve_llm_config(workspace: str) -> tuple | None:
+    """解析 LLM 配置。优先级：环境变量 > llm_config.json active_provider。"""
+    base_url = os.environ.get("GITGO_LLM_BASE_URL", "")
+    api_key = os.environ.get("GITGO_LLM_API_KEY", "")
+    model_id = os.environ.get("GITGO_LLM_MODEL", "")
+
+    if base_url and api_key and model_id:
+        return (base_url, api_key, model_id)
+
+    if workspace:
+        try:
+            from backend.core.llm_config import LLMConfigManager
+            active = LLMConfigManager.get_active(workspace)
+            if active:
+                return (active.base_url, active.api_key, active.model_id)
+        except Exception:
+            pass
+
+    return None
+
+
 def run_daemon(
     cfg: Config,
     project: ProjectConfig,
@@ -303,6 +324,14 @@ def run_daemon(
                 run_daemon._last_policy_check = now
                 _emit({"event": "workspace_dirty", "project": project.name})
                 _emit({"event": "operation_started", "op": "scan"})
+                # 文件变更 → drift_cache 失效（内存 + 持久化）
+                if "drift_cache" in daemon_ctx:
+                    daemon_ctx["drift_cache"]["dirty"] = True
+                HistoryManager.add_operation(
+                    project.name, "drift_cache", "success",
+                    {"alerts": [], "dirty": True},
+                    correlation_id=session._correlation_id,
+                )
                 try:
                     # Invalidate cache entries for changed files
                     changed = ev.get("changed_files", [])
@@ -351,6 +380,60 @@ def run_daemon(
                     if msg:
                         _emit({"event": "policy_results",
                                "governance_warnings": gov_warnings, "message": msg})
+
+                    # ── Signal Normalization (四源) + Drift Cache ──
+                    from backend.core.loop.signal_normalizer import SignalNormalizer
+                    from backend.core.knowledge.lesson import LessonManager
+
+                    normalizer = SignalNormalizer()
+                    ws_path = str(session.workspace_path)
+                    lessons = (
+                        LessonManager.load_instance(ws_path, project.name)
+                        + LessonManager.load_pending(ws_path, project.name)
+                    )
+                    project_entries = [
+                        e for e in HistoryManager.load()
+                        if e.project_name == project.name
+                    ]
+                    rejections = [
+                        e for e in project_entries if e.operation == "rejection"
+                    ][-10:]
+                    new_facts = [
+                        e for e in project_entries if e.operation == "fact_derived"
+                    ][-10:]
+                    signals = normalizer.normalize(
+                        policy_results=results,
+                        lessons=lessons,
+                        rejections=rejections,
+                        facts=[],  # Fact objects parsed from entries below
+                    )
+                    daemon_ctx["governance_signals"] = signals
+
+                    # Drift cache: PolicyEngine 产出 → Gate 可直接复用
+                    # 写入 HistoryManager 使 Gate 可通过历史记录读取（系统维护，非 LLM 维护）
+                    drift_alerts = results.get("contract_drift", [])
+                    daemon_ctx["drift_cache"] = {
+                        "alerts": drift_alerts,
+                        "dirty": False,
+                    }
+                    import json as _json
+                    HistoryManager.add_operation(
+                        project.name, "drift_cache", "success",
+                        {"alerts": [
+                            {k: v for k, v in a.items() if k != "message"}
+                            for a in drift_alerts
+                        ], "dirty": False},
+                        correlation_id=session._correlation_id,
+                    )
+
+                    if signals:
+                        block_count = sum(1 for s in signals if s.category.value == "block")
+                        _emit({
+                            "event": "governance_signals",
+                            "total": len(signals),
+                            "block_count": block_count,
+                            "sources": list(set(s.source for s in signals)),
+                        })
 
                     _emit({
                         "event": "operation_complete", "op": "scan",
@@ -666,6 +749,183 @@ def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
                    "processes": processes,
                    "recent_tool_executed": recent_tools,
                }})
+
+    elif cmd_name == "task":
+        # ── 原生 Task 命令 —— Agent 编排的单一入口 ──
+        # 整合了 MCP 层之前的 _resolve_llm_config / _ensure_agent / _chat_via_daemon 逻辑。
+        # MCP 工具变为薄适配器：只构建上下文 + 调用此命令。
+        action = cmd.get("action", "chat")
+
+        if action == "fork":
+            # 仅 fork Agent，不执行
+            if apm is None:
+                _emit({"event": "command_result", "cmd": "task",
+                       "error": "AgentProcessManager not available"})
+                return
+            role = cmd.get("role", "executor")
+            ring = RingLevel.RING_3 if str(cmd.get("ring_level", "3")) != "0" else RingLevel.RING_0
+            tool_names = cmd.get("tool_registry", [])
+            max_steps = cmd.get("max_steps", 50)
+            parent_id = cmd.get("parent_id")
+            context_snapshot = cmd.get("context_snapshot")
+            provider_id = cmd.get("provider_id", "")
+            model_id = cmd.get("model_id", "")
+            registry = ToolRegistry(tool_names)
+            try:
+                proc = apm.fork(
+                    parent_id=parent_id, role=role,
+                    tool_registry=registry, max_steps=max_steps,
+                    ring_level=ring, context_snapshot=context_snapshot,
+                    workspace_path=str(session.workspace_path),
+                    provider_id=provider_id, model_id=model_id,
+                )
+                _emit({"event": "command_result", "cmd": "task",
+                       "result": {"process_id": proc.process_id, "role": role,
+                                  "ring_level": ring.value}})
+            except ValueError as e:
+                _emit({"event": "command_result", "cmd": "task",
+                       "error": str(e)})
+            return
+
+        if action == "status":
+            # 查询所有 Agent 进程状态
+            processes = {}
+            if apm is not None:
+                for pid, proc in apm._processes.items():
+                    processes[pid] = {
+                        "process_id": proc.process_id,
+                        "role": proc.role,
+                        "ring_level": proc.ring_level.value,
+                        "status": proc.status.value,
+                        "steps_used": proc.steps_used,
+                        "max_steps": proc.max_steps,
+                        "parent_id": proc.parent_id,
+                        "created_at": proc.created_at,
+                        "worktree_path": proc.worktree_path,
+                        "provider_id": proc.provider_id,
+                        "model_id": proc.model_id,
+                    }
+            _emit({"event": "command_result", "cmd": "task",
+                   "result": {"daemon_online": True, "processes": processes}})
+            return
+
+        if action == "kill":
+            if apm is None:
+                _emit({"event": "command_result", "cmd": "task",
+                       "error": "AgentProcessManager not available"})
+                return
+            process_id = cmd.get("process_id", "")
+            apm.kill(process_id)
+            _emit({"event": "command_result", "cmd": "task",
+                   "result": {"killed": process_id}})
+            return
+
+        if action == "chat":
+            # ── chat: 完整 Agent 编排 ──
+            if apm is None or dispatcher is None or evq is None:
+                _emit({"event": "command_result", "cmd": "task",
+                       "error": "AgentProcessManager, ToolDispatcher, or event queue not available"})
+                return
+
+            instruction = cmd.get("instruction", "")
+            role = cmd.get("role", "executor")
+            ring = RingLevel.RING_3 if str(cmd.get("ring_level", "3")) != "0" else RingLevel.RING_0
+            max_steps = cmd.get("max_steps", 50)
+            context_snapshot = cmd.get("context_snapshot")
+            provider_id = cmd.get("provider_id", "")
+            model_id = cmd.get("model_id", "")
+            task_description = cmd.get("task_description", instruction[:200] if instruction else "")
+
+            # Resolve LLM config
+            llm = llm_provider
+            if llm is None:
+                cfg = _resolve_llm_config(str(session.workspace_path))
+                if cfg:
+                    from backend.core.loop.llm import LLMProvider
+                    llm = LLMProvider(cfg[0], cfg[1], cfg[2])
+            if llm is None:
+                _emit({"event": "command_result", "cmd": "task",
+                       "error": "LLM not configured. Set env vars or configure in Dashboard."})
+                return
+
+            # Build governance context if not provided
+            if context_snapshot is None:
+                try:
+                    from backend.core.loop.context_builder import build_governance_context
+                    context_snapshot = build_governance_context(
+                        project.name, str(session.workspace_path),
+                    )
+                except Exception:
+                    context_snapshot = {}
+
+            # Inject daemon's latest governance signals into context
+            gov_signals = daemon_ctx.get("governance_signals")
+            if gov_signals and context_snapshot:
+                if "signals" not in context_snapshot:
+                    brief_parts = []
+                    for s in gov_signals:
+                        if s.severity.value in ("critical", "high"):
+                            brief_parts.append(
+                                f"[{s.severity.value.upper()}] {s.suggestion or s.rule}"
+                            )
+                    context_snapshot = {
+                        **context_snapshot,
+                        "signals": gov_signals,
+                        "brief": "; ".join(brief_parts[:5]) if brief_parts else "",
+                    }
+
+            # Find or fork agent
+            process_id = cmd.get("process_id", "")
+            process = apm.get(process_id) if process_id else None
+            if process is None:
+                # Fork new agent
+                tool_names = cmd.get("tool_registry", [])
+                registry = ToolRegistry(tool_names)
+                try:
+                    process = apm.fork(
+                        parent_id=cmd.get("parent_id"),
+                        role=role, tool_registry=registry,
+                        max_steps=max_steps, ring_level=ring,
+                        context_snapshot=context_snapshot,
+                        workspace_path=str(session.workspace_path),
+                        provider_id=provider_id, model_id=model_id,
+                    )
+                except ValueError as e:
+                    _emit({"event": "command_result", "cmd": "task",
+                           "error": str(e)})
+                    return
+            else:
+                # Resume existing agent — update context
+                process.task_description = task_description
+                if context_snapshot:
+                    process.context_snapshot = context_snapshot
+
+            # Run agent_step in background thread
+            from backend.core.loop.executor import agent_step
+
+            def _run_task_thread():
+                try:
+                    result = agent_step(
+                        process, llm, instruction, dispatcher,
+                        workspace_path=str(session.workspace_path),
+                    )
+                    evq.put({"event": "agent_complete", "process_id": process.process_id,
+                             "result": result})
+                except Exception as exc:
+                    evq.put({"event": "agent_complete", "process_id": process.process_id,
+                             "error": str(exc)})
+
+            threading.Thread(
+                target=_run_task_thread, daemon=True,
+                name=f"task-{process.process_id[:8]}",
+            ).start()
+            _emit({"event": "command_result", "cmd": "task",
+                   "result": {"status": "pending",
+                              "process_id": process.process_id}})
+            return
+
+        _emit({"event": "command_result", "cmd": "task",
+               "error": f"Unknown task action: {action}"})
 
     else:
         _emit({"event": "command_result", "cmd": cmd_name,

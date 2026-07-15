@@ -36,6 +36,8 @@ class DaemonClient:
         self._cmd_results: dict[str, dict] = {}
         self._llm_event = threading.Event()
         self._llm_data: dict | None = None
+        self._agent_events: dict[str, threading.Event] = {}
+        self._agent_data: dict[str, dict] = {}
         self._started_event = threading.Event()
         self._reader_thread: threading.Thread | None = None
         self._stderr_lines: list[str] = []
@@ -205,6 +207,45 @@ class DaemonClient:
 
         return data
 
+    def send_task(self, cmd: dict, timeout: float = 300.0) -> dict:
+        """Send a task command and wait for the async agent_complete event.
+
+        The task command returns immediately with process_id, then the daemon
+        runs agent_step in a background thread. This method blocks until
+        agent_complete fires or timeout expires.
+
+        Returns the agent_complete event dict with keys:
+        process_id, result (or error).
+        """
+        # Send task command — returns immediately
+        ack = self.send_command(cmd)
+        process_id = ack.get("process_id", "")
+        if not process_id:
+            raise RuntimeError(f"task command did not return process_id: {ack}")
+
+        # Create event for this process
+        event = threading.Event()
+        with self._lock:
+            self._agent_events[process_id] = event
+
+        # Wait for async agent_complete
+        if not event.wait(timeout=timeout):
+            with self._lock:
+                self._agent_events.pop(process_id, None)
+            raise RuntimeError(
+                f"Agent task for {process_id} timed out after {timeout}s"
+            )
+
+        with self._lock:
+            data = self._agent_data.pop(process_id, None)
+            self._agent_events.pop(process_id, None)
+
+        if data is None:
+            raise RuntimeError("task: daemon disconnected before agent_complete")
+        if "error" in data:
+            raise RuntimeError(f"task error: {data['error']}")
+        return data
+
     # ── internals ──────────────────────────────────────────────
 
     def _write_cmd(self, cmd: dict) -> None:
@@ -248,6 +289,13 @@ class DaemonClient:
                         self._llm_data = event
                         self._llm_event.set()
 
+                elif event_type == "agent_complete":
+                    pid = event.get("process_id", "")
+                    with self._lock:
+                        self._agent_data[pid] = event
+                        if pid in self._agent_events:
+                            self._agent_events[pid].set()
+
                 # Other events (progress, log, state_changed, etc.) are ignored
         except Exception:
             # Process stdout closed or read error
@@ -267,10 +315,12 @@ class DaemonClient:
             pass
 
     def _wake_all_waiters(self) -> None:
-        """Wake up all threads waiting on command responses."""
+        """Wake up all threads waiting on command/LLM/agent responses."""
         for event in self._cmd_events.values():
             event.set()
         self._llm_event.set()
+        for event in self._agent_events.values():
+            event.set()
         self._started_event.set()
 
     def _kill_existing(self) -> None:

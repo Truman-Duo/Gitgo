@@ -4,6 +4,79 @@
 
 ---
 
+- 9 项目完成, 0 修改中, 1 待归档
+
+## v0.34 (2026-07-15)
+
+**系统整合 —— 原生 Task 命令 + 断裂修复 + 迭代规划**
+
+### S1: 原生 Task 命令（架构下沉）
+- Daemon 新增 `_handle_command("task")`：整合 LLM 配置解析 + Agent 生命周期 + 治理上下文注入 + agent_step 执行
+  - `action: "chat"` — 完整 Agent 编排（fork + context + execute）
+  - `action: "fork"` — 仅创建 Agent
+  - `action: "status"` — 查询进程树
+  - `action: "kill"` — 终止 Agent
+- `_resolve_llm_config()` 从 mcp_tools/loop.py 移入 daemon
+- `mcp_tools/loop.py` 重构为薄适配器：从 ~360 行缩减到 ~180 行，编排逻辑全部下沉
+- `DaemonClient.send_task()` 新增异步 task 通信方法
+- RingGate / ToolRegistry 原生化：`ring_level` 作为 task 命令的显式参数，系统自行维护
+- MCP 回归设计定位：兼容层（虚线），Agent Loop 自包含
+
+### S2: 断裂修复
+- **断裂 1+3**：daemon 治理上下文从单源 → 四源归一化
+  - `_do_workspace_scan` 内联代码补 `lessons` / `rejections` / `facts` 三源
+  - `derive_facts()` 返回值与 normalize 连通
+- **断裂 2**：Gate 缓存 + Dirty Flag
+  - PolicyEngine 产出 → HistoryManager `drift_cache` event
+  - watcher 文件变更 → dirty=true
+  - `ContractDriftGate.check()` 优先读缓存，dirty 时现场检测
+  - 系统维护 flag，非 LLM 维护
+
+### S3: 迭代计划
+- v0.35：Agent Loop 工具注册完善（3→10+ 工具执行器）
+- v0.36：真实 LLM API 端到端验证（Groq）
+- v0.37：Git 性能优化（大仓库 + libgit2/pygit2 选项）
+- 断裂 4（Lesson Harvest 多触发点）延期至 v0.35
+
+## v0.33 (2026-07-07)
+
+**三个 P0 Bug 修复 —— 外审回应**
+
+### E1: HistoryManager 并发安全
+- JSONL 逐行追加写入（O(1) per add）+ `threading.Lock`
+- 向后兼容旧 JSON 数组格式
+- 超过 400 条触发 compact 保留 200 条
+
+### Gate A/B 可插拔化
+- 新增 `backend/core/policy/gates.py`：`SyncGate` ABC + 3 内置 Gate
+  - `ForeignCommitGate` / `ContractDriftGate` / `PrivacyScanGate`
+- `load_gates()` 从 contract.yaml 加载配置
+- `step_sync` / `step_push` 改为遍历 Gate 列表
+
+### Fact 时间窗口
+- `consecutive_policy_warnings`: ≥3 within 1h
+- `rejection_chain`: ≥3 within 24h
+- `burst_formalize`: ≥5 within 1h
+- `repeated_contract_drift`: ≥5 within 24h
+
+## v0.32 (2026-07-07)
+
+**6 份完全透底技术报告**
+- `docs/technical-reports/01-agent-loop.md` — agent_step 全流程 + LLMProvider + RingGate + ContextWindow + SignalBus/Harness
+- `docs/technical-reports/02-daemon-dispatch.md` — 三线程架构 + workspace_dirty 链路 + DaemonClient 协议 + ToolDispatcher
+- `docs/technical-reports/03-policy-governance.md` — PolicyEngine 四检查 + HistoryManager 事件溯源 + Fact 推导 + Governance 度量
+- `docs/technical-reports/04-syncsession-operations.md` — 24 step 状态机 + Gate A/B 链 + compare_files 算法 + 适配器工厂
+- `docs/technical-reports/05-knowledge-identity-authorship.md` — harvest 四源 + Lesson 三层 + Identity 三规则 + AI 痕迹清洗
+- `docs/technical-reports/06-external-interfaces.md` — 47 MCP 工具 + 21 CLI 命令 + Dashboard 18 组件 + IME + Ink 管线
+
+## v0.31 (2026-07-05)
+
+**Dashboard 颜色修复 + IME 中文输入 + 前端模块化 + 文档刷新**
+- CommandBar 标签颜色修正（COMMAND=绿, NORMAL=蓝）
+- `useDeclaredCursor` IME 物理光标定位
+- 模块化拆分：`types.ts` / `ToolCallDisplay.tsx` / `usePoll.ts`
+- 12 个文件归档 + README 架构图重写（Agent Loop 中心 + MCP 虚线兼容层）
+
 ## v0.30 (2026-07-05)
 
 **Dispatch Layer + LLM Provider 配置面板 — A→B Agent 通路真实化 + Ink 终端 Provider 管理**
