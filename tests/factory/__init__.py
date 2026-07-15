@@ -125,6 +125,9 @@ class TestDataFactory:
     def commit_info(self, **overrides):
         return self.sync.commit_info(**overrides)
 
+    def commit_infos(self, n=5):
+        return self.sync.commit_infos(n)
+
     def scan_result(self, file_count=10):
         return self.sync.scan_result(file_count)
 
