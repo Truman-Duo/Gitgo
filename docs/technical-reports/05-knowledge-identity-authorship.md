@@ -1,6 +1,6 @@
 # 报告五：Knowledge、Identity 与 Authorship 系统深度解析
 
-> gitgo v0.33 | 2026-07-07 | 完全透底技术报告
+> gitgo v0.35 | 2026-07-16 | 完全透底技术报告
 
 ---
 
@@ -496,3 +496,18 @@ class TemplateManager:
 - Lesson 的自动定期收割（当前依赖手动触发）
 - Identity 的文件内容完整性校验（哈希对比）
 - Memory Snapshot 的增量快照
+
+---
+
+## v0.35 更新补遗
+
+**Knowledge 三期实施**:
+- 收割: 硬规则5源信号捕获 + 多维调度算法 + LLM总结 + is_testable_proposition门禁 + pending三级消化
+- 检索+注射: recall_grep(L0)/recall_semantic(L1)/recall_rag(L2), tool_result即注射
+- 分离: per-agent scope实时embedding过滤(替代文件复制)
+- 回收: round_complete锚定 + 热/温/冷分类 + sticky cap
+- 联想: 架构预留,暂未设计
+
+**Lesson数据模型**: 10+新字段 (trigger_count/applied_count/recent_retrievals/origin/harvest_retry_count)
+
+**TestDataFactory**: 种子可复现的通用测试数据生成器, 覆盖5个子系统

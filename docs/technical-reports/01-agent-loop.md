@@ -1,6 +1,6 @@
 # 报告一：Agent Loop —— 自包含执行引擎深度解析
 
-> gitgo v0.33 | 2026-07-07 | 完全透底技术报告
+> gitgo v0.35 | 2026-07-16 | 完全透底技术报告
 
 ---
 
@@ -593,3 +593,11 @@ compact() 失败降级、HALF_OPEN 并发安全、max_steps 优雅处理。
 ### ❌ 未实现
 
 Agent checkpoint/resume、流式响应、跨 session 记忆。
+
+---
+
+## v0.34-v0.35 更新补遗
+
+**v0.34**: daemon 新增 native task 命令, 编排逻辑下沉。MCP 回归兼容层。Agent Loop 自包含。
+
+**v0.35**: tool_executors 3→6 (新增 recall_grep/semantic/rag)。Agent 可主动检索 Knowledge。

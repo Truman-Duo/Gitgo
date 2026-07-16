@@ -1,6 +1,6 @@
 # 报告三：Policy Engine 与治理管线深度解析
 
-> gitgo v0.33 | 2026-07-07 | 完全透底技术报告
+> gitgo v0.35 | 2026-07-16 | 完全透底技术报告
 
 ---
 
@@ -585,3 +585,13 @@ Governance Metrics (按需):
 - 可配置的 Fact 推导阈值
 - HistoryManager 增量写入（JSONL）
 - Policy Engine 的监控/告警端点
+
+---
+
+## v0.33-v0.35 更新补遗
+
+**v0.33**: Fact 阈值加时间窗口。Gate A/B 可插拔化 (SyncGate ABC + ForeignCommit/ContractDrift/PrivacyScan)。
+
+**v0.34**: Gate 缓存 + dirty flag 系统 (PolicyEngine 产出→Gate 复用)。
+
+**v0.35**: unprocessed_signal 新 operation 类型 (第 13 种)。integration_test_result (第 14 种, 预留)。

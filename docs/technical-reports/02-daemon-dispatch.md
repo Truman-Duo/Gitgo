@@ -1,6 +1,6 @@
 # 报告二：Daemon 守护进程与 Dispatch 调度层深度解析
 
-> gitgo v0.33 | 2026-07-07 | 完全透底技术报告
+> gitgo v0.35 | 2026-07-16 | 完全透底技术报告
 
 ---
 
@@ -617,3 +617,11 @@ DaemonClient ──stdin JSON──→ CommandReader (Thread-3)
 |----------|------|
 | Daemon 健康检查端点 | 无 HTTP health check，只能通过 DaemonClient.is_running() |
 | Daemon 日志文件 | 所有输出走 stdout，无持久化日志 |
+
+---
+
+## v0.34-v0.35 更新补遗
+
+**v0.34**: daemon 新增 task 命令 (chat/fork/status/kill), 17→21 种命令。
+
+**v0.35**: workspace_dirty 后自动信号捕获 (capture_signal)。harvest 触发调度。独立 pending digest 定时器。

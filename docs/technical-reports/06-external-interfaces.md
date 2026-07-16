@@ -1,6 +1,6 @@
 # 报告六：外部接口层 —— MCP、CLI 与 Dashboard 深度解析
 
-> gitgo v0.33 | 2026-07-07 | 完全透底技术报告
+> gitgo v0.35 | 2026-07-16 | 完全透底技术报告
 
 ---
 
@@ -481,3 +481,14 @@ Terminal stdout (原始 ANSI 转义序列)
 - Dashboard 的 Trial 状态展示（P2 待做）
 - Dashboard 的远程连接器状态展示
 - Web Dashboard（替代 Ink TUI 的浏览器版本）
+
+---
+
+## v0.34-v0.35 更新补遗
+
+**v0.34**: Dashboard `--native` 通路: DaemonClient.ts 直连 daemon stdin/stdout。
+双路径并存: MCP(Claude Code兼容) + 原生(gitgo Loop专用)。
+
+**v0.35**: MCP 工具新增 recall_grep/recall_semantic/recall_rag (3个)。
+Knowledge System 架构文档 + Testing Subsystem 架构文档。
+501 测试 (从 334 增长 +167)。
