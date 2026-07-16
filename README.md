@@ -1,41 +1,31 @@
-# Gitgo
+# gitgo — Agent 编排系统
 
-**Development Semantic Runtime** — AI 协作开发过程中的项目状态治理系统。
+多 Agent 并行 | 长任务可靠 | 自定义工作流
 
-501 个测试 | 50 个 MCP 工具 | 22 个 CLI 模式 | v0.35
+gitgo 是运行在项目内的 Agent 编排层。类比 OS 管理硬件资源，gitgo 管理 Agent 的生命周期、任务分发、状态持久化和治理策略。
 
----
+## 快速开始
 
-## 是什么
+```bash
+pip install -r requirements.txt
+cd cli/dashboard && bun install
+```
 
-**Gitgo 是一个 Development Semantic Runtime**——运行在 workspace 内部，治理 AI 协作开发过程中项目状态。
+```bash
+# 启动 MCP Server（Claude Code 连接）
+python mcp_server.py
 
-### 机制层
+# 启动 Dashboard（人类观测面板）
+cd cli/dashboard && bun run src/main.tsx
 
-- **Gate A（语义合法性边界）**：Agent 写完后、代码交给用户之前的检查点。contract 约束 / lesson 继承 / drift 检测 / identity guard 全部在此执行。不通过则 Agent 原地修改，通过才通知用户。
-- **Gate B（发布合法性边界）**：用户确认发布后、代码进入 Canonical Release Space 之前的检查点。authorship 清洗 / 隐私扫描 / 安全检测在此执行。
-- **Policy Engine（常驻规则引擎）**：daemon 内置，watchdog 检测到文件变更时自动运行。不依赖 Agent 调用，检查结果写入 append-only HistoryManager。
-- **Semantic Scheduler**：`suggested_next_action` / `action_queue` 从 governance 层推导。当前只输出建议，不驱动实际调度（待 Phase D）。
-
-### 当前理论困境
-
-Gitgo 的强制力模型依赖于一个前提：**Agent 的所有输出最终必须经过一个 Gate 才能离开 workspace**。这个前提在以下情况下成立：
-
-- **Git 路径**：Agent 的 workspace commit 要进入 release 仓库，只有 gitgo sync → push 一条路。Gate A 和 Gate B 拦截在 sync 和 push 之前，Agent 无法绕过。
-
-- **文件系统路径**：daemon 的 Policy Engine 通过 OS filesystem watchdog 检测到文件变更后自动运行检查，不依赖 Agent 调用。Agent 无法阻止这个检查。
-
-但以下情况**不成立**：
-
-- **Agent 框架不提供可挂载的强制拦截接口**。Claude Code 的 hook 机制仅限于 pre-commit / post-commit 等 git 事件，没有 "pre-agent-action" 或 "post-agent-reasoning" 级别的拦截点。Gitgo 的 Policy Engine 可以检测到 Agent 的每一次文件变更，但不能在 Agent 执行下一步推理之前**强制暂停**它。
-
-- **MCP tool 依赖 Agent 主动调用**。`gitgo_round_complete()` 是机制上正确的闸口——Agent 必须收到 `passed: true` 才能确认本轮完成。但 Agent 可以选择不调。MCP 协议本身没有 "tool 必须被调用" 的语义。
-
-- **跨进程边界不可逾越**。Gitgo 和 Agent 是两个独立进程。在没有 Agent 框架提供的进程间同步原语的情况下，Gitgo 能做到的上限是**Gate A 在 sync 时的历史审计**——Agent 绕不过去（release pipeline 只有这一条路），但不是在犯规的当时拦住。
-
-**当前实际效果**：Gitgo 在 release pipeline 入口（sync）提供不可跳过的检查。在 workspace 内部，Policy Engine 提供实时信号但不强制 Agent 响应。完全实时拦截需要 Agent 框架开放进程内的 hook 接口——这是 gitgo 自身无法解决的依赖。
+# 运行测试
+pytest tests/ -q    # 501 passed, 1 skipped
+```
 
 ## 架构
+
+gitgo 内置完整的 Agent 循环——自包含的 LLM 调用、工具分发、权限检查、多步执行引擎。
+MCP 接口为兼容 Claude Code 保留，但完整的治理编排能力通过原生协议发挥。
 
 ```mermaid
 %%{init: {
@@ -60,251 +50,172 @@ Gitgo 的强制力模型依赖于一个前提：**Agent 的所有输出最终必
 }}%%
 flowchart TB
 
-    subgraph External ["External · 外部世界"]
-        GitHub[("GitHub / GitLab")]
-        Human["用户 / Reviewer"]
+    subgraph Interface ["Interface · 入口层"]
+        Dashboard["Dashboard<br>人类观测 + 手动触发"]
+        MCPCompat["MCP Server<br>（Claude Code 兼容）"]
     end
 
-    subgraph RuntimeKernel ["Runtime Kernel · 调度层"]
-        Kernel["SyncSession / step orchestration<br>state transition / lifecycle control"]
-        Scheduler["Semantic Scheduler<br>next_action / action_queue"]
+    subgraph AgentLoop ["gitgo Agent Loop · 自包含循环"]
+        direction TB
+        LLM["LLMProvider<br>HTTP → OpenAI API<br>多 Provider failover + 熔断"]
+        Executor["agent_step()<br>多步执行引擎<br>XML tool_call 解析<br>死循环检测"]
+        RingGate["RingGate<br>RING_0 (全能) / RING_3 (受限)<br>per-Agent 工具注册表"]
+        AgentPool["AgentProcessManager<br>fork B/C Agent<br>独立 worktree 隔离"]
     end
 
-    subgraph EventBus ["Event Bus · 信号层"]
-        HistoryManager["HistoryManager<br>append-only governance event log"]
-        Events["pre_scan | post_sync | drift_detected<br>governance_synced | governance_pushed"]
+    subgraph DispatchLayer ["Dispatch Layer"]
+        Daemon["Daemon<br>子进程 + 事件循环<br>watcher / poller / reader"]
+        ToolDispatcher["ToolDispatcher<br>命令 → 工具路由<br>30s 超时"]
     end
 
-    subgraph StateStore ["State Store · 状态层"]
-        RuntimeState["RuntimeState<br>operational / governance / semantic<br>integrity / memory / lessons / releases"]
-        Persistent["session.json | contract.yaml<br>lessons.jsonl | formal commits"]
+    subgraph Guard ["Policy Guard · 三层检查"]
+        PreDispatch["PreDispatchGuard<br>危险工具前置条件"]
+        Completion["CompletionGuard<br>TASK_COMPLETE 验证"]
+        Retention["RetentionAdvisor<br>上下文修剪 + 信号排序"]
     end
 
-    subgraph PolicyEngine ["Policy Engine · 规则层"]
-        Contract["contract validation"]
-        Identity["identity guard"]
-        Authorship["authorship cleanup"]
-        Lesson["lesson inheritance"]
-        Drift["drift detection"]
-        Privacy["privacy scan / secret detection"]
+    subgraph Storage ["Storage · 状态持久化"]
+        Workspace["Workspace<br>Agent 编辑区"]
+        Release["Release<br>正式仓库 + GitHub"]
+        History["HistoryManager<br>append-only event log"]
     end
 
-    subgraph Trial ["Trial Space · 物理测试区"]
-        Incoming["incoming/*<br>外部代码唯一入口"]
-        Triage{"triage()"}
-        Discard["discard（标记已读）"]
-    end
+    %% ── 入口 → Agent Loop ──────────────────────────
+    Dashboard    --> AgentLoop
+    MCPCompat    -. "兼容<br>（受限）" .-> AgentLoop
 
-    subgraph Workspace ["Mutable Workspace · 工作区"]
-        AgentDev["Agent 日常开发<br>自由 commit / 实验"]
-        GateA{"Gate A<br>语义合法性边界"}
-        GateA_fail["不通过 → Agent 原地改"]
-        UserGateA["用户审查 / 更新检查集"]
-        UserPublish["用户确认发布"]
-    end
+    %% ── Agent Loop 内部 ─────────────────────────────
+    Executor     --> LLM
+    LLM          --> Executor
+    Executor     --> RingGate
+    RingGate     --> ToolDispatcher
+    AgentPool    --> Executor
 
-    subgraph Validated ["Validated State · 逻辑边界内"]
-        direction LR
-        AfterGateA["已通过 Gate A 的状态"]
-    end
+    %% ── Dispatch → 执行 ────────────────────────────
+    ToolDispatcher --> Daemon
+    Daemon       --> Workspace
 
-    subgraph GateB_Check ["Gate B · 发布合法性"]
-        GateB{"Gate B<br>发布合法性边界"}
-        GateB_fail["发布拒绝 → 返回 Workspace"]
-        UserConfirm["用户确认发布摘要"]
-    end
+    %% ── Guard 三层 ──────────────────────────────────
+    Executor     --> PreDispatch
+    Executor     --> Completion
+    Executor     --> Retention
+    Completion   --> History
 
-    subgraph Release ["Canonical Release Space · 物理备份区"]
-        CanonicalState[("Canonical State<br>formal commits / immutable<br>event log / contract / lessons")]
-        PublishToGitHub["发布到 GitHub"]
-    end
+    %% ── 存储 ────────────────────────────────────────
+    Workspace    --> Release
 
-    %% ── 主流程（实线）───────────────────────────────────────
-    GitHub         --> Incoming
-    Human          -- "PR / 接手项目"   --> Incoming
-    Incoming       --> Triage
-    Triage         -- discard           --> Discard
-    Triage         -- accept            --> GateB
-    Triage         -- promote           --> AgentDev
+    %% ── 样式（与旧版 README 渲染格式一致）──────────
+    style Interface      fill:#334155,stroke:#94A3B8,stroke-width:2px,color:#FFFFFF
+    style AgentLoop      fill:#431407,stroke:#F97316,stroke-width:2px,color:#FFFFFF
+    style DispatchLayer  fill:#2E1065,stroke:#8B5CF6,stroke-width:2px,color:#FFFFFF
+    style Guard          fill:#451A03,stroke:#F59E0B,stroke-width:2px,color:#FFFFFF
+    style Storage        fill:#022C22,stroke:#10B981,stroke-width:2px,color:#FFFFFF
 
-    AgentDev       --> GateA
-    GateA          -- 不通过            --> GateA_fail
-    GateA_fail     --> AgentDev
-    GateA          -- 通过              --> AfterGateA
-    AfterGateA     --> UserGateA
-    UserGateA      -- "需要修改"        --> AgentDev
-    UserGateA      -- "满意准备发布"    --> UserPublish
-
-    UserPublish    --> GateB
-    GateB          -- 通过              --> UserConfirm
-    GateB          -- 不通过            --> GateB_fail
-    GateB_fail     --> AgentDev
-    UserConfirm    --> CanonicalState
-
-    CanonicalState --> PublishToGitHub
-    PublishToGitHub --> GitHub
-
-    %% ── 治理信号闭环（虚线）────────────────────────────────
-    GateA          -.-> Events
-    GateB          -.-> Events
-    Events         -.-> HistoryManager
-    HistoryManager -.-> RuntimeState
-    RuntimeState   -.-> Kernel
-
-    %% ── Policy Engine 接入（虚线）──────────────────────────
-    PolicyEngine   -.-> GateA
-    PolicyEngine   -.-> GateB
-
-    %% ── Scheduler 提示（虚线）──────────────────────────────
-    Scheduler      -.-> AgentDev
-
-    %% ── 用户反馈（实线）────────────────────────────────────
-    Human          -- "更新 contract / lesson" --> PolicyEngine
-
-    %% ═══════════════════════════════════════════════════════
-    %% 分区背景色（高对比 · 相互区分）
-    %% ═══════════════════════════════════════════════════════
-    style External      fill:#334155,stroke:#94A3B8,stroke-width:2px,color:#FFFFFF
-    style RuntimeKernel fill:#1E3A5F,stroke:#3B82F6,stroke-width:2px,color:#FFFFFF
-    style EventBus      fill:#2E1065,stroke:#8B5CF6,stroke-width:2px,color:#FFFFFF
-    style StateStore    fill:#022C22,stroke:#10B981,stroke-width:2px,color:#FFFFFF
-    style PolicyEngine  fill:#451A03,stroke:#F59E0B,stroke-width:2px,color:#FFFFFF
-    style Trial         fill:#450A0A,stroke:#EF4444,stroke-width:2px,color:#FFFFFF
-    style Workspace     fill:#431407,stroke:#F97316,stroke-width:2px,color:#FFFFFF
-    style Validated     fill:#052E16,stroke:#22C55E,stroke-width:2px,color:#FFFFFF
-    style GateB_Check   fill:#451A03,stroke:#F59E0B,stroke-width:2px,color:#FFFFFF
-    style Release       fill:#042F2E,stroke:#06B6D4,stroke-width:2px,color:#FFFFFF
-
-    %% ═══════════════════════════════════════════════════════
-    %% 节点样式
-    %% ═══════════════════════════════════════════════════════
-    classDef gate fill:#F97316,stroke:#FFFFFF,stroke-width:2.5px,color:#FFFFFF,font-weight:bold
-    classDef evtNode fill:#4C1D95,stroke:#FFFFFF,stroke-width:1.5px,color:#FFFFFF
-    classDef storeNode fill:#065F46,stroke:#FFFFFF,stroke-width:1.5px,color:#FFFFFF
     classDef extNode fill:#1E293B,stroke:#FFFFFF,stroke-width:2px,color:#FFFFFF
-    classDef releaseNode fill:#0F766E,stroke:#FFFFFF,stroke-width:2px,color:#FFFFFF
-    classDef plain fill:#334155,stroke:#6B7280,stroke-width:1.5px,color:#FFFFFF
-
-    class GateA,GateB gate
-    class Events,HistoryManager evtNode
-    class RuntimeState,Persistent storeNode
-    class GitHub,Human extNode
-    class CanonicalState releaseNode
-    class Kernel,Scheduler,Contract,Identity,Authorship,Lesson,Drift,Privacy plain
-    class Incoming,Discard,AgentDev,GateA_fail,UserGateA,UserPublish plain
-    class AfterGateA,GateB_fail,UserConfirm,PublishToGitHub plain
+    class Dashboard,MCPCompat extNode
 ```
 
----
+## 核心概念
 
-## 能力
-
-### 工作流
-
-| 功能 | CLI | MCP |
-|------|-----|-----|
-| `scan` — 文件变更扫描（SHA256 + EOL 归一化） | ✅ | ✅ |
-| `formalize` — workspace commit → formal commit 聚合 | ✅ | ✅ |
-| `sync` — 同步到 release 仓库（Gate A 拦截） | ✅ | ✅ |
-| `push` — 推送至 GitHub（Gate B） | ✅ | ✅ |
-| `trial` — 外部代码 triage（accept/promote/discard） | ✅ | ✅ |
-| `daemon` — 持久守护进程（watchdog + trial 轮询 + Policy Engine） | ✅ | — |
-| `dashboard` — 实时项目状态面板（Ink 终端 UI） | ✅ | — |
-| `agent` — A→B Agent 循环（fork + dispatch + LLM call） | — | ✅ |
-| `llm_config` — LLM Provider 多路管理 + 切换（Ink 终端面板） | ✅ | ✅ |
-
-### 治理
-
-| 系统 | 说明 |
+| 概念 | 说明 |
 |------|------|
-| **Identity Guard** | 全量覆盖检测 / 身份文件删除告警 / 目录骨架崩塌检测 |
-| **Memory Snapshot** | sync 时自动快照 `.claude/` `.codex/` `.codebuddy/` → backup |
-| **Project Contract** | 项目合约自动维护 + push 前漂移检测（功能删除/技术栈漂移/架构违反） |
-| **Lesson System** | 抽象层+实例层知识传承，sync 后自动收割（CLAUDE.md + git log + governance signals） |
-| **Authorship** | push 前 AI 痕迹清洗（commit message + 代码注释 + AI 配置文件排除） |
-| **Template System** | 多套命名 commit message 模板，`str.format()` 8 变量填充 |
-| **Discipline** | 8 条 Runtime Constitution 规则 + 三层状态机 |
+| **Agent Loop** | 自包含的 Agent 循环：LLM 调用 → XML tool_call 解析 → RingGate 权限 → 工具执行 → 下一轮 LLM 调用 |
+| **LLMProvider** | 内置 HTTP 调用器，直连 OpenAI API。多 Provider failover + 熔断 + 指数退避 |
+| **RingGate** | 两层权限：RING_0（全能）/ RING_3（受限），per-Agent 工具注册表 |
+| **AgentProcessManager** | 多 Agent 并行 fork，独立 worktree 隔离，最大深度 2 |
+| **Policy Guard** | 三层检查：PreDispatch（前置条件）+ Completion（完成验证）+ Retention（上下文修剪）|
+| **MCP Server** | 为 Claude Code 兼容保留。47 个工具，但受限——完整治理编排需原生协议 |
+| **Dashboard** | Ink 终端 UI：进程列表 + 聊天 + LLM 配置 + 治理 Tab |
+| **HistoryManager** | Append-only governance event log，完整审计追踪 |
 
-### 9 种 Governance Event
+## 能力矩阵
 
-`governance_synced` / `governance_pushed` / `governance_dissolved` / `governance_edited` / `governance_renumbered` / `governance_drift` / `governance_contract_updated` / `governance_lesson` / `governance_memory_snapshot`
+### Agent 编排（gitgo Loop 自主执行）
 
-全部写入 append-only HistoryManager。
+| 能力 | 说明 |
+|------|------|
+| 多 Agent 并行 fork | AgentProcessManager 管理 B/C Agent 池，独立 worktree，RingGate 权限隔离 |
+| 多步执行循环 | agent_step()：LLM → tool_call 解析 → dispatch → 检查 → 循环，可配 max_steps |
+| 上下文管理 | 自动检测上下文使用率，>80% 修剪，>90% LLM 摘要压缩 |
+| 死循环检测 | 连续无工具调用的纯文本响应 → KILL |
+| LLM Failover | 多 Provider 链式 fallback，每 Provider 独立熔断器，指数退避重试 |
 
----
+### MCP 工具（Claude Code 兼容接口）
 
-## 快速开始
+| MCP Tool | 说明 |
+|----------|------|
+| `gitgo_fork_agent` | 派生 Agent，独立 worktree |
+| `gitgo_agent_chat` | 触发 Agent 循环执行 |
+| `gitgo_loop_status` | 查询 Agent 状态 + 资源 |
+| `gitgo_round_complete` | Agent 交付，Gate 检查 |
 
-```bash
-pip install -r requirements.txt
+### 治理策略
+| MCP Tool | 说明 |
+|----------|------|
+| `gitgo_policy_check` | 手动触发策略引擎 |
+| `gitgo_contract_show` / `_update` | 项目合约管理 |
+| `gitgo_lesson_list` / `_verify` / `_harvest` | 知识传承系统 |
+| `gitgo_identity_check` | 身份完整性检测 |
 
-# 自举配置（把 gitgo 自己注册为项目）
-python -m gitgo --mode bootstrap
+### LLM 配置
+| MCP Tool | 说明 |
+|----------|------|
+| `gitgo_llm_status` | 查看所有 Provider |
+| `gitgo_llm_save` | 添加/更新 Provider |
+| `gitgo_llm_switch` | 切换 active provider |
+| `gitgo_llm_delete` | 删除 Provider |
 
-# 实时 dashboard
-python -m gitgo --mode dashboard --refresh 5
-
-# Agent 交付检查
-# MCP: gitgo_round_complete(project="myproject")
-
-# 发布
-python -m gitgo --mode push --project myproject --strip-authorship
-```
-
----
+### Git 工作流
+| MCP Tool | 说明 |
+|----------|------|
+| `gitgo_scan` | 文件变更扫描（SHA256 + EOL 归一化） |
+| `gitgo_sync` | 同步到 release（Gate A） |
+| `gitgo_push` | 推送到 GitHub（Gate B） |
+| `gitgo_trial_*` | 外部代码 triage（accept/promote/discard） |
 
 ## 项目结构
 
 ```
 gitgo/
 ├── backend/                   # 引擎层
-│   ├── core/                  #   Runtime Kernel + State Store + Policy Engine
-│   │   ├── sync_session.py    #   状态机（18 step_* 方法）
-│   │   ├── state_reader.py    #   统一状态查询
-│   │   ├── config.py          #   项目配置
-│   │   ├── history.py         #   HistoryManager (append-only event log)
-│   │   ├── llm_config.py      #   LLMConfigManager（多 Provider CRUD + 切换）
-│   │   ├── governance/        #   quality / patterns / graph / releases
-│   │   ├── identity/          #   guard (完整性检测) + snapshot (记忆快照)
-│   │   ├── knowledge/         #   lesson (知识传承)
-│   │   ├── operations/        #   scan / git / sync / security / diff
-│   │   ├── daemon/            #   持久守护进程 + DaemonClient（subprocess 通信）
-│   │   ├── loop/              #   Agent 循环（context/gate/llm/manager）
-│   │   ├── dispatch/          #   ToolDispatcher（MCP→Daemon 命令路由）
+│   ├── core/                  #   Agent Loop / Policy Engine / Dispatch / Steps
+│   │   ├── loop/              #   Agent 生命周期（context / gate / llm / manager）
+│   │   ├── daemon/            #   守护进程 + DaemonClient（subprocess 通信）
+│   │   ├── dispatch/          #   ToolDispatcher（MCP → Daemon 命令路由）
 │   │   ├── policy/            #   Policy Engine 可插拔策略
-│   │   ├── steps/             #   纯函数管线（scan/commits/sync）
-│   │   ├── fact/              #   模式匹配（contract/file/workflow）
+│   │   ├── steps/             #   纯函数管线（scan / commits / sync）
+│   │   ├── knowledge/         #   Lesson 知识传承系统
+│   │   ├── identity/          #   Identity Guard 完整性检测
+│   │   ├── governance/        #   质量度量 + 模式检测
+│   │   ├── operations/        #   git / scan / sync / security
+│   │   ├── fact/              #   模式匹配
 │   │   ├── cache/             #   文件哈希缓存
+│   │   ├── sync_session.py    #   状态机（18 step_* 方法）
+│   │   ├── history.py         #   HistoryManager（append-only event log）
 │   │   ├── contract.py        #   项目合约 + 漂移检测
+│   │   ├── llm_config.py      #   LLMConfigManager（多 Provider CRUD）
 │   │   ├── authorship.py      #   AI 痕迹清洗
-│   │   └── template_manager.py #  commit 模板系统
+│   │   └── template_manager.py #  Commit 模板系统
 │   ├── adapters/              #   Local / SSH / SMB 三实现
 │   ├── models/                #   数据模型
 │   └── remote/                #   GitHub / GitLab API
 ├── cli/                       # CLI verbs
 │   └── dashboard/             #   Ink 终端 Dashboard（TypeScript + Bun）
-├── mcp_server.py              # FastMCP server (47 tools)
+├── mcp_server.py              # FastMCP server（47 tools）
 ├── mcp_tools/                 # MCP 工具实现（loop / llm_config / daemon_registry ...）
 ├── frontend/                  # Qt GUI（搁置）
-├── cui/                       # Rich 终端界面
-├── tests/                     # 501 测试 + 1 skip
-└── docs/                      # RuntimeConstitution / HANDOFF / VERSION / iterations
+├── tests/                     # 501 tests + 1 skip
+└── docs/                      # VERSION / CLAUDE.md / HANDOFF / iterations
 ```
-
----
 
 ## 版本
 
+最新 **v0.35**。详见 [VERSION.md](docs/VERSION.md)。
+
 | 版本 | 里程碑 |
 |------|--------|
-| v0.10–v0.20 | P1–P4: Foundation + Governance |
-| v0.21 | P5: Protocol & Ecosystem |
-| v0.22 | P6: Template + SMB + CLI/MCP |
-| v0.23 | Identity Guard |
-| v0.24 | Authorship + Contract + Lesson |
-| v0.25 | State Convergence (C1–C3) |
-| v0.26 | Runtime Discipline |
-| v0.27 | Constitution + Policy Engine daemon + Dashboard + MCP gate |
-| v0.28 | Dashboard 异构重写（Python Rich → TypeScript Ink） |
-| v0.29 | Policy Engine 可插拔 + Dashboard Governance Tab + 链式依赖 |
-| **v0.35** | **Dispatch Layer + LLM Provider 配置面板 + Agent Loop A→B 通路** |
+| v0.10–v0.25 | Foundation: Governance + Identity + Contract + Lesson + State Convergence |
+| v0.26–v0.30 | Runtime + Policy Engine + Dashboard + Dispatch Layer + Agent Loop |
+| v0.31–v0.33 | Dashboard 完善 + 技术报告 + P0 修复 |
+| v0.34 | 系统整合：原生 Task 命令 + 断裂修复 + Dashboard 双路径 |
+| **v0.35** | **Knowledge System 三期 + TestDataFactory + 501 测试** |
