@@ -4,7 +4,32 @@
 
 ---
 
-- 9 项目完成, 0 修改中, 1 待归档
+- 12 项目完成, 0 修改中, 0 待归档
+
+## v0.35 (2026-07-16)
+
+**Knowledge System 三期 —— 收割/检索/注射/分离/回收 + Testing Infrastructure**
+
+### K1-K3: Knowledge 核心
+- `knowledge/models.py` — Lesson 数据模型升级：10 个新字段 (dangerous_tools / prerequisite_tools / required_tools / trigger_count / recent_retrievals 等)
+- `knowledge/manager.py` — save_pending 内容哈希去重 + discard_lesson / revert_to_pending / pending_count
+- `knowledge/harvest.py` — 信号捕获 + 多维调度算法 (事件密度+来源多样性+批量+冷却) + LLM 总结 + `is_testable_proposition` 门禁 + `auto_discard_invalid`
+- Daemon 集成 — workspace_dirty 后自动信号捕获 + harvest 触发 + pending digest 定时
+
+### K4-K5: Retrieval + Recall
+- `knowledge/recall.py` — **新建** (290 行) L0 grep + 轻量排序 / L1 多向量语义搜索 / L2 RAG
+- `knowledge/embedding.py` — **新建** (56 行) Provider-agnostic EmbeddingProvider
+- `filter_by_relevance()` — Per-agent scope 实时过滤
+- `record_retrieval()` — 检索持久化 + 热/温/冷分层
+
+### K6: Recycle
+- `round_complete` 集成 — 回收信号 + sticky lesson 管理
+- 热/温/冷分类 (`classify_lesson_heat`) + sticky cap
+
+### Testing Infrastructure
+- `tests/factory/` — **新建** (7 文件, ~800 行) TestDataFactory：种子可复现的通用测试数据生成器
+- 跨 Knowledge / Governance / Identity / SyncSession / Contract / Config 子系统
+- 501 测试 (从 334 增长 +167)
 
 ## v0.34 (2026-07-15)
 

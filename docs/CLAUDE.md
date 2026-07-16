@@ -50,33 +50,26 @@ Trial 目前功能完备（poller 轮询 + triage 三叉 + MCP tools），但尚
 
 | Module | Lines | Responsibility |
 |---|---|---|
-| `backend/core/daemon/` | ~810 | Daemon 主循环 + DaemonClient（subprocess 通信）+ workspace snapshot + rejection handler |
-| `backend/core/loop/` | ~250 | **Agent Loop**：context builder + gate + LLM wrapper + AgentProcessManager + models |
+| `backend/core/daemon/` | ~1,000 | Daemon 主循环 + task 命令 + signal capture wiring + pending digest |
+| `backend/core/loop/` | ~550 | **Agent Loop**：gate + LLM + AgentProcessManager + models + tools |
 | `backend/core/dispatch/` | ~120 | **ToolDispatcher**：MCP→Daemon 命令分发 + RingGate 路由 |
-| `backend/core/policy/` | ~330 | **Policy Engine**：可插拔策略（lesson/contract/identity/dep-chain）+ registry + 条件 harvest |
+| `backend/core/policy/` | ~570 | **Policy Engine**：可插拔策略（lesson/contract/identity/dep-chain）+ Gate 系统 + registry |
 | `backend/core/steps/` | ~200 | **纯函数管线**：scan / commits / sync / push，零依赖 SyncSession |
-| `backend/core/fact/` | ~150 | 模式匹配：contract / file / workflow patterns |
+| `backend/core/fact/` | ~200 | 模式匹配 + 时间窗口 |
 | `backend/core/cache/` | ~100 | 文件哈希缓存（file_hash） |
-| `backend/core/sync_session.py` | ~1300 | 状态机：编排层，委托 steps 纯函数 |
-| `backend/core/llm_config.py` | ~130 | **LLMConfigManager**：多 Provider CRUD + active switch（`.gitgo/llm_config.json`） |
-| `backend/core/history.py` | ~140 | HistoryManager：append-only event log（per-project 隔离） |
-| `backend/core/contract.py` | ~420 | ContractManager：feature 合约 + drift 检测 + 依赖图 |
-| `backend/core/knowledge/` | ~760 | Lesson 系统：harvest（5 模式）+ manager + models |
+| `backend/core/sync_session.py` | ~1,300 | 状态机：编排层 + Gate plugin 化 |
+| `backend/core/llm_config.py` | ~130 | **LLMConfigManager**：多 Provider CRUD + active switch |
+| `backend/core/history.py` | ~180 | HistoryManager：JSONL append-only + threading.Lock 并发安全 |
+| `backend/core/contract.py` | ~420 | ContractManager + drift + 依赖图 |
+| `backend/core/knowledge/` | ~1,600 | **Knowledge System**：harvest(5源) + recall(L0/L1/L2) + models + manager |
 | `backend/core/identity/` | ~340 | Identity Guard：完整性 + memory snapshot |
 | `backend/core/governance/` | ~690 | 质量度量 + 模式检测 + 语义变更图 + 发布推理 |
-| `mcp_server.py` | ~200 | MCP Server：47 tools，stdin/stdout JSON-RPC |
-| `mcp_tools/` | ~1800 | MCP 工具实现：loop / llm_config / daemon_registry / scan / sync / push 等 |
+| `mcp_server.py` | ~200 | MCP Server：47 tools |
+| `mcp_tools/` | ~1,800 | MCP 工具实现 |
 | `backend/core/operations/` | ~500 | git / scan / sync / security / utils |
 | `backend/core/authorship.py` | ~120 | AI 痕迹清洗 + 隐私扫描 |
-| `backend/core/state_reader.py` | ~100 | StateReader：统一查询接口 |
-| `backend/core/template_manager.py` | ~200 | Commit 模板系统 |
-| `backend/adapters/` | ~300 | GitRunner + FileAdapter（Local/SSH/SMB） |
-| `backend/models/` | ~100 | RepoNode + FileAccess + SyncStatus |
-| `backend/remote/` | ~400 | GitHub/GitLab API 连接器 |
-| `cli/` | ~1400 | CLI 命令矩阵（commands + commands_ext） |
-| `cli/dashboard/` | ~2500 | TypeScript + Bun + Ink CLI Dashboard（独立项目） |
-| `frontend/` | ~7000 | PySide6 Qt GUI（搁置） |
-| `themes/` | ~200 | QSS 主题系统 |
+| `cli/dashboard/` | ~3,000 | Ink Dashboard：18 组件 + 5 hooks + 原生 daemon 通路 |
+| `tests/` | 501 tests | 7 子系统：Knowledge/Governance/Identity/SyncSession/Contract/Config + factory |
 
 ## Commands
 

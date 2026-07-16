@@ -2,7 +2,7 @@
 
 **Development Semantic Runtime** — AI 协作开发过程中的项目状态治理系统。
 
-334 个测试 | 47 个 MCP 工具 | 22 个 CLI 模式 | v0.30
+501 个测试 | 50 个 MCP 工具 | 22 个 CLI 模式 | v0.35
 
 ---
 
@@ -287,7 +287,7 @@ gitgo/
 ├── mcp_tools/                 # MCP 工具实现（loop / llm_config / daemon_registry ...）
 ├── frontend/                  # Qt GUI（搁置）
 ├── cui/                       # Rich 终端界面
-├── tests/                     # 334 测试 + 1 skip
+├── tests/                     # 501 测试 + 1 skip
 └── docs/                      # RuntimeConstitution / HANDOFF / VERSION / iterations
 ```
 
@@ -307,4 +307,4 @@ gitgo/
 | v0.27 | Constitution + Policy Engine daemon + Dashboard + MCP gate |
 | v0.28 | Dashboard 异构重写（Python Rich → TypeScript Ink） |
 | v0.29 | Policy Engine 可插拔 + Dashboard Governance Tab + 链式依赖 |
-| **v0.30** | **Dispatch Layer + LLM Provider 配置面板 + Agent Loop A→B 通路** |
+| **v0.35** | **Dispatch Layer + LLM Provider 配置面板 + Agent Loop A→B 通路** |
