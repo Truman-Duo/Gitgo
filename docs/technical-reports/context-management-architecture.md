@@ -1,361 +1,434 @@
 # Gitgo Context Management Architecture
 
-> 设计日期：2026-07-17 | 状态：架构设计
+> 设计日期：2026-07-17 | 状态：架构设计 | 定位：实施规格
 
 ---
 
-## 零、核心原则
+## 零、与已有系统的对接表
 
-1. **Raw 永存，压缩是最后手段。** 原文不删。压缩是穷尽所有轻量算法后的兜底。
-2. **多套转录，非原地覆盖。** 从同一份 Raw 生成多份 Transcript，每份一个视角。
-3. **储存廉价，算法必要。** 硬盘便宜——Raw 全部保留。算法决定什么进入稀缺的 context window。
-4. **推负责保底，拉负责补救。** 系统推送"需要的"，Agent 可以拉取更多。
-5. **稳定性 > 相关性。** 相同输入应产生 99% 相同的 Context，不让 Assemble 变成波动源。
-6. **复用已有基础设施。** PolicyEngine、Knowledge recall、HistoryManager 已经在做检测和检索——不重复造。
-
----
-
-## 一、Context 完整组成
-
-每个 Agent 启动时，Runtime 从多个来源组装 Context。以下按 Prompt Cache 稳定性从高到低排列。
-
-### 1.1 九层 Context 结构
-
-```
-┌──────────────────────────────────────────────┐
-│ Layer 0: System Prompt         (~500 tokens) │ ← 永久固定
-├──────────────────────────────────────────────┤
-│ Layer 1: Project Identity      (~200 tokens) │ ← 项目级，数月不变
-├──────────────────────────────────────────────┤
-│ Layer 2: Contract & Rules      (~800 tokens) │ ← 合约级，版本变更时更新
-├──────────────────────────────────────────────┤
-│ Layer 3: RingGate & Permissions (~300 tokens)│ ← Agent 角色级，Fork 时确定
-├──────────────────────────────────────────────┤
-│ Layer 4: Tool Registry         (~500 tokens) │ ← Agent 角色级，Fork 时确定
-├──────────────────────────────────────────────┤
-│ Layer 5: Governance Signals     (可变 tokens) │ ← needed, PolicyEngine 每轮推送
-├──────────────────────────────────────────────┤
-│ Layer 6: Knowledge Brief        (可变 tokens) │ ← relevant, recall 检索结果
-├──────────────────────────────────────────────┤
-│ Layer 7: Task Transcript       (可变 tokens) │ ← 当前 task 范围内的对话+工具结果
-├──────────────────────────────────────────────┤
-│ Layer 8: Conversation Tail     (~4000 tokens)│ ← 最近 N 轮完整对话
-└──────────────────────────────────────────────┘
-
-Prompt Cache 命中区: L0-L4 (固定前缀, ~2300 tokens)
-Prompt Cache 变化区: L5-L8 (每轮/每 task 可能变化)
-```
-
-### 1.2 每层详细定义
-
-**Layer 0: System Prompt**
-
-永久固定。告诉 LLM 它是什么角色、它的行为边界、它的基本能力。
-
-```
-你是 gitgo Agent Runtime 中的一个 Agent。
-你的行为受 RingGate 权限约束，受 PolicyEngine 治理信号约束。
-你必须通过工具与环境交互。不能直接读写文件。
-完成任务后回复 TASK_COMPLETE。
-```
-
-**Layer 1: Project Identity**
-
-项目级信息。切换项目时更新——同项目内稳定。
-
-| 字段 | 来源 | 示例 |
-|------|------|------|
-| 项目名 | `ProjectConfig.name` | `"gitgo"` |
-| 工作区路径 | `ProjectConfig.workspace_path` | `/home/dev/gitgo` |
-| 技术栈 | `contract.tech_stack` | `["python", "typescript"]` |
-| 当前分支/HEAD | `git rev-parse HEAD` | `abc123` |
-
-**Layer 2: Contract & Rules**
-
-合约约束 + 架构规则。`contract.yaml` 更新时刷新。
-
-| 字段 | 来源 | 示例 |
-|------|------|------|
-| Decided Features | `contract.decided_features` | `[{name:"auth", location:"auth.py", signature:"def auth()"}]` |
-| Architecture Constraints | `contract.architecture_constraints` | `["不使用绝对定位", "不跳过 git hooks"]` |
-| 依赖图摘要 | `load_dep_graph()` → 当前 task 涉及文件的相关节点 | `"auth.py ← login.py, api.py"` |
-
-**Layer 3: RingGate & Permissions**
-
-Agent 的权限边界。Fork 时确定，整个生命周期不变。
-
-| 字段 | 来源 | 示例 |
-|------|------|------|
-| Ring Level | `AgentProcess.ring_level` | `RING_3` |
-| 可用工具列表 | `ToolRegistry.list_all()` | `["scan", "formalize", "recall_grep"]` |
-| 被禁止的工具 | RingGate 过滤结果 | `sync, push, promote_lesson` 不可用 |
-| 可写/可读的目录 | worktree 路径 | `可写: .gitgo/worktrees/{pid}/` |
-
-**Layer 4: Tool Registry**
-
-每个可用工具的 Schema 定义。Fork 时确定。
-
-| 字段 | 来源 | 示例 |
-|------|------|------|
-| 工具名 + 描述 | `ToolDispatcher._executors` | `recall_grep: 搜索已知教训...` |
-| 参数 Schema | 工具定义的 JSON Schema | `{query: str, top_k: int}` |
-| 调用格式 | Function calling 或 XML（当前） | `<tool_call><name>recall_grep</name>...` |
-
-**Layer 5: Governance Signals（needed）**
-
-PolicyEngine 每轮 workspace_dirty 后的产出。不参与裁剪——钉为 never-compact。
-
-| 字段 | 来源 | 示例 |
-|------|------|------|
-| Lesson Trigger 匹配 | `PolicyEngine.LessonTriggerCheck` | `"修改 auth.py 前必须先 scan"` |
-| Contract Drift 告警 | `PolicyEngine.ContractDriftCheck` | `"auth.py 的 authenticate 签名已变更"` |
-| Identity Integrity 告警 | `PolicyEngine.IdentityIntegrityCheck` | `"CLAUDE.md 文件丢失"` |
-| Dependency 告警 | `DependencyChainCheck`（AST 精确版） | `"auth.authenticate() 被 login.handle_login() 调用"` |
-| Rejection 历史 | `HistoryManager` | `"上次被拒绝理由: 登录安全验证不足"` |
-| 对应 Lesson 的工具约束 | `Lesson.prerequisite_tools` + `required_tools` | `"完成前必须调用: scan, test"` |
-
-**Layer 6: Knowledge Brief（relevant）**
-
-Agent 主动或被动检索的知识。依赖图打分排序，填满 budget 剩余空间。
-
-| 字段 | 来源 | 检索方式 |
-|------|------|---------|
-| 匹配的 Lesson | `recall_grep/semantic` → 依赖图打分排序 | Agent 主动调 recall / 系统推送 |
-| 相关 Fact | `derive_facts()` → 按 project_name 筛选 | 系统推送 |
-| 历史决策记录 | `HistoryManager` → 按 changed_files 筛选 | Agent 主动拉取 |
-
-**Layer 7: Task Transcript**
-
-当前 task 范围内的对话 + 工具调用 + 结果。会随 task 进度增长。
-
-| 字段 | 来源 | 示例 |
-|------|------|------|
-| Task 描述 | `AgentProcess.task_description` | `"修复 auth 模块的登录安全问题"` |
-| 本 task 内的对话 | `AgentSession.messages` | user / assistant / tool_result |
-| 本 task 内的工具结果 | `ToolDispatcher.dispatch()` 结果 | `scan: 5 files changed` |
-| 本 task 内的 Lesson 检索结果 | `recall_grep` 返回的 lesson 列表 | 作为 tool_result 注入 |
-
-**Layer 8: Conversation Tail**
-
-最近 N 轮完整对话（跨 task 的上下文尾巴）。Prune 时最先被裁剪。
-
-| 字段 | 来源 |
-|------|------|
-| 最近 3-5 轮 assistant 消息 | `AgentSession.messages[-N:]` |
-| 这些轮中调用的工具及结果 | tool_call + tool_result pairs |
-| 用户的最新指令 | user message |
-
-### 1.3 与 Claude Code / OpenCode 的对比
-
-| Context 层 | Claude Code | OpenCode | gitgo |
-|-----------|-------------|----------|-------|
-| System Prompt | ✅ | ✅ (SystemContext) | ✅ |
-| 项目信息 | ✅ (CLAUDE.md 多层) | ✅ (AGENTS.md) | ✅ (ProjectConfig + contract) |
-| 规则/约束 | ✅ (rules/*.md) | ❌ | ✅ (PolicyEngine) |
-| 权限 | ✅ (permission ruleset) | ✅ (permission ruleset) | ✅ (RingGate + ToolRegistry) |
-| 工具定义 | ✅ (Tool schemas) | ✅ (Tool schemas) | ✅ (ToolDispatcher) |
-| **治理信号** | ❌ | ❌ | ✅ **gitgo 独有** |
-| **知识/教训** | ⚠️ (MEMORY.md 文件) | ❌ | ✅ (Knowledge recall) |
-| **依赖图** | ❌ | ❌ | ✅ **gitgo 独有** |
-| **Task 上下文** | ✅ (conversation) | ✅ (conversation) | ✅ |
-| 最近对话 | ✅ | ✅ | ✅ |
-
-**gitgo 独有的三层**：Governance Signals（PolicyEngine 推送）、Knowledge Brief（recall 检索）、Dependency Graph（AST 函数级图）。这三层是 gitgo 作为 Agent Runtime 而非普通 Agent 的核心差异——系统主动告诉 Agent "你需要知道这些"，而不是等 Agent 自己发现。
+| 本设计的概念 | gitgo 已有模块 | 当前状态 | 需改动 |
+|-------------|-------------|---------|--------|
+| Raw Store | `HistoryManager` | append-only JSONL + threading.Lock | 追加 2 个 operation 类型 |
+| L0-L4 固定前缀 | `ContextBuilder` + `agent_step` | 已有 `build_governance_context()` | 添加组装入口 |
+| L5 隐用户输入 | `Harness` 三层 Plugin | `PreDispatchGuard.check_tool()` 已做 `session.append_user` | CompletionGuard 同上 |
+| L6 拉取通道 | `recall_grep/semantic/rag` | 已注册为 tool_executor | 无 |
+| L7-L8 结构化转录 | **新增** | 无 | 新建 `TranscriptBuilder` |
+| 压缩优先级链 | `ContextWindow` | 三档水位线 (SOFT/PRUNE/FORCE) | 增加隐用户输入回收 + 依赖图过滤 |
+| Context Assembler | **新增** | 无 | 新建 tool executor |
+| 依赖图 | `contract.py` | v0.36 新增 `get_callers()` + `get_changed_symbols()` | DependencyChainCheck 消费 |
 
 ---
 
-## 二、整体数据流
+## 一、单 Session 心智模式 —— 具体流程
+
+### 1.1 用户视角
+
+用户始终在一个对话窗口里。只说人话——"修登录 bug"、"加 rate limit"。不知道 A/B fork。
+
+### 1.2 系统实际执行的步骤
+
+**Step 1: A 收到用户指令**
 
 ```
-                    ┌──────────────────┐
-                    │   Raw Store       │
-                    │ (HistoryManager)  │
-                    │  append-only      │
-                    └────────┬─────────┘
-                             │
-           ┌─────────────────┼─────────────────┐
-           ▼                 ▼                  ▼
-    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-    │ PolicyEngine │  │  Knowledge   │  │  Dependency  │
-    │  (需要的)     │  │  recall      │  │  Graph       │
-    │  硬约束检测   │  │  (相关的)     │  │  (相关的)     │
-    └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
-           │                 │                  │
-           └─────────────────┼──────────────────┘
-                             │
-                             ▼
-                  ┌──────────────────┐
-                  │ Context Assembler │
-                  │  两阶段组装       │
-                  └────────┬─────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-       ┌──────────┐ ┌──────────┐ ┌──────────┐
-       │ needed   │ │ relevant │ │ recent   │
-       │(never-   │ │(dep-graph│ │(tail     │
-       │ compact) │ │ scored)  │ │ window)  │
-       └──────────┘ └──────────┘ └──────────┘
-              │            │            │
-              └────────────┼────────────┘
-                           │
-                           ▼
-                  ┌──────────────────┐
-                  │  Agent Context   │
-                  │  (context window)│
-                  └──────────────────┘
+用户 → A Agent (Ring 0, session=gitgo-main):
+  "修复 login 模块的认证漏洞"
+```
+
+**Step 2: A 调 assemble_context 工具，查看 B 会拿到什么**
+
+```
+A → tool: assemble_context
+  args: { task: "fix-auth", files: ["login.py","auth.py","middleware.py"], role: "executor" }
+  
+返回:
+  context_snapshot: {
+    needed: [
+      { signal: "lesson_trigger", rule: "修改 auth.py 前必须先 scan", tools:["scan"] },
+      { signal: "contract_drift", file: "login.py", rule: "login函数签名已变更" }
+    ],
+    relevant: [
+      { lesson: "L01", trigger: "auth.py", rule: "修改 auth 前 scan", score: 0.92 },
+      { lesson: "L03", trigger: "login", rule: "修改登录必须更新测试", score: 0.85 }
+    ],
+    dependency: {
+      "auth.py": { callers: ["login.py:handle_login", "api.py:verify_token"] },
+      "login.py": { callers: ["middleware.py:auth_middleware"] }
+    },
+    transcript_tokens: 1800
+  }
+```
+
+A 审阅这份 snapshot → 确认足够 → 决定 fork。
+
+**Step 3: A fork B**
+
+```
+A → tool: fork_agent
+  args: { role: "executor", ring_level: 3, context_snapshot: {...}, instruction: "修复 login 认证漏洞" }
+  
+内部执行:
+  AgentProcessManager.fork() → 创建 AgentProcess
+    → _create_agent_scoped_lessons() → 从 context_snapshot 中提取 relevant lessons
+    → ContextBuilder.build_from_snapshot() → 构建完整 Context
+    
+B Agent context 组装结果:
+  L0: "你是 gitgo Agent Runtime 中的一个 Agent。你的行为受 RingGate 约束..."
+  L1: "项目: gitgo, 工作区: /home/dev/gitgo, 技术栈: python, HEAD: abc123"
+  L2: "decided_features: auth(authenticate); 约束: 不使用绝对定位, 不跳过 git hooks"
+  L3: "Ring: RING_3, 可用: scan,formalize,recall_grep; 禁止: sync,push,promote_lesson"
+  L4: 工具 Schema (scan/formalize/recall_grep/recall_semantic/recall_rag/status)
+  L5-L6: (空——隐用户输入由 Harness 在 loop 中动态注入)
+  L7: (空——新 task)
+  L8: (空——新 task)
+```
+
+**Step 4: B 执行 task**
+
+```
+agent_step() 循环:
+
+  第1轮: LLM → tool_call: recall_grep("auth")
+    → PreDispatchGuard.check_tool("recall_grep", ...) → allowed ✓
+    → 执行 → 结果: { lessons: [L01, L03], total: 2 }
+    → session.append_assistant("...") + session.append_user(tool_result)
+    
+  第2轮: LLM → tool_call: scan
+    → PreDispatchGuard 检查 → 没有前置条件 → allowed ✓
+    → 执行 → 结果: files=5, changed=3
+    → 继续
+    
+  第3轮: LLM → "TASK_COMPLETE，auth.py的authenticate函数已修复"
+    → CompletionGuard.on_signals(signals, process):
+        _check_required_tools:
+          L01.required_tools = ["scan", "test"] → B 调了 scan 但没调 test
+          → missing_tools = ["test"]
+          → result.blocked = True
+    → agent_step: if blocked → session.append_user("[完成前需先调用以下工具] test")
+    → continue ← 循环继续
+    
+  第4轮: LLM 看到隐用户输入 → tool_call: test
+    → 执行 → 5 passed
+    
+  第5轮: LLM → "TASK_COMPLETE"
+    → CompletionGuard 检查 → 全部通过
+    → TaskGate.decide() → allowed
+    → process.status = COMPLETED
+    → agent_complete 事件
+```
+
+**Step 5: B 结果返回 A**
+
+```
+agent_complete 事件到达 daemon 主循环:
+  → _emit agent_complete 到 DaemonClient
+  → assemble_return_context(process):
+      提取 B 的 session 中的关键信息 → 结构化转录
+      {
+        task: "fix-auth",
+        status: "COMPLETED",
+        steps_used: 5,
+        tools_called: ["recall_grep","scan","test"],
+        lessons_triggered: ["L01"],
+        compliance: { L01: {required:["scan","test"], called:["scan","test"], passed:true} },
+        files_changed: ["auth.py"],
+        key_decisions: ["修改了 authenticate 函数的签名校验逻辑"]
+      }
+
+A 收到这份结构化摘要:
+  "已修复认证漏洞。修改了 auth.py 的 authenticate 函数。
+   遵循了 L01 约束（scan + test），5 个测试通过。"
+  
+用户看到: A 的这条回复
+```
+
+**Step 6: B context 回收**
+
+```
+agent_complete 处理完 → ContextWindow.recycle_after_round():
+  1. 隐用户输入 (L5-L6) → retention override = 0.1 → 被 prune 清除
+  2. Tool 结果 (L7) → snip 为占位符
+  3. 对话消息 → 保留在 Raw Store (HistoryManager)
+  4. ContextWindow.prune(session, force=True)
 ```
 
 ---
 
-## 三、Raw Store —— 原文层
+## 二、隐用户输入 —— 具体注入机制
 
-**实现**：HistoryManager append-only event log（已有）。
+### 2.1 三个注入点
 
-所有信息以 event 形式写入，不可删除。每条 event 有 `timestamp`、`operation`、`detail`、`correlation_id`、`project_name`。
+所有注入通过 `session.append_user()` —— 进入对话流，LLM 无法跳过。
 
-| Raw 类型 | HistoryManager operation | 写入时机 |
-|----------|------------------------|---------|
-| 对话消息 | `agent_message` | Agent 每轮 LLM 调用后 |
-| 工具调用结果 | `tool_executed` | ToolDispatcher.dispatch() |
-| PolicyEngine 信号 | `policy_check_result` | daemon workspace_dirty |
-| Lesson 检索结果 | `lesson_recalled` | Agent 调 recall 工具 |
-| 治理简报 | `governance_brief` | ContextBuilder 构建时 |
-| 拒绝记录 | `rejection` | round_complete 拒绝 |
-| 交付快照 | `workspace_state_snapshot` | round_complete |
+| 时机 | Plugin | 代码位置 | 注入格式 |
+|------|--------|---------|---------|
+| tool_call 前 | `PreDispatchGuard.check_tool()` | `executor.py` 行 132 | `[工具调用被阻止] {tool}: {reason}` |
+| 声明完成时 | `CompletionGuard.on_signals()` | `executor.py` 行 159 | `[完成前需先调用以下工具] {tools}` |
+| 声明完成时 | `CompletionGuard._check_rejection_instructions()` | `completion.py` 行 91 | `[完成检查] 以下纠正指令未被处理: {instructions}` |
+
+### 2.2 agent_step 中的集成
+
+```python
+# executor.py agent_step 伪代码
+while process.steps_used < process.max_steps:
+    # ... LLM 调用 ...
+    
+    for tc in tool_calls:
+        # Layer 1: PreDispatchGuard
+        pre_check = PreDispatchGuard.check_tool(tc.name, tc.args, process, signals)
+        if not pre_check.allowed:
+            session.append_user(f"[工具调用被阻止] {tc.name}: {pre_check.reason}")
+            continue  # 跳过这个 tool_call, 回到 LLM
+    
+    if _is_completion(response):
+        # Layer 2+3: CompletionGuard
+        completion = CompletionGuard.on_signals(signals, process)
+        if completion.blocked:
+            session.append_user(completion.nudge_text)  # ← 隐用户输入
+            continue  # 回到循环
+            
+        process.status = COMPLETED
+        return
+```
+
+### 2.3 与 CC/OpenCode 的本质区别
+
+| | CC/OpenCode | gitgo |
+|---|---|---|
+| 信号位置 | System prompt | `session.append_user()` |
+| Agent 能否跳过 | 可以（prompt 是建议） | 不能（user message 必须响应） |
+| 强制力 | `continue` 阻断循环 | `continue` 阻断循环 |
+| Agent 的感知 | "我需要遵守这些规则" | "系统告诉我做 X，我必须做" |
 
 ---
 
-## 四、"需要的" vs "相关的" —— 两阶段组装
+## 三、结构化转录 —— 具体格式
 
-### Phase 1: "需要的" —— never-compact
+### 3.1 任务转录（L7: Task Transcript）
 
-从 PolicyEngine + rejection history + 当前 task 的 lesson 提取。不参与裁剪、不参与打分。Agent 必须看到。
+LLM 最擅长理解的结构化 XML。由硬规则在每步工具执行后追加——不是 LLM 生成的。
 
-| 来源 | 提取内容 | 注入方式 |
-|------|---------|---------|
-| PolicyEngine.LessonTriggerCheck | 匹配当前变更文件的 lesson → `required_tools` + `prerequisite_tools` + `dangerous_tools` | Harness 信号 → system prompt |
-| PolicyEngine.ContractDriftCheck | 合约漂移告警 → 违反了什么规则 | 同上 |
-| PolicyEngine.IdentityIntegrityCheck | 身份破坏告警 → 哪些文件异常 | 同上 |
-| PolicyEngine.DependencyChainCheck | 变更文件的函数级调用链 → 哪些调用者受影响 | 同上 |
-| Rejection history | 上次被拒绝的理由 → 这次不能重复 | CompletionGuard 注入 |
-| Contract.decided_features | 当前 task 涉及的文件 → 对应的 feature 合约约束 | system prompt |
-
-**实现路径**：所有 PolicyEngine 产出已经通过 SignalNormalizer → GovernanceSignal → SignalBus.dispatch(context="pre_dispatch") 注入 agent_step。接上已有的 Harness 管道即可。
-
-### Phase 2: "相关的" —— 依赖图打分排序
-
-从 HistoryManager + Knowledge recall 中检索与当前 task 相关的材料。按依赖图打分排序，填满剩余 context budget。
-
-**依赖图打分算法**（替代时间衰减）：
-
-```
-score(info) = 
-  引用距离分 (0-0.5)   // 在依赖图上离当前变更文件几跳？越近越高
-  + 统计记忆分 (0-0.3)  // 这个依赖关系过去被违反过几次？
-  + 验证次数分 (0-0.2)  // 对应的 lesson 被 verified 过几次？
+```xml
+<task id="fix-auth" started="2026-07-17T10:00:00">
+<step n="1" tool="recall_grep" query="auth" matches="3" top="L01" time_ms="120"/>
+<step n="2" tool="scan" files="5" changed="3" key="auth.py,login.py" time_ms="340"/>
+<step n="3" governance="blocked" reason="required_tool_test_missing"/>
+<step n="4" tool="test" passed="5" failed="0" time_ms="2100"/>
+<step n="5" status="completed" tools_used="recall_grep,scan,test" lessons="L01"/>
+</task>
 ```
 
-| 维度 | 来源 | 说明 |
-|------|------|------|
-| 引用距离 | `get_callers(file, func)` | AST 函数级图：谁调了当前变更的函数 |
-| 统计记忆 | `Lesson.trigger_count` + `violated_after_count` | 这条 lesson 被触发过几次、触发后 Agent 仍然违反了几次 |
-| 验证次数 | `Lesson.verified_count` | 被人工 verify 过的 lesson 权重更高 |
+### 3.2 返回转录（B → A）
 
-**实现路径**：`contract.py` 已有 `build_function_graph()` + `get_callers()`（v0.36 新增）。`Lesson` 数据模型已有 `trigger_count`、`applied_count`、`violated_after_count`、`verified_count` 字段。
+B 完成时由 `assemble_return_context` 生成——纯结构化 JSON，A 直接消费。
+
+```json
+{
+  "task": "fix-auth",
+  "status": "COMPLETED",
+  "steps": 5,
+  "tools": ["recall_grep","scan","test"],
+  "lessons_triggered": [
+    {"id":"L01","rule":"修改auth前scan","complied":true}
+  ],
+  "files_changed": ["auth.py"],
+  "governance_events": [
+    {"step":3,"type":"blocked","reason":"required_tool_test_missing"}
+  ]
+}
+```
+
+### 3.3 压缩转录（Compact 产出）
+
+Compact 最终触发时，LLM 产出也必须走 JSON Schema 约束，不是自由文本。
+
+```json
+{
+  "compact_version": 3,
+  "range": "step_1_to_step_8",
+  "key_decisions": [
+    {"step":2,"decision":"scan后确定主要问题在authenticate函数","basis":"scan结果"}
+  ],
+  "files_touched": ["auth.py"],
+  "errors_encountered": [
+    {"step":3,"type":"governance_block","reason":"required_tool_test_missing","resolved_at":4}
+  ],
+  "pending_work": []
+}
+```
 
 ---
 
-## 五、Transcript 系统 —— 多套转录
+## 四、压缩优先级链 —— 具体算法
 
-### 4.1 转录类型
+### 4.1 实现位置
 
-| 转录 | 提取算法 | 格式 | 用途 |
-|------|---------|------|------|
-| 治理转录 | PolicyEngine → GovernanceSignal → 结构化 JSON | GovernanceSignal 列表 | Agent 的 Harness 消费 |
-| 知识转录 | Knowledge recall → Lesson 列表 | Lesson 结构化字段 | Agent 主动检索 |
-| 任务转录 | 硬规则按 task_description 过滤 Raw | 对话+工具结果子集 | B Agent 上下文注入 |
-| 决策转录 | 从 Raw 中提取决策动词 + 上下文 | Markdown 摘要 | A Agent 跨 task 回顾 |
-| 压缩转录 | LLM compact（最后手段） | 结构化 JSON 摘要 | context 不够时的兜底 |
+`ContextWindow.manage()` —— 新增方法，替代当前裸调 `check() → prune() → compact()`。
 
-### 4.2 Transcript 格式原则
+```python
+def manage(self, session, harness_data, llm_provider, dep_graph):
+    tokens = session.estimate_tokens()
+    budget = self._limit
+    
+    # ── 50%: 隐用户输入回收 ──
+    if tokens > budget * 0.5:
+        self._recycle_governance_nudges(session)
+    
+    # ── 70%: Tool Result Snip（免费）──
+    if tokens > budget * 0.7:
+        self._snip_old_tool_results(session)
+    
+    # ── 80%: 依赖图过滤（免费，图遍历）──
+    if tokens > budget * 0.8:
+        self._dep_graph_filter(session, dep_graph)
+    
+    # ── 85%: 知识替代（免费，已有 recall 工具结果）──
+    if tokens > budget * 0.85:
+        self._replace_with_lesson_transcripts(session, harness_data)
+    
+    # ── 90%: ⚠️ 最后手段 —— LLM Compact ──
+    if tokens > budget * 0.9:
+        # 生成转录，不覆盖原文
+        transcript = self.compact(session, llm_provider, harness_data)
+        # 转录存入转录池（HistoryManager event）
+        _save_transcript(transcript)
+```
 
-1. **为 LLM 理解优化，非人类可读。** 不追求自然语言流畅——用结构化标签、明确的分隔符、精确的字段名。
-2. **量化内容显式标注。** 数值、时间、行数、token 数——不给 LLM 留模糊空间。
-3. **稳定生成。** Transcript 不依赖 LLM 的自由文本生成——用 Schema 约束输出格式。同一段 Raw 两次转录结果应高度一致。
+### 4.2 每步具体做什么
 
-### 4.3 Transcript 存储
+**`_recycle_governance_nudges`**：
+```
+遍历 session.messages → 找到 Harness 注入的隐用户输入
+  → 标记为 "已处理的历史治理信号"
+  → 降 retention override 到 0.1
+  → prune 时优先删除
+```
 
-知识转录走 Knowledge 系统的三层结构（pending → instance → abstract）。其他转录暂存为 HistoryManager event（`operation="transcript"`）或独立文件。
+**`_snip_old_tool_results`**：
+```
+遍历 session.messages → 找到 tool_result 类型
+  → 如果 tool_result 对应的 tool_call 在 3 轮之前
+  → 替换为 "[tool {name}: {N} files, {M}ms, output elided — use recall to retrieve]"
+  → 释放原文 token
+```
+
+**`_dep_graph_filter`**：
+```
+获取当前 task 涉及的文件列表 → 查依赖图
+  → 对每条 session 消息: 
+    它涉及的文件在依赖图上离 task 文件几跳？
+    0-1 跳 → retention = 0.9
+    2 跳 → retention = 0.6
+    3+ 跳 → retention = 0.3
+  → prune 时低 retention 优先被裁剪
+```
+
+**`_replace_with_lesson_transcripts`**：
+```
+对每条对话消息:
+  → 如果消息的内容在 recall 检索结果中有对应的 lesson
+  → 用 lesson 的结构化转录替代原文
+  → lesson 格式: {id, rule, trigger, severity} — 远小于原文
+```
 
 ---
 
-## 六、回收 —— 转录轮换
+## 五、Context Assembler 工具
 
-### 5.1 机制
+### 5.1 工具定义
 
+```python
+# 注册到 ToolDispatcher
+"assemble_context": {
+    "description": "为指定 task 组装 Agent Context。返回 context_snapshot 供 A Agent 审阅。",
+    "parameters": {
+        "task": "str — task 描述",
+        "files": "list[str] — 涉及的相对文件路径",
+        "role": "executor | reviewer | observer",
+        "ring_level": "int — 0 or 3, default 3"
+    },
+    "returns": {
+        "needed": "list[GovernanceSignal] — PolicyEngine 硬约束",
+        "relevant": "list[Lesson] — recall 检索结果 + 依赖图打分",
+        "dependency": "dict — AST 函数级调用链",
+        "transcript_tokens": "int — 预估 token 数"
+    }
+}
 ```
-Agent 开始 task:
-  → Context Assembler 组装 needed + relevant
-  → 注入 context window
 
-Agent 完成 task:
-  → round_complete 或 B Agent kill
-  → 将当前 context 中的转录存入 Transcript Store
-  → RetentionAdvisor 降非 sticky 内容的优先级
-  → ContextWindow.prune() 释放空间
-  → 原文保留在 Raw Store
+### 5.2 内部实现
+
+```python
+def _exec_assemble_context(args: dict) -> dict:
+    task = args["task"]
+    files = args.get("files", [])
+    
+    # Phase 1: needed — PolicyEngine 最近一次 check
+    policy_results = HistoryManager.load(operation="policy_check_result")[-1:]
+    signals = SignalNormalizer().normalize(policy_results=policy_results)
+    needed = [s for s in signals if any(f in s.target_files for f in files)]
+    
+    # Phase 2: relevant — recall 检索 + 依赖图打分
+    lessons = Knowledge.recall_grep(task, top_k=10)
+    dep_graph = load_function_graph(workspace)
+    for l in lessons:
+        l._relevance_score = _dep_graph_score(l, files, dep_graph)
+    relevant = sorted(lessons, key=lambda l: -l._relevance_score)[:5]
+    
+    # Phase 3: dependency — 函数级调用链
+    dependency = {}
+    for f in files:
+        callers = get_callers(workspace, f)
+        dependency[f] = {"callers": callers}
+    
+    return {"needed": needed, "relevant": relevant, "dependency": dependency, "transcript_tokens": ...}
 ```
 
-### 5.2 与知识系统回收的统一
+### 5.3 assemble_return_context
 
-知识回收和上下文回收使用同一机制：
-- 知识回收：recall 工具检索的 lesson 在 task 完成后从 context 撤出
-- 上下文回收：所有 tool_call/tool_result 对（不只 recall）在 task 完成后撤出
-- 判断依据：lesson/信息的热冷分类（`classify_lesson_heat`），非 hot 的降优先级
-- 执行方式：`ContextWindow.prune(session, force=True)`
-
-### 5.3 单 Session 轮换
-
-一个项目一个 A Agent session。上下文里始终只有当前 task 需要的内容。用户感受不到切换——Agent 通过 recall 工具可以查到历史 task 的任何信息。
-
-**Prompt Cache 稳定性**：固定前缀（System Prompt + Contract + Role Prompt = ~95%）+ 变化尾巴（Task Transcript + Recent Conversation = ~5%）。
+```python
+def _exec_assemble_return_context(args: dict) -> dict:
+    process_id = args["process_id"]
+    process = apm.get(process_id)
+    
+    return {
+        "task": process.task_description,
+        "status": process.status.value,
+        "steps": process.steps_used,
+        "tools": _extract_tools_from_session(process.session),
+        "lessons_triggered": _extract_lessons_from_session(process.session),
+        "files_changed": _extract_files_from_tool_results(process.session),
+        "governance_events": _extract_governance_nudges(process.session),
+    }
+```
 
 ---
 
-## 七、依赖图 —— 治理 + 上下文共用
+## 六、依赖图双消费者 —— 具体调用链
 
-同一套图数据，两个消费者：
+### 6.1 治理侧
 
-**治理侧**：
 ```
-文件 X 变更 → get_changed_symbols(X) 找到变了什么函数
-→ get_callers(workspace, X, func) 找到谁调了它
-→ DependencyChainCheck 告警精确到函数
-→ CompletionGuard 在交付前验证调用者
+daemon workspace_dirty
+  → PolicyEngine.DependencyChainCheck.check(session, project)
+    → for each changed_file:
+        get_changed_symbols(file) → ["authenticate"]
+        get_callers(workspace, file, "authenticate") → ["login.py:handle_login"]
+    → result: DependencyChain 告警 → SignalNormalizer → GovernanceSignal
+    → CompletionGuard.on_signals():
+        for sig in dependency_signals:
+            当前 task 的 files 包含 sig 的 changed_file？
+              → required_tools.append("验证 " + sig.callers)
+    → B 声明 TASK_COMPLETE 时被阻拦
 ```
 
-**上下文侧**：
+### 6.2 上下文侧
+
 ```
-Agent 要改 X → 查依赖图 → 找到 X 在依赖链上的相关文件
-→ 这些文件的历史决策/lesson/对话 → 加权保留
-→ 不相关的 → 正常参与 prune
+ContextWindow._dep_graph_filter(session, dep_graph):
+  task_files = 当前 task 涉及的 files
+  for each message in session.messages:
+    msg_files = 消息中涉及的文件
+    min_hops = min(dep_graph.distance(f, task_files) for f in msg_files)
+    msg._retention_override = {0: 0.9, 1: 0.9, 2: 0.6}.get(min_hops, 0.3)
+  → prune() 时低 override 优先清除
 ```
-
-分层精度：
-- Level 1: `get_dependents()` — import 正则，毫秒级，全量跑
-- Level 2: `get_callers(file, func)` — AST 函数级，只对 Level 1 命中的文件做
-- Level 3: 统计记忆 — Lesson 的 `trigger_count` + `violated_after_count`，HistoryManager 已有
-
----
-
-## 八、实现优先级
-
-| 优先级 | 内容 | 状态 |
-|--------|------|------|
-| P0 | PolicyEngine → never-compact 管道（已有 Harness，需接上 ContextWindow） | 部分 |
-| P0 | AST 函数级依赖图（刚加入 contract.py，需在 DependencyChainCheck 中消费） | 新增 |
-| P1 | 依赖图打分替换时间衰减（ContextWindow prune 优先级改依赖图权重） | 待做 |
-| P1 | Transcript 统一存储格式（复用 Knowledge 三层或独立 event） | 待做 |
-| P2 | 单 session 轮换（Assembler 稳定性优先 + Prompt Cache 分区） | 待做 |
-| P2 | LLM compact 最后手段化（穷尽轻量算法后才调） | 待做 |
