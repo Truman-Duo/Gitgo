@@ -279,6 +279,103 @@ def run_daemon(
         "recall_rag": _exec_recall_rag,
     }
 
+    # ── v0.36: Context Assembler 工具 ──
+    def _exec_assemble_context(args: dict) -> dict:
+        from backend.core.knowledge.recall import recall_grep
+        from backend.core.loop.signal_normalizer import SignalNormalizer
+        from backend.core.contract import load_function_graph, get_callers
+
+        task = args.get("task", "")
+        files = args.get("files", [])
+        ws = str(session.workspace_path)
+
+        # Phase 1: needed — PolicyEngine 最近一次 check
+        entries = HistoryManager.load()
+        policy = [e for e in entries[-20:]
+                  if e.operation == "policy_check_result"]
+        normalizer = SignalNormalizer()
+        signals = normalizer.normalize(
+            policy_results=policy[0].detail if policy else {},
+        )
+        needed = [{
+            "source": s.source,
+            "severity": s.severity.value,
+            "rule": s.rule,
+            "target_files": s.target_files,
+            "target_tools": s.target_tools,
+            "required_tools": s.required_tools,
+        } for s in signals
+            if any(f in s.target_files for f in files)]
+
+        # Phase 2: relevant — recall 检索
+        search_terms = " ".join(files) + " " + task
+        recalled = recall_grep(
+            search_terms, project.name,
+            workspace=str(session.workspace_path),
+        )
+        lessons = recalled.get("lessons", [])
+
+        # Phase 3: dependency — 函数级调用链
+        dependency = {}
+        try:
+            func_graph = load_function_graph(Path(ws))
+        except Exception:
+            func_graph = {}
+        for f in files:
+            callers = get_callers(Path(ws), f) if func_graph else []
+            dependency[f] = {"callers": callers[:10]}
+
+        # 预估 token
+        estimated = len(str(needed)) // 4 + len(str(lessons)) // 4
+
+        return {
+            "needed": needed,
+            "relevant": lessons[:10],
+            "dependency": dependency,
+            "transcript_tokens": estimated,
+            "context_utilization_ratio": round(estimated / 128000, 3),
+        }
+
+    def _exec_assemble_return_context(args: dict) -> dict:
+        process_id = args.get("process_id", "")
+        process = apm.get(process_id) if apm else None
+        if not process:
+            return {"error": "process not found"}
+
+        return _build_return_context(process)
+
+    tool_executors.update({
+        "assemble_context": _exec_assemble_context,
+        "assemble_return_context": _exec_assemble_return_context,
+    })
+
+    def _build_return_context(process) -> dict:
+        """从 AgentProcess 构建 B→A 返回转录。"""
+        from backend.core.loop.transcript import TaskTranscriptBuilder
+        # 如果 process 有 transcript builder 实例，用它的
+        tb = getattr(process, '_transcript_builder', None)
+        if tb:
+            return tb.to_return_context()
+
+        # fallback: 从 session 提取
+        session = process.session
+        tools = []
+        if session:
+            for m in session.messages:
+                if m.get("message_type") == "tool_result":
+                    tn = m.get("_tool_name", "unknown")
+                    if tn not in tools:
+                        tools.append(tn)
+
+        return {
+            "task": process.task_description or "",
+            "status": process.status.value,
+            "steps": process.steps_used,
+            "tools": tools,
+            "lessons_triggered": [],
+            "governance_events": [],
+        }
+
     from backend.core.loop.gate import RingGate
     dispatcher = ToolDispatcher(
         RingGate(), tool_executors,
