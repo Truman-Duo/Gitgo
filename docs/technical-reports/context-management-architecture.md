@@ -15,7 +15,156 @@
 
 ---
 
-## 一、整体数据流
+## 一、Context 完整组成
+
+每个 Agent 启动时，Runtime 从多个来源组装 Context。以下按 Prompt Cache 稳定性从高到低排列。
+
+### 1.1 九层 Context 结构
+
+```
+┌──────────────────────────────────────────────┐
+│ Layer 0: System Prompt         (~500 tokens) │ ← 永久固定
+├──────────────────────────────────────────────┤
+│ Layer 1: Project Identity      (~200 tokens) │ ← 项目级，数月不变
+├──────────────────────────────────────────────┤
+│ Layer 2: Contract & Rules      (~800 tokens) │ ← 合约级，版本变更时更新
+├──────────────────────────────────────────────┤
+│ Layer 3: RingGate & Permissions (~300 tokens)│ ← Agent 角色级，Fork 时确定
+├──────────────────────────────────────────────┤
+│ Layer 4: Tool Registry         (~500 tokens) │ ← Agent 角色级，Fork 时确定
+├──────────────────────────────────────────────┤
+│ Layer 5: Governance Signals     (可变 tokens) │ ← needed, PolicyEngine 每轮推送
+├──────────────────────────────────────────────┤
+│ Layer 6: Knowledge Brief        (可变 tokens) │ ← relevant, recall 检索结果
+├──────────────────────────────────────────────┤
+│ Layer 7: Task Transcript       (可变 tokens) │ ← 当前 task 范围内的对话+工具结果
+├──────────────────────────────────────────────┤
+│ Layer 8: Conversation Tail     (~4000 tokens)│ ← 最近 N 轮完整对话
+└──────────────────────────────────────────────┘
+
+Prompt Cache 命中区: L0-L4 (固定前缀, ~2300 tokens)
+Prompt Cache 变化区: L5-L8 (每轮/每 task 可能变化)
+```
+
+### 1.2 每层详细定义
+
+**Layer 0: System Prompt**
+
+永久固定。告诉 LLM 它是什么角色、它的行为边界、它的基本能力。
+
+```
+你是 gitgo Agent Runtime 中的一个 Agent。
+你的行为受 RingGate 权限约束，受 PolicyEngine 治理信号约束。
+你必须通过工具与环境交互。不能直接读写文件。
+完成任务后回复 TASK_COMPLETE。
+```
+
+**Layer 1: Project Identity**
+
+项目级信息。切换项目时更新——同项目内稳定。
+
+| 字段 | 来源 | 示例 |
+|------|------|------|
+| 项目名 | `ProjectConfig.name` | `"gitgo"` |
+| 工作区路径 | `ProjectConfig.workspace_path` | `/home/dev/gitgo` |
+| 技术栈 | `contract.tech_stack` | `["python", "typescript"]` |
+| 当前分支/HEAD | `git rev-parse HEAD` | `abc123` |
+
+**Layer 2: Contract & Rules**
+
+合约约束 + 架构规则。`contract.yaml` 更新时刷新。
+
+| 字段 | 来源 | 示例 |
+|------|------|------|
+| Decided Features | `contract.decided_features` | `[{name:"auth", location:"auth.py", signature:"def auth()"}]` |
+| Architecture Constraints | `contract.architecture_constraints` | `["不使用绝对定位", "不跳过 git hooks"]` |
+| 依赖图摘要 | `load_dep_graph()` → 当前 task 涉及文件的相关节点 | `"auth.py ← login.py, api.py"` |
+
+**Layer 3: RingGate & Permissions**
+
+Agent 的权限边界。Fork 时确定，整个生命周期不变。
+
+| 字段 | 来源 | 示例 |
+|------|------|------|
+| Ring Level | `AgentProcess.ring_level` | `RING_3` |
+| 可用工具列表 | `ToolRegistry.list_all()` | `["scan", "formalize", "recall_grep"]` |
+| 被禁止的工具 | RingGate 过滤结果 | `sync, push, promote_lesson` 不可用 |
+| 可写/可读的目录 | worktree 路径 | `可写: .gitgo/worktrees/{pid}/` |
+
+**Layer 4: Tool Registry**
+
+每个可用工具的 Schema 定义。Fork 时确定。
+
+| 字段 | 来源 | 示例 |
+|------|------|------|
+| 工具名 + 描述 | `ToolDispatcher._executors` | `recall_grep: 搜索已知教训...` |
+| 参数 Schema | 工具定义的 JSON Schema | `{query: str, top_k: int}` |
+| 调用格式 | Function calling 或 XML（当前） | `<tool_call><name>recall_grep</name>...` |
+
+**Layer 5: Governance Signals（needed）**
+
+PolicyEngine 每轮 workspace_dirty 后的产出。不参与裁剪——钉为 never-compact。
+
+| 字段 | 来源 | 示例 |
+|------|------|------|
+| Lesson Trigger 匹配 | `PolicyEngine.LessonTriggerCheck` | `"修改 auth.py 前必须先 scan"` |
+| Contract Drift 告警 | `PolicyEngine.ContractDriftCheck` | `"auth.py 的 authenticate 签名已变更"` |
+| Identity Integrity 告警 | `PolicyEngine.IdentityIntegrityCheck` | `"CLAUDE.md 文件丢失"` |
+| Dependency 告警 | `DependencyChainCheck`（AST 精确版） | `"auth.authenticate() 被 login.handle_login() 调用"` |
+| Rejection 历史 | `HistoryManager` | `"上次被拒绝理由: 登录安全验证不足"` |
+| 对应 Lesson 的工具约束 | `Lesson.prerequisite_tools` + `required_tools` | `"完成前必须调用: scan, test"` |
+
+**Layer 6: Knowledge Brief（relevant）**
+
+Agent 主动或被动检索的知识。依赖图打分排序，填满 budget 剩余空间。
+
+| 字段 | 来源 | 检索方式 |
+|------|------|---------|
+| 匹配的 Lesson | `recall_grep/semantic` → 依赖图打分排序 | Agent 主动调 recall / 系统推送 |
+| 相关 Fact | `derive_facts()` → 按 project_name 筛选 | 系统推送 |
+| 历史决策记录 | `HistoryManager` → 按 changed_files 筛选 | Agent 主动拉取 |
+
+**Layer 7: Task Transcript**
+
+当前 task 范围内的对话 + 工具调用 + 结果。会随 task 进度增长。
+
+| 字段 | 来源 | 示例 |
+|------|------|------|
+| Task 描述 | `AgentProcess.task_description` | `"修复 auth 模块的登录安全问题"` |
+| 本 task 内的对话 | `AgentSession.messages` | user / assistant / tool_result |
+| 本 task 内的工具结果 | `ToolDispatcher.dispatch()` 结果 | `scan: 5 files changed` |
+| 本 task 内的 Lesson 检索结果 | `recall_grep` 返回的 lesson 列表 | 作为 tool_result 注入 |
+
+**Layer 8: Conversation Tail**
+
+最近 N 轮完整对话（跨 task 的上下文尾巴）。Prune 时最先被裁剪。
+
+| 字段 | 来源 |
+|------|------|
+| 最近 3-5 轮 assistant 消息 | `AgentSession.messages[-N:]` |
+| 这些轮中调用的工具及结果 | tool_call + tool_result pairs |
+| 用户的最新指令 | user message |
+
+### 1.3 与 Claude Code / OpenCode 的对比
+
+| Context 层 | Claude Code | OpenCode | gitgo |
+|-----------|-------------|----------|-------|
+| System Prompt | ✅ | ✅ (SystemContext) | ✅ |
+| 项目信息 | ✅ (CLAUDE.md 多层) | ✅ (AGENTS.md) | ✅ (ProjectConfig + contract) |
+| 规则/约束 | ✅ (rules/*.md) | ❌ | ✅ (PolicyEngine) |
+| 权限 | ✅ (permission ruleset) | ✅ (permission ruleset) | ✅ (RingGate + ToolRegistry) |
+| 工具定义 | ✅ (Tool schemas) | ✅ (Tool schemas) | ✅ (ToolDispatcher) |
+| **治理信号** | ❌ | ❌ | ✅ **gitgo 独有** |
+| **知识/教训** | ⚠️ (MEMORY.md 文件) | ❌ | ✅ (Knowledge recall) |
+| **依赖图** | ❌ | ❌ | ✅ **gitgo 独有** |
+| **Task 上下文** | ✅ (conversation) | ✅ (conversation) | ✅ |
+| 最近对话 | ✅ | ✅ | ✅ |
+
+**gitgo 独有的三层**：Governance Signals（PolicyEngine 推送）、Knowledge Brief（recall 检索）、Dependency Graph（AST 函数级图）。这三层是 gitgo 作为 Agent Runtime 而非普通 Agent 的核心差异——系统主动告诉 Agent "你需要知道这些"，而不是等 Agent 自己发现。
+
+---
+
+## 二、整体数据流
 
 ```
                     ┌──────────────────┐
@@ -59,7 +208,7 @@
 
 ---
 
-## 二、Raw Store —— 原文层
+## 三、Raw Store —— 原文层
 
 **实现**：HistoryManager append-only event log（已有）。
 
@@ -77,7 +226,7 @@
 
 ---
 
-## 三、"需要的" vs "相关的" —— 两阶段组装
+## 四、"需要的" vs "相关的" —— 两阶段组装
 
 ### Phase 1: "需要的" —— never-compact
 
@@ -117,7 +266,7 @@ score(info) =
 
 ---
 
-## 四、Transcript 系统 —— 多套转录
+## 五、Transcript 系统 —— 多套转录
 
 ### 4.1 转录类型
 
@@ -141,7 +290,7 @@ score(info) =
 
 ---
 
-## 五、回收 —— 转录轮换
+## 六、回收 —— 转录轮换
 
 ### 5.1 机制
 
@@ -174,7 +323,7 @@ Agent 完成 task:
 
 ---
 
-## 六、依赖图 —— 治理 + 上下文共用
+## 七、依赖图 —— 治理 + 上下文共用
 
 同一套图数据，两个消费者：
 
@@ -200,7 +349,7 @@ Agent 要改 X → 查依赖图 → 找到 X 在依赖链上的相关文件
 
 ---
 
-## 七、实现优先级
+## 八、实现优先级
 
 | 优先级 | 内容 | 状态 |
 |--------|------|------|
