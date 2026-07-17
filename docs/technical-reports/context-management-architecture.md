@@ -348,11 +348,28 @@ def manage(self, session, harness_data, llm_provider, dep_graph):
         → 标记 _nudge_state = "resolved"
         → retention override = 0.1 → prune 时优先删除
 
-判断方法: 对每条 nudge，搜索它之后的消息中是否有 role="assistant" 的消息。
-如果有 → resolved。如果没有 → pending。
+判断方法:
+  idx = 此 nudge 在 session.messages 中的位置
+  subsequent = session.messages[idx+1:]
+  
+  if any(m.get("role") == "assistant" for m in subsequent):
+      → resolved (Agent 已响应)
+  
+  elif len(subsequent) >= MAX_NUDGE_TTL_TURNS:  # 默认 5 轮
+      → orphan (Agent 未响应但已过去太多轮)
+      → 允许回收，但写入 HistoryManager: operation="orphan_nudge"
+      → 为什么需要 orphan: 如果 LLM 生成了空响应导致永远没有 assistant 消息，
+        pending nudge 会永远不能回收 → 90% 触发 compact → compact 也清不掉 → 硬崩
+  
+  else:
+      → pending (仍在等待 Agent 响应)
 
-关键: 只有在本次 manage() 调用中状态为 resolved 的 nudge 才进入回收池。
-pending 的 nudge 不降优先级、不裁剪——即使超过水位线。
+MAX_NUDGE_TTL_TURNS = 5  # 常量，可通过 contract.yaml 覆盖
+
+关键:
+  - resolved → 进入回收池（降 retention 到 0.1）
+  - orphan → 进入回收池 + 写入 HistoryManager warning event（事后可查）
+  - pending → 绝对不能碰（保持正常 retention，不参与 prune）
 ```
 
 **`_snip_old_tool_results`**：
@@ -377,14 +394,18 @@ pending 的 nudge 不降优先级、不裁剪——即使超过水位线。
     2 跳 → retention = 0.6
     3+ 跳 → retention = 0.3
 
-⚠ 权重是 v0 经验值，待真实项目数据校准。标注为 CONFIGURABLE。
-  contract.yaml: context.dep_graph_hop_weights: {0: 0.9, 1: 0.9, 2: 0.6, default: 0.3}
+⚠ "消息涉及的文件"来源: 不在消费时从 free text 反解 → 在产生时打元数据。
+  Message 新增字段: referenced_files: list[str]
+  填充时机:
+    - tool_result: ToolDispatcher 返回时，从 args 提取 file/path 参数
+    - governance_nudge: Harness 注入时，从 signal.target_files 提取
+    - assistant/user text: 不反解（自由文本不可靠），该消息 referenced_files=[]
+    - compact_transcript: 从 transcript 的 files_touched 提取
 
-⚠ 已知假阴性来源: import/调用图的跳数是"结构相关性"的代理，不等于"语义相关性"。
-  全局配置、共享工具函数、中间件文件在图上可能离 task 文件很远(3+跳)，
-  但它们是实际 bug 的高发根因——跳数 filter 会误判为低优先级。
-  缓解措施: 把 .gitgo/config.yaml、pyproject.toml、conftest.py 等高频根因文件
-  加入白名单，不受跳数限制，默认 retention=0.8。
+⚠ 权重是 v0 经验值，CONFIGURABLE via contract.yaml。
+  白名单文件(.gitgo/config.yaml, pyproject.toml, conftest.py)不受跳数限制,
+  default retention=0.8。白名单从 HistoryManager 的 governance_drift 记录自动学习:
+  过去90天 drift 次数最多的文件自动加入。
 ```
 
 **`_replace_with_lesson_transcripts`**：
@@ -397,7 +418,94 @@ pending 的 nudge 不降优先级、不裁剪——即使超过水位线。
 
 ---
 
-## 五、中途临时约束晋升
+## 五、Retention 优先级多源合成
+
+一条消息可能同时被多个 filter 打上 `retention_override`。合成规则：取最大值（most conservative——任一 filter 认为重要，就保留）。
+
+```python
+final_retention = max(
+    signal_based_priority,       # from RetentionAdvisor plugin (lesson_trigger=0.8, rejection=1.0)
+    dep_graph_priority,          # from _dep_graph_filter (0-1跳=0.9, 2跳=0.6, 3+=0.3)
+    lesson_transcript_priority,  # from _replace_with_lesson_transcripts (0.5)
+    nudge_state_priority,        # from _recycle_governance_nudges (resolved=0.1, pending=1.0, orphan=0.1)
+)
+```
+
+**理由**：任一 filter 认为重要就保留——不会因为两个 filter 互相矛盾而错误裁剪。
+
+---
+
+## 六、L2-ext 注入策略与 Prompt Cache 权衡
+
+L2-ext（中途约束）不注入 `session.messages`。在每次 LLM 调用前动态拼接到 system message 末尾：
+
+```python
+def _build_system_message_for_llm(process, base_system):
+    if process.task_constraints:
+        constraint_block = "\n\n## Task-level Constraints (this task only)\n" + "\n".join(
+            f"- {c}" for c in process.task_constraints
+        )
+        return base_system + constraint_block
+    return base_system
+```
+
+**代价**：constraint 变化时 system prompt 变化 → 破坏 prompt cache。
+**权衡**：task_constraints 在一个 task 内变化频率极低（0-3 次），影响可接受。**这不是 bug，是有意的设计权衡。**
+
+---
+
+## 七、A Agent 的 Recycle
+
+B Agent: kill/reap → context 自然销毁。A Agent: 没有 kill 事件，锚定 `round_complete`。
+
+```
+A Agent round_complete:
+  1. 界定"本 round 范围": 上次 round_complete 之后新增的 session 消息
+  2. 对本 round 内的 recall tool_result → 查热冷分类（classify_lesson_heat）
+     hot → 不降优先级
+     non-hot → retention override = 0.1
+  3. ContextWindow.prune(session, force=True)
+  4. Raw 保留在 HistoryManager
+```
+
+**A 的 隐用户输入**：A 是 Ring 0，不需要 CompletionGuard 的强制检查（那是 B 需要的）。A 通过 GovernanceSignal 在 assemble_context 时了解状态，而非被 loop 阻断。
+
+---
+
+## 八、Transcript 池的下游消费者
+
+Transcript 存入 HistoryManager（`operation="transcript"`），被以下消费者使用：
+
+| 消费者 | 查询方式 | 用途 |
+|--------|---------|------|
+| `recall_grep/semantic` | 搜索 transcript 的 `key_decisions`、`constraints`、`files_touched` 字段 | Agent 主动检索历史决策 |
+| `assemble_return_context` | 读取最近 N 个 transcript → 生成 B→A 的结构化摘要 | A 审阅 B 的工作 |
+| `_replace_with_lesson_transcripts` | 如果 transcript 包含一条 lesson → 用 lesson 的紧凑格式替代原文对话 | 压缩层 85% |
+| `compact()` | 读取旧 transcript → 作为 compact 的输入上下文 | LLM compact 时避免重新扫描原文 |
+
+**存了就必须有消费者**。如果某个 transcript 类型当前没有消费者——不存。
+
+---
+
+## 九、常量与单位定义
+
+```python
+class ContextConstants:
+    TURN_UNIT = "assistant_message"     # 一"轮"=一次 assistant 响应（含 tool_call）
+    SNIP_AGE_TURNS = 3                   # tool_result 超过 3 轮 → snip
+    NUDGE_TTL_TURNS = 5                  # pending nudge 超过 5 轮 → orphan
+    MAX_NUDGE_REPEAT = 3                 # 同一条 nudge 重复注入上限
+    DEP_GRAPH_HOP_WEIGHTS = {0: 0.9, 1: 0.9, 2: 0.6}  # default=0.3
+    CONTEXT_BUDGET_RESERVED = 3000       # 预留空间（避免 API 413）
+```
+
+**计算 age 用索引距离不用时间戳**。时间戳在离线 replay 时不递增，索引在 session.messages 中一定递增。
+
+**transcript_tokens 估算**: 用 tiktoken（`cl100k_base` 或 provider 对应的 tokenizer）。值标记为保守上限（取 `len(tokens) * 1.15`）。`assemble_context` 返回增加 `context_utilization_ratio` 字段，让 A 直接知道会占多少 budget。
+
+---
+
+## 十、中途临时约束晋升
 
 ### 5.1 问题
 
@@ -416,14 +524,34 @@ def _promote_mid_task_constraints(session, process):
     
     for msg in recent_user_msgs:
         content = msg.get("content", "")
-        # 匹配指令模式: "不要..." "先别..." "这次..." "暂时..."
-        directives = re.findall(
-            r'(?:不要|先别|这次|暂时|别|do not|don\'t|never|avoid)\s+.+',
+        
+        # 层1: 硬正则匹配（负例句式）
+        candidates = re.findall(
+            r'(?:不要|先别|这次不要|暂时别|do not|don\'t|must not|never)\s+(.{10,80})',
             content, re.I
         )
-        for d in directives:
-            if d not in process.task_constraints:
-                process.task_constraints.append(d)
+        
+        # 层2: 结构过滤（必须包含明确宾语——动词+名词）
+        candidates = [c for c in candidates if _has_action_object(c)]
+        # _has_action_object: "别改 API"→True（动+名）, "不要这样"→False（无宾语）
+        
+        # 层3: 排除引述（用户引述 lesson 或系统消息不算新约束）
+        candidates = [c for c in candidates
+                     if not any(q in c for q in ["lesson", "规则说", "系统提示"])]
+        
+        for c in candidates:
+            if c not in process.task_constraints:
+                process.task_constraints.append(c)
+                # 写入 HistoryManager（可追溯、可撤销）
+                HistoryManager.add_operation(
+                    project.name, "task_constraint_promoted",
+                    "recorded",
+                    {"directive": c, "source_msg_idx": msg.get("_idx"),
+                     "task": process.task_description}
+                )
+    
+    # 撤销机制: A Agent 可通过 MCP 工具或在对话中说 "撤销约束 #N" 来移除
+    # 撤销 = 从 process.task_constraints 删除 + HistoryManager 写入 "task_constraint_revoked"
 ```
 
 **L2-ext 的生命周期**：
@@ -434,7 +562,7 @@ def _promote_mid_task_constraints(session, process):
 
 ---
 
-## 六、Context Assembler 工具
+## 十一、Context Assembler 工具
 
 ### 5.1 工具定义
 
@@ -505,7 +633,7 @@ def _exec_assemble_return_context(args: dict) -> dict:
 
 ---
 
-## 六、依赖图双消费者 —— 具体调用链
+## 十二、依赖图双消费者 —— 具体调用链
 
 ### 6.1 治理侧
 
