@@ -34,4 +34,6 @@ class AgentProcess:
     parent_id: str | None = None      # 谁 fork 的
     result: dict | None = None        # wait 之后的产出
     context_snapshot: dict | None = None  # C3: A 级 Agent 冻结的治理简报
+    task_description: str = ""            # 当前 task 描述
+    task_constraints: list[str] = field(default_factory=list)  # v0.36: 中途约束
     created_at: str = ""
