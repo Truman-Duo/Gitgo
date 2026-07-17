@@ -421,3 +421,163 @@ def get_dependents(workspace_path: Path, file_path: str) -> list[str]:
     graph = load_dep_graph(workspace_path)
     mod = file_path.replace("\\", "/").replace(".py", "").split("/")[-1]
     return graph.get(mod, [])
+
+
+# ── v0.36: AST 函数级依赖图（Level 2: 反向图差分）─────────
+
+import ast as _ast
+import json as _json
+
+_FUNC_GRAPH_FILE = "func_graph.json"
+
+
+def _parse_ast_symbols(file_path: Path) -> dict:
+    """解析单个 Python 文件的 AST，提取函数/类及其调用关系。
+
+    Returns:
+        {"defines": ["func1", "ClassA.method"], "calls": ["other_func", "ClassB.x"]}
+    """
+    if not file_path.exists() or not file_path.suffix == ".py":
+        return {"defines": [], "calls": []}
+
+    try:
+        tree = _ast.parse(file_path.read_text(encoding="utf-8", errors="ignore"))
+    except (SyntaxError, OSError):
+        return {"defines": [], "calls": []}
+
+    defines = []
+    calls = []
+    current_class = None
+
+    for node in _ast.walk(tree):
+        # 类定义
+        if isinstance(node, _ast.ClassDef):
+            current_class = node.name
+            defines.append(node.name)
+        # 函数定义
+        elif isinstance(node, _ast.FunctionDef):
+            name = f"{current_class}.{node.name}" if current_class else node.name
+            defines.append(name)
+        # 调用点
+        elif isinstance(node, _ast.Call):
+            if isinstance(node.func, _ast.Name):
+                calls.append(node.func.id)
+            elif isinstance(node.func, _ast.Attribute):
+                if isinstance(node.func.value, _ast.Name):
+                    calls.append(f"{node.func.value.id}.{node.func.attr}")
+
+    return {"defines": defines, "calls": list(set(calls))}
+
+
+def build_function_graph(workspace_path: Path) -> dict[str, dict]:
+    """构建函数级调用图：file:func → 谁调了它。
+
+    返回:
+        {"auth.py": {"authenticate": ["login.py:handle_login", "api.py:verify"]}}
+
+    Level 1 fallback: 如果 AST 解析失败，降级到 import 级图。
+    """
+    graph: dict[str, dict[str, list[str]]] = {}
+
+    for py_file in workspace_path.rglob("*.py"):
+        if ".git" in py_file.parts or "__pycache__" in py_file.parts:
+            continue
+
+        rel = str(py_file.relative_to(workspace_path)).replace("\\", "/")
+        symbols = _parse_ast_symbols(py_file)
+
+        if not symbols["defines"] and not symbols["calls"]:
+            continue
+
+        graph.setdefault(rel, {"defines": [], "called_by": {}})
+        graph[rel]["defines"] = symbols["defines"]
+
+        # 对每个调用，记录反向引用
+        for called in symbols["calls"]:
+            for other_rel, other_data in graph.items():
+                if other_rel == rel:
+                    continue
+                if called in other_data.get("defines", []):
+                    other_data.setdefault("called_by", {}).setdefault(
+                        called, [],
+                    ).append(f"{rel}:{called}")
+
+    # 持久化
+    cache_path = workspace_path / ".gitgo" / _FUNC_GRAPH_FILE
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(_json.dumps(graph, indent=2, ensure_ascii=False),
+                          encoding="utf-8")
+    return graph
+
+
+def load_function_graph(workspace_path: Path) -> dict[str, dict]:
+    """加载缓存的函数级调用图。不存在则构建。"""
+    cache_path = workspace_path / ".gitgo" / _FUNC_GRAPH_FILE
+    if cache_path.exists():
+        try:
+            return _json.loads(cache_path.read_text(encoding="utf-8"))
+        except (_json.JSONDecodeError, OSError):
+            pass
+    return build_function_graph(workspace_path)
+
+
+def get_callers(workspace_path: Path, file_path: str,
+                func_name: str = "") -> list[str]:
+    """反向图差分：查询哪些文件/函数依赖了 file_path 中的 func_name。
+
+    func_name 为空时 → 返回 import 级别的所有依赖者（Level 1 fallback）。
+    func_name 非空时 → 返回精确到函数的调用者。
+
+    Returns:
+        ["login.py:handle_login", "api.py:verify_token"]
+    """
+    rel = file_path.replace("\\", "/")
+    try:
+        graph = load_function_graph(workspace_path)
+    except Exception:
+        return get_dependents(workspace_path, file_path)
+
+    file_data = graph.get(rel, {})
+    if not func_name:
+        # Level 1 fallback: import 级
+        return get_dependents(workspace_path, file_path)
+
+    # Level 2: 函数级精确查询
+    called_by = file_data.get("called_by", {})
+    return called_by.get(func_name, [])
+
+
+def get_changed_symbols(file_path: Path, old_content: str = "",
+                        new_content: str = "") -> list[str]:
+    """对比文件两个版本的 AST，返回变更的函数/类名。
+
+    用于 workspace_dirty 时精确判断"X 的哪个函数变了"。
+    """
+    if not file_path.suffix == ".py":
+        return []
+
+    old_symbols = set()
+    new_symbols = set()
+
+    if old_content:
+        try:
+            old = _ast.parse(old_content)
+            old_symbols = {n.name for n in _ast.walk(old)
+                          if isinstance(n, (_ast.FunctionDef, _ast.ClassDef))}
+        except SyntaxError:
+            pass
+
+    if new_content:
+        try:
+            new = _ast.parse(new_content)
+            new_symbols = {n.name for n in _ast.walk(new)
+                          if isinstance(n, (_ast.FunctionDef, _ast.ClassDef))}
+        except SyntaxError:
+            pass
+
+    changed = []
+    # 新增或修改
+    changed.extend(new_symbols - old_symbols)
+    # 删除
+    changed.extend(old_symbols - new_symbols)
+    return list(changed)
