@@ -514,7 +514,7 @@ def _get_nudge_count(process: AgentProcess, nudge_type: str) -> int:
 import re as _re
 
 _NEGATIVE_DIRECTIVE_RE = _re.compile(
-    r'(?:不要|先别|这次不要|暂时别|do not|don\'t|must not|never)\s+(.{10,80})',
+    r'(?:不要|先别|这次不要|暂时别|do not|don\'t|must not|never)\s*(.{5,120})',
     _re.I,
 )
 
@@ -548,7 +548,7 @@ def _promote_mid_task_constraints(session, process: AgentProcess) -> int:
         candidates = _NEGATIVE_DIRECTIVE_RE.findall(content)
         candidates = [c for c in candidates if _has_action_object(c)]
         candidates = [c for c in candidates
-                      if not any(q in c for q in ["lesson", "规则说", "系统提示", "Claude说"])]
+                      if not any(q in content.lower() for q in ["lesson", "规则说", "系统提示", "claude说"])]
 
         for c in candidates:
             if c not in process.task_constraints:

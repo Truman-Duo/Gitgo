@@ -116,7 +116,7 @@ class TaskTranscriptBuilder:
 
         # 源1: 硬规则抓取
         negation_re = re.compile(
-            r'(?:不要|禁止|不能|先别|do not|don\'t|must not|never)\s+(.{10,120})',
+            r'(?:不要|禁止|不能|先别|do not|don\'t|must not|never)\s*(.{5,120})',
             re.I,
         )
         for msg in session_messages:
