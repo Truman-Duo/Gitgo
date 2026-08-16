@@ -3,7 +3,7 @@ import React, { memo, useState, useEffect, useCallback } from "react";
 import { Box, Text, useInput } from "@anthropic/ink";
 import type { McpClient } from "../mcp/client.js";
 import { trialList, trialTriage } from "../mcp/tools.js";
-import { resolveTrialKey } from "../input/overlayKeymaps.js";
+import { resolveTrialKey } from "../input/overlays/trial.js";
 import { useSelectionStyle, usePanelSize } from "../theme/index.js";
 import { ConfirmBox } from "./ConfirmBox.js";
 import { chordLabel } from "../input/bindings.js";

@@ -1,7 +1,7 @@
 // src/mock/MockMcpClient.ts — Mock MCP client for --mock mode
-// Returns canned data from mockData.ts, simulating a real MCP server.
+// Returns canned data from the mock registry, simulating a real MCP server.
 
-import { MCP_MOCK_MAP } from "./mockData.js";
+import { MCP_MOCK_MAP } from "./index.js";
 
 export class MockMcpClient {
   private _ready = true;

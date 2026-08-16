@@ -3,7 +3,7 @@
 import React, { memo, useState } from "react";
 import { Box, Text, useInput } from "@anthropic/ink";
 import type { ProjectRow } from "../hooks/useGitgoData.js";
-import { resolveStatusKey } from "../input/overlayKeymaps.js";
+import { resolveStatusKey } from "../input/overlays/status.js";
 import { colors, statusDot, truncate, useSelectionStyle } from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
 

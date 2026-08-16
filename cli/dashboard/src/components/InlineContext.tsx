@@ -8,7 +8,7 @@ import { ContractTab } from "./ContractTab.js";
 import { LessonsTab } from "./LessonsTab.js";
 import { EventsTab } from "./EventsTab.js";
 import type { ToolEvent } from "../hooks/useLoopData.js";
-import { resolveInlineContextKey } from "../input/overlayKeymaps.js";
+import { resolveInlineContextKey } from "../input/overlays/inlineContext.js";
 import { colors, usePanelSize } from "../theme/index.js";
 
 type Props = {

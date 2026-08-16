@@ -9,7 +9,8 @@
     "dev": "bun run src/main.tsx"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19.2.18"
   },
   "peerDependencies": {
     "typescript": "^5"

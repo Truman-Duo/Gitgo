@@ -8,7 +8,7 @@ import type { McpClient } from "../mcp/client.js";
 import { useSelectionStyle } from "../theme/index.js";
 import { createProject } from "../mcp/tools.js";
 import { chordLabel } from "../input/bindings.js";
-import { resolveCreateProjectKey } from "../input/overlayKeymaps.js";
+import { resolveCreateProjectKey } from "../input/overlays/createProject.js";
 import { applyTextOp, type UseTextInputReturn } from "../hooks/useTextInput.js";
 import type { FooterConfig } from "./CommandBar.js";
 

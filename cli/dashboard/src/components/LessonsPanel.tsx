@@ -3,7 +3,7 @@ import React, { memo, useState, useEffect, useCallback } from "react";
 import { Box, Text, useInput } from "@anthropic/ink";
 import type { McpClient } from "../mcp/client.js";
 import { lessonList, lessonSearch, lessonVerify } from "../mcp/tools.js";
-import { resolveLessonsKey } from "../input/overlayKeymaps.js";
+import { resolveLessonsKey } from "../input/overlays/lessons.js";
 import { colors, usePanelSize, useSelectionStyle } from "../theme/index.js";
 import { LessonsTab } from "./LessonsTab.js";
 import { chordLabel } from "../input/bindings.js";
