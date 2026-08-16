@@ -214,6 +214,11 @@ MCP Tool (A-level)
 - **直接 git commit 到 release**：裸 `fix:` 无 `[PREFIX-N]` 前缀，破坏编号体系。pre-commit hook 或 Policy Engine 检测。
 - **contract 数据是历史记录**：feature name 保留 formalize 时的原始编号——那是历史事实，不应事后篡改。只清理 release 的 git 历史，不伪造 contract 数据。
 
+## 分支与工作流
+
+- **所有开发直接在 `master` 上进行**，不再使用 worktree / 特性分支。如需临时隔离，用后立即并回 `master` 并删除分支与 worktree。
+- 推送仍由 gitgo MCP server 接管，本地不 `git push`（见上「安全」）。
+
 ## 测试
 
 ```bash
