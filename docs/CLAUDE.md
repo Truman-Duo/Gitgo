@@ -220,6 +220,16 @@ MCP Tool (A-level)
 pytest tests/ -q    # 334 passed, 1 skipped
 ```
 
+## 计划文件管理规则
+
+**每个计划一个独立文件，不要全部写在一个文件里面。** 所有计划文件放在项目根目录的 `.claude/plans/` 下，命名格式：`gitgo-<主题>.md`。
+
+示例：
+- `gitgo-v0.36-context-management.md`
+- `gitgo-completion-judgment-architecture.md`
+
+**禁止**继续往历史遗留的合集文件追加内容。新的计划一律独立文件。
+
 ## 相关文档
 
 - `docs/StateLog_Design_Discussion.md` — StateLog 完整设计与治理循环

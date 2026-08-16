@@ -8,6 +8,13 @@ export type CursorDeclaration = {
   readonly relativeY: number
   /** The ink-box DOMElement whose yoga layout provides the absolute origin */
   readonly node: DOMElement
+  /**
+   * When false, position the terminal cursor but keep it hidden.
+   * Defaults to true. Modern terminals (Windows Terminal, iTerm2, Kitty)
+   * render IME preedit at the cursor position even when the cursor is
+   * hidden (Microsoft Terminal PR #17181).
+   */
+  readonly visible?: boolean
 }
 
 /**

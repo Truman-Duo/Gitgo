@@ -1,91 +1,99 @@
-// src/components/Overview.tsx
+// src/components/Overview.tsx — 5-column blueprint-aligned project list
+// Blueprint grid: Status(10) | Project(1fr) | Procs(7) | Lessons(8) | Path(1fr)
+// Uses string padding for column alignment — no inner Box wrappers so
+// backgroundColor on Text elements drives correct Ink dirty/blit behavior.
 import React, { memo } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { ProjectRow } from "../hooks/useGitgoData.js";
+import { colors, usePanelSize, statusDot, truncate, useSelectionStyle, projectStatusDot, partitionByRank } from "../theme/index.js";
+import type { StatusState } from "../theme/index.js";
 
-type Props = { projects: ProjectRow[]; sel: number; focus: string; cols: number };
+type Props = { projects: ProjectRow[]; sel: number; mode: "NORMAL" | "COMMAND"; cols: number; listActive: boolean };
 
-export const Overview = memo(function Overview({ projects, sel, focus, cols }: Props) {
-  const w = Math.max(60, cols);
-  const markerW = 2;
+export const Overview = memo(function Overview({ projects, sel, mode, cols: _cols, listActive }: Props) {
+  const { w } = usePanelSize({ minWidth: 60 });
   const statusW = 3;
-  const nameW = Math.max(10, Math.floor(w * 0.14));
-  const procW = 4;
-  const lessonsW = Math.max(8, Math.floor(w * 0.10));
-  const contractW = Math.max(12, Math.floor(w * 0.15));
-  const techW = Math.floor(w * 0.30);
-  const pathW = Math.max(10, w - markerW - statusW - nameW - procW - lessonsW - contractW - techW - 2);
+  const procW = 7;
+  const lessonsW = 8;
+  const fixedW = statusW + procW + lessonsW;
+  const flexW = w - fixedW;
+  const nameW = Math.floor(flexW * 0.5);
+  const pathW = flexW - nameW;
+  const tableFocused = listActive;
+
+  // Projects arrive pre-ordered (running → pending → finished, each alphabetical).
+  const { running, pending, finished } = partitionByRank(
+    projects,
+    (p) =>
+      p.daemonOnline && p.activeProcessCount > 0 ? 0
+      : p.daemonOnline && p.waitingProcessCount > 0 ? 1 : 2,
+  );
+  const groups = [
+    { label: "Running", items: running, start: 0 },
+    { label: "Pending", items: pending, start: running.length },
+    { label: "Finished", items: finished, start: running.length + pending.length },
+  ];
 
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1}>
-      <Box flexDirection="column" marginBottom={1}>
-        <Text bold color="cyan">Gitgo Monitor</Text>
-      </Box>
-      <Box flexDirection="column" marginBottom={1}>
-        <Text dimColor>↑↓ select  Enter detail  :cmd  h help  q quit</Text>
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text dimColor>Projects</Text>
       </Box>
 
-      {/* Header row — bold only, no underline */}
-      <Box flexDirection="row" marginBottom={1}>
-        <Box width={markerW}><Text> </Text></Box>
-        <Box width={statusW}><Text bold dimColor>S</Text></Box>
-        <Box width={nameW}><Text bold>Project</Text></Box>
-        <Box width={procW}><Text bold dimColor>Proc</Text></Box>
-        <Box width={lessonsW}><Text bold>Lessons</Text></Box>
-        <Box width={contractW}><Text bold>Contract</Text></Box>
-        <Box width={techW}><Text bold>Tech Stack</Text></Box>
-        <Box width={pathW}><Text bold dimColor>Path</Text></Box>
+      {/* Header row — 5 columns padded to width */}
+      <Box flexDirection="row">
+        <Text bold dimColor>{"●".padEnd(statusW)}</Text>
+        <Text bold>{"Name".padEnd(nameW)}</Text>
+        <Text bold dimColor>{"Procs".padEnd(procW)}</Text>
+        <Text bold dimColor>{"Lessons".padEnd(lessonsW)}</Text>
+        <Text bold dimColor>Path</Text>
       </Box>
 
-      {projects.map((p, i) => {
-        const isSelected = i === sel;
-        const tableFocused = focus === "table";
-        // Status indicator: ● green=online+active, ◐ yellow=online no proc, ○ gray=offline
-        const statusIcon = p.daemonOnline
-          ? (p.activeProcessCount > 0 ? "●" : "◐")
-          : "○";
-        const statusColor = p.daemonOnline
-          ? (p.activeProcessCount > 0 ? "green" : "yellow")
-          : "gray";
-        const procBadge = p.activeProcessCount > 0 ? `[${p.activeProcessCount}]` : "";
+      {groups.map((group) => {
+        if (group.items.length === 0) return null;
         return (
-          <Box key={p.name} flexDirection="row" marginBottom={1}>
-            <Box width={markerW}>
-              <Text color={isSelected && tableFocused ? "cyan" : undefined}>
-                {isSelected && tableFocused ? "▶" : " "}
-              </Text>
-            </Box>
-            <Box width={statusW}>
-              <Text color={statusColor}>{statusIcon}</Text>
-            </Box>
-            <Box width={nameW}>
-              <Text
-                color={isSelected && tableFocused ? "cyan" : undefined}
-                bold={isSelected}
-              >
-                {p.name.length > nameW ? p.name.slice(0, nameW - 1) + "…" : p.name}
-              </Text>
-            </Box>
-            <Box width={procW}>
-              <Text color="cyan" dimColor={!procBadge}>{procBadge || "-"}</Text>
-            </Box>
-            <Box width={lessonsW}>
-              <Text>{String(p.pendingLessons)}</Text>
-            </Box>
-            <Box width={contractW}>
-              <Text>{p.features}f/{p.constraints}c</Text>
-            </Box>
-            <Box width={techW}>
-              <Text dimColor>
-                {p.techStack.length > techW ? p.techStack.slice(0, techW - 1) + "…" : p.techStack}
-              </Text>
-            </Box>
-            <Box width={pathW}>
-              <Text dimColor>
-                {(p.workspace.split("/").pop() || p.workspace.split("\\").pop() || "").slice(0, pathW)}
-              </Text>
-            </Box>
-          </Box>
+          <React.Fragment key={group.label}>
+            <Text dimColor bold>
+              {group.label} ({group.items.length})
+            </Text>
+            {group.items.map((p, gi) => {
+              const i = group.start + gi;
+              const isSelected = i === sel;
+              const highlightBg = isSelected && tableFocused ? colors.selection.row.bg : undefined;
+              const nameStyle = useSelectionStyle(isSelected && tableFocused ? "focused" : "non-focused", "row");
+
+              const dot = statusDot(projectStatusDot(p.daemonOnline, p.activeProcessCount));
+              const statusStr = dot.char.padEnd(statusW);
+
+              const procBadge = p.activeProcessCount > 0 ? String(p.activeProcessCount) : "";
+              const procColor = p.activeProcessCount > 0 ? colors.accent : undefined;
+              const procStr = (procBadge || "-").padEnd(procW);
+
+              const lessonNum = p.pendingLessons;
+              const lessonColor = lessonNum > 0 ? colors.warning : undefined;
+              const lessonsStr = String(lessonNum).padEnd(lessonsW);
+
+              const pathBase = p.workspace.split("/").pop() || p.workspace.split("\\").pop() || p.workspace;
+              const paddedName = truncate(p.name, nameW).padEnd(nameW);
+              const pathStr = truncate(pathBase, pathW);
+
+              return (
+                <Box key={p.name} flexDirection="row" backgroundColor={highlightBg}>
+                  <Text color={dot.color} backgroundColor={highlightBg}>{statusStr}</Text>
+                  <Text
+                    color={nameStyle.fg}
+                    bold={nameStyle.bold}
+                    backgroundColor={highlightBg}
+                  >
+                    {paddedName}
+                  </Text>
+                  <Text color={procColor} dimColor={!procBadge} backgroundColor={highlightBg}>{procStr}</Text>
+                  <Text color={lessonColor} dimColor={!lessonNum} backgroundColor={highlightBg}>{lessonsStr}</Text>
+                  <Text dimColor backgroundColor={highlightBg}>{pathStr}</Text>
+                </Box>
+              );
+            })}
+          </React.Fragment>
         );
       })}
     </Box>

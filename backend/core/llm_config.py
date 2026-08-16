@@ -1,11 +1,12 @@
-"""LLM Provider configuration — read/write .gitgo/llm_config.json.
+"""LLM Provider configuration — read/write global llm_config.json.
 
 Data model mirrors cc-switch's provider pattern (simplified):
   - Multiple named providers, each with base_url/api_key/model_id
   - One active_provider at a time
   - Optional failover order (for future use)
 
-Thread-safe for MCP server usage via _lock.
+Configuration is GLOBAL (not per-project): stored next to gitgo_config.json
+so all projects share one provider set. Thread-safe for MCP server usage via _lock.
 """
 
 from __future__ import annotations
@@ -54,18 +55,20 @@ class LLMProvider:
 
 
 class LLMConfigManager:
-    """Static methods for reading/writing .gitgo/llm_config.json."""
+    """Static methods for reading/writing the global llm_config.json."""
 
     _lock = threading.Lock()
 
     @staticmethod
-    def _config_path(workspace_path: str | Path) -> Path:
-        return Path(workspace_path) / ".gitgo" / CONFIG_FILENAME
+    def _config_path() -> Path:
+        from backend.core.config import ConfigManager
+
+        return ConfigManager.default_path().parent / CONFIG_FILENAME
 
     @staticmethod
-    def load(workspace_path: str | Path) -> dict:
+    def load() -> dict:
         """Load full config dict. Returns empty default if file doesn't exist."""
-        path = LLMConfigManager._config_path(workspace_path)
+        path = LLMConfigManager._config_path()
         if not path.exists():
             return {
                 "providers": [],
@@ -77,24 +80,24 @@ class LLMConfigManager:
             return json.load(f)
 
     @staticmethod
-    def save(workspace_path: str | Path, config: dict) -> None:
+    def save(config: dict) -> None:
         """Write full config dict to disk."""
-        path = LLMConfigManager._config_path(workspace_path)
+        path = LLMConfigManager._config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with LLMConfigManager._lock:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
 
     @staticmethod
-    def get_providers(workspace_path: str | Path) -> list[LLMProvider]:
+    def get_providers() -> list[LLMProvider]:
         """Return all configured providers."""
-        config = LLMConfigManager.load(workspace_path)
+        config = LLMConfigManager.load()
         return [LLMProvider.from_dict(p) for p in config.get("providers", [])]
 
     @staticmethod
-    def get_active(workspace_path: str | Path) -> LLMProvider | None:
+    def get_active() -> LLMProvider | None:
         """Return the currently active provider, or None."""
-        config = LLMConfigManager.load(workspace_path)
+        config = LLMConfigManager.load()
         active_id = config.get("active_provider", "")
         if not active_id:
             return None
@@ -104,31 +107,31 @@ class LLMConfigManager:
         return None
 
     @staticmethod
-    def add(workspace_path: str | Path, provider: LLMProvider) -> LLMProvider:
+    def add(provider: LLMProvider) -> LLMProvider:
         """Add a new provider. Sets it as active if it's the first one."""
-        config = LLMConfigManager.load(workspace_path)
+        config = LLMConfigManager.load()
         config["providers"].append(provider.to_dict())
         if not config.get("active_provider"):
             config["active_provider"] = provider.id
-        LLMConfigManager.save(workspace_path, config)
+        LLMConfigManager.save(config)
         return provider
 
     @staticmethod
-    def update(workspace_path: str | Path, provider: LLMProvider) -> LLMProvider | None:
+    def update(provider: LLMProvider) -> LLMProvider | None:
         """Update an existing provider by id. Returns None if not found."""
-        config = LLMConfigManager.load(workspace_path)
+        config = LLMConfigManager.load()
         for i, p in enumerate(config["providers"]):
             if p.get("id") == provider.id:
                 config["providers"][i] = provider.to_dict()
-                LLMConfigManager.save(workspace_path, config)
+                LLMConfigManager.save(config)
                 return provider
         return None
 
     @staticmethod
-    def delete(workspace_path: str | Path, provider_id: str) -> bool:
+    def delete(provider_id: str) -> bool:
         """Delete a provider by id. Clears active_provider if it was the deleted one.
         Returns False if not found, True if deleted."""
-        config = LLMConfigManager.load(workspace_path)
+        config = LLMConfigManager.load()
         before = len(config["providers"])
         config["providers"] = [
             p for p in config["providers"] if p.get("id") != provider_id
@@ -138,16 +141,16 @@ class LLMConfigManager:
 
         if config.get("active_provider") == provider_id:
             config["active_provider"] = config["providers"][0]["id"] if config["providers"] else ""
-        LLMConfigManager.save(workspace_path, config)
+        LLMConfigManager.save(config)
         return True
 
     @staticmethod
-    def switch(workspace_path: str | Path, provider_id: str) -> LLMProvider | None:
+    def switch(provider_id: str) -> LLMProvider | None:
         """Set a provider as active. Returns the provider or None if not found."""
-        config = LLMConfigManager.load(workspace_path)
+        config = LLMConfigManager.load()
         for p in config["providers"]:
             if p.get("id") == provider_id:
                 config["active_provider"] = provider_id
-                LLMConfigManager.save(workspace_path, config)
+                LLMConfigManager.save(config)
                 return LLMProvider.from_dict(p)
         return None

@@ -3,6 +3,9 @@
 
 import { useState, useCallback } from "react";
 import type { McpClient } from "../mcp/client.js";
+import { useAsyncPoll } from "./useAsyncPoll.js";
+import { llmStatus, llmSave, llmSwitch, llmDelete } from "../mcp/tools.js";
+import { sortByName } from "../theme/index.js";
 
 export type LLMProvider = {
   id: string;
@@ -22,36 +25,30 @@ export type LLMConfigState = {
   error: string | null;
 };
 
-export function useLLMConfig(client: McpClient | null, project: string | null) {
+export function useLLMConfig(client: McpClient | null) {
   const [providers, setProviders] = useState<LLMProvider[]>([]);
   const [activeProvider, setActiveProvider] = useState("");
   const [failoverEnabled, setFailoverEnabled] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [failoverOrder, setFailoverOrder] = useState<string[]>([]);
+  const { loading, error, run, setError } = useAsyncPoll(false);
 
   const fetchStatus = useCallback(async () => {
-    if (!client || !project) return;
-    setLoading(true);
-    try {
-      const result: any = await client.callTool("gitgo_llm_status", { project });
+    if (!client) return;
+    await run(async () => {
+      const result: any = await llmStatus(client);
       if (result?.error) { setError(result.error); return; }
-      setProviders((result?.providers || []) as LLMProvider[]);
+      setProviders(sortByName((result?.providers || []) as LLMProvider[]));
       setActiveProvider(result?.active_provider || "");
       setFailoverEnabled(result?.failover_enabled || false);
-      setError(null);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [client, project]);
+      setFailoverOrder((result?.failover_order || []) as string[]);
+    });
+  }, [client, run, setError]);
 
   const saveProvider = useCallback(async (p: LLMProvider) => {
-    if (!client || !project) return null;
+    if (!client) return null;
     try {
-      const result: any = await client.callTool("gitgo_llm_save", {
-        project,
-        provider_id: p.id || "",
+      const result: any = await llmSave(client, {
+        id: p.id || "",
         name: p.name,
         base_url: p.base_url,
         api_key: p.api_key,
@@ -64,14 +61,12 @@ export function useLLMConfig(client: McpClient | null, project: string | null) {
       setError(e.message);
       return null;
     }
-  }, [client, project, fetchStatus]);
+  }, [client, fetchStatus, setError]);
 
   const switchProvider = useCallback(async (providerId: string) => {
-    if (!client || !project) return false;
+    if (!client) return false;
     try {
-      const result: any = await client.callTool("gitgo_llm_switch", {
-        project, provider_id: providerId,
-      });
+      const result: any = await llmSwitch(client, providerId);
       if (result?.error) { setError(result.error); return false; }
       setActiveProvider(providerId);
       return true;
@@ -79,14 +74,12 @@ export function useLLMConfig(client: McpClient | null, project: string | null) {
       setError(e.message);
       return false;
     }
-  }, [client, project]);
+  }, [client, setError]);
 
   const deleteProvider = useCallback(async (providerId: string) => {
-    if (!client || !project) return false;
+    if (!client) return false;
     try {
-      const result: any = await client.callTool("gitgo_llm_delete", {
-        project, provider_id: providerId,
-      });
+      const result: any = await llmDelete(client, providerId);
       if (result?.error) { setError(result.error); return false; }
       await fetchStatus();
       return true;
@@ -94,17 +87,23 @@ export function useLLMConfig(client: McpClient | null, project: string | null) {
       setError(e.message);
       return false;
     }
-  }, [client, project, fetchStatus]);
+  }, [client, fetchStatus, setError]);
+
+  const toggleFailover = useCallback(() => {
+    setFailoverEnabled((prev) => !prev);
+  }, []);
 
   return {
     providers,
     activeProvider,
     failoverEnabled,
+    failoverOrder,
     loading,
     error,
     fetchStatus,
     saveProvider,
     switchProvider,
     deleteProvider,
+    toggleFailover,
   };
 }

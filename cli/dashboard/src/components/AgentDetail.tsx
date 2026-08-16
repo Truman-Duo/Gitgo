@@ -1,120 +1,80 @@
-// src/components/AgentDetail.tsx — Scene 3: B Agent detail + color-coded tool cards
-import React, { memo, useState, useEffect } from "react";
-import { Box, Text } from "@anthropic/ink";
+// src/components/AgentDetail.tsx — v4 blueprint: B Agent chat conversation
+import React, { memo, useEffect, useRef } from "react";
+import { Box, Text, ScrollBox } from "@anthropic/ink";
+import type { ScrollBoxHandle } from "@anthropic/ink";
 import type { McpClient } from "../mcp/client.js";
 import type { ProcessInfo, ToolEvent } from "../hooks/useLoopData.js";
+import { useLoopData } from "../hooks/useLoopData.js";
+import type { ChatMessage, StreamingRow, ChatScrollHandle } from "../types.js";
+import { useChat } from "../hooks/useChat.js";
+import { MessageRow } from "./MessageRow.js";
+import { StreamingMessage } from "./StreamingMessage.js";
+import { colors, usePanelSize } from "../theme/index.js";
 
-// ── Tool color coding (DeepSeek pattern) ────────────────────
-
-const TOOL_COLORS: Record<string, string> = {
-  read_file: "cyan", scan: "cyan", glob: "cyan", grep: "cyan",
-  write_file: "green", edit: "green",
-  bash: "yellow", shell: "yellow", execute: "yellow",
-  dispatch_tool: "magenta", fork_agent: "magenta",
-};
-
-function toolColor(toolName: string): string {
-  for (const [key, color] of Object.entries(TOOL_COLORS)) {
-    if (toolName.includes(key) || key.includes(toolName)) return color;
-  }
-  return "white";
-}
-
-function toolIcon(toolName: string): string {
-  const c = toolColor(toolName);
-  if (c === "cyan") return "◇";    // ◇ read
-  if (c === "green") return "◆";   // ◆ write
-  if (c === "yellow") return "▶";  // ▶ shell
-  if (c === "magenta") return "◎"; // ◎ dispatch
-  return "●";                       // ●
-}
-
-// ── AgentDetail component ────────────────────────────────────
+// ── AgentDetail component ──────────────────────────────────
 
 type Props = {
   process: ProcessInfo;
   toolEvents: ToolEvent[];
+  messages: ChatMessage[];
+  streaming: StreamingRow | null;
   cols: number;
   rows: number;
+  scrollChatRef: React.MutableRefObject<ChatScrollHandle | null>;
 };
 
 export const AgentDetail = memo(function AgentDetail({
-  process, toolEvents, cols, rows,
+  process, toolEvents, messages, streaming, cols, rows, scrollChatRef,
 }: Props) {
-  const width = Math.max(50, cols);
-  const detailW = width - 4;
-  const statusColor =
-    process.status === "running" ? "green"
-    : process.status === "killed" ? "red"
-    : process.status === "orphaned" ? "yellow"
-    : "white";
+  const { w: width } = usePanelSize({ minWidth: 50 });
+  const contentWidth = width - 4;
+  const scrollRef = useRef<ScrollBoxHandle>(null);
 
-  const processTools = toolEvents.filter(
-    (t) => t.process_id === process.process_id,
-  );
+  useEffect(() => {
+    const handle = scrollRef.current;
+    scrollChatRef.current = handle
+      ? { scrollBy: (dy: number) => handle.scrollBy(dy), scrollToBottom: () => handle.scrollToBottom() }
+      : null;
+    return () => { scrollChatRef.current = null; };
+  }, [scrollChatRef]);
 
-  const pct = process.max_steps > 0
-    ? Math.min(1, process.steps_used / process.max_steps) : 0;
-  const barLen = Math.min(30, detailW - 15);
-  const filled = Math.round(pct * barLen);
-  const bar = "█".repeat(filled) + "░".repeat(barLen - filled);
+  const visibleMessages = messages.filter((m) => m.role !== "system");
 
   return (
-    <Box flexDirection="column" paddingLeft={1} width={width}>
-      <Box marginBottom={1}>
-        <Text bold color="cyan">
-          B Agent: {process.role} ({process.process_id.slice(0, 8)})
-        </Text>
+    <Box flexDirection="column" paddingLeft={1} width={width} flexGrow={1}>
+      {/* Header — name + steps only */}
+      <Box flexShrink={0} flexDirection="row">
+        <Text bold>B Agent — {process.role || "agent"}</Text>
+        <Text dimColor>  {process.steps_used}/{process.max_steps} steps</Text>
       </Box>
 
-      <Box flexDirection="column" marginBottom={1}>
-        <Box flexDirection="row">
-          <Text>Status: </Text>
-          <Text color={statusColor} bold>{process.status}</Text>
-          <Text>  Ring: {process.ring_level}</Text>
-          <Text>  Parent: {process.parent_id?.slice(0, 8) || "none"}</Text>
-        </Box>
-        <Box flexDirection="row" marginTop={1}>
-          <Text>Steps: </Text>
-          <Text color={pct > 0.8 ? "yellow" : "cyan"}>
-            {process.steps_used}/{process.max_steps}
-          </Text>
-          <Text> [{bar}]</Text>
-        </Box>
-        <Box flexDirection="row">
-          <Text dimColor>Created: {process.created_at?.slice(0, 19) || "?"}</Text>
-        </Box>
-      </Box>
-
-      <Box marginBottom={1}>
-        <Text bold>Tool Calls ({processTools.length})</Text>
-      </Box>
-
-      <Box flexDirection="column">
-        {processTools.length === 0 ? (
-          <Text dimColor>此 Agent 尚无工具调用记录</Text>
+      {/* Chat conversation */}
+      <ScrollBox ref={scrollRef} stickyScroll flexDirection="column" flexGrow={1}>
+        {visibleMessages.length === 0 ? (
+          <Box paddingTop={1}>
+            <Text dimColor>No conversation recorded</Text>
+          </Box>
         ) : (
-          processTools.map((t, i) => {
-            const color = toolColor(t.tool_name);
-            const icon = toolIcon(t.tool_name);
-            const mark = t.allowed ? "OK" : "DENIED";
-            const markColor = t.allowed ? "green" : "red";
+          visibleMessages.map((msg, idx) => {
+            const msgKey = `${msg.timestamp}-${msg.role}-${msg.content.slice(0, 20)}`;
             return (
-              <Box key={i} flexDirection="row" marginBottom={1}>
-                <Text color={color}>{icon} </Text>
-                <Text color={color}>{t.tool_name}</Text>
-                <Text dimColor> ({t.duration_ms}ms)</Text>
-                <Text color={markColor}> [{mark}]</Text>
+              <Box key={msgKey} marginTop={idx > 0 ? 1 : 0} width="100%">
+                <MessageRow msg={msg} contentWidth={contentWidth} />
               </Box>
             );
           })
         )}
-      </Box>
+
+        {/* Transient streaming row — separate from the persisted list */}
+        {streaming ? (
+          <StreamingMessage streaming={streaming} contentWidth={contentWidth} />
+        ) : null}
+      </ScrollBox>
     </Box>
   );
 });
 
-// ── AgentDetailScene — data-fetching wrapper for Scene 3 ─────
+// ── AgentDetailScene — data-fetching wrapper ────────────────
 
 type SceneProps = {
   client: McpClient;
@@ -122,45 +82,25 @@ type SceneProps = {
   activeAgentId: string | null;
   cols: number;
   rows: number;
+  sendChatRef?: React.MutableRefObject<(text: string) => void>;
+  scrollChatRef: React.MutableRefObject<ChatScrollHandle | null>;
 };
 
 export const AgentDetailScene = memo(function AgentDetailScene({
-  client, activeProject, activeAgentId, cols, rows,
+  client, activeProject, activeAgentId, cols, rows, sendChatRef, scrollChatRef,
 }: SceneProps) {
-  const [data, setData] = useState<{
-    processes: Record<string, ProcessInfo>;
-    toolEvents: ToolEvent[];
-    loading: boolean;
-  }>({ processes: {}, toolEvents: [], loading: true });
+  // Poll live (2s) so the B-side conversation is not frozen on a single fetch.
+  const loop = useLoopData(client, activeProject, 2);
+  const conv = loop.agentConversations?.[activeAgentId ?? ""] ?? null;
+  const { messages, streaming, send } = useChat(client, activeProject || "", conv);
 
   useEffect(() => {
-    if (!client || !activeProject) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const result: any = await client.callTool("gitgo_loop_status", {
-          project: activeProject,
-        });
-        if (cancelled) return;
-        const procs: Record<string, ProcessInfo> = {};
-        if (result?.processes) {
-          for (const [pid, p] of Object.entries(result.processes)) {
-            procs[pid] = p as ProcessInfo;
-          }
-        }
-        setData({
-          processes: procs,
-          toolEvents: (result?.recent_tool_executed || []) as ToolEvent[],
-          loading: false,
-        });
-      } catch {
-        if (!cancelled) setData({ processes: {}, toolEvents: [], loading: false });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [client, activeProject]);
+    if (sendChatRef) {
+      sendChatRef.current = (text: string) => { send(text); };
+    }
+  }, [send, sendChatRef]);
 
-  if (data.loading) {
+  if (loop.loading) {
     return (
       <Box paddingLeft={1}>
         <Text dimColor>Loading agent data...</Text>
@@ -168,11 +108,11 @@ export const AgentDetailScene = memo(function AgentDetailScene({
     );
   }
 
-  const process = activeAgentId ? data.processes[activeAgentId] : null;
+  const process = activeAgentId ? loop.processes[activeAgentId] : null;
   if (!process) {
     return (
       <Box paddingLeft={1} flexDirection="column">
-        <Text color="red">Agent not found: {activeAgentId}</Text>
+        <Text color={colors.danger}>Agent not found: {activeAgentId}</Text>
         <Text dimColor>Process may have been killed or completed.</Text>
       </Box>
     );
@@ -181,9 +121,12 @@ export const AgentDetailScene = memo(function AgentDetailScene({
   return (
     <AgentDetail
       process={process}
-      toolEvents={data.toolEvents}
+      toolEvents={loop.toolEvents}
+      messages={messages}
+      streaming={streaming}
       cols={cols}
       rows={rows}
+      scrollChatRef={scrollChatRef}
     />
   );
 });

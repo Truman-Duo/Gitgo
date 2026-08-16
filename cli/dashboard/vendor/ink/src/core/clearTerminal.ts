@@ -59,7 +59,10 @@ function isModernWindowsTerminal(): boolean {
 export function getClearTerminalSequence(): string {
   if (process.platform === 'win32') {
     if (isModernWindowsTerminal()) {
-      return ERASE_SCREEN + ERASE_SCROLLBACK + CURSOR_HOME
+      // \x1b[3J (erase scrollback) is broken on Windows Terminal v1.22+
+      // (microsoft/terminal#19086). Emitting it can corrupt the display on
+      // resize. Use only \x1b[2J (erase screen) + \x1b[H (cursor home).
+      return ERASE_SCREEN + CURSOR_HOME
     } else {
       // Legacy Windows console - can't clear scrollback
       return ERASE_SCREEN + CURSOR_HOME_WINDOWS

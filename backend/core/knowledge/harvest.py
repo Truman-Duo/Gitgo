@@ -41,6 +41,23 @@ def harvest_lessons(
     existing_triggers = {getattr(e, 'trigger', '') for e in existing}
     harvested = [h for h in harvested if getattr(h, 'trigger', '') not in existing_triggers]
 
+    # ── Phase 4: 实例→抽象自动提升 ──
+    try:
+        instances = LessonManager.load_instance(workspace_path, project_name)
+        for lesson in instances:
+            vc = getattr(lesson, 'verified_count', 0)
+            sev = getattr(lesson, 'severity', '')
+            if vc >= 5 and sev in ('high', 'critical') and not getattr(lesson, 'abstract', False):
+                try:
+                    LessonManager.promote_to_abstract(
+                        workspace_path, lesson.id, project_name,
+                        getattr(lesson, 'tech_stack', ''),
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     return harvested
 
 
@@ -675,9 +692,54 @@ def auto_discard_invalid(workspace_path: Path, project_name: str) -> int:
 
 
 def auto_verify_high_confidence(workspace_path: Path, project_name: str) -> int:
-    """L2 Digest: LLM 自动 verify 高置信度 pending。
+    """L2 Digest: 自动 verify 高置信度 pending lesson。
 
-    只在 pending >= medium_threshold 时由 daemon 调用。
-    目前为 stub（需要 LLM provider 注入），返回 0。
+    规则（不依赖 LLM）：
+    - verified_count >= 3（已在多个项目中验证）→ 自动 verify
+    - severity == "critical" 且 trigger 在 workspace 中匹配 >= 2 个文件 → 自动 verify
+
+    Returns: auto-verified 的 lesson 数量。
     """
-    return 0
+    from .models import severity_rank
+    verified = 0
+    pending = LessonManager.load_pending(workspace_path, project_name)
+    if not pending:
+        return 0
+
+    for lesson in pending:
+        should_verify = False
+
+        # 规则 1: 高频使用
+        if getattr(lesson, 'verified_count', 0) >= 3:
+            should_verify = True
+
+        # 规则 2: critical + 多文件匹配
+        if not should_verify and getattr(lesson, 'severity', '') == 'critical':
+            trigger = getattr(lesson, 'trigger', '')
+            if trigger:
+                matched_files = 0
+                try:
+                    for py_file in workspace_path.rglob("*.py"):
+                        if ".git" in py_file.parts or ".gitgo" in py_file.parts:
+                            continue
+                        try:
+                            content = py_file.read_text(encoding="utf-8", errors="ignore")
+                            if trigger in content:
+                                matched_files += 1
+                                if matched_files >= 2:
+                                    break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                if matched_files >= 2:
+                    should_verify = True
+
+        if should_verify:
+            try:
+                LessonManager.verify(workspace_path, lesson.id, project_name)
+                verified += 1
+            except Exception:
+                pass
+
+    return verified

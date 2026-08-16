@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from backend.core.loop.signals import GovernanceSignal, HarnessResult
 from backend.core.loop.signal_bus import HarnessPlugin
-from backend.core.loop.harness.tool_history import tool_already_called
+from backend.core.loop.harness.tool_history import tool_succeeded
 
 if TYPE_CHECKING:
     from backend.core.loop.models import AgentProcess
@@ -63,7 +63,11 @@ class CompletionGuard(HarnessPlugin):
         signals: list[GovernanceSignal],
         process: "AgentProcess",
     ) -> list[str]:
-        """检查涉及前科文件的 task 是否遗漏必要工具。"""
+        """检查涉及前科文件的 task 是否遗漏必要工具。
+
+        v0.42: 从 tool_already_called（只检查"调过没有"）升级为 tool_succeeded
+        （验证工具调用是否真正成功：is_error=False 且 exit_code=0）。
+        """
         if process is None:
             return []
         task_desc = process.task_description or ""
@@ -83,7 +87,7 @@ class CompletionGuard(HarnessPlugin):
                     continue
 
             for tool_name in sig.required_tools:
-                if not tool_already_called(process, tool_name):
+                if not tool_succeeded(process, tool_name):
                     missing.append(tool_name)
 
         return missing

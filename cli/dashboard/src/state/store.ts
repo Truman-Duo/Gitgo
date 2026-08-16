@@ -14,30 +14,131 @@ export type Store<T> = {
   subscribe: (listener: Listener) => () => void;
 };
 
-export type Scene = "projects" | "workspace" | "agent_detail" | "llm_config";
+export type Scene = "projects" | "workspace" | "process_list" | "agent_detail";
+
+export function isChatScene(scene: Scene): boolean {
+  return scene === "workspace" || scene === "agent_detail";
+}
+
+export type OverlayType = "help" | "context" | "whichkey" | "dialogSelect" | "quitConfirm" | "createForm" | "configPanel" | "exportPanel" | "statusPanel" | "lessonsPanel" | "governancePanel" | "memoryPanel" | "trialPanel" | "formalPanel" | "runtimeMenu";
+
+export type OverlayEntry = {
+  type: OverlayType;
+  props?: Record<string, any>;
+};
+
+export type Mode = "NORMAL" | "COMMAND";
 
 export type AppState = {
   scene: Scene;
-  previousScene: Scene; // for llm_config to know where to go back to
   activeProject: string | null;
   activeAgentId: string | null; // B-level agent process_id for detail view
+  processListSelIdx: number;   // process list selection index
+  runningBSelIdx: number;      // running B footer strip selection index
+  statusBarFocused: boolean;   // workspace-only: running-B strip is in selection mode
+
+  // Mode system — text buffers now managed by useTextInput hook
+  mode: Mode;
 
   // Overview state (from old App.tsx)
   sel: number;
-  focus: "table" | "command";
-  cmdBuf: string;
-  cmdCursor: number;
   cmdResult: string;
-  showHelp: boolean;
+  overlayStack: OverlayEntry[];  // unified overlay stack (help/context/configPanel/whichkey/dialogSelect)
   cmdHistory: string[];
   cmdHistoryIdx: number;
   suggestionIdx: number;
   refreshKey: number;
 
   // Chat state (Scene 2)
-  chatMessages: { role: string; content: string; timestamp: string }[];
   chatInputFocused: boolean;
 };
+
+// ── App actions (reducer-driven state transitions) ─────────
+
+export type NavigatePatch = Partial<
+  Pick<AppState, "activeProject" | "activeAgentId" | "processListSelIdx">
+>;
+
+export type AppAction =
+  | { type: "navigate"; scene: Scene; patch?: NavigatePatch }
+  | { type: "select_project"; index: number }
+  | { type: "select_process"; index: number }
+  | { type: "select_running_b"; index: number }
+  | { type: "push_overlay"; overlay: OverlayType; props?: Record<string, any> }
+  | { type: "pop_overlay" }
+  | { type: "enter_command" }
+  | { type: "exit_command" }
+  | { type: "set_chat_input_focused"; focused: boolean }
+  | { type: "set_status_bar_focused"; focused: boolean }
+  | { type: "set_cmd_result"; text: string }
+  | { type: "set_suggestion_idx"; index: number }
+  | { type: "push_cmd_history"; cmd: string }
+  | { type: "set_cmd_history_idx"; index: number }
+  | { type: "set_active_project"; name: string | null }
+  | { type: "bump_refresh_key" };
+
+export function reducer(state: AppState, action: AppAction): AppState {
+  switch (action.type) {
+    case "navigate":
+      return {
+        ...state,
+        scene: action.scene,
+        mode: isChatScene(action.scene) ? "NORMAL" : "COMMAND",
+        statusBarFocused: false,
+        cmdResult: "",
+        ...(action.patch ?? {}),
+      };
+    case "select_project":
+      return { ...state, sel: action.index };
+    case "select_process":
+      return { ...state, processListSelIdx: action.index };
+    case "select_running_b":
+      return { ...state, runningBSelIdx: action.index };
+    case "push_overlay":
+      return {
+        ...state,
+        mode: "NORMAL",
+        overlayStack: [...state.overlayStack, { type: action.overlay, props: action.props }],
+      };
+    case "pop_overlay": {
+      const overlayStack = state.overlayStack.slice(0, -1);
+      return {
+        ...state,
+        overlayStack,
+        mode:
+          overlayStack.length > 0
+            ? "NORMAL"
+            : isChatScene(state.scene)
+            ? "NORMAL"
+            : "COMMAND",
+      };
+    }
+    case "enter_command":
+      return { ...state, mode: "COMMAND", cmdResult: "", suggestionIdx: 0 };
+    case "exit_command":
+      return { ...state, mode: "NORMAL", suggestionIdx: 0 };
+    case "set_chat_input_focused":
+      return { ...state, chatInputFocused: action.focused, statusBarFocused: action.focused ? false : state.statusBarFocused };
+    case "set_status_bar_focused":
+      return { ...state, statusBarFocused: action.focused, chatInputFocused: action.focused ? false : state.chatInputFocused };
+    case "set_cmd_result":
+      return { ...state, cmdResult: action.text };
+    case "set_suggestion_idx":
+      return { ...state, suggestionIdx: action.index };
+    case "push_cmd_history":
+      return {
+        ...state,
+        cmdHistory: [...state.cmdHistory, action.cmd],
+        cmdHistoryIdx: -1,
+      };
+    case "set_cmd_history_idx":
+      return { ...state, cmdHistoryIdx: action.index };
+    case "set_active_project":
+      return { ...state, activeProject: action.name };
+    case "bump_refresh_key":
+      return { ...state, refreshKey: state.refreshKey + 1 };
+  }
+}
 
 // ── Factory ────────────────────────────────────────────────
 
@@ -56,6 +157,19 @@ export function createStore<T>(initial: T): Store<T> {
     subscribe(listener: Listener) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
+    },
+  };
+}
+
+export function createReducerStore<T, A>(
+  reducer: (state: T, action: A) => T,
+  initial: T,
+): Store<T> & { dispatch: (action: A) => void } {
+  const store = createStore(initial);
+  return {
+    ...store,
+    dispatch(action: A) {
+      store.setState((prev) => reducer(prev, action));
     },
   };
 }
@@ -93,22 +207,22 @@ export function useStore<T, R>(
 export function initialAppState(): AppState {
   return {
     scene: "projects",
-    previousScene: "projects",
     activeProject: null,
     activeAgentId: null,
+    processListSelIdx: 0,
+    runningBSelIdx: 0,
+    statusBarFocused: false,
+
+    mode: "COMMAND",
 
     sel: 0,
-    focus: "table",
-    cmdBuf: "",
-    cmdCursor: 0,
     cmdResult: "",
-    showHelp: false,
+    overlayStack: [],
     cmdHistory: [],
     cmdHistoryIdx: -1,
     suggestionIdx: 0,
     refreshKey: 0,
 
-    chatMessages: [],
     chatInputFocused: false,
   };
 }

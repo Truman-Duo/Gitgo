@@ -12,8 +12,3 @@ export function setDaemonClient(c: DaemonClient) { _daemon = c; }
 
 export function getMcpClient(): McpClient | null { return _mcp; }
 export function getDaemonClient(): DaemonClient | null { return _daemon; }
-
-/** Returns the daemon client if available, otherwise the MCP client. */
-export function getLoopClient(): McpClient | DaemonClient {
-  return _daemon || _mcp!;
-}

@@ -198,6 +198,9 @@ export function eraseToEndOfLine(): string {
   return csi('K')
 }
 
+/** Erase from cursor to end of line - constant form */
+export const ERASE_TO_END_OF_LINE = csi('K')
+
 /** Erase from cursor to start of line (CSI 1 K) */
 export function eraseToStartOfLine(): string {
   return csi(1, 'K')

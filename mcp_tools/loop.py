@@ -124,6 +124,35 @@ def register(mcp):
             "instruction": instruction[:200],
         }
 
+    @mcp.tool(description="打断指定 Agent 进程（停止其任务线程）")
+    def gitgo_stop_process(project: str, process_id: str) -> dict:
+        """Stop a running agent process via the daemon's task kill action."""
+        try:
+            from mcp_tools.daemon_registry import get_client
+            client = get_client(project)
+
+            if client.is_running():
+                result = client.send_command({
+                    "cmd": "task",
+                    "action": "kill",
+                    "process_id": process_id,
+                })
+                return {"project": project, "process_id": process_id, **result}
+        except Exception:
+            pass
+
+        # Fallback: record kill in history so status reconstruction reflects it
+        from backend.core.history import HistoryManager
+        HistoryManager.add_operation(
+            project, "agent_killed", "recorded",
+            {"process_id": process_id},
+        )
+        return {
+            "project": project,
+            "process_id": process_id,
+            "killed": process_id,
+        }
+
 
 # ── Fallback helpers ─────────────────────────────────────────
 
@@ -145,7 +174,7 @@ def _chat_fallback(project: str, message: str, workspace: str,
     if not (base_url and api_key and model_id) and workspace:
         try:
             from backend.core.llm_config import LLMConfigManager
-            active = LLMConfigManager.get_active(workspace)
+            active = LLMConfigManager.get_active()
             if active:
                 base_url, api_key, model_id = active.base_url, active.api_key, active.model_id
         except Exception:

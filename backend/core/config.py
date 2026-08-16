@@ -78,6 +78,8 @@ class ProjectConfig:
     security_scan: dict = field(default_factory=lambda: dict(DEFAULT_SECURITY_SCAN))
     integrity: dict = field(default_factory=lambda: dict(DEFAULT_INTEGRITY_CONFIG))
     authorship: dict = field(default_factory=lambda: dict(DEFAULT_AUTHORSHIP_CONFIG))
+    archived: bool = False
+    pending_hard_delete_at: str = ""  # ISO timestamp, empty = no pending delete
 
     # ── 向后兼容 property ─────────────────────────────────
 
@@ -158,6 +160,8 @@ class ProjectConfig:
             security_scan=ss if ss else dict(DEFAULT_SECURITY_SCAN),
             integrity=d.get("integrity", dict(DEFAULT_INTEGRITY_CONFIG)),
             authorship=d.get("authorship", dict(DEFAULT_AUTHORSHIP_CONFIG)),
+            archived=d.get("archived", False),
+            pending_hard_delete_at=d.get("pending_hard_delete_at", ""),
         )
 
 
@@ -167,6 +171,7 @@ class Config:
     language: str = "zh"  # 界面语言代码
     theme: str = "system"  # 主题: "light" | "dark" | "system"
     animation: bool = True  # 是否启用动画
+    safety: dict = field(default_factory=lambda: {"delete_delay_minutes": 10})
 
     @classmethod
     def from_dict(cls, d: dict) -> Config:
@@ -178,8 +183,14 @@ class Config:
                 language=d.get("language", "zh"),
                 theme=d.get("theme", "system"),
                 animation=d.get("animation", True),
+                safety=d.get("safety", {"delete_delay_minutes": 10}),
             )
-        return cls(language=d.get("language", "zh"), theme=d.get("theme", "system"), animation=d.get("animation", True))
+        return cls(
+            language=d.get("language", "zh"),
+            theme=d.get("theme", "system"),
+            animation=d.get("animation", True),
+            safety=d.get("safety", {"delete_delay_minutes": 10}),
+        )
 
 
 class ConfigManager:

@@ -4,6 +4,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
+import type { StreamEvent } from "./streamEvents.js";
 
 export class DaemonClient {
   private proc: ChildProcess | null = null;
@@ -15,6 +16,11 @@ export class DaemonClient {
   private agentPending = new Map<
     string,
     { resolve: Function; reject: Function }
+  >();
+  // v0.44: streaming callbacks
+  private _streamCallbacks = new Map<
+    string,
+    { onChunk: (event: StreamEvent) => void }
   >();
   private buffer = "";
   private _ready = false;
@@ -30,20 +36,24 @@ export class DaemonClient {
 
   async start(): Promise<void> {
     const gitgoDir = resolve(import.meta.dir, "../../../..");
-    const daemonArgs = [
-      "-m", "gitgo",
-      "--mode", "daemon",
-      "--project", this.projectName,
-      "--daemon-action", "start",
-      "--trial-interval", "9999",
-      "--debounce", "2.0",
-    ];
 
     process.stderr.write(`[daemon] Starting daemon for '${this.projectName}'...\n`);
 
-    this.proc = spawn(this.pythonPath, daemonArgs, {
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd: resolve(gitgoDir, ".."),
+    // Use python -c (like daemon.bat) to avoid -m gitgo module lookup
+    // which depends on the directory being named "gitgo"
+    const pythonCode = [
+      "import sys",
+      `sys.path.insert(0, ${JSON.stringify(gitgoDir)})`,
+      "from backend.core.config import ConfigManager",
+      "from backend.core.daemon import run_daemon",
+      "cfg = ConfigManager.load()",
+      `proj = next(p for p in cfg.projects if p.name == ${JSON.stringify(this.projectName)})`,
+      "run_daemon(cfg, proj, trial_interval=9999, debounce_sec=2.0)",
+    ].join("; ");
+
+    this.proc = spawn(this.pythonPath, ["-u", "-c", pythonCode], {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: gitgoDir,
     });
 
     this._running = true;
@@ -148,6 +158,38 @@ export class DaemonClient {
     });
   }
 
+  // v0.44: streaming task — onChunk receives text_delta/toolcall_start/etc.
+  async sendTaskStreaming(
+    cmd: Record<string, any>,
+    callbacks: {
+      onChunk: (event: StreamEvent) => void;
+      onComplete: (result: any) => void;
+      onError: (error: Error) => void;
+    },
+    timeout = 300,
+  ): Promise<void> {
+    const ack = await this.sendCommand(cmd);
+    const pid = ack?.process_id;
+    if (!pid) throw new Error("task did not return process_id");
+
+    this._streamCallbacks.set(pid, { onChunk: callbacks.onChunk });
+    this.agentPending.set(pid, {
+      resolve: (event: any) => {
+        this._streamCallbacks.delete(pid);
+        callbacks.onComplete(event);
+      },
+      reject: callbacks.onError,
+    });
+
+    setTimeout(() => {
+      if (this.agentPending.has(pid)) {
+        this.agentPending.delete(pid);
+        this._streamCallbacks.delete(pid);
+        callbacks.onError(new Error(`Agent task ${pid} timed out`));
+      }
+    }, timeout * 1000);
+  }
+
   // ── MCP-compatible interface (drop-in for hooks) ───────────
 
   async callTool(toolName: string, args: Record<string, any> = {}): Promise<any> {
@@ -171,11 +213,20 @@ export class DaemonClient {
         return {
           project: args.project,
           process_id: r?.process_id || "",
-          response: resp || "(无回复)",
+          response: resp || "(no reply)",
           status: r?.result?.status || "",
           steps_used: r?.result?.steps_used || 0,
           llm_used: true,
         };
+      }
+
+      case "gitgo_stop_process": {
+        const r = await this.sendCommand({
+          cmd: "task",
+          action: "kill",
+          process_id: args.process_id || "",
+        });
+        return { ...args, ...r };
       }
 
       // Non-loop tools not available via daemon — signal caller to use MCP
@@ -223,8 +274,24 @@ export class DaemonClient {
       return;
     }
 
+    // v0.44: streaming events — route to per-process callback
+    if (
+      type === "text_delta" ||
+      type === "toolcall_start" ||
+      type === "toolcall_delta" ||
+      type === "tool_progress" ||
+      type === "stream_recovery"
+    ) {
+      const pid = event.process_id;
+      const cb = pid ? this._streamCallbacks.get(pid) : undefined;
+      if (cb) cb.onChunk(event as StreamEvent);
+      return;
+    }
+
     if (type === "agent_complete") {
       const pid = event.process_id;
+      // Clean up streaming callback
+      if (pid) this._streamCallbacks.delete(pid);
       if (pid && this.agentPending.has(pid)) {
         const { resolve, reject } = this.agentPending.get(pid)!;
         this.agentPending.delete(pid);

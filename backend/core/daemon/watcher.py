@@ -34,6 +34,7 @@ class WorkspaceWatcher(FileSystemEventHandler):
         self._changed: set[str] = set()
         self._observer = Observer()
         self._observer.schedule(self, self._path, recursive=True)
+        self._started = False
 
     def on_any_event(self, event):
         if event.is_directory:
@@ -67,9 +68,11 @@ class WorkspaceWatcher(FileSystemEventHandler):
 
     def start(self):
         self._observer.start()
+        self._started = True
 
     def stop(self):
         if self._timer:
             self._timer.cancel()
-        self._observer.stop()
-        self._observer.join()
+        if self._started:
+            self._observer.stop()
+            self._observer.join()

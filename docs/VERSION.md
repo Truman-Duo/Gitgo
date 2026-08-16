@@ -6,6 +6,64 @@
 
 - 12 项目完成, 0 修改中, 0 待归档
 
+## 已知问题 — Windows Terminal CJK IME 输入停止
+
+**现象**：Dashboard 中输入 CJK 字符（中文/日文/韩文）约 19 个字后 IME 停止响应。
+光标仍然显示，但 IME 候选窗不再出现，无法继续输入。英文输入不受影响。
+
+**根因**：**Windows Terminal v1.21-v1.22 的 TSF 重写 Bug**（非 gitgo 代码问题）。
+
+- Windows Terminal PR [#17067](https://github.com/microsoft/terminal/pull/17067) 重写了 TSF（Text Services Framework）输入处理
+- 该重写导致 IME composition 状态在 ~19 次 composition 周期后损坏，`compositionend` 事件停止触发
+- 每个 CJK 字符 = 一次 IME composition 周期（compositionstart → compositionupdate → compositionend），约 19 个周期后 TSF 内部状态溢出或错乱
+- 英文不经过 IME composition 生命周期，因此不受影响
+
+**影响范围**：所有 Windows Terminal 上的终端 TUI 应用，包括 Claude Code、OpenCode [#14761](https://github.com/anomalyco/opencode/issues/14761)、Qwen Code、gitgo Dashboard
+
+**gitgo 侧验证**：`TextInput` 的光标位置计算（`wrapText` + `stringWidth` + `useDeclaredCursor`）已经过单元测试验证正确（`test_cursor.ts`），问题不在 gitgo 代码层面。
+
+**解决方案**：用户升级 Windows Terminal 到 **Preview v1.24+**。
+- Windows Terminal PR [#19738](https://github.com/microsoft/terminal/pull/19738) 恢复了中日韩 IME 兼容性
+- Preview v1.24 changelog 明确列出了 IME bug 修复
+
+**日期**：2026-08-09 诊断确认
+
+---
+
+## 已知问题 — Windows ConPTY Resize 主屏幕重复渲染
+
+**现象**：Windows 上 Dashboard 在主屏幕（非 alt-screen）模式下，resize 终端窗口后出现重复/堆叠渲染——旧视口尺寸的内容残留在上方，新尺寸内容在下方。非 Windows 平台不受影响。
+
+**根因**：ConPTY `ResizePseudoConsole` 在 resize 时会 reflow scrollback 历史，将旧视口内容重新注入可视区域。Ink 主屏幕渲染使用 `\n` 换行，每帧（60fps × 40行）在 scrollback 中产生约 150,000 行/分钟的堆积。ConPTY 的 reflow 发生在所有应用输出之后，不受 ANSI 控制。
+
+相关 Issue：
+- [microsoft/terminal#16911](https://github.com/microsoft/terminal/issues/16911) — ConPTY resize reflow
+- [microsoft/terminal#19086](https://github.com/microsoft/terminal/issues/19086) — `\x1b[3J` (erase scrollback) broken on WT v1.22+（by design / not planned）
+
+**三种已知解法**：
+
+| 方案 | 说明 | 可行性 |
+|------|------|--------|
+| A. 延迟重绘 debounce | resize 后等待 ConPTY reflow 完成再重绘 | 时机不可靠，无法确定 ConPTY 何时完成 reflow |
+| B. `PSEUDOCONSOLE_RESIZE_QUIRK` (0x2) | 禁用 ConPTY resize reflow | 需由 PTY host（终端模拟器）设置，应用层无法控制 |
+| C. Alt-Screen | alt-screen 无 scrollback，ConPTY 无历史可 reflow | **已采用**，Claude Code 同方案 |
+
+**gitgo 侧决策**：选 C。Windows 上默认 `GITGO_ALT_SCREEN=1`（alt-screen），保留 `GITGO_ALT_SCREEN=0` 显式退出开关。
+
+- `GITGO_ALT_SCREEN=1` → 强制 alt-screen（所有平台）
+- `GITGO_ALT_SCREEN=0` → 强制主屏幕（包括 Windows，可复现 resize 重复渲染）
+- （未设置）→ Windows 默认 alt-screen，其他平台默认主屏幕
+
+实现位置：`cli/dashboard/src/main.tsx`，详见代码注释。
+
+**与 Claude Code 对比**：Claude Code 同样使用 alt-screen，无主屏幕 TUI 支持，无退出开关。gitgo 保留显式开关，不隐藏问题。
+
+详细分析：`cli/dashboard/docs/resize-duplicate-analysis.md`（14 次实验全记录）
+
+**日期**：2026-08-12 决策
+
+---
+
 ## v0.35 (2026-07-16)
 
 **Knowledge System 三期 —— 收割/检索/注射/分离/回收 + Testing Infrastructure**
@@ -62,6 +120,7 @@
 - v0.36：真实 LLM API 端到端验证（Groq）
 - v0.37：Git 性能优化（大仓库 + libgit2/pygit2 选项）
 - 断裂 4（Lesson Harvest 多触发点）延期至 v0.35
+- 手动新建 Agent 进程（人工子 agent 挂靠 A 树下）：**延期** —— 依赖「A 如何接收/治理突然出现的人工子 agent」的 agent 治理设计未定，暂不实现
 
 ## v0.33 (2026-07-07)
 

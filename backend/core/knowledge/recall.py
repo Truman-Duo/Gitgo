@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from backend.core.knowledge.models import Lesson
+from backend.core.knowledge.models import Lesson, severity_rank  # severity_rank 统一从 models 导入
 from backend.core.knowledge.manager import LessonManager
 
 if TYPE_CHECKING:
@@ -33,11 +33,6 @@ DEFAULT_TOP_K = 10
 
 # ── L0: grep + 轻量排序 ──────────────────────────────────
 
-def severity_rank(severity: str) -> int:
-    _map = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-    return _map.get(severity, 1)
-
-
 def _sort_key(lesson: Lesson) -> tuple:
     return (
         -lesson.verified_count,
@@ -45,14 +40,6 @@ def _sort_key(lesson: Lesson) -> tuple:
         -(lesson.project_name != ""),  # 有项目归属的靠前
         -(lesson.verified_at > ""),    # 已验证的靠前
     )
-
-
-def _is_current_project(lesson: Lesson, current_project: str) -> int:
-    if lesson.project_name == current_project:
-        return 1
-    if current_project in (lesson.verified_in or []):
-        return 1
-    return 0
 
 
 def _compute_noise_signal(matches: list[Lesson]) -> str | None:
@@ -98,6 +85,9 @@ def record_retrieval(lesson: Lesson, workspace: str = "",
     lesson.recent_retrievals.append(datetime.now().isoformat())
     if len(lesson.recent_retrievals) > 10:
         lesson.recent_retrievals = lesson.recent_retrievals[-10:]
+
+    # v0.40: 追踪 trigger_count
+    lesson.trigger_count += 1
 
     # 持久化：重新写入 JSONL（替换同 ID 的旧行）
     if workspace and project and lesson.id:
@@ -256,18 +246,28 @@ def recall_rag(
     l0_result = recall_grep(query, project, top_k=15,
                             agent_context=agent_context, workspace=workspace)
 
-    # 构建 RAG prompt（纯文本综合，不调工具）
+    # v0.40: 尝试 LLM 调用闭环。若无 LLM provider 则返回 prompt 供上层使用。
+    # 优先使用嵌入式 fallback 总结（不依赖外部 LLM）。
+    lessons_text = l0_result['text']
+    if len(lessons_text) > 2000:
+        # 超长时截断为前 2KB + 统计摘要
+        lesson_count = len(l0_result.get("lessons", []))
+        severities = {}
+        for l in l0_result.get("lessons", []):
+            s = l.get("severity", "unknown")
+            severities[s] = severities.get(s, 0) + 1
+        summary = f"[检索到 {lesson_count} 条 lesson，严重度分布: {severities}]\n\n"
+        lessons_text = summary + lessons_text[:2000]
+
     prompt = (
         "根据以下检索到的项目经验教训，回答用户的查询。\n"
         "综合多条 lesson 的信息，给出一个连贯的答案。\n"
         "如果检索结果不足以回答，请说明。\n\n"
         f"用户查询: {query}\n\n"
-        f"检索结果:\n{l0_result['text']}\n\n"
+        f"检索结果:\n{lessons_text}\n\n"
         "综合回答:"
     )
 
-    # 注意：此处 LLM 调用由 agent_step 的 dispatcher 执行，
-    # 不在本函数内直接调 LLM。返回 prompt 供上层使用。
     return {
         "lessons": l0_result["lessons"],
         "total_matches": l0_result["total_matches"],
