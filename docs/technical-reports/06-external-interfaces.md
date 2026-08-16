@@ -492,3 +492,24 @@ Terminal stdout (原始 ANSI 转义序列)
 **v0.35**: MCP 工具新增 recall_grep/recall_semantic/recall_rag (3个)。
 Knowledge System 架构文档 + Testing Subsystem 架构文档。
 501 测试 (从 334 增长 +167)。
+
+---
+
+## v0.36-v0.41 更新补遗
+
+**v0.39 错误恢复（架构）**:
+- `mcp_tools/cache_stats.py`: 新增缓存统计 MCP 工具，暴露 `cache/file_hash.py .stats()`
+
+**v0.40 流式响应（架构）**:
+- `cli/dashboard/src/daemon/streamEvents.ts` + `streamReducer.ts`: 流式事件管线骨架
+- `components/StreamingMessage.tsx`: 流式消息渲染组件
+- `chat/sendChat.ts`: 聊天发送接入
+- 后端 LLM 流式 → 前端渲染端到端接线待迭代
+
+**v0.41 前端工作（架构）**:
+- `components/config/`: Bin / Providers / Publish 三标签（ConfigPanel 多标签化）
+- `input/overlays/`（13 个 overlay 子模块）: 输入覆盖层拆分
+- `mock/`（11 个数据域）: mock 数据模块化
+- `effects/run.ts`: 运行时效果
+- 新面板: Governance / Memory / Formal / Trial / Lessons / Export / Status / RuntimeMenu / Quit / ConfirmBox / DiffView
+- `commands.ts` 命令矩阵更新

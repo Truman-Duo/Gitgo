@@ -601,3 +601,42 @@ Agent checkpoint/resume、流式响应、跨 session 记忆。
 **v0.34**: daemon 新增 native task 命令, 编排逻辑下沉。MCP 回归兼容层。Agent Loop 自包含。
 
 **v0.35**: tool_executors 3→6 (新增 recall_grep/semantic/rag)。Agent 可主动检索 Knowledge。
+
+---
+
+## v0.36-v0.41 更新补遗
+
+> 以下 6 个版本为本报告（Agent Loop）所覆盖主题的后续演进。除 v0.36 已落地外，其余均为**架构阶段**——架构设计 + 骨架代码已就位，具体子任务见对应架构报告的延期项 / Phase 2，尚未实施。
+
+**v0.36 上下文管理（已落地，+38 测试 → 539）**:
+- `loop/context_window.py`: 九层 Context 分层（System / Identity / Contract / Governance / Knowledge / Session / Transcript / Tool / Signal），水位线自动检测
+- `loop/signals.py` + `signal_normalizer.py` + `signal_bus.py`: 治理信号统一采集、归一化与分发总线
+- `loop/session.py`: 会话状态持久化
+- `loop/harness/`（completion / pre_dispatch / registry / retention / tool_history）: Harness 三层注入框架
+- `loop/transcript.py` + Assembler + Compact: 压缩链（Assembler/Transcript/Compact），上下文 >80% 修剪、>90% LLM 摘要压缩
+- 详见 `context-management-architecture.md`
+
+**v0.37 多 Agent 运行时（架构）**:
+- `loop/scheduler.py` + `task_slot.py`: Actor Model 调度器 + TaskSlot 四件套（接口/状态/数据/执行）
+- `loop/interface_contract.py`: 结构化通信契约（L0/L1/L2 三级）
+- `loop/event_bus.py`: 事件总线；`loop/execution_context.py`: 执行上下文
+- `loop/llm_adapter.py` + `agent_tool.py`: LLM 适配 + Agent 工具封装
+- `tools/{registrations,runner}.py`: 工具注册中心
+- Phase 2 数据驱动迭代（SSHBackend / RemoteLLMBackend / Escalate 多分支 / DAG 深度可配置）未实施，见 `multi-agent-architecture.md` §十二
+
+**v0.38 完成判断（架构）**:
+- `loop/loop_guard.py` + `gate.py` + `task_gate.py`: 任务完成语义判定骨架
+- `loop/harness/completion.py`: BUSINESS 结果判定
+- 完成判定策略细化待迭代，见 `error-recovery-architecture.md` §十六
+
+**v0.39 错误恢复（架构，+40 测试 → 579）**:
+- `loop/error_taxonomy.py`: 四维分类（Source / Severity / Retryability / Nature，Nature = CRASH vs BUSINESS）
+- `loop/loop_guard.py` + `loop/harness/tool_history.py`: 事务回滚 + 重试引擎 + 工具历史追踪
+- `loop/process_tool_runner.py`: 子进程工具运行器
+- 延期项（Rust PyO3 ToolRunner 6 个月后评估 / 遥测持久化 P3）见 `error-recovery-architecture.md` §十五
+
+**v0.40 流式响应（架构）**:
+- 流式事件管线骨架就位，后端 LLM 流式 → 前端渲染端到端接线待迭代（详见报告六补遗）
+
+**v0.41 前端工作（架构）**:
+- 组件矩阵 + god module 解耦收尾（详见报告六补遗）

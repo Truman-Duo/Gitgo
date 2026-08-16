@@ -57,7 +57,7 @@ Trial 目前功能完备（poller 轮询 + triage 三叉 + MCP tools），但尚
 | `backend/core/steps/` | ~200 | **纯函数管线**：scan / commits / sync / push，零依赖 SyncSession |
 | `backend/core/fact/` | ~200 | 模式匹配 + 时间窗口 |
 | `backend/core/cache/` | ~100 | 文件哈希缓存（file_hash） |
-| `backend/core/sync_session.py` | ~1,300 | 状态机：编排层 + Gate plugin 化 |
+| `backend/core/sync_session/` | ~1,200 | 状态机拆包：base/commit/finalize/scan/syncpush/triage/persist + Gate plugin 化 |
 | `backend/core/llm_config.py` | ~130 | **LLMConfigManager**：多 Provider CRUD + active switch |
 | `backend/core/history.py` | ~180 | HistoryManager：JSONL append-only + threading.Lock 并发安全 |
 | `backend/core/contract.py` | ~420 | ContractManager + drift + 依赖图 |
@@ -69,7 +69,7 @@ Trial 目前功能完备（poller 轮询 + triage 三叉 + MCP tools），但尚
 | `backend/core/operations/` | ~500 | git / scan / sync / security / utils |
 | `backend/core/authorship.py` | ~120 | AI 痕迹清洗 + 隐私扫描 |
 | `cli/dashboard/` | ~3,000 | Ink Dashboard：18 组件 + 5 hooks + 原生 daemon 通路 |
-| `tests/` | 501 tests | 7 子系统：Knowledge/Governance/Identity/SyncSession/Contract/Config + factory |
+| `tests/` | 579 tests | 7 子系统 + Context Management + Error Recovery + factory |
 
 ## Commands
 
@@ -113,7 +113,7 @@ HistoryEntry 结构：`timestamp / project_name / operation / status / detail / 
 
 ## Daemon + Dispatch（v0.30）
 
-**入口**：`backend/core/daemon/__init__.py:run_daemon()`
+**入口**：`backend/core/daemon/__init__.py:run_daemon()`；命令分发已拆到 `daemon/dispatch.py`（`COMMAND_HANDLERS` registry）
 
 三线程架构（watcher / poller / reader）+ 单线程主循环（event queue）。通过 stdin/stdout line-delimited JSON 与外部通信。
 
@@ -175,7 +175,7 @@ MCP Tool (A-level)
 - `mcp_tools/llm_config.py` — 4 个 MCP 工具：`gitgo_llm_status` / `gitgo_llm_save` / `gitgo_llm_switch` / `gitgo_llm_delete`
 
 **前端**（Ink 终端 UI）：
-- `cli/dashboard/src/components/LLMConfigPanel.tsx` — 列表模式（Provider 卡片 + ●/○ 激活标记）+ 编辑模式（内联表单 + Tab 切换字段）+ 连接测试
+- `cli/dashboard/src/components/ConfigPanel.tsx` — 多标签页（Providers / Publish / Bin），Provider 卡片 + ●/○ 激活标记 + 连接测试
 - 快捷键：`L` 键或 `:llm` 命令打开面板，↑↓ 选择，Enter 切换激活，N/E/D/T 新建/编辑/删除/测试
 
 ## CLI Dashboard（cli/dashboard/）
@@ -184,7 +184,7 @@ MCP Tool (A-level)
 
 **数据流**：`mcp_server.py` → JSON-RPC → `src/mcp/client.ts` → React state → Ink 渲染
 
-**场景导航**：Overview（项目列表）→ ProjectWorkspace（Tab 页：Contract/Lessons/Events/Governance）→ AgentDetail / LLMConfigPanel
+**场景导航**：Overview（项目列表）→ ProjectWorkspace（Tab 页：Contract/Lessons/Events/Governance）→ AgentDetail / ConfigPanel
 
 **命令系统**：`:` 进入命令模式，Tab 补全，支持 lesson/contract/status/verify/project/refresh/help/llm
 
@@ -222,7 +222,7 @@ MCP Tool (A-level)
 ## 测试
 
 ```bash
-pytest tests/ -q    # 334 passed, 1 skipped
+pytest tests/ -q    # 579 passed, 1 skipped
 ```
 
 ## 计划文件管理规则

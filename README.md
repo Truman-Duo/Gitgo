@@ -19,7 +19,7 @@ python mcp_server.py
 cd cli/dashboard && bun run src/main.tsx
 
 # 运行测试
-pytest tests/ -q    # 501 passed, 1 skipped
+pytest tests/ -q    # 579 passed, 1 skipped
 ```
 
 ## 架构
@@ -204,13 +204,13 @@ gitgo/
 ├── mcp_server.py              # FastMCP server（47 tools）
 ├── mcp_tools/                 # MCP 工具实现（loop / llm_config / daemon_registry ...）
 ├── frontend/                  # Qt GUI（搁置）
-├── tests/                     # 501 tests + 1 skip
+├── tests/                     # 579 tests + 1 skip
 └── docs/                      # VERSION / CLAUDE.md / HANDOFF / iterations
 ```
 
 ## 版本
 
-最新 **v0.35**。详见 [VERSION.md](docs/VERSION.md)。
+最新 **v0.41**。详见 [VERSION.md](docs/VERSION.md)。
 
 | 版本 | 里程碑 |
 |------|--------|
@@ -218,4 +218,10 @@ gitgo/
 | v0.26–v0.30 | Runtime + Policy Engine + Dashboard + Dispatch Layer + Agent Loop |
 | v0.31–v0.33 | Dashboard 完善 + 技术报告 + P0 修复 |
 | v0.34 | 系统整合：原生 Task 命令 + 断裂修复 + Dashboard 双路径 |
-| **v0.35** | **Knowledge System 三期 + TestDataFactory + 501 测试** |
+| v0.35 | Knowledge System 三期 + TestDataFactory + 501 测试 |
+| v0.36 | 上下文管理：九层 Context + 压缩链 + Assembler/Transcript |
+| v0.37 | 多 Agent 运行时：Actor Model + 结构化通信（架构） |
+| v0.38 | 完成判断：任务完成语义判定（架构） |
+| v0.39 | 错误恢复：四维分类 + 事务回滚（架构） |
+| v0.40 | 流式响应：流式事件管线（架构） |
+| **v0.41** | **前端工作：组件矩阵 + god module 解耦收尾（架构）** |

@@ -12,7 +12,7 @@ Daemon 是 gitgo 的**常驻后台进程**，负责三件事：(1) 监控工作�
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `daemon/__init__.py` | 845 | Daemon 主循环 + 全部事件处理 |
+| `daemon/__init__.py` | 845 → 拆包 | Daemon 主循环（v0.41 拆为 `daemon/` 包 + `dispatch.py` registry，见补遗） |
 | `daemon/client.py` | 442 | DaemonClient 子进程通信客户端 |
 | `daemon/watcher.py` | 75 | 文件系统监控（watchdog） |
 | `daemon/poller.py` | 29 | Trial 仓库轮询 |
@@ -625,3 +625,20 @@ DaemonClient ──stdin JSON──→ CommandReader (Thread-3)
 **v0.34**: daemon 新增 task 命令 (chat/fork/status/kill), 17→21 种命令。
 
 **v0.35**: workspace_dirty 后自动信号捕获 (capture_signal)。harvest 触发调度。独立 pending digest 定时器。
+
+---
+
+## v0.36-v0.41 更新补遗
+
+> 本报告（Daemon 与 Dispatch）在 v0.36–v0.40 主要是跨子系统接线；v0.41 完成 god module 解耦（架构阶段）。子任务见对应架构报告。
+
+**v0.36 上下文管理接线（已落地）**:
+- `loop/transcript.py` 与 daemon 事件流接通，Agent 每轮结束写入 transcript
+
+**v0.39 错误恢复接线（架构）**:
+- `daemon/client.py`: 幂等命令自动重连（指数退避）+ `request_id` 请求路由
+- `cache/file_hash.py` 新增 `.stats()` 观测 + `mcp_tools/cache_stats.py` 暴露缓存统计
+
+**v0.41 daemon 拆包（架构）**:
+- `daemon/__init__.py`（845 行）→ `daemon/` 包：`dispatch.py`（`COMMAND_HANDLERS` registry）+ `executors` / `emit` / `persist` / `cleanup` / `pidfile` / `policy_helpers`
+- 命令分发从 if-elif 链重构为 registry 模式，新命令只需注册 handler

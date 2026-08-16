@@ -14,7 +14,7 @@ Operations 层提供纯函数（文件扫描、git 操作、安全检查），St
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `sync_session.py` | 1317 | 状态机：24 个 step_* 方法 + 语义层 |
+| `sync_session.py` | 1317 → 拆包 | 状态机：24 个 step_* 方法（v0.41 拆为 `sync_session/` 包，见补遗） |
 | `operations/scan.py` | 253 | 文件扫描 + 对比 + 排除 |
 | `operations/git.py` | 228 | Git log 解析 + commit template |
 | `operations/sync.py` | 207 | 文件同步 + 推送到远程 |
@@ -505,7 +505,7 @@ class ProjectConfig:
 
 ## 九、已知限制与潜在问题
 
-1. **SyncSession 1317 行仍然很大**：虽然 v0.29 将纯函数提取到 steps/ 和 operations/，但 SyncSession 本身作为编排层仍然承载了太多职责（状态管理 + 语义计算 + session 持久化 + 决策钩子）。
+1. **SyncSession 1317 行仍然很大**：~~虽然 v0.29 将纯函数提取到 steps/ 和 operations/，但 SyncSession 本身作为编排层仍然承载了太多职责（状态管理 + 语义计算 + session 持久化 + 决策钩子）~~ **已于 v0.41 拆包解决**——`sync_session.py` 拆为 `sync_session/` 包（base / commit / finalize / scan / syncpush / triage / persist / hooks / models / session）。
 
 2. **Gate A/B 检查硬编码在 step_* 中**：无法在 gate 和 step 之间插入自定义检查——所有检查逻辑在 `step_sync()` 和 `step_push()` 中顺序执行。
 
@@ -540,3 +540,13 @@ class ProjectConfig:
 - SyncSession 的增量 sync（当前每次 sync 都是全量文件复制）
 - 远程仓库 Webhook 集成
 - Sync 冲突的自动解决策略
+
+---
+
+## v0.36-v0.41 更新补遗
+
+> 本报告（SyncSession 状态机）在 v0.36–v0.40 无直接改动；v0.41 完成 god module 解耦（架构阶段）。
+
+**v0.41 sync_session 拆包（架构）**:
+- `sync_session.py`（1317 行）→ `sync_session/` 包：`base` / `commit` / `finalize` / `scan` / `syncpush` / `triage` / `persist` / `hooks` / `models` / `session`
+- 状态机职责按生命周期阶段切分，Gate 检查 plugin 化（呼应上文「已知限制 #2 Gate A/B 硬编码」的解决方向）

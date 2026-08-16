@@ -87,6 +87,168 @@ mock 会被 Bun 拆为独立 chunk，生产路径不加载。属「打包行为�
 
 ---
 
+## v0.41 (2026-08-17)
+
+**前端工作 —— Dashboard 组件矩阵 + 前后端 god module 解耦收尾（架构阶段）**
+
+### F1: 前端模块化（god component 拆分）
+- `components/config/` — `ConfigPanel.tsx`（1042 行）拆成 `BinTab` / `ProvidersTab` / `PublishTab`（+ `registry.ts` / `types.ts`）
+- `input/overlays/` — `overlayKeymaps.ts`（424 行）拆成 13 个 overlay 子模块（createProject / dialogSelect / export / formal / help / inlineContext / lessons / memory / quit / runtimeMenu / status / trial / actions）
+- `mock/` — `mockData.ts`（724 行）拆成 11 个数据域（conversations / contract / lessons / processes / projects / providers / registry / runtime / status / toolEvents / index）
+- `App.tsx` 瘦身 241 行；新增 `utils/clipboard.ts`、`chat/sendChat.ts`、`effects/run.ts`、`daemon/streamEvents.ts` / `streamReducer.ts`
+
+### F2: 新增面板与组件
+- 读面板：`GovernancePanel` / `LessonsPanel` / `MemoryPanel` / `FormalPanel` / `TrialPanel` / `ExportPanel` / `StatusPanel`
+- 交互：`RuntimeMenu` / `QuitPanel` / `ConfirmBox` / `DialogSelect` / `CreateProjectPanel` / `InlineContext`
+- 渲染：`DiffView` / `MessageRow` / `StreamingMessage` / `ToolCallDisplay` / `Spinner` / `valueTree`
+
+### F3: 同时完成（内部重构，不单独成版）
+- 后端 god module 解耦：`daemon/__init__.py`（1059 行）→ `daemon/` 包（`dispatch.py` COMMAND_HANDLERS registry + `executors` / `emit` / `persist` / `cleanup` / `pidfile` / `policy_helpers`）
+- `sync_session.py`（1314 行）→ `sync_session/` 包（`base` / `commit` / `finalize` / `scan` / `syncpush` / `triage` / `persist` / `hooks` / `models` / `session`）
+
+**状态：架构阶段** —— 组件矩阵与模块化骨架已就位，面板交互子任务见迭代计划，尚未实施。
+
+---
+
+## v0.40 (2026-08-16)
+
+**流式响应 —— Dashboard 流式事件管线（架构阶段）**
+
+### 流式事件数据层
+- `daemon/streamEvents.ts`（49 行）— 流式事件序列化/反序列化
+- `daemon/streamReducer.ts`（86 行）— 流式事件归并 reducer
+- `chat/sendChat.ts`（104 行）— 聊天发送通路
+
+### 流式渲染层
+- `StreamingMessage.tsx`（44 行）— 流式消息渲染
+- `MessageRow.tsx` — 消息行抽象
+- `ToolCallDisplay.tsx` — 工具调用实时展示
+
+### 与错误恢复的衔接
+- 回滚时 `rollback_notification` 事件 → Dashboard 已渲染内容加删除线/灰化（见 `error-recovery-architecture.md` §十六）
+
+**状态：架构阶段** —— 流式事件管线骨架已就位，端到端流式接通子任务见迭代计划，尚未实施。
+
+---
+
+## v0.39 (2026-08-05)
+
+**错误恢复 —— 四维错误分类 + 事务回滚 + 重试引擎（架构阶段）**
+
+### E1: 错误分类体系（新建）
+- `loop/error_taxonomy.py`（217 行）— 四维分类 **(Source, Severity, Retryability, Nature)**
+- **Nature 维度是回滚决策依据**：`CRASH`（工具崩溃/超时）→ 回滚；`BUSINESS`（工具正常但业务失败，如 test exit_code≠0）→ 不回滚
+- Nature 区分解决「错误恢复」与「完成判断」两个子系统的语义冲突
+
+### E2: LLM 重试引擎
+- `loop/llm.py` 三层分工：分类重试引擎（5xx/429/context-overflow 各自策略）+ CircuitBreaker（健康状态）+ Failover（跨 provider 切换）
+- 删除旧 `_chat_single_provider` 硬编码重试循环与各处 ad-hoc 重试
+
+### E3: 事务回滚 + 会话同步
+- `loop/tool_execution.py` — Execution 级原子事务：内容备份 + SHA256 去重 + NATURE 门控 + 会话裁剪（消除「幻影成功」）
+
+### E4: 进程隔离 + 超时
+- `loop/process_tool_runner.py`（153 行）— Python 真进程隔离 + 三级超时
+
+### E5: 死循环检测 + Storm Break
+- `loop/loop_guard.py`（282 行）— doom_loop 检测 + error_code 触发熔断
+
+### E6: 观测 + 可靠性增强（同时完成）
+- `cache/file_hash.py` +52 行 `.stats()`；`mcp_tools/cache_stats.py`（29 行）观测工具
+- `daemon/client.py` +66 行：断线重连 + request_id 关联
+
+### 测试
+- `tests/test_error_recovery.py`（40 测试）→ 总测试 **579 passed, 1 skipped**（+40）
+
+### 延期项（迭代计划）
+- Rust PyO3 ToolRunner —— 6 个月后评估（`tool_runner/`，异构计划第 3 项）
+- 遥测与崩溃持久化 —— P3 暂缓
+
+**状态：架构阶段** —— 分类/回滚/重试/隔离骨架已就位，延期项见 `error-recovery-architecture.md` §十五。
+
+---
+
+## v0.38 (2026-07-24)
+
+**完成判断 —— 任务完成语义判定（架构阶段）**
+
+### 定位
+- 与「错误恢复」并列的子系统：错误恢复处理 `CRASH`（回滚），完成判断解读 `BUSINESS`（结果语义）
+- 核心命题：**工具正常执行完成 ≠ 任务完成**——`run_test exit_code≠0` 是 BUSINESS 信号，应交给 LLM 修 bug，而非回滚消失
+
+### 代码落点
+- `loop/loop_guard.py` — 循环终止守卫（doom_loop / max_steps 消耗判定）
+- `loop/gate.py` / `loop/task_gate.py` — 任务门控（是否继续派发下一步）
+- `loop/harness/completion.py` — 完成判定 harness（消费 BUSINESS 结果）
+
+### 语义分界
+- 见 `error-recovery-architecture.md` §二 Nature 维度（CRASH/BUSINESS）、§十六「Completion Judgment」行
+
+**状态：架构阶段** —— 完成判定骨架已就位，判定策略细化子任务见迭代计划，尚未实施。
+
+---
+
+## v0.37 (2026-07-24)
+
+**多 Agent 运行时 —— Actor Model + 结构化通信 + 契约驱动协作（架构阶段）**
+
+### M1: 核心抽象（四组件拆分）
+- `loop/task_slot.py`（244 行）— `TaskSpec`（不可变声明）/ `ContextSnapshot`（上下文精选）/ `Capability`（权限四元组）/ `TaskRuntime`（运行时状态）/ `TaskSlot`（薄包装）
+
+### M2: Scheduler 编排层
+- `loop/scheduler.py`（338 行）— Partition → Build DAG → Assemble Context → Create Slots → Execute & Collect
+
+### M3: 结构化通信（三级强制原语）
+- `loop/interface_contract.py`（206 行）— InterfaceContract freeze + verify（方案 B 冻结签名）
+- L0 无依赖 / L1 单向依赖强制注入 / L2 共享接口冻结契约
+- `loop/event_bus.py`（83 行）— 异步消息路由
+
+### M4: 工具执行管线
+- `loop/tool_pipeline.py`（269 行）/ `tool_execution.py`（503 行）/ `tool_wrappers.py`（227 行）
+- `loop/process_tool_runner.py`（153 行）— 进程隔离
+- `tools/registrations.py`（398 行）/ `tools/runner.py`（114 行）— 工具注册中心
+- `loop/agent_tool.py` / `loop/llm_adapter.py` / `loop/execution_context.py` / `loop/decomposition.py`
+
+### M5: Runtime Constitution
+- `docs/technical-reports/runtime-constitution.md` — 7 条宪法级约束（hard gate 不可信 / 冲突升级父级 / 上下文隔离与文件系统共享正交 等）
+
+### 实施路径
+- **Phase 1 基础设施层（本次）** / **Phase 2 数据驱动迭代（未来）**：SSHBackend / RemoteLLMBackend / Escalate 多分支 / DAG 深度可配置
+- **Phase 3 不做**：LocalBackend / 通用 DAG 引擎 / 预设角色名
+
+**状态：架构阶段** —— 多 Agent 基础设施已就位，Phase 2 见 `multi-agent-architecture.md` §十二。
+
+---
+
+## v0.36 (2026-07-18)
+
+**上下文管理 —— 九层 Context + 压缩链 + Assembler/Transcript（GITGO-46，已落地）**
+
+### C1: AST 函数级依赖图
+- `contract.py` +160 行 — `get_callers()` + `get_changed_symbols()`（DependencyChainCheck 消费）
+
+### C2: 九层 Context 完整组成
+- `loop/context_window.py`（520 行）— 五级压缩优先级链
+- `loop/signals.py`（188 行）+ `signal_normalizer.py`（191 行）+ `signal_bus.py`（273 行）— 信号归一化与总线
+- `loop/session.py`（89 行）/ `task_gate.py`（78 行）
+
+### C3: Phase 1 — 压缩链 + 隐用户输入 + 约束晋升
+- 压缩链、隐式用户输入注入、治理约束晋升
+
+### C4: Phase 2 — Assembler + Transcript + Compact
+- `loop/transcript.py`（172 行）— 结构化执行记录 + 返回上下文
+- `loop/harness/` — `completion` / `pre_dispatch` / `registry` / `retention` / `tool_history`
+
+### 测试
+- `tests/test_context_management.py`（38 测试）→ 总测试 **539 passed, 1 skipped**（+38）
+
+### 文档
+- `docs/technical-reports/context-management-architecture.md`（v2/v3/v4 三版评审）
+
+**状态：已落地**（代码 + 38 测试已 commit；尚未 push 到 origin）。
+
+---
+
 ## v0.35 (2026-07-16)
 
 **Knowledge System 三期 —— 收割/检索/注射/分离/回收 + Testing Infrastructure**

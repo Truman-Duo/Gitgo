@@ -511,3 +511,11 @@ class TemplateManager:
 **Lesson数据模型**: 10+新字段 (trigger_count/applied_count/recent_retrievals/origin/harvest_retry_count)
 
 **TestDataFactory**: 种子可复现的通用测试数据生成器, 覆盖5个子系统
+
+---
+
+## v0.36-v0.41 更新补遗
+
+**v0.36 上下文管理接线（已落地）**:
+- `harvest.py`（+70）: 收割信号接入九层 Context 的 Signal 层
+- `recall.py`（+36）: 检索结果经 tool_result 注入 Transcript 层

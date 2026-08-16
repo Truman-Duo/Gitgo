@@ -595,3 +595,14 @@ Governance Metrics (按需):
 **v0.34**: Gate 缓存 + dirty flag 系统 (PolicyEngine 产出→Gate 复用)。
 
 **v0.35**: unprocessed_signal 新 operation 类型 (第 13 种)。integration_test_result (第 14 种, 预留)。
+
+---
+
+## v0.36-v0.41 更新补遗
+
+**v0.36 上下文管理（已落地）**:
+- `contract.py`: AST 依赖图构建（+160 行），Contract 漂移检测依赖注入上下文
+- 上下文分层将 Contract / Governance 信号纳入九层 Context
+
+**v0.39 错误恢复（架构）**:
+- `policy/contract.py` + `policy/lessons.py`: 策略增强，与 `error_taxonomy` 联动（CRASH vs BUSINESS 分类）
