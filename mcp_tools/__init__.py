@@ -13,6 +13,7 @@ def register_all(mcp):
 
     from mcp_tools.loop import register as reg_loop
     from mcp_tools.llm_config import register as reg_llm
+    from mcp_tools.cache_stats import register as reg_cache
 
     reg_project(mcp)
     reg_sync(mcp)
@@ -21,6 +22,7 @@ def register_all(mcp):
     reg_memory(mcp)
     reg_loop(mcp)
     reg_llm(mcp)
+    reg_cache(mcp)
 
     # Ensure daemon subprocesses are cleaned up on exit
     atexit.register(_shutdown_daemons)

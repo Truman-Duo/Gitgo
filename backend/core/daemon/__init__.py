@@ -1439,6 +1439,12 @@ def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
         _emit({"event": "command_result", "cmd": "reject",
                "result": {"rejection_count": len(rejections)}})
 
+    elif cmd_name == "cache_stats":
+        hash_cache = daemon_ctx.get("hash_cache") if daemon_ctx else None
+        stats = hash_cache.stats() if hash_cache else {}
+        _emit({"event": "command_result", "cmd": "cache_stats",
+               "result": stats})
+
     elif cmd_name == "loop_status":
         processes = {}
         if apm is not None:

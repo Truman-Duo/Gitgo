@@ -140,7 +140,7 @@ export const colors = {
     lerp: { frames: 4, intervalMs: 37 },
   },
 
-  // ── Tool colors (from toolStyles.ts) ──────────────────────
+  // ── Tool colors ──────────────────────
   tool: {
     read: "#58a6ff",
     write: "#3fb950",
@@ -158,7 +158,7 @@ export const colors = {
   },
 } as const;
 
-// ── Tool color helpers (from toolStyles.ts) ───────────────────
+// ── Tool color helpers ───────────────────
 const TOOL_COLOR_MAP: Record<string, string> = {
   read_file: colors.tool.read,
   scan: colors.tool.read,

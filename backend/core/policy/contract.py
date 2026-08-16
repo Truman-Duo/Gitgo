@@ -29,7 +29,16 @@ class ContractDriftCheck(PolicyCheck):
         changed = [e.rel_path for e in session.entries if e.status != "same"]
         alerts = detect_drift(Path(session.workspace_path), changed, contract)
         if alerts:
-            return [{"rule": d.get("rule", "contract"),
-                     "message": d.get("message", ""),
-                     "alert_count": len(alerts)} for d in alerts]
+            results = []
+            for d in alerts:
+                results.append({
+                    "rule": d.get("rule", "contract"),
+                    "message": d.get("message", ""),
+                    "level": d.get("level", "warning"),
+                    "file": d.get("location", changed[0] if changed else ""),
+                    "feature": d.get("feature", ""),
+                    "target_tools": ["formalize", "push", "sync"],
+                    "suggestion": "drift 文件在写入前请先 scan 验证签名",
+                })
+            return results
         return []

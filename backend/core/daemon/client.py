@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 
@@ -26,6 +27,14 @@ class DaemonClient:
         llm = client.send_llm_call([{"role":"user","content":"hello"}], "pid-123")
         client.stop()
     """
+
+    MAX_RECONNECT_ATTEMPTS = 5
+    RECONNECT_BACKOFF_CAP = 16  # seconds
+    MAX_STDERR_LINES = 1000
+
+    IDEMPOTENT_COMMANDS = {
+        "status", "loop_status", "scan", "llm_configure", "llm_call",
+    }
 
     def __init__(self, project_name: str) -> None:
         self.project_name = project_name
@@ -135,29 +144,59 @@ class DaemonClient:
         """Send a synchronous command and wait for its command_result.
 
         Returns the 'result' dict from the response, or raises RuntimeError on error.
+        Automatically retries with reconnection for idempotent commands.
         """
+        cmd_name = cmd.get("cmd", "")
+        idempotent = cmd_name in self.IDEMPOTENT_COMMANDS
+        max_attempts = self.MAX_RECONNECT_ATTEMPTS if idempotent else 1
+
+        last_error: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                return self._send_command_once(cmd, timeout)
+            except (RuntimeError, BrokenPipeError, OSError) as e:
+                last_error = e
+                if attempt >= max_attempts - 1:
+                    raise
+                # Only retry if daemon is actually dead
+                if self.is_running():
+                    raise
+                backoff = min(2 ** attempt, self.RECONNECT_BACKOFF_CAP)
+                time.sleep(backoff)
+                try:
+                    self.start()
+                except Exception:
+                    continue
+
+        raise last_error  # type: ignore[misc]
+
+    def _send_command_once(self, cmd: dict, timeout: float = 30.0) -> dict:
+        """Single attempt at sending a command (no retry/reconnect)."""
         cmd_name = cmd.get("cmd", "")
         if not cmd_name:
             raise ValueError("Command dict must contain 'cmd' key")
 
-        # Clear previous result for this command name
+        request_id = str(uuid.uuid4())
+        cmd["request_id"] = request_id
+
         with self._lock:
-            if cmd_name not in self._cmd_events:
-                self._cmd_events[cmd_name] = threading.Event()
-            self._cmd_events[cmd_name].clear()
-            self._cmd_results.pop(cmd_name, None)
+            self._cmd_events[request_id] = threading.Event()
+            self._cmd_events[request_id].clear()
 
         self._write_cmd(cmd)
 
-        event = self._cmd_events[cmd_name]
+        event = self._cmd_events[request_id]
         if not event.wait(timeout=timeout):
+            with self._lock:
+                self._cmd_events.pop(request_id, None)
             raise RuntimeError(
                 f"Command '{cmd_name}' timed out after {timeout}s "
                 f"(daemon running={self.is_running()})"
             )
 
         with self._lock:
-            result = self._cmd_results.pop(cmd_name, None)
+            result = self._cmd_results.pop(request_id, None)
+            self._cmd_events.pop(request_id, None)
 
         if result is None:
             raise RuntimeError(
@@ -278,11 +317,11 @@ class DaemonClient:
                     self._started_event.set()
 
                 elif event_type == "command_result":
-                    cmd_name = event.get("cmd", "")
+                    rid = event.get("request_id", event.get("cmd", ""))
                     with self._lock:
-                        self._cmd_results[cmd_name] = event
-                        if cmd_name in self._cmd_events:
-                            self._cmd_events[cmd_name].set()
+                        self._cmd_results[rid] = event
+                        if rid in self._cmd_events:
+                            self._cmd_events[rid].set()
 
                 elif event_type == "llm_response":
                     with self._lock:
@@ -310,7 +349,10 @@ class DaemonClient:
         try:
             assert self._process is not None
             for line in self._process.stderr:
-                self._stderr_lines.append(line)
+                with self._lock:
+                    self._stderr_lines.append(line)
+                    if len(self._stderr_lines) > self.MAX_STDERR_LINES:
+                        self._stderr_lines = self._stderr_lines[-self.MAX_STDERR_LINES:]
         except Exception:
             pass
 

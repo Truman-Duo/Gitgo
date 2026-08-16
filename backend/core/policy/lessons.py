@@ -62,6 +62,15 @@ class LessonTriggerCheck(PolicyCheck):
                     matched_trigger = True
 
             if matched_trigger:
+                # Track which file triggered this match
+                matched_file = ""
+                for f in changed_files:
+                    if trigger.lower() in f.lower():
+                        matched_file = f
+                        break
+                if not matched_file and trigger.lower() in changed_content.lower():
+                    matched_file = changed_files[0] if changed_files else ""
+
                 matched.append({
                     "lesson_id": getattr(lesson, 'id', ''),
                     "trigger": trigger,
@@ -69,6 +78,10 @@ class LessonTriggerCheck(PolicyCheck):
                     "severity": getattr(lesson, 'severity', 'medium'),
                     "category": getattr(lesson, 'category', ''),
                     "has_check": bool(check and check.get("pattern")),
+                    "file": matched_file,
+                    "dangerous_tools": getattr(lesson, 'dangerous_tools', None) or [],
+                    "prerequisite_tools": getattr(lesson, 'prerequisite_tools', None) or [],
+                    "required_tools": getattr(lesson, 'required_tools', None) or [],
                 })
 
         return matched
