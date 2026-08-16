@@ -2,7 +2,7 @@
 import React, { memo } from "react";
 import { Box, Text, useInput } from "@anthropic/ink";
 import type { Scene } from "../state/store.js";
-import { resolveHelpKey } from "../input/overlayKeymaps.js";
+import { resolveHelpKey } from "../input/overlays/help.js";
 import { colors } from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
 

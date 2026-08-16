@@ -5,7 +5,7 @@ import type { McpClient } from "../mcp/client.js";
 import {
   governanceQuality, governancePatterns, governanceFeed, governanceReleases,
 } from "../mcp/tools.js";
-import { resolveInlineContextKey } from "../input/overlayKeymaps.js";
+import { resolveInlineContextKey } from "../input/overlays/inlineContext.js";
 import { colors, usePanelSize } from "../theme/index.js";
 import { valueLines } from "./valueTree.js";
 import { chordLabel } from "../input/bindings.js";

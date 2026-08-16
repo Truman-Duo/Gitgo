@@ -1,7 +1,6 @@
 // src/components/App.tsx — Three-scene routing with createStore
 import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import { Box, Text, useInput, useApp, useTerminalSize } from "@anthropic/ink";
-import { execSync } from "node:child_process";
 import { McpClient } from "../mcp/client.js";
 import { colors, contextPct } from "../theme/index.js";
 import { useGitgoData } from "../hooks/useGitgoData.js";
@@ -18,22 +17,9 @@ import { Overview } from "./Overview.js";
 import { ProjectWorkspace } from "./ProjectWorkspace.js";
 import { ProcessList } from "./ProcessList.js";
 import { AgentDetail, AgentDetailScene } from "./AgentDetail.js";
-import { ConfigPanel } from "./ConfigPanel.js";
 import { CommandBar, type FooterConfig } from "./CommandBar.js";
-import { HelpPanel } from "./HelpPanel.js";
-import { QuitPanel } from "./QuitPanel.js";
-import { CreateProjectPanel } from "./CreateProjectPanel.js";
-import { StatusPanel } from "./StatusPanel.js";
-import { ExportPanel } from "./ExportPanel.js";
-import { GovernancePanel } from "./GovernancePanel.js";
-import { MemoryPanel } from "./MemoryPanel.js";
-import { TrialPanel } from "./TrialPanel.js";
-import { FormalPanel } from "./FormalPanel.js";
-import { LessonsPanel } from "./LessonsPanel.js";
-import { RuntimeMenu } from "./RuntimeMenu.js";
-import { InlineContext } from "./InlineContext.js";
-import { DialogSelect, type DialogItem } from "./DialogSelect.js";
-import { REGISTRY, getKeybindings } from "../keybindings.js";
+import { renderOverlay } from "./overlays.js";
+import { readClipboard } from "../utils/clipboard.js";
 import { chordLabel } from "../input/bindings.js";
 
 type Props = { client: McpClient; refreshSec?: number };
@@ -296,181 +282,25 @@ export function App({ client, refreshSec = 5 }: Props) {
     return null;
   }, [footerOverride, overlayStack.length]);
 
-  function renderOverlay(overlay: { type: string; props?: Record<string, any> }) {
-    switch (overlay.type) {
-      case "help":
-        return <HelpPanel scene={scene} onDismiss={popOverlay} />;
-      case "quitConfirm":
-        return (
-          <QuitPanel
-            onSaveAndQuit={() => {
-              // Notify daemon, then exit gracefully
-              popOverlay();
-              exit();
-            }}
-            onForceQuit={() => {
-              popOverlay();
-              exit();
-            }}
-            onCancel={popOverlay}
-          />
-        );
-      case "context": {
-        const ctxProject = overlay.props?.project || activeProject;
-        return ctxProject ? (
-          <InlineContext project={ctxProject} client={client} cols={w}
-            toolEvents={[]} initialTab={overlay.props?.initialTab ?? 0} onDismiss={popOverlay} />
-        ) : null;
-      }
-      case "configPanel": {
-        const llmProject = overlay.props?.project || activeProject || "";
-        return (
-          <ConfigPanel client={client} project={llmProject}
-            cols={w} rows={h}
-            initialTab={overlay.props?.initialTab ?? "providers"}
-            cmdInput={llmCmdInput}
-            onFooter={setFooterOverride}
-            onBack={popOverlay}
-            onStatusUpdate={setScreenStatusText}
-            onRefresh={refresh} />
-        );
-      }
-      case "whichkey": {
-        const bindings = getKeybindings(scene);
-        const items: DialogItem[] = bindings.map((c) => ({
-          id: c.name,
-          title: c.slashName,
-          category: c.category,
-          hint: c.keys.length > 0 ? c.keys.join(" ") : undefined,
-        }));
-        return (
-          <DialogSelect
-            items={items}
-            onSelect={(id) => {
-              popOverlay();
-              const def = bindings.find((c) => c.name === id);
-              if (def) {
-                enterCommandMode(cmdInput, dispatch);
-                cmdInput.setValue("/" + def.slashName);
-              }
-            }}
-            onDismiss={popOverlay}
-            title="Which Key?"
-            placeholder="Filter commands..."
-            height={h}
-          />
-        );
-      }
-      case "dialogSelect": {
-        const cmds = getCommands(scene);
-        const items: DialogItem[] = cmds.map((c) => ({
-          id: c.label,
-          title: c.label,
-          category: "Commands",
-          hint: c.description,
-        }));
-        return (
-          <DialogSelect
-            items={items}
-            onSelect={(id) => {
-              popOverlay();
-              enterCommandMode(cmdInput, dispatch);
-              cmdInput.setValue(id);
-            }}
-            onDismiss={popOverlay}
-            title="Command Palette"
-            placeholder="Type command..."
-            height={h}
-          />
-        );
-      }
-      case "createForm":
-        return (
-          <CreateProjectPanel
-            client={client}
-            defaultWorkspace={process.cwd()}
-            onDismiss={popOverlay}
-            onCreated={() => { refresh(); popOverlay(); }}
-            cmdInput={llmCmdInput}
-            onFooter={setFooterOverride}
-          />
-        );
-      case "statusPanel":
-        return (
-          <StatusPanel
-            projects={projects}
-            cols={w}
-            onDismiss={popOverlay}
-            onEnterProject={(name) => {
-              popOverlay();
-              navigate("workspace", { activeProject: name, activeAgentId: null });
-            }}
-          />
-        );
-      case "exportPanel": {
-        const exportProject = overlay.props?.project || activeProject;
-        return exportProject ? (
-          <ExportPanel
-            client={client}
-            project={exportProject}
-            cols={w}
-            onDismiss={popOverlay}
-          />
-        ) : null;
-      }
-      case "governancePanel": {
-        const govProject = overlay.props?.project || activeProject;
-        return govProject ? (
-          <GovernancePanel
-            client={client}
-            project={govProject}
-            cols={w}
-            initialTab={overlay.props?.initialTab ?? 0}
-            onDismiss={popOverlay}
-          />
-        ) : null;
-      }
-      case "memoryPanel": {
-        const memProject = overlay.props?.project || activeProject;
-        return memProject ? (
-          <MemoryPanel client={client} project={memProject} cols={w} onDismiss={popOverlay} />
-        ) : null;
-      }
-      case "trialPanel": {
-        const trialProject = overlay.props?.project || activeProject;
-        return trialProject ? (
-          <TrialPanel client={client} project={trialProject} cols={w} onDismiss={popOverlay} />
-        ) : null;
-      }
-      case "formalPanel": {
-        const formalProject = overlay.props?.project || activeProject;
-        return formalProject ? (
-          <FormalPanel client={client} project={formalProject} cols={w} onDismiss={popOverlay} />
-        ) : null;
-      }
-      case "lessonsPanel": {
-        const lessonsProject = overlay.props?.project || activeProject;
-        return lessonsProject ? (
-          <LessonsPanel client={client} project={lessonsProject} cols={w}
-            initialQuery={overlay.props?.initialQuery} onDismiss={popOverlay} />
-        ) : null;
-      }
-      case "runtimeMenu":
-        return (
-          <RuntimeMenu
-            cols={w}
-            rows={h}
-            onSelect={(sub) => {
-              popOverlay();
-              void runCommandEffect("/runtime " + sub, runCommandDeps);
-            }}
-            onDismiss={popOverlay}
-          />
-        );
-      default:
-        return null;
-    }
-  }
+  const overlayCtx = {
+    client,
+    scene,
+    activeProject,
+    w,
+    h,
+    llmCmdInput,
+    cmdInput,
+    dispatch,
+    popOverlay,
+    refresh,
+    navigate,
+    setFooterOverride,
+    setScreenStatusText,
+    exit,
+    projects,
+    runCommandEffect,
+    runCommandDeps,
+  };
 
   return (
     <Box flexDirection="column" width={w} flexGrow={1}>
@@ -480,7 +310,7 @@ export function App({ client, refreshSec = 5 }: Props) {
 
       <Box flexGrow={1}>
       {overlayStack.length > 0 ? (
-        renderOverlay(overlayStack[overlayStack.length - 1])
+        renderOverlay(overlayStack[overlayStack.length - 1], overlayCtx)
       ) : loading ? (
         <Box paddingLeft={1} paddingTop={1}><Text dimColor>Loading projects...</Text></Box>
       ) : scene === "process_list" && activeProject ? (
@@ -536,31 +366,4 @@ export function App({ client, refreshSec = 5 }: Props) {
       />
     </Box>
   );
-}
-
-// ── Helpers ─────────────────────────────────────────────────
-
-function enterCommandMode(
-  cmdInput: UseTextInputReturn,
-  dispatch: (action: AppAction) => void,
-) {
-  cmdInput.setValue("");
-  dispatch({ type: "enter_command" });
-}
-
-function readClipboard(): string {
-  let text = "";
-  try {
-    text = execSync(
-      process.platform === "win32"
-        ? "powershell -NoProfile -Command Get-Clipboard"
-        : process.platform === "darwin"
-        ? "pbpaste"
-        : "xclip -o -selection clipboard",
-      { encoding: "utf-8" }
-    )
-      .replace(/\r\n/g, "\n")
-      .replace(/\r/g, "\n");
-  } catch (_) {}
-  return text;
 }

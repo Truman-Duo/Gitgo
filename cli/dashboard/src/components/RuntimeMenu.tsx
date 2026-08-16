@@ -4,7 +4,7 @@
 //  which this menu does not yet have.)
 import React, { memo, useState } from "react";
 import { Box, Text, useInput } from "@anthropic/ink";
-import { resolveRuntimeMenuKey } from "../input/overlayKeymaps.js";
+import { resolveRuntimeMenuKey } from "../input/overlays/runtimeMenu.js";
 import { colors, usePanelSize, separator } from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
 

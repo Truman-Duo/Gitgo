@@ -11,103 +11,37 @@ The main loop owns the SyncSession and dispatches events to step methods.
 from __future__ import annotations
 
 import atexit
-import json
 import os
 import queue
 import signal
 import sys
 import threading
 import time
-from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Optional
 
-from backend.core.config import Config, ConfigManager, ProjectConfig
+from backend.core.config import Config, ProjectConfig
 from backend.core.sync_session import SyncSession, SessionStage
 from backend.core.daemon.watcher import WorkspaceWatcher
 from backend.core.daemon.poller import TrialPoller
 from backend.core.daemon.commands import CommandReader
-
-
-def _emit(event: dict) -> None:
-    """Write a line-delimited JSON event to stdout (backward-compat wrapper)."""
-    _emit_v2(event)
-
-
-# ── v0.44: 微批 flush ──
-_emit_buffer: list[dict] = []
-_last_flush_time: float = 0.0
-BATCH_SIZE = 32
-BATCH_INTERVAL_MS = 16
-
-
-def _emit_v2(ev: dict, priority: str = "normal") -> None:
-    """Write a line-delimited JSON event to stdout with micro-batch flush.
-
-    priority="normal": 微批缓冲（16ms 或 32 事件）
-    priority="immediate": 立即 flush（agent_complete、stream_recovery、治理事件）
-    """
-    global _last_flush_time
-    if priority == "immediate":
-        _flush_emit_buffer()
-        sys.stdout.write(json.dumps(ev, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
-        return
-    _emit_buffer.append(ev)
-    now_ms = int(time.time() * 1000)
-    if len(_emit_buffer) >= BATCH_SIZE or (now_ms - _last_flush_time) >= BATCH_INTERVAL_MS:
-        _flush_emit_buffer()
-        _last_flush_time = now_ms
-
-
-def _flush_emit_buffer() -> None:
-    """Flush 所有缓冲事件到 stdout。"""
-    global _emit_buffer
-    if not _emit_buffer:
-        return
-    for e in _emit_buffer:
-        sys.stdout.write(json.dumps(e, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
-    _emit_buffer = []
-
-
-def _pid_file_path(project: ProjectConfig) -> Path:
-    ws_path = project.workspace.file_access.path
-    return Path(ws_path) / ".gitgo" / "daemon.pid"
-
-
-def _acquire_pid_file(project: ProjectConfig) -> bool:
-    """Create PID file. Returns False if another daemon is already running."""
-    pid_path = _pid_file_path(project)
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if pid_path.exists():
-        try:
-            old_pid = int(pid_path.read_text().strip())
-            os.kill(old_pid, 0)  # signal 0 = existence check (Unix only)
-        except (OSError, ValueError, ProcessLookupError, SystemError):
-            pass  # stale or Windows — overwrite
-        else:
-            return False  # alive
-
-    pid_path.write_text(str(os.getpid()))
-    return True
-
-
-def _release_pid_file(project: ProjectConfig) -> None:
-    pid_path = _pid_file_path(project)
-    try:
-        pid_path.unlink(missing_ok=True)
-    except OSError:
-        pass
+from backend.core.daemon.emit import _emit, _emit_v2, _flush_emit_buffer
+from backend.core.daemon.pidfile import _pid_file_path, _acquire_pid_file, _release_pid_file
+from backend.core.daemon.persist import _scan_incomplete_sessions
+from backend.core.daemon.cleanup import _cleanup_resources
+from backend.core.daemon.executors import (
+    _exec_scan, _exec_status, _exec_formalize,
+    _exec_recall_grep, _exec_recall_semantic, _exec_recall_rag,
+    _exec_assemble_context, _exec_assemble_return_context,
+    _exec_decompose_task,
+)
+from backend.core.daemon.dispatch import _handle_command
 
 
 # ── Policy Engine ─────────────────────────────────────────
 
 from backend.core.policy import PolicyEngine, build_policy_message
 from backend.core.loop.manager import AgentProcessManager
-from backend.core.loop.models import RingLevel
-from backend.core.loop.tools import ToolRegistry
 from backend.core.loop.agent_tool import AgentTool
 from backend.core.loop.tool_wrappers import (
     contract_detect_drift,
@@ -124,174 +58,6 @@ from backend.core.loop.tool_wrappers import (
     memory_restore,
 )
 from backend.core.dispatch import ToolDispatcher
-
-
-def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[str] | None:
-    """每轮结束时在 workspace 做 git commit 快照。"""
-    import subprocess
-
-    ws = str(session.workspace_path)
-    changed = [e.rel_path for e in session.entries if e.status != "same"]
-
-    try:
-        creationflags = 0x08000000 if sys.platform == "win32" else 0
-        subprocess.run(["git", "add", "-A"], cwd=ws,
-                       capture_output=True, text=True,
-                       creationflags=creationflags, timeout=30)
-
-        msg = f"gitgo: round snapshot [{datetime.now().strftime('%H:%M:%S')}]\n\n"
-        msg += f"变更文件: {len(changed)}\n"
-        if changed:
-            msg += "\n".join(f"  {f}" for f in changed[:20])
-            if len(changed) > 20:
-                msg += f"\n  ... 还有 {len(changed) - 20} 个文件"
-
-        result = subprocess.run(["git", "commit", "-m", msg], cwd=ws,
-                                capture_output=True, text=True,
-                                creationflags=creationflags, timeout=30)
-
-        if result.returncode == 0:
-            from backend.core.history import HistoryManager
-            HistoryManager.add_operation(
-                project.name, "workspace_state_snapshot", "success",
-                {"files_changed": changed,
-                 "round_time": datetime.now().isoformat()},
-                correlation_id=session._correlation_id,
-            )
-            _emit({"event": "workspace_snapshot", "files": len(changed)})
-            return changed
-        return []  # no changes to commit
-    except (subprocess.SubprocessError, OSError) as e:
-        _emit({"event": "snapshot_error", "error": str(e)})
-        return None
-
-
-def _harvest_from_rejection_chain(
-    project_name: str, rejections: list, session: SyncSession
-) -> None:
-    """从连续 rejection 中提取 pending lesson。"""
-    from backend.core.knowledge.lesson import LessonManager
-    from backend.core.knowledge.models import Lesson
-    from backend.core.history import HistoryManager
-
-    recent_3 = rejections[-3:]
-    reasons = []
-    for r in recent_3:
-        d = r.detail if isinstance(r.detail, dict) else {}
-        reasons.append(d.get("reason", ""))
-
-    last_detail = recent_3[-1].detail if isinstance(recent_3[-1].detail, dict) else {}
-    final_rule = last_detail.get("instruction", "")
-
-    lesson = Lesson(
-        tech_stack="",
-        category="process",
-        severity="high",
-        trigger=f"连续 3 次被人否定: {'; '.join(reasons[-2:])}",
-        rule=final_rule or "人连续纠正了多次方向性错误，最终方案需要被记录。",
-    )
-    lesson.id = f"rejection_{project_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-    ws = Path(session.workspace_path)
-    LessonManager.save_pending(ws, lesson)
-
-    HistoryManager.add_operation(
-        project_name, "governance_lesson", "success",
-        {"harvested_count": 1, "lesson_id": lesson.id, "trigger": "rejection_chain"},
-        correlation_id=session._correlation_id,
-    )
-    _emit({"event": "lesson_harvested", "lesson_id": lesson.id,
-           "trigger": "rejection_chain"})
-
-
-def _resolve_llm_config(workspace: str) -> tuple | None:
-    """解析 LLM 配置。优先级：环境变量 > llm_config.json active_provider。"""
-    base_url = os.environ.get("GITGO_LLM_BASE_URL", "")
-    api_key = os.environ.get("GITGO_LLM_API_KEY", "")
-    model_id = os.environ.get("GITGO_LLM_MODEL", "")
-
-    if base_url and api_key and model_id:
-        return (base_url, api_key, model_id)
-
-    if workspace:
-        try:
-            from backend.core.llm_config import LLMConfigManager
-            active = LLMConfigManager.get_active()
-            if active:
-                return (active.base_url, active.api_key, active.model_id)
-        except Exception:
-            pass
-
-    return None
-
-
-# ── v0.45: Session persistence helpers ─────────────────────
-
-def _save_session_checkpoint(daemon_ctx: dict, process) -> None:
-    """Save session checkpoint after agent_step completes or errors."""
-    store = daemon_ctx.get("session_store")
-    if store is None:
-        return
-    sess = getattr(process, "session", None)
-    if sess is None:
-        return
-    store.save_checkpoint(process.process_id, sess)
-    store.append_event(process.process_id, "agent_complete", {
-        "status": process.status.value,
-        "steps_used": process.steps_used,
-    })
-
-
-def _scan_incomplete_sessions(session_store, apm) -> list[str]:
-    """扫描 .gitgo/sessions/ 中的未完成会话，返回可恢复的 process_id 列表。
-
-    有 checkpoint 或 jsonl 数据但进程不在 apm 中的视为"未完成"。
-    """
-    incomplete = session_store.list_incomplete()
-    recoverable = []
-    for pid in incomplete:
-        if apm.get(pid) is None:
-            msgs = session_store.load_session(pid)
-            if msgs:
-                recoverable.append(pid)
-    return recoverable
-
-
-# ── v0.45: Resource cleanup on shutdown ─────────────────────
-
-def _cleanup_resources(workspace_path: str) -> None:
-    """清理 daemon 关闭时的临时资源。
-
-    - 清理旧快照备份（.gitgo/snapshots/）
-    - 清理已完成会话的持久化文件（.gitgo/sessions/ 中无对应运行进程的）
-    - 不删除正在运行的进程的会话文件
-    """
-    ws = Path(workspace_path)
-
-    # 清理过期快照（保留最近 MAX_SNAPSHOTS 个）
-    snap_dir = ws / ".gitgo" / "snapshots"
-    if snap_dir.exists():
-        try:
-            backups = sorted(snap_dir.glob("*@v*"),
-                           key=lambda p: p.stat().st_mtime)
-            from backend.core.loop.tool_execution import MAX_SNAPSHOTS
-            if len(backups) > MAX_SNAPSHOTS:
-                for old in backups[:len(backups) - MAX_SNAPSHOTS]:
-                    try:
-                        old.unlink()
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-
-    # 清理临时文件（.gitgo/tmp/）
-    tmp_dir = ws / ".gitgo" / "tmp"
-    if tmp_dir.exists():
-        try:
-            import shutil
-            shutil.rmtree(str(tmp_dir), ignore_errors=True)
-        except OSError:
-            pass
 
 
 def run_daemon(
@@ -351,58 +117,14 @@ def run_daemon(
             "process_ids": _incomplete,
         })
 
-    # Tool executors — thin wrappers that delegate to SyncSession methods
-    def _exec_scan(args: dict) -> dict:
-        changed = args.get("files", [])
-        if changed:
-            session.step_scan_files(changed, hash_cache=hash_cache)
-        else:
-            session.step_scan(hash_cache=hash_cache)
-        session.step_load_commits()
-        return session.status_dict(semantic=True)
-
-    def _exec_status(args: dict) -> dict:
-        return session.status_dict(semantic=args.get("semantic", True))
-
-    def _exec_formalize(args: dict) -> dict:
-        indices = args.get("indices")
-        message = args.get("message")
-        if indices is not None:
-            session.selected_workspace = set(indices)
-        fc = session.step_create_formal_commit(message=message)
-        if fc:
-            return {"commit": f"[{fc.prefix}-{fc.number}]", "message": fc.message}
-        return {"error": "FORMALIZE_FAILED"}
-
-    # v0.35: Knowledge recall tools
-    def _exec_recall_grep(args: dict) -> dict:
-        from backend.core.knowledge.recall import recall_grep
-        return recall_grep(
-            query=args.get("query", ""),
-            project=project.name,
-            top_k=args.get("top_k", 10),
-            agent_context=args.get("agent_context"),
-            workspace=str(session.workspace_path),
-        )
-
-    def _exec_recall_semantic(args: dict) -> dict:
-        from backend.core.knowledge.recall import recall_semantic
-        return recall_semantic(
-            query=args.get("query", ""),
-            project=project.name,
-            top_k=args.get("top_k", 10),
-            agent_context=args.get("agent_context"),
-            workspace=str(session.workspace_path),
-        )
-
-    def _exec_recall_rag(args: dict) -> dict:
-        from backend.core.knowledge.recall import recall_rag
-        return recall_rag(
-            query=args.get("query", ""),
-            project=project.name,
-            agent_context=args.get("agent_context"),
-            workspace=str(session.workspace_path),
-        )
+    # Context bundle for executors + _handle_command — populated incrementally.
+    # executors only need apm/hash_cache at bind time; dispatcher/evq added later.
+    daemon_ctx = {
+        "apm": apm,
+        "hash_cache": hash_cache,
+        "llm": None,  # set via config or stdin command
+        "session_store": session_store,  # v0.45: session persistence
+    }
 
     # v0.38: AgentTool 定义 —— 替代裸 dict[str, Callable]
     _WRITE_TOOLS = {"formalize", "write", "edit", "push", "sync",
@@ -413,21 +135,21 @@ def run_daemon(
             name="scan",
             description="扫描项目工作区，检测文件变更和 git 状态。当需要了解项目当前状态、检查哪些文件被修改时使用。",
             parameters={"type": "object", "properties": {"files": {"type": "array", "items": {"type": "string"}, "description": "可选，指定要扫描的文件列表"}}, "required": []},
-            execute=_exec_scan,
+            execute=partial(_exec_scan, daemon_ctx, session, project),
             read_only=True,
         ),
         "status": AgentTool(
             name="status",
             description="获取工作区语义化状态摘要（文件变更、合同漂移、治理信号）。",
             parameters={"type": "object", "properties": {"semantic": {"type": "boolean", "description": "是否返回语义化摘要"}}, "required": []},
-            execute=_exec_status,
+            execute=partial(_exec_status, daemon_ctx, session, project),
             read_only=True,
         ),
         "formalize": AgentTool(
             name="formalize",
             description="基于选中的工作区文件创建正式的结构化提交（formal commit）。需要 indices 和 message 参数。",
             parameters={"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}}, "message": {"type": "string"}}, "required": ["message"]},
-            execute=_exec_formalize,
+            execute=partial(_exec_formalize, daemon_ctx, session, project),
             read_only=False,
             resources=["filesystem:*"],
         ),
@@ -435,126 +157,38 @@ def run_daemon(
             name="recall_grep",
             description="全文搜索知识库中的历史教训（lessons），按关键词匹配。用于查找相似问题的处理经验。",
             parameters={"type": "object", "properties": {"query": {"type": "string", "description": "搜索关键词"}, "top_k": {"type": "integer"}, "agent_context": {"type": "string"}}, "required": ["query"]},
-            execute=_exec_recall_grep,
+            execute=partial(_exec_recall_grep, daemon_ctx, session, project),
             read_only=True,
         ),
         "recall_semantic": AgentTool(
             name="recall_semantic",
             description="语义搜索知识库中的历史教训，按向量相似度匹配。",
             parameters={"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}, "agent_context": {"type": "string"}}, "required": ["query"]},
-            execute=_exec_recall_semantic,
+            execute=partial(_exec_recall_semantic, daemon_ctx, session, project),
             read_only=True,
         ),
         "recall_rag": AgentTool(
             name="recall_rag",
             description="RAG（检索增强生成）搜索知识库。",
             parameters={"type": "object", "properties": {"query": {"type": "string"}, "agent_context": {"type": "string"}}, "required": ["query"]},
-            execute=_exec_recall_rag,
+            execute=partial(_exec_recall_rag, daemon_ctx, session, project),
             read_only=True,
         ),
     }
-
-    # ── v0.36: Context Assembler 工具 ──
-    def _exec_assemble_context(args: dict) -> dict:
-        from backend.core.knowledge.recall import recall_grep
-        from backend.core.loop.signal_normalizer import SignalNormalizer
-        from backend.core.contract import load_function_graph, get_callers
-
-        task = args.get("task", "")
-        files = args.get("files", [])
-        ws = str(session.workspace_path)
-
-        # Phase 1: needed — PolicyEngine 最近一次 check
-        entries = HistoryManager.load()
-        policy = [e for e in entries[-20:]
-                  if e.operation == "policy_check_result"]
-        normalizer = SignalNormalizer()
-        signals = normalizer.normalize(
-            policy_results=policy[0].detail if policy else {},
-        )
-        needed = [{
-            "source": s.source,
-            "severity": s.severity.value,
-            "rule": s.rule,
-            "target_files": s.target_files,
-            "target_tools": s.target_tools,
-            "required_tools": s.required_tools,
-        } for s in signals
-            if any(f in s.target_files for f in files)]
-
-        # Phase 2: relevant — recall 检索
-        search_terms = " ".join(files) + " " + task
-        recalled = recall_grep(
-            search_terms, project.name,
-            workspace=str(session.workspace_path),
-        )
-        lessons = recalled.get("lessons", [])
-
-        # Phase 3: dependency — 函数级调用链
-        dependency = {}
-        try:
-            func_graph = load_function_graph(Path(ws))
-        except Exception:
-            func_graph = {}
-        for f in files:
-            callers = get_callers(Path(ws), f) if func_graph else []
-            dependency[f] = {"callers": callers[:10]}
-
-        # 预估 token
-        estimated = len(str(needed)) // 4 + len(str(lessons)) // 4
-
-        return {
-            "needed": needed,
-            "relevant": lessons[:10],
-            "dependency": dependency,
-            "transcript_tokens": estimated,
-            "context_utilization_ratio": round(estimated / 128000, 3),
-        }
-
-    def _exec_assemble_return_context(args: dict) -> dict:
-        process_id = args.get("process_id", "")
-        process = apm.get(process_id) if apm else None
-        if not process:
-            return {"error": "process not found"}
-
-        return _build_return_context(process)
-
-    # ── v0.36: decompose_task executor ──
-    def _exec_decompose_task(args: dict) -> dict:
-        """decompose_task 工具实现。
-
-        LLM 调用此工具建议拆分方案。Scheduler 进行 structural 验证。
-        """
-        from backend.core.loop.decomposition import suggest_split
-        task = args.get("task", "")
-        files = args.get("files", [])
-        suggestions = suggest_split(task, files)
-        return {
-            "suggested_splits": [
-                {
-                    "task_description": s.task_description,
-                    "target_files": s.target_files,
-                    "estimated_steps": s.estimated_steps,
-                }
-                for s in suggestions
-            ],
-            "total_suggestions": len(suggestions),
-            "note": "拆分建议需经 Scheduler structural 验证后才能执行。",
-        }
 
     tool_executors.update({
         "assemble_context": AgentTool(
             name="assemble_context",
             description="汇编上下文：从 policy signals + recall + dependency graph 三层收集相关上下文。需要 task 和 files 参数。",
             parameters={"type": "object", "properties": {"task": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}, "required": ["task"]},
-            execute=_exec_assemble_context,
+            execute=partial(_exec_assemble_context, daemon_ctx, session, project),
             read_only=True,
         ),
         "assemble_return_context": AgentTool(
             name="assemble_return_context",
             description="构建 B Agent 返回给 A Agent 的上下文转录。需要 process_id 参数。",
             parameters={"type": "object", "properties": {"process_id": {"type": "string"}}, "required": ["process_id"]},
-            execute=_exec_assemble_return_context,
+            execute=partial(_exec_assemble_return_context, daemon_ctx, session, project),
             read_only=True,
         ),
         "decompose_task": AgentTool(
@@ -573,7 +207,7 @@ def run_daemon(
                 },
                 "required": ["task", "files"],
             },
-            execute=_exec_decompose_task,
+            execute=partial(_exec_decompose_task, daemon_ctx, session, project),
             read_only=True,
         ),
     })
@@ -770,33 +404,6 @@ def run_daemon(
         ),
     })
 
-    def _build_return_context(process) -> dict:
-        """从 AgentProcess 构建 B→A 返回转录。"""
-        from backend.core.loop.transcript import TaskTranscriptBuilder
-        # 如果 process 有 transcript builder 实例，用它的
-        tb = getattr(process, '_transcript_builder', None)
-        if tb:
-            return tb.to_return_context()
-
-        # fallback: 从 session 提取
-        session = process.session
-        tools = []
-        if session:
-            for m in session.messages:
-                if m.get("message_type") == "tool_result":
-                    tn = m.get("_tool_name", "unknown")
-                    if tn not in tools:
-                        tools.append(tn)
-
-        return {
-            "task": process.task_description or "",
-            "status": process.status.value,
-            "steps": process.steps_used,
-            "tools": tools,
-            "lessons_triggered": [],
-            "governance_events": [],
-        }
-
     from backend.core.loop.gate import RingGate
     from backend.adapters.local_git_runner import LocalGitRunner
     _git_runner = LocalGitRunner(session.workspace_path)
@@ -806,18 +413,10 @@ def run_daemon(
         git_runner=_git_runner,
     )
 
-    # Event queue — must be created before daemon_ctx references it
+    # Event queue — created before wiring into daemon_ctx
     evq: queue.Queue = queue.Queue()
-
-    # Context bundle for _handle_command — avoids growing its parameter list
-    daemon_ctx = {
-        "apm": apm,
-        "dispatcher": dispatcher,
-        "evq": evq,
-        "hash_cache": hash_cache,
-        "llm": None,  # set via config or stdin command
-        "session_store": session_store,  # v0.45: session persistence
-    }
+    daemon_ctx["dispatcher"] = dispatcher
+    daemon_ctx["evq"] = evq
 
     _emit({
         "event": "daemon_started",
@@ -1170,601 +769,3 @@ def run_daemon(
         # v0.45: cleanup temp resources on shutdown
         _cleanup_resources(str(session.workspace_path))
         _emit({"event": "daemon_stopped", "project": project.name})
-
-
-def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
-                    daemon_ctx: dict = None,
-                    on_shutdown: callable = None) -> None:
-    """Dispatch a stdin command to the appropriate step method."""
-    cmd_name = cmd.get("cmd", "")
-    apm = daemon_ctx.get("apm") if daemon_ctx else None
-    dispatcher = daemon_ctx.get("dispatcher") if daemon_ctx else None
-    evq = daemon_ctx.get("evq") if daemon_ctx else None
-    llm_provider = daemon_ctx.get("llm") if daemon_ctx else None
-
-    # v0.44: 注入 request_id 到所有 command_result 事件，使 JS sendCommand 能匹配响应
-    request_id = cmd.get("request_id", "")
-    _emit_global = _emit
-
-    def _emit(ev: dict) -> None:
-        if ev.get("event") == "command_result" and request_id:
-            ev = dict(ev)
-            ev["request_id"] = request_id
-        _emit_global(ev)
-
-    if cmd_name == "shutdown":
-        _emit({"event": "shutdown_ack", "message": "Shutting down"})
-        if on_shutdown:
-            on_shutdown()
-        return
-
-    if cmd_name == "fork_agent":
-        if apm is None:
-            _emit({"event": "command_result", "cmd": "fork_agent",
-                   "error": "AgentProcessManager not available"})
-            return
-        role = cmd.get("role", "worker")
-        ring = RingLevel.RING_3 if cmd.get("ring", "3") != "0" else RingLevel.RING_0
-        tool_names = cmd.get("tools", [])
-        max_steps = cmd.get("max_steps", 50)
-        parent_id = cmd.get("parent_id")
-        context_snapshot = cmd.get("context_snapshot")
-        registry = ToolRegistry(tool_names)
-        try:
-            proc = apm.fork(parent_id=parent_id, role=role,
-                           tool_registry=registry, max_steps=max_steps,
-                           ring_level=ring, context_snapshot=context_snapshot)
-            _emit({"event": "command_result", "cmd": "fork_agent",
-                   "result": {"process_id": proc.process_id, "role": role,
-                              "ring": ring.value}})
-        except ValueError as e:
-            _emit({"event": "command_result", "cmd": "fork_agent",
-                   "error": str(e)})
-        return
-
-    if cmd_name == "dispatch_tool":
-        if dispatcher is None or apm is None:
-            _emit({"event": "command_result", "cmd": "dispatch_tool",
-                   "error": "ToolDispatcher or AgentProcessManager not available"})
-            return
-        process_id = cmd.get("process_id", "")
-        tool_name = cmd.get("tool", "")
-        tool_args = cmd.get("args", {})
-        process = apm.get(process_id)
-        if process is None:
-            _emit({"event": "command_result", "cmd": "dispatch_tool",
-                   "error": f"Process not found: {process_id}"})
-            return
-        result = dispatcher.dispatch(process, tool_name, tool_args)
-        _emit({"event": "command_result", "cmd": "dispatch_tool",
-               "result": {
-                   "allowed": result.allowed,
-                   "data": result.data,
-                   "error": result.error,
-                   "duration_ms": result.duration_ms,
-                   "steps_remaining": result.steps_remaining,
-                   "process_status": process.status.value,
-               }})
-        return
-
-    if cmd_name == "llm_configure":
-        base_url = cmd.get("base_url", "")
-        api_key = cmd.get("api_key", "")
-        model_id = cmd.get("model_id", "")
-        if not base_url or not api_key or not model_id:
-            _emit({"event": "command_result", "cmd": "llm_configure",
-                   "error": "base_url, api_key, model_id are all required"})
-            return
-        from backend.core.loop.llm import LLMProvider
-        daemon_ctx["llm"] = LLMProvider(base_url, api_key, model_id)
-        _emit({"event": "command_result", "cmd": "llm_configure",
-               "result": {"model": model_id, "base_url": base_url}})
-        return
-
-    if cmd_name == "llm_call":
-        if llm_provider is None:
-            _emit({"event": "command_result", "cmd": "llm_call",
-                   "error": "LLM not configured. Send llm_configure first."})
-            return
-        if evq is None:
-            _emit({"event": "command_result", "cmd": "llm_call",
-                   "error": "Event queue not available"})
-            return
-        messages = cmd.get("messages", [])
-        process_id = cmd.get("process_id", "")
-        if not messages:
-            _emit({"event": "command_result", "cmd": "llm_call",
-                   "error": "messages required"})
-            return
-        # Run LLM call in background thread to avoid blocking main loop
-        def _call_llm_thread():
-            try:
-                response = llm_provider.chat(messages)
-                evq.put({"event": "llm_response", "process_id": process_id,
-                         "response": response, "status": "success"})
-            except Exception as exc:
-                evq.put({"event": "llm_response", "process_id": process_id,
-                         "response": None, "status": "error",
-                         "error": str(exc)})
-        threading.Thread(target=_call_llm_thread, daemon=True,
-                        name=f"llm-{process_id[:8]}").start()
-        _emit({"event": "command_result", "cmd": "llm_call",
-               "result": {"status": "pending", "process_id": process_id}})
-        return
-
-    if cmd_name == "status":
-        raw = cmd.get("raw", False)
-        semantic_only = cmd.get("semantic_only", False)
-        if semantic_only:
-            d = session.status_dict(semantic=True)
-            _emit({"event": "command_result", "cmd": "status",
-                   "result": d.get("semantic", {})})
-        else:
-            _emit({"event": "command_result", "cmd": "status",
-                   "result": session.status_dict(semantic=not raw)})
-
-    elif cmd_name == "scan":
-        _emit({"event": "operation_started", "op": "scan"})
-        try:
-            session.step_scan(hash_cache=daemon_ctx.get("hash_cache"))
-            session.step_load_commits()
-            _emit({"event": "operation_complete", "op": "scan",
-                   "status": "success",
-                   "result": session.status_dict(semantic=True)})
-        except Exception as exc:
-            _emit({"event": "operation_complete", "op": "scan",
-                   "status": "failed", "error": str(exc)})
-
-    elif cmd_name == "formalize":
-        indices = cmd.get("indices")
-        message = cmd.get("message")
-        session.step_load_commits()
-        if indices is not None:
-            session.selected_workspace = set(indices)
-        fc = session.step_create_formal_commit(message=message)
-        if fc:
-            _emit({"event": "command_result", "cmd": "formalize",
-                   "result": {"commit": f"[{fc.prefix}-{fc.number}]",
-                              "message": fc.message}})
-        else:
-            _emit({"event": "command_result", "cmd": "formalize",
-                   "result": None, "error": "create_formal_commit failed"})
-
-    elif cmd_name == "sync":
-        _emit({"event": "operation_started", "op": "sync"})
-        ok = session.step_sync()
-        _emit({"event": "operation_complete", "op": "sync",
-               "status": "success" if ok else "failed"})
-
-    elif cmd_name == "push":
-        _emit({"event": "operation_started", "op": "push"})
-        ok, _ = session.step_push()
-        _emit({"event": "operation_complete", "op": "push",
-               "status": "success" if ok else "failed"})
-
-    elif cmd_name == "trial":
-        action = cmd.get("action", "list")
-        if action == "list":
-            result = [
-                {"index": i, "hash": c.hash, "message": c.message,
-                 "author": c.author, "date": c.date,
-                 "triage": c.triage.value}
-                for i, c in enumerate(session.incoming_changes)
-            ]
-            _emit({"event": "command_result", "cmd": "trial",
-                   "result": result})
-        elif action in ("accept", "promote", "discard"):
-            idx = cmd.get("index")
-            if idx is None:
-                _emit({"event": "command_result", "cmd": "trial",
-                       "error": "index required"})
-                return
-            ok = session.step_triage_incoming(idx, action)
-            _emit({"event": "command_result", "cmd": "trial",
-                   "result": "ok" if ok else "failed"})
-
-    elif cmd_name == "session":
-        action = cmd.get("action", "status")
-        if action == "save":
-            path = session.save_session()
-            _emit({"event": "command_result", "cmd": "session",
-                   "result": {"saved": str(path)}})
-        elif action == "status":
-            _emit({"event": "command_result", "cmd": "session",
-                   "result": session.status_dict(semantic=True)})
-        elif action == "resume":
-            loaded = SyncSession.load_session(project, ConfigManager.load())
-            _emit({"event": "command_result", "cmd": "session",
-                   "result": {"resumed": loaded is not None}})
-
-    elif cmd_name == "round_complete":
-        changed = _snapshot_workspace(session, project)
-
-        # ── v0.35 Phase 3: 回收 —— round_complete 时从上下文撤出知识 ──
-        try:
-            from backend.core.knowledge.models import (
-                classify_lesson_heat, get_sticky_lessons,
-            )
-            from backend.core.knowledge.lesson import LessonManager
-
-            ws = Path(session.workspace_path)
-            all_lessons = (
-                LessonManager.load_instance(ws, project.name)
-                + LessonManager.load_pending(ws, project.name)
-            )
-            sticky_ids = set(get_sticky_lessons(all_lessons))
-
-            # 遍历 A Agent session（如果存在），标记非 sticky 的 recall 结果
-            # 注意：此 worktree 版没有 ContextWindow；主动 prunes 留给未来
-            _emit({
-                "event": "recycle_check",
-                "total_lessons": len(all_lessons),
-                "sticky_count": len(sticky_ids),
-                "hot_lesson_ids": list(sticky_ids)[:5],
-            })
-        except Exception:
-            pass
-
-        _emit({"event": "command_result", "cmd": "round_complete",
-               "result": {"snapshot": changed is not None,
-                          "files": len(changed) if changed else 0}})
-
-    elif cmd_name == "reject":
-        reason = cmd.get("reason", "")
-        instruction = cmd.get("instruction", "")
-        from backend.core.history import HistoryManager
-        HistoryManager.add_operation(
-            project.name, "rejection", "recorded",
-            {"round": cmd.get("round", 0),
-             "reason": reason,
-             "instruction": instruction,
-             "timestamp": datetime.now().isoformat()},
-            correlation_id=session._correlation_id,
-        )
-        entries = HistoryManager.load()
-        project_entries = [e for e in entries if e.project_name == project.name]
-        rejections = [e for e in project_entries if e.operation == "rejection"]
-        if len(rejections) >= 3:
-            recent = project_entries[-20:]
-            last_rej_idx = max(
-                (i for i, e in enumerate(recent) if e.operation == "rejection"),
-                default=-1,
-            )
-            if last_rej_idx >= 0:
-                post_rej = [e for i, e in enumerate(recent) if i > last_rej_idx
-                            and e.operation == "policy_check_result"
-                            and e.status == "success"]
-                if post_rej:
-                    _harvest_from_rejection_chain(project.name, rejections, session)
-        _emit({"event": "command_result", "cmd": "reject",
-               "result": {"rejection_count": len(rejections)}})
-
-    elif cmd_name == "cache_stats":
-        hash_cache = daemon_ctx.get("hash_cache") if daemon_ctx else None
-        stats = hash_cache.stats() if hash_cache else {}
-        _emit({"event": "command_result", "cmd": "cache_stats",
-               "result": stats})
-
-    elif cmd_name == "loop_status":
-        processes = {}
-        if apm is not None:
-            for pid, proc in apm._processes.items():
-                processes[pid] = {
-                    "process_id": proc.process_id,
-                    "role": proc.role,
-                    "ring_level": proc.ring_level.value,
-                    "status": proc.status.value,
-                    "steps_used": proc.steps_used,
-                    "max_steps": proc.max_steps,
-                    "parent_id": proc.parent_id,
-                    "created_at": proc.created_at,
-                    "worktree_path": getattr(proc, "worktree_path", ""),
-                    "provider_id": getattr(proc, "provider_id", ""),
-                    "model_id": getattr(proc, "model_id", ""),
-                    "estimated_tokens": getattr(proc, "estimated_tokens", 0),
-                }
-        from backend.core.history import HistoryManager
-        entries = HistoryManager.load()
-        recent_tools = []
-        for e in entries:
-            if e.operation == "tool_executed" and e.project_name == project.name:
-                d = e.detail
-                recent_tools.append({
-                    "timestamp": e.timestamp,
-                    "process_id": d.get("process_id", ""),
-                    "tool_name": d.get("tool_name", ""),
-                    "allowed": d.get("allowed", False),
-                    "duration_ms": d.get("duration_ms", 0),
-                    "role": d.get("role", ""),
-                    "blocked_reason": d.get("blocked_reason", ""),
-                    "diff": d.get("diff", ""),
-                })
-        recent_tools = recent_tools[-20:]
-        _emit({"event": "command_result", "cmd": "loop_status",
-               "result": {
-                   "daemon_online": True,
-                   "processes": processes,
-                   "recent_tool_executed": recent_tools,
-                   "providers": [],
-               }})
-
-    elif cmd_name == "task":
-        # ── 原生 Task 命令 —— Agent 编排的单一入口 ──
-        # 整合了 MCP 层之前的 _resolve_llm_config / _ensure_agent / _chat_via_daemon 逻辑。
-        # MCP 工具变为薄适配器：只构建上下文 + 调用此命令。
-        action = cmd.get("action", "chat")
-
-        if action == "fork":
-            # 仅 fork Agent，不执行
-            if apm is None:
-                _emit({"event": "command_result", "cmd": "task",
-                       "error": "AgentProcessManager not available"})
-                return
-            role = cmd.get("role", "executor")
-            ring = RingLevel.RING_3 if str(cmd.get("ring_level", "3")) != "0" else RingLevel.RING_0
-            tool_names = cmd.get("tool_registry", [])
-            max_steps = cmd.get("max_steps", 50)
-            parent_id = cmd.get("parent_id")
-            context_snapshot = cmd.get("context_snapshot")
-            provider_id = cmd.get("provider_id", "")
-            model_id = cmd.get("model_id", "")
-            registry = ToolRegistry(tool_names)
-            try:
-                proc = apm.fork(
-                    parent_id=parent_id, role=role,
-                    tool_registry=registry, max_steps=max_steps,
-                    ring_level=ring, context_snapshot=context_snapshot,
-                    workspace_path=str(session.workspace_path),
-                    provider_id=provider_id, model_id=model_id,
-                )
-                _emit({"event": "command_result", "cmd": "task",
-                       "result": {"process_id": proc.process_id, "role": role,
-                                  "ring_level": ring.value}})
-            except ValueError as e:
-                _emit({"event": "command_result", "cmd": "task",
-                       "error": str(e)})
-            return
-
-        if action == "status":
-            # 查询所有 Agent 进程状态
-            processes = {}
-            if apm is not None:
-                for pid, proc in apm._processes.items():
-                    processes[pid] = {
-                        "process_id": proc.process_id,
-                        "role": proc.role,
-                        "ring_level": proc.ring_level.value,
-                        "status": proc.status.value,
-                        "steps_used": proc.steps_used,
-                        "max_steps": proc.max_steps,
-                        "parent_id": proc.parent_id,
-                        "created_at": proc.created_at,
-                        "worktree_path": getattr(proc, "worktree_path", ""),
-                        "provider_id": getattr(proc, "provider_id", ""),
-                        "model_id": getattr(proc, "model_id", ""),
-                        "estimated_tokens": getattr(proc, "estimated_tokens", 0),
-                    }
-            # v0.45: include recent_tool_executed from history for v4 dashboard
-            from backend.core.history import HistoryManager
-            entries = HistoryManager.load()
-            recent_tools = []
-            for e in entries:
-                if e.operation == "tool_executed" and e.project_name == project.name:
-                    d = e.detail
-                    recent_tools.append({
-                        "timestamp": e.timestamp,
-                        "process_id": d.get("process_id", ""),
-                        "tool_name": d.get("tool_name", ""),
-                        "allowed": d.get("allowed", False),
-                        "duration_ms": d.get("duration_ms", 0),
-                        "role": d.get("role", ""),
-                        "blocked_reason": d.get("blocked_reason", ""),
-                        "diff": d.get("diff", ""),
-                    })
-            recent_tools = recent_tools[-20:]
-            _emit({"event": "command_result", "cmd": "task",
-                   "result": {"daemon_online": True,
-                              "processes": processes,
-                              "recent_tool_executed": recent_tools,
-                              "providers": []}})
-            return
-
-        if action == "kill":
-            if apm is None:
-                _emit({"event": "command_result", "cmd": "task",
-                       "error": "AgentProcessManager not available"})
-                return
-            process_id = cmd.get("process_id", "")
-            apm.kill(process_id)
-            _emit({"event": "command_result", "cmd": "task",
-                   "result": {"killed": process_id}})
-            return
-
-        if action == "chat":
-            # ── chat: 完整 Agent 编排 ──
-            if apm is None or dispatcher is None or evq is None:
-                _emit({"event": "command_result", "cmd": "task",
-                       "error": "AgentProcessManager, ToolDispatcher, or event queue not available"})
-                return
-
-            instruction = cmd.get("instruction", "")
-            role = cmd.get("role", "executor")
-            ring = RingLevel.RING_3 if str(cmd.get("ring_level", "3")) != "0" else RingLevel.RING_0
-            max_steps = cmd.get("max_steps", 50)
-            context_snapshot = cmd.get("context_snapshot")
-            provider_id = cmd.get("provider_id", "")
-            model_id = cmd.get("model_id", "")
-            task_description = cmd.get("task_description", instruction[:200] if instruction else "")
-
-            # Resolve LLM config
-            llm = llm_provider
-            if llm is None:
-                cfg = _resolve_llm_config(str(session.workspace_path))
-                if cfg:
-                    from backend.core.loop.llm import LLMProvider
-                    llm = LLMProvider(cfg[0], cfg[1], cfg[2])
-            if llm is None:
-                _emit({"event": "command_result", "cmd": "task",
-                       "error": "LLM not configured. Set env vars or configure in Dashboard."})
-                return
-
-            # Build governance context if not provided (v0.43: fix G6 — use existing build_governance_brief)
-            if context_snapshot is None:
-                try:
-                    from backend.core.loop.context_builder import build_governance_brief
-                    context_snapshot = build_governance_brief(
-                        project.name, str(session.workspace_path),
-                    )
-                except Exception:
-                    context_snapshot = {}
-
-            # Inject daemon's latest governance signals into context
-            gov_signals = daemon_ctx.get("governance_signals")
-            if gov_signals and context_snapshot:
-                if "signals" not in context_snapshot:
-                    brief_parts = []
-                    for s in gov_signals:
-                        if s.severity.value in ("critical", "high"):
-                            brief_parts.append(
-                                f"[{s.severity.value.upper()}] {s.suggestion or s.rule}"
-                            )
-                    context_snapshot = {
-                        **context_snapshot,
-                        "signals": gov_signals,
-                        "brief": "; ".join(brief_parts[:5]) if brief_parts else "",
-                    }
-
-            # v0.43: Try Scheduler multi-agent path first
-            # Check if task should be decomposed across multiple B agents
-            target_files = cmd.get("target_files", [])
-            use_scheduler = cmd.get("multi_agent", False) and len(target_files) >= 2
-
-            if use_scheduler:
-                try:
-                    from backend.core.loop.scheduler import SlotScheduler
-                    from pathlib import Path
-                    ws = str(session.workspace_path)
-                    dep_graph = {}
-                    try:
-                        from backend.core.contract import load_function_graph
-                        dep_graph = load_function_graph(Path(ws))
-                    except Exception:
-                        pass
-                    scheduler = SlotScheduler()
-                    scheduler_result = scheduler.run(
-                        task_description=task_description,
-                        target_files=target_files,
-                        process=process if process is not None else None,
-                        session=None,  # Scheduler creates sessions per slot
-                        workspace_path=ws,
-                        llm_provider=llm,
-                        dep_graph=dep_graph,
-                    )
-                    _emit({"event": "command_result", "cmd": "task",
-                           "result": {
-                               "status": scheduler_result.get("status", ""),
-                               "total_slots": scheduler_result.get("total_slots", 0),
-                               "completed_slots": scheduler_result.get("completed_slots", 0),
-                           }})
-                    return
-                except Exception as e:
-                    _emit({"event": "scheduler_fallback", "reason": str(e)})
-                    # Fall through to single-B path
-
-            # Find or fork agent
-            process_id = cmd.get("process_id", "")
-            process = apm.get(process_id) if process_id else None
-            if process is None:
-                # Fork new agent
-                tool_names = cmd.get("tool_registry", [])
-                registry = ToolRegistry(tool_names)
-                try:
-                    process = apm.fork(
-                        parent_id=cmd.get("parent_id"),
-                        role=role, tool_registry=registry,
-                        max_steps=max_steps, ring_level=ring,
-                        context_snapshot=context_snapshot,
-                        workspace_path=str(session.workspace_path),
-                        provider_id=provider_id, model_id=model_id,
-                    )
-                except ValueError as e:
-                    _emit({"event": "command_result", "cmd": "task",
-                           "error": str(e)})
-                    return
-            else:
-                # Resume existing agent — update context
-                process.task_description = task_description
-                if context_snapshot:
-                    process.context_snapshot = context_snapshot
-
-            # Run agent_step in background thread
-            from backend.core.loop.executor import agent_step
-
-            # v0.45: backoff retry config for task thread crashes
-            _MAX_TASK_RETRIES = 3
-            _TASK_BASE_DELAY = 2.0
-            _MAX_RAPID_FAILURES = 5
-            _RAPID_WINDOW = 30.0
-            _task_failure_times: list[float] = []
-
-            def _run_task_thread():
-                # v0.44: on_stream_event 闭包 —— 流式事件即时入队
-                def _emit_stream_event(event):
-                    evq.put(event)
-
-                last_error = None
-                for attempt in range(_MAX_TASK_RETRIES + 1):
-                    try:
-                        result = agent_step(
-                            process, llm, instruction, dispatcher,
-                            workspace_path=str(session.workspace_path),
-                            on_stream_event=_emit_stream_event,
-                        )
-                        # v0.45: persist session checkpoint on success
-                        _save_session_checkpoint(daemon_ctx, process)
-                        evq.put({"event": "agent_complete",
-                                 "process_id": process.process_id,
-                                 "result": result})
-                        return
-                    except Exception as exc:
-                        last_error = exc
-                        # v0.45: rapid failure detection
-                        now = time.time()
-                        _task_failure_times.append(now)
-                        _task_failure_times[:] = [
-                            t for t in _task_failure_times
-                            if now - t < _RAPID_WINDOW
-                        ]
-                        if len(_task_failure_times) >= _MAX_RAPID_FAILURES:
-                            break  # too many rapid failures, give up
-
-                        if attempt < _MAX_TASK_RETRIES:
-                            delay = min(
-                                _TASK_BASE_DELAY * (2 ** attempt),
-                                30.0,
-                            )
-                            time.sleep(delay)
-                            # v0.45: kill lingering thread state before retry
-                            process.steps_used = max(0, process.steps_used - 1)
-
-                # All retries exhausted or rapid failure threshold hit
-                _save_session_checkpoint(daemon_ctx, process)
-                evq.put({"event": "agent_complete",
-                         "process_id": process.process_id,
-                         "error": f"task_crashed_after_{_MAX_TASK_RETRIES}_retries: {last_error}"})
-
-            threading.Thread(
-                target=_run_task_thread, daemon=True,
-                name=f"task-{process.process_id[:8]}",
-            ).start()
-            _emit({"event": "command_result", "cmd": "task",
-                   "result": {"status": "pending",
-                              "process_id": process.process_id}})
-            return
-
-        _emit({"event": "command_result", "cmd": "task",
-               "error": f"Unknown task action: {action}"})
-
-    else:
-        _emit({"event": "command_result", "cmd": cmd_name,
-               "error": f"Unknown command: {cmd_name}"})

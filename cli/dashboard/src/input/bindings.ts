@@ -1,6 +1,6 @@
 // src/input/bindings.ts — single source of truth for key chords.
 // Each chord maps a human-readable display label to the predicate that
-// recognizes it. Both key resolution (keymap.ts / overlayKeymaps.ts) and
+// recognizes it. Both key resolution (keymap.ts / input/overlays/) and
 // hint text (component footers) read from here, so a future /config rebind
 // menu only needs to change this one module.
 

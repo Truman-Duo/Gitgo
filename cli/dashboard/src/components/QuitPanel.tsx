@@ -2,7 +2,7 @@
 // Color-block selection: Save & Quit / Force Quit / Cancel
 import React, { memo, useState } from "react";
 import { Box, Text, useInput } from "@anthropic/ink";
-import { resolveQuitKey } from "../input/overlayKeymaps.js";
+import { resolveQuitKey } from "../input/overlays/quit.js";
 import { colors, useSelectionStyle } from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
 

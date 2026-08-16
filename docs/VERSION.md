@@ -64,6 +64,29 @@
 
 ---
 
+## 已知问题 — mock 污染生产 bundle
+
+**现象**：`bun run build` 产出的 `dist/cli.js` 内含 mock 数据本体 —— grep 到 `lesson-abc123def456` / `health-check-endpoint` / `/home/gitgo/ergo` / `proc-001` 等 mock 专属字符串。约 1300 行 mock 代码（数据 + `MockMcpClient` + `mockStream`）被打进生产 bundle。
+
+**根因**：`cli/dashboard/src/main.tsx:6` 静态 `import { MockMcpClient } from "./mock/MockMcpClient.js"`，`MockMcpClient` 再静态 import `mock/index.ts`（→ registry → 各领域数据）。`useMock`（`process.argv.includes("--mock")`）是**运行时**分支，非静态死代码，Bun 无法 tree-shake，mock 始终进 bundle。
+
+**影响**：非 `--mock` 运行时这些代码永不执行，但虚增 bundle 体积与加载/解析成本。
+
+**解决方案（待做，非本次范围）**：把 `MockMcpClient` 改为**动态 `import()`**，仅 `--mock` 时懒加载：
+
+```ts
+if (useMock) {
+  const { MockMcpClient } = await import("./mock/MockMcpClient.js");
+  client = new MockMcpClient() as unknown as McpClient;
+}
+```
+
+mock 会被 Bun 拆为独立 chunk，生产路径不加载。属「打包行为变更」，非「纯结构重构」，留待单独迭代。
+
+**日期**：2026-08-17 发现（Phase 5 mockData.ts 模块化时确认）
+
+---
+
 ## v0.35 (2026-07-16)
 
 **Knowledge System 三期 —— 收割/检索/注射/分离/回收 + Testing Infrastructure**

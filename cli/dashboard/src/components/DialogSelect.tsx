@@ -5,7 +5,7 @@
 import React, { memo, useState, useMemo } from "react";
 import { Box, Text, useInput } from "@anthropic/ink";
 import { useTextInput, applyTextOp } from "../hooks/useTextInput.js";
-import { resolveDialogSelectKey } from "../input/overlayKeymaps.js";
+import { resolveDialogSelectKey } from "../input/overlays/dialogSelect.js";
 import { colors, usePanelSize, separator, placeholderChar } from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
 

@@ -3,7 +3,7 @@
 import React, { memo, useState } from "react";
 import { Box, Text, useInput } from "@anthropic/ink";
 import type { McpClient } from "../mcp/client.js";
-import { resolveExportKey } from "../input/overlayKeymaps.js";
+import { resolveExportKey } from "../input/overlays/export.js";
 import { colors, useSelectionStyle } from "../theme/index.js";
 import { exportData } from "../mcp/tools.js";
 import { chordLabel } from "../input/bindings.js";
