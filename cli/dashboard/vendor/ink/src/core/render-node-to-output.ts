@@ -13,16 +13,8 @@ import {
   squashTextNodesToSegments,
 } from './squash-text-nodes.js'
 import type { Color } from './styles.js'
-import { isXtermJs } from './terminal.js'
 import { widestLine } from './widest-line.js'
 import wrapText from './wrap-text.js'
-
-// Matches detectXtermJsWheel() in ScrollKeybindingHandler.tsx — the curve
-// and drain must agree on terminal detection. TERM_PROGRAM check is the sync
-// fallback; isXtermJs() is the authoritative XTVERSION-probe result.
-function isXtermJsHost(): boolean {
-  return process.env.TERM_PROGRAM === 'vscode' || isXtermJs()
-}
 
 // Per-frame scratch: set when any node's yoga position/size differs from
 // its cached value, or a child was removed. Read by ink.tsx to decide
@@ -94,12 +86,14 @@ export type FollowScroll = {
   delta: number
   viewportTop: number
   viewportBottom: number
+  kind: 'follow' | 'manual'
+  layoutChanged: boolean
 }
-let followScroll: FollowScroll | null = null
+let followScroll: FollowScroll[] = []
 
-export function consumeFollowScroll(): FollowScroll | null {
+export function consumeFollowScroll(): FollowScroll[] {
   const f = followScroll
-  followScroll = null
+  followScroll = []
   return f
 }
 
@@ -109,54 +103,7 @@ export function consumeFollowScroll(): FollowScroll | null {
 // decelerates smoothly. Hard cap is innerHeight-1 so DECSTBM hint fires.
 const SCROLL_MIN_PER_FRAME = 4
 
-// ── xterm.js (VS Code) smooth drain ──
-// Low pending (≤5) drains ALL in one frame — slow wheel clicks should be
-// instant (click → visible jump → done), not micro-stutter 1-row frames.
-// Higher pending drains at a small fixed step so fast-scroll animation
-// stays smooth (no big jumps). Pending >MAX snaps excess.
-const SCROLL_INSTANT_THRESHOLD = 5 // ≤ this: drain all at once
-const SCROLL_HIGH_PENDING = 12 // threshold for HIGH step
-const SCROLL_STEP_MED = 2 // pending (INSTANT, HIGH): catch-up
-const SCROLL_STEP_HIGH = 3 // pending ≥ HIGH: fast flick
-const SCROLL_MAX_PENDING = 30 // snap excess beyond this
-
-// xterm.js adaptive drain. Returns rows applied; mutates pendingScrollDelta.
-function drainAdaptive(
-  node: DOMElement,
-  pending: number,
-  innerHeight: number,
-): number {
-  const sign = pending > 0 ? 1 : -1
-  let abs = Math.abs(pending)
-  let applied = 0
-  // Snap excess beyond animation window so big flicks don't coast.
-  if (abs > SCROLL_MAX_PENDING) {
-    applied += sign * (abs - SCROLL_MAX_PENDING)
-    abs = SCROLL_MAX_PENDING
-  }
-  // ≤5: drain all (slow click = instant). Above: small fixed step.
-  const step =
-    abs <= SCROLL_INSTANT_THRESHOLD
-      ? abs
-      : abs < SCROLL_HIGH_PENDING
-        ? SCROLL_STEP_MED
-        : SCROLL_STEP_HIGH
-  applied += sign * step
-  const rem = abs - step
-  // Cap total at innerHeight-1 so DECSTBM blit+shift fast path fires
-  // (matches drainProportional). Excess stays in pendingScrollDelta.
-  const cap = Math.max(1, innerHeight - 1)
-  const totalAbs = Math.abs(applied)
-  if (totalAbs > cap) {
-    const excess = totalAbs - cap
-    node.pendingScrollDelta = sign * (rem + excess)
-    return sign * cap
-  }
-  node.pendingScrollDelta = rem > 0 ? sign * rem : undefined
-  return applied
-}
-
-// Native proportional drain. step = max(MIN, floor(abs*3/4)), capped at
+// Proportional drain. step = max(MIN, floor(abs*3/4)), capped at
 // innerHeight-1 so DECSTBM + blit+shift fast path fire.
 function drainProportional(
   node: DOMElement,
@@ -734,13 +681,20 @@ function renderNodeToOutput(
         // → firstVisible wrong. Also: SCROLL_MIN_PER_FRAME=4 with snap-at-1
         // ping-ponged forever at delta=2. Smooth needs drain-end notify
         // plumbing; shipping instant first. stickyScroll overrides.
-        if (node.scrollAnchor) {
-          const anchorTop = node.scrollAnchor.el.yogaNode?.getComputedTop()
-          if (anchorTop != null) {
-            node.scrollTop = anchorTop + node.scrollAnchor.offset
+        const semanticAnchor = node.resizeScrollAnchor ?? node.scrollAnchor
+        if (semanticAnchor) {
+          let anchorTop = 0
+          let anchorNode: DOMElement | undefined = semanticAnchor.el
+          while (anchorNode && anchorNode !== content) {
+            anchorTop += anchorNode.yogaNode?.getComputedTop() ?? 0
+            anchorNode = anchorNode.parentNode
+          }
+          if (anchorNode === content) {
+            node.scrollTop = anchorTop + semanticAnchor.offset
             node.pendingScrollDelta = undefined
           }
           node.scrollAnchor = undefined
+          node.resizeScrollAnchor = undefined
         }
         // At-bottom follow. Positional: if scrollTop was at (or past) the
         // previous max, pin to the new max. Scroll away → stop following;
@@ -763,7 +717,7 @@ function renderNodeToOutput(
         // because the user was at bottom.
         const grew = scrollHeight >= prevScrollHeight
         const atBottom =
-          sticky || (grew && scrollTopBeforeFollow >= prevMaxScroll)
+          !semanticAnchor && (sticky || (grew && scrollTopBeforeFollow >= prevMaxScroll))
         if (atBottom && (node.pendingScrollDelta ?? 0) >= 0) {
           node.scrollTop = maxScroll
           node.pendingScrollDelta = undefined
@@ -785,21 +739,10 @@ function renderNodeToOutput(
           }
         }
         const followDelta = (node.scrollTop ?? 0) - scrollTopBeforeFollow
-        if (followDelta > 0) {
-          const vpTop = node.scrollViewportTop ?? 0
-          followScroll = {
-            delta: followDelta,
-            viewportTop: vpTop,
-            viewportBottom: vpTop + innerHeight - 1,
-          }
-        }
-        // Drain pendingScrollDelta. Native terminals (proportional burst
-        // events) use proportional drain; xterm.js (VS Code, sparse events +
-        // app-side accel curve) uses adaptive small-step drain. isXtermJs()
-        // depends on the async XTVERSION probe, but by the time this runs
-        // (pendingScrollDelta is only set by wheel events, >>50ms after
-        // startup) the probe has resolved — same timing guarantee the
-        // wheel-accel curve relies on.
+        // Drain pendingScrollDelta proportionally on every terminal. The input
+        // layer already normalizes xterm.js wheel bursts; a second fixed-step
+        // animation here created a visible backlog and made the dashboard feel
+        // detached from the wheel. Small movements still complete in one frame.
         let cur = node.scrollTop ?? 0
         const pending = node.pendingScrollDelta
         const cMin = node.scrollClampMin
@@ -822,9 +765,7 @@ function renderNodeToOutput(
             haveClamp &&
             ((pending < 0 && cur < cMin) || (pending > 0 && cur > cMax))
           const eff = pastClamp ? Math.min(4, innerHeight >> 3) : innerHeight
-          cur += isXtermJsHost()
-            ? drainAdaptive(node, pending, eff)
-            : drainProportional(node, pending, eff)
+          cur += drainProportional(node, pending, eff)
         } else if (pending === 0) {
           // Opposite scrollBy calls cancelled to zero — clear so we don't
           // schedule an infinite loop of no-op drain frames.
@@ -848,6 +789,24 @@ function renderNodeToOutput(
         if (scrollTop !== cur) node.pendingScrollDelta = undefined
         if (node.pendingScrollDelta !== undefined) scrollDrainNode = node
         scrollTop = clamped
+
+        // Record the applied paint delta, including manual wheel/PageUp/Down.
+        // Requested deltas can be drained over several frames or clamped at an
+        // edge, so translating selection in input handlers is not correct.
+        const vpTop = node.scrollViewportTop ?? 0
+        const previousPaint = node.renderedScrollTop
+        if (previousPaint !== undefined) {
+          const delta = scrollTop - previousPaint
+          const layoutChanged = node.renderedViewportTop !== vpTop || node.renderedViewportHeight !== innerHeight
+          if (delta || layoutChanged) followScroll.push({
+            delta, viewportTop: node.renderedViewportTop ?? vpTop,
+            viewportBottom: (node.renderedViewportTop ?? vpTop) + (node.renderedViewportHeight ?? innerHeight) - 1,
+            kind: followDelta > 0 ? 'follow' : 'manual', layoutChanged,
+          })
+        }
+        node.renderedScrollTop = scrollTop
+        node.renderedViewportTop = vpTop
+        node.renderedViewportHeight = innerHeight
 
         if (content && contentYoga) {
           // Compute content wrapper's absolute render position with scroll

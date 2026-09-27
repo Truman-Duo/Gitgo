@@ -1174,6 +1174,7 @@ export function diff(
       removed ? { ...removed } : undefined,
       added ? { ...added } : undefined,
     ])
+    return undefined
   })
   return output
 }

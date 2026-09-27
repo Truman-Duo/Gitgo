@@ -22,6 +22,7 @@ export class DaemonClient {
     string,
     { onChunk: (event: StreamEvent) => void }
   >();
+  private agentSessions = new Map<string, string>();
   private buffer = "";
   private _ready = false;
   private _startedEvent = false;
@@ -52,8 +53,14 @@ export class DaemonClient {
     ].join("; ");
 
     this.proc = spawn(this.pythonPath, ["-u", "-c", pythonCode], {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       cwd: gitgoDir,
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+      },
     });
 
     this._running = true;
@@ -140,19 +147,41 @@ export class DaemonClient {
   }
 
   async sendTask(cmd: Record<string, any>, timeout = 300): Promise<any> {
-    const ack = await this.sendCommand(cmd);
-    const processId = ack?.process_id;
-    if (!processId) {
-      throw new Error(`task did not return process_id: ${JSON.stringify(ack)}`);
-    }
-
+    const taskId = cmd.task_id || `task_${Date.now()}_${++this.requestId}`;
+    const command = { ...cmd, task_id: taskId };
     return new Promise((resolve, reject) => {
-      this.agentPending.set(processId, { resolve, reject });
+      let acknowledged = false;
+      let completion: any = undefined;
+      let settled = false;
+
+      const succeed = (event: any) => {
+        completion = event;
+        if (acknowledged && !settled) {
+          settled = true;
+          resolve(event);
+        }
+      };
+      const fail = (error: Error) => {
+        if (!settled) {
+          settled = true;
+          this.agentPending.delete(taskId);
+          reject(error);
+        }
+      };
+
+      this.agentPending.set(taskId, { resolve: succeed, reject: fail });
+      this.sendCommand(command).then((ack) => {
+        if (!ack?.process_id || ack?.task_id !== taskId) {
+          fail(new Error(`invalid task acknowledgement: ${JSON.stringify(ack)}`));
+          return;
+        }
+        acknowledged = true;
+        if (completion !== undefined) succeed(completion);
+      }).catch((error) => fail(error instanceof Error ? error : new Error(String(error))));
 
       setTimeout(() => {
-        if (this.agentPending.has(processId)) {
-          this.agentPending.delete(processId);
-          reject(new Error(`Agent task ${processId} timed out`));
+        if (!settled) {
+          fail(new Error(`Agent task ${taskId} timed out`));
         }
       }, timeout * 1000);
     });
@@ -163,29 +192,52 @@ export class DaemonClient {
     cmd: Record<string, any>,
     callbacks: {
       onChunk: (event: StreamEvent) => void;
+      onAcknowledged?: (ack: any) => void;
       onComplete: (result: any) => void;
       onError: (error: Error) => void;
     },
     timeout = 300,
   ): Promise<void> {
-    const ack = await this.sendCommand(cmd);
-    const pid = ack?.process_id;
-    if (!pid) throw new Error("task did not return process_id");
+    const taskId = cmd.task_id || `task_${Date.now()}_${++this.requestId}`;
+    const command = { ...cmd, task_id: taskId };
+    let acknowledged = false;
+    let completion: any = undefined;
+    let settled = false;
 
-    this._streamCallbacks.set(pid, { onChunk: callbacks.onChunk });
-    this.agentPending.set(pid, {
-      resolve: (event: any) => {
-        this._streamCallbacks.delete(pid);
-        callbacks.onComplete(event);
-      },
-      reject: callbacks.onError,
-    });
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      this.agentPending.delete(taskId);
+      this._streamCallbacks.delete(taskId);
+      callbacks.onError(error);
+    };
+    const complete = (event: any) => {
+      completion = event;
+      if (!acknowledged || settled) return;
+      settled = true;
+      this._streamCallbacks.delete(taskId);
+      callbacks.onComplete(event);
+    };
+
+    this._streamCallbacks.set(taskId, { onChunk: callbacks.onChunk });
+    this.agentPending.set(taskId, { resolve: complete, reject: fail });
+    try {
+      const ack = await this.sendCommand(command);
+      if (!ack?.process_id || ack?.task_id !== taskId) {
+        fail(new Error(`invalid task acknowledgement: ${JSON.stringify(ack)}`));
+        return;
+      }
+      acknowledged = true;
+      callbacks.onAcknowledged?.(ack);
+      if (completion !== undefined) complete(completion);
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
 
     setTimeout(() => {
-      if (this.agentPending.has(pid)) {
-        this.agentPending.delete(pid);
-        this._streamCallbacks.delete(pid);
-        callbacks.onError(new Error(`Agent task ${pid} timed out`));
+      if (!settled) {
+        fail(new Error(`Agent task ${taskId} timed out`));
       }
     }, timeout * 1000);
   }
@@ -200,23 +252,52 @@ export class DaemonClient {
       }
 
       case "gitgo_agent_chat": {
-        const r = await this.sendTask({
+        const sessionKey = String(args.project || this.projectName);
+        const sessionId = this.agentSessions.get(sessionKey);
+        const command: Record<string, any> = {
           cmd: "task", action: "chat",
           instruction: args.message || "",
-          role: "executor",
-          ring_level: 3,
+          role: "supervisor",
+          actor_kind: "supervisor",
+          // Public chat starts with the stable supervisor tool surface. The
+          // Host promotes task semantics from committed workflow receipts,
+          // never from wording in the user's message.
+          capability_profile_id: "supervisor.control",
+          task_kind: "answer",
           max_steps: 50,
           task_description: (args.message || "").slice(0, 200),
-        }, args.timeout || 300);
+        };
+        if (sessionId) command.session_id = sessionId;
+        let r: any;
+        try {
+          r = await this.sendTask(command, args.timeout || 300);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!sessionId || !message.includes("Session not found:")) throw error;
+          // A daemon restart invalidates its in-memory session table. The
+          // rejected command has not executed, so one fresh-session retry is
+          // safe and prevents a stale client handle from failing forever.
+          this.agentSessions.delete(sessionKey);
+          delete command.session_id;
+          r = await this.sendTask(command, args.timeout || 300);
+        }
 
-        const resp = r?.result?.response || "";
+        if (r?.session_id) {
+          this.agentSessions.set(sessionKey, String(r.session_id));
+        }
+
+        const outcome = r?.outcome;
+        if (!outcome) throw new Error("agent_complete missing TaskOutcome");
         return {
           project: args.project,
-          process_id: r?.process_id || "",
-          response: resp || "(no reply)",
-          status: r?.result?.status || "",
-          steps_used: r?.result?.steps_used || 0,
-          llm_used: true,
+          task_id: outcome.task_id,
+          process_id: outcome.process_id,
+          response: outcome.response || "",
+          status: outcome.status,
+          error: outcome.error,
+          steps_used: outcome.steps_used || 0,
+          llm_used: Boolean(outcome.llm_used),
+          outcome,
         };
       }
 
@@ -277,25 +358,37 @@ export class DaemonClient {
     // v0.44: streaming events — route to per-process callback
     if (
       type === "text_delta" ||
+      type === "reasoning_delta" ||
       type === "toolcall_start" ||
       type === "toolcall_delta" ||
       type === "tool_progress" ||
-      type === "stream_recovery"
+      type === "tool_result" ||
+      type === "stream_recovery" ||
+      type === "provider_request_started" ||
+      type === "provider_response_completed" ||
+      type === "provider_usage" ||
+      type === "governance_snapshot" ||
+      type === "context_window_action" ||
+      type === "context_compaction_completed" ||
+      type === "completion_gate" ||
+      type === "agent_started" ||
+      type === "agent_terminal" ||
+      type === "task_bundle_delegated" ||
+      type === "toolcall_done"
     ) {
-      const pid = event.process_id;
-      const cb = pid ? this._streamCallbacks.get(pid) : undefined;
+      const taskId = event.task_id || event.process_id;
+      const cb = taskId ? this._streamCallbacks.get(taskId) : undefined;
       if (cb) cb.onChunk(event as StreamEvent);
       return;
     }
 
     if (type === "agent_complete") {
-      const pid = event.process_id;
+      const taskId = event.task_id || event.process_id;
       // Clean up streaming callback
-      if (pid) this._streamCallbacks.delete(pid);
-      if (pid && this.agentPending.has(pid)) {
-        const { resolve, reject } = this.agentPending.get(pid)!;
-        this.agentPending.delete(pid);
-        event.error ? reject(new Error(event.error)) : resolve(event);
+      if (taskId && this.agentPending.has(taskId)) {
+        const { resolve } = this.agentPending.get(taskId)!;
+        this.agentPending.delete(taskId);
+        resolve(event);
       }
       return;
     }

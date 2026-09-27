@@ -216,6 +216,12 @@ export { useTerminalViewport } from './hooks/use-terminal-viewport.js'
 export { useSearchHighlight } from './hooks/use-search-highlight.js'
 export { useDeclaredCursor } from './hooks/use-declared-cursor.js'
 export {
+  useVirtualScroll,
+  calculateVirtualWindow,
+  type VirtualWindow,
+  type VirtualScrollResult,
+} from './hooks/use-virtual-scroll.js'
+export {
   TerminalWriteProvider,
   useTerminalNotification,
   type TerminalNotification,

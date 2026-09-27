@@ -16,6 +16,7 @@ import * as dom from './dom.js';
 import { KeyboardEvent } from './events/keyboard-event.js';
 import { FocusManager } from './focus.js';
 import { emptyFrame, type Frame, type FrameEvent } from './frame.js';
+import { type Rectangle, unionRect } from './layout/geometry.js';
 import { dispatchClick, dispatchHover } from './hit-test.js';
 import instances from './instances.js';
 import { LogUpdate } from './log-update.js';
@@ -55,6 +56,7 @@ import {
   findPlainTextUrlAt,
   getSelectedText,
   hasSelection,
+  selectionBounds,
   moveFocus,
   type SelectionState,
   selectLineAt,
@@ -62,6 +64,7 @@ import {
   shiftAnchor,
   shiftSelection,
   shiftSelectionForFollow,
+  trackViewportScroll,
   startSelection,
   updateSelection,
 } from './selection.js';
@@ -174,6 +177,7 @@ export default class Ink {
     live: number;
   } = { ms: 0, visited: 0, measured: 0, cacheHits: 0, live: 0 };
   private altScreenParkPatch: Readonly<{ type: 'stdout'; content: string }>;
+  private selectionRenderTimer: ReturnType<typeof setTimeout> | null = null;
   // Text selection state (alt-screen only). Owned here so the overlay
   // pass in onRender can read it and App.tsx can update it from mouse
   // events. Public so instances.get() callers can access.
@@ -214,6 +218,11 @@ export default class Ink {
   // one full-render frame; steady-state frames after clear it and regain
   // the blit + narrow-damage fast path.
   private prevFrameContaminated = false;
+  // Selection mutates the rendered buffer after normal damage tracking. Keep
+  // the previous visible row band so moving/clearing a selection repaints only
+  // the affected rows rather than invalidating the entire terminal viewport.
+  private previousSelectionDamage: Rectangle | null = null;
+  private previousHighlightActive = false;
   // Set by handleResize: prepend ERASE_SCREEN to the next onRender's patches
   // INSIDE the BSU/ESU block so clear+paint is atomic. Writing ERASE_SCREEN
   // synchronously in handleResize would leave the screen blank for the ~80ms
@@ -402,6 +411,7 @@ export default class Ink {
     // settling). Same-dimension events are no-ops; skip to avoid redundant
     // frame resets and renders.
     if (cols === this.terminalColumns && rows === this.terminalRows) return;
+    this.captureResizeScrollAnchors(this.rootNode);
     this.terminalColumns = cols;
     this.terminalRows = rows;
     this.altScreenParkPatch = makeAltScreenParkPatch(this.terminalRows);
@@ -433,6 +443,45 @@ export default class Ink {
       this.render(this.currentNode);
     }
   };
+
+  /** Preserve a visible semantic child across terminal text reflow. */
+  private captureResizeScrollAnchors(node: dom.DOMElement): void {
+    if (node.scrollViewportHeight !== undefined) {
+      const sticky = node.stickyScroll ?? Boolean(node.attributes['stickyScroll']);
+      if (!sticky) {
+        const content = node.childNodes.find(child =>
+          child.nodeName !== '#text' && Boolean((child as dom.DOMElement).yogaNode),
+        ) as dom.DOMElement | undefined;
+        const scrollTop = node.renderedScrollTop ?? node.scrollTop ?? 0;
+        const findVisible = (
+          parent: dom.DOMElement, parentTop: number,
+        ): {el: dom.DOMElement; top: number} | undefined => {
+          for (const raw of parent.childNodes) {
+            if (raw.nodeName === '#text') continue;
+            const child = raw as dom.DOMElement;
+            if (!child.yogaNode) continue;
+            const top = parentTop + child.yogaNode.getComputedTop();
+            const height = child.yogaNode.getComputedHeight();
+            if (top + height <= scrollTop) continue;
+            if (top > scrollTop) return {el: child, top};
+            // Prefer the deepest mounted block crossing the viewport. This
+            // normally resolves to one message/tool/diff row rather than the
+            // single wrapper containing the entire conversation.
+            return findVisible(child, top) ?? {el: child, top};
+          }
+          return undefined;
+        };
+        const anchor = content ? findVisible(content, 0) : undefined;
+        if (anchor) {
+          node.resizeScrollAnchor = {el: anchor.el, offset: scrollTop - anchor.top};
+          node.pendingScrollDelta = undefined;
+        }
+      }
+    }
+    for (const child of node.childNodes) {
+      if (child.nodeName !== '#text') this.captureResizeScrollAnchors(child as dom.DOMElement);
+    }
+  }
 
   resolveExitPromise: () => void = () => {};
   rejectExitPromise: (reason?: Error) => void = () => {};
@@ -536,69 +585,11 @@ export default class Ink {
     });
     const rendererMs = performance.now() - renderStart;
 
-    // Sticky/auto-follow scrolled the ScrollBox this frame. Translate the
-    // selection by the same delta so the highlight stays anchored to the
-    // TEXT (native terminal behavior — the selection walks up the screen
-    // as content scrolls, eventually clipping at the top). frontFrame
-    // still holds the PREVIOUS frame's screen (swap is at ~500 below), so
-    // captureScrolledRows reads the rows that are about to scroll out
-    // before they're overwritten — the text stays copyable until the
-    // selection scrolls entirely off. During drag, focus tracks the mouse
-    // (screen-local) so only anchor shifts — selection grows toward the
-    // mouse as the anchor walks up. After release, both ends are text-
-    // anchored and move as a block.
-    const follow = consumeFollowScroll();
-    if (
-      follow &&
-      this.selection.anchor &&
-      // Only translate if the selection is ON scrollbox content. Selections
-      // in the footer/prompt/StickyPromptHeader are on static text — the
-      // scroll doesn't move what's under them. Without this guard, a
-      // footer selection would be shifted by -delta then clamped to
-      // viewportBottom, teleporting it into the scrollbox. Mirror the
-      // bounds check the deleted check() in ScrollKeybindingHandler had.
-      this.selection.anchor.row >= follow.viewportTop &&
-      this.selection.anchor.row <= follow.viewportBottom
-    ) {
-      const { delta, viewportTop, viewportBottom } = follow;
-      // captureScrolledRows and shift* are a pair: capture grabs rows about
-      // to scroll off, shift moves the selection endpoint so the same rows
-      // won't intersect again next frame. Capturing without shifting leaves
-      // the endpoint in place, so the SAME viewport rows re-intersect every
-      // frame and scrolledOffAbove grows without bound — getSelectedText
-      // then returns ever-growing text on each re-copy. Keep capture inside
-      // each shift branch so the pairing can't be broken by a new guard.
-      if (this.selection.isDragging) {
-        if (hasSelection(this.selection)) {
-          captureScrolledRows(this.selection, this.frontFrame.screen, viewportTop, viewportTop + delta - 1, 'above');
-        }
-        shiftAnchor(this.selection, -delta, viewportTop, viewportBottom);
-      } else if (
-        // Flag-3 guard: the anchor check above only proves ONE endpoint is
-        // on scrollbox content. A drag from row 3 (scrollbox) into the
-        // footer at row 6, then release, leaves focus outside the viewport
-        // — shiftSelectionForFollow would clamp it to viewportBottom,
-        // teleporting the highlight from static footer into the scrollbox.
-        // Symmetric check: require BOTH ends inside to translate. A
-        // straddling selection falls through to NEITHER shift NOR capture:
-        // the footer endpoint pins the selection, text scrolls away under
-        // the highlight, and getSelectedText reads the CURRENT screen
-        // contents — no accumulation. Dragging branch doesn't need this:
-        // shiftAnchor ignores focus, and the anchor DOES shift (so capture
-        // is correct there even when focus is in the footer).
-        !this.selection.focus ||
-        (this.selection.focus.row >= viewportTop && this.selection.focus.row <= viewportBottom)
-      ) {
-        if (hasSelection(this.selection)) {
-          captureScrolledRows(this.selection, this.frontFrame.screen, viewportTop, viewportTop + delta - 1, 'above');
-        }
-        const cleared = shiftSelectionForFollow(this.selection, -delta, viewportTop, viewportBottom);
-        // Auto-clear (both ends overshot minRow) must notify React-land
-        // so useHasSelection re-renders and the footer copy/escape hint
-        // disappears. notifySelectionChange() would recurse into onRender;
-        // fire the listeners directly — they schedule a React update for
-        // LATER, they don't re-enter this frame.
-        if (cleared) for (const cb of this.selectionListeners) cb();
+    // One post-paint path for manual scrolling and streaming follow. Read
+    // outgoing rows from the previous frame, before swapping screen buffers.
+    for (const movement of consumeFollowScroll()) {
+      if (trackViewportScroll(this.selection, this.frontFrame.screen, movement)) {
+        for (const cb of this.selectionListeners) cb();
       }
     }
 
@@ -617,10 +608,9 @@ export default class Ink {
     // stream into fixed-height box) don't shift layout, so normal damage
     // bounds are correct and diffEach only compares the damaged region.
     //
-    // Selection also requires full damage: overlay writes via setCellStyleId
-    // which doesn't track damage, and prev-frame overlay cells need to be
-    // compared when selection moves/clears. prevFrameContaminated covers
-    // the frame-after-selection-clears case.
+    // Selection overlays write outside normal node damage tracking. Their
+    // current and previous row bands are merged below; search highlights keep
+    // the conservative full-frame path because their matches are disjoint.
     let selActive = false;
     let hlActive = false;
     if (this.altScreenActive) {
@@ -647,19 +637,51 @@ export default class Ink {
       }
     }
 
+    const bounds = selActive ? selectionBounds(this.selection) : null;
+    const selectionDamage: Rectangle | null = bounds
+      ? bounds.start.row === bounds.end.row
+        ? {
+            x: Math.max(0, bounds.start.col),
+            y: Math.max(0, bounds.start.row),
+            width: Math.max(1, bounds.end.col - bounds.start.col + 1),
+            height: 1,
+          }
+        : {
+            x: 0,
+            y: Math.max(0, bounds.start.row),
+            width: frame.screen.width,
+            height: Math.max(1, bounds.end.row - bounds.start.row + 1),
+          }
+      : null;
+
     // Full-damage backstop: applies on BOTH alt-screen and main-screen.
     // Layout shifts (spinner appears, status line resizes) can leave stale
     // cells at sibling boundaries that per-node damage tracking misses.
-    // Selection/highlight overlays write via setCellStyleId which doesn't
-    // track damage. prevFrameContaminated covers the cleanup frame.
-    if (didLayoutShift() || selActive || hlActive || this.prevFrameContaminated) {
+    // Search highlights may touch disjoint cells across the viewport, so their
+    // active and cleanup frames remain full damage. Selection uses the bounded
+    // union below. Other contamination (resize/forceRedraw) stays conservative.
+    if (
+      didLayoutShift() || hlActive || this.previousHighlightActive ||
+      (this.prevFrameContaminated && !this.previousSelectionDamage)
+    ) {
       frame.screen.damage = {
         x: 0,
         y: 0,
         width: frame.screen.width,
         height: frame.screen.height,
       };
+    } else {
+      const selectionUnion = selectionDamage && this.previousSelectionDamage
+        ? unionRect(selectionDamage, this.previousSelectionDamage)
+        : selectionDamage ?? this.previousSelectionDamage;
+      if (selectionUnion) {
+        frame.screen.damage = frame.screen.damage
+          ? unionRect(frame.screen.damage, selectionUnion)
+          : selectionUnion;
+      }
     }
+    this.previousSelectionDamage = selectionDamage;
+    this.previousHighlightActive = hlActive;
 
     // Alt-screen: anchor the physical cursor to (0,0) before every diff.
     // All cursor moves in log-update are RELATIVE to prev.cursor; if tmux
@@ -1350,9 +1372,27 @@ export default class Ink {
     return () => this.selectionListeners.delete(cb);
   }
 
-  private notifySelectionChange(): void {
-    this.onRender();
-    for (const cb of this.selectionListeners) cb();
+  private notifySelectionChange(coalesce = false): void {
+    if (!coalesce) {
+      if (this.selectionRenderTimer) {
+        clearTimeout(this.selectionRenderTimer);
+        this.selectionRenderTimer = null;
+      }
+      this.onRender();
+      for (const cb of this.selectionListeners) cb();
+      return;
+    }
+    // Mouse motion can report hundreds of individual terminal cells per
+    // second.  Paint at most once per display frame while retaining the most
+    // recent focus coordinate; keyboard/click/copy notifications stay
+    // immediate through the branch above.
+    if (this.selectionRenderTimer) return;
+    this.selectionRenderTimer = setTimeout(() => {
+      this.selectionRenderTimer = null;
+      if (this.isUnmounted) return;
+      this.onRender();
+      for (const cb of this.selectionListeners) cb();
+    }, FRAME_INTERVAL_MS);
   }
 
   /**
@@ -1461,7 +1501,7 @@ export default class Ink {
     } else {
       updateSelection(sel, col, row);
     }
-    this.notifySelectionChange();
+    this.notifySelectionChange(true);
   }
 
   // Methods to properly suspend stdin for external editor usage

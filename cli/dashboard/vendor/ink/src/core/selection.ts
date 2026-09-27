@@ -16,6 +16,34 @@ import { CellWidth, cellAt, cellAtIndex, setCellStyleId } from './screen.js'
 
 type Point = { col: number; row: number }
 
+/** Apply one already-painted viewport movement to a content-anchored selection.
+ * Reads the previous screen before the frame swap. No input/prediction path may
+ * also shift these endpoints, or scroll will be counted twice.
+ */
+export function trackViewportScroll(s: SelectionState, screen: Screen, movement: {
+  delta: number; viewportTop: number; viewportBottom: number;
+  kind: 'follow' | 'manual'; layoutChanged: boolean;
+}): boolean {
+  const {delta, viewportTop: top, viewportBottom: bottom} = movement
+  if (!s.anchor || s.anchor.row < top || s.anchor.row > bottom) return false
+  if (movement.layoutChanged || Math.abs(delta) > bottom - top + 1) {
+    // A resized/reflowed viewport no longer maps rows to the same content.
+    // Clear rather than silently copying unrelated replacement text.
+    clearSelection(s)
+    return true
+  }
+  if (!delta || (!s.isDragging && s.focus && (s.focus.row < top || s.focus.row > bottom))) return false
+  const hadSelection = hasSelection(s)
+  if (hadSelection) {
+    if (delta > 0) captureScrolledRows(s, screen, top, Math.min(bottom, top + delta - 1), 'above')
+    else captureScrolledRows(s, screen, Math.max(top, bottom + delta + 1), bottom, 'below')
+  }
+  if (s.isDragging) shiftAnchor(s, -delta, top, bottom)
+  else if (movement.kind === 'follow') shiftSelectionForFollow(s, -delta, top, bottom)
+  else shiftSelection(s, -delta, top, bottom, screen.width)
+  return hadSelection && !hasSelection(s)
+}
+
 export type SelectionState = {
   /** Where the mouse-down occurred. Null when no selection. */
   anchor: Point | null

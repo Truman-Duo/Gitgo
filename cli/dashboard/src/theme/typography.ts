@@ -2,30 +2,74 @@
 
 import type { StatusState, StatusDot } from "./types.js";
 import { colors } from "./tokens.js";
+import { eastAsianWidth } from "get-east-asian-width";
+import type { HexColor } from "@anthropic/ink";
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+function graphemes(text: string): string[] {
+  return Array.from(graphemeSegmenter.segment(text), (part) => part.segment);
+}
+
+function graphemeWidth(value: string): number {
+  if (value === "\t") return 4;
+  let width = 0;
+  for (const char of value) {
+    const point = char.codePointAt(0) ?? 0;
+    if (point === 0x200d || /\p{Mark}/u.test(char) || point === 0xfe0f) continue;
+    width = Math.max(width, eastAsianWidth(point));
+  }
+  return width;
+}
+
+export function displayWidth(text: string): number {
+  return graphemes(text).reduce((total, item) => total + graphemeWidth(item), 0);
+}
 
 /** Truncate string with ellipsis. */
 export function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "…" : s; // …
+  if (displayWidth(s) <= max) return s;
+  const target = Math.max(0, max - 1);
+  let width = 0;
+  let result = "";
+  for (const item of graphemes(s)) {
+    const next = graphemeWidth(item);
+    if (width + next > target) break;
+    result += item;
+    width += next;
+  }
+  return result + "…";
 }
 
-/** Hard-character text wrapper. Splits on \n, then chops each line at maxW. */
+export function padEndWidth(s: string, width: number): string {
+  return s + " ".repeat(Math.max(0, width - displayWidth(s)));
+}
+
+/** Terminal-cell-aware wrapper for CJK, combining marks and emoji graphemes. */
 export function wrap(text: string, maxW: number): string[] {
   if (!text) return [""];
   const lines: string[] = [];
   for (const para of text.split("\n")) {
     if (!para) { lines.push(""); continue; }
-    let remaining = para;
-    while (remaining.length > maxW) {
-      lines.push(remaining.slice(0, maxW));
-      remaining = remaining.slice(maxW);
+    let current = "";
+    let width = 0;
+    for (const item of graphemes(para)) {
+      const next = graphemeWidth(item);
+      if (current && width + next > maxW) {
+        lines.push(current);
+        current = "";
+        width = 0;
+      }
+      current += item;
+      width += next;
     }
-    if (remaining) lines.push(remaining);
+    if (current) lines.push(current);
   }
   return lines;
 }
 
 /** Linear interpolate between two hex colors. */
-export function lerpColor(a: string, b: string, t: number): string {
+export function lerpColor(a: HexColor, b: HexColor, t: number): HexColor {
   const parseHex = (s: string) => [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
   const [r1, g1, b1] = parseHex(a);
   const [r2, g2, b2] = parseHex(b);
@@ -35,7 +79,7 @@ export function lerpColor(a: string, b: string, t: number): string {
     [lerp(r1, r2), lerp(g1, g2), lerp(b1, b2)]
       .map((v) => v.toString(16).padStart(2, "0"))
       .join("")
-  );
+  ) as HexColor;
 }
 
 /** Unified status dot (● ◐ ○) with color and badge background. */
@@ -92,21 +136,47 @@ export function contextBarFill(
   return { fillColor, emptyColor: colors.contextBar.empty, filled, empty };
 }
 
-/** Model context window in tokens (single source for utilization math). */
-const CONTEXT_WINDOW = 128000;
+/** Context utilization from the process/provider-specific limit; never invent 128K. */
+export function contextPct(estimatedTokens: number, contextWindow?: number): string {
+  if (!estimatedTokens || estimatedTokens <= 0) return "0%";
+  if (!contextWindow || contextWindow <= 0) {
+    return "?%";
+  }
+  const raw = (estimatedTokens / contextWindow) * 100;
+  // Preserve meaningful low utilization instead of rounding every small but
+  // growing conversation to the indistinguishable value 0%.
+  const pct = raw < 10 ? Math.ceil(raw * 10) / 10 : Math.round(raw);
+  return `${pct}%`;
+}
 
-/** Context utilization percentage ("ctx 35%") from a token estimate. Empty for 0/unknown. */
-export function contextPct(estimatedTokens: number): string {
-  if (!estimatedTokens || estimatedTokens <= 0) return "";
-  const pct = Math.round((estimatedTokens / CONTEXT_WINDOW) * 100);
-  return `ctx ${pct}%`;
+/** Human duration used by live and persisted runtime projections.
+ * Under one minute the display has 0.01 s resolution and rounds upward so a
+ * completed operation never appears faster than it was. Larger units omit
+ * zero-valued slots: 1min,1s and 1hour,2min,3s. */
+export function formatDuration(milliseconds: number): string {
+  const safeMs = Math.max(0, Number(milliseconds) || 0);
+  if (safeMs < 60_000) {
+    const centiseconds = Math.ceil(safeMs / 10);
+    return `${(centiseconds / 100).toFixed(2)}s`;
+  }
+  const totalSeconds = Math.ceil(safeMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}hour`);
+  if (minutes > 0) parts.push(`${minutes}min`);
+  if (seconds > 0) parts.push(`${seconds}s`);
+  return parts.join(",");
 }
 
 /** Map a process status string to its StatusState for statusDot(). */
 export function processStatusToDot(s: string): StatusState {
   if (s === "running") return "ok";
-  if (s === "completed") return "done";
-  if (s === "waiting" || s === "orphaned") return "warning";
+  if (s === "completed" || s === "recovered") return "done";
+  if ([
+    "waiting", "awaiting_user", "cancelling", "recovering", "resume_available",
+  ].includes(s)) return "warning";
   return "error";
 }
 

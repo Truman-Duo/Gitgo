@@ -56,9 +56,8 @@ export type DOMElement = {
   // auto-pins scrollTop to the bottom when content grows.
   scrollTop?: number
   // Accumulated scroll delta not yet applied to scrollTop. The renderer
-  // drains this at SCROLL_MAX_PER_FRAME rows/frame so fast flicks show
-  // intermediate frames instead of one big jump. Direction reversal
-  // naturally cancels (pure accumulator, no target tracking).
+  // drains this proportionally over a small number of frames. Direction
+  // reversal naturally cancels (pure accumulator, no target tracking).
   pendingScrollDelta?: number
   // Render-time clamp bounds for virtual scroll. useVirtualScroll writes
   // the currently-mounted children's coverage span; render-node-to-output
@@ -72,6 +71,10 @@ export type DOMElement = {
   scrollHeight?: number
   scrollViewportHeight?: number
   scrollViewportTop?: number
+  /** Last painted viewport, used to anchor selection to actual (not requested) scroll. */
+  renderedScrollTop?: number
+  renderedViewportTop?: number
+  renderedViewportHeight?: number
   stickyScroll?: boolean
   // Set by ScrollBox.scrollToElement; render-node-to-output reads
   // el.yogaNode.getComputedTop() (FRESH — same Yoga pass as scrollHeight)
@@ -80,6 +83,11 @@ export type DOMElement = {
   // time the throttled render fires, the element ref defers the position
   // read to paint time. One-shot.
   scrollAnchor?: { el: DOMElement; offset: number }
+  // A terminal resize reflows wrapped text.  Preserve the first visible
+  // semantic child instead of preserving a stale numeric row or snapping to
+  // the bottom.  Ink captures this before Yoga receives the new viewport and
+  // consumes it in the first layout at the new size.
+  resizeScrollAnchor?: { el: DOMElement; offset: number }
   // Only set on ink-root. The document owns focus — any node can
   // reach it by walking parentNode, like browser getRootNode().
   focusManager?: FocusManager

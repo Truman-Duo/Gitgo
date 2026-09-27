@@ -10,14 +10,14 @@ import { BEL, ESC, ESC_TYPE, SEP } from './ansi.js'
 function execFileNoThrow(
   command: string,
   args: string[],
-  options: { input?: string; useCwd?: boolean; timeout?: number } = {},
+  options: { input?: string | Buffer; useCwd?: boolean; timeout?: number } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => {
     const { input, timeout } = options
     const proc = nodeExecFile(
       command,
       args,
-      { timeout },
+      { timeout, windowsHide: true },
       (error, stdout, stderr) => {
         resolve({
           code: error ? 1 : 0,
@@ -237,9 +237,11 @@ function copyNative(text: string): void {
       return
     }
     case 'win32':
-      // clip.exe is always available on Windows. Unicode handling is
-      // imperfect (system locale encoding) but good enough for a fallback.
-      void execFileNoThrow('clip', [], opts)
+      // BOM-tagged UTF-16 avoids the system ANSI/OEM code page destroying
+      // Chinese text. This fallback is hidden and has no UI animation.
+      void execFileNoThrow('clip', [], {...opts, input: Buffer.concat([
+        Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le'),
+      ])})
       return
   }
 }
