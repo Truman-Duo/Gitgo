@@ -54,7 +54,7 @@ Governance 模块**不持有自己的状态**。它是从 HistoryManager 读取�
 
 | 状态字段 | 类型 | 位置 | 生产者 | 消费者 | 更新策略 | 持久化 |
 |---------|------|------|--------|--------|---------|--------|
-| `integrity_warnings` | 写入 HistoryManager | identity/guard.py: _run_integrity_checks() | step_scan() 末尾 | HistoryManager query, CLI/MCP | 每次 scan 重新检测 | gitgo_history.json (operation="integrity_warning") |
+| `integrity_warnings` | 写入 HistoryManager | identity/guard.py: _run_integrity_checks() | step_scan() 末尾 | HistoryManager query, CLI/MCP | 每次 scan 重新检测 | `state.sqlite3/history_events` + CAS |
 | `tool_memory_snapshots` | 文件目录 | identity/snapshot.py: snapshot_tool_memories() | step_sync() 成功后 | restore_tool_memories(), CLI memory list | 增量快照，保留 5 次 | `.gitgo/memories/` (backup repo) |
 | `directory_skeleton` | `list[str]` | identity/guard.py: _save_directory_skeleton() | step_sync() 成功后 | _detect_structure_collapse() (下次 scan) | 覆盖 | `.gitgo/directory_skeleton.json` |
 
@@ -62,9 +62,9 @@ Governance 模块**不持有自己的状态**。它是从 HistoryManager 读取�
 
 | 状态字段 | 类型 | 位置 | 生产者 | 消费者 | 更新策略 | 持久化 |
 |---------|------|------|--------|--------|---------|--------|
-| `lessons` (abstract) | `list[Lesson]` | knowledge/lesson.py | harvest_lessons() (sync 后), 人工 promote | CLI/MCP lesson search/verify | JSONL 追加 | `.gitgo/knowledge/abstract.jsonl` |
-| `lessons` (instance) | `list[InstanceLesson]` | knowledge/lesson.py | harvest_lessons() (sync 后) | CLI/MCP lesson search/verify | JSONL 追加 | `.gitgo/knowledge/instance.jsonl` |
-| `pendings` | 农割过程中临时列表 | knowledge/lesson.py: harvest_lessons() | harvest_lessons() | lesson verify (人工确认) | harvest 时追加 | 否 (pending 在当前 harvest 调用内) |
+| `lessons` (abstract) | `list[Lesson]` | knowledge/lesson.py | harvest_lessons() (sync 后), 人工 promote | CLI/MCP lesson search/verify | 同 ID upsert | `state.sqlite3/lessons(scope=abstract)` + CAS |
+| `lessons` (instance) | `list[InstanceLesson]` | knowledge/lesson.py | harvest_lessons() (sync 后) | CLI/MCP lesson search/verify | 同 ID upsert | `state.sqlite3/lessons(scope=instance)` + CAS |
+| `pendings` | `list[Lesson]` | knowledge/lesson.py: harvest_lessons() | harvest_lessons() | lesson verify (人工确认) | project + 内容哈希去重 | `state.sqlite3/lessons(scope=pending)` + CAS |
 
 ### 2.6 Authorship — 发布净化状态
 
@@ -161,10 +161,10 @@ synced/pushed 是 governance state 的核心标志，但它们和 message（文�
 | 位置 | 内容 |
 |------|------|
 | `.gitgo/session.json` | formal_commits (synced/pushed + message + number) |
-| `gitgo_history.json` | 全操作日志 + suggestion records + integrity warnings |
+| `state.sqlite3/history_events` + CAS | 全操作日志 + suggestion records + integrity warnings |
 | `.gitgo/contract.yaml` | project tech_stack + decided_features + constraints |
-| `.gitgo/knowledge/abstract.jsonl` | 跨项目通用 lesson |
-| `.gitgo/knowledge/instance.jsonl` | 单项目具体 lesson |
+| `state.sqlite3/lessons(scope=abstract)` + CAS | 跨项目通用 lesson |
+| `state.sqlite3/lessons(scope=instance/pending)` + CAS | 单项目 lesson 与待确认草稿 |
 | `.gitgo/memories/` | 工具记忆快照 |
 | `.gitgo/directory_skeleton.json` | 目录骨架 |
 
