@@ -13,6 +13,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -49,6 +53,152 @@ class ContractViolation:
     actual_signature: str | None
     file: str
     violation_type: str         # "signature_changed" | "symbol_removed" | "file_missing"
+
+
+def normalise_interface_ref(value: str) -> str:
+    """Return one safe ``relative/path:symbol`` declaration."""
+    raw = str(value or "").strip().replace("\\", "/")
+    if ":" not in raw:
+        raise ValueError(f"interface must use file:symbol syntax: {raw}")
+    file_name, symbol = raw.rsplit(":", 1)
+    while file_name.startswith("./"):
+        file_name = file_name[2:]
+    if (
+        not file_name or not symbol
+        or Path(file_name).is_absolute()
+        or ".." in Path(file_name).parts
+        or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_.$-]*", symbol)
+    ):
+        raise ValueError(f"invalid interface declaration: {raw}")
+    return f"{file_name}:{symbol}"
+
+
+def capture_declared_contract(workspace_path: str | Path, nodes: list[dict]) -> dict:
+    """Freeze declared cross-node interfaces from the admitted task snapshot.
+
+    The result is JSON-safe and can be persisted in every child task contract.
+    Unknown languages degrade to a presence check instead of guessing a hard
+    signature.  This keeps false hard blocks lower without making the contract
+    advisory.
+    """
+    workspace = Path(workspace_path).resolve()
+    owners: dict[str, str] = {}
+    consumers: dict[str, list[str]] = {}
+    for node in nodes:
+        node_id = str(node.get("node_id") or "")
+        for raw in node.get("output_interfaces") or []:
+            ref = normalise_interface_ref(raw)
+            if ref in owners and owners[ref] != node_id:
+                raise ValueError(f"interface has multiple owners: {ref}")
+            owners[ref] = node_id
+        for raw in node.get("input_interfaces") or []:
+            ref = normalise_interface_ref(raw)
+            consumers.setdefault(ref, []).append(node_id)
+
+    interfaces = []
+    for ref in sorted(set(owners) | set(consumers)):
+        file_name, symbol = ref.rsplit(":", 1)
+        path = (workspace / file_name).resolve()
+        try:
+            path.relative_to(workspace)
+        except ValueError as exc:
+            raise ValueError(f"interface file escapes workspace: {file_name}") from exc
+        present, signature = _inspect_declared_interface(path, symbol)
+        interfaces.append({
+            "ref": ref,
+            "file": file_name,
+            "symbol": symbol,
+            "owner_node_id": owners.get(ref, ""),
+            "consumer_node_ids": sorted(set(consumers.get(ref, []))),
+            "initially_present": present,
+            "frozen_signature": signature,
+        })
+    canonical = json.dumps(interfaces, ensure_ascii=False, sort_keys=True)
+    return {
+        "contract_id": hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16],
+        "interfaces": interfaces,
+    }
+
+
+def verify_declared_contract(
+    contract: dict | None,
+    workspace_path: str | Path,
+    references: list[str],
+) -> list[dict]:
+    """Verify required declared interfaces at a Host lifecycle boundary."""
+    if not contract or not references:
+        return []
+    workspace = Path(workspace_path).resolve()
+    by_ref = {
+        str(item.get("ref") or ""): dict(item)
+        for item in (contract.get("interfaces") or [])
+    }
+    violations = []
+    for raw in references:
+        ref = normalise_interface_ref(raw)
+        item = by_ref.get(ref)
+        if item is None:
+            violations.append({"ref": ref, "type": "contract_entry_missing"})
+            continue
+        path = (workspace / str(item.get("file") or "")).resolve()
+        try:
+            path.relative_to(workspace)
+        except ValueError:
+            violations.append({"ref": ref, "type": "file_escape"})
+            continue
+        present, actual = _inspect_declared_interface(
+            path, str(item.get("symbol") or "")
+        )
+        if not present:
+            violations.append({
+                "ref": ref,
+                "type": "file_missing" if not path.is_file() else "symbol_missing",
+                "expected": item.get("frozen_signature") or "present",
+                "actual": None,
+            })
+            continue
+        frozen = str(item.get("frozen_signature") or "")
+        if bool(item.get("initially_present")) and frozen and actual != frozen:
+            violations.append({
+                "ref": ref,
+                "type": "signature_changed",
+                "expected": frozen,
+                "actual": actual,
+            })
+    return violations
+
+
+def _inspect_declared_interface(path: Path, symbol: str) -> tuple[bool, str]:
+    if not path.is_file():
+        return False, ""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False, ""
+    if path.suffix.lower() in {".py", ".pyi"}:
+        signature = _extract_current_signature_from_file(str(path), symbol)
+        return signature is not None, signature or ""
+
+    escaped = re.escape(symbol)
+    patterns = (
+        rf"(?m)^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+        rf"(?:function|class|interface|type|const|let|var)\s+{escaped}\b[^\r\n]*",
+        rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+{escaped}\b[^\r\n{{]*",
+        rf"(?m)^\s*func\s+(?:\([^)]*\)\s*)?{escaped}\b[^\r\n{{]*",
+        rf"(?m)^\s*(?:(?:public|private|protected|internal|static|final|abstract|"
+        rf"suspend|open|virtual|override)\s+)*(?:class|interface|enum|record|struct)\s+"
+        rf"{escaped}\b[^\r\n{{]*",
+        rf"(?m)^\s*(?:(?:public|private|protected|internal|static|final|virtual|"
+        rf"override|async)\s+)+[^\r\n;{{}}]*\b{escaped}\s*\([^\r\n{{;]*",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, content)
+        if match:
+            signature = re.sub(r"\s+", " ", match.group(0)).strip()
+            return True, signature[:1000]
+    # For less common languages/config schemas, exact symbol presence is still
+    # a useful hard existence contract.  Do not invent a signature.
+    return bool(re.search(rf"(?<![A-Za-z0-9_$]){escaped}(?![A-Za-z0-9_$])", content)), ""
 
 
 def freeze_contract(
@@ -152,7 +302,7 @@ def verify_contract(
                 file=iface.file,
                 violation_type="symbol_removed",
             ))
-        elif actual != iface.signature:
+        elif iface.signature != iface.symbol and actual != iface.signature:
             violations.append(ContractViolation(
                 interface=iface,
                 expected_signature=iface.signature,
@@ -196,11 +346,15 @@ def _extract_current_signature_from_file(
         with open(file_path, "r", encoding="utf-8") as f:
             tree = ast.parse(f.read())
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == symbol:
-                args = [a.arg for a in node.args.args]
-                return f"{node.name}({', '.join(args)})"
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol:
+                prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                returns = (
+                    f" -> {ast.unparse(node.returns)}" if node.returns is not None else ""
+                )
+                return f"{prefix} {node.name}({ast.unparse(node.args)}){returns}"
             if isinstance(node, ast.ClassDef) and node.name == symbol:
-                return f"class {node.name}"
+                bases = ", ".join(ast.unparse(item) for item in node.bases)
+                return f"class {node.name}" + (f"({bases})" if bases else "")
         return None
     except Exception:
         return None

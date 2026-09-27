@@ -70,7 +70,6 @@ class CompletionGuard(HarnessPlugin):
         """
         if process is None:
             return []
-        task_desc = process.task_description or ""
         missing: list[str] = []
 
         for sig in signals:
@@ -78,13 +77,6 @@ class CompletionGuard(HarnessPlugin):
                 continue
             if not sig.required_tools:
                 continue
-
-            # 检查 task 是否涉及该 signal 的文件
-            sig_files = sig.target_files
-            if sig_files:
-                task_involves_signal = any(f in task_desc for f in sig_files)
-                if not task_involves_signal:
-                    continue
 
             for tool_name in sig.required_tools:
                 if not tool_succeeded(process, tool_name):
@@ -102,23 +94,15 @@ class CompletionGuard(HarnessPlugin):
         if not rejection_signals:
             return []
 
-        session_messages = (
-            process.session.messages if (process and process.session) else []
-        )
-        session_text = " ".join(
-            m.get("content", "") for m in session_messages
-        )
-
         unchecked: list[str] = []
+        resolutions = dict(
+            getattr(process, "governance_resolutions", {}) or {}
+        ) if process is not None else {}
         for sig in rejection_signals:
             instruction = sig.rule
             if not instruction:
                 continue
-            instr_words = instruction.split()
-            if not instr_words:
-                continue
-            matched = sum(1 for w in instr_words if w in session_text)
-            if matched / len(instr_words) < 0.5:
+            if sig.signal_id not in resolutions:
                 unchecked.append(instruction[:120])
 
         return unchecked

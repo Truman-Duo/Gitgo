@@ -35,6 +35,12 @@ class ExecutionContext:
     cancellation: threading.Event = field(default_factory=threading.Event)
     logger: Callable | None = None
     artifacts: dict = field(default_factory=dict)
+    # Canonical per-tool governance hook.  ToolPipeline owns the invocation so
+    # ordinary calls and expanded composite steps cannot drift onto two paths.
+    tool_authorizer: Callable[[str, dict], dict] | None = None
+    # Project-owned SQLite/CAS runtime. Optional only for isolated component
+    # tests and compatibility callers; production daemon contexts always bind it.
+    storage: object | None = None
 
     def is_cancelled(self) -> bool:
         return self.cancellation.is_set()

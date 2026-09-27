@@ -196,6 +196,8 @@ class ForkBackend(SlotBackend):
             max_steps=slot.capability.max_steps,
             ring_level=ring,
             context_snapshot=snapshot,
+            task_description=slot.spec.task_description,
+            workspace_path=workspace_path,
         )
 
         slot.runtime.status = "RUNNING"
@@ -209,10 +211,8 @@ class ForkBackend(SlotBackend):
             if llm is None:
                 raise RuntimeError("ForkBackend requires _llm_provider to be set by daemon")
 
-            # 创建 session（agent_step 内部用到 process.session）
-            from backend.core.loop.session import AgentSession
-            session = AgentSession()
-            process.session = session
+            # Runtime Factory guarantees a session for every process.
+            session = process.session
 
             # 注入 context_snapshot 到 session（governance brief）
             session.inject_governance_brief({
@@ -229,8 +229,12 @@ class ForkBackend(SlotBackend):
                 workspace_path=workspace_path,
             )
 
-            slot.runtime.status = "COMPLETED"
+            from backend.core.loop.outcome import TaskOutcome
+            outcome = TaskOutcome.from_dict(result)
+            slot.runtime.status = outcome.status.value.upper()
             slot.runtime.result = result
+            if outcome.error:
+                slot.runtime.error = outcome.error.message
             return result
 
         except Exception as exc:
