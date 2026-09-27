@@ -1,18 +1,22 @@
-"""操作历史记录 — 记录全操作类型的审计日志。
+"""Authoritative operation history stored through the SQLite facade.
 
-v0.33 E1-fix: JSONL 追加写入 + threading.Lock 并发安全。
-            不再每次全量覆写，改为逐行追加（O(1) per add）。
-            超过 400 条时触发 compact 保留最近 200 条。
+Legacy JSON/JSONL is imported idempotently and archived.  The public static
+API remains compatible, but no call continues writing repository-local audit
+files after the cutover.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from backend.core.storage import StorageRuntime, bind_storage, get_storage
 
 HISTORY_FILE = "gitgo_history.json"
 
@@ -48,58 +52,140 @@ class HistoryEntry:
 
 
 class HistoryManager:
-    """管理操作历史日志的读写。可通过 set_workspace 切换到项目级路径。
-
-    v0.33: JSONL 追加写入 + threading.Lock 并发安全。
-           add_operation / add_suggestion 不再全量覆写，改为逐行追加。
-           超过 _COMPACT_THRESHOLD 条时自动 compact 到 _MAX_ENTRIES 条。
-    """
+    """Manage the bounded audit stream through one project StorageRuntime."""
 
     _workspace_path: str | None = None
+    _local = threading.local()
     _lock = threading.Lock()
 
     @classmethod
-    def set_workspace(cls, path: str) -> None:
-        """设置当前工作项目路径。后续读写使用 .gitgo/gitgo_history.json。"""
+    @contextmanager
+    def workspace_scope(cls, path: str):
+        """Bind one operation without changing another thread's default project."""
+        previous = getattr(cls._local, "workspace_path", None)
+        cls._local.workspace_path = str(path)
+        try:
+            yield
+        finally:
+            if previous is None:
+                cls._local.__dict__.pop("workspace_path", None)
+            else:
+                cls._local.workspace_path = previous
+
+    @classmethod
+    def set_workspace(
+        cls, path: str, *, storage: StorageRuntime | None = None,
+    ) -> None:
+        """Select a workspace and optionally bind the daemon-owned runtime."""
         cls._workspace_path = path
+        cls._local.workspace_path = path
+        if storage is not None:
+            bind_storage(path, storage)
+            cls._migrate_legacy()
 
     @staticmethod
     def _path() -> Path:
-        import sys
-        ws = HistoryManager._workspace_path
+        """Legacy import path retained for diagnostics and compatibility."""
+        ws = getattr(
+            HistoryManager._local, "workspace_path", None,
+        ) or HistoryManager._workspace_path
         if ws:
             p = Path(ws) / ".gitgo" / HISTORY_FILE
             p.parent.mkdir(parents=True, exist_ok=True)
             return p
-        if getattr(sys, "frozen", False):
-            base = Path(sys.executable).parent
-        else:
-            base = Path.cwd()
-        return base / HISTORY_FILE
+        # Unbound legacy diagnostics are still private Gitgo metadata; never
+        # create another audit file beside user deliverables merely because a
+        # launcher changed cwd.
+        return Path.cwd() / ".gitgo" / HISTORY_FILE
+
+    @classmethod
+    def _legacy_paths(cls) -> list[Path]:
+        canonical = cls._path()
+        candidates = [canonical]
+        ws = getattr(cls._local, "workspace_path", None) or cls._workspace_path
+        if ws:
+            old_root_file = Path(ws) / HISTORY_FILE
+            if old_root_file != canonical:
+                candidates.append(old_root_file)
+        return candidates
+
+    @classmethod
+    def _storage(cls) -> StorageRuntime:
+        ws = getattr(cls._local, "workspace_path", None) or cls._workspace_path
+        ws = ws or str(Path.cwd())
+        return get_storage(ws)
+
+    @classmethod
+    def _read_legacy_path(cls, path: Path) -> list[HistoryEntry]:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        if not raw.strip():
+            return []
+        stripped = raw.lstrip()
+        if stripped.startswith("{"):
+            return cls._load_jsonl(raw)
+        if stripped.startswith("["):
+            return cls._load_json_array(raw)
+        return []
+
+    @classmethod
+    def _migrate_legacy(cls) -> None:
+        paths = [path for path in cls._legacy_paths() if path.exists()]
+        if not paths:
+            return
+        with cls._lock:
+            runtime = cls._storage()
+            for path in paths:
+                if not path.exists():
+                    continue
+                entries = cls._read_legacy_path(path)
+                try:
+                    source = str(path.resolve()).encode("utf-8", errors="replace")
+                    for index, entry in enumerate(entries):
+                        record = asdict(entry)
+                        encoded = json.dumps(
+                            record, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        event_id = "legacy_history_" + hashlib.sha256(
+                            source + b"\0" + encoded + b"\0" + str(index).encode("ascii")
+                        ).hexdigest()[:32]
+                        runtime.append_history_record(
+                            record, event_id=event_id,
+                            compact_threshold=0,
+                        )
+                    suffix = datetime.now().strftime("%Y%m%dT%H%M%S")
+                    archive_parent = (
+                        path.parent if path == cls._path()
+                        else cls._path().parent / "legacy"
+                    )
+                    archive_parent.mkdir(parents=True, exist_ok=True)
+                    archived = archive_parent / f"{path.name}.legacy-imported-{suffix}"
+                    counter = 1
+                    while archived.exists():
+                        archived = archive_parent / f"{path.name}.legacy-imported-{suffix}-{counter}"
+                        counter += 1
+                    path.replace(archived)
+                except Exception:
+                    # Fail closed for this bounded source: do not archive the
+                    # source and never fall back to a second writer.
+                    raise
 
     # ── 读写（JSONL 格式，向后兼容旧 JSON 数组格式）────────────
 
     @staticmethod
     def load() -> list[HistoryEntry]:
-        """从 JSONL 文件加载历史。向后兼容旧 JSON 数组格式。"""
-        path = HistoryManager._path()
-        if not path.exists():
-            return []
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError:
-            return []
-
-        if not raw.strip():
-            return []
-
-        stripped = raw.lstrip()
-        if stripped.startswith("{"):
-            return HistoryManager._load_jsonl(raw)
-        elif stripped.startswith("["):
-            return HistoryManager._load_json_array(raw)
-        else:
-            return []
+        """Load the authoritative chronological SQLite projection."""
+        HistoryManager._migrate_legacy()
+        entries: list[HistoryEntry] = []
+        for item in HistoryManager._storage().load_history_records():
+            try:
+                entries.append(HistoryEntry(**item))
+            except TypeError:
+                continue
+        return entries
 
     @staticmethod
     def _load_jsonl(raw: str) -> list[HistoryEntry]:
@@ -116,37 +202,46 @@ class HistoryManager:
 
     @staticmethod
     def _load_json_array(raw: str) -> list[HistoryEntry]:
+        """Load the legacy array format and recover any appended JSONL tail.
+
+        Releases before v0.46 compacted JSONL into a pretty-printed JSON array,
+        then ``_append_one`` continued appending JSON objects.  The resulting
+        ``[...]{...}\n{...}`` file is not valid JSON, but both parts are still
+        complete and recoverable.  ``raw_decode`` gives us the exact end of the
+        array so no valid audit events need to be discarded during migration.
+        """
         try:
-            data = json.loads(raw)
-            return [HistoryEntry(**e) for e in data]
+            stripped = raw.lstrip()
+            data, end = json.JSONDecoder().raw_decode(stripped)
+            if not isinstance(data, list):
+                return []
+            entries = [HistoryEntry(**e) for e in data if isinstance(e, dict)]
+            tail = stripped[end:].strip()
+            if tail:
+                entries.extend(HistoryManager._load_jsonl(tail))
+            return entries
         except (json.JSONDecodeError, TypeError):
             return []
 
     @staticmethod
     def save(entries: list[HistoryEntry]) -> None:
-        """全量覆写（compact 时使用），用 tmp + rename 保证原子性。"""
-        path = HistoryManager._path()
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps([asdict(e) for e in entries], indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)  # 同一文件系统上 rename 是原子的
+        """Atomically replace the authoritative bounded history."""
+        HistoryManager._storage().replace_history_records([
+            asdict(entry) for entry in entries
+        ])
 
     @staticmethod
     def _append_one(entry: HistoryEntry) -> None:
-        """追加一行 JSON 到文件末尾。调用方需持有 _lock。"""
-        path = HistoryManager._path()
-        line = json.dumps(asdict(entry), ensure_ascii=False) + "\n"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
+        """Append one SQLite/CAS record. Caller holds ``_lock``."""
+        HistoryManager._storage().append_history_record(
+            asdict(entry),
+            compact_threshold=_COMPACT_THRESHOLD,
+            keep_entries=_MAX_ENTRIES,
+        )
 
     @classmethod
     def _compact(cls) -> None:
-        """重写文件，只保留最近 _MAX_ENTRIES 条。调用方需持有 _lock。"""
-        path = HistoryManager._path()
-        if not path.exists():
-            return
+        """Atomically retain the newest configured entries."""
         entries = cls.load()
         if len(entries) <= _MAX_ENTRIES:
             return
@@ -154,16 +249,8 @@ class HistoryManager:
 
     @classmethod
     def _compact_if_needed(cls) -> None:
-        """行数超过阈值时触发 compact。调用方需持有 _lock。"""
-        path = HistoryManager._path()
-        if not path.exists():
-            return
-        try:
-            line_count = sum(1 for _ in open(path, "r", encoding="utf-8"))
-            if line_count >= _COMPACT_THRESHOLD:
-                cls._compact()
-        except OSError:
-            pass
+        """Compatibility no-op; append performs low-frequency batch retention."""
+        return
 
     # ── 公开 API ─────────────────────────────────────────────
 
@@ -188,7 +275,6 @@ class HistoryManager:
 
         with cls._lock:
             cls._append_one(entry)
-            cls._compact_if_needed()
 
     @classmethod
     def add_suggestion(cls, project_name: str, suggest_type: str,
@@ -214,7 +300,6 @@ class HistoryManager:
 
         with cls._lock:
             cls._append_one(entry)
-            cls._compact_if_needed()
 
     @classmethod
     def add_entry(cls,
