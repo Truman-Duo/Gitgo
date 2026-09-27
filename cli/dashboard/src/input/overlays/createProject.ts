@@ -9,6 +9,8 @@ export type CreateProjectAction =
   | { type: "submit" }
   | { type: "llmPrev" }
   | { type: "llmNext" }
+  | { type: "modePrev" }
+  | { type: "modeNext" }
   | { type: "text"; op: TextOp };
 
 export function resolveCreateProjectKey(field: string, input: string, key: any): CreateProjectAction[] {
@@ -25,7 +27,14 @@ export function resolveCreateProjectKey(field: string, input: string, key: any):
     return [];
   }
 
-  if (matchChord("enter", input, key)) return [{ type: "submit" }];
+  if (field === "mode") {
+    if (matchChord("left", input, key)) return [{type: "modePrev"}];
+    if (matchChord("right", input, key)) return [{type: "modeNext"}];
+    if (matchChord("enter", input, key)) return [{type: "nextField"}];
+    return [];
+  }
+
+  if (matchChord("enter", input, key)) return [{ type: "nextField" }];
   if (matchChord("backspace", input, key)) return [{ type: "text", op: { op: "delete_back" } }];
   if (matchChord("delete", input, key)) return [{ type: "text", op: { op: "delete_forward" } }];
   if (matchChord("left", input, key)) return [{ type: "text", op: { op: "move_cursor", delta: -1 } }];

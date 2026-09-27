@@ -1,17 +1,18 @@
 // src/components/TrialPanel.tsx — /runtime trial: incoming external changes + triage
 import React, { memo, useState, useEffect, useCallback } from "react";
-import { Box, Text, useInput } from "@anthropic/ink";
-import type { McpClient } from "../mcp/client.js";
-import { trialList, trialTriage } from "../mcp/tools.js";
+import { Box, Text } from "@anthropic/ink";
+import { useManagedInput as useInput } from "../input/runtime.js";
+import type { BackendClient } from "../backend/client.js";
+import { trialList, trialTriage } from "../backend/tools.js";
 import { resolveTrialKey } from "../input/overlays/trial.js";
-import { useSelectionStyle, usePanelSize } from "../theme/index.js";
+import { colors, usePanelSize } from "../theme/index.js";
 import { ConfirmBox } from "./ConfirmBox.js";
 import { chordLabel } from "../input/bindings.js";
 
 type Incoming = { index: number; hash: string; message: string; author: string; date: string; triage: string };
 
 type Props = {
-  client: McpClient;
+  client: BackendClient;
   project: string;
   cols: number;
   onDismiss: () => void;
@@ -85,17 +86,13 @@ export const TrialPanel = memo(function TrialPanel({ client, project, onDismiss 
       ) : (
         items.map((it, i) => {
           const active = i === sel;
-          const st = useSelectionStyle(active ? "focused" : "non-focused", "block", "accent");
           return (
-            <Box key={it.index} marginBottom={1} flexDirection="column">
-              <Text color={st.fg} backgroundColor={st.bg} bold={st.bold}>
+            <Box key={it.index} flexDirection="row">
+              <Text color={active ? colors.selection.row.fg : undefined} bold={active}>
                 #{it.index}  {it.hash.slice(0, 10)}  [{it.triage}]
               </Text>
               {active && (
-                <Box paddingLeft={2}>
-                  <Text dimColor>{it.message.slice(0, w - 12)}</Text>
-                  <Text dimColor>{it.author || "?"}  {it.date?.slice(0, 16) || ""}</Text>
-                </Box>
+                <Text dimColor>  {it.message.slice(0, Math.max(10, w - 48))}  {it.author || "?"}</Text>
               )}
             </Box>
           );

@@ -20,7 +20,15 @@ const EDIT_DIFF = `diff --git a/src/api/health.py b/src/api/health.py
 
 export async function simulateMockStream(opts: {
   onStream: (row: StreamingRow) => void;
-  onDone: (finalText: string, tools: ToolCallCard[]) => void;
+  onDone: (
+    finalText: string,
+    tools: ToolCallCard[],
+    notices?: undefined,
+    pendingDecision?: null,
+    round?: {
+      task_id: string; status: string; duration_ms: number; trace_id: string; process_id: string;
+    },
+  ) => void;
 }): Promise<void> {
   const startTime = new Date().toISOString();
   const tokens = [
@@ -32,7 +40,7 @@ export async function simulateMockStream(opts: {
   let text = "";
   for (const tok of tokens) {
     text += tok;
-    opts.onStream({ text, tools: [], timestamp: startTime });
+    opts.onStream({ text, reasoning: "", tools: [], notices: [], timestamp: startTime });
     await sleep(55);
   }
 
@@ -47,7 +55,7 @@ export async function simulateMockStream(opts: {
     is_running: true,
     state: "running",
   };
-  opts.onStream({ text, tools: [runningTool], timestamp: startTime });
+  opts.onStream({ text, reasoning: "", tools: [runningTool], notices: [], timestamp: startTime });
   await sleep(420);
 
   // Tool completes with a result + side-by-side diff.
@@ -60,11 +68,17 @@ export async function simulateMockStream(opts: {
     result_text: "Timeout now configurable; 503 on ping failure",
     diff: EDIT_DIFF,
   };
-  opts.onStream({ text, tools: [doneTool], timestamp: startTime });
+  opts.onStream({ text, reasoning: "", tools: [doneTool], notices: [], timestamp: startTime });
   await sleep(320);
 
   const finalText =
     text +
     " Done — the ping timeout now reads from config everywhere, and the 503 failure path is covered by a new test.";
-  opts.onDone(finalText, [doneTool]);
+  opts.onDone(finalText, [doneTool], undefined, null, {
+    task_id: "",
+    status: "completed",
+    duration_ms: Math.max(0, Date.now() - Date.parse(startTime)),
+    trace_id: "",
+    process_id: "mock-root",
+  });
 }

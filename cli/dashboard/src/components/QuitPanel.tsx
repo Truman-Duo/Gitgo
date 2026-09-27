@@ -1,24 +1,22 @@
-// src/components/QuitPanel.tsx — safe exit panel with three options
-// Color-block selection: Save & Quit / Force Quit / Cancel
+// src/components/QuitPanel.tsx — truthful graceful-exit panel.
 import React, { memo, useState } from "react";
-import { Box, Text, useInput } from "@anthropic/ink";
+import { Box, Text } from "@anthropic/ink";
+import { useManagedInput as useInput } from "../input/runtime.js";
 import { resolveQuitKey } from "../input/overlays/quit.js";
 import { colors, useSelectionStyle } from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
 
 type Props = {
-  onSaveAndQuit: () => void;
-  onForceQuit: () => void;
+  onQuit: () => void;
   onCancel: () => void;
 };
 
 const OPTIONS = [
-  { label: "Save & Quit", desc: "Notify daemon, save state, clean exit", action: "save" as const },
-  { label: "Force Quit", desc: "Exit immediately without saving", action: "force" as const },
+  { label: "Quit", desc: "Close the Native Host and its managed daemons, then exit", action: "quit" as const },
   { label: "Cancel", desc: "Return to dashboard", action: "cancel" as const },
 ];
 
-export const QuitPanel = memo(function QuitPanel({ onSaveAndQuit, onForceQuit, onCancel }: Props) {
+export const QuitPanel = memo(function QuitPanel({ onQuit, onCancel }: Props) {
   const [sel, setSel] = useState(0);
 
   useInput((input: string, key: any) => {
@@ -30,8 +28,7 @@ export const QuitPanel = memo(function QuitPanel({ onSaveAndQuit, onForceQuit, o
       } else if (a.type === "confirm") {
         const chosen = OPTIONS[sel];
         switch (chosen?.action) {
-          case "save": onSaveAndQuit(); break;
-          case "force": onForceQuit(); break;
+          case "quit": onQuit(); break;
           case "cancel": onCancel(); break;
         }
       }

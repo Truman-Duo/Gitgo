@@ -4,6 +4,7 @@
 // hint text (component footers) read from here, so a future /config rebind
 // menu only needs to change this one module.
 
+import { applicationBindings } from "./router.js";
 export type Chord = {
   label: string;
   match: (input: string, key: any) => boolean;
@@ -45,9 +46,9 @@ export const CHORDS: Record<string, Chord> = {
   ctrlU:      { label: "Ctrl+U",      match: (i: string, k: any) => k.ctrl && (i === "u" || i === "U") },
   ctrlW:      { label: "Ctrl+W",      match: (i: string, k: any) => k.ctrl && (i === "w" || i === "W") },
   ctrlY:      { label: "Ctrl+Y",      match: (i: string, k: any) => k.ctrl && (i === "y" || i === "Y") },
+  ctrlG:      { label: "Ctrl+G",      match: (i: string, k: any) => k.ctrl && (i === "g" || i === "G") },
 
   // Printable command / shortcut characters
-  question:   { label: "?",           match: (i: string) => i === "?" },
   slash:      { label: "/",           match: (i: string) => i === "/" },
 
   // Letter action keys
@@ -67,11 +68,16 @@ export const CHORDS: Record<string, Chord> = {
 };
 
 export function matchChord(name: string, input: string, key: any): boolean {
+  if (["left", "right", "up", "down", "upDown", "leftRight"].includes(name) && (key.ctrl || key.meta)) return false;
   const chord = CHORDS[name];
   return chord ? chord.match(input, key) : false;
 }
 
 export function chordLabel(name: string): string {
+  const actions: Record<string, string> = {escape: "execution.interrupt", enter: "navigation.confirm", enterNoShift: "navigation.confirm", shiftEnter: "editor.newline", tab: "navigation.tab", tabAny: "navigation.tab", shiftTab: "navigation.previousTab", left: "navigation.left", right: "navigation.right", up: "navigation.up", down: "navigation.down", pageUp: "viewport.pageUp", pageDown: "viewport.pageDown", ctrlLeft: "editor.previousWord", ctrlRight: "editor.nextWord", ctrlK: "editor.killToEnd", ctrlU: "editor.killToStart", ctrlW: "editor.killWord", ctrlY: "editor.yank", ctrlG: "editor.external", home: "editor.start", end: "editor.end", delete: "editor.delete", backspace: "editor.backspace"};
+  if (actions[name]) return applicationBindings.label(actions[name]);
+  if (name === "upDown") return chordLabel("up") + chordLabel("down");
+  if (name === "leftRight") return chordLabel("left") + "/" + chordLabel("right");
   const chord = CHORDS[name];
   return chord ? chord.label : name;
 }

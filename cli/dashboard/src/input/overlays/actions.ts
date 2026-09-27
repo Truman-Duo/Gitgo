@@ -6,5 +6,6 @@ import type { TextOp } from "../keymap.js";
 export type OverlayAction =
   | { type: "dismiss" }
   | { type: "move"; delta: number }
+  | { type: "page"; delta: number }
   | { type: "confirm" }
   | { type: "text"; op: TextOp };

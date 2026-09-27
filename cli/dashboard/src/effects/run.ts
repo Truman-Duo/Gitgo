@@ -12,9 +12,8 @@ import {
   type CommandOutcome,
 } from "../commands.js";
 import { noticeToActions } from "../notices.js";
-import { stopProcess } from "../mcp/tools.js";
-import { getDaemonClient } from "../clients.js";
-import type { McpClient } from "../mcp/client.js";
+import { stopProcess } from "../backend/tools.js";
+import type { BackendClient } from "../backend/client.js";
 
 function sceneLabel(s: Scene): string {
   switch (s) {
@@ -44,7 +43,6 @@ export function commandOutcomeToActions(
     if (projName) acts.push({ type: "push_overlay", overlay: "exportPanel", props: { project: projName } });
     else acts.push(...noticeToActions(3002));
   }
-  if (outcome.showStatus) acts.push({ type: "push_overlay", overlay: "statusPanel" });
   if (outcome.showPanel) {
     acts.push({ type: "push_overlay", overlay: outcome.showPanel.overlay, props: outcome.showPanel.props });
   }
@@ -87,7 +85,8 @@ export async function runCommandEffect(cmd: string, deps: RunCommandDeps): Promi
   if (isBareAlias || isBareConfig) {
     const proj = projectNames[sel] ?? activeProject ?? projectNames[0] ?? null;
     dispatch({ type: "set_active_project", name: proj });
-    dispatch({ type: "push_overlay", overlay: "configPanel" });
+    dispatch({ type: "push_overlay", overlay: "configPanel",
+      props: isBareAlias ? { initialTab: "providers" } : undefined });
     clearCmd();
     return;
   }
@@ -118,16 +117,14 @@ export async function runCommandEffect(cmd: string, deps: RunCommandDeps): Promi
 
 export type StopProcessDeps = {
   dispatch: (action: AppAction) => void;
-  client: McpClient;
+  client: BackendClient;
   activeProject: string | null;
 };
 
 export async function stopProcessEffect(pid: string, deps: StopProcessDeps): Promise<void> {
   if (!deps.activeProject) return;
   try {
-    const daemon = getDaemonClient();
-    const caller = (daemon?.ready ? daemon : deps.client) as McpClient;
-    await stopProcess(caller, deps.activeProject, pid);
+    await stopProcess(deps.client, deps.activeProject, pid);
     for (const a of noticeToActions(2003, { pid: pid.slice(0, 8) })) deps.dispatch(a);
   } catch (e: any) {
     for (const a of noticeToActions(2002, { reason: e.message })) deps.dispatch(a);

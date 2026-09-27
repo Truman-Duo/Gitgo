@@ -5,6 +5,7 @@ export type LessonsAction =
   | { type: "dismiss" }
   | { type: "move"; delta: number }
   | { type: "searchMode" }
+  | { type: "harvestMode" }
   | { type: "verify" }
   | { type: "searchBack" }
   | { type: "searchRun" }
@@ -26,5 +27,6 @@ export function resolveLessonsKey(mode: "list" | "search", input: string, key: a
   if (matchChord("down", input, key)) return [{ type: "move", delta: 1 }];
   if (matchChord("letterV", input, key)) return [{ type: "verify" }];
   if (matchChord("letterS", input, key)) return [{ type: "searchMode" }];
+  if (input.toLowerCase() === "h" && !key.ctrl && !key.meta) return [{ type: "harvestMode" }];
   return [];
 }

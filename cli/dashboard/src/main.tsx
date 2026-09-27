@@ -1,19 +1,41 @@
 // src/main.tsx
 import React from "react";
 import { renderSync, AlternateScreen, Box, useTerminalSize } from "@anthropic/ink";
-import { McpClient } from "./mcp/client.js";
-import { DaemonClient } from "./daemon/client.js";
+import { NativeHostClient, type BackendClient } from "./backend/client.js";
 import { MockMcpClient } from "./mock/MockMcpClient.js";
-import { setMcpClient, setDaemonClient } from "./clients.js";
+import { setBackendClient } from "./clients.js";
 import { App } from "./components/App.js";
-import { resolve } from "node:path";
+import { InputProvider } from "./input/runtime.js";
+import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { resolvePythonRuntime } from "./backend/pythonRuntime.js";
+import {
+  loadTerminalLauncherConfig,
+  relaunchInConfiguredTerminal,
+  shouldRelaunchInConfiguredTerminal,
+  windowsParentProcessName,
+} from "./backend/terminalLauncher.js";
 
-const GITGO_DIR = resolve(import.meta.dir, "../../..");
-const PYTHON =
-  process.platform === "win32"
-    ? "C:/Users/Duo/AppData/Local/Programs/Python/Python312/python.exe"
-    : "python3";
-const MCP_SERVER = resolve(GITGO_DIR, "mcp_server.py");
+const EXECUTABLE_DIR = dirname(process.execPath);
+const COMPILED = Boolean(
+  process.env.GITGO_INSTALL_ROOT
+  || existsSync(resolve(EXECUTABLE_DIR, "product.json"))
+  || process.execPath.toLowerCase().endsWith("gitgo.exe"),
+);
+const GITGO_DIR = process.env.GITGO_INSTALL_ROOT
+  ? resolve(process.env.GITGO_INSTALL_ROOT)
+  : COMPILED ? EXECUTABLE_DIR : resolve(import.meta.dir, "../../..");
+const PYTHON = resolvePythonRuntime();
+const INTERNAL_HOST = (() => {
+  const explicit = process.env.GITGO_HOST_EXECUTABLE || "";
+  if (explicit) return explicit;
+  const name = process.platform === "win32" ? "gitgo-host.exe" : "gitgo-host";
+  const candidates = [
+    resolve(GITGO_DIR, "internal", name),
+    resolve(GITGO_DIR, "internal", "gitgo-host", name),
+  ];
+  return candidates.find(existsSync) || "";
+})();
 
 // ── Alt-Screen vs Main-Screen ──────────────────────────────────────────
 //
@@ -48,7 +70,7 @@ function ScreenWrapper({ children }: { children: React.ReactNode }) {
   const size = useTerminalSize();
   const rows = size.rows || process.stdout.rows || 24;
   if (USE_ALT_SCREEN) {
-    return <AlternateScreen mouseTracking={false}>{children}</AlternateScreen>;
+    return <AlternateScreen mouseTracking>{children}</AlternateScreen>;
   }
   return (
     <Box flexDirection="column" height={rows} width="100%" flexShrink={0}>
@@ -62,55 +84,82 @@ const REFRESH_SEC = (() => {
   return parseInt(numArg || "5", 10);
 })();
 
+function argumentValue(name: string): string {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? String(process.argv[index + 1] || "") : "";
+}
+
+function startupSmokeTask(): {
+  project: string;
+  message: string;
+  manualDelegation: boolean;
+  autoAllowOnce: boolean;
+} | undefined {
+  const encoded = argumentValue("--smoke-task-b64");
+  if (!encoded) return undefined;
+  const message = Buffer.from(encoded, "base64").toString("utf8").trim();
+  if (!message) throw new Error("--smoke-task-b64 decoded to an empty task");
+  return {
+    project: argumentValue("--smoke-project") || "gitgo",
+    message,
+    manualDelegation: process.argv.includes("--smoke-manual-delegation"),
+    autoAllowOnce: process.argv.includes("--smoke-auto-allow-once"),
+  };
+}
+
 async function main() {
-  const useMock = process.argv.includes("--mock");
-  const useNative = process.argv.includes("--native");
-  const nativeProject = useNative
-    ? (process.argv[process.argv.indexOf("--native") + 1] || "gitgo")
-    : "gitgo";
-
-  if (useNative) {
-    // Native daemon (loop/chat) + MCP (data queries)
-    const daemon = new DaemonClient(nativeProject, PYTHON);
-    await daemon.start();
-    setDaemonClient(daemon);
-
-    const mcp = new McpClient(PYTHON, MCP_SERVER);
-    await new Promise((r) => setTimeout(r, 500));
-    setMcpClient(mcp);
-
-    process.stderr.write("[gitgo-dashboard] Native+ MCP hybrid mode\n");
-
-    const { waitUntilExit } = renderSync(
-      <ScreenWrapper>
-        <App client={mcp} refreshSec={REFRESH_SEC} />
-      </ScreenWrapper>,
-      { exitOnCtrlC: false }
+  const launcherConfig = loadTerminalLauncherConfig();
+  if (shouldRelaunchInConfiguredTerminal({
+    compiled: COMPILED,
+    platform: process.platform,
+    argv: process.argv,
+    parentProcessName: windowsParentProcessName(),
+    config: launcherConfig,
+  })) {
+    if (relaunchInConfiguredTerminal(launcherConfig)) return;
+    process.stderr.write(
+      "[gitgo-dashboard] Configured terminal unavailable; continuing in the current console.\n",
     );
-
-    await waitUntilExit();
-    mcp.close();
-    daemon.close();
-  } else {
-    const client: McpClient = useMock
-      ? (new MockMcpClient() as unknown as McpClient)
-      : new McpClient(PYTHON, MCP_SERVER);
-
-    // Wait for MCP handshake to settle (up to 5 seconds) — real client only
-    if (!useMock) {
-      await new Promise((r) => setTimeout(r, 500));
-    }
-
-    const { waitUntilExit } = renderSync(
-      <ScreenWrapper>
-        <App client={client} refreshSec={REFRESH_SEC} />
-      </ScreenWrapper>,
-      { exitOnCtrlC: false }
-    );
-
-    await waitUntilExit();
-    client.close();
   }
+  const useMock = process.argv.includes("--mock");
+  const client: BackendClient = useMock
+    ? (new MockMcpClient() as unknown as BackendClient)
+    : new NativeHostClient(PYTHON, GITGO_DIR, INTERNAL_HOST);
+  if (client instanceof NativeHostClient) {
+    await client.start();
+    process.stderr.write("[gitgo-dashboard] Native host mode\n");
+  }
+  setBackendClient(client);
+
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (exitCode: number): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = Promise.resolve(client.close())
+      .catch(() => undefined)
+      .then(() => { process.exit(exitCode); });
+    return shutdownPromise;
+  };
+  process.once("SIGINT", () => { void shutdown(130); });
+  process.once("SIGTERM", () => { void shutdown(143); });
+  process.once("SIGHUP", () => { void shutdown(129); });
+  process.stdin.once("end", () => { void shutdown(0); });
+
+  const { waitUntilExit } = renderSync(
+    <ScreenWrapper>
+      <InputProvider><App
+        client={client}
+        refreshSec={REFRESH_SEC}
+        startupSmokeTask={startupSmokeTask()}
+      /></InputProvider>
+    </ScreenWrapper>,
+    { exitOnCtrlC: false }
+  );
+
+  await waitUntilExit();
+  if (!shutdownPromise) await client.close();
+  // Ink and terminal observers may retain timers after the renderer exits.
+  // The backend is already closed, so make the CLI lifecycle deterministic.
+  process.exit(0);
 }
 
 main().catch((err) => {

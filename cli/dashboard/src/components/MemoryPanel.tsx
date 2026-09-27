@@ -1,23 +1,25 @@
 // src/components/MemoryPanel.tsx — /runtime memory: list/snapshot/restore tool memories
 import React, { memo, useState, useEffect, useCallback } from "react";
-import { Box, Text, useInput } from "@anthropic/ink";
-import type { McpClient } from "../mcp/client.js";
-import { memoryList, memorySnapshot, memoryRestore } from "../mcp/tools.js";
+import { Box, Text } from "@anthropic/ink";
+import { useManagedInput as useInput } from "../input/runtime.js";
+import type { BackendClient } from "../backend/client.js";
+import { memoryList, memorySnapshot, memoryRestore } from "../backend/tools.js";
 import { resolveMemoryKey } from "../input/overlays/memory.js";
-import { useSelectionStyle, usePanelSize } from "../theme/index.js";
+import { colors, usePanelSize } from "../theme/index.js";
 import { ConfirmBox } from "./ConfirmBox.js";
 import { chordLabel } from "../input/bindings.js";
 
 type Snapshot = { source: string; timestamp: string; path: string; is_dir: boolean };
 
 type Props = {
-  client: McpClient;
+  client: BackendClient;
   project: string;
   cols: number;
   onDismiss: () => void;
+  interactive?: boolean;
 };
 
-export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismiss }: Props) {
+export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismiss, interactive = true }: Props) {
   const [snaps, setSnaps] = useState<Snapshot[]>([]);
   const [sel, setSel] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -31,7 +33,7 @@ export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismis
         setSnaps(Array.isArray(r) ? r : r?.snapshots || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((error) => { setStatus(String(error?.message || error)); setLoading(false); });
   }, [client, project]);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -64,7 +66,7 @@ export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismis
           break;
       }
     }
-  });
+  }, {isActive: interactive});
 
   const { w } = usePanelSize({ minWidth: 40 });
 
@@ -86,15 +88,14 @@ export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismis
       </Box>
       {status ? <Text dimColor>{status}</Text> : null}
 
-      {snaps.length === 0 ? (
+      {status && snaps.length===0 ? <Text dimColor>{status}</Text> : snaps.length === 0 ? (
         <Text dimColor>No snapshots yet. Press S to create one.</Text>
       ) : (
         snaps.map((sn, i) => {
           const active = i === sel;
-          const st = useSelectionStyle(active ? "focused" : "non-focused", "block", "accent");
           return (
-            <Box key={sn.timestamp + sn.source} marginBottom={1}>
-              <Text color={st.fg} backgroundColor={st.bg} bold={st.bold}>
+            <Box key={sn.timestamp + sn.source}>
+              <Text color={active ? colors.selection.row.fg : undefined} bold={active}>
                 {sn.source}  {sn.timestamp.slice(0, 19)}
               </Text>
             </Box>

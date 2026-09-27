@@ -1,79 +1,34 @@
-// src/components/HelpPanel.tsx — v5: scene-specific keyboard reference with useInput dismiss
 import React, { memo } from "react";
-import { Box, Text, useInput } from "@anthropic/ink";
+import { Box, Text } from "@anthropic/ink";
+import { useManagedInput as useInput } from "../input/runtime.js";
 import type { Scene } from "../state/store.js";
 import { resolveHelpKey } from "../input/overlays/help.js";
-import { colors } from "../theme/index.js";
+import { getKeybindings } from "../keybindings.js";
 import { chordLabel } from "../input/bindings.js";
 
 type Props = { scene: Scene; onDismiss: () => void };
 
-function commandsForScene(scene: Scene): { label: string; desc: string }[] {
-  switch (scene) {
-    case "projects":
-      return [
-        { label: "/create <name>", desc: "Create new project" },
-        { label: "/archive [name]", desc: "Archive manager" },
-        { label: "/status", desc: "Global project status" },
-        { label: "/export [project]", desc: "Export project knowledge" },
-        { label: "/config", desc: "Project settings (LLM / publish / safety)" },
-        { label: "/quit", desc: "Save and exit safely" },
-      ];
-    case "workspace":
-      return [
-        { label: "/runtime", desc: "Runtime data (lesson/contract/governance/memory...)" },
-        { label: "/quit", desc: "Save and exit safely" },
-      ];
-    case "agent_detail":
-      return [
-        { label: "/runtime", desc: "Agent runtime data (status/context/lesson...)" },
-        { label: "/quit", desc: "Save and exit safely" },
-      ];
-    default:
-      return [
-        { label: "/quit", desc: "Save and exit safely" },
-      ];
-  }
-}
-
+/** Help projects the command/key registries instead of copying another menu. */
 export const HelpPanel = memo(function HelpPanel({ scene, onDismiss }: Props) {
   useInput((input: string, key: any) => {
-    for (const a of resolveHelpKey(input, key)) {
-      if (a.type === "dismiss") onDismiss();
+    for (const action of resolveHelpKey(input, key)) {
+      if (action.type === "dismiss") onDismiss();
     }
   });
-
-  const cmds = commandsForScene(scene);
-
-  return (
-    <Box flexDirection="column" padding={1}>
-      <Box>
-        <Text bold>Keyboard Reference</Text>
-        <Text dimColor>    {chordLabel("escape")} or {chordLabel("letterH")} to dismiss</Text>
-      </Box>
-
-      <Box flexDirection="row" gap={2}>
-        <Box flexDirection="column" marginRight={2}>
-          <Box>
-            <Text bold color={colors.accent}>Navigation</Text>
-          </Box>
-          <Text color={colors.accent}>{chordLabel("upDown")}  Navigate</Text>
-          <Text color={colors.accent}>{chordLabel("enter")}  Select / Send</Text>
-          <Text color={colors.accent}>{chordLabel("left")}      Back</Text>
-          <Text color={colors.accent}>{chordLabel("escape")}    Interrupt / Cancel</Text>
-          <Text color={colors.accent}>{chordLabel("slash")}      Command mode</Text>
-          <Text color={colors.accent}>{chordLabel("tab")}    Next panel</Text>
-        </Box>
-
-        <Box flexDirection="column">
-          <Box>
-            <Text bold color={colors.warning}>Commands</Text>
-          </Box>
-          {cmds.map((c) => (
-            <Text key={c.label} dimColor>{c.label.padEnd(18)} {c.desc}</Text>
-          ))}
-        </Box>
-      </Box>
+  const commands = getKeybindings(scene);
+  return <Box flexDirection="column" paddingLeft={1} paddingRight={1}>
+    <Text bold>Help</Text>
+    <Text dimColor>
+      {chordLabel("upDown")} navigate · {chordLabel("enter")} select/send · {chordLabel("left")} back · {chordLabel("escape")} cancel · {chordLabel("slash")} commands
+    </Text>
+    {(scene === "workspace" || scene === "agent_detail")
+      ? <Text dimColor>{chordLabel("ctrlG")} edit the complete prompt in an external editor</Text>
+      : null}
+    <Box flexDirection="column" marginTop={1}>
+      {commands.map(command => <Text key={command.name}>
+        {(`/${command.slashName}`).padEnd(18)} <Text dimColor>{command.title}</Text>
+      </Text>)}
     </Box>
-  );
+    <Text dimColor>{chordLabel("escape")} close</Text>
+  </Box>;
 });

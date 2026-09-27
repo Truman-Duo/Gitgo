@@ -13,10 +13,39 @@ export type CommandDef = {
   slashAliases?: string[];
   scene?: Scene[];
   hidden?: boolean;
+  /** Parameterised commands fill the editor first; Enter must not execute an empty invocation. */
+  inputMode?: "execute" | "fill";
   children?: CommandDef[];
 };
 
+const ZH_TITLES: Record<string, string> = {
+  "app.help": "帮助", "app.quit": "退出", "projects.bin": "归档项目",
+  "projects.create": "创建项目", "projects.archive": "归档项目",
+  "projects.stats_overview": "全局用量概览", "workspace.stats": "项目统计与任务时间轴", "projects.export": "导出知识",
+  "projects.config": "设置", "config.general": "通用设置",
+  "config.llm": "模型服务商", "config.publish": "发布设置",
+  "nav.processlist": "Agent 进程列表", "workspace.compact": "压缩上下文",
+  "workspace.undo": "撤回最近一轮会话",
+  "workspace.btw": "独立旁路问答", "workspace.runtime": "运行时数据",
+  "runtime.lesson": "经验知识", "runtime.contract": "项目合同",
+  "runtime.governance": "治理数据", "runtime.memory": "记忆快照",
+  "runtime.history": "操作历史", "runtime.context": "上下文面板",
+  "runtime.recovery": "Daemon 恢复", "runtime.trial": "外部 PR 试验仓",
+  "runtime.formal": "正式提交",
+  "process.rename": "重命名所选 B（ID 不变）", "process.archive": "归档所选 B（不停止、不删除）",
+};
+
+function description(def: CommandDef, language: "en" | "zh") {
+  return language === "zh" ? (ZH_TITLES[def.name] || def.title) : def.title;
+}
+
 export const REGISTRY: CommandDef[] = [
+  {name: "process.create", title: "Ask A to create and supervise a new B", category: "action",
+    keys: [], slashName: "create", inputMode: "fill", scene: ["process_list"]},
+  {name: "process.rename", title: "Rename selected B (identity unchanged)", category: "action",
+    keys: [], slashName: "rename", inputMode: "fill", scene: ["process_list"]},
+  {name: "process.archive", title: "Archive selected B (execution unchanged)", category: "action",
+    keys: [], slashName: "archive", scene: ["process_list"]},
   // ═══════════════════════════════════════════════════════════
   // Global
   // ═══════════════════════════════════════════════════════════
@@ -24,8 +53,9 @@ export const REGISTRY: CommandDef[] = [
     name: "app.help",
     title: "Help",
     category: "system",
-    keys: ["?"],
+    keys: [],
     slashName: "help",
+    scene: ["projects", "workspace", "process_list", "agent_detail"],
   },
   {
     name: "app.quit",
@@ -33,6 +63,14 @@ export const REGISTRY: CommandDef[] = [
     category: "system",
     keys: ["q"],
     slashName: "quit",
+  },
+  {
+    name: "projects.bin",
+    title: "Archived Projects",
+    category: "action",
+    keys: [],
+    slashName: "bin",
+    scene: ["projects"],
   },
 
   // ═══════════════════════════════════════════════════════════
@@ -55,11 +93,12 @@ export const REGISTRY: CommandDef[] = [
     scene: ["projects"],
   },
   {
-    name: "projects.status",
-    title: "Global Status",
+    name: "projects.stats_overview",
+    title: "Usage Overview",
     category: "action",
     keys: [],
-    slashName: "status",
+    slashName: "stats",
+    slashAliases: ["status"],
     scene: ["projects"],
   },
   {
@@ -77,50 +116,23 @@ export const REGISTRY: CommandDef[] = [
     keys: [],
     slashName: "config",
     slashAliases: ["llm", "lcfg"],
-    scene: ["projects"],
     children: [
       {
-        name: "config.llm",
-        title: "LLM Providers",
+        name: "config.general",
+        title: "General Settings",
         category: "system",
         keys: [],
-        slashName: "llm",
-        children: [
-          { name: "config.llm.default", title: "Default Provider", category: "system", keys: [], slashName: "default" },
-        ],
+        slashName: "general",
       },
       {
-        name: "config.publish",
-        title: "Publish Settings",
+        name: "config.llm",
+        title: "Providers",
         category: "system",
         keys: [],
-        slashName: "publish",
+        slashName: "providers",
+        slashAliases: ["llm"],
         children: [
-          {
-            name: "config.publish.templates",
-            title: "Templates",
-            category: "system",
-            keys: [],
-            slashName: "templates",
-            children: [
-              { name: "config.publish.templates.list", title: "List templates", category: "system", keys: [], slashName: "list" },
-              { name: "config.publish.templates.add", title: "Add template", category: "system", keys: [], slashName: "add" },
-              { name: "config.publish.templates.edit", title: "Edit template", category: "system", keys: [], slashName: "edit" },
-              { name: "config.publish.templates.delete", title: "Delete template", category: "system", keys: [], slashName: "delete" },
-            ],
-          },
-          {
-            name: "config.publish.push",
-            title: "Push Config",
-            category: "system",
-            keys: [],
-            slashName: "push",
-            children: [
-              { name: "config.publish.push.privacy", title: "Privacy Clean ON/OFF", category: "system", keys: [], slashName: "privacy" },
-              { name: "config.publish.push.format", title: "Commit Format", category: "system", keys: [], slashName: "format" },
-              { name: "config.publish.push.release", title: "Release URL", category: "system", keys: [], slashName: "release_url" },
-            ],
-          },
+          { name: "config.llm.default", title: "Default Provider", category: "system", keys: [], slashName: "default" },
         ],
       },
       {
@@ -129,6 +141,7 @@ export const REGISTRY: CommandDef[] = [
         category: "system",
         keys: [],
         slashName: "bin",
+        hidden: true,
         children: [
           { name: "config.bin.delete_delay", title: "Delete Delay", category: "system", keys: [], slashName: "delete_delay" },
         ],
@@ -145,6 +158,48 @@ export const REGISTRY: CommandDef[] = [
     category: "navigation",
     keys: [],
     slashName: "processlist",
+    scene: ["workspace", "agent_detail"],
+  },
+  {
+    name:"workspace.publish",title:"Publish",category:"action",keys:[],slashName:"publish",
+    scene:["projects","workspace","agent_detail"],children:[
+      {name:"publish.trial",title:"Trial changes",category:"action",keys:[],slashName:"trial"},
+      {name:"publish.formal",title:"Formal commits",category:"action",keys:[],slashName:"formal"},
+    ],
+  },
+  {
+    name: "workspace.compact",
+    title: "Compact Context",
+    category: "action",
+    keys: [],
+    slashName: "compact",
+    scene: ["workspace", "agent_detail"],
+  },
+  {
+    name: "workspace.undo",
+    title: "Rewind Latest Conversation Turn",
+    category: "action",
+    keys: [],
+    slashName: "undo",
+    slashAliases: ["rewind"],
+    scene: ["workspace", "agent_detail"],
+  },
+  {
+    name: "workspace.btw",
+    title: "Isolated Side Question",
+    category: "action",
+    keys: [],
+    slashName: "btw",
+    inputMode: "fill",
+    scene: ["workspace", "agent_detail"],
+  },
+  {
+    name: "workspace.stats",
+    title: "Project Statistics & Timeline",
+    category: "action",
+    keys: [],
+    slashName: "stats",
+    slashAliases: ["status"],
     scene: ["workspace", "agent_detail"],
   },
   {
@@ -200,16 +255,6 @@ export const REGISTRY: CommandDef[] = [
         ],
       },
       {
-        name: "runtime.history",
-        title: "Operation History",
-        category: "action",
-        keys: [],
-        slashName: "history",
-        children: [
-          { name: "runtime.history.full", title: "Full history", category: "action", keys: [], slashName: "full" },
-        ],
-      },
-      {
         name: "runtime.context",
         title: "Context Panel",
         category: "navigation",
@@ -217,11 +262,31 @@ export const REGISTRY: CommandDef[] = [
         slashName: "context",
       },
       {
+        name: "runtime.tools",
+        title: "Saved Custom Tools",
+        category: "action",
+        keys: [],
+        slashName: "tools",
+      },
+      {
+        name: "runtime.recovery",
+        title: "Daemon Recovery",
+        category: "action",
+        keys: [],
+        slashName: "recovery",
+        children: [
+          { name: "runtime.recovery.resume", title: "Resume a safe candidate", category: "action", keys: [], slashName: "resume" },
+          { name: "runtime.recovery.resume_verified", title: "Resume after manual verification", category: "action", keys: [], slashName: "resume_verified" },
+          { name: "runtime.recovery.discard", title: "Discard a recovery candidate", category: "action", keys: [], slashName: "discard" },
+        ],
+      },
+      {
         name: "runtime.trial",
         title: "Trial (External PRs)",
         category: "action",
         keys: [],
         slashName: "trial",
+        hidden: true,
         children: [
           { name: "runtime.trial.list", title: "List incoming PRs", category: "action", keys: [], slashName: "list" },
           { name: "runtime.trial.triage", title: "Triage: accept/promote/discard", category: "action", keys: [], slashName: "triage" },
@@ -233,6 +298,7 @@ export const REGISTRY: CommandDef[] = [
         category: "action",
         keys: [],
         slashName: "formal",
+        hidden: true,
         children: [
           { name: "runtime.formal.list", title: "List formal commits", category: "action", keys: [], slashName: "list" },
           { name: "runtime.formal.edit", title: "Edit commit message", category: "action", keys: [], slashName: "edit" },
@@ -259,7 +325,10 @@ function resolvePath(input: string, registry: CommandDef[]): { node: CommandDef 
   const root = registry.find((c) =>
     c.slashName === tokens[0] || c.slashAliases?.includes(tokens[0])
   );
-  if (!root) return { node: null, children: visible(registry) };
+  // A complete but unavailable root command must not fall back to unrelated
+  // commands from the current scene. Partial top-level input is handled by
+  // getCommands() before this resolver is called.
+  if (!root) return { node: null, children: [] };
 
   let current: CommandDef = root;
   let currentChildren = visible(current.children || []);
@@ -286,17 +355,21 @@ function visible(defs: CommandDef[]): CommandDef[] {
 
 /** Return top-level suggestions for the given scene. */
 function topLevelCommands(scene: Scene): CommandDef[] {
+  if (scene === "process_list") return visible(REGISTRY).filter(c =>
+    c.name.startsWith("process.") || c.name === "app.help"
+  );
   return visible(REGISTRY).filter((c) => !c.scene || c.scene.includes(scene));
 }
 
 /** Get suggestions for the current command input and scene. */
 export function getCommands(scene: Scene): Suggestion[];
 export function getCommands(scene: Scene, cmdValue: string): Suggestion[];
-export function getCommands(scene: Scene, cmdValue?: string): Suggestion[] {
+export function getCommands(scene: Scene, cmdValue: string | undefined, language: "en" | "zh"): Suggestion[];
+export function getCommands(scene: Scene, cmdValue?: string, language: "en" | "zh" = "en"): Suggestion[] {
   const top = topLevelCommands(scene);
 
   if (!cmdValue || cmdValue.trim().length === 0) {
-    return sortByName(top.map((c) => ({ label: "/" + c.slashName, description: c.title })));
+    return sortByName(top.map((c) => ({ label: "/" + c.slashName, description: description(c, language), inputMode: c.inputMode })));
   }
 
   // Strip leading slash if present, then parse path
@@ -304,7 +377,7 @@ export function getCommands(scene: Scene, cmdValue?: string): Suggestion[] {
   const tokens = input.trim().split(/\s+/);
 
   if (tokens.length === 0) {
-    return sortByName(top.map((c) => ({ label: "/" + c.slashName, description: c.title })));
+    return sortByName(top.map((c) => ({ label: "/" + c.slashName, description: description(c, language), inputMode: c.inputMode })));
   }
 
   const firstToken = tokens[0].toLowerCase();
@@ -314,7 +387,7 @@ export function getCommands(scene: Scene, cmdValue?: string): Suggestion[] {
     return sortByName(
       top
         .filter((c) => c.slashName.startsWith(firstToken) || c.slashAliases?.some((a) => a.startsWith(firstToken)))
-        .map((c) => ({ label: "/" + c.slashName, description: c.title })),
+        .map((c) => ({ label: "/" + c.slashName, description: description(c, language), inputMode: c.inputMode })),
     );
   }
 
@@ -331,12 +404,12 @@ export function getCommands(scene: Scene, cmdValue?: string): Suggestion[] {
     return sortByName(
       children
         .filter((c) => c.slashName.startsWith(lastToken))
-        .map((c) => ({ label: c.slashName, description: c.title })),
+        .map((c) => ({ label: c.slashName, description: description(c, language), inputMode: c.inputMode })),
     );
   }
 
   // Full path resolved — show all children
-  return sortByName(children.map((c) => ({ label: c.slashName, description: c.title })));
+  return sortByName(children.map((c) => ({ label: c.slashName, description: description(c, language), inputMode: c.inputMode })));
 }
 
 /** Returns all keybindings visible in the help panel for a given scene */
