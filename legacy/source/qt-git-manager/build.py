@@ -1,4 +1,8 @@
-"""PyInstaller build script for gitgo — 增量构建 + 缓存复用
+"""Archived PyInstaller build script for the legacy Qt Git manager.
+
+This does not build the Bun/Ink terminal product. Pass ``--legacy-qt``
+explicitly to produce an archival compatibility build; new terminal release
+work starts at ``packaging/build_windows.ps1``.
 
 Usage:
   python build.py                  # Release build (复用缓存)
@@ -48,6 +52,10 @@ _HIDDEN_IMPORTS = [
     "backend.core.i18n", "backend.core.history", "backend.core.plugin",
     "backend.core.plugin_loader", "backend.core.migrate",
     "backend.core.operations", "backend.core.scanner", "backend.core.daemon",
+    "backend.core.dependency_graph", "backend.core.process_control",
+    "backend.core.tools.runner", "backend.core.tools.registrations",
+    "backend.core.tools.workspace_tools", "backend.core.tools.dynamic_tools",
+    "backend.core.tools.document_tools", "backend.core.tools.web_tools",
     "backend.models",
     "backend.adapters.file_adapter", "backend.adapters.git_runner",
     "backend.adapters.local_file_adapter", "backend.adapters.local_git_runner",
@@ -59,6 +67,7 @@ _HIDDEN_IMPORTS = [
     "frontend.global_lsb",
     "cui", "cui.main",
     "httpx",
+    "pypdf", "reportlab", "docx", "pptx", "openpyxl", "xlrd",
     "paramiko",
 ]
 
@@ -72,7 +81,8 @@ def _install_deps(reinstall: bool = False):
     """条件安装运行时依赖（哈希校验，避免重复安装）"""
     script_dir = Path(__file__).parent.resolve()
     req_path = script_dir / "requirements.txt"
-    hash_path = script_dir / ".build_deps_hash"
+    hash_path = script_dir / ".gitgo" / "build" / "legacy-deps.hash"
+    hash_path.parent.mkdir(parents=True, exist_ok=True)
 
     current_hash = _hash_file(req_path)
 
@@ -193,6 +203,10 @@ def _clean_old_exes(dist_dir: Path, names: list[str]):
 
 
 def main():
+    if "--legacy-qt" not in sys.argv:
+        print("This builder is archived for the legacy Qt product.")
+        print("Use packaging/build_windows.ps1 for the terminal product.")
+        return 2
     script_dir = Path(__file__).parent.resolve()
     os.chdir(script_dir)
 
@@ -317,4 +331,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
