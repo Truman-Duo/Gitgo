@@ -13,6 +13,33 @@ from backend.core.sync_session.models import SessionStage
 
 
 class SyncPushMixin:
+    def _ensure_configured_release_remote(self) -> bool:
+        """Materialize /publish Remote into the release repository's origin.
+
+        The config is the user-facing source of truth; leaving it disconnected
+        from Git made the Remote page cosmetic and caused step_push() to target
+        whatever stale origin happened to exist.  Do not print the URL because
+        it may contain credentials.
+        """
+        remote = getattr(getattr(self.project, "release", None), "remote", None)
+        configured = str(getattr(remote, "url", "") or "").strip()
+        if not configured:
+            return True
+        current = self.bk_git_runner.run(
+            ["remote", "get-url", "origin"], timeout=15,
+        )
+        if current.returncode == 0 and current.stdout.strip() == configured:
+            return True
+        action = ["remote", "set-url", "origin", configured]
+        if current.returncode != 0:
+            action = ["remote", "add", "origin", configured]
+        updated = self.bk_git_runner.run(action, timeout=15)
+        if updated.returncode != 0:
+            self.on_log("无法应用 /publish 中配置的发布远端")
+            return False
+        self.on_log("已应用 /publish 中配置的发布远端")
+        return True
+
     def step_sync(self, formal_index: Optional[int] = None) -> bool:
         """同步到备份仓库。formal_index=None → 找第一个未 synced 的。"""
         self.stage = SessionStage.SYNCING
@@ -101,6 +128,20 @@ class SyncPushMixin:
             self.workspace_path, self.backup_path,
             self.on_progress,
             plugin_ids=self.project.commit_format.get("plugins"),
+            privacy_config={
+                **dict(self.project.authorship or {}),
+                "exclude_tool_configs": list(
+                    (self.project.outbound_policy or {}).get("exclude_paths")
+                    or (self.project.authorship or {}).get("exclude_tool_configs", [])
+                ),
+                "privacy": {
+                    "level": int((self.project.outbound_policy or {}).get("content_level", 2) or 2),
+                    "deep_scan": bool((self.project.outbound_policy or {}).get("deep_scan", False)),
+                    "approved_fingerprints": list(
+                        (self.project.outbound_policy or {}).get("approved_fingerprints", [])
+                    ),
+                },
+            },
             ws_adapter=self.ws_adapter, bk_adapter=self.bk_adapter,
             git_runner=self.bk_git_runner,
         )
@@ -206,6 +247,9 @@ class SyncPushMixin:
             self.on_log("备份目录不是 git 仓库")
             return False, []
 
+        if not self._ensure_configured_release_remote():
+            return False, []
+
         targets = [fc for fc in self.formal_commits if fc.synced and not fc.pushed]
         if not targets:
             self.on_log("没有待 push 的正式 Commit")
@@ -241,7 +285,17 @@ class SyncPushMixin:
             self.backup_path,
             progress_callback=self.on_progress,
             skip_scan=skip_scan,
-            security_config=self.project.security_scan,
+            security_config={
+                "enabled": bool((self.project.outbound_policy or {}).get("enabled", True)),
+                "severity_threshold": (self.project.outbound_policy or {}).get(
+                    "severity_threshold", self.project.security_scan.get("severity_threshold", "medium")
+                ),
+                "ignored_rules": list((self.project.outbound_policy or {}).get("ignored_rules", [])),
+                "extra_patterns": list((self.project.outbound_policy or {}).get("extra_patterns", [])),
+                "approved_fingerprints": list(
+                    (self.project.outbound_policy or {}).get("approved_fingerprints", [])
+                ),
+            },
             plugin_ids=self.project.commit_format.get("plugins"),
             git_runner=self.bk_git_runner,
         )

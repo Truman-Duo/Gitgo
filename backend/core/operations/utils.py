@@ -83,7 +83,16 @@ def _match_glob(pattern: str, path: str) -> bool:
 
 
 def _is_excluded(rel_path: str, patterns: list[str]) -> bool:
-    return any(_match_glob(p, rel_path) for p in patterns)
+    excluded = False
+    for raw in patterns:
+        pattern = str(raw or "").strip()
+        if not pattern:
+            continue
+        negated = pattern.startswith("!")
+        candidate = pattern[1:] if negated else pattern
+        if _match_glob(candidate, rel_path):
+            excluded = not negated
+    return excluded
 
 
 def _entry_to_dict(e: FileEntry) -> dict:

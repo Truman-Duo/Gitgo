@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 class IdentityIntegrityCheck(PolicyCheck):
     name = "identity_integrity"
     description = "Check identity files for deletion or mass override"
+    applicable_task_kinds = frozenset({"action", "supervisor", "review"})
 
     def check(self, session: "SyncSession",
               project: "ProjectConfig") -> list[dict]:

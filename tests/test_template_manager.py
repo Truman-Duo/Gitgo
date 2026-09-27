@@ -51,6 +51,22 @@ def test_load_returns_default_when_no_file(monkeypatch):
     assert templates[0].name == "default"
 
 
+def test_explicit_config_root_never_imports_cwd_template(monkeypatch, tmp_path_factory):
+    workspace = tmp_path_factory / "live-workspace"
+    workspace.mkdir()
+    legacy = workspace / TemplateManager.TEMPLATE_FILE
+    legacy.write_text('{"templates": [{"name": "live"}]}', encoding="utf-8")
+    isolated = tmp_path_factory / "isolated" / "config.json"
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("GITGO_CONFIG_PATH", str(isolated))
+
+    templates = TemplateManager.load()
+
+    assert [template.name for template in templates] == ["default"]
+    assert legacy.exists()
+    assert not (isolated.parent / TemplateManager.TEMPLATE_FILE).exists()
+
+
 # ── TemplateManager save / load 往返 ──────────────────
 
 def test_save_and_load_roundtrip(monkeypatch):

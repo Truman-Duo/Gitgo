@@ -203,6 +203,18 @@ def detect_drift(
 
     # Rule 3: 架构约束违反
     for constraint in contract.architecture_constraints:
+        if constraint not in _CONSTRAINT_CHECKS:
+            alerts.append({
+                "rule": "architecture_constraint_unverified",
+                "level": "warning",
+                "message": (
+                    f"Architecture constraint has no registered deterministic checker: "
+                    f"'{constraint}'. Review is required; no violation is inferred from words."
+                ),
+                "constraint": constraint,
+                "machine_verifiable": False,
+            })
+            continue
         violations = _check_architecture_constraint(
             workspace_path, changed_files, constraint,
         )
@@ -301,22 +313,10 @@ def _check_architecture_constraint(
             if pattern.search(content):
                 violations.append(rel_path)
     else:
-        # 通用规则：把 constraint 文本作为关键词搜索
-        keyword = constraint.split()[0] if constraint else ""
-        if len(keyword) < 3:
-            return []
-        for rel_path in changed_files:
-            if not rel_path.endswith(".py"):
-                continue
-            fpath = workspace_path / rel_path
-            if not fpath.exists():
-                continue
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            if keyword in content:
-                violations.append(rel_path)
+        # Unknown prose constraints are not executable specifications.  The
+        # caller emits an explicit unverified warning instead of manufacturing
+        # a violation from a keyword hit.
+        return []
 
     return violations
 
@@ -371,29 +371,25 @@ _DEP_GRAPH_FILE = "dep_graph.json"
 
 
 def build_dep_graph(workspace_path: Path) -> dict[str, list[str]]:
-    """扫描 .py 文件构建反向依赖图 {被引用模块名: [引用者文件路径...]}。
+    """Build the legacy reverse-import view from the multi-signal graph.
 
-    存入 .gitgo/dep_graph.json。
+    The returned shape remains ``{module_stem: [dependent files...]}`` for old
+    callers.  New code should use :mod:`backend.core.dependency_graph`, whose
+    edges preserve full paths, evidence, confidence, feedback and languages.
     """
+    from backend.core.dependency_graph import build_dependency_graph
+
+    rich = build_dependency_graph(workspace_path)
     graph: dict[str, list[str]] = {}
-    for py_file in workspace_path.rglob("*.py"):
-        pstr = str(py_file)
-        if any(x in pstr for x in ["__pycache__", ".venv", ".git", "build", "dist", "out"]):
+    for edge in rich.edges.values():
+        if edge.dismissed:
             continue
-        try:
-            content = py_file.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        imports = re.findall(r'^(?:from|import)\s+([\w.]+)', content, re.M)
-        rel = str(py_file.relative_to(workspace_path)).replace("\\", "/")
-        for mod_raw in imports:
-            # 取顶层模块名: "lexi.classifier" → "classifier", "os.path" → "os"
-            mod = mod_raw.split(".")[-1] if "." in mod_raw else mod_raw
-            graph.setdefault(mod, []).append(rel)
-    # Deduplicate
-    for k in graph:
-        graph[k] = sorted(set(graph[k]))
-    # Save
+        dependency = Path(edge.dependency)
+        aliases = {dependency.stem, edge.dependency}
+        for alias in aliases:
+            graph.setdefault(alias, []).append(edge.dependent)
+    for key in graph:
+        graph[key] = sorted(set(graph[key]))
     dep_path = workspace_path / ".gitgo" / _DEP_GRAPH_FILE
     dep_path.parent.mkdir(parents=True, exist_ok=True)
     import json
@@ -402,15 +398,18 @@ def build_dep_graph(workspace_path: Path) -> dict[str, list[str]]:
 
 
 def load_dep_graph(workspace_path: Path) -> dict[str, list[str]]:
-    """加载已缓存的依赖图。不存在则构建。"""
-    dep_path = workspace_path / ".gitgo" / _DEP_GRAPH_FILE
-    if dep_path.exists():
-        import json
-        try:
-            return json.loads(dep_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return build_dep_graph(workspace_path)
+    """Load a fresh legacy view; rich-graph fingerprints own invalidation."""
+    from backend.core.dependency_graph import load_dependency_graph
+
+    rich = load_dependency_graph(workspace_path)
+    graph: dict[str, list[str]] = {}
+    for edge in rich.edges.values():
+        if edge.dismissed:
+            continue
+        dependency = Path(edge.dependency)
+        for alias in {dependency.stem, edge.dependency}:
+            graph.setdefault(alias, []).append(edge.dependent)
+    return {key: sorted(set(values)) for key, values in graph.items()}
 
 
 def get_dependents(workspace_path: Path, file_path: str) -> list[str]:
@@ -418,9 +417,10 @@ def get_dependents(workspace_path: Path, file_path: str) -> list[str]:
 
     file_path: 相对于 workspace 的路径，如 'lexi/classifier.py'
     """
-    graph = load_dep_graph(workspace_path)
-    mod = file_path.replace("\\", "/").replace(".py", "").split("/")[-1]
-    return graph.get(mod, [])
+    from backend.core.dependency_graph import query_dependents
+
+    edges = query_dependents(workspace_path, file_path)
+    return sorted({edge["dependent"] for edge in edges})
 
 
 # ── v0.36: AST 函数级依赖图（Level 2: 反向图差分）─────────
@@ -478,8 +478,12 @@ def build_function_graph(workspace_path: Path) -> dict[str, dict]:
     Level 1 fallback: 如果 AST 解析失败，降级到 import 级图。
     """
     graph: dict[str, dict[str, list[str]]] = {}
+    parsed: dict[str, dict] = {}
 
-    for py_file in workspace_path.rglob("*.py"):
+    # Pass 1 collects every definition before any call is resolved.  The old
+    # one-pass implementation silently missed callees that happened to be
+    # visited later by rglob(), making the graph filesystem-order dependent.
+    for py_file in sorted(workspace_path.rglob("*.py")):
         if ".git" in py_file.parts or "__pycache__" in py_file.parts:
             continue
 
@@ -489,18 +493,37 @@ def build_function_graph(workspace_path: Path) -> dict[str, dict]:
         if not symbols["defines"] and not symbols["calls"]:
             continue
 
-        graph.setdefault(rel, {"defines": [], "called_by": {}})
-        graph[rel]["defines"] = symbols["defines"]
+        parsed[rel] = symbols
+        graph[rel] = {"defines": symbols["defines"], "called_by": {}}
 
-        # 对每个调用，记录反向引用
+    definition_index: dict[str, list[str]] = {}
+    for rel, symbols in parsed.items():
+        for defined in symbols["defines"]:
+            definition_index.setdefault(defined, []).append(rel)
+            definition_index.setdefault(defined.split(".")[-1], []).append(rel)
+
+    # Pass 2 resolves simple and qualified calls against the complete index.
+    # Ambiguous symbols intentionally create multiple candidates: this graph is
+    # used for impact discovery, where a false positive is cheaper than a miss.
+    for caller_rel, symbols in parsed.items():
         for called in symbols["calls"]:
-            for other_rel, other_data in graph.items():
-                if other_rel == rel:
+            candidates = set(definition_index.get(called, []))
+            candidates.update(definition_index.get(called.split(".")[-1], []))
+            for callee_rel in candidates:
+                if callee_rel == caller_rel:
                     continue
-                if called in other_data.get("defines", []):
-                    other_data.setdefault("called_by", {}).setdefault(
-                        called, [],
-                    ).append(f"{rel}:{called}")
+                callee_data = graph[callee_rel]
+                matched = [
+                    item for item in callee_data.get("defines", [])
+                    if item == called or item.split(".")[-1] == called.split(".")[-1]
+                ]
+                for defined in matched:
+                    refs = callee_data.setdefault("called_by", {}).setdefault(defined, [])
+                    refs.append(f"{caller_rel}:{called}")
+
+    for data in graph.values():
+        for symbol, callers in data.get("called_by", {}).items():
+            data["called_by"][symbol] = sorted(set(callers))
 
     # 持久化
     cache_path = workspace_path / ".gitgo" / _FUNC_GRAPH_FILE
@@ -511,11 +534,21 @@ def build_function_graph(workspace_path: Path) -> dict[str, dict]:
 
 
 def load_function_graph(workspace_path: Path) -> dict[str, dict]:
-    """加载缓存的函数级调用图。不存在则构建。"""
+    """加载缓存的函数级调用图。不存在则构建。
+
+    Source fingerprint invalidation is owned by dependency_graph.v2; rebuild
+    here when its generated graph is newer than the legacy function cache.
+    """
+    from backend.core.dependency_graph import load_dependency_graph
+
+    # This refreshes the source fingerprint cache before comparing mtimes.
+    load_dependency_graph(workspace_path)
     cache_path = workspace_path / ".gitgo" / _FUNC_GRAPH_FILE
     if cache_path.exists():
         try:
-            return _json.loads(cache_path.read_text(encoding="utf-8"))
+            rich_path = workspace_path / ".gitgo" / "dependency_graph.v2.json"
+            if not rich_path.exists() or cache_path.stat().st_mtime_ns >= rich_path.stat().st_mtime_ns:
+                return _json.loads(cache_path.read_text(encoding="utf-8"))
         except (_json.JSONDecodeError, OSError):
             pass
     return build_function_graph(workspace_path)

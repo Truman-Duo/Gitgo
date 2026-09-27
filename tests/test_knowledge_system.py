@@ -141,9 +141,9 @@ class TestIsTestableProposition:
         from backend.core.knowledge.harvest import is_testable_proposition
         assert not is_testable_proposition("auth.py 经常被改")
 
-    def test_descriptive_rejected(self):
+    def test_wording_is_not_used_as_semantic_authority(self):
         from backend.core.knowledge.harvest import is_testable_proposition
-        assert not is_testable_proposition(
+        assert is_testable_proposition(
             "auth.py 文件在最近被修改了很多次"
         )
 
@@ -188,6 +188,51 @@ class TestHarvestLLMFallback:
         result = harvest_llm_summary(signals, None, "/tmp", "test")
         assert result == []
         assert signals[0].get("harvest_retry_count", 0) >= 1
+
+    def test_harvested_lesson_is_bound_to_source_evidence(self, tmp_workspace):
+        from backend.core.knowledge.harvest import harvest_llm_summary
+        from backend.core.knowledge.applicability import assess_lesson
+
+        source = tmp_workspace / "auth.py"
+        source.write_text("version one", encoding="utf-8")
+
+        class Provider:
+            def chat(self, *_args, **_kwargs):
+                return ('[{"trigger":"auth.py","rule":'
+                        '"When auth changes, rerun the authentication checks and verify success",'
+                        '"severity":"high","category":"process"}]')
+
+        lessons = harvest_llm_summary([
+            {"signal_id": "hs-1", "signal_type": "contract_drift",
+             "trigger": "auth.py", "detail": {"file": "auth.py"}},
+        ], Provider(), str(tmp_workspace), "testproject", raise_on_error=True)
+        assert len(lessons) == 1
+        assert assess_lesson(lessons[0], tmp_workspace)["state"] == "current"
+        source.write_text("version two", encoding="utf-8")
+        stale = assess_lesson(lessons[0], tmp_workspace)
+        assert stale == {"state": "needs_recheck", "reason": "source_file_changed",
+                         "path": "auth.py"}
+
+    def test_governance_context_exposes_pending_lesson_with_applicability(
+        self, tmp_workspace,
+    ):
+        from backend.core.knowledge.manager import LessonManager
+        from backend.core.knowledge.models import Lesson
+        from backend.core.loop.context_builder import build_governance_context
+
+        LessonManager.save_pending(tmp_workspace, Lesson(
+            id="pending-1", trigger="auth.py",
+            rule="When auth changes, rerun the authentication checks and verify success",
+            project_name="testproject", source="auto_harvested",
+            evidence={"schema_version": 1, "workspace_files": {}},
+        ))
+        context = build_governance_context(
+            "testproject", tmp_workspace, current_policy_results={},
+            source_snapshot={"entries": []},
+        )
+        assert context["lessons"][0]["id"] == "pending-1"
+        assert context["lessons"][0]["scope"] == "pending"
+        assert context["lessons"][0]["applicability"]["state"] == "current"
 
 
 # ── recall_grep 检索 ─────────────────────────────────────────
@@ -240,6 +285,26 @@ class TestRecallGrep:
                         workspace=str(tmp_workspace))
         vcs = [l.get("verified_count", 0) for l in r["lessons"]]
         assert vcs[0] >= vcs[-1]  # 降序
+
+    def test_stale_harvested_lesson_is_explicit_retrieval_only(self, tmp_workspace):
+        from backend.core.knowledge.manager import LessonManager
+        from backend.core.knowledge.models import Lesson
+        from backend.core.knowledge.recall import recall_grep
+
+        source = tmp_workspace / "auth.py"
+        source.write_text("new", encoding="utf-8")
+        LessonManager.save_pending(tmp_workspace, Lesson(
+            id="stale", trigger="auth.py",
+            rule="When auth changes, rerun the authentication checks and verify success",
+            project_name="testproject", source="auto_harvested",
+            evidence={"schema_version": 1, "workspace_files": {"auth.py": "old-digest"}},
+        ))
+        result = recall_grep(
+            "auth", "testproject", workspace=str(tmp_workspace),
+        )
+        assert result["lessons"][0]["applicability"]["state"] == "needs_recheck"
+        assert "[NEEDS_RECHECK]" in result["text"]
+        assert "revalidate" in result["text"]
 
 
 # ── filter_by_relevance ──────────────────────────────────────
@@ -568,6 +633,119 @@ class TestChainSignalToLesson:
         result = harvest_llm_summary(signals, mock_llm, "/tmp", "test")
         # retry_count=5 → 超过 MAX_HARVEST_RETRY → 不回写
         assert result == []
+
+    def test_mixed_source_scheduler_and_durable_signal_lifecycle(
+        self, tmp_workspace, monkeypatch,
+    ):
+        """The scheduler consumes one mixed-source batch exactly once.
+
+        This is the regression for the old impossible trigger where the
+        scheduler filtered to one signal type and then required two source
+        types.  It also proves that retries live in the durable record rather
+        than in an ephemeral copy passed to the LLM.
+        """
+        from backend.core.history import HistoryManager
+        from backend.core.knowledge import harvest
+
+        HistoryManager.set_workspace(str(tmp_workspace))
+        monkeypatch.setattr(harvest, "COOLDOWN_SECONDS", 0)
+        harvest._last_harvest_time.pop("testproject", None)
+
+        signal_ids = []
+        for index in range(4):
+            signal_ids.append(harvest.capture_signal(
+                "lesson_trigger",
+                {"trigger": f"file_{index}.py", "rule": f"rule {index}"},
+                "testproject",
+                source_event_id=f"lesson:{index}",
+            ))
+        signal_ids.append(harvest.capture_signal(
+            "contract_drift",
+            {"trigger": "api.py", "rule": "contract drift"},
+            "testproject",
+            source_event_id="drift:0",
+        ))
+
+        assert harvest.should_trigger_harvest("lesson_trigger", "testproject")
+        leased = harvest.lease_harvest_signals("testproject")
+        assert {item["signal_id"] for item in leased} == set(signal_ids)
+        assert harvest.lease_harvest_signals("testproject") == []
+
+        harvest.fail_harvest(
+            "testproject", [item["signal_id"] for item in leased], "temporary",
+        )
+        retryable = harvest.get_unprocessed_signals("testproject")
+        assert len(retryable) == 5
+        assert {item["harvest_retry_count"] for item in retryable} == {1}
+
+        leased_again = harvest.lease_harvest_signals("testproject")
+        harvest.complete_harvest(
+            "testproject",
+            [item["signal_id"] for item in leased_again],
+            ["lesson_example"],
+        )
+        assert harvest.get_unprocessed_signals("testproject") == []
+        assert not harvest.should_trigger_harvest(
+            "lesson_trigger", "testproject",
+        )
+
+        # A completed batch is history, not a permanently rising admission
+        # threshold.  A later mixed-source batch must still be harvested even
+        # when its size matches the earlier batch; otherwise steady recurring
+        # evidence disables automatic learning after the first success.
+        for index in range(4):
+            harvest.capture_signal(
+                "lesson_trigger",
+                {"trigger": f"next_{index}.py", "rule": f"next rule {index}"},
+                "testproject",
+                source_event_id=f"next-lesson:{index}",
+            )
+        harvest.capture_signal(
+            "contract_drift",
+            {"trigger": "next_api.py", "rule": "next contract drift"},
+            "testproject",
+            source_event_id="next-drift:0",
+        )
+        assert harvest.should_trigger_harvest(
+            "lesson_trigger", "testproject",
+        )
+
+    def test_explicit_semantic_harvest_waits_for_confirmation(
+        self, tmp_workspace,
+    ):
+        from backend.core.history import HistoryManager
+        from backend.core.knowledge import harvest
+        from backend.core.knowledge.models import Lesson
+
+        HistoryManager.set_workspace(str(tmp_workspace))
+        signal_id = harvest.capture_signal(
+            "manual_explicit",
+            {"trigger": "manual reflection", "detail": {"observation": "repeatable issue"}},
+            "testproject", source_event_id="manual:one",
+        )
+        leased = harvest.lease_harvest_signal_ids("testproject", [signal_id])
+        assert [item["signal_id"] for item in leased] == [signal_id]
+        proposal = harvest.stage_harvest_proposal(
+            "testproject", [signal_id], [Lesson(
+                trigger="When a provider changes between turns",
+                rule="At a safe boundary, retire the old runtime and resume the durable session with the selected provider.",
+                project_name="testproject",
+            )],
+        )
+
+        staged = harvest.get_harvest_proposal("testproject", proposal["proposal_id"])
+        assert staged is not None
+        assert staged["candidates"][0]["rule"].startswith("At a safe boundary")
+        assert harvest.get_unprocessed_signals("testproject") == []
+
+        resolved = harvest.resolve_harvest_proposal(
+            "testproject", proposal["proposal_id"],
+            accepted=True, lesson_ids=["lesson-1"],
+        )
+        assert resolved["status"] == "accepted"
+        assert harvest.get_harvest_proposal("testproject", proposal["proposal_id"]) is None
+        status = harvest.harvest_status("testproject")
+        assert status["states"] == {"processed": 1}
 
 
 # ── Chain 2: Recall → Record Retrieval → Classify Heat → Recycle ──

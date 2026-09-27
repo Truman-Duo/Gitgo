@@ -148,3 +148,39 @@ def test_bundle_json_serializable():
     # 验证可被 json.tool 解析
     parsed = json.loads(json_str)
     assert parsed["gitgo_protocol_version"] == "1.0"
+
+
+def test_knowledge_export_marks_stale_lesson_instead_of_presenting_raw_rule_as_current(
+    monkeypatch, tmp_path_factory,
+):
+    from types import SimpleNamespace
+    from backend.core.governance.state_bundle import _collect_knowledge_snapshot
+    from backend.core.knowledge.models import Lesson
+    from backend.core.knowledge.lesson import LessonManager
+    from backend.core.knowledge import harvest
+
+    source = tmp_path_factory / "source.txt"
+    source.write_text("new", encoding="utf-8")
+    lesson = Lesson(
+        id="stale-lesson", trigger="source.txt", rule="recheck source",
+        project_name="BundleTest", source="auto_harvested",
+        evidence={"schema_version": 1, "workspace_files": {"source.txt": "old"}},
+    )
+    monkeypatch.setattr(LessonManager, "load_abstract", lambda _workspace: [])
+    monkeypatch.setattr(LessonManager, "load_instance", lambda _workspace, _project: [])
+    monkeypatch.setattr(LessonManager, "load_pending", lambda _workspace, _project: [lesson])
+    monkeypatch.setattr(harvest, "harvest_status", lambda _project: {"states": {}})
+    session = SimpleNamespace(
+        workspace_path=str(tmp_path_factory),
+        project=SimpleNamespace(name="BundleTest"),
+    )
+
+    full = _collect_knowledge_snapshot(session, minimal=False)
+    minimal = _collect_knowledge_snapshot(session, minimal=True)
+
+    assert full["pending"][0]["applicability"] == {
+        "state": "needs_recheck", "reason": "source_file_changed",
+        "path": "source.txt",
+    }
+    assert full["applicability_counts"] == {"needs_recheck": 1}
+    assert minimal["applicability_counts"] == {"needs_recheck": 1}

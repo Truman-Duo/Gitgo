@@ -61,6 +61,47 @@ class GovernanceSignal:
     check_id: str = ""  # 产生此信号的检查 ID（lesson_id / check_name）
     metadata: dict = field(default_factory=dict)
 
+    WIRE_VERSION = 1
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.WIRE_VERSION,
+            "signal_id": self.signal_id,
+            "source": self.source,
+            "severity": self.severity.value,
+            "category": self.category.value,
+            "target_tools": list(self.target_tools),
+            "target_files": list(self.target_files),
+            "prerequisite_tools": list(self.prerequisite_tools),
+            "required_tools": list(self.required_tools),
+            "rule": self.rule,
+            "suggestion": self.suggestion,
+            "check_id": self.check_id,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "GovernanceSignal":
+        try:
+            severity = SignalSeverity(str(raw.get("severity", "medium")))
+            category = SignalCategory(str(raw.get("category", "warn")))
+        except ValueError as exc:
+            raise ValueError("Invalid GovernanceSignal enum value") from exc
+        return cls(
+            signal_id=str(raw.get("signal_id", "")) or str(uuid.uuid4()),
+            source=str(raw.get("source", "")),
+            severity=severity,
+            category=category,
+            target_tools=list(raw.get("target_tools", []) or []),
+            target_files=list(raw.get("target_files", []) or []),
+            prerequisite_tools=list(raw.get("prerequisite_tools", []) or []),
+            required_tools=list(raw.get("required_tools", []) or []),
+            rule=str(raw.get("rule", "")),
+            suggestion=str(raw.get("suggestion", "")),
+            check_id=str(raw.get("check_id", "")),
+            metadata=dict(raw.get("metadata", {}) or {}),
+        )
+
     # ── 工厂方法 ──────────────────────────────────────────────
 
     @classmethod
@@ -72,20 +113,35 @@ class GovernanceSignal:
             "medium": SignalSeverity.MEDIUM,
             "low": SignalSeverity.LOW,
         }
+        authoritative = lesson_data.get("match_mode") == "registered_pattern"
+        severity = severity_map.get(
+            lesson_data.get("severity", "medium"), SignalSeverity.MEDIUM
+        )
+        if not authoritative and severity in {
+            SignalSeverity.CRITICAL, SignalSeverity.HIGH,
+        }:
+            severity = SignalSeverity.MEDIUM
         return cls(
             source="lesson_trigger",
-            severity=severity_map.get(
-                lesson_data.get("severity", "medium"), SignalSeverity.MEDIUM
-            ),
-            category=SignalCategory.BLOCK,
-            target_tools=lesson_data.get("dangerous_tools", []),
+            severity=severity,
+            category=(SignalCategory.BLOCK if authoritative else SignalCategory.SUGGEST),
+            target_tools=(lesson_data.get("dangerous_tools", []) if authoritative else []),
             target_files=[lesson_data.get("file", "")] if lesson_data.get("file") else [],
-            prerequisite_tools=lesson_data.get("prerequisite_tools", []),
-            required_tools=lesson_data.get("required_tools", []),
+            prerequisite_tools=(
+                lesson_data.get("prerequisite_tools", []) if authoritative else []
+            ),
+            required_tools=(lesson_data.get("required_tools", []) if authoritative else []),
             rule=lesson_data.get("rule", ""),
-            suggestion=f"请先执行: {', '.join(lesson_data.get('prerequisite_tools', []))}"
-                if lesson_data.get("prerequisite_tools") else "",
+            suggestion=(
+                f"请先执行: {', '.join(lesson_data.get('prerequisite_tools', []))}"
+                if authoritative and lesson_data.get("prerequisite_tools")
+                else "Lexical lesson match is a retrieval candidate, not an enforcement fact."
+            ),
             check_id=lesson_data.get("lesson_id", ""),
+            metadata={
+                "match_mode": lesson_data.get("match_mode", "lexical_candidate"),
+                "enforcement_authority": authoritative,
+            },
         )
 
     @classmethod
@@ -131,7 +187,10 @@ class GovernanceSignal:
     @classmethod
     def from_rejection(cls, rejection_data: dict, instruction: str) -> "GovernanceSignal":
         """从 rejection 历史创建信号。"""
+        source_id = str(rejection_data.get("correlation_id", ""))
+        stable_key = f"gitgo:rejection:{source_id}:{instruction}"
         return cls(
+            signal_id=str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key)),
             source="rejection",
             severity=SignalSeverity.HIGH,
             category=SignalCategory.WARN,
@@ -158,6 +217,29 @@ class GovernanceSignal:
             check_id=fact.fact_id,
             metadata={"fact_type": fact.fact_type},
         )
+
+
+def normalize_governance_signals(values) -> list[GovernanceSignal]:
+    """Restore the typed signal boundary after durable JSON round-trips.
+
+    Process checkpoints intentionally store plain dictionaries.  Every live
+    consumer, however, works with ``GovernanceSignal`` values and accesses
+    attributes such as ``source`` and ``category``.  Centralizing this adapter
+    prevents individual resume paths from accidentally passing wire records
+    into the live governance graph.
+    """
+    normalized: list[GovernanceSignal] = []
+    for value in list(values or []):
+        if isinstance(value, GovernanceSignal):
+            normalized.append(value)
+            continue
+        if isinstance(value, dict):
+            normalized.append(GovernanceSignal.from_dict(value))
+            continue
+        raise TypeError(
+            "Governance signals must be GovernanceSignal objects or wire dictionaries"
+        )
+    return normalized
 
 
 @dataclass

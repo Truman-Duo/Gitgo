@@ -7,7 +7,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import re
+from pathlib import Path
+
+from backend.adapters import FileAdapter, LocalFileAdapter
+from backend.core.operations.utils import _match_glob
 
 # Patterns for stripping AI co-authorship from commit messages
 _COAUTHOR_PATTERNS = [
@@ -35,6 +41,11 @@ _DEFAULT_AI_CONFIG_FILES = [
     ".cursor/",
     ".github/copilot-instructions.md",
     ".windsurf/",
+    "llm_config.json",
+    "gitgo_config.json",
+    "sync_config.json",
+    ".env",
+    ".env.*",
 ]
 
 # AI-tool gitignore-like patterns to add to push exclusion
@@ -46,7 +57,23 @@ _DEFAULT_AI_PATTERNS = [
     ".cursor/",
     ".windsurf/",
     ".github/copilot-instructions.md",
+    "llm_config.json",
+    "gitgo_config.json",
+    "sync_config.json",
+    ".env",
+    ".env.*",
 ]
+
+_PRIVATE_TOOL_FIRST_LINE = re.compile(
+    r"(?i)^\s*#{1,3}\s*CLAUDE(?:\.md|\s+CODE)\b"
+)
+_PRIVATE_TOOL_HEAD_PATTERNS = [
+    re.compile(r"(?im)^\s*(?:instructions\s+for\s+claude|claude\s+instructions)\b"),
+    re.compile(r"(?im)^\s*(?:you\s+are\s+claude|你是[^\n]{0,40}claude)\b"),
+]
+_PRIVATE_TOOL_STUB = re.compile(
+    r"(?is)(?:详情请见|详见|see|refer\s+to)[^\n]{0,120}CLAUDE\.md"
+)
 
 
 def strip_commit_message(msg: str) -> str:
@@ -89,12 +116,88 @@ def get_ai_exclude_patterns(project=None) -> list[str]:
 def is_ai_config_file(rel_path: str, exclude_patterns: list[str] | None = None) -> bool:
     """检查文件是否属于 AI 工具配置文件。"""
     patterns = exclude_patterns or _DEFAULT_AI_CONFIG_FILES
-    normalized = rel_path.replace("\\", "/")
+    normalized = rel_path.replace("\\", "/").strip("/").casefold()
     for pattern in patterns:
-        p = pattern.rstrip("/")
-        if normalized == p or normalized.startswith(p + "/"):
+        if _match_glob(str(pattern).casefold(), normalized):
             return True
     return False
+
+
+def private_content_fingerprint(content: bytes | str) -> str:
+    """Hash normalized content so a filename-only rename cannot bypass exclusion."""
+    raw = content if isinstance(content, bytes) else content.encode("utf-8")
+    normalized = raw.replace(b"\r\n", b"\n").strip()
+    return hashlib.sha256(normalized).hexdigest()
+
+
+def _decode_private_text(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    try:
+        return raw.decode("gb18030")
+    except UnicodeDecodeError:
+        pass
+    return raw.decode("latin-1", errors="replace")
+
+
+def looks_like_private_tool_content(
+    content: bytes | str, *, known_fingerprints: set[str] | None = None,
+) -> bool:
+    """Conservatively identify renamed AI instruction/config artifacts."""
+    fingerprint = private_content_fingerprint(content)
+    if known_fingerprints and fingerprint in known_fingerprints:
+        return True
+    raw = content if isinstance(content, bytes) else content.encode("utf-8")
+    # Tool instruction files are text.  Limit heuristic decoding while exact
+    # fingerprints still cover arbitrarily large known private artifacts.
+    text = _decode_private_text(raw[:256 * 1024])
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    if _PRIVATE_TOOL_FIRST_LINE.search(first_line):
+        return True
+    head = text[:4096]
+    if any(pattern.search(head) for pattern in _PRIVATE_TOOL_HEAD_PATTERNS):
+        return True
+    return len(raw) <= 16 * 1024 and bool(_PRIVATE_TOOL_STUB.search(text))
+
+
+def collect_private_fingerprints(
+    workspace_path: str | Path = "", *, file_adapter: FileAdapter | None = None,
+) -> set[str]:
+    """Collect hashes of currently named private artifacts for rename detection."""
+    adapter = file_adapter or LocalFileAdapter(Path(workspace_path).resolve())
+    fingerprints: set[str] = set()
+    for dirpath, dirnames, filenames in adapter.walk(""):
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        for filename in filenames:
+            rel_path = f"{dirpath}/{filename}" if dirpath not in ("", ".") else filename
+            if not is_ai_config_file(rel_path):
+                continue
+            try:
+                fingerprints.add(private_content_fingerprint(adapter.read_bytes(rel_path)))
+            except OSError:
+                continue
+    return fingerprints
+
+
+def should_exclude_outbound_file(
+    rel_path: str, content: bytes | str,
+    *, known_fingerprints: set[str] | None = None,
+    exclude_patterns: list[str] | None = None,
+) -> bool:
+    """Host-enforced path + content classification for release artifacts."""
+    kernel_patterns = list(_DEFAULT_AI_CONFIG_FILES)
+    if exclude_patterns:
+        kernel_patterns.extend(exclude_patterns)
+    return is_ai_config_file(rel_path, kernel_patterns) or looks_like_private_tool_content(
+        content, known_fingerprints=known_fingerprints,
+    )
 
 
 def apply_authorship_filter(
@@ -151,7 +254,14 @@ def strip_authorship_from_code(content: str, aggressive: bool = False) -> str:
 _DEFAULT_PRIVACY_PATTERNS = {
     "email": re.compile(r'[\w.\-+]+@[\w.\-]+\.\w+'),
     "ip": re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
-    "apikey": re.compile(r'(?:sk-[A-Za-z0-9]{20,})|(?:ghp_[A-Za-z0-9]{30,})|(?:xox[baprs]-[A-Za-z0-9-]+)'),
+    "apikey": re.compile(
+        r'(?:sk-[A-Za-z0-9_-]{16,})|'
+        r'(?:ghp_[A-Za-z0-9]{30,})|'
+        r'(?:xox[baprs]-[A-Za-z0-9-]+)|'
+        r'(?:[\'\"]?(?:api[_-]?key|apikey|api_secret)[\'\"]?'
+        r'\s*[:=]\s*[\'\"]?[A-Za-z0-9_./+=-]{16,})',
+        re.I,
+    ),
     "private_key": re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'),
     "internal_path": re.compile(r'(?:\\\\[\w.-]+\\[\w.-]+)|(?:\b/home/\w+)|(?:\b/Users/\w+)'),
 }
@@ -184,15 +294,74 @@ def scan_privacy(
             pat = _DEFAULT_PRIVACY_PATTERNS.get(name)
             if pat is None:
                 continue
-            matches = pat.findall(content)
+            redacted_evidence = None
+            if name == "apikey":
+                # Keep the legacy privacy API but share the stricter outbound
+                # secret parser used by push and Agent-worktree sealing.  The
+                # old assignment regex treated source references, JSON schema,
+                # and documentation field names as credentials, making normal
+                # Gitgo development permanently unpublishable.
+                from backend.core.operations.security import scan_diff_for_secrets
+                lines = content.splitlines()
+                synthetic_diff = (
+                    f"+++ b/{file_path}\n@@ -0,0 +1,{len(lines)} @@\n"
+                    + "\n".join("+" + line for line in lines)
+                )
+                secret_alerts = [
+                    item for item in scan_diff_for_secrets(synthetic_diff)
+                    if item.get("rule_id") in {
+                        "provider_key", "github_token", "github_fine_token",
+                        "slack_token", "api_key",
+                    }
+                ]
+                matches = [str(item.get("match_fingerprint") or "") for item in secret_alerts]
+                redacted_evidence = [
+                    {
+                        "sha256": str(item.get("match_fingerprint") or ""),
+                        "length": int(item.get("match_length", 0) or 0),
+                    }
+                    for item in secret_alerts[:5]
+                ]
+            else:
+                matches = pat.findall(content)
+            if name == "email":
+                # RFC-reserved .invalid addresses are deterministic test and
+                # local machine identities, never user PII.
+                matches = [
+                    value for value in matches
+                    if not (
+                        str(value).casefold().endswith(".invalid")
+                        or str(value).casefold().rsplit("@", 1)[-1]
+                        in {"example.com", "example.net", "example.org"}
+                    )
+                ]
+            elif name == "ip":
+                # Loopback and unspecified bind addresses are protocol/config
+                # literals.  Private LAN addresses remain reportable.
+                filtered = []
+                for value in matches:
+                    try:
+                        address = ipaddress.ip_address(str(value))
+                    except ValueError:
+                        filtered.append(value)
+                        continue
+                    if not (address.is_loopback or address.is_unspecified):
+                        filtered.append(value)
+                matches = filtered
             if matches:
-                # 取不重复的前 5 个匹配
                 unique = list(dict.fromkeys(matches))[:5]
                 alerts.append({
                     "level": "error",
                     "rule": f"privacy_{name}",
                     "message": f"Privacy violation: {len(matches)} {name} pattern(s) found in {file_path}",
-                    "matches": unique,
+                    # Never return the secret or personal value to logs/tools.
+                    "evidence": redacted_evidence or [
+                        {
+                            "sha256": hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16],
+                            "length": len(str(value)),
+                        }
+                        for value in unique
+                    ],
                 })
 
     if level >= 3 and deep_scan:
@@ -236,26 +405,55 @@ def scan_files_privacy(
     file_list: list[str],
     level: int = 2,
     deep_scan: bool = False,
+    approved_fingerprints: list[str] | None = None,
+    *,
+    file_adapter: FileAdapter | None = None,
 ) -> list[dict]:
     """扫描变更文件列表的隐私风险。返回所有告警。"""
     from pathlib import Path
     ws = Path(workspace_path)
+    adapter = file_adapter or LocalFileAdapter(ws)
     all_alerts = []
 
-    # 只检查文本文件
+    fingerprints = collect_private_fingerprints(ws, file_adapter=adapter)
     for rel_path in file_list:
-        fpath = ws / rel_path
-        if not fpath.exists():
+        if not adapter.exists(rel_path):
             continue
-        # 跳过二进制
         try:
-            content = fpath.read_text(encoding="utf-8", errors="ignore")
-        except (OSError, UnicodeDecodeError):
+            size = adapter.stat(rel_path).st_size
+            if size > 64 * 1024 * 1024:
+                all_alerts.append({
+                    "level": "error", "rule": "privacy_unscanned_large_file",
+                    "message": f"Privacy scan refused oversized outbound file {rel_path}",
+                })
+                continue
+            raw = adapter.read_bytes(rel_path)
+        except OSError:
+            all_alerts.append({
+                "level": "error", "rule": "privacy_unreadable_file",
+                "message": f"Privacy scan could not read outbound file {rel_path}",
+            })
             continue
-        # 跳过超大文件（>1MB）
-        if len(content) > 1024 * 1024:
+        if should_exclude_outbound_file(
+            rel_path, raw, known_fingerprints=fingerprints,
+        ):
+            all_alerts.append({
+                "level": "error", "rule": "privacy_private_artifact",
+                "message": "Private tool/config artifact is not publishable",
+            })
             continue
+        content = _decode_private_text(raw)
         alerts = scan_privacy(rel_path, content, level=level, deep_scan=deep_scan)
         all_alerts.extend(alerts)
 
+    approved = {str(item).lower() for item in (approved_fingerprints or [])}
+    if approved:
+        all_alerts = [
+            alert for alert in all_alerts
+            if not any(
+                str(item.get("sha256") or "").lower() in approved
+                for item in list(alert.get("evidence") or [])
+                if isinstance(item, dict)
+            )
+        ]
     return all_alerts
