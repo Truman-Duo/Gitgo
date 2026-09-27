@@ -5,6 +5,11 @@ __pycache__/
 *.egg-info/
 .venv/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.secrets.json
 
 # Build artifacts
 build/
@@ -16,6 +21,13 @@ dist/
 .gitgo/
 gitgo_config.json
 gitgo_history.json
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
 
 # Build cache
 .build_deps_hash
@@ -41,3 +53,14 @@ htmlcov/
 .vscode/
 .idea/
 .claude/
+.codex/
+
+# Local agent instructions and private engineering records
+CLAUDE.md
+AGENTS.md
+docs/HANDOFF.md
+docs/technical-reports/
+
+# Local-only legacy material. Only legacy/README.md is published.
+legacy/docs/
+legacy/artifacts/
