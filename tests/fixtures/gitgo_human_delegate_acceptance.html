@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gitgo · 项目介绍 — 项目治理与多 Agent 运行时</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-soft: #f7f8fa;
+    --bg-accent: #eef2ff;
+    --ink: #111827;
+    --ink-soft: #4b5563;
+    --ink-faint: #6b7280;
+    --line: #e5e7eb;
+    --accent: #4f46e5;
+    --accent-strong: #4338ca;
+    --code-bg: #f3f4f6;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--accent-strong); text-decoration: underline; }
+  .page-nav {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(255, 255, 255, 0.92);
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(4px);
+  }
+  .nav-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 10px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .nav-brand { font-weight: 700; color: var(--ink); font-size: 15px; letter-spacing: 0.2px; }
+  .nav-brand span { color: var(--accent); }
+  .nav-links { display: flex; gap: 20px; font-size: 14px; }
+  .nav-links a { color: var(--ink-soft); }
+  .nav-links a:hover { color: var(--accent); text-decoration: none; }
+  main { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  section { padding: 56px 0 8px; }
+  .hero {
+    padding: 72px 0 40px;
+    border-bottom: 1px solid var(--line);
+  }
+  .eyebrow {
+    display: inline-block;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    background: var(--bg-accent);
+    border: 1px solid #e0e7ff;
+    border-radius: 999px;
+    padding: 4px 12px;
+    margin: 0 0 20px;
+    font-weight: 600;
+  }
+  h1 {
+    font-size: 44px;
+    line-height: 1.15;
+    margin: 0 0 16px;
+    letter-spacing: -0.02em;
+  }
+  .tagline {
+    font-size: 20px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    max-width: 46em;
+    margin: 0 0 24px;
+  }
+  .hero-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+  .hero-tags span {
+    font-size: 13px;
+    color: var(--ink-soft);
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 10px;
+  }
+  h2 {
+    font-size: 26px;
+    line-height: 1.3;
+    margin: 0 0 8px;
+    letter-spacing: -0.01em;
+    scroll-margin-top: 72px;
+  }
+  h2 .no { color: var(--accent); font-size: 15px; font-weight: 700; vertical-align: 3px; margin-right: 10px; letter-spacing: 0.06em; }
+  .lede { color: var(--ink-soft); margin: 0 0 28px; max-width: 52em; }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+    gap: 16px;
+    margin: 0 0 16px;
+  }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 20px 16px;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .card:hover { border-color: #c7d2fe; box-shadow: 0 2px 10px rgba(79, 70, 229, 0.06); }
+  .card .chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    background: var(--bg-accent);
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+  .card h3 { font-size: 17px; margin: 0; line-height: 1.4; }
+  .card p { font-size: 14.5px; color: var(--ink-soft); margin: 0; line-height: 1.7; }
+  .card .more { margin-top: auto; font-size: 13.5px; padding-top: 6px; }
+  details {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    margin: 0 0 12px;
+    background: var(--bg);
+  }
+  details[open] { border-color: #c7d2fe; }
+  summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 14px 18px;
+    font-weight: 700;
+    font-size: 15.5px;
+    color: var(--ink);
+    user-select: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "+";
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    line-height: 16px;
+    text-align: center;
+    border-radius: 4px;
+    background: var(--bg-accent);
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 14px;
+  }
+  details[open] summary::before { content: "–"; }
+  summary .mno { color: var(--accent); font-size: 13px; }
+  details .body { padding: 0 20px 16px 50px; color: var(--ink-soft); font-size: 14.5px; }
+  details .body p { margin: 0 0 10px; }
+  details .body ul { margin: 0 0 6px; padding-left: 20px; }
+  details .body li { margin: 0 0 4px; }
+  details .body code {
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 13px;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--ink);
+  }
+  footer {
+    margin-top: 64px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-soft);
+  }
+  .foot-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 28px 24px 40px;
+    color: var(--ink-soft);
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .foot-inner .verification {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 10px 14px;
+    color: var(--ink);
+    font-size: 13.5px;
+    margin-top: 6px;
+  }
+  .marker {
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12.5px;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--accent-strong);
+  }
+  @media (max-width: 640px) {
+    h1 { font-size: 34px; }
+    .tagline { font-size: 18px; }
+    .nav-inner { justify-content: center; }
+    details .body { padding-left: 20px; }
+  }
+  @media print {
+    body { font-size: 11pt; }
+    .page-nav { position: static; }
+    .nav-links { display: none; }
+    a { color: var(--ink); }
+    section { padding-top: 24px; }
+    details { break-inside: avoid; }
+    .hero { padding-top: 32px; }
+    footer { margin-top: 32px; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="page-nav">
+  <div class="nav-inner">
+    <div class="nav-brand">Gitgo<span> ·</span> 项目治理与多 Agent 运行时</div>
+    <div class="nav-links">
+      <a href="#overview">概览</a>
+      <a href="#capabilities">核心能力</a>
+      <a href="#mechanisms">机制详解</a>
+      <a href="#verification">验证标记</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+
+  <header class="hero" id="top">
+    <p class="eyebrow">本地开发工具 · 面向开发者的多 Agent 协作运行时</p>
+    <h1>Gitgo</h1>
+    <p class="tagline">让 AI 代理在清晰契约与治理约束下，可追溯地协作完成软件工程任务。</p>
+    <div class="hero-tags">
+      <span>治理合约</span>
+      <span>任务委派</span>
+      <span>代码审查与漂移检测</span>
+      <span>知识库</span>
+      <span>隐私扫描</span>
+      <span>作者审计</span>
+    </div>
+  </header>
+
+  <section id="overview">
+    <h2><span class="no">01</span>项目概览</h2>
+    <p class="lede">
+      Gitgo 把“多代理协作”从自由对话收敛为契约化执行：任务携带明确目标、验收标准与目标文件，
+      结果凭证据链与测试事实验收，而不是代理的自述。已确认的特性以项目级快照记录，
+      后续改动与其对照，任何静默破坏都会在合并前被检测出来。
+    </p>
+  </section>
+
+  <section id="capabilities">
+    <h2><span class="no">02</span>核心能力</h2>
+    <p class="lede">六项能力覆盖“契约定义 → 委派执行 → 结果审查 → 经验沉淀”的完整回路。每项可展开到下方机制详解。</p>
+    <div class="cards">
+      <article class="card">
+        <span class="chip">01</span>
+        <h3>治理合约</h3>
+        <p>把目标、验收标准、目标文件与接口约束固化为机器可读契约，并随项目快照确认。变更后对照合约检测漂移，防止特性被静默删除或签名被破坏。</p>
+        <div class="more"><a href="#m1">了解机制 →</a></div>
+      </article>
+      <article class="card">
+        <span class="chip">02</span>
+        <h3>任务委派</h3>
+        <p>任务以结构化契约在角色间委派：B 级执行、A 级审批、Host 做硬规则核验。交付凭验收声明与证据记录兑现，而非口头宣称完成。</p>
+        <div class="more"><a href="#m2">了解机制 →</a></div>
+      </article>
+      <article class="card">
+        <span class="chip">03</span>
+        <h3>代码审查与漂移检测</h3>
+        <p>提供变更的符号级 diff、影响面与依赖图查询；每次改动后对照项目合约输出告警，依赖边可由测试与人工审查确认或驳回。</p>
+        <div class="more"><a href="#m3">了解机制 →</a></div>
+      </article>
+      <article class="card">
+        <span class="chip">04</span>
+        <h3>知识库</h3>
+        <p>经验教训按抽象层与实例层沉淀，支持全文、语义与 RAG 三类检索。相似问题先查历史结论，避免重复犯错。</p>
+        <div class="more"><a href="#m4">了解机制 →</a></div>
+      </article>
+      <article class="card">
+        <span class="chip">05</span>
+        <h3>隐私扫描</h3>
+        <p>对变更文件扫描密钥硬编码、敏感信息泄露与 AI 痕迹等风险，支持 1–3 级强度与深度扫描，适合在 push 前与代码审查阶段运行。</p>
+        <div class="more"><a href="#m5">了解机制 →</a></div>
+      </article>
+      <article class="card">
+        <span class="chip">06</span>
+        <h3>作者审计与治理记录</h3>
+        <p>每个变更关联身份与作者链，治理时间线保留特性确认快照；Dashboard 提供按时间回溯的视图，回答“谁、何时、依据什么确认”。</p>
+        <div class="more"><a href="#m6">了解机制 →</a></div>
+      </article>
+    </div>
+  </section>
+
+  <section id="mechanisms">
+    <h2><span class="no">03</span>机制详解</h2>
+    <p class="lede">以下条目默认折叠，保持首屏轻量；按需展开查看机制内部的工作方式。内容面向开发者，表述以项目实际行为为准。</p>
+
+    <details id="m1">
+      <summary><span class="mno">M1</span>治理合约：分层权威与证据链验收</summary>
+      <div class="body">
+        <p>系统把“谁能做什么”和“怎样算完成”显式编码，而不是依赖口头约定。不同角色持有不同的能力集：B 级 worker 负责在契约范围内执行并汇报证据，不能自我批准完成；A 级拥有审批与面向用户的提问权；Host 执行硬规则并附加验收 receipts。任务交付时提交结构化的完成声明与 verification 记录，Host 逐项核对文件、测试与治理事实，证据链可回溯到具体工具调用。</p>
+        <p>决策顺序固定为三层：Host 硬规则与快捷键优先，其次为模型语义判断，最后才是向用户升级。拒收的治理信号必须被语义化处理并附证据后才能解除，避免“关键词匹配指令”式的表面合规。</p>
+        <ul>
+          <li>角色与权力分离：执行、审查、审批不集中于同一代理。</li>
+          <li>证据驱动验收：receipt、测试事实与文件版本构成可审计链。</li>
+          <li>信号先于指令：每条治理信号都要求明确的处理与证据回执。</li>
+        </ul>
+      </div>
+    </details>
+
+    <details id="m2">
+      <summary><span class="mno">M2</span>任务委派：结构化契约与可追溯执行</summary>
+      <div class="body">
+        <p>委派以契约对象为载体，字段显式记录：goal、acceptance_criteria、target_files、required_test_ids、depends_on、interface_contract 与 uncertainties。接收方按契约执行、按契约汇报；契约是否要求拆分给子代理、需要多少个委派结果兜底，也由字段声明，而不是执行中临时起意。</p>
+        <p>验收标准被写成可检查的事实（例如“文件存在且由子代理写入磁盘”“结构完整闭合”“精确标记存在于正文可见区域”），让验证可机械执行；执行层保留上下文转录，供上游在收尾时做语义判断。</p>
+        <ul>
+          <li>委派链每层保留上下文，失败原因与重试尝试（delegation_attempts）留痕。</li>
+          <li>子代理对“做了什么”与“验证了什么”分开汇报，禁止把调用动作冒充为结果达成。</li>
+        </ul>
+      </div>
+    </details>
+
+    <details id="m3">
+      <summary><span class="mno">M3</span>代码审查：符号级影响与漂移检测</summary>
+      <div class="body">
+        <p>文件改动后可对两个版本做 AST 级符号对比，得到新增、删除、改名的函数与类清单；结合调用关系查询影响面，回答“这个函数被谁依赖、这个文件改动能波及到哪里”。</p>
+        <p>漂移检测把本轮变更与项目合约对照，输出 feature_deleted、signature_changed 等告警，使“改动是否破坏了已确认特性”在合并前暴露。依赖图由 import、调用与测试等多信号构建，依赖边可按证据排序；一条依赖边可被测试或人工审查确认，也可在证据不足时驳回，而任一侧文件变更后驳回即失效，避免用过期结论掩盖真实影响。</p>
+      </div>
+    </details>
+
+    <details id="m4">
+      <summary><span class="mno">M4</span>知识库：沉淀、分层与检索</summary>
+      <div class="body">
+        <p>历史经验以 lesson 形式沉淀，分为抽象层（可跨项目迁移的方法论）与实例层（绑定具体项目与技术栈的案例），另设待确认区等待新证据升格。经验既记录“正确做法”，也记录“踩过的坑”，供后续任务在开工前检索。</p>
+        <p>检索提供三种入口：关键词全文检索（recall_grep）、语义向量检索（recall_semantic）与 RAG 检索（recall_rag），可按项目名与技术栈过滤。当相似问题的处理经验存在时，新任务可直接复用结论而不是重复推演。</p>
+      </div>
+    </details>
+
+    <details id="m5">
+      <summary><span class="mno">M5</span>隐私扫描：变更即检，push 前把关</summary>
+      <div class="body">
+        <p>针对变更文件做静态风险扫描，覆盖敏感信息泄露、密钥与令牌硬编码、AI 痕迹等类别，提供 1–3 级扫描强度与深度扫描选项，通常在代码审查与 push 前运行，把秘密外泄挡在进入仓库历史之前。</p>
+        <p>扫描结果只陈述检测事实，例如在哪些文件、哪类风险上“发现”或“未发现”；它不等同于实现层面的安全保证——扫描通过不代表系统不做本地存储或不存在逻辑缺陷。这种表述上的克制同样是工程纪律的一部分。</p>
+      </div>
+    </details>
+
+    <details id="m6">
+      <summary><span class="mno">M6</span>作者审计与治理记录</summary>
+      <div class="body">
+        <p>变更与提交关联身份与作者链，作者归属不被匿名抹去；治理时间线记录特性确认快照与治理活动，Dashboard 的治理页与历史面板提供按时间回溯的视图。</p>
+        <p>与证据链验收配合，形成“委派 → 执行 → 确认 → 审计”的闭环：任何一条已确认特性都能回答是谁、在哪个快照、依据什么被确认，适合多人或多代理长期维护同一仓库的场景。</p>
+      </div>
+    </details>
+  </section>
+
+</main>
+
+<footer>
+  <div class="foot-inner" id="verification">
+    <div>Gitgo — 本地开发工具：项目治理与多 Agent 运行时。能力描述依据已确认特性快照整理，具体行为以运行版本为准。</div>
+    <div class="verification">
+      本页面由子代理按委派契约实际写入磁盘，并经读回核验：DOCTYPE/html/head/body 结构完整，CSS 全部内联于 style，无外部网络资源引用，正文可见区域包含精确验证标记
+      <span class="marker">GITGO_HUMAN_DELEGATION_OK_20260902</span>。
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

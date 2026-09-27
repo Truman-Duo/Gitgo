@@ -75,6 +75,7 @@ def _exec_assemble_context(daemon_ctx, session, project, args: dict) -> dict:
     from backend.core.knowledge.recall import recall_grep
     from backend.core.loop.signal_normalizer import SignalNormalizer
     from backend.core.contract import load_function_graph, get_callers
+    from backend.core.dependency_graph import query_dependents
 
     task = args.get("task", "")
     files = args.get("files", [])
@@ -114,7 +115,12 @@ def _exec_assemble_context(daemon_ctx, session, project, args: dict) -> dict:
         func_graph = {}
     for f in files:
         callers = get_callers(Path(ws), f) if func_graph else []
-        dependency[f] = {"callers": callers[:10]}
+        edges = query_dependents(Path(ws), f)
+        dependency[f] = {
+            "callers": callers[:20],
+            "dependents": edges[:50],
+            "completeness": "best_effort_recall_first",
+        }
 
     # 预估 token
     estimated = len(str(needed)) // 4 + len(str(lessons)) // 4

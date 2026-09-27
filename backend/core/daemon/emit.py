@@ -9,6 +9,8 @@ import json
 import sys
 import time
 
+from backend.core.protocol_io import write_utf8_line
+
 
 def _emit(event: dict) -> None:
     """Write a line-delimited JSON event to stdout (backward-compat wrapper)."""
@@ -26,13 +28,12 @@ def _emit_v2(ev: dict, priority: str = "normal") -> None:
     """Write a line-delimited JSON event to stdout with micro-batch flush.
 
     priority="normal": 微批缓冲（16ms 或 32 事件）
-    priority="immediate": 立即 flush（agent_complete、stream_recovery、治理事件）
+    priority="immediate": 立即 flush（协议屏障、agent_complete、stream_recovery、治理事件）
     """
     global _last_flush_time
     if priority == "immediate":
         _flush_emit_buffer()
-        sys.stdout.write(json.dumps(ev, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+        write_utf8_line(sys.stdout, json.dumps(ev, ensure_ascii=False))
         return
     _emit_buffer.append(ev)
     now_ms = int(time.time() * 1000)
@@ -46,7 +47,8 @@ def _flush_emit_buffer() -> None:
     global _emit_buffer
     if not _emit_buffer:
         return
-    for e in _emit_buffer:
-        sys.stdout.write(json.dumps(e, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    write_utf8_line(
+        sys.stdout,
+        "\n".join(json.dumps(e, ensure_ascii=False) for e in _emit_buffer),
+    )
     _emit_buffer = []

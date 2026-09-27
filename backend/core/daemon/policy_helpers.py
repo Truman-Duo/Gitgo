@@ -98,16 +98,24 @@ def _resolve_llm_config(workspace: str) -> tuple | None:
     base_url = os.environ.get("GITGO_LLM_BASE_URL", "")
     api_key = os.environ.get("GITGO_LLM_API_KEY", "")
     model_id = os.environ.get("GITGO_LLM_MODEL", "")
+    protocol = os.environ.get("GITGO_LLM_PROTOCOL", "openai_chat")
+    env_capabilities = {
+        "context_window": int(os.environ.get("GITGO_LLM_CONTEXT_WINDOW", "128000")),
+        "max_output_tokens": int(os.environ.get("GITGO_LLM_MAX_OUTPUT_TOKENS", "4096")),
+    }
 
     if base_url and api_key and model_id:
-        return (base_url, api_key, model_id)
+        return (base_url, api_key, model_id, protocol, env_capabilities)
 
     if workspace:
         try:
             from backend.core.llm_config import LLMConfigManager
             active = LLMConfigManager.get_active()
             if active:
-                return (active.base_url, active.api_key, active.model_id)
+                return (
+                    active.base_url, active.api_key, active.model_id,
+                    active.protocol, active.runtime_capabilities(),
+                )
         except Exception:
             pass
 

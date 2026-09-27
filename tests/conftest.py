@@ -12,6 +12,31 @@ import pytest
 
 from backend.adapters.local_file_adapter import LocalFileAdapter
 from backend.adapters.local_git_runner import LocalGitRunner
+from backend.core.storage import close_owned_storage
+
+
+@pytest.fixture(autouse=True)
+def isolate_default_gitgo_state(
+    tmp_path_factory: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Never let a test's implicit workspace write the user's live state.
+
+    Most storage tests inject ``state_home`` explicitly, but older unittest
+    cases legitimately use ``Path('.')`` or omit a workspace.  Redirect the
+    default facade for every test and close its process-level LRU on both
+    boundaries so a cached runtime cannot outlive the temporary directory.
+    """
+    close_owned_storage()
+    monkeypatch.setenv(
+        "GITGO_STATE_HOME", str(tmp_path_factory / "default-gitgo-state"),
+    )
+    monkeypatch.setenv(
+        "GITGO_CONFIG_PATH", str(tmp_path_factory / "config" / "config.json"),
+    )
+    try:
+        yield
+    finally:
+        close_owned_storage()
 
 
 @pytest.fixture
@@ -32,7 +57,10 @@ def git_repo(tmp_path_factory: Path) -> Path:
     repo = tmp_path_factory / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@local.gitgo.invalid"],
+        cwd=repo, capture_output=True,
+    )
     subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo, capture_output=True)
     readme = repo / "README.md"
     readme.write_text("# Test")

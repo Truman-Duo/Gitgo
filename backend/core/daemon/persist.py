@@ -5,16 +5,17 @@ Extracted from daemon/__init__.py (pure structural refactor).
 
 from __future__ import annotations
 
+from backend.core.storage import StorageReferenceMissing
+
 
 def _save_session_checkpoint(daemon_ctx: dict, process) -> None:
     """Save session checkpoint after agent_step completes or errors."""
     store = daemon_ctx.get("session_store")
     if store is None:
         return
-    sess = getattr(process, "session", None)
-    if sess is None:
+    if getattr(process, "session", None) is None:
         return
-    store.save_checkpoint(process.process_id, sess)
+    store.save_process_checkpoint(process)
     store.append_event(process.process_id, "agent_complete", {
         "status": process.status.value,
         "steps_used": process.steps_used,
@@ -22,15 +23,17 @@ def _save_session_checkpoint(daemon_ctx: dict, process) -> None:
 
 
 def _scan_incomplete_sessions(session_store, apm) -> list[str]:
-    """扫描 .gitgo/sessions/ 中的未完成会话，返回可恢复的 process_id 列表。
-
-    有 checkpoint 或 jsonl 数据但进程不在 apm 中的视为"未完成"。
-    """
+    """Read durable incomplete processes from the authoritative session store."""
     incomplete = session_store.list_incomplete()
     recoverable = []
     for pid in incomplete:
         if apm.get(pid) is None:
-            msgs = session_store.load_session(pid)
+            try:
+                msgs = session_store.load_session(pid)
+            except StorageReferenceMissing:
+                # Recovery will expose a discard-only diagnostic candidate;
+                # startup itself must remain available.
+                msgs = ["storage-reference-missing"]
             if msgs:
                 recoverable.append(pid)
     return recoverable
