@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
@@ -24,6 +26,10 @@ DEFAULT_FORCE_EXCLUDE = [
     "*.pyc",
     ".venv/",
     ".env",
+    ".env.*",
+    "llm_config.json",
+    "gitgo_config.json",
+    "sync_config.json",
     ".pytest_cache/",
 ]
 
@@ -48,6 +54,7 @@ DEFAULT_AUTHORSHIP_CONFIG = {
     "strip_code_comments": False,
     "exclude_tool_configs": [
         "CLAUDE.md", ".claude/", ".codex/", ".codebuddy/", ".cursor/", ".windsurf/",
+        "llm_config.json", "gitgo_config.json", "sync_config.json", ".env", ".env.*",
     ],
 }
 
@@ -66,6 +73,58 @@ DEFAULT_INTEGRITY_CONFIG = {
 }
 
 
+def default_outbound_policy() -> dict:
+    """Canonical project policy for every outbound/publish path.
+
+    The legacy force_exclude/security_scan/authorship fields remain readable for
+    old configs, but new runtime code consumes this projection.
+    """
+    return {
+        "enabled": True,
+        "exclude_paths": list(DEFAULT_FORCE_EXCLUDE),
+        "include_paths": [],
+        "severity_threshold": DEFAULT_SECURITY_SCAN["severity_threshold"],
+        "ignored_rules": [],
+        "extra_patterns": [],
+        "content_level": 2,
+        "deep_scan": False,
+        "approved_fingerprints": [],
+        "version": 1,
+    }
+
+
+def normalize_outbound_policy(raw: dict | None, *, legacy: dict | None = None) -> dict:
+    base = default_outbound_policy()
+    legacy = dict(legacy or {})
+    if legacy:
+        base.update({
+            "enabled": bool(legacy.get("enabled", True)),
+            "exclude_paths": list(legacy.get("force_exclude") or base["exclude_paths"]),
+            "severity_threshold": str(legacy.get("severity_threshold") or base["severity_threshold"]),
+            "ignored_rules": list(legacy.get("ignored_rules") or []),
+            "extra_patterns": list(legacy.get("extra_patterns") or []),
+            "content_level": int(legacy.get("content_level", 2) or 2),
+            "deep_scan": bool(legacy.get("deep_scan", False)),
+        })
+    if isinstance(raw, dict):
+        for key in base:
+            if key in raw:
+                base[key] = raw[key]
+    base["enabled"] = bool(base["enabled"])
+    for key in ("exclude_paths", "include_paths", "ignored_rules", "extra_patterns", "approved_fingerprints"):
+        value = base.get(key)
+        if not isinstance(value, list):
+            raise ValueError(f"outbound_policy.{key} must be a list")
+        base[key] = list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+    base["content_level"] = max(1, min(3, int(base.get("content_level", 2) or 2)))
+    base["deep_scan"] = bool(base.get("deep_scan", False))
+    base["severity_threshold"] = str(base.get("severity_threshold") or "medium").lower()
+    if base["severity_threshold"] not in {"low", "medium", "high", "critical"}:
+        raise ValueError("outbound_policy.severity_threshold is invalid")
+    base["version"] = max(1, int(base.get("version", 1) or 1))
+    return base
+
+
 @dataclass
 class ProjectConfig:
     name: str = ""
@@ -78,6 +137,7 @@ class ProjectConfig:
     security_scan: dict = field(default_factory=lambda: dict(DEFAULT_SECURITY_SCAN))
     integrity: dict = field(default_factory=lambda: dict(DEFAULT_INTEGRITY_CONFIG))
     authorship: dict = field(default_factory=lambda: dict(DEFAULT_AUTHORSHIP_CONFIG))
+    outbound_policy: dict = field(default_factory=default_outbound_policy)
     archived: bool = False
     pending_hard_delete_at: str = ""  # ISO timestamp, empty = no pending delete
 
@@ -144,6 +204,14 @@ class ProjectConfig:
 
         cf = d.get("commit_format", {})
         ss = d.get("security_scan", {})
+        authorship = d.get("authorship", dict(DEFAULT_AUTHORSHIP_CONFIG))
+        privacy = dict(authorship.get("privacy") or {}) if isinstance(authorship, dict) else {}
+        outbound = normalize_outbound_policy(d.get("outbound_policy"), legacy={
+            **(ss if isinstance(ss, dict) else {}),
+            "force_exclude": d.get("force_exclude", list(DEFAULT_FORCE_EXCLUDE)),
+            "content_level": privacy.get("level", 2),
+            "deep_scan": privacy.get("deep_scan", False),
+        })
         return cls(
             name=d.get("name", "Unnamed"),
             workspace=RepoNode.from_dict(d.get("workspace")) or RepoNode(),
@@ -159,7 +227,8 @@ class ProjectConfig:
             force_exclude=d.get("force_exclude", list(DEFAULT_FORCE_EXCLUDE)),
             security_scan=ss if ss else dict(DEFAULT_SECURITY_SCAN),
             integrity=d.get("integrity", dict(DEFAULT_INTEGRITY_CONFIG)),
-            authorship=d.get("authorship", dict(DEFAULT_AUTHORSHIP_CONFIG)),
+            authorship=authorship,
+            outbound_policy=outbound,
             archived=d.get("archived", False),
             pending_hard_delete_at=d.get("pending_hard_delete_at", ""),
         )
@@ -167,10 +236,22 @@ class ProjectConfig:
 
 @dataclass
 class Config:
+    schema_version: int = 1
+    revision: int = 0
     projects: list[ProjectConfig] = field(default_factory=list)
-    language: str = "zh"  # 界面语言代码
+    language: str = "en"  # UI copy only; commands/protocol identifiers stay stable
+    verbose: bool = False
+    auto_compact: bool = True
+    agent_routing: str = "owner"
     theme: str = "system"  # 主题: "light" | "dark" | "system"
     animation: bool = True  # 是否启用动画
+    external_editor: str = ""
+    launcher: dict = field(default_factory=lambda: {
+        "terminal": "auto", "command": "", "args": [],
+    })
+    web_search_mode: str = "auto"
+    web_search_endpoint: str = ""
+    web_search_engine: str = "duckduckgo"
     safety: dict = field(default_factory=lambda: {"delete_delay_minutes": 10})
 
     @classmethod
@@ -179,16 +260,50 @@ class Config:
         d = migrate_config_dict(d)
         if "projects" in d and isinstance(d["projects"], list):
             return cls(
+                schema_version=max(1, int(d.get("schema_version", 1) or 1)),
+                revision=max(0, int(d.get("revision", 0) or 0)),
                 projects=[ProjectConfig.from_dict(p) for p in d["projects"]],
-                language=d.get("language", "zh"),
+                language=d.get("language", "en"),
+                verbose=bool(d.get("verbose", False)),
+                auto_compact=bool(d.get("auto_compact", True)),
+                agent_routing="fresh" if d.get("agent_routing") == "fresh" else "owner",
                 theme=d.get("theme", "system"),
                 animation=d.get("animation", True),
+                external_editor=str(d.get("external_editor", "") or ""),
+                launcher=dict(d.get("launcher") or {
+                    "terminal": "auto", "command": "", "args": [],
+                }),
+                web_search_mode=(str(d.get("web_search_mode", "auto") or "auto").lower()
+                                 if str(d.get("web_search_mode", "auto") or "auto").lower()
+                                 in {"auto", "provider", "searxng", "disabled"} else "auto"),
+                web_search_endpoint=str(d.get("web_search_endpoint", "") or ""),
+                web_search_engine=(str(d.get("web_search_engine", "duckduckgo") or "duckduckgo").lower()
+                                   if str(d.get("web_search_engine", "duckduckgo") or "duckduckgo").lower()
+                                   in {"google", "bing", "baidu", "yandex", "duckduckgo"}
+                                   else "duckduckgo"),
                 safety=d.get("safety", {"delete_delay_minutes": 10}),
             )
         return cls(
-            language=d.get("language", "zh"),
+            schema_version=max(1, int(d.get("schema_version", 1) or 1)),
+            revision=max(0, int(d.get("revision", 0) or 0)),
+            language=d.get("language", "en"),
+            verbose=bool(d.get("verbose", False)),
+            auto_compact=bool(d.get("auto_compact", True)),
+            agent_routing="fresh" if d.get("agent_routing") == "fresh" else "owner",
             theme=d.get("theme", "system"),
             animation=d.get("animation", True),
+            external_editor=str(d.get("external_editor", "") or ""),
+            launcher=dict(d.get("launcher") or {
+                "terminal": "auto", "command": "", "args": [],
+            }),
+            web_search_mode=(str(d.get("web_search_mode", "auto") or "auto").lower()
+                             if str(d.get("web_search_mode", "auto") or "auto").lower()
+                             in {"auto", "provider", "searxng", "disabled"} else "auto"),
+            web_search_endpoint=str(d.get("web_search_endpoint", "") or ""),
+            web_search_engine=(str(d.get("web_search_engine", "duckduckgo") or "duckduckgo").lower()
+                               if str(d.get("web_search_engine", "duckduckgo") or "duckduckgo").lower()
+                               in {"google", "bing", "baidu", "yandex", "duckduckgo"}
+                               else "duckduckgo"),
             safety=d.get("safety", {"delete_delay_minutes": 10}),
         )
 
@@ -196,73 +311,110 @@ class Config:
 class ConfigManager:
     """管理配置的读写和搜索"""
 
-    CONFIG_FILE = "gitgo_config.json"
+    CONFIG_FILE = "config.json"
+    OLD_CONFIG_FILE = "gitgo_config.json"
     LEGACY_CONFIG_FILE = "sync_config.json"
+    _lock = threading.RLock()
 
     @staticmethod
     def default_path() -> Path:
-        """优先 exe/脚本同目录，其次用户目录，再其次模块自身目录"""
-        if getattr(sys, "frozen", False):
-            base = Path(sys.executable).parent
-        else:
-            base = Path.cwd()
-        # 优先新文件名
-        candidate = base / ConfigManager.CONFIG_FILE
-        if candidate.exists():
-            return candidate
-        # 兼容旧文件名
-        legacy = base / ConfigManager.LEGACY_CONFIG_FILE
-        if legacy.exists():
-            return legacy
-        user_cfg = Path.home() / ".vernier" / ConfigManager.CONFIG_FILE
-        if user_cfg.exists():
-            return user_cfg
-        user_legacy = Path.home() / ".vernier" / ConfigManager.LEGACY_CONFIG_FILE
-        if user_legacy.exists():
-            return user_legacy
-        # 模块自身目录（gitgo 安装目录）
-        pkg_dir = Path(__file__).parent.parent.parent
-        pkg_candidate = pkg_dir / ConfigManager.CONFIG_FILE
-        if pkg_candidate.exists():
-            return pkg_candidate
-        # 都不存在 → 默认写新文件名到 exe/脚本同目录
-        return candidate
+        """Return the user-scoped, launcher-independent configuration path."""
+        override = os.getenv("GITGO_CONFIG_PATH", "").strip()
+        if override:
+            return Path(override).expanduser().resolve()
+        return (Path.home() / ".gitgo" / ConfigManager.CONFIG_FILE).resolve()
+
+    @staticmethod
+    def _legacy_paths() -> list[Path]:
+        # An explicit destination is an isolation boundary for tests,
+        # portable profiles and managed deployments.  Looking back into the
+        # caller's cwd here could migrate unrelated live configuration into a
+        # temporary profile.
+        if os.getenv("GITGO_CONFIG_PATH", "").strip():
+            return []
+        cwd = Path.cwd()
+        package_root = Path(__file__).parent.parent.parent
+        candidates = [
+            cwd / ConfigManager.OLD_CONFIG_FILE,
+            cwd / ConfigManager.LEGACY_CONFIG_FILE,
+            Path.home() / ".vernier" / ConfigManager.OLD_CONFIG_FILE,
+            Path.home() / ".vernier" / ConfigManager.LEGACY_CONFIG_FILE,
+            package_root / ConfigManager.OLD_CONFIG_FILE,
+        ]
+        canonical = ConfigManager.default_path()
+        result: list[Path] = []
+        for item in candidates:
+            resolved = item.expanduser().resolve()
+            if resolved != canonical and resolved not in result:
+                result.append(resolved)
+        return result
 
     @staticmethod
     def find_config() -> Optional[Path]:
         path = ConfigManager.default_path()
-        return path if path.exists() else None
+        if path.exists():
+            return path
+        return next((candidate for candidate in ConfigManager._legacy_paths()
+                     if candidate.exists()), None)
 
     @staticmethod
-    def load(path: Optional[Path] = None) -> Config:
-        p = path or ConfigManager.find_config()
-        if not p or not p.exists():
-            return Config()
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            cfg = Config.from_dict(data)
-            return cfg
-        except (json.JSONDecodeError, OSError):
-            return Config()
-
-    @staticmethod
-    def save(config: Config, path: Optional[Path] = None) -> Path:
-        p = path or ConfigManager.default_path()
-        # 如果加载的是旧文件名，迁移到新文件名
-        if p.name == ConfigManager.LEGACY_CONFIG_FILE:
-            p = p.with_name(ConfigManager.CONFIG_FILE)
-        # 保护：如果当前文件有项目但 config 对象是空的，不覆盖
-        if not config.projects and p.exists():
+    def load(path: Optional[Path] = None, *, strict: bool = False) -> Config:
+        with ConfigManager._lock:
+            p = path or ConfigManager.find_config()
+            if not p or not p.exists():
+                return Config()
             try:
-                existing = json.loads(p.read_text(encoding="utf-8"))
-                if existing.get("projects"):
-                    return p  # 保护已有项目不被空 config 覆盖
+                data = json.loads(p.read_text(encoding="utf-8"))
+                cfg = Config.from_dict(data)
+                if path is None and p != ConfigManager.default_path():
+                    canonical = ConfigManager.save(cfg, ConfigManager.default_path(), allow_empty=True)
+                    migration_dir = canonical.parent / "migrations"
+                    migration_dir.mkdir(parents=True, exist_ok=True)
+                    archived = migration_dir / f"{p.name}.legacy-imported-{uuid.uuid4().hex[:8]}"
+                    os.replace(p, archived)
+                return cfg
             except (json.JSONDecodeError, OSError):
-                pass
-        p.parent.mkdir(parents=True, exist_ok=True)
-        data = _serialize_config(config)
-        p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        return p
+                if strict:
+                    raise
+                return Config()
+
+    @staticmethod
+    def save(config: Config, path: Optional[Path] = None, *, allow_empty: bool = False) -> Path:
+        with ConfigManager._lock:
+            p = path or ConfigManager.default_path()
+            # Only implicit legacy discovery migrates to the canonical user
+            # file.  An explicit path is an API boundary used by export,
+            # tests and managed profiles, and must be honoured verbatim even
+            # when its basename is historical.
+            if path is None and p.name in {
+                ConfigManager.OLD_CONFIG_FILE, ConfigManager.LEGACY_CONFIG_FILE,
+            }:
+                p = ConfigManager.default_path()
+            # 保护：如果当前文件有项目但 config 对象是空的，不覆盖
+            if not config.projects and p.exists() and not allow_empty:
+                try:
+                    existing = json.loads(p.read_text(encoding="utf-8"))
+                    if existing.get("projects"):
+                        return p  # 保护已有项目不被空 config 覆盖
+                except (json.JSONDecodeError, OSError):
+                    pass
+            p.parent.mkdir(parents=True, exist_ok=True)
+            config.schema_version = max(1, int(config.schema_version or 1))
+            config.revision = max(0, int(config.revision or 0)) + 1
+            data = _serialize_config(config)
+            temp_path = p.with_name(f".{p.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                with open(temp_path, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle, indent=2, ensure_ascii=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, p)
+            finally:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return p
 
     @staticmethod
     def get_backup_git_dir(project: ProjectConfig) -> Optional[Path]:
