@@ -16,7 +16,9 @@ import os
 import subprocess
 import sys
 import time
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -45,7 +47,8 @@ class ProcessToolRunner:
         self._timeout = timeout
 
     def run(self, tool_name: str, args: dict,
-            timeout: float | None = None) -> SubprocessResult:
+            timeout: float | None = None,
+            cancellation_event: threading.Event | None = None) -> SubprocessResult:
         """在子进程中执行工具。
 
         Args:
@@ -58,22 +61,61 @@ class ProcessToolRunner:
         start = time.time()
 
         try:
+            from backend.core.process_control import attach_kill_job, close_job, creation_flags
             # Inherit parent env so GITGO_TOOL_REGISTRY_MODULE etc. propagate
+            child_env = os.environ.copy()
+            child_env.update({
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1",
+            })
             proc = subprocess.Popen(
                 [sys.executable, "-m", "backend.core.tools.runner"],
+                # DaemonClient starts ``python -m gitgo`` from the package's
+                # parent directory.  Relying on inherited cwd therefore makes
+                # the top-level ``backend`` module disappear only in real
+                # daemon runs.  Anchor the isolated runner at the package root.
+                cwd=str(Path(__file__).resolve().parents[3]),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=os.environ.copy(),
+                encoding="utf-8",
+                errors="strict",
+                env=child_env,
+                creationflags=creation_flags(),
+                start_new_session=sys.platform != "win32",
             )
+            proc._gitgo_job_handle = attach_kill_job(proc)
 
             try:
-                stdout_str, stderr_str = proc.communicate(
-                    input=json.dumps(input_data, ensure_ascii=False),
-                    timeout=effective_timeout,
-                )
+                payload = json.dumps(input_data, ensure_ascii=False)
+                stdout_str = ""
+                stderr_str = ""
+                first = True
+                while True:
+                    if cancellation_event is not None and cancellation_event.is_set():
+                        self._kill_tree(proc)
+                        return SubprocessResult(
+                            success=False,
+                            error=f"tool '{tool_name}' cancelled",
+                            exit_code=-1,
+                            duration_ms=(time.time() - start) * 1000,
+                        )
+                    elapsed = time.time() - start
+                    if elapsed >= effective_timeout:
+                        raise subprocess.TimeoutExpired(proc.args, effective_timeout)
+                    try:
+                        stdout_str, stderr_str = proc.communicate(
+                            input=payload if first else None,
+                            timeout=min(0.2, effective_timeout - elapsed),
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        first = False
+                        continue
                 duration_ms = (time.time() - start) * 1000
+                close_job(getattr(proc, "_gitgo_job_handle", None))
+                proc._gitgo_job_handle = None
 
                 if proc.returncode != 0:
                     return SubprocessResult(
@@ -115,6 +157,9 @@ class ProcessToolRunner:
                 duration_ms=duration_ms,
             )
         except Exception as exc:
+            spawned = locals().get("proc")
+            if spawned is not None and spawned.poll() is None:
+                self._kill_tree(spawned)
             duration_ms = (time.time() - start) * 1000
             return SubprocessResult(
                 success=False,
@@ -130,24 +175,6 @@ class ProcessToolRunner:
         Windows: taskkill /F /T /PID
         Unix: os.killpg (需要进程组)
         """
-        pid = proc.pid
-        if pid is None:
-            return
-
-        try:
-            if sys.platform == "win32":
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True,
-                    timeout=10,
-                )
-            else:
-                try:
-                    os.killpg(pid, 9)  # SIGKILL to process group
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    os.kill(pid, 9)  # fallback: kill single process
-        except Exception:
-            # Best-effort kill — don't raise from kill_tree
-            pass
+        from backend.core.process_control import terminate_tree
+        terminate_tree(proc, getattr(proc, "_gitgo_job_handle", None))
+        proc._gitgo_job_handle = None

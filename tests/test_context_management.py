@@ -211,62 +211,11 @@ class TestResolveRetention:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 单元测试: 约束晋升
+# 单元测试: 结构化约束
 # ═══════════════════════════════════════════════════════════════
 
 
-class TestPromoteConstraints:
-    def test_detects_negative_directive(self):
-        from backend.core.loop.session import AgentSession
-        from backend.core.loop.models import AgentProcess, RingLevel, ProcessStatus
-        from backend.core.loop.executor import _promote_mid_task_constraints
-
-        s = AgentSession()
-        s.append_user("这次不要改 API 层的接口定义")
-        p = AgentProcess(
-            process_id="test", role="executor",
-            ring_level=RingLevel.RING_3,
-            status=ProcessStatus.RUNNING,
-        )
-
-        promoted = _promote_mid_task_constraints(s, p)
-        assert promoted >= 1
-        assert any("API" in c for c in p.task_constraints)
-
-    def test_rejects_vague_negative(self):
-        """不要这样 → 无宾语 → 不晋升。"""
-        from backend.core.loop.session import AgentSession
-        from backend.core.loop.models import AgentProcess, RingLevel, ProcessStatus
-        from backend.core.loop.executor import _promote_mid_task_constraints
-
-        s = AgentSession()
-        s.append_user("不要这样")
-        p = AgentProcess(
-            process_id="test", role="executor",
-            ring_level=RingLevel.RING_3,
-            status=ProcessStatus.RUNNING,
-        )
-
-        promoted = _promote_mid_task_constraints(s, p)
-        assert promoted == 0
-
-    def test_excludes_quoted_lesson(self):
-        """lesson 引述不算新约束。"""
-        from backend.core.loop.session import AgentSession
-        from backend.core.loop.models import AgentProcess, RingLevel, ProcessStatus
-        from backend.core.loop.executor import _promote_mid_task_constraints
-
-        s = AgentSession()
-        s.append_user("lesson L01 说不要直接修改 release 仓库")
-        p = AgentProcess(
-            process_id="test", role="executor",
-            ring_level=RingLevel.RING_3,
-            status=ProcessStatus.RUNNING,
-        )
-
-        promoted = _promote_mid_task_constraints(s, p)
-        assert promoted == 0  # "lesson" 关键词 → 被排除
-
+class TestStructuredConstraints:
     def test_system_message_includes_constraints(self):
         from backend.core.loop.models import AgentProcess, RingLevel, ProcessStatus
         from backend.core.loop.executor import _build_system_message_for_llm
@@ -353,16 +302,22 @@ class TestTranscriptBuilder:
         assert ctx["status"] == "COMPLETED"
         assert "recall_grep" in ctx["tools"]
 
-    def test_extract_compact_constraints_hard_extract(self):
+    def test_extract_compact_constraints_requires_host_marker(self):
         from backend.core.loop.transcript import TaskTranscriptBuilder
 
         msgs = [
             {"role": "user", "content": "不要改 API 层接口"},
-            {"role": "user", "content": "禁止直接 modfiy release repo"},
+            {
+                "role": "user", "content": "禁止直接 modify release repo",
+                "message_type": "task_constraint", "constraint_scope": "task",
+            },
         ]
         constraints = TaskTranscriptBuilder.extract_compact_constraints(msgs)
-        assert len(constraints) >= 1
-        assert any("API" in c["rule"] for c in constraints)
+        assert constraints == [{
+            "rule": "禁止直接 modify release repo",
+            "scope": "task",
+            "source": "host_structured",
+        }]
 
     def test_extract_compact_constraints_lesson_inherit(self):
         from backend.core.loop.transcript import TaskTranscriptBuilder
@@ -421,13 +376,14 @@ class TestDepGraphFilter:
 
 
 class TestReplaceWithLessonTranscripts:
-    def test_replaces_matching_content(self):
+    def test_replaces_explicitly_linked_lesson(self):
         from backend.core.loop.session import AgentSession
         from backend.core.loop.context_window import _replace_with_lesson_transcripts
         from backend.core.knowledge.models import Lesson
 
         s = AgentSession()
         s.append_user("改了 auth.py 文件需要验证")
+        s.messages[-1]["lesson_ids"] = ["L01"]
         harness = {
             "lessons": [
                 Lesson(trigger="auth.py", rule="修改 auth 前必须 scan",
@@ -439,6 +395,18 @@ class TestReplaceWithLessonTranscripts:
         assert replaced >= 1
         assert "L01" in s.messages[0]["content"]
         assert s.messages[0].get("_replaced_by_lesson")
+
+    def test_text_mention_does_not_authorize_replacement(self):
+        from backend.core.loop.session import AgentSession
+        from backend.core.loop.context_window import _replace_with_lesson_transcripts
+        from backend.core.knowledge.models import Lesson
+
+        s = AgentSession()
+        s.append_user("This quoted example happens to mention auth.py")
+        replaced = _replace_with_lesson_transcripts(s, {
+            "lessons": [Lesson(trigger="auth.py", rule="rule", id="L01")],
+        })
+        assert replaced == 0
 
     def test_no_lessons_no_replacement(self):
         from backend.core.loop.session import AgentSession
@@ -610,24 +578,23 @@ class TestChainTranscriptToReturn:
 
 
 class TestChainConstraintToPrompt:
-    def test_promote_then_build_system(self):
-        from backend.core.loop.session import AgentSession
+    def test_structured_constraint_then_build_system(self):
+        from backend.core.loop.transcript import TaskTranscriptBuilder
         from backend.core.loop.models import AgentProcess, RingLevel, ProcessStatus
-        from backend.core.loop.executor import (
-            _promote_mid_task_constraints, _build_system_message_for_llm,
-        )
+        from backend.core.loop.executor import _build_system_message_for_llm
 
-        s = AgentSession()
-        s.append_user("这次不要改 API 层接口")
+        constraints = TaskTranscriptBuilder.extract_compact_constraints([{
+            "role": "user",
+            "content": "这次不要改 API 层接口",
+            "message_type": "task_constraint",
+        }])
 
         p = AgentProcess(
             process_id="test", role="executor",
             ring_level=RingLevel.RING_3,
             status=ProcessStatus.RUNNING,
+            task_constraints=[item["rule"] for item in constraints],
         )
-
-        promoted = _promote_mid_task_constraints(s, p)
-        assert promoted >= 1
 
         result = _build_system_message_for_llm(p, "Base system prompt")
         assert "Task-level Constraints" in result
@@ -675,3 +642,35 @@ class TestContextEdgeCases:
         )
         base = "You are an Agent."
         assert _build_system_message_for_llm(p, base) == base
+
+
+class TestContextUsageView:
+    def test_provider_measurement_and_compaction_reserve(self):
+        from backend.core.loop.session import AgentSession
+
+        session = AgentSession(model_context_limit=100_000)
+        session.append_system("system policy", message_type="compiled_system_prompt",
+                              prompt_sections=[{"name": "Base identity", "estimated_tokens": 100}])
+        session.append_user("hello", message_type="conversation")
+        session.context_inventory = {"tool_count": 3, "tool_schema_tokens": 500}
+        session.provider_usage.append({
+            "protocol": "openai_responses", "input_tokens": 2_000,
+            "cache_read_tokens": 1_200,
+        })
+
+        view = session.context_view(auto_compact=True)
+        assert view["used_tokens"] == 2_000
+        assert view["measurement"] == "provider"
+        assert view["auto_compact_tokens"] == 10_000
+        assert view["free_tokens"] == 88_000
+        assert any(item["name"] == "Tool schemas" for item in view["breakdown"]["sections"])
+
+    def test_anthropic_usage_adds_cached_input(self):
+        from backend.core.loop.session import AgentSession
+
+        session = AgentSession(model_context_limit=20_000)
+        session.provider_usage.append({
+            "protocol": "anthropic_messages", "input_tokens": 1_000,
+            "cache_read_tokens": 4_000, "cache_write_tokens": 500,
+        })
+        assert session.context_view(auto_compact=False)["used_tokens"] == 5_500

@@ -17,7 +17,9 @@ from pathlib import Path
 class FileHashCache:
     """文件哈希缓存。mtime+size 匹配则返回缓存 SHA-256，跳过重算。"""
 
-    MAX_HOT = 500
+    # A real project commonly has more than 500 workspace + release entries.
+    # A smaller bound thrashes on every full scan and defeats the cache.
+    MAX_HOT = 20_000
     TTL_SECONDS = 3600  # 1 小时无命中则淘汰
 
     def __init__(self, cache_dir: Path):
@@ -32,13 +34,19 @@ class FileHashCache:
 
     # ── Public API ──────────────────────────────────────────
 
-    def lookup(self, rel_path: str, mtime: float, size: int) -> str | None:
+    @staticmethod
+    def _key(rel_path: str, namespace: str = "") -> str:
+        return f"{namespace}\0{rel_path}" if namespace else rel_path
+
+    def lookup(self, rel_path: str, mtime: float, size: int, *,
+               namespace: str = "") -> str | None:
         """mtime + size 匹配 → 返回缓存 sha256；不匹配 → None。
 
         命中时更新 cached_at（access-time LRU）。
         检查 TTL，过期条目视为 miss。
         """
-        entry = self._hot.get(rel_path) or self._cold.get(rel_path)
+        key = self._key(rel_path, namespace)
+        entry = self._hot.get(key) or self._cold.get(key)
         if entry is None:
             self._misses += 1
             return None
@@ -51,7 +59,9 @@ class FileHashCache:
                 age = (datetime.now() - cached_dt).total_seconds()
                 if age > self.TTL_SECONDS:
                     self._misses += 1
-                    self.invalidate(rel_path)
+                    self._hot.pop(key, None)
+                    self._cold.pop(key, None)
+                    self._dirty = True
                     return None
             except (ValueError, TypeError):
                 pass
@@ -59,9 +69,9 @@ class FileHashCache:
         if entry["mtime"] == mtime and entry["size"] == size:
             # access-time LRU: 更新访问时间
             entry["cached_at"] = datetime.now().isoformat()
-            if rel_path in self._cold:
-                self._hot[rel_path] = entry
-                del self._cold[rel_path]
+            if key in self._cold:
+                self._hot[key] = entry
+                del self._cold[key]
                 self._dirty = True
             self._hits += 1
             return entry["sha256"]
@@ -69,9 +79,10 @@ class FileHashCache:
         self._misses += 1
         return None
 
-    def store(self, rel_path: str, mtime: float, size: int, sha256: str):
+    def store(self, rel_path: str, mtime: float, size: int, sha256: str, *,
+              namespace: str = ""):
         """写入热缓存。"""
-        self._hot[rel_path] = {
+        self._hot[self._key(rel_path, namespace)] = {
             "mtime": mtime, "size": size, "sha256": sha256,
             "cached_at": datetime.now().isoformat(),
         }
@@ -80,10 +91,13 @@ class FileHashCache:
 
     def invalidate(self, rel_path: str):
         """Watcher 检测到文件变化时主动删除缓存条目。"""
-        self._hot.pop(rel_path, None)
-        if rel_path in self._cold:
-            del self._cold[rel_path]
-            self._dirty = True
+        suffix = "\0" + rel_path
+        removed = False
+        for entries in (self._hot, self._cold):
+            for key in [key for key in entries if key == rel_path or key.endswith(suffix)]:
+                del entries[key]
+                removed = True
+        self._dirty = self._dirty or removed
 
     def flush(self):
         """持久化到磁盘。合并 hot → cold，LRU 淘汰后写入 JSON。"""

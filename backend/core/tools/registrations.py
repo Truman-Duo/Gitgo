@@ -33,6 +33,53 @@ def register_all(register) -> None:
     register("git_branch", git_branch)
     register("run_command", run_command)
 
+    # Canonical Agent development tools.  Legacy names above remain available
+    # for compatibility, but new capability profiles use these confined,
+    # receipt-friendly implementations.
+    from backend.core.tools import workspace_tools
+    register("read_file", workspace_tools.read_file)
+    register("list_files", workspace_tools.list_files)
+    register("search_text", workspace_tools.search_text)
+    register("edit_file", workspace_tools.edit_file)
+    register("write_file", workspace_tools.write_file)
+    register("delete_file", workspace_tools.delete_file)
+    register("apply_patch", workspace_tools.apply_patch)
+    register("exec_command", workspace_tools.exec_command)
+    register("shell_script", workspace_tools.shell_script)
+    register("dependency_feedback", workspace_tools.dependency_feedback)
+    register("rebuild_dependency_graph", workspace_tools.rebuild_dependency_graph)
+    from backend.core.tools.document_tools import document_create, document_open
+    register("document_open", document_open)
+    register("document_create", document_create)
+    from backend.core.tools.web_tools import web_fetch, web_search
+    register("web_search", web_search)
+    register("web_fetch", web_fetch)
+
+    # Existing governance tools are also available to the isolated runner.  The
+    # daemon keeps the original public names, so profiles and old transcripts do
+    # not break while their execution boundary becomes cancellable.
+    from backend.core.loop import tool_wrappers
+    register("contract_detect_drift", tool_wrappers.contract_detect_drift)
+    register("contract_get_impact", tool_wrappers.contract_get_impact)
+    register("contract_get_changed_symbols", tool_wrappers.contract_get_changed_symbols)
+    register("lesson_search", tool_wrappers.lesson_search)
+    register("lesson_discard", tool_wrappers.lesson_discard)
+    register("lesson_verify", tool_wrappers.lesson_verify)
+    register("lesson_harvest", tool_wrappers.lesson_harvest)
+    register("lesson_promote", tool_wrappers.lesson_promote)
+    register("lesson_list", tool_wrappers.lesson_list)
+    register("privacy_scan", tool_wrappers.privacy_scan)
+    register("memory_snapshot", tool_wrappers.memory_snapshot)
+    register("memory_restore", tool_wrappers.memory_restore)
+    register("run_test", _run_test_isolated)
+    register("formalize", _formalize_isolated)
+    from backend.core.tools.dynamic_tools import (
+        execute_authored_python, execute_authored_privileged_python, execute_composite,
+    )
+    register("dynamic_composite", execute_composite)
+    register("authored_python", execute_authored_python)
+    register("authored_privileged_python", execute_authored_privileged_python)
+
 
 # ── File Tools ─────────────────────────────────────────────
 
@@ -386,6 +433,44 @@ def run_command(args: dict) -> dict:
         return {"error": "COMMAND_TIMEOUT", "timeout": timeout}
     except Exception as e:
         return {"error": "COMMAND_ERROR", "detail": str(e)}
+
+
+def _run_test_isolated(args: dict) -> dict:
+    from backend.core.loop.test_manifest import run_registered_test
+    workspace = args.get("_workspace") or args.get("workspace_path") or str(Path.cwd())
+    public_args = {key: value for key, value in args.items() if not key.startswith("_")}
+    return run_registered_test(workspace, public_args)
+
+
+def _formalize_isolated(args: dict) -> dict:
+    """Reconstruct SyncSession from serializable config inside the runner."""
+    from backend.core.config import Config
+    from backend.core.sync_session import SyncSession
+
+    config_data = args.get("_config")
+    project_name = str(args.get("_project_name", ""))
+    if not isinstance(config_data, dict):
+        return {"error": "FORMALIZE_CONFIG_MISSING"}
+    config = Config.from_dict(config_data)
+    project = next((item for item in config.projects if item.name == project_name), None)
+    if project is None:
+        return {"error": "FORMALIZE_PROJECT_NOT_FOUND", "project": project_name}
+    session = SyncSession.load_session(project, config) or SyncSession(project, config)
+    session.step_scan()
+    session.step_load_commits()
+    raw_indices = args.get("indices")
+    indices = None if raw_indices is None else {int(item) for item in raw_indices}
+    result = session.step_create_formal_commit(
+        selected_indices=indices,
+        message=args.get("message"),
+    )
+    if result is None:
+        return {"error": "FORMALIZE_FAILED"}
+    return {
+        "commit": f"[{result.prefix}-{result.number}]",
+        "message": result.message,
+        "session_path": str(session.workspace_path / ".gitgo" / "session.json"),
+    }
 
 
 # ── Helpers ────────────────────────────────────────────────

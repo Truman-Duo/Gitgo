@@ -42,6 +42,7 @@ class ToolExecution:
     status: str = "pending"   # pending | running | completed | failed | cancelled
     idempotency_key: str = field(default="", repr=False)
     _rolled_back: bool = field(default=False, repr=False)
+    _rollback_reason: str = field(default="", repr=False)
 
     def __post_init__(self):
         if not self.idempotency_key:
@@ -75,7 +76,9 @@ class ToolExecution:
 
         Returns: 按调用顺序排列的 ToolResult 列表。
         """
-        from backend.core.loop.tool_pipeline import ToolPipeline
+        # ToolResult is instantiated on missing-tool and worker-crash paths, so
+        # it must be a runtime import rather than TYPE_CHECKING-only metadata.
+        from backend.core.loop.tool_pipeline import ToolPipeline, ToolResult
         from backend.core.loop.error_taxonomy import ErrorNature
 
         pipeline = ToolPipeline()
@@ -101,12 +104,8 @@ class ToolExecution:
             if len(group) == 1:
                 call_index, tc, tool, _res = group[0]
                 if tool is None:
-                    r = ToolResult(
-                        id=f"{self.execution_id}_{call_index}",
-                        tool_name=tc.get("name", "?"),
-                        is_error=True,
-                        error="TOOL_NOT_FOUND",
-                        call_index=call_index,
+                    r = self._missing_tool_result(
+                        pipeline, tc, call_index, tools,
                     )
                     results.append(r)
                 else:
@@ -123,12 +122,8 @@ class ToolExecution:
                     futures = {}
                     for call_index, tc, tool, _res in group:
                         if tool is None:
-                            results.append(ToolResult(
-                                id=f"{self.execution_id}_{call_index}",
-                                tool_name=tc.get("name", "?"),
-                                is_error=True,
-                                error="TOOL_NOT_FOUND",
-                                call_index=call_index,
+                            results.append(self._missing_tool_result(
+                                pipeline, tc, call_index, tools,
                             ))
                             continue
                         future = executor.submit(
@@ -164,6 +159,80 @@ class ToolExecution:
         self.results = results
         return results
 
+    def _missing_tool_result(
+        self, pipeline, tool_call: dict, call_index: int,
+        tools: dict[str, "AgentTool"],
+    ) -> "ToolResult":
+        """Return a recoverable, model-readable missing-capability result."""
+        from backend.core.errors import error_payload
+
+        tool_name = str(tool_call.get("name") or "unknown")
+        available = sorted(str(name) for name in tools)
+        process = getattr(self.ctx, "process", None)
+        lease_required = False
+        if (
+            process is not None
+            and str(getattr(process, "actor_kind", "")) == "supervisor"
+            and getattr(process, "capability_lease", None) is None
+        ):
+            try:
+                from backend.core.loop.capabilities import CapabilityProfiles
+                from backend.core.loop.task_contract import get_task_contract
+
+                contract = get_task_contract(process)
+                executable = set(CapabilityProfiles.resolve_tools(
+                    "development.workspace",
+                )) | set(CapabilityProfiles.resolve_tools(
+                    "governance.operate",
+                ))
+                lease_required = (
+                    str(contract.get("execution_mode") or "").strip().lower()
+                    == "self_execute"
+                    and tool_name in executable
+                )
+            except (ValueError, TypeError):
+                lease_required = False
+        error_name = (
+            "SELF_EXECUTION_LEASE_REQUIRED"
+            if lease_required else "TOOL_NOT_FOUND"
+        )
+        next_actions = ([{
+            "action": "request_self_execute",
+            "profile_id": "development.workspace",
+            "effect": (
+                "Obtain the task-scoped lease explicitly, then retry this "
+                "same tool call. No workspace action has started."
+            ),
+        }] if lease_required else [{
+            "action": "choose_available_tool",
+            "available_tools": available,
+        }, {
+            "action": "refresh_capabilities",
+            "effect": "Use the current Host capability list; do not rely on old session text.",
+        }])
+        payload = error_payload(
+            error_name,
+            details={
+                "requested_tool": tool_name,
+                "available_tools": available,
+                "execution_state": "not_started",
+                "capability_transition": (
+                    "request_self_execute" if lease_required else ""
+                ),
+            },
+            next_actions=next_actions,
+        )
+        return pipeline.error_result(
+            tool_name, self.execution_id, call_index, payload["error"],
+            diagnostics={
+                "nature": "governance",
+                "code": payload["error"],
+                "source": "host",
+                "execution_state": "not_started",
+                "error_info": payload["error_info"],
+            },
+        )
+
     def _is_crash_error(self, result: "ToolResult") -> bool:
         """Check if a ToolResult represents a CRASH (not BUSINESS) error.
 
@@ -174,7 +243,7 @@ class ToolExecution:
             return False
         diag = result.diagnostics
         nature = diag.get("nature", "")
-        if nature == "business":
+        if nature in {"business", "governance"}:
             return False
         return True
 
@@ -192,12 +261,17 @@ class ToolExecution:
         )
 
     def rollback(self, reason: str = "") -> None:
-        """事务失败——恢复文件快照 + 裁剪会话 + 注入回滚通知。"""
+        """Fail the transaction and restore side effects.
+
+        Conversation mutation is deliberately owned by ``agent_step``.  It
+        must first append one result for every provider-issued tool call and
+        only then append the rollback notice; writing a notice here would split
+        the provider's required assistant/tool-result sequence.
+        """
         if self.snapshot:
             self._restore_snapshot(self.snapshot)
-        self._trim_session()
-        self._inject_rollback_notice(reason)
         self._rolled_back = True
+        self._rollback_reason = str(reason or "unknown tool execution error")
         self.status = "failed"
         # Emit rollback_notification for Dashboard to grey out this turn
         self.ctx.event_bus.emit(
@@ -252,12 +326,11 @@ class ToolExecution:
                 sha = hashlib.sha256(content).hexdigest()
                 backup_dir = Path(ws) / SNAPSHOT_DIR
                 backup_dir.mkdir(parents=True, exist_ok=True)
-                # Find next version number for this hash
-                existing = list(backup_dir.glob(f"{sha}@v*"))
-                version = len(existing) + 1
-                backup_path = backup_dir / f"{sha}@v{version}"
-                if not existing:
-                    backup_path.write_bytes(content)
+                # Execution-owned backup.  The previous pseudo-dedup selected a
+                # new @vN path but skipped writing it when an older hash existed,
+                # leaving rollback pointed at a nonexistent file.
+                backup_path = backup_dir / f"{sha}@v{uuid.uuid4().hex[:10]}"
+                backup_path.write_bytes(content)
                 files[file_path_str] = {
                     "action": "modified",
                     "original_sha": sha,
@@ -274,25 +347,76 @@ class ToolExecution:
     def _extract_write_targets(self) -> list[str]:
         """Extract file paths from write tool calls' args."""
         targets = []
+        catalog = self.ctx.artifacts.get("tool_catalog") or {}
         for tc in self.tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
-            # Only extract from write tools (not read tools)
-            if not self._is_write_tool(tool_name):
+            tool = catalog.get(tool_name)
+            effect = getattr(getattr(tool, "effect", "read"), "value", "read")
+            if effect != "workspace_write":
                 continue
-            for key in ("file", "path", "files", "target", "source"):
-                val = args.get(key)
-                if isinstance(val, str) and val:
-                    targets.append(val)
-                elif isinstance(val, list):
-                    targets.extend([v for v in val if isinstance(v, str)])
+            if getattr(tool, "composite_spec", None):
+                targets.extend(self._extract_composite_targets(tool, args, catalog))
+            else:
+                targets.extend(self._extract_targets_from_args(tool_name, args))
+                targets.extend(self._resource_file_targets(tool))
         return list(set(targets))  # dedup
 
-    def _is_write_tool(self, tool_name: str) -> bool:
-        """Heuristic: tools that modify filesystem state."""
-        write_tools = {"formalize", "write", "edit", "delete", "push", "sync",
-                        "assemble_context", "assemble_return_context"}
-        return tool_name in write_tools
+    @staticmethod
+    def _extract_targets_from_args(tool_name: str, args: dict) -> list[str]:
+        targets: list[str] = []
+        for key in ("file", "path", "files", "target", "source"):
+            val = args.get(key)
+            if isinstance(val, str) and val:
+                targets.append(val)
+            elif isinstance(val, list):
+                targets.extend(v for v in val if isinstance(v, str))
+        if tool_name == "apply_patch" and isinstance(args.get("patch"), str):
+            import re
+            for raw in re.findall(r"^(?:---|\+\+\+)\s+([^\t\r\n]+)", args["patch"], re.M):
+                value = raw.strip()
+                if value == "/dev/null":
+                    continue
+                if value.startswith(("a/", "b/")):
+                    value = value[2:]
+                targets.append(value)
+        return targets
+
+    @staticmethod
+    def _resource_file_targets(tool) -> list[str]:
+        targets = []
+        for resource in getattr(tool, "resources", None) or []:
+            if resource.startswith("filesystem:") and not resource.endswith("*"):
+                targets.append(resource.split(":", 1)[1])
+        return targets
+
+    def _extract_composite_targets(self, tool, inputs: dict, catalog: dict) -> list[str]:
+        """Resolve literal/input-addressable targets from a compiled plan."""
+        targets: list[str] = []
+        for step in (tool.composite_spec or {}).get("steps", []):
+            base = catalog.get(str(step.get("tool", "")))
+            effect = getattr(getattr(base, "effect", "read"), "value", "read")
+            if effect != "workspace_write":
+                continue
+            resolved = self._resolve_input_only(step.get("arguments", {}), inputs)
+            targets.extend(self._extract_targets_from_args(base.name, resolved))
+            targets.extend(self._resource_file_targets(base))
+        return targets
+
+    @classmethod
+    def _resolve_input_only(cls, value, inputs: dict):
+        if isinstance(value, dict):
+            return {key: cls._resolve_input_only(item, inputs) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._resolve_input_only(item, inputs) for item in value]
+        if not isinstance(value, str) or not value.startswith("${input.") or not value.endswith("}"):
+            return value
+        current = inputs
+        for part in value[8:-1].split("."):
+            if not isinstance(current, dict) or part not in current:
+                return value
+            current = current[part]
+        return current
 
     def _restore_snapshot(self, snapshot: dict) -> None:
         """恢复 workspace 到快照状态。
@@ -414,6 +538,15 @@ def _resolve_tool_resources(
     """
     if tool is None:
         return {"*"}  # 未知工具：保守串行
+
+    # Anonymous external reads are observations, not shared mutable resources.
+    # Their resource labels describe authority/audit scope (for example
+    # network:public-search), not an exclusive lock. Treating that label as a
+    # mutex serialized every search/fetch in an LLM-issued parallel batch and
+    # made ordinary research scale linearly with source count.
+    effect = getattr(getattr(tool, "effect", "read"), "value", tool.effect)
+    if tool.read_only and str(effect) == "external_read":
+        return set()
 
     if tool.resources is not None:
         return set(tool.resources)

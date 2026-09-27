@@ -13,14 +13,20 @@ if TYPE_CHECKING:
 
 
 def tool_already_called(process: "AgentProcess", tool_name: str) -> bool:
-    """检查某个工具是否已在当前 session 中调用过（字符串匹配）。"""
-    if process is None or not process.session:
+    """Return whether Host receipts prove a successful tool invocation.
+
+    Session prose is untrusted: user text and model-visible tool formatting must
+    never satisfy a governance prerequisite.  A committed receipt is the single
+    source of truth for both read and effectful tools.
+    """
+    if process is None:
         return False
-    marker = f"[工具 {tool_name}"
-    for msg in process.session.messages:
-        if msg.get("role") == "user" and marker in msg.get("content", ""):
-            return True
-    return False
+    return any(
+        receipt.get("tool_name") == tool_name
+        and receipt.get("succeeded") is True
+        and receipt.get("committed") is True
+        for receipt in (getattr(process, "tool_receipts", []) or [])
+    )
 
 
 def tools_already_called(process: "AgentProcess", tool_names: list[str]) -> bool:
@@ -29,33 +35,5 @@ def tools_already_called(process: "AgentProcess", tool_names: list[str]) -> bool
 
 
 def tool_succeeded(process: "AgentProcess", tool_name: str) -> bool:
-    """检查某个工具是否调用成功（结构化验证，非字符串匹配）。
-
-    判定逻辑：
-    1. 在 session.messages 中找到该工具的 tool_result
-    2. 读取 message 的 metadata: is_error == False
-    3. 检查 exit_code == 0（对于 test/lint/typecheck 等验证类工具）
-    4. 如果找不到对应的 tool_result → 返回 False
-
-    与 tool_already_called 的区别：
-    - tool_already_called: "B 说它调过了"（字符串匹配，可被 LLM 绕过）
-    - tool_succeeded: "工具真正返回了成功状态"（结构化验证，不可伪造）
-    """
-    if process is None or not process.session:
-        return False
-    for msg in process.session.messages:
-        if msg.get("message_type") != "tool_result":
-            continue
-        if msg.get("_tool_name") != tool_name:
-            continue
-        # v0.38+: tool_result 消息可能携带 is_error 标记
-        if msg.get("is_error", False):
-            return False
-        # 检查结构化结果中是否包含 exit_code（验证类工具）
-        data = msg.get("data")
-        if isinstance(data, dict):
-            exit_code = data.get("exit_code")
-            if exit_code is not None and exit_code != 0:
-                return False
-        return True
-    return False
+    """Alias for the receipt-backed success predicate."""
+    return tool_already_called(process, tool_name)

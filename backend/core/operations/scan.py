@@ -48,6 +48,8 @@ def compare_files(
     bk_adapter: FileAdapter | None = None,
     normalize_eol: bool = False,
     hash_cache: "FileHashCache | None" = None,
+    exclude_patterns: list[str] | None = None,
+    detect_renames: bool = True,
 ) -> list[FileEntry]:
     """对比工作区和备份仓库的文件，返回带状态的文件列表
 
@@ -57,12 +59,18 @@ def compare_files(
     def _hash(adapter: FileAdapter, path: str) -> str:
         # Cache lookup: stat mtime+size → check cache for sha256
         cached_sha = None
-        if hash_cache is not None and not normalize_eol:
+        st = None
+        namespace = ""
+        if hash_cache is not None:
             import os
             try:
-                full = Path(_resolve_adapter_root(adapter, workspace, backup)) / path
+                root = Path(_resolve_adapter_root(adapter, workspace, backup)).resolve()
+                full = root / path
                 st = os.stat(full)
-                cached_sha = hash_cache.lookup(path, st.st_mtime, st.st_size)
+                namespace = f"{root}|{'normalized-eol' if normalize_eol else 'raw'}"
+                cached_sha = hash_cache.lookup(
+                    path, st.st_mtime, st.st_size, namespace=namespace,
+                )
             except OSError:
                 pass
         if cached_sha is not None:
@@ -77,10 +85,12 @@ def compare_files(
             h = hashlib.sha256(data).hexdigest()
 
         # Store in cache
-        if hash_cache is not None and not normalize_eol:
+        if hash_cache is not None and st is not None:
             try:
-                hash_cache.store(path, st.st_mtime, st.st_size, h)
-            except (OSError, UnboundLocalError):
+                hash_cache.store(
+                    path, st.st_mtime, st.st_size, h, namespace=namespace,
+                )
+            except OSError:
                 pass
 
         return h
@@ -106,23 +116,26 @@ def compare_files(
     backup_by_hash: dict[str, list[str]] = {}
     ws_by_hash: dict[str, list[str]] = {}
 
-    if total > 0 and progress_callback:
+    if total > 0 and progress_callback and detect_renames:
         progress_callback(0, total, "正在扫描备份仓库...")
-    for dirpath, dirnames, filenames in bk_adapter.walk(""):
-        if ".git" in dirnames:
-            dirnames.remove(".git")
-        for fn in filenames:
-            rel_path = f"{dirpath}/{fn}" if dirpath else fn
-            try:
-                if bk_adapter.is_symlink(rel_path):
+    if detect_renames:
+        for dirpath, dirnames, filenames in bk_adapter.walk(""):
+            if ".git" in dirnames:
+                dirnames.remove(".git")
+            for fn in filenames:
+                rel_path = f"{dirpath}/{fn}" if dirpath else fn
+                try:
+                    if bk_adapter.is_symlink(rel_path):
+                        continue
+                    rel = _normalize_path(rel_path)
+                    if not rel.startswith(".git/") and not _is_excluded(
+                        rel, exclude_patterns or [],
+                    ):
+                        backup_by_hash.setdefault(
+                            _hash(bk_adapter, rel_path), []
+                        ).append(rel)
+                except (ValueError, OSError):
                     continue
-                rel = _normalize_path(rel_path)
-                if not rel.startswith(".git/"):
-                    backup_by_hash.setdefault(
-                        _hash(bk_adapter, rel_path), []
-                    ).append(rel)
-            except (ValueError, OSError):
-                continue
 
     file_list = file_list or []
     for idx, rel in enumerate(file_list):
@@ -171,22 +184,23 @@ def compare_files(
 
         ws_by_hash.setdefault(ws_hash, []).append(rel)
 
-    path_to_entry = {e.rel_path: e for e in entries}
-    for ws_hash, ws_paths in ws_by_hash.items():
-        bk_paths = backup_by_hash.get(ws_hash, [])
-        if not bk_paths:
-            continue
-        for wp in ws_paths:
-            entry = path_to_entry.get(wp)
-            if not entry or entry.status != "new":
+    if detect_renames:
+        path_to_entry = {e.rel_path: e for e in entries}
+        for ws_hash, ws_paths in ws_by_hash.items():
+            bk_paths = backup_by_hash.get(ws_hash, [])
+            if not bk_paths:
                 continue
-            for bp in bk_paths:
-                if bp != wp:
-                    entry.status = "renamed"
-                    entry.old_path = bp
-                    entry.selected = True
-                    bk_paths.remove(bp)
-                    break
+            for wp in ws_paths:
+                entry = path_to_entry.get(wp)
+                if not entry or entry.status != "new":
+                    continue
+                for bp in bk_paths:
+                    if bp != wp:
+                        entry.status = "renamed"
+                        entry.old_path = bp
+                        entry.selected = True
+                        bk_paths.remove(bp)
+                        break
 
     return entries
 
@@ -199,12 +213,18 @@ def get_exclude_patterns(
 ) -> list[str]:
     """合并 .gitignore 规则 + force_exclude + 硬编码保护的规则"""
     patterns = _read_gitignore(workspace, file_adapter=file_adapter)
-    patterns.extend(project.force_exclude)
+    policy = dict(getattr(project, "outbound_policy", {}) or {})
+    patterns.extend(policy.get("exclude_paths") or project.force_exclude)
     # 硬编码保护：这些目录在任何项目中都不能被 sync
     patterns.extend([
         ".git/", ".claude/", ".codex/", ".codebuddy/", ".cursor/",
         ".gitgo/", "gitgo_config.json", "gitgo_history.json",
+        "llm_config.json", "sync_config.json", ".env", ".env.*",
     ])
+    # Ordered negation mirrors gitignore semantics. Explicit includes are
+    # evaluated last, while structural Gitgo/.git directories remain guarded by
+    # the publishing implementation itself.
+    patterns.extend("!" + item.lstrip("!") for item in policy.get("include_paths", []))
     return patterns
 
 

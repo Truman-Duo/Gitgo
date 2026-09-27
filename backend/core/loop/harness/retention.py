@@ -56,7 +56,7 @@ class RetentionAdvisor(HarnessPlugin):
 
     def retention_priority(
         self,
-        content: str,
+        content: str | dict,
         signals: list[GovernanceSignal] | None = None,
     ) -> float:
         """计算消息的保留优先级（0-1）。委托给纯函数版。"""
@@ -64,35 +64,44 @@ class RetentionAdvisor(HarnessPlugin):
 
 
 def retention_priority_from_signals(
-    content: str,
+    content: str | dict,
     signals: list[GovernanceSignal],
 ) -> float:
     """纯函数版：从信号列表计算消息保留优先级。
 
     方便在无 RetentionAdvisor 实例时直接调用（如 context_window.py 的 _retention_priority）。
     """
-    if not signals or not content:
+    message = content if isinstance(content, dict) else {"content": str(content or "")}
+    if not signals or not message.get("content"):
         return 0.3
 
     score = 0.3
+    signal_ids = {
+        str(item) for item in (message.get("governance_signal_ids", []) or [])
+    }
+    referenced_files = {
+        str(item) for item in (message.get("referenced_files", []) or [])
+    }
+    semantic_tags = {
+        str(item) for item in (message.get("semantic_tags", []) or [])
+    }
 
     for sig in signals:
-        if sig.source == "rejection" and sig.rule:
-            if sig.rule[:30] in content:
-                return 1.0
+        if sig.source == "rejection" and sig.signal_id in signal_ids:
+            return 1.0
 
         if sig.source == "lesson_trigger":
             for fname in sig.target_files:
-                if fname and fname in content:
+                if fname and fname in referenced_files:
                     score = max(score, 0.8)
 
         if sig.source == "contract_drift":
             for fname in sig.target_files:
-                if fname and fname in content:
+                if fname and fname in referenced_files:
                     score = max(score, 0.7)
 
         if sig.metadata.get("critical_feature"):
-            if sig.metadata["critical_feature"] in content:
+            if sig.metadata["critical_feature"] in semantic_tags:
                 score = max(score, 0.6)
 
     return score

@@ -52,7 +52,9 @@ def contract_get_impact(args: dict) -> dict:
         workspace = Path(args["workspace_path"])
         file_path = args["file_path"]
         func_name = args.get("func_name", "")
-        dependents = get_dependents(workspace, file_path)
+        from backend.core.dependency_graph import query_dependents
+        dependency_edges = query_dependents(workspace, file_path)
+        dependents = sorted({item["dependent"] for item in dependency_edges})
         callers = get_callers(workspace, file_path, func_name)
         return {
             "file_path": file_path,
@@ -60,6 +62,8 @@ def contract_get_impact(args: dict) -> dict:
             "callers": callers,
             "dependent_count": len(dependents),
             "caller_count": len(callers),
+            "dependency_edges": dependency_edges,
+            "graph_policy": "recall_first_multi_signal",
         }
     except Exception as e:
         return {"error": str(e)}
