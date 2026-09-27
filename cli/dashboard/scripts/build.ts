@@ -1,7 +1,7 @@
 // scripts/build.ts
 import { build } from "bun";
 
-const result = await build({
+const dashboard = await build({
   entrypoints: ["./src/main.tsx"],
   outdir: "./dist",
   target: "bun",
@@ -10,12 +10,22 @@ const result = await build({
   minify: true,
 });
 
-if (result.success) {
-  console.log("Build OK: dist/cli.js");
-  for (const log of result.logs) {
+const inspector = await build({
+  entrypoints: ["./src/traceMain.tsx"],
+  outdir: "./dist",
+  target: "bun",
+  format: "esm",
+  naming: "trace.[ext]",
+  minify: true,
+});
+
+if (dashboard.success && inspector.success) {
+  console.log("Build OK: dist/cli.js + dist/trace.js");
+  for (const log of [...dashboard.logs, ...inspector.logs]) {
     console.log(log);
   }
 } else {
   console.error("Build failed");
+  for (const log of [...dashboard.logs, ...inspector.logs]) console.error(log);
   process.exit(1);
 }

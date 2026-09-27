@@ -14,6 +14,8 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+dist-terminal/
+dist-installer/
 *.exe
 *.spec
 

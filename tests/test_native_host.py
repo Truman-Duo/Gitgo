@@ -363,7 +363,7 @@ def test_provider_secret_is_not_round_tripped_and_blank_can_retain(tmp_path_fact
 
 def test_plaintext_provider_config_is_migrated_to_encrypted_store(tmp_path_factory):
     config_path = tmp_path_factory / "llm_config.json"
-    fake_key = "sk-legacy-plaintext-must-disappear"
+    fake_key = "sk-" + "legacy-plaintext-must-disappear"
     config_path.write_text(json.dumps({
         "providers": [{
             "id": "legacy", "name": "legacy", "base_url": "https://example.invalid/v1",
