@@ -1,187 +1,99 @@
 # Gitgo Runtime Constitution
 
-> 版本：v0.27 | 基于 v0.26 RuntimeDiscipline | 显式化已有结构
+本文声明当前 Terminal Preview 的运行时不变量。它不是路线图；违反这些规则的实现应视为缺陷。组件拓扑见 [ARCHITECTURE.md](ARCHITECTURE.md)，具体表结构见 [RuntimeStateModel.md](RuntimeStateModel.md)。
 
----
+## 1. 单一事实源
 
-## 定位
+同一事实只能有一个权威写入者：
 
-本文档声明 gitgo Runtime 的根本规则。不是"将来应该做"，而是"现在就是这样做的，违反即 bug"。
+- Native Host 负责协议、项目注册和应用服务边界；
+- 每项目 Daemon 负责该项目的任务生命周期与运行事件；
+- SQLite 保存关系状态，CAS 保存较大的不可变内容；
+- Git 与 linked worktree 保存代码事实；
+- Dashboard 只消费投影，不反向创造运行时真相。
 
-v0.26 的 RuntimeDiscipline 覆盖了 Canonical Events / State Authority / Derivation Rules / Observer Constraint 四条。
-v0.27 补全 Layer Mutation / Gate Extension / Semantic Reversibility / Event Taxonomy 四条。共八条。
+缓存、状态栏、项目概览和 Runtime 页面都必须从权威状态派生。读取失败应显示 `Unavailable/Error`，不能伪装成空项目、零用量或已完成。
 
----
+## 2. 原生协议优先
 
-## 1. Canonical Events
+Dashboard 通过版本化原生协议连接 Native Host。MCP 是给外部 harness 和自动化使用的受限兼容面，不是产品前后端的默认数据面，也不能成为原生能力缺失时的隐式降级路径。
 
-9 种 governance event 是闭集。新增 governance event 类型必须修改本文档。
+协议操作必须具备稳定的名称、结构化结果、结构化错误和取消语义。界面文字不是协议。
 
-| Event | 位置 | 触发 |
-|-------|------|------|
-| `governance_synced` | `sync_session.py:816` | `step_sync()` 成功，Gate A 通过 |
-| `governance_pushed` | `sync_session.py:945` | `step_push()` 成功，Gate B 通过 |
-| `governance_dissolved` | `sync_session.py:730` | `step_dissolve_formal()` 成功 |
-| `governance_edited` | `sync_session.py:673` | `step_edit_formal_message()` 成功 |
-| `governance_renumbered` | `sync_session.py:702` | `step_edit_formal_number()` 成功 |
-| `governance_drift` | `sync_session.py:802` | `step_sync()` 中 Gate A 漂移检测 |
-| `governance_contract_updated` | `sync_session.py:845` | 合约自动更新后 |
-| `governance_lesson` | `sync_session.py:856` | lesson harvest 后 |
-| `governance_memory_snapshot` | `sync_session.py:829` | memory snapshot 后 |
+## 3. Main Process / Subprocess 责任
 
-操作级 event（`scan`/`formalize`/`sync`/`push`/`triage_*`/`delete_formal`/`dissolve_formal`）是独立的 workflow log——不与 governance event 混用。
+- Main Process 直接面对用户，负责意图对齐、动态路由、协调、审查和最终交付；
+- Subprocess 负责一个可持续迭代的任务域或 DAG 节点；
+- 简短、单责任人的工作允许 Main Process 自执行；
+- 任务中途变复杂时允许将已有事实和责任交接给 Subprocess；
+- 同一部件的连续工作优先回到原 Subprocess；
+- Subprocess 不绕过 Main Process 私聊其他 Subprocess，依赖变化通过合同、事件和 Main Process 转发。
 
-区分标准：
-- governance event 的 detail 包含**状态变更内容**（如 `{"commit": "[MYAPP-1]"}`、`{"commits": [...]}`）
-- 操作级 event 的 detail 包含**操作范围**（如 `{"entries_total": 45}`、`{"file_count": 12}`）
+创建 Subprocess 不是质量证明；测试、收据、审查和用户确认才是证据。
 
----
+## 4. Provider-neutral Agent Loop
 
-## 2. State Authority
+OpenAI Responses、OpenAI Chat Completions 和 Anthropic Messages 必须映射到统一的消息、Reasoning、工具调用和流事件模型。Provider 特有字段留在 adapter 边界，不扩散到 Dashboard、治理或存储层。
 
-每个持久化 state 有且仅有一个写入源。
+会话中途切换 Provider 后，以 Host 保存的当前配置和能力探针为准。旧上下文中的模型身份或能力描述不能覆盖当前事实。
 
-| State 字段 | Authority | 禁止直接写入者 |
-|-----------|----------|---------------|
-| `formal_commits[].synced` | `step_sync()` | 任何其他方法 |
-| `formal_commits[].pushed` | `step_push()` | 任何其他方法 |
-| `formal_commits[].message` | `step_edit_formal_message()` | 直接赋值 |
-| `formal_commits[].number` | `step_edit_formal_number()` | 直接赋值 |
-| `contract.tech_stack` | `ContractManager` | 直接读写 contract.yaml |
-| `contract.decided_features` | `ContractManager` | 直接读写 contract.yaml |
-| `state.sqlite3/lessons` + CAS | `LessonManager` | 直接打开 SQLite/写旧 JSONL |
-| `.gitgo/memories/` | `snapshot_tool_memories()` | 直接读写文件 |
-| `state.sqlite3/history_events` + CAS | `HistoryManager.add_operation/add_entry` | 直接打开 SQLite/写旧 JSON |
+## 5. 工具与权限
 
-违反 authority 的代码是 bug——即使测试通过，它造成了"同一个 state 被两个不协调的写入者修改"的语义风险。
+所有内置工具、组合工具和自定义工具都经过同一条工具管线：
 
----
-
-## 3. Derivation Rules
-
-Semantic 层的所有字段从 operational + governance 层数据计算，**不能引入新的持久化位置**。
-
-| Semantic 字段 | 计算来源 | 持久化 |
-|--------------|---------|--------|
-| `workspace_entropy` | `entries_changed`（operational） | 否 |
-| `suggested_next_action` | `trial_pending + entries_changed + formal_synced + formal_pushed` | 否 |
-| `action_queue` | 优先级链: triage > formalize > push | 否 |
-| `blocked_reason` | `formal_synced vs formal_pushed + entries_changed` | 否 |
-| `trial_requires_review` | `trial_pending > 0` | 否 |
-| `safe_to_formalize` | `entries_changed > 0 and stage == IDLE` | 否 |
-| `safe_to_publish` | `formal_synced > 0 and formal_synced > formal_pushed` | 否 |
-| governance/quality | `HistoryManager suggest_* entries` | 否 |
-| governance/patterns | `HistoryManager formalize entries` | 否 |
-| governance/graph | `HistoryManager formalize/triage_accept/push entries` | 否 |
-
----
-
-## 4. Observer Constraint
-
-当前没有 observer 链。`step_*()` 使用硬编码调用序列。在显式解决 observer 循环检测之前，**不引入 event-driven dispatch**。硬编码调用序列是天然的循环安全阀。
-
----
-
-## 5. Layer Mutation Rules
-
-```
-mutability:
-  operational layer:  mutable, transient, session-scoped
-  governance layer:   append-only, cross-session
-  semantic layer:     pure derivation, never persisted
-
-具体规则:
-  - operational 层的任何字段可以随 step_*() 执行而改变
-  - governance 层的任何字段只能通过 HistoryManager 追加（append-only）
-  - semantic 层的任何字段不能写入 session.json 或任何持久化文件
-  - 如果在 session.json 中发现 semantic 字段，这是 bug
+```text
+schema → capability/policy → approval → isolation → execution → receipt → projection
 ```
 
----
+- 模型不能自行扩大权限；
+- 用户的明确授权在其作用域和有效期内优先于普通治理软门；
+- 授权不能伪造工具版本、参数摘要、执行收据或回滚事实；
+- 低风险、已由用户目标明确表达的操作不应制造重复审批；
+- 等待审批是可恢复状态，不应丢失尚未执行的工具调用。
 
-## 6. Gate Extension Policy
+## 6. 完成与恢复
 
-```
-Gate A (Semantic Legitimacy) 可扩展规则:
-  - 扩展方式: 新增 Policy 模块
-  - Policy 必须由 Runtime Kernel 在 transition 前调用
-  - 不允许: Policy 直接调用 step_*() 或修改 formal_commits
+自然语言声称“已完成”不是完成证据。完成判断应读取任务合同、工具收据、测试证据、Subprocess outcome、未决问题和用户决策。
 
-Gate B (Publication Legitimacy) 可扩展规则:
-  - 扩展方式: 同上
-  - 不允许: Policy 在 Gate B 阶段修改代码内容（只能检查/清洗）
-```
+超时、断线、关闭终端或 Daemon 重启不得被伪装成完成。恢复时：
 
----
+- 可以重建已持久化的任务树、消息、上下文 epoch 和安全检查点；
+- 不自动重放无法证明副作用状态的操作；
+- 取消 Main Process 时取消其仍活动的任务树；
+- 关闭终端应触发有界关闭，随后由 Host 做强制终止兜底。
 
-## 7. Semantic Reversibility
+## 7. 上下文与缓存
 
-```
-semantic 层的字段不具备可逆性:
-  - suggested_next_action 是瞬时推导，不保证跨 session 一致
-  - workspace_entropy 随 entries 变化，历史值不保留
-  - 如果需要历史 semantic 状态，从 governance event log 重新推导
+Provider 可见内容按稳定性组装：
 
-canonical state 具备可逆性:
-  - 进入 Canonical Release Space 的 formal commit 不可删除（只能 dissolve 回 workspace）
-  - dissolve 本身产生 governance_dissolved event，不消除历史
-```
-
----
-
-## 8. Event Taxonomy
-
-所有 event 归类为 6 种之一：
-
-| 类型 | 含义 | 示例 |
-|------|------|------|
-| `operational` | workflow 生命周期 | scan, formalize, sync, push, triage_*, delete_formal, dissolve_formal |
-| `governance` | 长期治理变化 | governance_synced, governance_pushed, governance_dissolved, governance_edited, governance_renumbered |
-| `integrity` | 连续性警告 | integrity_warning |
-| `publication` | 发布合法性 | governance_drift, governance_contract_updated |
-| `knowledge` | lesson/contract 演化 | governance_lesson, governance_memory_snapshot |
-| `discipline` | 约束违反 | discipline_violation |
-
-新增 event 必须:
-1. 在本文档的 taxonomy 中声明类型
-2. detail 字段包含状态变更内容（governance）或操作范围（operational）
-3. 不能同时属于两个类型
-
----
-
-## 三层状态机
-
-### Layer 1: Operational State Machine
-
-代码位置: `sync_session.py`, `SessionStage` enum
-
-```
-IDLE → SCANNING → SELECTING → COMMITTING → SYNCING → PUSHING → IDLE
-          ↘ TRIAL_CHECKING → TRIAL_REVIEWING → INCOMING_CONFIRMING
+```text
+稳定 ROM / 能力合同
+→ Task Contract
+→ append-only 会话事件
+→ 本轮动态 envelope
+→ 当前输入
 ```
 
-18 个 `step_*()` 方法驱动转移。禁止直接修改 `self.stage`。
+动态信息只在相关时进入模型上下文；Host-only 元数据留在运行轨迹。大对象进入 CAS，通过 locator 按需物化。相同引用由 session memo 去重；压缩创建新的 `context_epoch`，但不能改写历史事实。
 
-### Layer 2: Semantic State Machine
+## 8. 持久化与写入预算
 
-代码中不存在显式 enum。由 Gate A / Gate B 的检查逻辑隐式定义。
+- `state.sqlite3` 保存权威关系；
+- `observability.sqlite3` 保存有界事件、Trace 和聚合指标；
+- CAS 保存 Prompt、Reasoning、工具结果等较大对象；
+- token delta、动画帧、成功心跳和原始网络帧不得逐条同步落盘；
+- migration 只追加并校验 checksum；
+- 数据库大小、WAL、checkpoint、保留期和物理写入速率必须可观测；
+- 损坏或版本不安全时失败关闭，并提供备份、恢复或迁移路径。
 
-```
-Workspace State → Gate A → Validated State → Gate B → Canonical State
-```
+## 9. 事件与投影
 
-- Gate A: `step_sync()` 中 `sync_to_backup()` 调用前。Policy Engine 全部 policy 检查。
-- Gate B: `step_push()` 中 `push_to_backup()` 调用前。Authorship / Privacy / Security 检查。
+任务、工具、权限、问题、Diff、用量和治理事件首先进入统一的有序时间线，再投影到 Dashboard、Stats 和 Runtime。最终回答是时间线中的后续独立节点，不能覆盖工作轨迹。
 
-### Layer 3: Governance State Machine
+Verbose 只改变折叠内容的详细程度：关闭时仍保留有意义的阶段摘要、工具名、简要结果、决策和 Diff；开启时展示更完整的 Reasoning 与工具细节。
 
-分布在多个 subsystem 中，无统一 enum。
+## 10. 隐私与发布
 
-```
-Formal Commit: created → synced → pushed
-                       ↘ dissolved
+密钥、SQLite/WAL、Trace、项目状态和本地技术报告不得进入源码发布。Provider 凭据与元数据分离保存；Windows 凭据使用当前用户 DPAPI。所有 commit/push/publish 路径必须复用统一的内容级隐私策略，不能只依赖文件名或 `.gitignore`。
 
-Trial:         incoming → pending → accepted / promoted / discarded
-
-Contract:      feature introduced → confirmed (N times)
-```
+详细边界见 [SECURITY_AND_PRIVACY.md](SECURITY_AND_PRIVACY.md)。

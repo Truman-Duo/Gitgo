@@ -11,9 +11,9 @@
 - 通用工具、文档读取、网络检索、spill、动态工具注册与权限入口。
 - Main Process / Subprocess 路由、任务 DAG、协调事件、完成证据与恢复流程。
 - 上下文装配、手动/自动压缩和运行时投影。
-- 知识、依赖、治理、隐私扫描与发布前出站策略。
+- 知识收割/导出、依赖、治理、隐私扫描与发布前出站策略。
 - Bun/Ink Dashboard、时间线、Markdown、Diff、输入路由、配置、运行时和项目视图。
-- Windows staging 构建与打包后 Native Host 协议 smoke test。
+- Windows staging 构建、打包后 Native Host 协议 smoke test 与 GitHub prerelease。
 
 “自动验证”表示已有测试或构建检查，不等同于所有真实 Provider、终端尺寸和项目组合都已覆盖。
 
@@ -22,7 +22,9 @@
 - 技术报告、迭代过程、完整交接记录；
 - 真实 API 验收记录、Trace 和运行时数据库；
 - 项目状态、知识实例和本地 Agent 指令；
-- Windows staging/installer 二进制与旧版 Qt 产物。
+- 未发布的本地 staging/installer、运行数据库与旧版 Qt 产物。
+
+公开 prerelease 的完整 staging ZIP 作为 GitHub Release asset 发布，不进入 Git history。知识的跨项目复用与基于知识的持续治理尚未完成正式验收，不能由“收割/导出可用”推导为已经稳定。
 
 ## 后续版本
 
