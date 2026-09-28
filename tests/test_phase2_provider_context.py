@@ -345,6 +345,18 @@ def test_transport_normalizes_windows_read_error_after_cancel(monkeypatch):
         ))
 
 
+def test_transport_normalizes_legacy_unpaired_surrogates_before_utf8():
+    request = HttpProviderTransport()._request(
+        "https://example.test/responses",
+        {"input": "中文\udc80tail"},
+        {},
+    )
+    assert request.data is not None
+    decoded = request.data.decode("utf-8")
+    assert "中文" in decoded
+    assert "\\\\udc80tail" in decoded
+
+
 def test_transport_heartbeats_do_not_mask_semantic_idle_timeout(monkeypatch):
     class HeartbeatResponse:
         def __enter__(self):

@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from backend.core.unicode_safety import normalize_unicode_text
+
 
 _SECRET_KEYS = re.compile(
     r"(?i)^(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|"
@@ -41,10 +43,10 @@ def redact_for_persistence(value: Any, *, key: str = "") -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, str):
-        return _API_TOKEN.sub(
+        return normalize_unicode_text(_API_TOKEN.sub(
             "[REDACTED_API_KEY]",
             _BEARER.sub("Bearer [REDACTED]", value),
-        )
+        ))
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return f"[UNSUPPORTED_TYPE:{type(value).__name__}]"

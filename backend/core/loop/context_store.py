@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
+from backend.core.unicode_safety import normalize_unicode_text, normalize_unicode_value
 
 
 _REF_RE = re.compile(r"^context:([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.\/-]+)(?:@(.+))?$")
@@ -83,14 +84,15 @@ class ContextObjectStore:
         metadata: dict | None = None,
     ) -> dict:
         name = self._validate_name(logical_name)
-        object_metadata = dict(metadata or {})
+        object_metadata = normalize_unicode_value(dict(metadata or {}))
         if media_type == "application/json":
             content = json.dumps(
-                value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                normalize_unicode_value(value),
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 default=_json_default,
             )
         else:
-            content = str(value)
+            content = normalize_unicode_text(str(value))
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         self.blobs.mkdir(parents=True, exist_ok=True)
         blob_path = self.blobs / f"{digest}.json"

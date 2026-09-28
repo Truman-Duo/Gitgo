@@ -265,8 +265,9 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
         env["GITGO_TEST_SEED"] = str(seed)
         started = time.monotonic()
         try:
+            from backend.core.child_process import python_command
             completed = subprocess.run(
-                [sys.executable, "-m", "pytest", target, "-q"],
+                python_command(["-m", "pytest", target, "-q"]),
                 cwd=str(workspace), env=env, capture_output=True, text=True,
                 timeout=timeout, shell=False,
             )

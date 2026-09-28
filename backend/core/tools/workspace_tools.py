@@ -535,16 +535,17 @@ def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
             continue
         break
 
+    from backend.core.child_process import python_command
+
     if not remaining:
-        return [sys.executable, *interpreter_flags]
+        return python_command(interpreter_flags)
 
     bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r});"
     mode = remaining[0]
     if mode == "-c" and len(remaining) >= 2:
-        return [
-            sys.executable, *interpreter_flags, "-c",
-            bootstrap + remaining[1], *remaining[2:],
-        ]
+        return python_command([
+            *interpreter_flags, "-c", bootstrap + remaining[1], *remaining[2:],
+        ])
     if mode == "-m" and len(remaining) >= 2:
         module = remaining[1]
         module_args = remaining[2:]
@@ -554,7 +555,7 @@ def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
             + f"sys.argv={[module, *module_args]!r};"
             + f"runpy.run_module({module!r},run_name='__main__',alter_sys=True)"
         )
-        return [sys.executable, *interpreter_flags, "-c", code]
+        return python_command([*interpreter_flags, "-c", code])
     if not mode.startswith("-"):
         script = str((cwd / mode).resolve(strict=False)) if not Path(mode).is_absolute() else mode
         script_args = remaining[1:]
@@ -564,8 +565,8 @@ def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
             + f"sys.argv={[script, *script_args]!r};"
             + f"runpy.run_path({script!r},run_name='__main__')"
         )
-        return [sys.executable, *interpreter_flags, "-c", code]
-    return [sys.executable, *interpreter_flags, *remaining]
+        return python_command([*interpreter_flags, "-c", code])
+    return python_command([*interpreter_flags, *remaining])
 
 
 def shell_script(args: dict) -> dict:

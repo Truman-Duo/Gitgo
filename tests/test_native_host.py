@@ -123,6 +123,43 @@ def test_native_host_reports_daemon_start_failure_with_stable_code():
     assert exc.value.details["diagnostic_tail"] == "backend detail"
 
 
+def test_daemon_cold_start_does_not_block_status_projection():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowDaemon:
+        def __init__(self, _project):
+            self.running = False
+
+        def is_running(self):
+            return self.running
+
+        def add_event_listener(self, _listener):
+            pass
+
+        def start(self, timeout=30):
+            entered.set()
+            assert release.wait(timeout=2)
+            self.running = True
+
+    host = NativeHost(stdout=io.StringIO(), daemon_factory=SlowDaemon)
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(host._get_daemon("demo", start=True)),
+    )
+    worker.start()
+    assert entered.wait(timeout=1)
+
+    started = time.perf_counter()
+    assert host._get_daemon("demo", start=False) is None
+    assert time.perf_counter() - started < 0.2
+
+    release.set()
+    worker.join(timeout=2)
+    assert len(result) == 1
+    assert result[0].is_running()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object contract")
 def test_windows_kill_on_close_job_terminates_attached_child():
     """Model a terminal hard-close: the owner disappears without RPC cleanup."""

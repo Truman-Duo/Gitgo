@@ -11,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Generator
 
+from backend.core.unicode_safety import normalize_unicode_value
+
 
 @dataclass
 class ProviderHttpError(RuntimeError):
@@ -124,7 +126,9 @@ class HttpProviderTransport:
     def _request(url: str, body: dict, headers: dict) -> urllib.request.Request:
         return urllib.request.Request(
             url,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps(
+                normalize_unicode_value(body), ensure_ascii=False,
+            ).encode("utf-8"),
             headers={"Content-Type": "application/json", **headers},
             method="POST",
         )

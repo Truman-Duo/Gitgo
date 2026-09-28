@@ -62,3 +62,23 @@ def test_incremental_compare_does_not_walk_the_release_tree(tmp_path_factory: Pa
     )
 
     assert entries[0].status == "modified"
+
+
+def test_file_hash_cache_round_trips_utf8_on_non_utf8_system_locale(
+    tmp_path_factory, monkeypatch,
+):
+    cache_dir = tmp_path_factory / "utf8-cache"
+    cache = FileHashCache(cache_dir)
+    cache.store("资料/说明.md", 1.0, 3, "abc")
+    cache.flush()
+
+    original = Path.read_text
+
+    def require_explicit_encoding(path, *args, **kwargs):
+        if path.name == "file_hashes.json":
+            assert kwargs.get("encoding") == "utf-8"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", require_explicit_encoding)
+    restored = FileHashCache(cache_dir)
+    assert restored.lookup("资料/说明.md", 1.0, 3) == "abc"

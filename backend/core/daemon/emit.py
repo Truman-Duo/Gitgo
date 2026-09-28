@@ -5,11 +5,10 @@ Extracted from daemon/__init__.py (pure structural refactor).
 
 from __future__ import annotations
 
-import json
 import sys
 import time
 
-from backend.core.protocol_io import write_utf8_line
+from backend.core.protocol_io import dump_protocol_json, write_utf8_line
 
 
 def _emit(event: dict) -> None:
@@ -33,7 +32,7 @@ def _emit_v2(ev: dict, priority: str = "normal") -> None:
     global _last_flush_time
     if priority == "immediate":
         _flush_emit_buffer()
-        write_utf8_line(sys.stdout, json.dumps(ev, ensure_ascii=False))
+        write_utf8_line(sys.stdout, dump_protocol_json(ev))
         return
     _emit_buffer.append(ev)
     now_ms = int(time.time() * 1000)
@@ -49,6 +48,6 @@ def _flush_emit_buffer() -> None:
         return
     write_utf8_line(
         sys.stdout,
-        "\n".join(json.dumps(e, ensure_ascii=False) for e in _emit_buffer),
+        "\n".join(dump_protocol_json(e) for e in _emit_buffer),
     )
     _emit_buffer = []

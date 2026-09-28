@@ -188,6 +188,22 @@ def test_seeded_context_refs_publish_their_producer_dependencies(tmp_path_factor
     }
 
 
+def test_seeded_context_normalizes_legacy_unpaired_surrogates(tmp_path_factory):
+    from backend.core.loop.context_store import seed_context_objects
+
+    context = seed_context_objects(str(tmp_path_factory), {
+        "task_contract": {"goal": "中文\udc80tail"},
+        "lessons": [], "signals": [],
+    })
+
+    resolved = ContextObjectStore(tmp_path_factory).resolve(
+        context["context_refs"]["task_contract"]["latest"],
+    )
+    assert "中文" in resolved.content
+    assert "\\udc80tail" in resolved.content
+    assert resolved.content.encode("utf-8")
+
+
 def test_live_publication_replaces_project_lessons_object(tmp_path_factory):
     process = AgentProcess(
         process_id="p", role="worker", ring_level=RingLevel.RING_3,

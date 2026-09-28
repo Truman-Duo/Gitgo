@@ -21,6 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.core.child_process import owned_child_cwd, tool_runner_command
+from backend.core.protocol_io import dump_protocol_json
+
 
 @dataclass
 class SubprocessResult:
@@ -68,13 +71,14 @@ class ProcessToolRunner:
                 "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1",
             })
+            source_root = Path(__file__).resolve().parents[3]
             proc = subprocess.Popen(
-                [sys.executable, "-m", "backend.core.tools.runner"],
+                tool_runner_command(),
                 # DaemonClient starts ``python -m gitgo`` from the package's
                 # parent directory.  Relying on inherited cwd therefore makes
                 # the top-level ``backend`` module disappear only in real
                 # daemon runs.  Anchor the isolated runner at the package root.
-                cwd=str(Path(__file__).resolve().parents[3]),
+                cwd=str(owned_child_cwd(source_root)),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -88,7 +92,7 @@ class ProcessToolRunner:
             proc._gitgo_job_handle = attach_kill_job(proc)
 
             try:
-                payload = json.dumps(input_data, ensure_ascii=False)
+                payload = dump_protocol_json(input_data)
                 stdout_str = ""
                 stderr_str = ""
                 first = True
