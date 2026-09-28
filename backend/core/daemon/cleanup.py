@@ -12,8 +12,8 @@ def _cleanup_resources(workspace_path: str) -> None:
     """清理 daemon 关闭时的临时资源。
 
     - 清理旧快照备份（.gitgo/snapshots/）
-    - 清理已完成会话的持久化文件（.gitgo/sessions/ 中无对应运行进程的）
-    - 不删除正在运行的进程的会话文件
+    - 清理临时文件（.gitgo/tmp/）
+    - 会话权威状态由仓库外 SQLite/CAS 管理，不在这里按文件清除
     """
     ws = Path(workspace_path)
 

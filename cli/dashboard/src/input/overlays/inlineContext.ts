@@ -7,5 +7,7 @@ export function resolveInlineContextKey(input: string, key: any): OverlayAction[
   if (matchChord("escape", input, key)) return [{ type: "dismiss" }];
   if (matchChord("left", input, key)) return [{ type: "move", delta: -1 }];
   if (matchChord("right", input, key)) return [{ type: "move", delta: 1 }];
+  if (matchChord("pageUp", input, key)) return [{ type: "page", delta: -1 }];
+  if (matchChord("pageDown", input, key)) return [{ type: "page", delta: 1 }];
   return [];
 }

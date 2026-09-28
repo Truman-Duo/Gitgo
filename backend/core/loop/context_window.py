@@ -29,7 +29,7 @@ class ContextWindow:
 
     def __init__(self, model_token_limit: int = 128000):
         self._limit = model_token_limit
-        self._flags: set[str] = set()
+        self.last_compaction_error = ""
 
     # ── Public API ──────────────────────────────────────────
 
@@ -51,8 +51,9 @@ class ContextWindow:
             return {"action": "prune", "tokens": tokens,
                     "usage_ratio": round(ratio, 3), "pruned_count": 0}
 
-        if ratio >= self.SOFT_RATIO and self.SOFT_NOTICED not in self._flags:
-            self._flags.add(self.SOFT_NOTICED)
+        flags = getattr(session, "context_flags", set())
+        if ratio >= self.SOFT_RATIO and self.SOFT_NOTICED not in flags:
+            flags.add(self.SOFT_NOTICED)
             return {"action": "soft_warn", "tokens": tokens,
                     "usage_ratio": round(ratio, 3), "pruned_count": 0}
 
@@ -104,7 +105,7 @@ class ContextWindow:
                 continue
 
             # 按 harness 优先级决定是否保留
-            priority = _retention_priority(content, harness)
+            priority = _retention_priority(msg, harness)
             if priority >= 0.7:
                 kept.append(msg)
                 continue
@@ -124,14 +125,18 @@ class ContextWindow:
 
     def compact(self, session: "AgentSession",
                 llm_provider, harness_data: dict | None = None,
-                retention_suggestions: list[str] | None = None) -> bool:
+                retention_suggestions: list[str] | None = None,
+                task_budget=None, cancel_event=None,
+                budget_process_id: str = "") -> bool:
         """LLM 摘要压缩（付费操作，仅 >90% 时触发）。
 
         将中间消息替换为结构化摘要。返回是否成功。
         """
         # v1: 仅在 >90% 时调用，用 LLM 生成摘要替换中间轮次
+        self.last_compaction_error = ""
         messages = session.messages
         if len(messages) <= 6:
+            self.last_compaction_error = "not_enough_foldable_history"
             return False
 
         harness = harness_data or {}
@@ -155,6 +160,7 @@ class ContextWindow:
 
         foldable = messages[1:-3]  # 保留 system + 最近 3 条
         if not foldable:
+            self.last_compaction_error = "not_enough_foldable_history"
             return False
 
         text_parts = []
@@ -174,10 +180,46 @@ class ContextWindow:
         )
 
         try:
+            if task_budget is not None:
+                task_budget.begin_provider_call(budget_process_id)
             summary = llm_provider.chat(
                 [{"role": "user", "content": compact_prompt}],
-                max_tokens=2048, timeout=60,
+                max_tokens=min(2048, int(getattr(
+                    llm_provider, "max_output_tokens", 2048,
+                ))),
+                timeout=60, preserve_provider_state=True,
+                cancel_event=cancel_event,
+                max_retries=0,
             )
+            if isinstance(summary, dict):
+                provider_state = {
+                    key: summary[key] for key in (
+                        "response_id", "reasoning_content", "reasoning_details",
+                        "provider_artifacts",
+                    ) if summary.get(key) is not None
+                }
+                if provider_state:
+                    session.host_ledger.append({
+                        "event": "context_compaction_provider_state",
+                        "context_epoch": session.context_epoch,
+                        "provider_state": provider_state,
+                    })
+                if summary.get("usage"):
+                    if task_budget is not None:
+                        task_budget.record_provider_usage(summary["usage"])
+                    session.record_provider_usage(
+                        summary["usage"],
+                        protocol=str(getattr(
+                            getattr(llm_provider, "protocol", ""), "value",
+                            getattr(llm_provider, "protocol", ""),
+                        )),
+                    )
+                summary = str(summary.get("content", ""))
+            if not isinstance(summary, str) or not summary.strip():
+                self.last_compaction_error = "empty_compaction_summary"
+                return False
+            if task_budget is not None:
+                task_budget.consume_output(str(summary), budget_process_id)
 
             # 保留不可压缩前缀 + 摘要 + 最近 3 条
             prefix = ""
@@ -186,18 +228,63 @@ class ContextWindow:
                     f"- {r}" for r in rejection_instructions
                 ) + "\n\n"
 
-            new_messages = [messages[0]]  # system prompt
-            new_messages.append({
-                "role": "user",
-                "content": f"{prefix}[上下文摘要]\n{summary}",
-            })
-            new_messages.extend(messages[-3:])  # 最近 3 条
-
-            session.messages = new_messages
-            self._flags.discard(self.SOFT_NOTICED)  # 重置软通知
+            session.begin_context_epoch(
+                summary=f"{prefix}[上下文摘要]\n{summary}",
+                retained_messages=list(messages[-3:]),
+                reason="force_compact_watermark",
+            )
             return True
-        except Exception:
+        except Exception as exc:
+            from backend.core.loop.budget import TaskBudgetExceeded
+            from backend.core.loop.llm import StreamCancelledError
+            if isinstance(exc, (TaskBudgetExceeded, StreamCancelledError)):
+                raise
+            self.last_compaction_error = f"{type(exc).__name__}: {exc}"[:500]
             return False
+
+    def force_compact(self, session: "AgentSession", *, reason: str) -> bool:
+        """Start a bounded epoch after explicit user approval.
+
+        This path deliberately does not call a model. The full prior epoch stays
+        in the local audit archive, while provider-visible history keeps the
+        immutable ROM/task prefix plus a small host-authored checkpoint. It is
+        destructive only from the provider context's point of view.
+        """
+        messages = list(session.messages)
+        if not messages:
+            self.last_compaction_error = "empty_session"
+            return False
+        prefix = [item for item in messages if item.get("message_type") in {
+            "compiled_system_prompt", "compiled_task_contract",
+        }][:2]
+        prefix_chars = sum(len(str(item.get("content") or "")) for item in prefix)
+        checkpoint_chars = min(16000, max(0, int(self._limit * 4 * 0.5) - prefix_chars - 1000))
+        if checkpoint_chars < 256:
+            self.last_compaction_error = "immutable_prefix_exceeds_context_budget"
+            return False
+        latest_user = next((
+            str(item.get("content", "")) for item in reversed(messages)
+            if item.get("role") == "user" and item.get("message_type", "") in {"", "conversation"}
+        ), "")
+        latest_assistant = next((
+            str(item.get("content", "")) for item in reversed(messages)
+            if item.get("role") == "assistant" and item.get("content")
+        ), "")
+        summary = (
+            "[HOST FORCED COMPACTION — USER APPROVED]\n"
+            f"Reason: {reason}\n"
+            f"Removed provider-visible messages: {len(messages)}. "
+            "The complete prior epoch remains in the local audit archive.\n"
+            f"Latest user direction: {latest_user[:checkpoint_chars // 2]}\n"
+            f"Latest assistant state: {latest_assistant[:checkpoint_chars // 2]}"
+        )
+        session.begin_context_epoch(
+            summary=summary,
+            retained_messages=[],
+            reason="user_approved_force_compact",
+        )
+        self.last_compaction_error = ""
+        return True
 
     def check_budget_continuity(self, session: "AgentSession",
                                 window_size: int = 5) -> dict:
@@ -230,11 +317,10 @@ class ContextWindow:
         cv = std / avg if avg > 0 else 0
 
         # Check for tool calls or completion in the window
+        from backend.core.loop.loop_guard import _is_completion
         has_action = any(
-            "<tool_call>" in m.get("content", "") or
-            "TASK_COMPLETE" in m.get("content", "") or
-            "分析完成" in m.get("content", "") or
-            "任务完成" in m.get("content", "")
+            bool((session.provider_state.get(m.get("provider_state_id"), {}) or {}).get("tool_calls"))
+            or _is_completion(m.get("content", ""))
             for m in recent
         )
 
@@ -248,41 +334,48 @@ class ContextWindow:
         }
 
 
-def _retention_priority(content: str, harness: dict) -> float:
+def _retention_priority(message: dict | str, harness: dict) -> float:
     """计算消息的保留优先级（0-1）。
 
     兼容两种 harness 格式:
     - 新格式: {"signals": [GovernanceSignal, ...], "brief": "..."}
     - 旧格式: {"lesson_triggers": [...], "contract_drift": [...], ...}
     """
-    if not harness or not content:
+    msg = message if isinstance(message, dict) else {"content": str(message or "")}
+    if not harness or not msg.get("content"):
         return 0.3
 
     # 新格式：从 GovernanceSignal 列表计算优先级
     signals = harness.get("signals")
     if signals is not None:
         from backend.core.loop.harness.retention import retention_priority_from_signals
-        return retention_priority_from_signals(content, signals)
+        return retention_priority_from_signals(msg, signals)
 
     # 旧格式兼容
     score = 0.3
 
-    for instr in harness.get("rejection_instructions", []):
-        if instr[:30] in content:
-            return 1.0
+    signal_ids = {str(item) for item in (msg.get("governance_signal_ids", []) or [])}
+    referenced_files = {str(item) for item in (msg.get("referenced_files", []) or [])}
+    semantic_tags = {str(item) for item in (msg.get("semantic_tags", []) or [])}
+
+    rejection_ids = {
+        str(item) for item in (harness.get("rejection_signal_ids", []) or [])
+    }
+    if signal_ids.intersection(rejection_ids):
+        return 1.0
 
     for lt in harness.get("lesson_triggers", []):
         fname = lt.get("file", "")
-        if fname and fname in content:
+        if fname and fname in referenced_files:
             score = max(score, 0.8)
 
     for d in harness.get("contract_drift", []):
         fname = d.get("file", "")
-        if fname and fname in content:
+        if fname and fname in referenced_files:
             score = max(score, 0.7)
 
     for cf in harness.get("critical_features", []):
-        if cf in content:
+        if cf in semantic_tags:
             score = max(score, 0.6)
 
     return score
@@ -307,31 +400,19 @@ class ContextConstants:
 # ── manage() 统一入口 ─────────────────────────────────────
 
 def manage_context(session, harness_data, llm_provider,
-                   dep_graph=None, task_files=None):
-    """压缩优先级链：免费算法 → 最后手段 LLM compact。
+                   dep_graph=None, task_files=None,
+                   model_token_limit: int | None = None):
+    """Decide whether to start a low-frequency context GC epoch.
 
-    替代裸调 check()→prune()→compact()。
+    Phase 2 stops mutating sent history at intermediate watermarks.  Routing,
+    addressable context and memo receipts keep the active log small; only the
+    force watermark creates an auditable new epoch.
     """
     tokens = session.estimate_tokens()
-    budget = 128000  # 默认，可从 contract.yaml 取
+    budget = int(model_token_limit or getattr(
+        session, "model_context_limit", 128000,
+    ))
 
-    # 50%: 隐用户输入回收
-    if tokens > budget * 0.5:
-        _recycle_governance_nudges(session)
-
-    # 70%: Tool Result Snip
-    if tokens > budget * 0.7:
-        _snip_old_tool_results(session)
-
-    # 80%: 依赖图过滤（需 dep_graph + task_files）
-    if tokens > budget * 0.8 and dep_graph and task_files:
-        _dep_graph_filter(session, dep_graph, task_files)
-
-    # 85%: 知识替代
-    if tokens > budget * 0.85:
-        _replace_with_lesson_transcripts(session, harness_data)
-
-    # 90%: 最后手段 — 返回 True 表示需要 compact
     if tokens > budget * 0.9:
         return True
 
@@ -492,13 +573,18 @@ def _replace_with_lesson_transcripts(session, harness_data) -> int:
     replaced = 0
 
     for msg in session.messages:
-        content = msg.get("content", "")
+        linked_lesson_ids = {
+            str(item) for item in (msg.get("lesson_ids", []) or []) if str(item)
+        }
+        if not linked_lesson_ids:
+            continue
         for lesson in lessons:
-            trigger = getattr(lesson, "trigger", "")
-            if trigger and trigger in content:
+            lesson_id = str(getattr(lesson, "id", ""))
+            if lesson_id and lesson_id in linked_lesson_ids:
                 # 替代为紧凑格式
+                trigger = getattr(lesson, "trigger", "")
                 msg["content"] = (
-                    f"[lesson {getattr(lesson, 'id', '?')}] "
+                    f"[lesson {lesson_id}] "
                     f"trigger={trigger} "
                     f"rule={getattr(lesson, 'rule', '')[:80]}"
                 )

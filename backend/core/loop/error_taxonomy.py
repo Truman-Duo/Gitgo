@@ -191,6 +191,16 @@ def classify_tool_error(exception: Exception,
             message=f"Tool '{tool_name}' timed out" if tool_name else "Tool timed out",
             original=exception,
         )
+    if isinstance(exception, PermissionError):
+        return ClassifiedError(
+            source=ErrorSource.SYSTEM,
+            severity=ErrorSeverity.WARN,
+            retryability=Retryability.LIMITED,
+            nature=ErrorNature.BUSINESS,
+            code="RESOURCE_SCOPE_APPROVAL_REQUIRED",
+            message=str(exception)[:200],
+            original=exception,
+        )
     return ClassifiedError(
         source=ErrorSource.TOOL,
         severity=ErrorSeverity.ERROR,

@@ -12,6 +12,9 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+import json
+import uuid
+from dataclasses import asdict, is_dataclass
 
 from backend.core.loop.signals import (
     GovernanceSignal,
@@ -81,7 +84,15 @@ class SignalNormalizer:
         if facts:
             signals.extend(self._from_facts(facts))
 
-        return self._sort_by_priority(signals)
+        unique = {}
+        for signal in signals:
+            if signal.source != "rejection":
+                identity = signal.to_dict()
+                identity.pop("signal_id", None)
+                signal.signal_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                    "gitgo:signal:" + json.dumps(identity, sort_keys=True, ensure_ascii=False, default=str)))
+            unique[signal.signal_id] = signal
+        return self._sort_by_priority(list(unique.values()))
 
     # ── 来源转换 ──────────────────────────────────────────────
 
@@ -114,12 +125,19 @@ class SignalNormalizer:
                 # 自定义 PolicyCheck → 通配注册为 SUGGEST 级别
                 for item in items:
                     item_dict = item if isinstance(item, dict) else {"data": str(item)}
-                    signals.append(GovernanceSignal.from_fact(
-                        type("_Fact", (), {
-                            "category": key,
-                            "data": item_dict,
-                            "severity": "low",
-                        })
+                    rule = str(
+                        item_dict.get("rule")
+                        or item_dict.get("message")
+                        or item_dict.get("data")
+                        or key
+                    )
+                    signals.append(GovernanceSignal(
+                        source=f"policy:{key}",
+                        severity=SignalSeverity.LOW,
+                        category=SignalCategory.SUGGEST,
+                        rule=rule,
+                        check_id=key,
+                        metadata={"raw": item_dict},
                     ))
 
         return signals
@@ -128,49 +146,53 @@ class SignalNormalizer:
         """Lesson 对象 → GovernanceSignal 列表（仅当 lesson 有工具约束时）。"""
         signals: list[GovernanceSignal] = []
         for lesson in lessons:
+            trust_tier = str(getattr(lesson, "_gitgo_trust_tier", "verified"))
+            applicability = dict(getattr(lesson, "_gitgo_applicability", {}) or {})
             dangerous = getattr(lesson, 'dangerous_tools', None) or []
             prerequisite = getattr(lesson, 'prerequisite_tools', None) or []
             required = getattr(lesson, 'required_tools', None) or []
             if not dangerous and not prerequisite and not required:
                 continue  # 无工具约束的 lesson 不产生信号
 
-            severity_map = {
-                "critical": SignalSeverity.CRITICAL,
-                "high": SignalSeverity.HIGH,
-                "medium": SignalSeverity.MEDIUM,
-                "low": SignalSeverity.LOW,
-            }
+            # Catalog lessons have not matched a registered checker in the
+            # current workspace state.  They are retrieval candidates only,
+            # regardless of whether a human verified the lesson itself.  Hard
+            # tool constraints are emitted solely by LessonTriggerCheck after
+            # an authoritative structured check matches.
             signals.append(GovernanceSignal(
                 source="lesson_trigger",
-                severity=severity_map.get(
-                    getattr(lesson, 'severity', 'medium'), SignalSeverity.MEDIUM
-                ),
-                category=SignalCategory.BLOCK if dangerous else SignalCategory.WARN,
-                target_tools=list(dangerous),
-                prerequisite_tools=list(prerequisite),
-                required_tools=list(required),
+                severity=SignalSeverity.MEDIUM,
+                category=SignalCategory.SUGGEST,
+                target_tools=[],
+                prerequisite_tools=[],
+                required_tools=[],
                 rule=getattr(lesson, 'rule', ''),
-                suggestion=f"Lesson '{getattr(lesson, 'id', '')}': "
-                           f"执行前需先调用 {', '.join(prerequisite)}"
-                    if prerequisite else "",
+                suggestion=f"Lesson '{getattr(lesson, 'id', '')}' is available for retrieval.",
                 check_id=getattr(lesson, 'id', ''),
+                metadata={
+                    "trust_tier": trust_tier,
+                    "source": getattr(lesson, 'source', ''),
+                    "origin": getattr(lesson, 'origin', ''),
+                    "enforcement_authority": False,
+                    "applicability": applicability,
+                },
             ))
         return signals
 
     def _from_rejections(self, rejections: list[dict]) -> list[GovernanceSignal]:
         """Rejection 历史 → GovernanceSignal 列表。"""
-        from backend.core.loop.executor import _extract_rejection_instructions
-
         signals: list[GovernanceSignal] = []
         for r in rejections:
+            if is_dataclass(r):
+                r = asdict(r)
             detail = r.get("detail", {})
-            reason = detail.get("reason", "")
-            instruction = detail.get("instruction", "")
-
-            text = f"{reason}\n{instruction}"
-            instructions = _extract_rejection_instructions(text)
-            for instr in instructions:
-                signals.append(GovernanceSignal.from_rejection(r, instr))
+            if detail.get("resolved") is True or detail.get("state") in {"resolved", "superseded"}:
+                continue
+            instruction = str(detail.get("instruction", "")).strip()
+            if not instruction:
+                instruction = str(detail.get("reason", "")).strip()
+            if instruction:
+                signals.append(GovernanceSignal.from_rejection(r, instruction))
 
         return signals
 

@@ -1,19 +1,21 @@
 // src/components/InlineContext.tsx — v4 blueprint inline-context: tabbed Contract/Lessons/Events
 // Opened via /context command, replaces screen content, Esc to dismiss
 import React, { memo, useState, useEffect } from "react";
-import { Box, Text, useInput } from "@anthropic/ink";
-import type { McpClient } from "../mcp/client.js";
-import { contractShow, lessonList, historyList } from "../mcp/tools.js";
+import { Box, Text } from "@anthropic/ink";
+import { useManagedInput as useInput } from "../input/runtime.js";
+import type { BackendClient } from "../backend/client.js";
+import { contractShow, lessonList, historyList } from "../backend/tools.js";
 import { ContractTab } from "./ContractTab.js";
 import { LessonsTab } from "./LessonsTab.js";
 import { EventsTab } from "./EventsTab.js";
 import type { ToolEvent } from "../hooks/useLoopData.js";
 import { resolveInlineContextKey } from "../input/overlays/inlineContext.js";
-import { colors, usePanelSize } from "../theme/index.js";
+import { usePanelSize } from "../theme/index.js";
+import { HorizontalHeaderStrip } from "./HorizontalHeaderStrip.js";
 
 type Props = {
   project: string;
-  client: McpClient;
+  client: BackendClient;
   cols: number;
   toolEvents: ToolEvent[];
   initialTab?: number;
@@ -34,10 +36,10 @@ export const InlineContext = memo(function InlineContext({
   useEffect(() => {
     if (activeTab === 0 && !contract) {
       contractShow(client, project)
-        .then(setContract).catch(() => {});
+        .then(setContract).catch((error) => setContract({error:String(error)}));
     } else if (activeTab === 1 && !lessons) {
       lessonList(client, project)
-        .then(setLessons).catch(() => {});
+        .then(setLessons).catch((error) => setLessons({error:String(error)}));
     } else if (activeTab === 2 && events.length === 0) {
       historyList(client, project)
         .then((h: any) => setEvents(Array.isArray(h) ? h : h?.entries || [])).catch(() => {});
@@ -59,20 +61,12 @@ export const InlineContext = memo(function InlineContext({
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
       {/* Header */}
-      <Box flexDirection="row" justifyContent="space-between">
-        <Box flexDirection="row" gap={1}>
-          {TABS.map((label, i) => (
-            <Box key={label} marginRight={1}>
-              <Text
-                color={i === activeTab ? colors.named.cyan : undefined}
-                bold={i === activeTab}
-                dimColor={i !== activeTab}
-              >[{label}]</Text>
-            </Box>
-          ))}
-        </Box>
-        <Text dimColor>{project}</Text>
-      </Box>
+      <HorizontalHeaderStrip
+        items={TABS.map(label => ({id: label, label}))}
+        selected={activeTab}
+        width={w}
+      />
+      <Text dimColor>{project}</Text>
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1}>

@@ -1,10 +1,10 @@
 // src/hooks/useLLMConfig.ts
-// Fetch and manage LLM provider configuration via MCP tools.
+// Fetch and manage LLM provider configuration through native application services.
 
 import { useState, useCallback } from "react";
-import type { McpClient } from "../mcp/client.js";
+import type { BackendClient } from "../backend/client.js";
 import { useAsyncPoll } from "./useAsyncPoll.js";
-import { llmStatus, llmSave, llmSwitch, llmDelete } from "../mcp/tools.js";
+import { llmStatus, llmSave, llmSwitch, llmDelete } from "../backend/tools.js";
 import { sortByName } from "../theme/index.js";
 
 export type LLMProvider = {
@@ -12,7 +12,14 @@ export type LLMProvider = {
   name: string;
   base_url: string;
   api_key: string;
+  api_key_present: boolean;
+  api_key_display: string;
   model_id: string;
+  protocol?: "openai_chat" | "openai_responses" | "anthropic_messages" | "auto";
+  capabilities?: Record<string, any>;
+  context_window: number;
+  max_output_tokens: number;
+  limits_source?: "default" | "configured";
   created_at: string;
 };
 
@@ -25,12 +32,10 @@ export type LLMConfigState = {
   error: string | null;
 };
 
-export function useLLMConfig(client: McpClient | null) {
+export function useLLMConfig(client: BackendClient | null) {
   const [providers, setProviders] = useState<LLMProvider[]>([]);
   const [activeProvider, setActiveProvider] = useState("");
-  const [failoverEnabled, setFailoverEnabled] = useState(false);
-  const [failoverOrder, setFailoverOrder] = useState<string[]>([]);
-  const { loading, error, run, setError } = useAsyncPoll(false);
+  const { loading, error, run, setError } = useAsyncPoll(true);
 
   const fetchStatus = useCallback(async () => {
     if (!client) return;
@@ -39,8 +44,6 @@ export function useLLMConfig(client: McpClient | null) {
       if (result?.error) { setError(result.error); return; }
       setProviders(sortByName((result?.providers || []) as LLMProvider[]));
       setActiveProvider(result?.active_provider || "");
-      setFailoverEnabled(result?.failover_enabled || false);
-      setFailoverOrder((result?.failover_order || []) as string[]);
     });
   }, [client, run, setError]);
 
@@ -53,6 +56,10 @@ export function useLLMConfig(client: McpClient | null) {
         base_url: p.base_url,
         api_key: p.api_key,
         model_id: p.model_id,
+        protocol: p.protocol || "openai_chat",
+        context_window: p.context_window || 128000,
+        max_output_tokens: p.max_output_tokens || 4096,
+        retain_api_key: Boolean(p.id && !p.api_key),
       });
       if (result?.error) { setError(result.error); return null; }
       await fetchStatus(); // refresh list
@@ -89,21 +96,14 @@ export function useLLMConfig(client: McpClient | null) {
     }
   }, [client, fetchStatus, setError]);
 
-  const toggleFailover = useCallback(() => {
-    setFailoverEnabled((prev) => !prev);
-  }, []);
-
   return {
     providers,
     activeProvider,
-    failoverEnabled,
-    failoverOrder,
     loading,
     error,
     fetchStatus,
     saveProvider,
     switchProvider,
     deleteProvider,
-    toggleFailover,
   };
 }

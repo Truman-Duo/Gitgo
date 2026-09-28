@@ -22,14 +22,25 @@ class PolicyEngine:
     """运行一组 PolicyCheck 策略，返回结果字典。"""
 
     def __init__(self, checks: list[PolicyCheck] | None = None,
-                 contract: Any = None, lessons: list | None = None):
-        self._checks = checks or self._defaults(contract, lessons)
+                 contract: Any = None, lessons: list | None = None,
+                 changed_files: list[str] | None = None):
+        self._checks = checks or self._defaults(
+            contract, lessons, changed_files=changed_files,
+        )
+        # Registry-loaded checks still consume the same authoritative watcher
+        # event.  The hint is deliberately scoped to this PolicyEngine run;
+        # it is not persisted on SyncSession where it could become stale.
+        if changed_files is not None:
+            for check in self._checks:
+                if isinstance(check, LessonTriggerCheck):
+                    check.set_changed_files(changed_files)
 
     @staticmethod
     def _defaults(contract: Any = None,
-                  lessons: list | None = None) -> list[PolicyCheck]:
+                  lessons: list | None = None,
+                  changed_files: list[str] | None = None) -> list[PolicyCheck]:
         return [
-            LessonTriggerCheck(lessons=lessons),
+            LessonTriggerCheck(lessons=lessons, changed_files=changed_files),
             ContractDriftCheck(contract=contract),
             IdentityIntegrityCheck(),
             DependencyChainCheck(),
@@ -37,7 +48,8 @@ class PolicyEngine:
 
     @classmethod
     def from_project(cls, project_name: str,
-                     workspace_path: Path) -> "PolicyEngine":
+                     workspace_path: Path,
+                     changed_files: list[str] | None = None) -> "PolicyEngine":
         """从 contract.yaml 加载项目级策略配置和 contract 对象。"""
         from backend.core.policy.registry import load_checks
         from backend.core.contract import ContractManager
@@ -47,13 +59,15 @@ class PolicyEngine:
         for c in checks:
             if hasattr(c, '_contract') and c._contract is None:
                 c._contract = contract
-        return cls(checks=checks)
+        return cls(checks=checks, changed_files=changed_files)
 
     def run(self, session: "SyncSession",
-            project: "ProjectConfig") -> dict:
+            project: "ProjectConfig", *, task_kind: str = "") -> dict:
         """运行所有策略。返回 {check_name: [alerts]}。"""
         results: dict = {}
         for check in self._checks:
+            if not check.applies_to(task_kind):
+                continue
             results[check.name] = check.check(session, project)
         return results
 

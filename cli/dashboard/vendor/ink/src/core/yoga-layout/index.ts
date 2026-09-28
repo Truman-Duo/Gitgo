@@ -1112,7 +1112,10 @@ function layoutNode(
     // Same-generation check covers fresh-mounted (dirty) nodes during
     // virtual scroll — the dirty chain invokes them ≥2^depth times, first
     // call writes cache, rest hit: 105k visits → ~10k for 1593-node tree.
-    if (node._cN > 0 && (sameGen || !node.isDirty_)) {
+    // These entries contain dimensions only, not a positioned subtree.
+    // Reusing an older size for layout would restore the parent but leave
+    // its children at the most recently laid-out (different) size.
+    if (!performLayout && node._cN > 0 && (sameGen || !node.isDirty_)) {
       const cIn = node._cIn!
       for (let i = 0; i < node._cN; i++) {
         const o = i * 8
@@ -1185,13 +1188,11 @@ function layoutNode(
     node._mOW = ownerWidth
     node._mOH = ownerHeight
     node._hasM = true
-    // Don't clear isDirty_. For DIRTY nodes, invalidate _hasL so the upcoming
-    // performLayout=true call recomputes with the new child set (otherwise
-    // sticky-scroll never follows new content — the bug from 4557bc9f9c).
-    // Clean nodes keep _hasL: their layout from the previous generation is
-    // still valid, they're only here because an ancestor is dirty and called
-    // with different inputs than cached.
-    if (wasDirty) node._hasL = false
+    // Don't clear isDirty_: measurement must not certify a positioned tree.
+    // A real measurement below may mutate descendants' dimensions even
+    // when the subtree is clean. Only a subsequent layout pass can restore
+    // them. Cache-only measurements above do not recurse and remain cheap.
+    node._hasL = false
   }
 
   // Resolve padding/border/margin against ownerWidth (yoga uses ownerWidth for %)

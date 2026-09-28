@@ -13,6 +13,7 @@
 // IME stable.
 import React, { useEffect } from "react";
 import { Text, Box, useDeclaredCursor, stringWidth, wrapText } from "@anthropic/ink";
+import type { Color } from "@anthropic/ink";
 
 type Props = {
   value: string;
@@ -20,7 +21,7 @@ type Props = {
   placeholder?: string;
   focus?: boolean;
   showCursor?: boolean;
-  color?: string;
+  color?: Color;
   dimColor?: boolean;
   maxWidth?: number;
 };

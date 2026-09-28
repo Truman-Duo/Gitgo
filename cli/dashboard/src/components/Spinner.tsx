@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from "react";
 import { Text } from "@anthropic/ink";
+import type { Color } from "@anthropic/ink";
 import { colors } from "../theme/index.js";
 
 export function Spinner({ frames, intervalMs, color }: {
   frames?: readonly string[];
   intervalMs?: number;
-  color?: string;
+  color?: Color;
 }) {
   const f = frames ?? colors.spinner.frames;
   const iv = intervalMs ?? colors.spinner.intervalMs;

@@ -2,6 +2,7 @@
 // No other file should define hex color literals or named color strings.
 
 import chalk from "chalk";
+import type { Color } from "@anthropic/ink";
 
 // ── Semantic colors ──────────────────────────────────────────
 export const colors = {
@@ -11,6 +12,18 @@ export const colors = {
 
   warning: "#d29922",
   warningBadge: "#3d351a",
+
+  cache: {
+    green1: "#3fb950",
+    green2: "#2ea043",
+    brown1: "#a06a42",
+    brown2: "#7a5230",
+    yellow: "#d29922",
+    orange: "#e67e22",
+    red: "#f85149",
+    unknown: "#6e7681",
+  },
+  contextUsage: { normal: "#a8a8a8", high: "#e67e22" },
 
   danger: "#f85149",
   dangerBadge: "#3d1a1a",
@@ -33,7 +46,7 @@ export const colors = {
   selection: {
     row: {
       bg: "#2a2a2a",
-      fg: undefined as string | undefined,
+      fg: "#f0f0f0",
     },
     block: {
       bg: "#ffffff",
@@ -63,6 +76,7 @@ export const colors = {
     command: {
       prompt: chalk.green.bold("/ "),
       bg: "#0d1a0d",
+      fg: "#f0f0f0",
       border: "#3fb950",
       badge: chalk.bgGreen.black.bold(" COMMAND "),
     },
@@ -79,7 +93,7 @@ export const colors = {
     error: { char: "●", color: "#f85149", badgeBg: "#3d1a1a" }, // ●
     warning: { char: "◐", color: "#d29922", badgeBg: "#3d351a" }, // ◐
     ok: { char: "●", color: "#3fb950", badgeBg: "#1a3d1a" }, // ●
-    offline: { char: "○", color: undefined as string | undefined, badgeBg: undefined as string | undefined }, // ○
+    offline: { char: "○", color: undefined, badgeBg: undefined }, // ○
     done: { char: "●", color: "#8b949e", badgeBg: "#1a2333" }, // ●
   },
 
@@ -87,12 +101,13 @@ export const colors = {
   badge: {
     user: { fg: "#3fb950", bg: "#1a3d1a" },
     agent: { fg: "#58a6ff", bg: "#1a2d3d" },
-    system: { fg: undefined as string | undefined, bg: "#1a2333" },
+    system: { fg: undefined, bg: "#1a2333" },
   },
 
   // ── Chat message layering (user block / gutter) ────────────
   chat: {
     userBg: "#262626",   // 用户提示词灰底块
+    userFg: "#f0f0f0",
     gutter: "#6e7681",   // assistant/tool 行首 gutter 标记
     userMarker: "#a8a8a8", // 用户消息行首指针 ❯ 标记
   },
@@ -133,6 +148,17 @@ export const colors = {
     // Triangle fill pulse (hollow ▹ → large ▷ → solid ▶ → settled ▸) used as the running-tool buffer.
     triangleFrames: ["▹", "▷", "▶", "▸"], // ▹▷▶▸
     triangleIntervalMs: 150,
+    // Thinking pulse grows from a centre point into an outer ring.
+    thinkingFrames: ["·", "∙", "●", "◉", "●", "∙"],
+    thinkingIntervalMs: 140,
+  },
+
+  // Claude-style context bill. These colors describe ownership categories,
+  // not interaction state, so they deliberately live outside selection tokens.
+  contextMap: {
+    categories: ["#58a6ff", "#3fb950", "#d29922", "#a371f7", "#f778ba", "#79c0ff", "#7ee787", "#ffa657"],
+    free: "#3f3f3f",
+    compact: "#6e7681",
   },
 
   // ── Animation ──────────────────────────────────────────────
@@ -158,26 +184,54 @@ export const colors = {
   },
 } as const;
 
+export function cacheHitColor(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return colors.cache.unknown;
+  if (value >= 95) return colors.cache.green1;
+  if (value >= 90) return colors.cache.green2;
+  if (value >= 85) return colors.cache.brown1;
+  if (value >= 80) return colors.cache.brown2;
+  if (value >= 70) return colors.cache.yellow;
+  if (value >= 50) return colors.cache.orange;
+  return colors.cache.red;
+}
+
 // ── Tool color helpers ───────────────────
-const TOOL_COLOR_MAP: Record<string, string> = {
+const TOOL_COLOR_MAP: Record<string, Color> = {
   read_file: colors.tool.read,
+  search_text: colors.tool.read,
+  list_files: colors.tool.read,
+  context_open: colors.tool.read,
+  context_search: colors.tool.read,
+  artifact_read: colors.tool.read,
+  decision_evidence: colors.tool.read,
   scan: colors.tool.read,
   glob: colors.tool.read,
   grep: colors.tool.read,
   write_file: colors.tool.write,
+  edit_file: colors.tool.write,
   edit: colors.tool.write,
   bash: colors.tool.exec,
   shell: colors.tool.exec,
   execute: colors.tool.exec,
+  run_shell: colors.tool.exec,
   dispatch_tool: colors.tool.exec,
   fork_agent: colors.tool.exec,
+  delegate_task: colors.tool.exec,
+  delegate_task_bundle: colors.tool.exec,
+  prepare_task_bundle: colors.tool.read,
+  send_feedback: colors.tool.exec,
+  request_review: colors.tool.exec,
+  review_child_outcome: colors.tool.read,
+  complete_task: colors.tool.write,
+  complete_review: colors.tool.read,
+  complete_supervision: colors.tool.read,
 };
 
-export function toolColor(name: string): string {
+export function toolColor(name: string): Color {
   for (const [key, color] of Object.entries(TOOL_COLOR_MAP)) {
     if (name.includes(key) || key.includes(name)) return color;
   }
-  return "";
+  return colors.accent;
 }
 
 export function toolIcon(_name: string): string {

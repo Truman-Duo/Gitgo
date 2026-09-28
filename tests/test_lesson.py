@@ -3,12 +3,14 @@
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from backend.core.knowledge.lesson import (
     Lesson,
     LessonManager,
     harvest_lessons,
 )
+from backend.core.policy import PolicyEngine
 
 
 def _tmp():
@@ -160,11 +162,92 @@ def test_search_finds_in_instance():
         _rm(p)
 
 
+def test_search_finds_pending_project_lesson():
+    p = _tmp()
+    try:
+        lesson = Lesson(
+            id="pending-search-probe",
+            trigger="pending_unique_keyword_xyz",
+            rule="if a pending lesson matches, then must return it",
+            project_name="proj",
+        )
+        LessonManager.save_pending(p, lesson)
+        results = LessonManager.search(
+            p, "pending-search-probe", project_name="proj",
+        )
+        assert [item.id for item in results] == ["pending-search-probe"]
+    finally:
+        _rm(p)
+
+
 def test_search_no_match():
     p = _tmp()
     try:
         results = LessonManager.search(p, "nonexistent_99999")
         assert results == []
+    finally:
+        _rm(p)
+
+
+def test_lesson_trigger_uses_watcher_files_without_release_diff():
+    """A new project may have watcher facts before it has a release repo."""
+    p = _tmp()
+    try:
+        (p / "source.txt").write_text(
+            "the user explicitly requested subprocess execution",
+            encoding="utf-8",
+        )
+        lesson = Lesson(
+            id="watcher-fact",
+            trigger="requested subprocess",
+            rule="Preserve explicit delegation requests in the task contract.",
+            project_name="proj",
+        )
+        session = SimpleNamespace(
+            workspace_path=p,
+            entries=[],
+            project=SimpleNamespace(name="proj"),
+        )
+
+        results = PolicyEngine(
+            lessons=[lesson], changed_files=["source.txt"],
+        ).run(session, SimpleNamespace(), task_kind="action")
+
+        assert [item["lesson_id"] for item in results["lesson_triggers"]] == [
+            "watcher-fact",
+        ]
+        assert results["lesson_triggers"][0]["file"] == "source.txt"
+    finally:
+        _rm(p)
+
+
+def test_ambiguous_checker_does_not_hide_lexical_lesson_match():
+    """Legacy patterns have unknown polarity and therefore stay advisory."""
+    p = _tmp()
+    try:
+        (p / "source.txt").write_text(
+            "the user explicitly requested subprocess execution",
+            encoding="utf-8",
+        )
+        lesson = Lesson(
+            id="legacy-checker",
+            trigger="requested subprocess",
+            rule="The contract must retain the user's delegation request.",
+            project_name="proj",
+            check={"pattern": "user_requested_delegation.*original evidence"},
+        )
+        session = SimpleNamespace(
+            workspace_path=p,
+            entries=[],
+            project=SimpleNamespace(name="proj"),
+        )
+
+        results = PolicyEngine(
+            lessons=[lesson], changed_files=["source.txt"],
+        ).run(session, SimpleNamespace(), task_kind="action")
+
+        assert results["lesson_triggers"][0]["lesson_id"] == "legacy-checker"
+        assert results["lesson_triggers"][0]["match_mode"] == "lexical_candidate"
     finally:
         _rm(p)
 

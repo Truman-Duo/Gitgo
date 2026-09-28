@@ -204,6 +204,12 @@ export const MCP_MOCK_MAP: Record<string, (args: any) => any> = {
     provider_id: args.provider_id,
   }),
 
+  gitgo_llm_test: (args: { provider_id?: string }) => ({
+    ok: true,
+    provider_id: args.provider_id,
+    response: "pong",
+  }),
+
   gitgo_export: (args: { project?: string; minimal?: boolean }) => ({
     ok: true,
     export_path: `/tmp/gitgo/export/${args.project || "project"}-${args.minimal ? "minimal" : "full"}.json`,

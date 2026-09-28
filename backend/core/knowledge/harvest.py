@@ -1,8 +1,11 @@
 import json
+import hashlib
 import re
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -499,47 +502,377 @@ LLM_BATCH_MAX = 30
 MAX_HARVEST_RETRY = 5
 
 _last_harvest_time: dict[str, float] = {}
+_signal_store_lock = threading.Lock()
+_SIGNAL_STORE_VERSION = 1
 
 
-def capture_signal(signal_type: str, detail: dict, project_name: str) -> None:
-    """捕获一条未处理信号 → HistoryManager (operation='unprocessed_signal')。"""
+def _signal_store_path() -> Path:
+    return HistoryManager._path().with_name("harvest_signals.json")
+
+
+def _load_signal_store() -> dict:
+    runtime = HistoryManager._storage()
+    path = _signal_store_path()
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            records = raw.get("records") if isinstance(raw, dict) else None
+            if isinstance(records, dict):
+                runtime.save_harvest_signal_records([
+                    dict(item) for item in records.values()
+                    if isinstance(item, dict)
+                ])
+                suffix = datetime.now().strftime("%Y%m%dT%H%M%S")
+                archived = path.with_name(
+                    f"{path.name}.legacy-imported-{suffix}"
+                )
+                counter = 1
+                while archived.exists():
+                    archived = path.with_name(
+                        f"{path.name}.legacy-imported-{suffix}-{counter}"
+                    )
+                    counter += 1
+                path.replace(archived)
+        except (OSError, ValueError, json.JSONDecodeError):
+            # Keep the legacy source for a later idempotent retry.
+            raise
+    records = runtime.load_harvest_signal_records()
+    return {
+        "version": _SIGNAL_STORE_VERSION,
+        "records": {
+            str(item["signal_id"]): item for item in records
+            if item.get("signal_id")
+        },
+    }
+
+
+def _save_signal_store(store: dict) -> None:
+    records = store.get("records") if isinstance(store, dict) else None
+    if not isinstance(records, dict):
+        raise ValueError("invalid harvest signal store")
+    HistoryManager._storage().save_harvest_signal_records([
+        dict(item) for item in records.values() if isinstance(item, dict)
+    ])
+
+
+def _signal_id(project_name: str, signal_type: str,
+               source_event_id: str) -> str:
+    if source_event_id:
+        payload = f"{project_name}\0{signal_type}\0{source_event_id}".encode("utf-8")
+        return "hs_" + hashlib.sha256(payload).hexdigest()[:24]
+    return "hs_" + uuid.uuid4().hex
+
+
+def capture_signal(signal_type: str, detail: dict, project_name: str, *,
+                   source_event_id: str = "") -> str:
+    """Persist one idempotent harvest event in the pending state."""
+    signal_id = _signal_id(project_name, signal_type, source_event_id)
+    now = datetime.now().isoformat()
+    with _signal_store_lock:
+        store = _load_signal_store()
+        if signal_id in store["records"]:
+            return signal_id
+        store["records"][signal_id] = {
+            "signal_id": signal_id,
+            "project_name": project_name,
+            "signal_type": signal_type,
+            "detail": dict(detail),
+            "source_event_id": source_event_id,
+            "state": "pending",
+            "retry_count": 0,
+            "lease_id": "",
+            "lease_until": 0.0,
+            "lesson_ids": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        _save_signal_store(store)
     HistoryManager.add_operation(
         project_name, "unprocessed_signal", "recorded",
-        {"signal_type": signal_type, **detail},
+        {"signal_id": signal_id, "signal_type": signal_type},
+        correlation_id=signal_id,
     )
+    return signal_id
 
 
 def get_unprocessed_signals(project_name: str,
                             signal_type: str | None = None) -> list[dict]:
-    """获取未处理信号。signal_type=None → 全部类型。"""
-    entries = HistoryManager.load()
-    signals = []
-    for e in entries:
-        if e.operation != "unprocessed_signal":
-            continue
-        if e.project_name != project_name:
-            continue
-        d = e.detail if isinstance(e.detail, dict) else {}
-        if signal_type and d.get("signal_type") != signal_type:
-            continue
-        signals.append({"timestamp": e.timestamp,
-                        "correlation_id": e.correlation_id, **d})
-    return signals
+    """Return pending/retry signals; expired leases become retryable again."""
+    now = time.time()
+    changed = False
+    with _signal_store_lock:
+        store = _load_signal_store()
+        signals = []
+        for record in store["records"].values():
+            if record.get("project_name") != project_name:
+                continue
+            if record.get("state") == "leased" and float(
+                record.get("lease_until", 0.0)
+            ) <= now:
+                record["state"] = "retry"
+                record["lease_id"] = ""
+                changed = True
+            if record.get("state") not in {"pending", "retry"}:
+                continue
+            if signal_type and record.get("signal_type") != signal_type:
+                continue
+            detail = dict(record.get("detail") or {})
+            signals.append({
+                "signal_id": record["signal_id"],
+                "timestamp": record.get("created_at", ""),
+                "correlation_id": record["signal_id"],
+                "signal_type": record.get("signal_type", "unknown"),
+                "harvest_retry_count": int(record.get("retry_count", 0)),
+                **detail,
+            })
+        if changed:
+            _save_signal_store(store)
+    return sorted(signals, key=lambda item: item.get("timestamp", ""))
+
+
+def harvest_status(project_name: str) -> dict:
+    """Return a privacy-safe lifecycle summary without raw signal payloads."""
+    with _signal_store_lock:
+        store = _load_signal_store()
+        rows = [
+            record for record in store["records"].values()
+            if record.get("project_name") == project_name
+        ]
+    states: dict[str, int] = {}
+    types: dict[str, int] = {}
+    for row in rows:
+        state = str(row.get("state") or "unknown")
+        signal_type = str(row.get("signal_type") or "unknown")
+        states[state] = states.get(state, 0) + 1
+        types[signal_type] = types.get(signal_type, 0) + 1
+    return {
+        "total_signals": len(rows),
+        "states": states,
+        "signal_types": types,
+        "awaiting_confirmation": [
+            str(row.get("proposal_id")) for row in rows
+            if row.get("state") == "awaiting_confirmation" and row.get("proposal_id")
+        ],
+    }
+
+
+def lease_harvest_signals(project_name: str, *, limit: int = LLM_BATCH_MAX,
+                          lease_seconds: float = 120.0) -> list[dict]:
+    """Atomically lease a mixed-source batch for exactly one harvester."""
+    candidates = get_unprocessed_signals(project_name)[:limit]
+    if not candidates:
+        return []
+    ids = {item["signal_id"] for item in candidates}
+    lease_id = "hl_" + uuid.uuid4().hex
+    now = time.time()
+    with _signal_store_lock:
+        store = _load_signal_store()
+        leased_ids = []
+        for signal_id in ids:
+            record = store["records"].get(signal_id)
+            if record is None or record.get("state") not in {"pending", "retry"}:
+                continue
+            record["state"] = "leased"
+            record["lease_id"] = lease_id
+            record["lease_until"] = now + max(1.0, lease_seconds)
+            record["updated_at"] = datetime.now().isoformat()
+            leased_ids.append(signal_id)
+        _save_signal_store(store)
+    return [item for item in candidates if item["signal_id"] in leased_ids]
+
+
+def lease_harvest_signal_ids(
+    project_name: str, signal_ids: list[str], *, lease_seconds: float = 120.0,
+) -> list[dict]:
+    """Lease an explicit signal set without consuming the automatic backlog."""
+    requested = list(dict.fromkeys(str(item) for item in signal_ids if str(item)))
+    if not requested:
+        return []
+    lease_id = "hl_" + uuid.uuid4().hex
+    now = time.time()
+    leased_ids: list[str] = []
+    with _signal_store_lock:
+        store = _load_signal_store()
+        for signal_id in requested:
+            record = store["records"].get(signal_id)
+            if record is None or record.get("project_name") != project_name:
+                continue
+            if record.get("state") not in {"pending", "retry"}:
+                continue
+            record["state"] = "leased"
+            record["lease_id"] = lease_id
+            record["lease_until"] = now + max(1.0, lease_seconds)
+            record["updated_at"] = datetime.now().isoformat()
+            leased_ids.append(signal_id)
+        _save_signal_store(store)
+    available = {item["signal_id"]: item for item in get_unprocessed_signals(project_name)}
+    # get_unprocessed_signals intentionally hides active leases, so rebuild the
+    # exact public signal projection from durable records.
+    with _signal_store_lock:
+        store = _load_signal_store()
+        result = []
+        for signal_id in leased_ids:
+            record = store["records"].get(signal_id) or {}
+            detail = dict(record.get("detail") or {})
+            result.append({
+                "signal_id": signal_id,
+                "timestamp": record.get("created_at", ""),
+                "correlation_id": signal_id,
+                "signal_type": record.get("signal_type", "unknown"),
+                "harvest_retry_count": int(record.get("retry_count", 0)),
+                **detail,
+            })
+    return result
+
+
+def stage_harvest_proposal(
+    project_name: str, signal_ids: list[str], lessons: list[Lesson],
+) -> dict:
+    """Persist a semantic proposal until the user confirms or dismisses it."""
+    proposal_id = "hp_" + uuid.uuid4().hex
+    candidates = [lesson.to_dict() for lesson in lessons]
+    with _signal_store_lock:
+        store = _load_signal_store()
+        matched = []
+        for signal_id in signal_ids:
+            record = store["records"].get(signal_id)
+            if record is None or record.get("project_name") != project_name:
+                continue
+            if record.get("state") != "leased":
+                continue
+            record["state"] = "awaiting_confirmation"
+            record["proposal_id"] = proposal_id
+            record["proposal_lessons"] = candidates
+            record["lease_id"] = ""
+            record["lease_until"] = 0.0
+            record["updated_at"] = datetime.now().isoformat()
+            matched.append(signal_id)
+        if not matched:
+            raise ValueError("harvest proposal has no leased source signals")
+        _save_signal_store(store)
+    HistoryManager.add_operation(
+        project_name, "harvest_proposal", "awaiting_confirmation",
+        {"proposal_id": proposal_id, "signal_ids": matched,
+         "candidate_count": len(candidates)},
+        correlation_id=proposal_id,
+    )
+    return {"proposal_id": proposal_id, "signal_ids": matched,
+            "candidates": candidates}
+
+
+def get_harvest_proposal(project_name: str, proposal_id: str) -> dict | None:
+    with _signal_store_lock:
+        store = _load_signal_store()
+        rows = [
+            record for record in store["records"].values()
+            if record.get("project_name") == project_name
+            and record.get("proposal_id") == proposal_id
+            and record.get("state") == "awaiting_confirmation"
+        ]
+    if not rows:
+        return None
+    return {
+        "proposal_id": proposal_id,
+        "signal_ids": [str(row["signal_id"]) for row in rows],
+        "candidates": list(rows[0].get("proposal_lessons") or []),
+    }
+
+
+def resolve_harvest_proposal(
+    project_name: str, proposal_id: str, *, accepted: bool,
+    lesson_ids: list[str] | None = None,
+) -> dict:
+    """Resolve one explicit proposal exactly once and keep its audit trail."""
+    with _signal_store_lock:
+        store = _load_signal_store()
+        matched = []
+        for record in store["records"].values():
+            if record.get("project_name") != project_name:
+                continue
+            if record.get("proposal_id") != proposal_id:
+                continue
+            if record.get("state") != "awaiting_confirmation":
+                continue
+            record["state"] = "processed" if accepted else "dismissed"
+            record["lesson_ids"] = list(dict.fromkeys(lesson_ids or []))
+            record["proposal_lessons"] = []
+            record["updated_at"] = datetime.now().isoformat()
+            matched.append(str(record["signal_id"]))
+        if not matched:
+            raise ValueError("harvest proposal is missing or already resolved")
+        _save_signal_store(store)
+    status = "accepted" if accepted else "dismissed"
+    HistoryManager.add_operation(
+        project_name, "harvest_proposal", status,
+        {"proposal_id": proposal_id, "signal_ids": matched,
+         "lesson_ids": list(lesson_ids or [])},
+        correlation_id=proposal_id,
+    )
+    return {"proposal_id": proposal_id, "status": status,
+            "signal_ids": matched, "lesson_ids": list(lesson_ids or [])}
+
+
+def complete_harvest(project_name: str, signal_ids: list[str],
+                     lesson_ids: list[str]) -> None:
+    with _signal_store_lock:
+        store = _load_signal_store()
+        for signal_id in signal_ids:
+            record = store["records"].get(signal_id)
+            if record is None or record.get("project_name") != project_name:
+                continue
+            record["state"] = "processed"
+            record["lesson_ids"] = list(dict.fromkeys(lesson_ids))
+            record["lease_id"] = ""
+            record["lease_until"] = 0.0
+            record["updated_at"] = datetime.now().isoformat()
+        _save_signal_store(store)
+    HistoryManager.add_operation(
+        project_name, "harvest_batch", "success",
+        {"signal_ids": list(signal_ids), "lesson_ids": list(lesson_ids)},
+    )
+
+
+def fail_harvest(project_name: str, signal_ids: list[str], error: str) -> None:
+    with _signal_store_lock:
+        store = _load_signal_store()
+        dead = []
+        for signal_id in signal_ids:
+            record = store["records"].get(signal_id)
+            if record is None or record.get("project_name") != project_name:
+                continue
+            retries = int(record.get("retry_count", 0)) + 1
+            record["retry_count"] = retries
+            record["state"] = "dead_letter" if retries >= MAX_HARVEST_RETRY else "retry"
+            record["lease_id"] = ""
+            record["lease_until"] = 0.0
+            record["last_error"] = error[:1000]
+            record["updated_at"] = datetime.now().isoformat()
+            if record["state"] == "dead_letter":
+                dead.append(signal_id)
+        _save_signal_store(store)
+    HistoryManager.add_operation(
+        project_name, "harvest_batch",
+        "dead_letter" if dead else "retry",
+        {"signal_ids": list(signal_ids), "dead_letter_ids": dead,
+         "error": error[:1000]},
+    )
 
 
 def get_signal_baseline(signal_type: str, project_name: str) -> float:
-    """滚动 100 个事件的某类信号密度基线。"""
-    entries = HistoryManager.load()
-    recent = [e for e in entries[-100:]
-              if e.project_name == project_name]
-    if not recent:
+    """Baseline from terminal prior batches, excluding the current backlog."""
+    with _signal_store_lock:
+        store = _load_signal_store()
+        terminal = [
+            record for record in store["records"].values()
+            if record.get("project_name") == project_name
+            and record.get("state") in {"processed", "dead_letter"}
+        ][-100:]
+    if not terminal:
         return 0.0
     matching = sum(
-        1 for e in recent
-        if e.operation == "unprocessed_signal"
-        and (e.detail or {}).get("signal_type") == signal_type
+        1 for record in terminal if record.get("signal_type") == signal_type
     )
-    return matching / len(recent)
+    return matching / max(100, len(terminal))
 
 
 def signal_density(project_name: str, signal_type: str | None = None,
@@ -566,38 +899,38 @@ def source_diversity(signals: list[dict]) -> int:
 
 def should_trigger_harvest(signal_type: str, project_name: str) -> bool:
     """多维条件调度算法。事件驱动的，不是时间驱动的。"""
-    signals = get_unprocessed_signals(project_name, signal_type)
-    if len(signals) < MIN_BATCH_SIZE:
+    signals = get_unprocessed_signals(project_name)
+    if not any(s.get("signal_type") == signal_type for s in signals):
         return False
-    baseline = get_signal_baseline(signal_type, project_name)
-    density = signal_density(project_name, signal_type, DENSITY_WINDOW)
-    if density <= baseline * DENSITY_THRESHOLD:
+    if len(signals) < MIN_BATCH_SIZE:
         return False
     if source_diversity(signals) < MIN_SOURCES:
         return False
     now = time.time()
-    last = _last_harvest_time.get(signal_type, 0)
+    last = _last_harvest_time.get(project_name, 0)
     if now - last < COOLDOWN_SECONDS:
         return False
     return True
 
 
-def mark_harvest_triggered(signal_type: str) -> None:
+def mark_harvest_triggered(project_name: str) -> None:
     """记录 harvest 时间（冷却期用）。"""
-    _last_harvest_time[signal_type] = time.time()
+    _last_harvest_time[project_name] = time.time()
 
 
 def is_testable_proposition(rule: str) -> bool:
-    """LLM 输出门禁。不合规直接丢弃，不写入 pending。"""
-    if len(rule) < 20:
-        return False
-    keywords = ["if", "when", "must", "should",
-                "禁止", "必须", "需要先", "不能直接", "前需先"]
-    return any(kw in rule.lower() for kw in keywords)
+    """Validate only the transport shape of a pending lesson candidate.
+
+    Semantic testability cannot be inferred from modal keywords.  Harvested
+    lessons remain pending/advisory until independent evidence verifies them,
+    so this boundary rejects only empty or unusably short payloads.
+    """
+    return isinstance(rule, str) and len(rule.strip()) >= 20
 
 
 def harvest_llm_summary(signals: list[dict], llm_provider,
-                        workspace_path: str, project_name: str) -> list[Lesson]:
+                        workspace_path: str, project_name: str, *,
+                        raise_on_error: bool = False) -> list[Lesson]:
     """LLM 总结未处理信号 → lesson。降级：失败→重试→退避→废弃。"""
     if not signals:
         return []
@@ -613,13 +946,14 @@ def harvest_llm_summary(signals: list[dict], llm_provider,
     prompt = (
         "你是项目知识收割 Agent。根据以下信号提取教训。\n\n"
         "严格要求:\n"
-        "1. rule 必须是 'if X, then must/should/should not Y' 格式\n"
-        "2. 不接受纯描述性 lesson\n"
-        "3. trigger 必须能被子字符串匹配\n"
-        "4. 信号不足以形成 actionable lesson → 返回 []\n"
-        "5. 每条默认写入 pending\n\n"
+        "1. rule 应明确说明适用条件、动作和可观察的验证结果，不限定固定措辞\n"
+        "2. 不接受无法指导后续行动的纯描述性 lesson\n"
+        "3. trigger 是相关性检索提示，不具有治理执行权\n"
+        "4. 不要生成 check；机器可执行 checker 必须由 Host 单独注册并声明极性\n"
+        "5. 信号不足以形成 actionable lesson → 返回 []\n"
+        "6. 每条默认写入 pending\n\n"
         "返回 JSON: "
-        '[{"trigger":"...","rule":"if X, then must Y",'
+        '[{"trigger":"...","rule":"condition, action, observable result",'
         '"severity":"high|medium|low","category":"process|...",'
         '"dangerous_tools":[],"prerequisite_tools":[],"required_tools":[]}]\n\n'
         f"信号 ({len(batch)} 条):\n" + "\n".join(signal_text)
@@ -637,17 +971,19 @@ def harvest_llm_summary(signals: list[dict], llm_provider,
             text = text[:-3]
         lessons_data = json.loads(text.strip())
     except Exception:
-        for s in batch:
-            s["harvest_retry_count"] = s.get("harvest_retry_count", 0) + 1
-        viable = [s for s in batch
-                  if s.get("harvest_retry_count", 0) < MAX_HARVEST_RETRY]
-        for s in viable:
-            capture_signal(s.get("signal_type", "unknown"),
-                           {k: v for k, v in s.items()
-                            if k not in ("timestamp", "correlation_id")},
-                           project_name)
+        if raise_on_error:
+            raise
+        # Compatibility for direct callers: expose the attempted retry on the
+        # supplied batch, but never append duplicate signal events. Durable
+        # retries are owned by fail_harvest().
+        for signal in batch:
+            signal["harvest_retry_count"] = int(
+                signal.get("harvest_retry_count", 0)
+            ) + 1
         return []
 
+    from .applicability import capture_lesson_evidence
+    evidence = capture_lesson_evidence(workspace_path, batch)
     lessons = []
     for data in lessons_data if isinstance(lessons_data, list) else []:
         rule = data.get("rule", "")
@@ -660,8 +996,10 @@ def harvest_llm_summary(signals: list[dict], llm_provider,
             dangerous_tools=data.get("dangerous_tools", []),
             prerequisite_tools=data.get("prerequisite_tools", []),
             required_tools=data.get("required_tools", []),
+            check=(data.get("check") if isinstance(data.get("check"), dict) else None),
             source="auto_harvested", origin="harvest",
             project_name=project_name,
+            evidence=evidence,
         ))
     return lessons
 
@@ -694,9 +1032,10 @@ def auto_discard_invalid(workspace_path: Path, project_name: str) -> int:
 def auto_verify_high_confidence(workspace_path: Path, project_name: str) -> int:
     """L2 Digest: 自动 verify 高置信度 pending lesson。
 
-    规则（不依赖 LLM）：
-    - verified_count >= 3（已在多个项目中验证）→ 自动 verify
-    - severity == "critical" 且 trigger 在 workspace 中匹配 >= 2 个文件 → 自动 verify
+    规则（不依赖 LLM）：至少三个不同项目留下过明确验证记录。
+
+    Severity and substring frequency are not truth evidence and therefore never
+    auto-promote a lesson.
 
     Returns: auto-verified 的 lesson 数量。
     """
@@ -709,31 +1048,12 @@ def auto_verify_high_confidence(workspace_path: Path, project_name: str) -> int:
     for lesson in pending:
         should_verify = False
 
-        # 规则 1: 高频使用
-        if getattr(lesson, 'verified_count', 0) >= 3:
+        verified_in = {
+            str(item) for item in (getattr(lesson, "verified_in", []) or [])
+            if str(item)
+        }
+        if getattr(lesson, "verified_count", 0) >= 3 and len(verified_in) >= 3:
             should_verify = True
-
-        # 规则 2: critical + 多文件匹配
-        if not should_verify and getattr(lesson, 'severity', '') == 'critical':
-            trigger = getattr(lesson, 'trigger', '')
-            if trigger:
-                matched_files = 0
-                try:
-                    for py_file in workspace_path.rglob("*.py"):
-                        if ".git" in py_file.parts or ".gitgo" in py_file.parts:
-                            continue
-                        try:
-                            content = py_file.read_text(encoding="utf-8", errors="ignore")
-                            if trigger in content:
-                                matched_files += 1
-                                if matched_files >= 2:
-                                    break
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                if matched_files >= 2:
-                    should_verify = True
 
         if should_verify:
             try:

@@ -10,7 +10,7 @@ import { matchChord } from "./bindings.js";
 
 export type CommandAction =
   | { type: "insertSlash" }
-  | { type: "run" }
+  | { type: "run"; command?: string }
   | { type: "suggestionUp" }
   | { type: "suggestionDown" }
   | { type: "suggestionTab" }
@@ -25,9 +25,22 @@ export function resolveCommandKeys(
   suggestionCount: number,
   input: string,
   key: any,
+  activeSuggestion = "",
+  activeSuggestionMode: "execute" | "fill" = "fill",
 ): CommandAction[] {
   if (input === "/" && cmdValue === "") return [{ type: "insertSlash" }];
-  if (matchChord("enter", input, key)) return [{ type: "run" }];
+  if (matchChord("enter", input, key)) {
+    // Enter first accepts a highlighted completion.  A second Enter executes
+    // the now-exact command.  This prevents partial commands such as `/n`
+    // from being dispatched as errors and matches Tab without duplicating `/`.
+    if (suggestionCount > 0 && activeSuggestion !== cmdValue.trim()) {
+      if (activeSuggestionMode === "execute") {
+        return [{ type: "run", command: activeSuggestion }];
+      }
+      return [{ type: "suggestionTab" }];
+    }
+    return [{ type: "run" }];
+  }
   if (matchChord("up", input, key) && suggestionCount > 0) return [{ type: "suggestionUp" }];
   if (matchChord("down", input, key) && suggestionCount > 0) return [{ type: "suggestionDown" }];
   if (matchChord("tabAny", input, key) && suggestionCount > 0) return [{ type: "suggestionTab" }];
@@ -57,7 +70,7 @@ export function applyCommandAction(a: CommandAction, h: CommandHandlers): void {
       h.cmdInput.insert("/");
       break;
     case "run": {
-      const cmd = h.cmdInput.value.trim();
+      const cmd = (a.command ?? h.cmdInput.value).trim();
       if (cmd) {
         h.runCommand(cmd);
         h.setSuggestionIdx(0);

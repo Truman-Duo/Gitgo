@@ -6,7 +6,6 @@ v0.36 Phase 2: L7 Task Transcript (XML) + L8 返回转录 (JSON) + Compact 约�
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -109,23 +108,21 @@ class TaskTranscriptBuilder:
         """Compact JSON Schema: 规则填充 constraints，非 LLM 决定。
 
         填充源:
-        1. 硬规则抓取 (否定句/禁止句)
+        1. Host 标记的结构化 task_constraint 消息
         2. Lesson 约束继承
         """
         constraints = []
 
-        # 源1: 硬规则抓取
-        negation_re = re.compile(
-            r'(?:不要|禁止|不能|先别|do not|don\'t|must not|never)\s*(.{5,120})',
-            re.I,
-        )
+        # 源1: 只接受 Host/调用方显式标记的约束，不从任意对话文本猜测。
         for msg in session_messages:
-            content = msg.get("content", "")
-            for match in negation_re.findall(content):
+            if msg.get("message_type") != "task_constraint":
+                continue
+            content = str(msg.get("content", "")).strip()
+            if content:
                 constraints.append({
-                    "rule": match.strip(),
-                    "scope": "detected",
-                    "source": "hard_extract",
+                    "rule": content,
+                    "scope": str(msg.get("constraint_scope", "task")),
+                    "source": "host_structured",
                 })
 
         # 源2: Lesson 约束继承

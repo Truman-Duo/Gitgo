@@ -1,16 +1,17 @@
 // src/theme/useColorTransition.ts — Color lerp animation hook.
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useInterval } from "usehooks-ts";
 import { lerpColor } from "./typography.js";
 import { colors } from "./tokens.js";
+import type { HexColor } from "@anthropic/ink";
 
 export function useColorTransition(
   condition: boolean,
-  fromColor: string,
-  toColor: string,
+  fromColor: HexColor,
+  toColor: HexColor,
   opts?: { frameCount?: number; intervalMs?: number },
-): string {
+): HexColor {
   const frameCount = opts?.frameCount ?? colors.animation.lerp.frames;
   const intervalMs = opts?.intervalMs ?? colors.animation.lerp.intervalMs;
 
@@ -39,4 +40,30 @@ export function useColorTransition(
   const from = condition ? fromColor : toColor;
   const to = condition ? toColor : fromColor;
   return lerpColor(from, to, (frame + 1) / (frameCount + 1));
+}
+
+/** Animate between arbitrary palette values, not only a boolean pair. */
+export function useAnimatedColor(
+  targetColor: HexColor,
+  opts?: { frameCount?: number; intervalMs?: number },
+): HexColor {
+  const frameCount = opts?.frameCount ?? colors.animation.lerp.frames;
+  const intervalMs = opts?.intervalMs ?? colors.animation.lerp.intervalMs;
+  const settled = useRef<HexColor>(targetColor);
+  const from = useRef<HexColor>(targetColor);
+  const [frame, setFrame] = useState(frameCount);
+
+  useEffect(() => {
+    from.current = settled.current;
+    settled.current = targetColor;
+    setFrame(0);
+  }, [targetColor]);
+
+  useInterval(
+    () => setFrame((current) => Math.min(frameCount, current + 1)),
+    frame < frameCount ? intervalMs : null,
+  );
+
+  if (frame >= frameCount) return targetColor;
+  return lerpColor(from.current, targetColor, (frame + 1) / frameCount);
 }

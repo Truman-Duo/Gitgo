@@ -11,10 +11,15 @@ import { TextInput } from "./TextInput.js";
 import { isChatScene, type Scene, type Mode } from "../state/store.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
 import { colors, useColorTransition, useSuggestionStyle } from "../theme/index.js";
+import { ContextStatus } from "./ContextStatus.js";
 import { RunningBStrip } from "./RunningBStrip.js";
 import type { ProcessInfo } from "../hooks/useLoopData.js";
 
-export type Suggestion = { label: string; description: string };
+export type Suggestion = {
+  label: string;
+  description: string;
+  inputMode?: "execute" | "fill";
+};
 
 /** Overlay-provided footer configuration. */
 export type FooterConfig =
@@ -24,12 +29,13 @@ export type FooterConfig =
       kind?: "command" | "normal";
       cmdInput: UseTextInputReturn;
       statusText: string;
-      suggestions: string[];
+      suggestions: Suggestion[];
       suggestionIdx: number;
       cmdResult: string;
     };
 
 type Props = {
+  width: number;
   mode: Mode;
   textInput: UseTextInputReturn;
   cmdInput: UseTextInputReturn;
@@ -43,12 +49,17 @@ type Props = {
   runningBSelIdx?: number;
   statusBarFocused?: boolean;
   contextPct?: string;
+  cachePct?: number | null;
+  footerDrawer?: React.ReactNode;
+  language?: "en" | "zh";
 };
 
 export const CommandBar = memo(function CommandBar({
-  mode, textInput, cmdInput, cmdResult,
+  width, mode, textInput, cmdInput, cmdResult,
   statusText, suggestions, suggestionIdx, scene, footerOverride,
-  runningB, runningBSelIdx, statusBarFocused, contextPct,
+  runningB, runningBSelIdx, statusBarFocused, contextPct, cachePct,
+  footerDrawer,
+  language = "en",
 }: Props) {
   const isOverridden = !!(footerOverride && !footerOverride.hidden);
   const overrideKind = isOverridden ? (footerOverride.kind ?? "command") : "command";
@@ -64,7 +75,7 @@ export const CommandBar = memo(function CommandBar({
   const activeCmdResult = isOverridden ? footerOverride.cmdResult : cmdResult;
   const activeStatusText = isOverridden ? footerOverride.statusText : statusText;
   const activeSuggestions: Suggestion[] = isOverridden
-    ? footerOverride.suggestions.map((s) => ({ label: s, description: "" }))
+    ? footerOverride.suggestions
     : suggestions;
   const activeSuggestionIdx = isOverridden ? footerOverride.suggestionIdx : suggestionIdx;
 
@@ -72,7 +83,10 @@ export const CommandBar = memo(function CommandBar({
   const nonChatScene = !isChatScene(scene);
   const showSuggestions = effectiveCommand && activeSuggestions.length > 0
     && (nonChatScene ? activeCmdInput.value.startsWith("/") : true);
-  const showInput = true; // always show; overlay hides footer entirely via { hidden: true }
+  // Project/process scenes are list-first: the command editor appears only
+  // after a leading slash. Chat scenes keep their NORMAL editor visible.
+  const projectListIdle = !isOverridden && (scene === "projects" || scene === "process_list") && !activeCmdInput.value.startsWith("/");
+  const showInput = isOverridden || isChatScene(scene) || scene === "projects" || scene === "process_list" || activeCmdInput.value.startsWith("/");
 
   // Border color animation on mode switch
   const effectiveColor = useColorTransition(
@@ -80,6 +94,7 @@ export const CommandBar = memo(function CommandBar({
     colors.input.normal.border,
     colors.input.command.border,
   );
+  const contextValue = contextPct || "";
 
   // Mode badge rendered in the bottom border via borderText.
   const modeBadge: BorderTextOptions = {
@@ -97,9 +112,13 @@ export const CommandBar = memo(function CommandBar({
   }
 
   // Available width for text wrapping inside the input area.
-  const outputWidth = Math.max(60, 80); // conservative default; useTerminalSize removed
-  const promptWidth = 2;
-  const inputMaxWidth = Math.max(20, outputWidth - promptWidth - 1);
+  const outputWidth = Math.max(30, width);
+  // Two horizontal padding cells plus the visible two-cell prompt are outside
+  // TextInput's wrap width. Keeping the renderer and cursor on the same width
+  // prevents cumulative drift on long CJK/emoji input.
+  const horizontalPadding = 2;
+  const promptWidth = effectiveCommand && !explicitCommand ? 0 : 2;
+  const inputMaxWidth = Math.max(20, outputWidth - horizontalPadding - promptWidth);
 
   return (
     <Box flexDirection="column" flexShrink={0}>
@@ -123,12 +142,15 @@ export const CommandBar = memo(function CommandBar({
                   : colors.input.normal.prompt}
               </Ansi>
             )}
-            {isOverridden || effectiveCommand ? (
+            {projectListIdle ? (
+              <Text dimColor>{language === "zh" ? "输入 / 打开指令" : "Type / for commands"}</Text>
+            ) : isOverridden || effectiveCommand ? (
               <TextInput
                 value={activeCmdInput.value}
                 cursorOffset={activeCmdInput.cursor}
-                showCursor
-                maxWidth={effectiveCommand && !explicitCommand ? inputMaxWidth + 2 : inputMaxWidth}
+                showCursor={!projectListIdle}
+                color={effectiveCommand ? colors.input.command.fg : undefined}
+                maxWidth={inputMaxWidth}
               />
             ) : (
               <TextInput
@@ -181,12 +203,17 @@ export const CommandBar = memo(function CommandBar({
         );
       })()}
 
+      {footerDrawer}
+
       {/* Status text */}
       <Box paddingLeft={1} paddingRight={1} marginTop={showInput ? 1 : 0}>
         {!isOverridden && runningB !== undefined ? (
-          <RunningBStrip runningB={runningB} selIdx={runningBSelIdx ?? 0} focused={statusBarFocused ?? false} contextPct={contextPct ?? ""} />
+          <RunningBStrip width={Math.max(1, width - 2)} runningB={runningB} selIdx={runningBSelIdx ?? 0} focused={statusBarFocused ?? false} contextPct={contextPct ?? ""} cachePct={cachePct} />
         ) : (
-          <Text dimColor>{activeStatusText || " "}</Text>
+          <>
+            {contextValue ? <><ContextStatus contextPct={contextValue} cachePct={cachePct} /><Text>  </Text></> : null}
+            <Text dimColor>{activeStatusText || " "}</Text>
+          </>
         )}
       </Box>
     </Box>

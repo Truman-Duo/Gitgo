@@ -1,91 +1,117 @@
-// src/components/ProcessList.tsx — B Agent process flat list (blueprint L547-564)
+// src/components/ProcessList.tsx — project subprocess flat list
 import React, { memo, useMemo, useEffect } from "react";
 import { Box, Text } from "@anthropic/ink";
-import type { McpClient } from "../mcp/client.js";
-import { useLoopData, type ProcessInfo } from "../hooks/useLoopData.js";
-import { colors, usePanelSize, statusDot, badgeBg, indent as indentFn, useSelectionStyle, processStatusToDot, partitionByRank } from "../theme/index.js";
+import type { LoopData, ProcessInfo } from "../hooks/useLoopData.js";
+import { usePanelSize, statusDot, indent as indentFn, useSelectionStyle, processStatusToDot, truncate, displayWidth } from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
+import { agentLabel } from "../daemon/agentLabels.js";
 
 type Props = {
-  client: McpClient;
   project: string;
+  loopData: LoopData;
   cols: number;
   selIdx: number;
   idsRef?: { current: string[] };
   onStatusUpdate?: (text: string) => void;
 };
 
-// ── Tree → flat list (depth for indentation) ──────────────────
+// ── DAG → deterministic topological list ─────────────────────
 
-type TreeNode = ProcessInfo & { depth: number; children: TreeNode[] };
+type TopologyNode = ProcessInfo & {
+  depth: number;
+  dependency_ids: string[];
+  cyclic: boolean;
+};
 
-function buildTree(processes: Record<string, ProcessInfo>): TreeNode[] {
-  const procs = Object.values(processes);
-  const childrenMap = new Map<string | null, ProcessInfo[]>();
-  for (const p of procs) {
-    const parentKey = p.parent_id || null;
-    if (!childrenMap.has(parentKey)) childrenMap.set(parentKey, []);
-    childrenMap.get(parentKey)!.push(p);
-  }
-  function walk(parentId: string | null, depth: number): TreeNode[] {
-    const kids = childrenMap.get(parentId) || [];
-    return kids.map((p) => ({
-      ...p,
-      depth,
-      children: walk(p.process_id, depth + 1),
-    }));
-  }
-  return walk(null, 0);
+export function isBProcess(process: ProcessInfo): boolean {
+  return process.actor_kind !== "supervisor"
+    && (
+      Boolean(process.parent_id)
+      || ["worker", "reviewer"].includes(process.actor_kind || "")
+    );
 }
 
-function flatten(nodes: TreeNode[]): TreeNode[] {
-  const out: TreeNode[] = [];
-  function walk(list: TreeNode[]) {
-    for (const n of list) {
-      out.push(n);
-      walk(n.children);
+export function buildTopology(processes: Record<string, ProcessInfo>): TopologyNode[] {
+  const byId = new Map(Object.values(processes).map((item) => [item.process_id, item]));
+  const dependencies = new Map<string, string[]>();
+  const dependents = new Map<string, string[]>();
+  const indegree = new Map<string, number>();
+  for (const process of byId.values()) {
+    const declared = process.parent_ids && process.parent_ids.length > 0
+      ? process.parent_ids
+      : process.parent_id ? [process.parent_id] : [];
+    const deps = [...new Set(declared)].filter((id) => byId.has(id) && id !== process.process_id);
+    dependencies.set(process.process_id, deps);
+    indegree.set(process.process_id, deps.length);
+    for (const id of deps) dependents.set(id, [...(dependents.get(id) || []), process.process_id]);
+  }
+  const compare = (a: string, b: string) =>
+    (byId.get(a)?.created_at || "").localeCompare(byId.get(b)?.created_at || "") || a.localeCompare(b);
+  const ready = [...byId.keys()].filter((id) => indegree.get(id) === 0).sort(compare);
+  const ordered: string[] = [];
+  const depth = new Map<string, number>();
+  while (ready.length > 0) {
+    const id = ready.shift()!;
+    ordered.push(id);
+    for (const child of dependents.get(id) || []) {
+      depth.set(child, Math.max(depth.get(child) || 0, (depth.get(id) || 0) + 1));
+      indegree.set(child, (indegree.get(child) || 0) - 1);
+      if (indegree.get(child) === 0) {
+        ready.push(child);
+        ready.sort(compare);
+      }
     }
   }
-  walk(nodes);
-  return out;
+  const cyclic = [...byId.keys()].filter((id) => !ordered.includes(id)).sort(compare);
+  return [...ordered, ...cyclic].map((id) => ({
+    ...byId.get(id)!,
+    depth: depth.get(id) || 0,
+    dependency_ids: dependencies.get(id) || [],
+    cyclic: cyclic.includes(id),
+  }));
+}
+
+export function visibleBProcesses(processes: Record<string, ProcessInfo>): TopologyNode[] {
+  return buildTopology(Object.fromEntries(Object.entries(processes)
+    .filter(([, process]) => isBProcess(process) && !process.archived)));
 }
 
 // ── ProcessList component ─────────────────────────────────────
 
 export const ProcessList = memo(function ProcessList({
-  client, project, cols: _cols, selIdx, idsRef, onStatusUpdate,
+  project, loopData, cols: _cols, selIdx, idsRef, onStatusUpdate,
 }: Props) {
   const { w } = usePanelSize({ minWidth: 60 });
-  const { processes } = useLoopData(client, project, 5);
+  const { processes, recoveryAvailable, storage } = loopData;
 
   const flatList = useMemo(() => {
-    const tree = buildTree(processes);
-    return flatten(tree);
+    // /processlist is the project-wide B registry, not a task-run view. Keep
+    // every worker/reviewer state across tasks and exclude all A supervisors.
+    return visibleBProcesses(processes);
   }, [processes]);
 
-  const { running, pending, finished } = useMemo(
-    () => partitionByRank(flatList, (p: TreeNode) => (p.status === "running" ? 0 : p.status === "waiting" ? 1 : 2)),
-    [flatList],
-  );
+  const runningCount = flatList.filter((p) => p.status === "running").length;
+  const waitingCount = flatList.filter((p) => ["waiting", "awaiting_user", "recovering", "resume_available"].includes(p.status)).length;
 
   // Keep idsRef in sync for keyboard navigation in App.tsx
   useEffect(() => {
     if (idsRef) {
-      idsRef.current = [...running, ...pending, ...finished].map((p) => p.process_id);
+      idsRef.current = flatList.map((p) => p.process_id);
     }
-  }, [running, pending, finished, idsRef]);
+  }, [flatList, idsRef]);
 
   // Report status line to parent
   useEffect(() => {
     if (onStatusUpdate) {
-      const wtCount = flatList.filter((p) => p.worktree_path).length;
+      const wtCount = flatList.filter((p) => p.worktree?.isolated).length;
+      const storagePrefix = storage?.level === "blocked" ? "storage blocked  |  " : "";
       onStatusUpdate(
-        `● ${flatList.length} processes  |  ${wtCount} worktrees active`
+        `${storagePrefix}● ${flatList.length} subprocesses  |  ${wtCount} isolated worktrees  |  ${recoveryAvailable.length} recovery candidates`
       );
     }
-  }, [flatList, onStatusUpdate]);
+  }, [flatList, recoveryAvailable.length, storage?.level, onStatusUpdate]);
 
-  const renderRow = (p: TreeNode, i: number) => {
+  const renderRow = (p: TopologyNode, i: number) => {
     const st = processStatusToDot(p.status);
     const dot = statusDot(st);
     const isSelected = i === selIdx;
@@ -95,28 +121,33 @@ export const ProcessList = memo(function ProcessList({
       p.max_steps > 0
         ? `${p.steps_used}/${p.max_steps} steps`
         : "— steps";
+    const dependency = p.dependency_ids.length > 1 ? `  deps:${p.dependency_ids.length}` : "";
+    const cycle = p.cyclic ? "  cycle" : "";
+    const children = p.child_ids && p.child_ids.length > 0 ? `  children:${p.child_ids.length}` : "";
+    const decision = p.pending_decision ? "  decision" : "";
+    const worktree = p.worktree
+      ? `  wt:${p.worktree.isolated ? "isolated" : "shared"}${p.worktree.state ? `/${p.worktree.state}` : ""}${p.worktree.promoted ? "/promoted" : ""}`
+      : "";
+    const fixed = `${ind}● ${agentLabel(p)}  ${steps}  ring:${p.ring_level}${dependency}${cycle}${children}${decision}${worktree}`;
+    const pathWidth = Math.max(0, w - displayWidth(fixed) - 2);
     return (
-      <Box key={p.process_id} flexDirection="row"
-        backgroundColor={rowSel.bg}
-      >
-        <Text dimColor backgroundColor={rowSel.bg}>{ind}</Text>
-        <Text color={dot.color} backgroundColor={rowSel.bg}>● </Text>
-        <Text
-          color={rowSel.fg}
-          bold={rowSel.bold}
-          backgroundColor={rowSel.bg}
-        >
-          {p.role || "agent"}
+      <Box key={p.process_id} flexDirection="row">
+        <Text backgroundColor={rowSel.bg} color={rowSel.fg} bold={rowSel.bold}>
+          <Text dimColor>{ind}</Text>
+          <Text color={dot.color}>● </Text>
+          <Text>{agentLabel(p)}</Text>
+          <Text dimColor>{`  ${steps}  ring:${p.ring_level}`}</Text>
+          {dependency ? <Text dimColor>{dependency}</Text> : null}
+          {cycle ? <Text dimColor>{cycle}</Text> : null}
+          {children ? <Text dimColor>{children}</Text> : null}
+          {decision ? <Text dimColor>{decision}</Text> : null}
+          {p.worktree ? (
+            <Text dimColor>
+              {worktree}
+              {p.worktree.path && pathWidth > 3 ? ` ${truncate(p.worktree.path, pathWidth - 1)}` : ""}
+            </Text>
+          ) : null}
         </Text>
-        <Text backgroundColor={rowSel.bg}> </Text>
-        <Text backgroundColor={dot.badgeBg} color={dot.color}>
-          {p.status}
-        </Text>
-        <Text dimColor backgroundColor={rowSel.bg}>  {steps}</Text>
-        <Text dimColor backgroundColor={rowSel.bg}>  ring:{p.ring_level}</Text>
-        {p.worktree_path ? (
-          <Text dimColor backgroundColor={rowSel.bg}>  wt: {p.worktree_path}</Text>
-        ) : null}
       </Box>
     );
   };
@@ -125,37 +156,32 @@ export const ProcessList = memo(function ProcessList({
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
       {/* Header */}
       <Box flexDirection="row" gap={8}>
-        <Text bold color={colors.accent}>B Agent Processes</Text>
+        <Text bold>Subprocesses</Text>
         <Text dimColor>—</Text>
-        <Text color={colors.success}>{project}</Text>
+        <Text>{project}</Text>
       </Box>
 
-      {/* Grouped list: running then finished */}
+      {/* Project-wide B list: every status, across every task */}
       <Box flexDirection="column" flexGrow={1}>
+        {recoveryAvailable.length > 0 ? (
+          <Box marginBottom={1}>
+            <Text dimColor>
+              Recovery available for {recoveryAvailable.length} incomplete session(s); automatic replay is disabled.
+            </Text>
+          </Box>
+        ) : null}
         {flatList.length === 0 ? (
           <Box paddingTop={1}>
-            <Text dimColor>No active processes</Text>
+            <Text dimColor>No subprocesses</Text>
           </Box>
         ) : (
           <>
-            {running.length > 0 ? (
-              <>
-                <Text dimColor bold>Running ({running.length})</Text>
-                {running.map((p, i) => renderRow(p, i))}
-              </>
-            ) : null}
-            {pending.length > 0 ? (
-              <>
-                <Text dimColor bold>Pending ({pending.length})</Text>
-                {pending.map((p, i) => renderRow(p, running.length + i))}
-              </>
-            ) : null}
-            {finished.length > 0 ? (
-              <>
-                <Text dimColor bold>Finished ({finished.length})</Text>
-                {finished.map((p, i) => renderRow(p, running.length + pending.length + i))}
-              </>
-            ) : null}
+            <>
+              <Text dimColor bold>
+                All subprocesses ({flatList.length}) · running {runningCount} · waiting {waitingCount}
+              </Text>
+              {flatList.map((p, i) => renderRow(p, i))}
+            </>
           </>
         )}
       </Box>

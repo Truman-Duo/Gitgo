@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from backend.core.knowledge.models import Lesson, severity_rank  # severity_rank 统一从 models 导入
 from backend.core.knowledge.manager import LessonManager
+from backend.core.knowledge.applicability import assess_lesson
 
 if TYPE_CHECKING:
     pass
@@ -134,8 +135,13 @@ def recall_grep(
     matches = [l for l in lessons
                if q in l.trigger.lower() or q in l.rule.lower()]
 
-    # 轻量排序
-    matches.sort(key=_sort_key)
+    applicability = {id(item): assess_lesson(item, ws) for item in matches}
+    # Current evidence sorts before stale retrieval candidates. Stale lessons
+    # remain discoverable, but their text and wire form must never masquerade
+    # as an active rule.
+    matches.sort(key=lambda item: (
+        applicability[id(item)].get("state") != "current", *_sort_key(item),
+    ))
     result = matches[:top_k]
 
     # 记录检索（热/温/冷）+ 持久化
@@ -145,17 +151,21 @@ def recall_grep(
     # 格式化输出
     lines = []
     for i, l in enumerate(result):
+        state = applicability[id(l)].get("state", "unknown")
         lines.append(
-            f"## Lesson {i+1} [{l.severity.upper()}] {l.rule[:80]}\n"
+            f"## Lesson {i+1} [{l.severity.upper()}] [{state.upper()}] {l.rule[:80]}\n"
             f"  trigger: {l.trigger}\n"
-            f"  verified: {l.verified_count}x"
+            + ("  caution: revalidate this lesson before acting on it\n"
+               if state != "current" else "")
+            + f"  verified: {l.verified_count}x"
             + (f" in {l.verified_in}" if l.verified_in else "") + "\n"
         )
     if len(matches) > top_k:
         lines.append(f"\n还有 {len(matches) - top_k} 条匹配。使用 top_k 参数增加返回数。")
 
     return {
-        "lessons": [l.to_dict() for l in result],
+        "lessons": [{**l.to_dict(), "applicability": applicability[id(l)]}
+                    for l in result],
         "total_matches": len(matches),
         "text": "\n".join(lines),
         "noise_signal": _compute_noise_signal(result),
@@ -210,20 +220,25 @@ def recall_semantic(
 
     scored.sort(key=lambda x: -x[1])
     result = [l for l, _ in scored[:top_k]]
+    applicability = {id(item): assess_lesson(item, ws) for item in result}
 
     for l in result:
         record_retrieval(l, workspace=str(ws), project=project)
 
     lines = []
     for i, (l, score) in enumerate(scored[:top_k]):
+        state = applicability[id(l)].get("state", "unknown")
         lines.append(
-            f"## Lesson {i+1} [{l.severity.upper()}] (相似度: {score:.2f}) {l.rule[:80]}\n"
+            f"## Lesson {i+1} [{l.severity.upper()}] [{state.upper()}] (相似度: {score:.2f}) {l.rule[:80]}\n"
             f"  trigger: {l.trigger}\n"
-            f"  verified: {l.verified_count}x\n"
+            + ("  caution: revalidate this lesson before acting on it\n"
+               if state != "current" else "")
+            + f"  verified: {l.verified_count}x\n"
         )
 
     return {
-        "lessons": [l.to_dict() for l in result],
+        "lessons": [{**l.to_dict(), "applicability": applicability[id(l)]}
+                    for l in result],
         "total_matches": len(scored),
         "text": "\n".join(lines),
         "noise_signal": None,

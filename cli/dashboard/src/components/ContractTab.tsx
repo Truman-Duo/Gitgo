@@ -6,12 +6,17 @@ import { colors } from "../theme/index.js";
 type Props = { contract: any; width: number };
 
 export const ContractTab = memo(function ContractTab({ contract, width }: Props) {
-  if (!contract || contract.error) {
+  if (!contract) {
     return <Text dimColor>Loading...</Text>;
   }
-  const features = contract.decided_features || [];
-  const constraints = contract.architecture_constraints || [];
-  const ts = contract.tech_stack?.join(", ") || "-";
+  if (contract.error) return <Text dimColor>{String(contract.error)}</Text>;
+  if (Object.prototype.hasOwnProperty.call(contract,"contract") && contract.contract === null) {
+    return <Text dimColor>No project contract has been created yet.</Text>;
+  }
+  const value=contract.contract||contract;
+  const features = value.decided_features || [];
+  const constraints = value.architecture_constraints || [];
+  const ts = value.tech_stack?.join(", ") || "-";
   return (
     <Box flexDirection="column">
       <Box>

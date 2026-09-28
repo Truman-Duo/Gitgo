@@ -49,9 +49,9 @@ v0.27 补全 Layer Mutation / Gate Extension / Semantic Reversibility / Event Ta
 | `formal_commits[].number` | `step_edit_formal_number()` | 直接赋值 |
 | `contract.tech_stack` | `ContractManager` | 直接读写 contract.yaml |
 | `contract.decided_features` | `ContractManager` | 直接读写 contract.yaml |
-| `*.jsonl` (lesson) | `LessonManager` | 直接读写文件 |
+| `state.sqlite3/lessons` + CAS | `LessonManager` | 直接打开 SQLite/写旧 JSONL |
 | `.gitgo/memories/` | `snapshot_tool_memories()` | 直接读写文件 |
-| `gitgo_history.json` | `HistoryManager.add_operation/add_entry` | 直接读写文件 |
+| `state.sqlite3/history_events` + CAS | `HistoryManager.add_operation/add_entry` | 直接打开 SQLite/写旧 JSON |
 
 违反 authority 的代码是 bug——即使测试通过，它造成了"同一个 state 被两个不协调的写入者修改"的语义风险。
 

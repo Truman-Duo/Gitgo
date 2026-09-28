@@ -20,7 +20,7 @@ export function isChatScene(scene: Scene): boolean {
   return scene === "workspace" || scene === "agent_detail";
 }
 
-export type OverlayType = "help" | "context" | "whichkey" | "dialogSelect" | "quitConfirm" | "createForm" | "configPanel" | "exportPanel" | "statusPanel" | "lessonsPanel" | "governancePanel" | "memoryPanel" | "trialPanel" | "formalPanel" | "runtimeMenu";
+export type OverlayType = "interruptConfirm" | "help" | "context" | "runtimeContext" | "whichkey" | "dialogSelect" | "quitConfirm" | "createForm" | "configPanel" | "binPanel" | "publishPanel" | "exportPanel" | "statsOverview" | "statsPanel" | "btwPanel" | "compactPanel" | "undoPanel" | "lessonsPanel" | "governancePanel" | "memoryPanel" | "trialPanel" | "formalPanel" | "runtimeToolsPanel" | "runtimeMenu";
 
 export type OverlayEntry = {
   type: OverlayType;
@@ -51,6 +51,9 @@ export type AppState = {
 
   // Chat state (Scene 2)
   chatInputFocused: boolean;
+  decisionSelection: number;
+  decisionComposing: boolean;
+  decisionSubmitting: boolean;
 };
 
 // ── App actions (reducer-driven state transitions) ─────────
@@ -69,6 +72,9 @@ export type AppAction =
   | { type: "enter_command" }
   | { type: "exit_command" }
   | { type: "set_chat_input_focused"; focused: boolean }
+  | { type: "set_decision_selection"; index: number }
+  | { type: "set_decision_composing"; composing: boolean }
+  | { type: "set_decision_submitting"; submitting: boolean }
   | { type: "set_status_bar_focused"; focused: boolean }
   | { type: "set_cmd_result"; text: string }
   | { type: "set_suggestion_idx"; index: number }
@@ -119,6 +125,12 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, mode: "NORMAL", suggestionIdx: 0 };
     case "set_chat_input_focused":
       return { ...state, chatInputFocused: action.focused, statusBarFocused: action.focused ? false : state.statusBarFocused };
+    case "set_decision_selection":
+      return { ...state, decisionSelection: Math.max(0, action.index) };
+    case "set_decision_composing":
+      return { ...state, decisionComposing: action.composing };
+    case "set_decision_submitting":
+      return { ...state, decisionSubmitting: action.submitting };
     case "set_status_bar_focused":
       return { ...state, statusBarFocused: action.focused, chatInputFocused: action.focused ? false : state.chatInputFocused };
     case "set_cmd_result":
@@ -224,5 +236,8 @@ export function initialAppState(): AppState {
     refreshKey: 0,
 
     chatInputFocused: false,
+    decisionSelection: 0,
+    decisionComposing: false,
+    decisionSubmitting: false,
   };
 }

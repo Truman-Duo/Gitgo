@@ -1,4 +1,4 @@
-import React, { type PropsWithChildren, type Ref, useImperativeHandle, useRef, useState } from 'react';
+import React, { type PropsWithChildren, type Ref, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import type { Except } from 'type-fest';
 import type { DOMElement } from '../core/dom.js';
 import { markDirty, scheduleRenderFrom } from '../core/dom.js';
@@ -93,6 +93,17 @@ function ScrollBox({ children, ref, stickyScroll, ...style }: PropsWithChildren<
   const listenersRef = useRef(new Set<() => void>());
   const renderQueuedRef = useRef(false);
 
+  // Treat stickiness as a lifecycle state, not a permanent DOM attribute.
+  // A live turn starts pinned; once it completes the viewport becomes stable.
+  // Manual scroll still wins because this effect only runs when the prop
+  // changes, not on every streaming render.
+  useLayoutEffect(() => {
+    const el = domRef.current;
+    if (!el) return;
+    el.stickyScroll = Boolean(stickyScroll);
+    if (!stickyScroll) el.pendingScrollDelta = undefined;
+  }, [stickyScroll]);
+
   const notify = () => {
     for (const l of listenersRef.current) l();
   };
@@ -124,6 +135,7 @@ function ScrollBox({ children, ref, stickyScroll, ...style }: PropsWithChildren<
         el.stickyScroll = false;
         el.pendingScrollDelta = undefined;
         el.scrollAnchor = undefined;
+        el.resizeScrollAnchor = undefined;
         el.scrollTop = Math.max(0, Math.floor(y));
         scrollMutated(el);
       },

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 class ContractDriftCheck(PolicyCheck):
     name = "contract_drift"
     description = "Compare changed files against contract.yaml"
+    applicable_task_kinds = frozenset({"action", "supervisor", "review"})
 
     def __init__(self, contract: Any = None):
         """contract 可选注入——loop 已加载时传入，避免重复读文件。"""

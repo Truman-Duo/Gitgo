@@ -24,7 +24,7 @@ from backend.core.loop.error_taxonomy import (
     classify_context_overflow, classify_tool_error, classify_business_failure,
 )
 from backend.core.loop.loop_guard import LoopGuard
-from backend.core.loop.agent_tool import AgentTool
+from backend.core.loop.agent_tool import AgentTool, ToolEffect
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -147,27 +147,104 @@ class TestTransactionRollback:
         r = ToolResult(is_error=False, diagnostics={})
         assert exc._is_crash_error(r) is False
 
-    def test_is_write_tool_recognizes_write_ops(self):
+    def test_schema_error_is_model_correctable_and_does_not_rollback(self, tmp_path_factory):
         from backend.core.loop.tool_execution import ToolExecution
 
+        called = False
+
+        def execute(_args):
+            nonlocal called
+            called = True
+            return {}
+
+        tool = AgentTool(
+            name="write_file", description="write",
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            execute=execute, read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
+        )
+        ctx = MagicMock()
+        ctx.workspace_path = str(tmp_path_factory)
+        ctx.session = None
+        ctx.is_cancelled.return_value = False
+        ctx.process.cancel_requested = False
+        ctx.artifacts = {"tool_catalog": {tool.name: tool}}
+        execution = ToolExecution(
+            execution_id="schema-error", ctx=ctx,
+            tool_calls=[{"name": tool.name, "args": {}}],
+        )
+        execution.begin()
+        results = execution.execute_batch({tool.name: tool})
+
+        assert called is False
+        assert execution._rolled_back is False
+        assert results[0].diagnostics == {
+            "nature": "business",
+            "code": "INVALID_TOOL_ARGUMENTS",
+            "source": "llm",
+        }
+
+    def test_write_detection_uses_effect_contract(self):
+        from backend.core.loop.tool_execution import ToolExecution
+
+        write_tool = AgentTool(
+            name="custom_mutation", description="write", parameters={"type": "object"},
+            execute=lambda args: {}, read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
+        )
+        read_tool = AgentTool(
+            name="misleading_write_name", description="read", parameters={"type": "object"},
+            execute=lambda args: {}, effect=ToolEffect.READ,
+        )
+        ctx = MagicMock()
+        ctx.artifacts = {"tool_catalog": {
+            write_tool.name: write_tool, read_tool.name: read_tool,
+        }}
         exc = ToolExecution(
             execution_id="test-4",
-            ctx=MagicMock(),
-            tool_calls=[],
+            ctx=ctx,
+            tool_calls=[
+                {"name": write_tool.name, "args": {"path": "real.txt"}},
+                {"name": read_tool.name, "args": {"path": "ignored.txt"}},
+            ],
         )
-        assert exc._is_write_tool("formalize") is True
-        assert exc._is_write_tool("write") is True
-        assert exc._is_write_tool("edit") is True
-        assert exc._is_write_tool("delete") is True
-        assert exc._is_write_tool("scan") is False
-        assert exc._is_write_tool("status") is False
+        assert exc._extract_write_targets() == ["real.txt"]
+
+    def test_external_reads_do_not_turn_audit_resources_into_mutexes(self):
+        from backend.core.loop.tool_execution import _resolve_tool_resources
+
+        search = AgentTool(
+            name="web_search", description="search", parameters={"type": "object"},
+            execute=lambda args: {}, read_only=True,
+            effect=ToolEffect.EXTERNAL_READ,
+            resources=["network:public-search"],
+        )
+        assert _resolve_tool_resources(search, {"query": "one"}) == set()
 
     def test_extract_write_targets_finds_paths(self):
         from backend.core.loop.tool_execution import ToolExecution
 
+        write_tool = AgentTool(
+            name="write", description="write", parameters={"type": "object"},
+            execute=lambda args: {}, read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
+        )
+        edit_tool = AgentTool(
+            name="edit", description="edit", parameters={"type": "object"},
+            execute=lambda args: {}, read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
+        )
+        scan_tool = AgentTool(
+            name="scan", description="scan", parameters={"type": "object"},
+            execute=lambda args: {}, effect=ToolEffect.READ,
+        )
+        ctx = MagicMock()
+        ctx.artifacts = {"tool_catalog": {
+            "write": write_tool, "edit": edit_tool, "scan": scan_tool,
+        }}
         exc = ToolExecution(
             execution_id="test-5",
-            ctx=MagicMock(),
+            ctx=ctx,
             tool_calls=[
                 {"name": "write", "args": {"file": "a.txt"}},
                 {"name": "edit", "args": {"path": "b.py"}},
@@ -189,6 +266,13 @@ class TestTransactionRollback:
         ctx = MagicMock()
         ctx.workspace_path = str(tmp_path_factory)
         ctx.session = None
+        ctx.artifacts = {"tool_catalog": {
+            "write": AgentTool(
+                name="write", description="write", parameters={"type": "object"},
+                execute=lambda args: {}, read_only=False,
+                effect=ToolEffect.WORKSPACE_WRITE,
+            ),
+        }}
 
         exc = ToolExecution(
             execution_id="test-snap",
@@ -272,7 +356,10 @@ class TestStormBreak:
         # Now call a different tool
         nudge = g.check_storm_break("edit", "PERMISSION_DENIED")
         # Should have cleared old (write, FILE_NOT_FOUND) entries
-        assert g._tool_error_counts.get(("write", "FILE_NOT_FOUND")) is None
+        assert not any(
+            key[:2] == ("write", "FILE_NOT_FOUND")
+            for key in g._tool_error_counts
+        )
 
     def test_empty_error_code_skips(self):
         g = LoopGuard()
@@ -280,18 +367,154 @@ class TestStormBreak:
         nudge = g.check_storm_break("write", "")
         assert nudge == ""
 
+    def test_capability_transition_resets_only_newly_authorized_tools(self):
+        g = LoopGuard()
+        for _ in range(3):
+            g.record_tool_error("write_file", "SELF_EXECUTION_LEASE_REQUIRED")
+            g.record_tool_error("web_fetch", "NETWORK_ERROR")
+
+        g.reset_tool_errors({"write_file"})
+
+        assert next(
+            count for key, count in g._tool_error_counts.items()
+            if key[:2] == ("web_fetch", "NETWORK_ERROR")
+        ) == 3
+        assert g.check_storm_break(
+            "write_file", "SELF_EXECUTION_LEASE_REQUIRED",
+        ) == ""
+
+    def test_committed_mutation_invalidates_stale_cross_tool_storm_evidence(self):
+        g = LoopGuard()
+        for _ in range(3):
+            g.record_tool_error("write_file", "FILE_EXISTS")
+
+        # A successful mutation changes the workspace state.  The next write
+        # must be evaluated against that new state rather than rejected using
+        # the old FILE_EXISTS observations.
+        g.record_tool_result(
+            "delete_file", {"path": "sample.txt"}, False,
+            effect="workspace_write",
+        )
+
+        assert g.check_storm_break("write_file", "FILE_EXISTS") == ""
+
+    def test_distinct_command_arguments_are_not_a_retry_storm(self):
+        g = LoopGuard()
+        failed_commands = [
+            {"argv": ["python", "-m", "unittest", "tests.test_one"]},
+            {"argv": ["python", "-m", "unittest", "tests.test_two"]},
+            {"argv": ["python", "-m", "unittest", "tests.test_three"]},
+        ]
+        for args in failed_commands:
+            g.record_tool_error("exec_command", "COMMAND_EXIT_NONZERO", args)
+
+        candidate = {
+            "argv": ["python", "-m", "unittest", "tests.test_four"],
+        }
+        assert g.check_storm_break(
+            "exec_command", "COMMAND_EXIT_NONZERO", candidate,
+        ) == ""
+
+    def test_identical_command_arguments_still_trigger_retry_storm(self):
+        g = LoopGuard()
+        args = {"argv": ["python", "-m", "unittest", "tests.test_one"]}
+        for _ in range(3):
+            g.record_tool_error("exec_command", "COMMAND_EXIT_NONZERO", args)
+
+        nudge = g.check_storm_break(
+            "exec_command", "COMMAND_EXIT_NONZERO", args,
+        )
+        assert "3" in nudge
+        assert "exec_command" in nudge
+
+
+class TestDoomLoopAccounting:
+    """Only consecutive failed tool results may trigger the doom-loop gate."""
+
+    def test_repeated_model_turns_are_not_tool_failures(self, tmp_path_factory):
+        from backend.core.loop.manager import AgentProcessManager
+        from backend.core.loop.tools import ToolRegistry
+        from backend.core.loop.models import RingLevel
+
+        process = AgentProcessManager(max_concurrency=1).fork(
+            parent_id=None,
+            role="worker",
+            tool_registry=ToolRegistry([]),
+            max_steps=5,
+            ring_level=RingLevel.RING_3,
+            workspace_path=str(tmp_path_factory),
+            task_id="plain-text-is-not-doom-loop",
+            actor_kind="worker",
+            task_kind="action",
+        )
+        process._step_history.extend([
+            {"tool_name": "llm_call", "args": "same final"},
+            {"tool_name": "llm_call", "args": "same final"},
+            {"tool_name": "llm_call", "args": "same final"},
+        ])
+        result = LoopGuard().check(process, "a distinct response", process.session)
+        assert result.reason_code != "doom_loop"
+
+    def test_three_consecutive_matching_tool_failures_trigger(self, tmp_path_factory):
+        from backend.core.loop.manager import AgentProcessManager
+        from backend.core.loop.tools import ToolRegistry
+        from backend.core.loop.models import RingLevel
+
+        process = AgentProcessManager(max_concurrency=1).fork(
+            parent_id=None,
+            role="worker",
+            tool_registry=ToolRegistry([]),
+            max_steps=5,
+            ring_level=RingLevel.RING_3,
+            workspace_path=str(tmp_path_factory),
+            task_id="real-doom-loop",
+            actor_kind="worker",
+            task_kind="action",
+        )
+        guard = LoopGuard()
+        for _ in range(3):
+            guard.record_tool_result("edit_file", {"path": "a.py"}, True)
+        result = guard.check(process, "still working", process.session)
+        assert result.blocked is True
+        assert result.reason_code == "doom_loop"
+
+    def test_success_breaks_consecutive_failure_run(self, tmp_path_factory):
+        from backend.core.loop.manager import AgentProcessManager
+        from backend.core.loop.tools import ToolRegistry
+        from backend.core.loop.models import RingLevel
+
+        process = AgentProcessManager(max_concurrency=1).fork(
+            parent_id=None,
+            role="worker",
+            tool_registry=ToolRegistry([]),
+            max_steps=5,
+            ring_level=RingLevel.RING_3,
+            workspace_path=str(tmp_path_factory),
+            task_id="broken-doom-loop",
+            actor_kind="worker",
+            task_kind="action",
+        )
+        guard = LoopGuard()
+        for _ in range(2):
+            guard.record_tool_result("edit_file", {"path": "a.py"}, True)
+        guard.record_tool_result("read_file", {"path": "a.py"}, False, effect="read")
+        guard.record_tool_result("edit_file", {"path": "a.py"}, True)
+        result = guard.check(process, "still working", process.session)
+        assert result.reason_code != "doom_loop"
+
 
 # ═══════════════════════════════════════════════════════════════
 # Session Persistence (P1.2)
 # ═══════════════════════════════════════════════════════════════
 
 class TestSessionPersistence:
-    """P1.2: SessionStore —— JSONL + atomic checkpoint。"""
+    """P1.2: SessionStore —— SQLite/CAS authoritative checkpoints。"""
 
-    def test_append_and_load_jsonl(self):
+    def test_append_event_and_load_from_sqlite(self):
         from backend.core.loop.manager import SessionStore
 
-        store = SessionStore(str(tempfile.mkdtemp()))
+        root = Path(tempfile.mkdtemp())
+        store = SessionStore(str(root), state_home=root / "state")
         store.append_event("pid-1", "message_append", {
             "message": {"role": "user", "content": "hello"},
         })
@@ -308,25 +531,27 @@ class TestSessionPersistence:
         from backend.core.loop.manager import SessionStore
         from backend.core.loop.session import AgentSession
 
-        store = SessionStore(str(tempfile.mkdtemp()))
+        root = Path(tempfile.mkdtemp())
+        store = SessionStore(str(root), state_home=root / "state")
         sess = AgentSession()
         sess.append_user("checkpoint hello")
         sess.append_assistant("checkpoint world")
 
         ck = store.save_checkpoint("pid-2", sess)
         assert ck is not None
-        assert Path(ck).exists()
+        assert ck.startswith("sqlite:session/")
 
         msgs = store.load_session("pid-2")
         assert msgs is not None
         assert len(msgs) == 2
         assert msgs[0]["content"] == "checkpoint hello"
 
-    def test_checkpoint_truncates_jsonl(self):
+    def test_checkpoint_supersedes_pre_checkpoint_events(self):
         from backend.core.loop.manager import SessionStore
         from backend.core.loop.session import AgentSession
 
-        store = SessionStore(str(tempfile.mkdtemp()))
+        root = Path(tempfile.mkdtemp())
+        store = SessionStore(str(root), state_home=root / "state")
 
         # Append several events
         for i in range(5):
@@ -334,7 +559,8 @@ class TestSessionPersistence:
                 "message": {"role": "user", "content": f"msg {i}"},
             })
 
-        # Save checkpoint — should truncate jsonl
+        # The checkpoint advances the durable event cursor. Earlier events stay
+        # auditable but are no longer replayed over the canonical snapshot.
         sess = AgentSession()
         sess.append_user("final")
         store.save_checkpoint("pid-3", sess)
@@ -342,12 +568,13 @@ class TestSessionPersistence:
         # Load — should get checkpoint data only (2 messages)
         msgs = store.load_session("pid-3")
         assert msgs is not None
-        assert len(msgs) == 1  # checkpoint overwrites jsonl
+        assert len(msgs) == 1
 
     def test_list_incomplete_finds_active_sessions(self):
         from backend.core.loop.manager import SessionStore
 
-        store = SessionStore(str(tempfile.mkdtemp()))
+        root = Path(tempfile.mkdtemp())
+        store = SessionStore(str(root), state_home=root / "state")
         store.append_event("incomplete-1", "step_start", {"step": 1})
         store.append_event("incomplete-2", "step_start", {"step": 1})
 
@@ -355,11 +582,27 @@ class TestSessionPersistence:
         assert "incomplete-1" in incomplete
         assert "incomplete-2" in incomplete
 
+    def test_list_incomplete_excludes_retained_terminal_sessions(self):
+        from backend.core.loop.manager import SessionStore
+        from backend.core.loop.session import AgentSession
+
+        root = Path(tempfile.mkdtemp())
+        store = SessionStore(str(root), state_home=root / "state")
+        session = AgentSession()
+        session.append_user("durable completed session")
+        store.save_checkpoint("completed-1", session)
+        store.append_event("completed-1", "agent_complete", {
+            "status": "completed", "steps_used": 2,
+        })
+
+        assert "completed-1" not in store.list_incomplete()
+
     def test_delete_session_cleans_up(self):
         from backend.core.loop.manager import SessionStore
         from backend.core.loop.session import AgentSession
 
-        store = SessionStore(str(tempfile.mkdtemp()))
+        root = Path(tempfile.mkdtemp())
+        store = SessionStore(str(root), state_home=root / "state")
         sess = AgentSession()
         sess.append_user("data")
         store.save_checkpoint("pid-del", sess)
@@ -371,7 +614,8 @@ class TestSessionPersistence:
     def test_should_checkpoint_triggers_at_limit(self):
         from backend.core.loop.manager import SessionStore
 
-        store = SessionStore(str(tempfile.mkdtemp()))
+        root = Path(tempfile.mkdtemp())
+        store = SessionStore(str(root), state_home=root / "state")
         # Append many events
         for i in range(store.MAX_JSONL_LINES + 10):
             store.append_event("pid-chk", "step", {"i": i})
@@ -394,7 +638,7 @@ class TestProcessToolRunner:
         })
         proc = sp.run(
             [sys.executable, "-m", "backend.core.tools.runner"],
-            input=input_data, capture_output=True, text=True, timeout=10,
+            input=input_data, capture_output=True, text=True, encoding="utf-8", timeout=10,
         )
         result = json.loads(proc.stdout)
         assert result["success"] is True
@@ -410,7 +654,7 @@ class TestProcessToolRunner:
         })
         proc = sp.run(
             [sys.executable, "-m", "backend.core.tools.runner"],
-            input=input_data, capture_output=True, text=True, timeout=10,
+            input=input_data, capture_output=True, text=True, encoding="utf-8", timeout=10,
         )
         result = json.loads(proc.stdout)
         assert result["success"] is False
@@ -524,3 +768,35 @@ class TestAgentToolIsolation:
         )
         assert tool.isolated is True
         assert tool.timeout == 30.0
+def test_tool_execution_missing_tool_returns_structured_result_not_name_error(tmp_path_factory):
+    """The runtime missing-tool branch must import ToolResult at execution time."""
+    from backend.core.loop.event_bus import EventBus
+    from backend.core.loop.execution_context import ExecutionContext
+    from backend.core.loop.models import RingLevel
+    from backend.core.loop.runtime import AgentRuntimeFactory, RuntimeSpec
+    from backend.core.loop.tool_execution import ToolExecution
+    from backend.core.loop.tools import ToolRegistry
+
+    process = AgentRuntimeFactory.create(RuntimeSpec(
+        role="worker", ring_level=RingLevel.RING_3,
+        tool_registry=ToolRegistry([]), max_steps=2,
+    ))
+    ctx = ExecutionContext(
+        process=process, session=process.session,
+        workspace_path=str(tmp_path_factory), event_bus=EventBus(),
+        cancellation=process.cancellation_event,
+    )
+    execution = ToolExecution(
+        execution_id="missing-tool-execution", ctx=ctx,
+        tool_calls=[{"name": "not_registered", "args": {}}],
+    )
+    results = execution.execute_batch({})
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].error == "TOOL_NOT_FOUND"
+    assert results[0].formatted
+    assert "available_tools" in results[0].formatted
+    assert results[0].diagnostics["code"] == "TOOL_NOT_FOUND"
+    assert results[0].diagnostics["execution_state"] == "not_started"
+    assert results[0].receipt["succeeded"] is False
+    assert results[0].receipt["error_code"] == "TOOL_NOT_FOUND"

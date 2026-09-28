@@ -25,6 +25,7 @@ export const NOTICES: Record<number, NoticeDef> = {
   2001: { code: 2001, kind: "toast", message: "No running agent to interrupt" },
   2002: { code: 2002, kind: "toast", message: "Interrupt failed: {reason}" },
   2003: { code: 2003, kind: "toast", message: "Interrupted agent {pid}" },
+  2004: { code: 2004, kind: "toast", message: "Agent is still running; wait or press Esc to interrupt" },
 
   // 3xxx — project selection
   3001: { code: 3001, kind: "toast", message: "No project selected" },

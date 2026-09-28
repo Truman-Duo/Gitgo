@@ -3,7 +3,8 @@
 // Keyboard handling is done by the parent via overlay system (no internal useInput).
 
 import React, { memo, useState, useMemo } from "react";
-import { Box, Text, useInput } from "@anthropic/ink";
+import { Box, Text } from "@anthropic/ink";
+import { useManagedInput as useInput } from "../input/runtime.js";
 import { useTextInput, applyTextOp } from "../hooks/useTextInput.js";
 import { resolveDialogSelectKey } from "../input/overlays/dialogSelect.js";
 import { colors, usePanelSize, separator, placeholderChar } from "../theme/index.js";

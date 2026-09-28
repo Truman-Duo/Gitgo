@@ -1,17 +1,27 @@
+"""Knowledge persistence through the project SQLite/CAS storage facade."""
+
+from __future__ import annotations
+
+import hashlib
 import json
-from dataclasses import asdict
+import threading
 from datetime import datetime
 from pathlib import Path
 
-from .models import Lesson
+from backend.core.storage import StorageRuntime, bind_storage, get_storage
 
-# 知识存储根目录
+from .models import Lesson, lesson_content_hash
+
+
 KNOWLEDGE_DIR = ".gitgo/knowledge"
 MEMORY_SOURCES = [".claude", ".codex", ".codebuddy"]
 
 
 class LessonManager:
-    """管理知识的读写和搜索。"""
+    """Manage pending, project and abstract lessons as one SQLite authority."""
+
+    _migration_locks: dict[str, threading.RLock] = {}
+    _migration_guard = threading.Lock()
 
     @staticmethod
     def _abstract_dir(workspace_path: Path) -> Path:
@@ -34,294 +44,305 @@ class LessonManager:
     def _pending_path(workspace_path: Path, project_name: str) -> Path:
         return LessonManager._instance_dir(workspace_path, project_name) / "pending.jsonl"
 
-    # ── 读取 ────────────────────────────────────────────
+    @classmethod
+    def bind_storage(
+        cls, workspace_path: Path, storage: StorageRuntime,
+    ) -> None:
+        bind_storage(workspace_path, storage)
+        cls._migrate_legacy(workspace_path, storage=storage)
 
-    @staticmethod
-    def load_abstract(workspace_path: Path, tech_stack: str = "") -> list[Lesson]:
-        """加载抽象层知识。tech_stack 为空时加载全部。"""
-        lessons = []
-        ad = LessonManager._abstract_dir(workspace_path)
-        if not ad.exists():
-            return lessons
-        for fp in sorted(ad.glob("*.jsonl")):
-            if tech_stack and fp.stem.replace("_", " ") != tech_stack.replace("/", "_").replace(" ", "_"):
-                continue
-            for line in fp.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    lessons.append(Lesson.from_dict(json.loads(line)))
-                except json.JSONDecodeError:
-                    continue
-        return lessons
+    @classmethod
+    def _runtime(
+        cls, workspace_path: Path, storage: StorageRuntime | None = None,
+    ) -> StorageRuntime:
+        return storage or get_storage(workspace_path)
 
-    @staticmethod
-    def load_instance(workspace_path: Path, project_name: str) -> list[Lesson]:
-        """加载实例层知识。"""
-        fp = LessonManager._instance_path(workspace_path, project_name)
-        if not fp.exists():
-            return []
-        lessons = []
-        for line in fp.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
+    @classmethod
+    def _lock_for(cls, workspace_path: Path) -> threading.RLock:
+        key = str(workspace_path.resolve()).casefold()
+        with cls._migration_guard:
+            return cls._migration_locks.setdefault(key, threading.RLock())
+
+    @classmethod
+    def _migrate_legacy(
+        cls, workspace_path: Path, *, storage: StorageRuntime | None = None,
+    ) -> None:
+        workspace_path = Path(workspace_path).resolve()
+        root = workspace_path / KNOWLEDGE_DIR
+        if not root.exists():
+            return
+        with cls._lock_for(workspace_path):
+            if not root.exists():
+                return
+            runtime = cls._runtime(workspace_path, storage)
+            sources: list[tuple[str, str, str, Path]] = []
+            abstract_dir = root / "abstract"
+            if abstract_dir.exists():
+                for path in sorted(abstract_dir.glob("*.jsonl")):
+                    sources.append(("abstract", "", path.stem, path))
+            instances_dir = root / "instances"
+            if instances_dir.exists():
+                for project_dir in sorted(
+                    item for item in instances_dir.iterdir() if item.is_dir()
+                ):
+                    sources.append((
+                        "instance", project_dir.name, "",
+                        project_dir / "lessons.jsonl",
+                    ))
+                    sources.append((
+                        "pending", project_dir.name, "",
+                        project_dir / "pending.jsonl",
+                    ))
             try:
-                lessons.append(Lesson.from_dict(json.loads(line)))
-            except json.JSONDecodeError:
-                continue
-        return lessons
+                for scope, project_name, tech_stack, path in sources:
+                    if not path.exists():
+                        continue
+                    for index, line in enumerate(
+                        path.read_text(encoding="utf-8").splitlines()
+                    ):
+                        if not line.strip():
+                            continue
+                        try:
+                            raw = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        lesson = Lesson.from_dict(raw)
+                        if scope == "abstract":
+                            lesson.abstract = True
+                            lesson.project_name = ""
+                            lesson.tech_stack = lesson.tech_stack or tech_stack
+                        else:
+                            lesson.abstract = False
+                            lesson.project_name = lesson.project_name or project_name
+                        if not lesson.created_at:
+                            lesson.created_at = datetime.now().isoformat()
+                        if not lesson.id:
+                            encoded = json.dumps(
+                                raw, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                            lesson.id = "legacy_lesson_" + hashlib.sha256(
+                                encoded + b"\0" + str(index).encode("ascii")
+                            ).hexdigest()[:24]
+                        runtime.upsert_lesson_record(
+                            lesson.to_dict(), scope=scope,
+                            content_hash=lesson_content_hash(
+                                lesson.trigger, lesson.rule,
+                            ),
+                        )
+                suffix = datetime.now().strftime("%Y%m%dT%H%M%S")
+                archived = root.with_name(f"knowledge.legacy-imported-{suffix}")
+                counter = 1
+                while archived.exists():
+                    archived = root.with_name(
+                        f"knowledge.legacy-imported-{suffix}-{counter}"
+                    )
+                    counter += 1
+                root.replace(archived)
+            except Exception:
+                raise
 
-    @staticmethod
-    def load_pending(workspace_path: Path, project_name: str) -> list[Lesson]:
-        """加载待确认的自动收割草稿。"""
-        fp = LessonManager._pending_path(workspace_path, project_name)
-        if not fp.exists():
-            return []
-        lessons = []
-        for line in fp.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                lessons.append(Lesson.from_dict(json.loads(line)))
-            except json.JSONDecodeError:
-                continue
-        return lessons
+    @classmethod
+    def _load(
+        cls, workspace_path: Path, *, scope: str,
+        project_name: str | None = None, tech_stack: str | None = None,
+    ) -> list[Lesson]:
+        cls._migrate_legacy(workspace_path)
+        return [
+            Lesson.from_dict(item)
+            for item in cls._runtime(workspace_path).load_lesson_records(
+                scope=scope, project_name=project_name, tech_stack=tech_stack,
+            )
+        ]
 
-    # ── 写入 ────────────────────────────────────────────
+    @classmethod
+    def load_abstract(
+        cls, workspace_path: Path, tech_stack: str = "",
+    ) -> list[Lesson]:
+        return cls._load(
+            workspace_path, scope="abstract",
+            tech_stack=tech_stack or None,
+        )
 
-    @staticmethod
-    def save(workspace_path: Path, lesson: Lesson) -> Path:
-        """保存一条知识。根据 abstract 标志决定写入位置。"""
-        if lesson.abstract:
-            fp = LessonManager._abstract_path(workspace_path, lesson.tech_stack)
-        else:
-            fp = LessonManager._instance_path(workspace_path, lesson.project_name)
-        fp.parent.mkdir(parents=True, exist_ok=True)
+    @classmethod
+    def load_instance(
+        cls, workspace_path: Path, project_name: str,
+    ) -> list[Lesson]:
+        return cls._load(
+            workspace_path, scope="instance", project_name=project_name,
+        )
 
+    @classmethod
+    def load_pending(
+        cls, workspace_path: Path, project_name: str,
+    ) -> list[Lesson]:
+        return cls._load(
+            workspace_path, scope="pending", project_name=project_name,
+        )
+
+    @classmethod
+    def save(cls, workspace_path: Path, lesson: Lesson) -> Path:
         if not lesson.id:
-            lesson.id = f"{lesson.tech_stack or 'general'}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            lesson.id = (
+                f"{lesson.tech_stack or 'general'}_"
+                f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+            )
         if not lesson.created_at:
             lesson.created_at = datetime.now().isoformat()
+        scope = "abstract" if lesson.abstract else "instance"
+        cls._migrate_legacy(workspace_path)
+        runtime = cls._runtime(workspace_path)
+        runtime.upsert_lesson_record(
+            lesson.to_dict(), scope=scope,
+            content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
+        )
+        return runtime.paths.state_db
 
-        with open(fp, "a", encoding="utf-8") as f:
-            f.write(json.dumps(lesson.to_dict(), ensure_ascii=False) + "\n")
-        return fp
-
-    @staticmethod
-    def save_pending(workspace_path: Path, lesson: Lesson) -> Path:
-        """保存自动收割草稿。去重：内容哈希 (trigger+rule) 精确去重。
-
-        允许相似模式重复存在（不做语义去重，为联想留数据）。
-        """
-        fp = LessonManager._pending_path(workspace_path, lesson.project_name)
-        fp.parent.mkdir(parents=True, exist_ok=True)
+    @classmethod
+    def save_pending(cls, workspace_path: Path, lesson: Lesson) -> Path:
         if not lesson.id:
-            from backend.core.knowledge.models import lesson_content_hash
             lesson.id = lesson_content_hash(lesson.trigger, lesson.rule)[:12]
         if not lesson.created_at:
             lesson.created_at = datetime.now().isoformat()
         lesson.source = "auto_harvested"
+        lesson.abstract = False
+        cls._migrate_legacy(workspace_path)
+        runtime = cls._runtime(workspace_path)
+        lesson.id = runtime.upsert_lesson_record(
+            lesson.to_dict(), scope="pending",
+            content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
+        )
+        return runtime.paths.state_db
 
-        # 去重：内容哈希精确匹配
-        from backend.core.knowledge.models import lesson_content_hash
-        new_hash = lesson_content_hash(lesson.trigger, lesson.rule)
-        if fp.exists():
-            for line in fp.read_text(encoding="utf-8").splitlines():
-                try:
-                    existing = json.loads(line.strip())
-                    existing_hash = lesson_content_hash(
-                        existing.get("trigger", ""),
-                        existing.get("rule", ""),
-                    )
-                    if new_hash == existing_hash:
-                        return fp  # 精确重复，跳过
-                except json.JSONDecodeError:
-                    continue
-
-        with open(fp, "a", encoding="utf-8") as f:
-            f.write(json.dumps(lesson.to_dict(), ensure_ascii=False) + "\n")
-        return fp
-
-    # ── 操作 ────────────────────────────────────────────
-
-    @staticmethod
-    def verify(workspace_path: Path, lesson_id: str, project_name: str = "") -> Lesson | None:
-        """确认一条知识（从 pending 转为正式，或增加 verified_count）。"""
-        # 先查 pending
-        if project_name:
-            pending = LessonManager.load_pending(workspace_path, project_name)
-            for i, p in enumerate(pending):
-                if p.id == lesson_id:
-                    pending.pop(i)
-                    # 重写 pending 文件
-                    pp = LessonManager._pending_path(workspace_path, project_name)
-                    pp.write_text("\n".join(
-                        json.dumps(l.to_dict(), ensure_ascii=False) for l in pending
-                    ) + ("\n" if pending else ""), encoding="utf-8")
-                    # 保存到正式
-                    p.verified_at = datetime.now().isoformat()
-                    p.verified_count = 1
-                    p.source = "auto_harvested"
-                    LessonManager.save(workspace_path, p)
-                    return p
-
-        # 再查实例层
-        if project_name:
-            lessons = LessonManager.load_instance(workspace_path, project_name)
-            for l in lessons:
-                if l.id == lesson_id:
-                    l.verified_count += 1
-                    l.verified_at = datetime.now().isoformat()
-                    l.verified_in = (l.verified_in or []) + [project_name]
-                    LessonManager.save(workspace_path, l)
-                    return l
-
-        # 查抽象层
-        abstract = LessonManager.load_abstract(workspace_path)
-        for l in abstract:
-            if l.id == lesson_id:
-                l.verified_count += 1
-                l.verified_at = datetime.now().isoformat()
-                l.verified_in = (l.verified_in or []) + [project_name]
-                LessonManager.save(workspace_path, l)
-                return l
-
+    @classmethod
+    def verify(
+        cls, workspace_path: Path, lesson_id: str, project_name: str = "",
+    ) -> Lesson | None:
+        cls._migrate_legacy(workspace_path)
+        runtime = cls._runtime(workspace_path)
+        found = runtime.get_lesson_record(lesson_id)
+        if found is None:
+            return None
+        scope, raw = found
+        lesson = Lesson.from_dict(raw)
+        if scope in {"pending", "instance"} and project_name:
+            if lesson.project_name != project_name:
+                return None
+        if scope == "pending":
+            lesson.verified_at = datetime.now().isoformat()
+            lesson.verified_count = 1
+            lesson.source = "auto_harvested"
+            runtime.upsert_lesson_record(
+                lesson.to_dict(), scope="instance",
+                content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
+            )
+            return lesson
+        if scope in {"instance", "abstract"}:
+            lesson.verified_count += 1
+            lesson.verified_at = datetime.now().isoformat()
+            lesson.verified_in = (lesson.verified_in or []) + [project_name]
+            runtime.upsert_lesson_record(
+                lesson.to_dict(), scope=scope,
+                content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
+            )
+            return lesson
         return None
 
-    @staticmethod
+    @classmethod
     def promote_to_abstract(
-        workspace_path: Path, lesson_id: str,
+        cls, workspace_path: Path, lesson_id: str,
         project_name: str, tech_stack: str,
     ) -> Lesson | None:
-        """将实例层知识提升为抽象层。"""
-        lessons = LessonManager.load_instance(workspace_path, project_name)
-        for l in lessons:
-            if l.id == lesson_id:
-                l.abstract = True
-                l.tech_stack = tech_stack
-                l.project_name = ""  # 抽象层不存项目名
-                LessonManager.save(workspace_path, l)
-                return l
-        return None
+        cls._migrate_legacy(workspace_path)
+        runtime = cls._runtime(workspace_path)
+        found = runtime.get_lesson_record(lesson_id)
+        if found is None or found[0] != "instance":
+            return None
+        lesson = Lesson.from_dict(found[1])
+        if lesson.project_name != project_name:
+            return None
+        lesson.abstract = True
+        lesson.tech_stack = tech_stack
+        lesson.project_name = ""
+        runtime.upsert_lesson_record(
+            lesson.to_dict(), scope="abstract",
+            content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
+        )
+        return lesson
 
-    @staticmethod
+    @classmethod
     def search(
-        workspace_path: Path,
-        query: str,
-        project_name: str = "",
-        tech_stack: str = "",
+        cls, workspace_path: Path, query: str,
+        project_name: str = "", tech_stack: str = "",
     ) -> list[Lesson]:
-        """在抽象层和实例层中搜索。"""
-        results = []
-        q = query.lower()
-        for l in LessonManager.load_abstract(workspace_path, tech_stack):
-            text = json.dumps(l.to_dict(), ensure_ascii=False).lower()
-            if q in text:
-                results.append(l)
+        results: list[Lesson] = []
+        seen: set[str] = set()
+        needle = query.lower()
+
+        def add_matches(lessons: list[Lesson]) -> None:
+            for lesson in lessons:
+                text = json.dumps(lesson.to_dict(), ensure_ascii=False).lower()
+                identity = lesson.id or text
+                if needle in text and identity not in seen:
+                    seen.add(identity)
+                    results.append(lesson)
+
+        add_matches(cls.load_abstract(workspace_path, tech_stack))
         if project_name:
-            for l in LessonManager.load_instance(workspace_path, project_name):
-                text = json.dumps(l.to_dict(), ensure_ascii=False).lower()
-                if q in text:
-                    results.append(l)
+            add_matches(cls.load_instance(workspace_path, project_name))
+            add_matches(cls.load_pending(workspace_path, project_name))
         return results
 
-    # ── v0.35: 回收与清理 ──────────────────────────────────
+    @classmethod
+    def discard_lesson(
+        cls, workspace_path: Path, lesson_id: str, project_name: str = "",
+    ) -> bool:
+        cls._migrate_legacy(workspace_path)
+        return cls._runtime(workspace_path).delete_lesson_record(
+            lesson_id,
+            project_name=project_name or None,
+            scopes=("pending", "instance"),
+        )
 
-    @staticmethod
-    def discard_lesson(workspace_path: Path, lesson_id: str,
-                       project_name: str = "") -> bool:
-        """删除一条 lesson（从 pending 或 instance 中移除）。"""
-        if project_name:
-            fp = LessonManager._pending_path(workspace_path, project_name)
-            if fp.exists():
-                lines = fp.read_text(encoding="utf-8").splitlines()
-                kept = [l for l in lines
-                        if json.loads(l.strip()).get("id") != lesson_id]
-                fp.write_text("\n".join(kept) + ("\n" if kept else ""),
-                              encoding="utf-8")
-                if len(kept) < len(lines):
-                    return True
-
-            fp = LessonManager._instance_path(workspace_path, project_name)
-            if fp.exists():
-                lines = fp.read_text(encoding="utf-8").splitlines()
-                kept = [l for l in lines
-                        if json.loads(l.strip()).get("id") != lesson_id]
-                fp.write_text("\n".join(kept) + ("\n" if kept else ""),
-                              encoding="utf-8")
-                return len(kept) < len(lines)
-        return False
-
-    @staticmethod
-    def revert_to_pending(workspace_path: Path, lesson_id: str,
-                          project_name: str) -> Lesson | None:
-        """将 auto_verify 的 lesson 从 instance 回退到 pending。
-
-        只有 origin="auto_verify" 的 lesson 可以 revert。
-        """
-        fp = LessonManager._instance_path(workspace_path, project_name)
-        if not fp.exists():
+    @classmethod
+    def revert_to_pending(
+        cls, workspace_path: Path, lesson_id: str, project_name: str,
+    ) -> Lesson | None:
+        cls._migrate_legacy(workspace_path)
+        runtime = cls._runtime(workspace_path)
+        found = runtime.get_lesson_record(lesson_id)
+        if found is None or found[0] != "instance":
             return None
-
-        lines = fp.read_text(encoding="utf-8").splitlines()
-        target = None
-        kept = []
-        for line in lines:
-            data = json.loads(line.strip())
-            if data.get("id") == lesson_id and data.get("origin") == "auto_verify":
-                target = Lesson.from_dict(data)
-            else:
-                kept.append(line)
-
-        if target is None:
+        lesson = Lesson.from_dict(found[1])
+        if lesson.project_name != project_name or lesson.origin != "auto_verify":
             return None
+        lesson.origin = "auto_verify_reverted"
+        runtime.upsert_lesson_record(
+            lesson.to_dict(), scope="pending",
+            content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
+        )
+        return lesson
 
-        fp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-        target.verified = False
-        target.origin = "auto_verify_reverted"
-        LessonManager.save_pending(workspace_path, target)
-        return target
-
-    @staticmethod
+    @classmethod
     def _save_with_retrieval_update(
-        workspace_path: Path, lesson: Lesson, project_name: str,
+        cls, workspace_path: Path, lesson: Lesson, project_name: str,
     ) -> None:
-        """内部：更新 instance 或 pending 文件中同 ID lesson 的检索日志。
+        cls._migrate_legacy(workspace_path)
+        runtime = cls._runtime(workspace_path)
+        found = runtime.get_lesson_record(lesson.id)
+        if found is None or found[0] not in {"instance", "pending"}:
+            return
+        current = Lesson.from_dict(found[1])
+        if current.project_name != project_name:
+            return
+        runtime.upsert_lesson_record(
+            lesson.to_dict(), scope=found[0],
+            content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
+        )
 
-        先查 instance，再查 pending。
-        """
-        for fp in [
-            LessonManager._instance_path(workspace_path, project_name),
-            LessonManager._pending_path(workspace_path, project_name),
-        ]:
-            if not fp.exists():
-                continue
-            lines = fp.read_text(encoding="utf-8").splitlines()
-            new_lines = []
-            found = False
-            for line in lines:
-                try:
-                    data = json.loads(line.strip())
-                except json.JSONDecodeError:
-                    new_lines.append(line)
-                    continue
-                if data.get("id") == lesson.id:
-                    new_lines.append(json.dumps(lesson.to_dict(), ensure_ascii=False))
-                    found = True
-                else:
-                    new_lines.append(line)
-            if found:
-                fp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-                return
-
-    @staticmethod
-    def pending_count(workspace_path: Path, project_name: str) -> int:
-        """返回 pending lesson 数量。"""
-        fp = LessonManager._pending_path(workspace_path, project_name)
-        if not fp.exists():
-            return 0
-        return sum(1 for _ in fp.read_text(encoding="utf-8").splitlines() if _.strip())
-
+    @classmethod
+    def pending_count(cls, workspace_path: Path, project_name: str) -> int:
+        cls._migrate_legacy(workspace_path)
+        return cls._runtime(workspace_path).lesson_count(
+            scope="pending", project_name=project_name,
+        )

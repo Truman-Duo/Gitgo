@@ -17,7 +17,18 @@ class LocalGitRunner(GitRunner):
     """
 
     def __init__(self, repo_path: str | Path):
-        self._repo = Path(repo_path).resolve()
+        # ``Path.resolve()`` calls the Windows filesystem even with
+        # ``strict=False``.  For an SMB/UNC repository that means merely
+        # constructing an adapter can block on DNS/network I/O or raise
+        # WinError 64 while the share is temporarily offline.  Adapter
+        # construction is also used by project-list/config projections, where
+        # it must remain side-effect free.  Git itself is the correct boundary
+        # at which reachability is tested.
+        raw_path = os.fspath(repo_path)
+        if os.name == "nt":
+            self._repo = Path(os.path.abspath(raw_path))
+        else:
+            self._repo = Path(raw_path).resolve()
 
     def _build_cmd(self, *args: str) -> list[str]:
         return ["git", "-C", str(self._repo), *args]

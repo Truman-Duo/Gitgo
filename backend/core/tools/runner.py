@@ -21,6 +21,7 @@ import os
 import sys
 import traceback
 from typing import Callable
+from backend.core.protocol_io import write_utf8_line
 
 
 # ── Tool Registry ──────────────────────────────────────────
@@ -73,7 +74,8 @@ def main() -> None:
     _auto_import_registrations()
 
     try:
-        raw = sys.stdin.read()
+        buffer = getattr(sys.stdin, "buffer", None)
+        raw = buffer.read().decode("utf-8") if buffer is not None else sys.stdin.read()
         request = json.loads(raw)
     except (json.JSONDecodeError, Exception) as exc:
         _emit_error(f"invalid stdin JSON: {exc}")
@@ -99,15 +101,13 @@ def main() -> None:
 
 
 def _emit_success(data: dict) -> None:
-    json.dump({"success": True, "data": data}, sys.stdout,
-              ensure_ascii=False, default=str)
-    sys.stdout.flush()
+    write_utf8_line(sys.stdout, json.dumps({"success": True, "data": data},
+                   ensure_ascii=False, default=str))
 
 
 def _emit_error(message: str) -> None:
-    json.dump({"success": False, "error": message}, sys.stdout,
-              ensure_ascii=False)
-    sys.stdout.flush()
+    write_utf8_line(sys.stdout, json.dumps({"success": False, "error": message},
+                   ensure_ascii=False))
 
 
 if __name__ == "__main__":

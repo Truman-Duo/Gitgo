@@ -17,6 +17,9 @@ import signal
 import sys
 import threading
 import time
+import uuid
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -42,7 +45,8 @@ from backend.core.daemon.dispatch import _handle_command
 
 from backend.core.policy import PolicyEngine, build_policy_message
 from backend.core.loop.manager import AgentProcessManager
-from backend.core.loop.agent_tool import AgentTool
+from backend.core.loop.agent_tool import AgentTool, ToolEffect, CancellationMode
+from backend.core.loop.test_manifest import run_registered_test
 from backend.core.loop.tool_wrappers import (
     contract_detect_drift,
     contract_get_impact,
@@ -58,6 +62,182 @@ from backend.core.loop.tool_wrappers import (
     memory_restore,
 )
 from backend.core.dispatch import ToolDispatcher
+from backend.core.tools.catalog import build_workspace_tools
+from backend.core.storage import StorageRuntime, assess_repository_scope
+
+
+def _is_traced_runtime_event(event: dict) -> bool:
+    """Recognize redacted Agent events without a per-event allowlist."""
+    return (
+        isinstance(event, dict)
+        and bool(event.get("event"))
+        and bool(event.get("trace_id"))
+        and isinstance(event.get("seq"), int)
+        and isinstance(event.get("schema_version"), int)
+    )
+
+
+def _background_llm_provider(daemon_ctx: dict):
+    """Return the provider shared by foreground and event-driven work.
+
+    A project daemon may observe a workspace change before its first chat turn,
+    or while a different Native Host instance owns the foreground request.
+    Requiring ``llm_configure``/task admission to have populated the in-memory
+    slot makes automatic knowledge harvest silently dependent on that ordering.
+    Resolve the encrypted active provider lazily at the safe event boundary and
+    cache only the runtime client; provider switches already retire idle daemons.
+    """
+    current = daemon_ctx.get("llm")
+    if current is not None:
+        return current
+    from backend.core.llm_config import LLMConfigManager
+    from backend.core.loop.llm import LLMProvider as RuntimeLLMProvider
+
+    configured = LLMConfigManager.get_active()
+    if configured is None:
+        return None
+    current = RuntimeLLMProvider(
+        configured.base_url,
+        configured.api_key,
+        configured.model_id,
+        protocol=configured.protocol,
+        capabilities=configured.runtime_capabilities(),
+    )
+    daemon_ctx["llm"] = current
+    return current
+
+
+def _publish_governance_snapshot(
+    session, project, daemon_ctx: dict, apm,
+    *, policy_results: dict | None = None,
+) -> dict:
+    """Refresh the one authoritative governance projection at a safe boundary."""
+    from backend.core.loop.context_builder import (
+        build_governance_context, build_policy_source_snapshot,
+    )
+    from backend.core.loop.governance_projection import GovernanceProjection
+
+    fresh = build_governance_context(
+        project.name,
+        str(session.workspace_path),
+        current_policy_results=policy_results,
+        source_snapshot=build_policy_source_snapshot(session),
+    )
+    signals = fresh["signals"]
+    daemon_ctx["governance_signals"] = signals
+    daemon_ctx["governance_context"] = fresh
+    if apm is not None:
+        for process in list(apm._processes.values()):
+            if process.status.value not in {
+                "running", "waiting", "awaiting_user", "recovering",
+                "resume_available",
+            } or process.session is None:
+                continue
+            GovernanceProjection.publish(
+                process,
+                signals,
+                base_brief=fresh["base_brief"],
+                candidates=fresh.get("evidence_candidates"),
+                evidence_sources=fresh.get("evidence_sources"),
+                lessons=fresh.get("lessons"),
+            )
+    return fresh
+
+
+def _start_background_harvest(
+    daemon_ctx: dict,
+    *,
+    event_queue,
+    provider,
+    workspace_path: str,
+    project_name: str,
+    signal_type: str,
+    thread_factory=threading.Thread,
+) -> bool:
+    """Lease and execute one harvest without blocking the daemon command loop.
+
+    SQLite owns the durable lease and retry state. The worker performs only the
+    slow provider call and persistence; it returns a small event so the daemon
+    main loop remains the sole owner of process/governance projection updates
+    and user-visible emissions.
+    """
+    if daemon_ctx.get("knowledge_harvest_inflight"):
+        return False
+
+    from backend.core.knowledge.harvest import (
+        complete_harvest, fail_harvest, harvest_llm_summary,
+        lease_harvest_signals, mark_harvest_triggered,
+    )
+
+    batch = lease_harvest_signals(project_name)
+    if not batch:
+        return False
+
+    harvest_id = "harvest_" + uuid.uuid4().hex
+    daemon_ctx["knowledge_harvest_inflight"] = harvest_id
+    mark_harvest_triggered(project_name)
+
+    def _worker() -> None:
+        signal_ids = [item["signal_id"] for item in batch]
+        event = {
+            "event": "knowledge_harvest_result",
+            "harvest_id": harvest_id,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "signal_type": signal_type,
+        }
+        try:
+            from backend.core.knowledge.lesson import LessonManager as _LM
+
+            lessons = harvest_llm_summary(
+                batch,
+                provider,
+                workspace_path,
+                project_name,
+                raise_on_error=True,
+            )
+            workspace = Path(workspace_path)
+            for lesson in lessons:
+                _LM.save_pending(workspace, lesson)
+            complete_harvest(
+                project_name,
+                signal_ids,
+                [lesson.id for lesson in lessons],
+            )
+            event.update({"status": "success", "count": len(lessons)})
+        except Exception as exc:
+            fail_harvest(project_name, signal_ids, str(exc))
+            event.update({
+                "status": "failed",
+                "reason": "harvest_failed",
+                "error": str(exc),
+                "retryable": True,
+            })
+        finally:
+            event_queue.put(event)
+
+    try:
+        worker = thread_factory(
+            target=_worker,
+            name=f"gitgo-harvest-{project_name}",
+            daemon=True,
+        )
+        worker.start()
+    except Exception as exc:
+        daemon_ctx.pop("knowledge_harvest_inflight", None)
+        signal_ids = [item["signal_id"] for item in batch]
+        fail_harvest(project_name, signal_ids, str(exc))
+        event_queue.put({
+            "event": "knowledge_harvest_result",
+            "harvest_id": harvest_id,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "signal_type": signal_type,
+            "status": "failed",
+            "reason": "worker_start_failed",
+            "error": str(exc),
+            "retryable": True,
+        })
+        return False
+    return True
 
 
 def run_daemon(
@@ -77,6 +257,53 @@ def run_daemon(
     atexit.register(lambda: _release_pid_file(project))
 
     session = SyncSession(project, cfg)
+
+    # Refuse catastrophic repository roots before any broad initial scan.  A
+    # non-git directory is only a warning during the staged migration, but a
+    # home/volume root is never an acceptable Agent workspace.
+    scope = assess_repository_scope(session.workspace_path)
+    if not scope.allowed:
+        _emit_v2({
+            "event": "repository_scope_blocked",
+            "severity": "error",
+            "workspace": str(scope.workspace),
+            "git_root": str(scope.git_root or ""),
+            "reasons": list(scope.reasons),
+        }, priority="immediate")
+        _release_pid_file(project)
+        return
+    if scope.severity == "warning":
+        _emit_v2({
+            "event": "repository_scope_warning",
+            "severity": "warning",
+            "workspace": str(scope.workspace),
+            "reason": ",".join(scope.reasons),
+        }, priority="immediate")
+
+    # Session/task/message/receipt state is authoritative in SQLite.  Do not
+    # fall back to JSONL when initialization or migration fails: that would
+    # recreate two competing sources of truth.
+    try:
+        storage_runtime = StorageRuntime(session.workspace_path)
+        from backend.core.loop.manager import SessionStore
+        session_store = SessionStore(
+            str(session.workspace_path), storage=storage_runtime,
+        )
+    except Exception as exc:
+        _emit_v2({
+            "event": "storage_health",
+            "storage": {
+                "level": "blocked",
+                "reasons": ["authoritative_session_storage_failed"],
+                "message": str(exc),
+            },
+        }, priority="immediate")
+        try:
+            storage_runtime.close()
+        except Exception:
+            pass
+        _release_pid_file(project)
+        return
 
     # Wire progress to JSON stream
     session.on_progress = lambda c, t, m: _emit({
@@ -99,23 +326,38 @@ def run_daemon(
     session.step_check_trial()
 
     from backend.core.history import HistoryManager
-    HistoryManager.set_workspace(str(session.workspace_path))
+    HistoryManager.set_workspace(
+        str(session.workspace_path), storage=storage_runtime,
+    )
+    from backend.core.knowledge.lesson import LessonManager
+    LessonManager.bind_storage(
+        Path(session.workspace_path), storage_runtime,
+    )
 
-    # Agent process manager — forks externally via MCP/stdin, reaped here
-    apm = AgentProcessManager()
-
-    # v0.45: Session persistence — JSONL + atomic checkpoint
-    from backend.core.loop.manager import SessionStore
-    session_store = SessionStore(str(session.workspace_path))
-
-    # v0.45: Startup recovery — scan for incomplete sessions
-    _incomplete = _scan_incomplete_sessions(session_store, apm)
-    if _incomplete:
-        _emit({
-            "event": "sessions_recovered",
-            "count": len(_incomplete),
-            "process_ids": _incomplete,
-        })
+    # Agent process manager. Git repositories receive a host-owned worktree
+    # controller rooted in the external project state directory; non-Git
+    # workspaces keep the existing bounded shared-workspace mode.
+    worktree_manager = None
+    try:
+        from backend.core.loop.worktree import AgentWorktreeManager
+        if scope.git_root is not None:
+            worktree_manager = AgentWorktreeManager(
+                session.workspace_path, storage_runtime,
+            )
+    except Exception as exc:
+        _emit_v2({
+            "event": "worktree_unavailable",
+            "severity": "warning",
+            "reason": str(exc),
+        }, priority="immediate")
+    from backend.core.application.process_presentation import ProcessPresentation
+    apm = AgentProcessManager(worktree_manager=worktree_manager,
+                              presentation=ProcessPresentation(storage_runtime))
+    # Runtime services share the same authoritative project storage.  Binding
+    # it once on the manager keeps tool spill, checkpoints and DAG state on one
+    # path without reopening SQLite from isolated helper code.
+    apm.storage = storage_runtime
+    apm.session_store = session_store
 
     # Context bundle for executors + _handle_command — populated incrementally.
     # executors only need apm/hash_cache at bind time; dispatcher/evq added later.
@@ -123,7 +365,12 @@ def run_daemon(
         "apm": apm,
         "hash_cache": hash_cache,
         "llm": None,  # set via config or stdin command
-        "session_store": session_store,  # v0.45: session persistence
+        "session_store": session_store,
+        "storage": storage_runtime,
+        "recovery_available": [],
+        "recovery_candidates": [],
+        "btw_tasks": {},
+        "btw_tasks_lock": threading.RLock(),
     }
 
     # v0.38: AgentTool 定义 —— 替代裸 dict[str, Callable]
@@ -152,6 +399,10 @@ def run_daemon(
             execute=partial(_exec_formalize, daemon_ctx, session, project),
             read_only=False,
             resources=["filesystem:*"],
+            effect=ToolEffect.WORKSPACE_WRITE,
+            isolated=True,
+            cancellation=CancellationMode.ISOLATED_PROCESS,
+            runner_name="formalize",
         ),
         "recall_grep": AgentTool(
             name="recall_grep",
@@ -210,7 +461,90 @@ def run_daemon(
             execute=partial(_exec_decompose_task, daemon_ctx, session, project),
             read_only=True,
         ),
+        "run_test": AgentTool(
+            name="run_test",
+            description=(
+                "Run one registered pytest file/node under deterministic seeds and "
+                "atomically update .gitgo/test_manifest.json."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "test_id": {"type": "string"},
+                    "target": {"type": "string"},
+                    "seeds": {"type": "array", "items": {"type": "integer"}},
+                    "timeout": {"type": "integer"},
+                },
+                "required": ["test_id", "target"],
+            },
+            execute=partial(run_registered_test, session.workspace_path),
+            read_only=False,
+            effect=ToolEffect.PROCESS,
+            cancellation=CancellationMode.ISOLATED_PROCESS,
+            resources=["process:pytest", "filesystem:.gitgo/test_manifest.json"],
+            timeout=900,
+        ),
     })
+
+    # Bind the canonical development tool set to this daemon workspace.  These
+    # names are additive; legacy daemon/governance tools keep their contracts.
+    tool_executors.update(build_workspace_tools(session.workspace_path))
+
+    def _bind_private_workspace(tool: AgentTool) -> None:
+        previous = tool.prepare_args
+
+        def prepare(args: dict) -> dict:
+            prepared = previous(args) if previous else dict(args or {})
+            prepared = dict(prepared)
+            prepared["_workspace"] = str(session.workspace_path)
+            properties = tool.parameters.get("properties", {})
+            if "workspace_path" in properties:
+                prepared["workspace_path"] = str(session.workspace_path)
+            if "project_name" in properties:
+                # Project identity is host-owned runtime context.  Leaving an
+                # optional model argument blank silently redirected knowledge
+                # tools away from the active project's instance/pending store.
+                prepared["project_name"] = project.name
+            return prepared
+
+        tool.prepare_args = prepare
+
+    isolated_existing = {
+        "contract_detect_drift", "contract_get_impact",
+        "contract_get_changed_symbols", "lesson_search", "lesson_discard",
+        "lesson_verify", "lesson_harvest", "lesson_promote", "lesson_list",
+        "privacy_scan", "memory_snapshot", "memory_restore", "run_test",
+    }
+    for name in isolated_existing:
+        tool = tool_executors.get(name)
+        if tool is None:
+            continue
+        tool.isolated = True
+        tool.runner_name = name
+        tool.cancellation = CancellationMode.ISOLATED_PROCESS
+        _bind_private_workspace(tool)
+
+    # Formalize is stateful, so the child receives a serializable configuration
+    # and the daemon refreshes its in-memory view from the child's atomic state.
+    from backend.core.config import _serialize_config
+    formalize_tool = tool_executors["formalize"]
+
+    def _prepare_formalize(args: dict) -> dict:
+        prepared = dict(args or {})
+        prepared["_workspace"] = str(session.workspace_path)
+        prepared["_project_name"] = project.name
+        prepared["_config"] = _serialize_config(cfg)
+        return prepared
+
+    def _refresh_formalize(result: dict) -> dict:
+        restored = SyncSession.load_session(project, cfg)
+        if restored is not None:
+            session.formal_commits = restored.formal_commits
+            session.stage = restored.stage
+        return result
+
+    formalize_tool.prepare_args = _prepare_formalize
+    formalize_tool.finalize_result = _refresh_formalize
 
     # ── v0.45: 差异化后端工具 ──
     tool_executors.update({
@@ -404,6 +738,17 @@ def run_daemon(
         ),
     })
 
+    # The governance definitions above replace earlier dictionary entries, so
+    # apply the isolated execution contract after the complete registry exists.
+    for name in isolated_existing:
+        tool = tool_executors.get(name)
+        if tool is None:
+            continue
+        tool.isolated = True
+        tool.runner_name = name
+        tool.cancellation = CancellationMode.ISOLATED_PROCESS
+        _bind_private_workspace(tool)
+
     from backend.core.loop.gate import RingGate
     from backend.adapters.local_git_runner import LocalGitRunner
     _git_runner = LocalGitRunner(session.workspace_path)
@@ -418,15 +763,57 @@ def run_daemon(
     daemon_ctx["dispatcher"] = dispatcher
     daemon_ctx["evq"] = evq
 
-    _emit({
+    storage_runtime.set_health_listener(lambda event: evq.put(event))
+
+    # Rebuild durable process trees only after the canonical tool catalog and
+    # event queue exist. Recovery restores no self-execution lease and starts no
+    # model/tool work; every candidate waits for an explicit user action.
+    try:
+        from backend.core.loop.recovery import restore_incomplete_processes
+        recovery_candidates = restore_incomplete_processes(
+            session_store, apm, session.workspace_path,
+        )
+    except Exception as exc:
+        _emit_v2({
+            "event": "session_recovery_failed",
+            "severity": "error",
+            "error": str(exc),
+        }, priority="immediate")
+        storage_runtime.close()
+        _release_pid_file(project)
+        return
+    daemon_ctx["recovery_candidates"] = recovery_candidates
+    daemon_ctx["recovery_available"] = [
+        item["process_id"] for item in recovery_candidates
+    ]
+    if recovery_candidates:
+        _emit_v2({
+            "event": "sessions_recovery_available",
+            "count": len(recovery_candidates),
+            "process_ids": list(daemon_ctx["recovery_available"]),
+            "sessions": recovery_candidates,
+        }, priority="immediate")
+
+    # Startup is a protocol barrier: clients cannot send work until they see it.
+    # A normal-priority event may remain in the micro-batch forever while the
+    # daemon is idle, causing the client to time out and only observe this event
+    # during shutdown when the buffer is finally flushed.
+    _emit_v2({
         "event": "daemon_started",
         "project": project.name,
         "pid": os.getpid(),
         "status": session.status_dict(semantic=True),
-    })
+    }, priority="immediate")
 
     # Background threads
-    exclude = list(project.force_exclude) if project.force_exclude else []
+    # The watcher and the scanner must share one exclusion policy.  Using only
+    # project.force_exclude here omitted host-private paths such as .gitgo/;
+    # every checkpoint/tool receipt then dirtied the workspace and recursively
+    # triggered a full scan on the daemon's command loop.
+    from backend.core.operations import get_exclude_patterns
+    exclude = get_exclude_patterns(
+        project, Path(session.workspace_path), file_adapter=session.ws_adapter,
+    )
     watcher = WorkspaceWatcher(
         workspace_path=session.workspace_path,
         exclude_patterns=exclude,
@@ -506,7 +893,11 @@ def run_daemon(
                 if now - last_check < debounce_sec:
                     continue
                 run_daemon._last_policy_check = now
-                _emit({"event": "workspace_dirty", "project": project.name})
+                _emit({
+                    "event": "workspace_dirty",
+                    "project": project.name,
+                    "changed_files": list(ev.get("changed_files", []) or []),
+                })
                 _emit({"event": "operation_started", "op": "scan"})
                 # 文件变更 → drift_cache 失效（内存 + 持久化）
                 if "drift_cache" in daemon_ctx:
@@ -534,7 +925,7 @@ def run_daemon(
                     from backend.core.fact import derive_facts
                     derive_facts(project.name)
 
-                    engine = PolicyEngine()
+                    engine = PolicyEngine(changed_files=list(changed or []))
                     results = engine.run(session, project)
                     gov_warnings = sum(len(v) for v in results.values())
 
@@ -570,65 +961,13 @@ def run_daemon(
                               priority="immediate")
 
                     # ── Signal Normalization (四源) + Drift Cache ──
-                    from backend.core.loop.signal_normalizer import SignalNormalizer
-                    from backend.core.knowledge.lesson import LessonManager
-
-                    normalizer = SignalNormalizer()
                     ws_path = str(session.workspace_path)
-                    lessons = (
-                        LessonManager.load_instance(ws_path, project.name)
-                        + LessonManager.load_pending(ws_path, project.name)
-                    )
-                    project_entries = [
-                        e for e in HistoryManager.load()
-                        if e.project_name == project.name
-                    ]
-                    rejections = [
-                        e for e in project_entries if e.operation == "rejection"
-                    ][-10:]
-                    new_facts = [
-                        e for e in project_entries if e.operation == "fact_derived"
-                    ][-10:]
-                    signals = normalizer.normalize(
+                    daemon_ctx["last_policy_results"] = results
+                    fresh_governance = _publish_governance_snapshot(
+                        session, project, daemon_ctx, apm,
                         policy_results=results,
-                        lessons=lessons,
-                        rejections=rejections,
-                        facts=[],  # Fact objects parsed from entries below
                     )
-                    daemon_ctx["governance_signals"] = signals
-
-                    # v0.43: G1 —— 注入增量治理信号到正在运行的 B 进程
-                    if signals and apm is not None:
-                        for pid, running_proc in apm._processes.items():
-                            if running_proc.status.value != "running":
-                                continue
-                            if running_proc.session is None:
-                                continue
-                            # 获取该 B fork 时的旧 signals
-                            old_ctx = running_proc.context_snapshot or {}
-                            old_signals = old_ctx.get("signals", [])
-                            old_ids = {getattr(s, 'signal_id', '') for s in old_signals}
-                            # 找出 B 尚未见过的增量信号
-                            new_for_b = [s for s in signals
-                                         if s.signal_id not in old_ids]
-                            if new_for_b:
-                                # 注入为隐用户输入（B 无法区分来自用户还是系统）
-                                brief_parts = []
-                                for s in new_for_b[:5]:  # 最多 5 条，避免上下文污染
-                                    if s.severity.value in ("critical", "high"):
-                                        brief_parts.append(
-                                            f"[{s.severity.value.upper()}] {s.suggestion or s.rule}"
-                                        )
-                                if brief_parts:
-                                    running_proc.session.append_user(
-                                        "[治理更新] 你最近的操作触发了新的治理信号。"
-                                        "请检查并修正：\n" + "\n".join(brief_parts),
-                                        message_type="governance_nudge",
-                                        referenced_files=[
-                                            f for s in new_for_b[:5]
-                                            for f in (s.target_files or [])
-                                        ],
-                                    )
+                    signals = fresh_governance["signals"]
 
                     # Drift cache: PolicyEngine 产出 → Gate 可直接复用
                     # 写入 HistoryManager 使 Gate 可通过历史记录读取（系统维护，非 LLM 维护）
@@ -659,51 +998,65 @@ def run_daemon(
                     # ── v0.35: Harvest 信号捕获 ──
                     from backend.core.knowledge.harvest import (
                         capture_signal, should_trigger_harvest,
-                        mark_harvest_triggered, harvest_llm_summary,
                     )
-                    from backend.core.knowledge.lesson import LessonManager as _LM
 
                     # 捕获 lesson trigger 信号
-                    for lt in results.get("lesson_triggers", []):
+                    for index, lt in enumerate(results.get("lesson_triggers", [])):
                         capture_signal("lesson_trigger", {
                             "trigger": lt.get("file", ""),
                             "rule": lt.get("rule", ""),
                             "severity": lt.get("severity", "medium"),
                             "detail": lt,
-                        }, project.name)
+                        }, project.name, source_event_id=(
+                            f"{session._correlation_id}:lesson_trigger:{index}:"
+                            f"{lt.get('file', '')}:{lt.get('rule', '')}"
+                        ))
 
                     # 捕获 contract drift 信号
-                    for drift in results.get("contract_drift", []):
+                    for index, drift in enumerate(results.get("contract_drift", [])):
                         capture_signal("contract_drift", {
                             "trigger": drift.get("file", ""),
                             "rule": drift.get("rule", "contract drift"),
                             "detail": drift,
-                        }, project.name)
+                        }, project.name, source_event_id=(
+                            f"{session._correlation_id}:contract_drift:{index}:"
+                            f"{drift.get('file', '')}:{drift.get('rule', '')}"
+                        ))
 
-                    # 检查是否触发 LLM 总结
+                    # 检查是否触发 LLM 总结。Provider resolution belongs to
+                    # this event-driven boundary; it must not depend on whether
+                    # a foreground task happened to populate daemon_ctx first.
                     for sig_type in ("lesson_trigger", "contract_drift"):
                         if should_trigger_harvest(sig_type, project.name):
-                            mark_harvest_triggered(sig_type)
-                            signals_batch = get_unprocessed_signals(
-                                project.name, sig_type,
+                            try:
+                                harvest_provider = _background_llm_provider(daemon_ctx)
+                            except Exception as exc:
+                                _emit({
+                                    "event": "lesson_harvest_failed",
+                                    "time": datetime.now(timezone.utc).isoformat(),
+                                    "reason": "provider_unavailable",
+                                    "error": str(exc),
+                                    "retryable": True,
+                                })
+                                break
+                            if harvest_provider is None:
+                                _emit({
+                                    "event": "lesson_harvest_failed",
+                                    "time": datetime.now(timezone.utc).isoformat(),
+                                    "reason": "provider_not_configured",
+                                    "error": "Configure and test an active Provider.",
+                                    "retryable": True,
+                                })
+                                break
+                            _start_background_harvest(
+                                daemon_ctx,
+                                event_queue=evq,
+                                provider=harvest_provider,
+                                workspace_path=ws_path,
+                                project_name=project.name,
+                                signal_type=sig_type,
                             )
-                            if signals_batch and daemon_ctx.get("llm"):
-                                try:
-                                    new_lessons = harvest_llm_summary(
-                                        signals_batch, daemon_ctx["llm"],
-                                        str(session.workspace_path), project.name,
-                                    )
-                                    ws = Path(session.workspace_path)
-                                    for lesson in new_lessons:
-                                        _LM.save_pending(ws, lesson)
-                                    if new_lessons:
-                                        _emit({
-                                            "event": "lessons_harvested",
-                                            "count": len(new_lessons),
-                                            "signal_type": sig_type,
-                                        })
-                                except Exception:
-                                    pass
+                            break
 
                     _emit({
                         "event": "operation_complete", "op": "scan",
@@ -714,6 +1067,30 @@ def run_daemon(
                 except Exception as exc:
                     _emit({"event": "operation_complete", "op": "scan",
                            "status": "failed", "error": str(exc)})
+
+            elif event_type == "knowledge_harvest_result":
+                if daemon_ctx.get("knowledge_harvest_inflight") == ev.get("harvest_id"):
+                    daemon_ctx.pop("knowledge_harvest_inflight", None)
+                if ev.get("status") == "success":
+                    _publish_governance_snapshot(
+                        session, project, daemon_ctx, apm,
+                        policy_results=daemon_ctx.get("last_policy_results"),
+                    )
+                    _emit({
+                        "event": "lessons_harvested",
+                        "harvest_id": ev.get("harvest_id"),
+                        "time": ev.get("time"),
+                        "count": int(ev.get("count", 0)),
+                        "signal_type": ev.get("signal_type", ""),
+                    })
+                else:
+                    _emit({
+                        "event": "lesson_harvest_failed",
+                        "time": ev.get("time"),
+                        "reason": ev.get("reason", "harvest_failed"),
+                        "error": ev.get("error", "Knowledge harvest failed."),
+                        "retryable": bool(ev.get("retryable", True)),
+                    })
 
             elif event_type == "trial_check":
                 _emit({"event": "operation_started", "op": "trial_check"})
@@ -738,24 +1115,42 @@ def run_daemon(
                 _emit(ev)
 
             # ── v0.44: 流式事件 + agent_complete 修复 ──
-            elif event_type in ("text_delta", "toolcall_start",
-                                "toolcall_delta", "tool_progress",
-                                "stream_recovery"):
+            elif event_type in ("text_delta", "reasoning_delta", "progress_summary",
+                                "toolcall_start", "toolcall_delta",
+                                "toolcall_done", "tool_progress",
+                                "stream_recovery", "agent_started",
+                                "agent_terminal", "decision_required",
+                                "tool_result", "provider_request_started",
+                                "provider_response_completed",
+                                "provider_response_incomplete", "provider_usage",
+                                "governance_snapshot", "context_window_action",
+                                "context_compaction_completed", "completion_gate",
+                                "task_bundle_delegated", "storage_health",
+                                "repository_scope_warning",
+                                "session_recovery_resumed",
+                                "session_recovery_discarded",
+                                "session_recovery_blocked",
+                                "coordination_event",
+                                "coordination_event_resolved",
+                                "coordination_observation_failed"):
                 _emit_v2(ev)  # priority="normal" — 微批
             elif event_type == "agent_complete":
                 _emit_v2(ev, priority="immediate")  # 修复：之前无分支→静默丢弃
-                # v0.45: cleanup session files on normal completion
-                result = ev.get("result", {})
-                if result.get("status") == "completed":
-                    pid = ev.get("process_id", "")
-                    if pid and session_store:
-                        session_store.delete_session(pid)
+                # Session is durable across tasks (4A). Process checkpoints are
+                # retained until an explicit retention policy reaps them.
 
             elif event_type == "shutdown":
                 _handle_shutdown()
 
             elif event_type == "error":
                 _emit(ev)
+
+            # TraceJournal is the trust boundary for Agent runtime events: it
+            # redacts credentials and adds a monotonic envelope.  Forward that
+            # envelope generically so new semantic events cannot disappear
+            # merely because a second daemon allowlist was not updated.
+            elif _is_traced_runtime_event(ev):
+                _emit_v2(ev)
 
             # v0.44: 每轮末尾 flush 微批 buffer，防止空闲时事件滞留
             _flush_emit_buffer()
@@ -764,8 +1159,71 @@ def run_daemon(
         watcher.stop()
         poller.stop()
         reader.stop()
+        # BTW sidecars are intentionally outside the durable A/B process DAG,
+        # but they still own cancellable provider/tool work. Quiesce them before
+        # storage and process resources close.
+        btw_lock = daemon_ctx.get("btw_tasks_lock")
+        with btw_lock if btw_lock is not None else nullcontext():
+            btw_entries = list(daemon_ctx.get("btw_tasks", {}).values())
+        for entry in btw_entries:
+            entry.get("cancel_event", threading.Event()).set()
+            sidecar_process = entry.get("process")
+            if sidecar_process is not None:
+                sidecar_process.cancel_requested = True
+                sidecar_process.cancellation_reason = "daemon_shutdown"
+        # Quiesce real task threads while authoritative storage is still open.
+        # Recovery-only candidates have no thread and remain durable for the
+        # next explicit resume/discard decision; they must not be auto-run or
+        # silently converted to cancellation during an ordinary daemon stop.
+        live_thread_ids = [
+            process_id for process_id, thread in apm._threads.items()
+            if thread.is_alive()
+        ]
+        live_roots = []
+        for process_id in live_thread_ids:
+            process = apm.get(process_id)
+            if process is None:
+                continue
+            root = process
+            while root.parent_id and apm.get(root.parent_id) is not None:
+                root = apm.get(root.parent_id)
+            if root.process_id not in live_roots:
+                live_roots.append(root.process_id)
+        for process_id in live_roots:
+            apm.kill(process_id, reason="daemon_shutdown")
+        shutdown_deadline = time.monotonic() + max(
+            1.0, min(float(os.getenv("GITGO_DAEMON_SHUTDOWN_GRACE_SECONDS", "15")), 60.0)
+        )
+        for entry in btw_entries:
+            thread = entry.get("thread")
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=max(0.0, shutdown_deadline - time.monotonic()))
+        for process_id in live_thread_ids:
+            thread = apm._threads.get(process_id)
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=max(0.0, shutdown_deadline - time.monotonic()))
+        storage_writers_alive = [
+            process_id for process_id in live_thread_ids
+            if (thread := apm._threads.get(process_id)) is not None and thread.is_alive()
+        ]
+        if storage_writers_alive:
+            _emit_v2({
+                "event": "storage_health",
+                "storage": {
+                    "level": "warning",
+                    "reasons": ["daemon_shutdown_grace_exhausted"],
+                    "message": (
+                        "Task threads did not quiesce before shutdown; the OS will "
+                        "close SQLite handles at process exit to avoid a close/write race."
+                    ),
+                    "process_ids": storage_writers_alive,
+                },
+            }, priority="immediate")
         hash_cache.flush()
+        if storage_runtime is not None and not storage_writers_alive:
+            storage_runtime.close()
         _release_pid_file(project)
         # v0.45: cleanup temp resources on shutdown
-        _cleanup_resources(str(session.workspace_path))
+        if not storage_writers_alive:
+            _cleanup_resources(str(session.workspace_path))
         _emit({"event": "daemon_stopped", "project": project.name})

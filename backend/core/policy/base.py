@@ -16,6 +16,15 @@ class PolicyCheck(ABC):
 
     name: str = ""
     description: str = ""
+    # ``None`` means the check is universally applicable.  Workspace-mutation
+    # checks opt into the task kinds for which their evidence is relevant, so
+    # a conversational answer cannot synchronously trigger an action audit.
+    applicable_task_kinds: frozenset[str] | None = None
+
+    def applies_to(self, task_kind: str) -> bool:
+        if not task_kind or self.applicable_task_kinds is None:
+            return True
+        return task_kind in self.applicable_task_kinds
 
     @abstractmethod
     def check(self, session: "SyncSession",

@@ -1,5 +1,10 @@
-"""CLI 入口: python -m gitgo [--mode gui|cui|config|list|sync|daemon|status|history]
-   PyInstaller 打包入口。headless 模式下不加载 Qt/Rich。"""
+"""Compatibility CLI for Gitgo's project-management commands.
+
+The released terminal dashboard is built from ``cli/dashboard`` and launched
+through the native launcher in ``packaging``.  The retired Qt and Rich user
+interfaces live under ``legacy/source/qt-git-manager`` and are intentionally
+not importable from this entry point.
+"""
 from __future__ import annotations
 
 import argparse
@@ -26,11 +31,11 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["gui", "cui", "config", "list", "sync", "history", "daemon",
+        choices=["config", "list", "sync", "history", "daemon",
                  "status", "trial", "formalize", "scan", "push", "session", "release",
                  "suggest", "governance", "export", "template", "formal", "memory",
                  "contract", "lesson", "bootstrap", "dashboard"],
-        default="gui",
+        default="list",
         help="启动模式",
     )
     parser.add_argument(
@@ -267,22 +272,12 @@ def main():
     args = parser.parse_args()
 
     try:
-        # 加载界面语言（非 GUI/CUI 模式不影响）
+        # Compatibility commands still share the configured output language.
         cfg = ConfigManager.load()
         if cfg.language:
             load_language(cfg.language)
 
-        if args.mode == "gui":
-            from frontend.gui_main import entry as gui_entry
-            if getattr(sys, "frozen", False):
-                import tempfile
-                _log = Path(tempfile.gettempdir()) / "gitgo_startup.log"
-                _log.write_text(f"Starting GUI mode at {__import__('datetime').datetime.now()}\n", encoding="utf-8")
-            gui_entry()
-        elif args.mode == "cui":
-            from cui.main import entry as cui_entry
-            cui_entry()
-        elif args.mode == "config":
+        if args.mode == "config":
             from cli import _cmd_list
             _cmd_list(cfg)
         elif args.mode == "list":
@@ -439,13 +434,6 @@ def main():
         print(msg, file=sys.stderr)
         import tempfile
         (Path(tempfile.gettempdir()) / "gitgo_crash.log").write_text(msg, encoding="utf-8")
-        if getattr(sys, "frozen", False):
-            try:
-                from PySide6.QtWidgets import QApplication, QMessageBox
-                app = QApplication(sys.argv)
-                QMessageBox.critical(None, "gitgo - 错误", msg)
-            except Exception:
-                pass
         sys.exit(1)
 
 

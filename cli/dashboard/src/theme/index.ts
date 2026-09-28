@@ -7,17 +7,20 @@ export {
   diffCell,
   unifiedColWidth,
   splitColWidth,
+  canUseSplitDiff,
   DIFF_FRAME_OVERHEAD,
 } from "./diffLayout.js";
 export { useSelectionStyle } from "./useSelectionStyle.js";
 export { useInputStyle } from "./useInputStyle.js";
 export { useSuggestionStyle } from "./useSuggestionStyle.js";
 export { usePanelSize } from "./usePanelSize.js";
-export { useColorTransition } from "./useColorTransition.js";
+export { useAnimatedColor, useColorTransition } from "./useColorTransition.js";
 export { sortByName } from "./useSortAlpha.js";
 export {
   truncate,
   wrap,
+  displayWidth,
+  padEndWidth,
   lerpColor,
   statusDot,
   placeholderChar,
@@ -28,6 +31,7 @@ export {
   spinnerFrame,
   contextBarFill,
   contextPct,
+  formatDuration,
   processStatusToDot,
   projectStatusDot,
   partitionByRank,

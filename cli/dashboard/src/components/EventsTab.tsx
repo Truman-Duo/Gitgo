@@ -2,7 +2,7 @@
 import React, { memo } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { ToolEvent } from "../hooks/useLoopData.js";
-import { toolColor, toolIcon, colors } from "../theme/index.js";
+import { toolIcon, colors } from "../theme/index.js";
 
 type Props = { events: any[]; toolEvents: ToolEvent[]; width: number };
 
@@ -40,14 +40,13 @@ export const EventsTab = memo(function EventsTab({ events, toolEvents, width }: 
           );
         }
         const tItem = item as typeof toolItems[0];
-        const tColor = toolColor(tItem.toolName);
         const icon = toolIcon(tItem.toolName);
         const statusColor = tItem.allowed ? colors.named.green : colors.named.red;
         const statusLabel = tItem.allowed ? "OK" : "BLOCKED";
         return (
           <Box key={i} flexDirection="row">
             <Text dimColor>{tItem.time} </Text>
-            <Text color={tColor}>{icon} {tItem.toolName}</Text>
+            <Text dimColor>{icon} {tItem.toolName}</Text>
             <Text> </Text>
             <Text color={statusColor}>{statusLabel}</Text>
             {tItem.agent ? (

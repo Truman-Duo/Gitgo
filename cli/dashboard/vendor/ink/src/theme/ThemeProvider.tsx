@@ -80,7 +80,7 @@ export function ThemeProvider({ children, initialState, onThemeSave = defaultSav
       if (activeSetting !== 'auto' || !internal_querier) return;
       let cleanup: (() => void) | undefined;
       let cancelled = false;
-      void import('../../utils/systemThemeWatcher.js').then(({ watchSystemTheme }) => {
+      void import('./systemThemeWatcher.js').then(({ watchSystemTheme }) => {
         if (cancelled) return;
         cleanup = watchSystemTheme(internal_querier, setSystemTheme);
       });

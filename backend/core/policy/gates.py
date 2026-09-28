@@ -168,13 +168,17 @@ class PrivacyScanGate(SyncGate):
             return GateResult()
 
         from backend.core.authorship import scan_files_privacy
+        policy = dict(getattr(project, "outbound_policy", {}) or {})
+        if policy and not policy.get("enabled", True):
+            return GateResult()
         cfg = getattr(project, 'authorship', {}) or {}
         privacy_cfg = cfg.get("privacy", {})
         privacy_alerts = scan_files_privacy(
             str(session.workspace_path),
             push_files,
-            level=privacy_cfg.get("level", 2),
-            deep_scan=privacy_cfg.get("deep_scan", False),
+            level=policy.get("content_level", privacy_cfg.get("level", 2)),
+            deep_scan=policy.get("deep_scan", privacy_cfg.get("deep_scan", False)),
+            approved_fingerprints=policy.get("approved_fingerprints", []),
         )
         if not privacy_alerts:
             return GateResult()
@@ -195,6 +199,7 @@ class PrivacyScanGate(SyncGate):
 # 内置 Gate 按 context 注册
 _BUILTIN_GATES: dict[str, dict[str, type[SyncGate]]] = {
     "sync": {
+        "privacy_scan": PrivacyScanGate,
         "foreign_commit": ForeignCommitGate,
         "contract_drift": ContractDriftGate,
     },
@@ -232,9 +237,10 @@ def load_gates(context: str, workspace_path: str) -> list[SyncGate]:
 
     instances: list[SyncGate] = []
     for name, cls in builtins.items():
-        if name in disabled:
+        mandatory = name == "privacy_scan" and context in {"sync", "push"}
+        if name in disabled and not mandatory:
             continue
-        if enabled and name not in enabled:
+        if enabled and name not in enabled and not mandatory:
             continue
 
         instance = cls()
@@ -244,6 +250,8 @@ def load_gates(context: str, workspace_path: str) -> list[SyncGate]:
             instance.order = cfg["order"]
         if "fail_action" in cfg:
             instance.fail_action = cfg["fail_action"]
+        if mandatory:
+            instance.fail_action = "block"
 
         instances.append(instance)
 

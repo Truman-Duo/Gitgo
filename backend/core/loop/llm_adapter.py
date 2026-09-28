@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import re
 
+from backend.core.loop.agent_tool import normalize_tool_parameters
+
 # XML 降级正则（保留，给不支持 function calling 的模型用）
 TOOL_CALL_XML_RE = re.compile(
     r"<tool_call>\s*<name>(.*?)</name>\s*<args>(.*?)</args>\s*</tool_call>",
@@ -31,7 +33,8 @@ def build_tools_json(tools: dict) -> list[dict]:
          "parameters": {...}}}, ...]
     """
     result = []
-    for name, tool in tools.items():
+    for name in sorted(tools):
+        tool = tools[name]
         if hasattr(tool, "to_openai_function"):
             result.append(tool.to_openai_function())
         else:
@@ -41,7 +44,9 @@ def build_tools_json(tools: dict) -> list[dict]:
                 "function": {
                     "name": name,
                     "description": getattr(tool, "description", name),
-                    "parameters": getattr(tool, "parameters", {"type": "object", "properties": {}}),
+                    "parameters": normalize_tool_parameters(
+                        getattr(tool, "parameters", None)
+                    ),
                 },
             })
     return result
@@ -73,7 +78,7 @@ def parse_tool_calls(response: str | dict) -> list[dict]:
                 args = json.loads(args_str) if isinstance(args_str, str) else args_str
             except json.JSONDecodeError:
                 args = {"raw": args_str}
-            results.append({"name": name, "args": args})
+            results.append({"name": name, "args": args, "id": tc.get("id", "")})
         if results:
             return results
 

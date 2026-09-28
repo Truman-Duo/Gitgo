@@ -6,13 +6,56 @@ v0.33: 升级为双轨输出
 """
 
 from __future__ import annotations
+import hashlib
+import json
 from pathlib import Path
+
+
+def _evidence_digest(value) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+        default=lambda item: item.to_dict() if hasattr(item, "to_dict") else str(item),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_policy_source_snapshot(session) -> dict:
+    """Return the deterministic inputs observed by the current Policy run."""
+    return {
+        "project_name": str(getattr(getattr(session, "project", None), "name", "")),
+        "workspace_path": str(Path(session.workspace_path).resolve()),
+        "entries": sorted(({
+            "path": str(getattr(item, "rel_path", "")),
+            "status": str(getattr(item, "status", "")),
+            "workspace_hash": str(getattr(item, "workspace_hash", "")),
+            "backup_hash": str(getattr(item, "backup_hash", "")),
+            "old_path": str(getattr(item, "old_path", "")),
+        } for item in getattr(session, "entries", [])), key=lambda item: item["path"]),
+    }
 
 
 def build_governance_context(
     project_name: str,
     workspace_path: str | Path,
     changed_files: list[str] | None = None,
+    *,
+    current_policy_results: dict | None = None,
+    source_snapshot: dict | None = None,
+) -> dict:
+    from backend.core.history import HistoryManager
+    with HistoryManager.workspace_scope(str(workspace_path)):
+        return _build_governance_context(project_name, workspace_path, changed_files,
+                                         current_policy_results=current_policy_results,
+                                         source_snapshot=source_snapshot)
+
+
+def _build_governance_context(
+    project_name: str,
+    workspace_path: str | Path,
+    changed_files: list[str] | None = None,
+    *,
+    current_policy_results: dict | None = None,
+    source_snapshot: dict | None = None,
 ) -> dict:
     """构建治理上下文：结构化信号 + LLM 文本摘要。
 
@@ -22,24 +65,78 @@ def build_governance_context(
     from backend.core.loop.signal_normalizer import SignalNormalizer
 
     # 收集各来源的原始数据
-    policy_results = _get_latest_policy_results(project_name)
-    lessons = _get_relevant_lessons(workspace_path)
+    policy_results = (current_policy_results if current_policy_results is not None
+                      else _get_latest_policy_results(project_name))
+    lessons = _get_relevant_lessons(workspace_path, project_name)
     rejections = _get_recent_rejections(project_name)
     facts = _get_recent_facts(project_name)
 
+    from backend.core.knowledge.applicability import assess_lesson
+    lesson_manifest = []
+    for item in lessons:
+        applicability = assess_lesson(item, workspace_path)
+        setattr(item, "_gitgo_applicability", applicability)
+        lesson_manifest.append({
+            "id": str(getattr(item, "id", "")),
+            "trigger": str(getattr(item, "trigger", "")),
+            "rule": str(getattr(item, "rule", "")),
+            "severity": str(getattr(item, "severity", "")),
+            "scope": "abstract" if getattr(item, "abstract", False) else (
+                "pending" if getattr(item, "_gitgo_trust_tier", "") == "pending"
+                else "instance"
+            ),
+            "applicability": applicability,
+            "check": getattr(item, "check", None),
+            "dangerous_tools": list(getattr(item, "dangerous_tools", None) or []),
+            "prerequisite_tools": list(getattr(item, "prerequisite_tools", None) or []),
+            "required_tools": list(getattr(item, "required_tools", None) or []),
+        })
+    workspace_digest = _evidence_digest(source_snapshot or {
+        "project_name": project_name,
+        "workspace_path": str(Path(workspace_path).resolve()),
+        "state": "source_snapshot_unavailable",
+    })
+    lessons_digest = _evidence_digest(lesson_manifest)
+    policy_digest = _evidence_digest(policy_results or {})
+    evidence_sources = {
+        "workspace_snapshot": {
+            "digest": workspace_digest, "producer": "SyncSession.step_scan",
+        },
+        "lesson_catalog": {
+            "digest": lessons_digest, "producer": "LessonManager",
+        },
+        "policy_snapshot": {
+            "digest": policy_digest, "producer": "PolicyEngine.run",
+            "depends_on": {
+                "workspace_snapshot": workspace_digest,
+                "lesson_catalog": lessons_digest,
+            },
+        },
+    }
+
     # 归一化为统一信号
     normalizer = SignalNormalizer()
-    signals = normalizer.normalize(
-        policy_results=policy_results,
-        lessons=lessons,
-        rejections=rejections,
-        facts=facts,
+    from backend.core.loop.evidence_applicability import EvidenceApplicability
+    signals = EvidenceApplicability.annotate(
+        normalizer.normalize(policy_results=policy_results),
+        kind="observation" if current_policy_results is not None else "history",
+        project_name=project_name, workspace_path=str(workspace_path),
+        depends_on={"policy_snapshot": policy_digest},
+    )
+    signals += normalizer.normalize(lessons=lessons)
+    signals += EvidenceApplicability.annotate(
+        normalizer.normalize(rejections=rejections, facts=facts), kind="history",
+        project_name=project_name, workspace_path=str(workspace_path),
     )
 
     # 构建 LLM 文本摘要
-    brief = _build_text_brief(signals, project_name, workspace_path, changed_files or [])
-
-    return {"signals": signals, "brief": brief}
+    from backend.core.loop.governance_projection import GovernanceProjection
+    return GovernanceProjection.compose({
+        "project_name": project_name,
+        "workspace_path": str(workspace_path),
+        "evidence_sources": evidence_sources,
+        "lessons": lesson_manifest,
+    }, signals, base_brief=_contract_summary(project_name, workspace_path, changed_files or []))
 
 
 def build_governance_brief(
@@ -80,16 +177,18 @@ def _get_latest_policy_results(project_name: str) -> dict | None:
     return checks[-1].detail or {}
 
 
-def _get_relevant_lessons(workspace_path: str | Path) -> list:
+def _get_relevant_lessons(workspace_path: str | Path, project_name: str) -> list:
     """加载与工作区相关的 lesson。"""
     from backend.core.knowledge.lesson import LessonManager
     ws = Path(workspace_path)
-    lessons = LessonManager.load_abstract(ws)
-    # 尝试加载实例层 lessons（项目名未知时跳过）
-    try:
-        lessons += LessonManager.load_pending(ws, "")
-    except Exception:
-        pass
+    verified = LessonManager.load_abstract(ws)
+    verified += LessonManager.load_instance(ws, project_name)
+    pending = LessonManager.load_pending(ws, project_name)
+    for lesson in verified:
+        setattr(lesson, "_gitgo_trust_tier", "verified")
+    for lesson in pending:
+        setattr(lesson, "_gitgo_trust_tier", "pending")
+    lessons = verified + pending
     return lessons
 
 
@@ -210,12 +309,6 @@ def _phase_brief(project_name: str) -> str:
         if e.operation == "tool_executed"
         and e.detail.get("project_name", "") == project_name
     ]
-    if not tool_events:
-        tool_events = [
-            e for e in entries
-            if e.operation == "tool_executed"
-        ]
-
     if not tool_events:
         return ""
 

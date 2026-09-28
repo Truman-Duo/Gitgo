@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
-from backend.adapters import FileAdapter, GitRunner, LocalFileAdapter
+from backend.adapters import FileAdapter, GitRunner, LocalFileAdapter, LocalGitRunner
 
 from .models import FileEntry
 from .security import _security_scan
@@ -51,6 +51,7 @@ def sync_to_backup(
     backup: str | Path = "",
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     plugin_ids: Optional[list[str]] = None,
+    privacy_config: Optional[dict] = None,
     *,
     ws_adapter: FileAdapter | None = None,
     bk_adapter: FileAdapter | None = None,
@@ -70,7 +71,66 @@ def sync_to_backup(
             progress_callback(0, 0, "没有选中任何文件")
         return False
 
-    total = len(selected)
+    from backend.core.authorship import (
+        collect_private_fingerprints,
+        scan_files_privacy,
+        should_exclude_outbound_file,
+    )
+
+    fingerprints = collect_private_fingerprints(
+        workspace, file_adapter=ws_adapter,
+    )
+    exclude_patterns = (privacy_config or {}).get("exclude_tool_configs")
+    publishable = []
+    excluded_count = 0
+    for entry in selected:
+        if not ws_adapter.exists(entry.rel_path):
+            continue
+        try:
+            data = ws_adapter.read_bytes(entry.rel_path)
+        except OSError:
+            if progress_callback:
+                progress_callback(0, len(selected), "隐私检查无法读取待发布文件")
+            return False
+        if should_exclude_outbound_file(
+            entry.rel_path, data, known_fingerprints=fingerprints,
+            exclude_patterns=exclude_patterns,
+        ):
+            excluded_count += 1
+            continue
+        publishable.append(entry)
+
+    privacy = (privacy_config or {}).get("privacy", {})
+    alerts = scan_files_privacy(
+        str(workspace), [entry.rel_path for entry in publishable],
+        level=max(2, int(privacy.get("level", 2) or 2)),
+        deep_scan=bool(privacy.get("deep_scan", False)),
+        approved_fingerprints=list(privacy.get("approved_fingerprints") or []),
+        file_adapter=ws_adapter,
+    )
+    if any(alert.get("level") == "error" for alert in alerts):
+        if progress_callback:
+            progress_callback(0, len(selected), f"隐私硬门阻止提交（{len(alerts)} 项）")
+        return False
+
+    try:
+        purged_count = _purge_private_tracked_files(
+            bk_adapter, git_runner, fingerprints,
+            exclude_patterns=exclude_patterns,
+        )
+    except (OSError, RuntimeError):
+        if progress_callback:
+            progress_callback(0, len(selected), "无法验证发布仓库的私有文件清单")
+        return False
+
+    selected = publishable
+    total = len(selected) + purged_count
+    if not selected and not purged_count:
+        if progress_callback:
+            progress_callback(0, 0, "没有可发布文件")
+        return False
+    if excluded_count and progress_callback:
+        progress_callback(0, total, f"隐私层已静默排除 {excluded_count} 个私有对象")
 
     if plugin_ids:
         from plugin_loader import get_orchestrator
@@ -141,6 +201,48 @@ def sync_to_backup(
         return False
 
 
+def _purge_private_tracked_files(
+    backup_adapter: FileAdapter,
+    git_runner: GitRunner,
+    known_fingerprints: set[str],
+    *,
+    exclude_patterns: list[str] | None = None,
+) -> int:
+    """Remove private artifacts already tracked in the release worktree.
+
+    This is intentionally independent from .gitignore: ignored/tracked files
+    remain tracked, so the privacy boundary must inspect the Git index itself.
+    """
+    from backend.core.authorship import should_exclude_outbound_file
+
+    result = git_runner.run(["ls-files", "-z"], timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError("cannot enumerate tracked release files")
+    tracked = [path for path in result.stdout.split("\0") if path]
+    private_paths: list[str] = []
+    for rel_path in tracked:
+        try:
+            if not backup_adapter.exists(rel_path):
+                continue
+            data = backup_adapter.read_bytes(rel_path)
+        except OSError as exc:
+            raise RuntimeError("cannot inspect tracked release file") from exc
+        if should_exclude_outbound_file(
+            rel_path, data, known_fingerprints=known_fingerprints,
+            exclude_patterns=exclude_patterns,
+        ):
+            private_paths.append(rel_path)
+
+    for index in range(0, len(private_paths), 50):
+        batch = private_paths[index:index + 50]
+        removed = git_runner.run(
+            ["rm", "-f", "--ignore-unmatch", "--", *batch], timeout=60,
+        )
+        if removed.returncode != 0:
+            raise RuntimeError("cannot purge private release artifacts")
+    return len(private_paths)
+
+
 # ── 推送 ──────────────────────────────────────────────
 
 
@@ -170,12 +272,15 @@ def push_to_backup(
     if progress_callback:
         progress_callback(0, 1, f"正在 push 到 {remote}...")
 
-    if not skip_scan:
-        warnings = _security_scan(str(backup), security_config, git_runner=git_runner)
-        if warnings:
-            if progress_callback:
-                progress_callback(0, 1, f"安全检查发现 {len(warnings)} 项敏感信息")
-            return False, warnings
+    warnings = _security_scan(str(backup), security_config, git_runner=git_runner)
+    hard_warnings = [
+        warning for warning in warnings
+        if warning.get("severity") in {"high", "critical"}
+    ]
+    if hard_warnings or (warnings and not skip_scan):
+        if progress_callback:
+            progress_callback(0, 1, f"安全检查发现 {len(warnings)} 项敏感信息")
+        return False, warnings
 
     if plugin_ids:
         from plugin_loader import get_orchestrator

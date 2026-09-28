@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "product_id": "gitgo-terminal",
+  "display_name": "Gitgo",
+  "primary_command": "gitgo",
+  "command_aliases": [],
+  "layout": {
+    "dashboard": "gitgo.exe",
+    "native_host": "internal/gitgo-host/gitgo-host.exe",
+    "uninstaller": "uninstall.exe"
+  },
+  "uninstall": {
+    "remove_installation": true,
+    "remove_user_config": true,
+    "remove_user_secrets": true,
+    "remove_runtime_state": false,
+    "remove_project_directories": false,
+    "remove_project_gitgo_metadata": false
+  }
+}

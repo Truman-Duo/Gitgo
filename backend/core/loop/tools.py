@@ -24,6 +24,17 @@ class ToolRegistry:
     def list_all(self) -> list[str]:
         return sorted(self._tools)
 
+    def add_scoped(self, tool_name: str) -> None:
+        """Add a host-validated task-scoped tool without changing profiles."""
+        if not tool_name or not isinstance(tool_name, str):
+            raise ValueError("tool_name is required")
+        self._tools.add(tool_name)
+
+    def remove_scoped(self, tool_name: str) -> None:
+        """Remove a task-scoped tool without mutating server profiles."""
+        if tool_name:
+            self._tools.discard(tool_name)
+
     @classmethod
     def from_contract(cls, workspace_path, tool_names: list[str]
                       ) -> "ToolRegistry":

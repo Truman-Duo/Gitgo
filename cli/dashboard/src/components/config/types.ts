@@ -3,11 +3,11 @@
 // own render. The shell (ConfigPanel.tsx) only owns tab selection + the tab bar.
 
 import type { ComponentType } from "react";
-import type { McpClient } from "../../mcp/client.js";
+import type { BackendClient } from "../../backend/client.js";
 import type { UseTextInputReturn } from "../../hooks/useTextInput.js";
 import type { FooterConfig } from "../CommandBar.js";
 
-export type ConfigTabId = "providers" | "bin" | "publish";
+export type ConfigTabId = "general" | "providers";
 
 /** Navigation + coordination callbacks the shell hands to each tab. */
 export type ShellControls = {
@@ -15,6 +15,7 @@ export type ShellControls = {
   goToTab: (id: ConfigTabId) => void;
   tabPrev: () => void;
   tabNext: () => void;
+  leaveContent: () => void;
 };
 
 /** Sub-tab / fullscreen state a tab reports up to the shell (for the tab bar). */
@@ -24,7 +25,7 @@ export type TabReport = {
 };
 
 export type ConfigTabProps = {
-  client: McpClient;
+  client: BackendClient;
   project: string;
   cmdInput: UseTextInputReturn;
   onFooter: (cfg: FooterConfig | null) => void;
@@ -32,6 +33,7 @@ export type ConfigTabProps = {
   onRefresh?: () => void;
   report: (r: TabReport) => void;
   shell: ShellControls;
+  contentFocused: boolean;
 };
 
 export type ConfigTabModule = {

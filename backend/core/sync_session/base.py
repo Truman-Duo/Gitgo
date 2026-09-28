@@ -34,6 +34,11 @@ class SyncSessionBase:
         # 路径
         self.workspace_path = Path(project.workspace_path or Path.cwd()).resolve()
         self.backup_path = Path(project.backup_path) if project.backup_path else None
+        # Bind the legacy static History API to this state machine's project.
+        # This is metadata-only here; the first read/write resolves the shared
+        # StorageRuntime, while the daemon later injects its owned runtime.
+        from backend.core.history import HistoryManager
+        HistoryManager.set_workspace(str(self.workspace_path))
 
         # ── 适配器 ──
         workspace_node = project.workspace

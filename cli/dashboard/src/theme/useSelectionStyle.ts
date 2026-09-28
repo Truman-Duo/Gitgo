@@ -3,8 +3,9 @@
 
 import type { SelectionContext, SelectionVariant, StyleProps } from "./types.js";
 import { colors } from "./tokens.js";
+import type { Color } from "@anthropic/ink";
 
-const ACCENT_MAP: Record<string, { bg: string; fg: string }> = {
+const ACCENT_MAP: Record<string, { bg: Color; fg: Color }> = {
   accent: colors.selection.block.blue,
   success: colors.selection.block.green,
   warning: { bg: colors.warning, fg: colors.selection.block.fg },

@@ -54,6 +54,11 @@ class Lesson:
     # ── 收割重试追踪 ──
     harvest_retry_count: int = 0     # LLM 总结此信号失败次数，≥5 自动 discard
 
+    # ── 生命周期与证据适用性 ──
+    evidence: dict | None = None
+    expires_at: str = ""
+    superseded_by: str = ""
+
     def to_dict(self) -> dict:
         d = asdict(self)
         return {k: v for k, v in d.items()
@@ -86,6 +91,9 @@ class Lesson:
             violated_after_count=d.get("violated_after_count", 0),
             recent_retrievals=d.get("recent_retrievals", []),
             harvest_retry_count=d.get("harvest_retry_count", 0),
+            evidence=d.get("evidence") if isinstance(d.get("evidence"), dict) else None,
+            expires_at=d.get("expires_at", ""),
+            superseded_by=d.get("superseded_by", ""),
         )
 
 

@@ -1,10 +1,11 @@
 // src/components/FormalPanel.tsx — /runtime formal: formal commits + delete/dissolve
 import React, { memo, useState, useEffect, useCallback } from "react";
-import { Box, Text, useInput } from "@anthropic/ink";
-import type { McpClient } from "../mcp/client.js";
-import { formalList, formalDelete, formalDissolve } from "../mcp/tools.js";
+import { Box, Text } from "@anthropic/ink";
+import { useManagedInput as useInput } from "../input/runtime.js";
+import type { BackendClient } from "../backend/client.js";
+import { formalList, formalDelete, formalDissolve } from "../backend/tools.js";
 import { resolveFormalKey } from "../input/overlays/formal.js";
-import { useSelectionStyle, usePanelSize } from "../theme/index.js";
+import { colors, usePanelSize } from "../theme/index.js";
 import { ConfirmBox } from "./ConfirmBox.js";
 import { chordLabel } from "../input/bindings.js";
 
@@ -14,7 +15,7 @@ type Formal = {
 };
 
 type Props = {
-  client: McpClient;
+  client: BackendClient;
   project: string;
   cols: number;
   onDismiss: () => void;
@@ -98,17 +99,14 @@ export const FormalPanel = memo(function FormalPanel({ client, project, onDismis
       ) : (
         items.map((it, i) => {
           const active = i === sel;
-          const st = useSelectionStyle(active ? "focused" : "non-focused", "block", "accent");
           const syncLabel = it.pushed ? "pushed" : it.synced ? "synced" : "local";
           return (
-            <Box key={it.index} marginBottom={1} flexDirection="column">
-              <Text color={st.fg} backgroundColor={st.bg} bold={st.bold}>
+            <Box key={it.index} flexDirection="row">
+              <Text color={active ? colors.selection.row.fg : undefined} bold={active}>
                 [{it.prefix}-{it.number}]  {syncLabel}
               </Text>
               {active && (
-                <Box paddingLeft={2}>
-                  <Text dimColor>{it.message.slice(0, w - 12)}</Text>
-                </Box>
+                <Text dimColor>  {it.message.slice(0, Math.max(10, w - 32))}</Text>
               )}
             </Box>
           );

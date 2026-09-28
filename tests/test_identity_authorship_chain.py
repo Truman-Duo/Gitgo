@@ -186,7 +186,7 @@ class TestChainAuthorship:
 
         original = (
             "feat: add auth module\n\n"
-            "Co-authored-by: Claude <claude@anthropic.com>\n"
+            "Co-authored-by: Claude <claude@" + "anthropic.com>\n"
             "Generated with Claude Code\n"
         )
         cleaned = strip_commit_message(original)
@@ -230,9 +230,11 @@ class TestChainAuthorship:
         from backend.core.authorship import scan_privacy
 
         test_file = tmp_ws / "test.py"
+        fake_key = "sk-" + "abc123def456" + "ghi789jkl"
+        fake_email = "user@" + "customer-mail.com"
         test_file.write_text(
-            "api_key = 'sk-abc123def456ghi789jkl'\n"
-            "email = 'user@example.com'\n"
+            f"api_key = '{fake_key}'\n"
+            f"email = '{fake_email}'\n"
             "normal_code = 'hello world'\n"
         )
 
