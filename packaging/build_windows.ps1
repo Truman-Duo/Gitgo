@@ -45,8 +45,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 $pyInstallerRunner = Join-Path $root "scripts\run_pyinstaller.py"
 $useExternalPyInstaller = $false
+# This is an availability probe, so ImportError is expected when PyInstaller
+# lives in the separate build-only package directory. Windows PowerShell turns
+# native stderr into a terminating ErrorRecord under ErrorActionPreference=Stop;
+# temporarily downgrade only this probe and restore fail-closed behavior after.
+$savedErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $Python -B -c "import PyInstaller; print('PyInstaller', PyInstaller.__version__)" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$pyInstallerImportExit = $LASTEXITCODE
+$ErrorActionPreference = $savedErrorActionPreference
+if ($pyInstallerImportExit -ne 0) {
     if (-not $PyInstallerPackages) {
         $packageCandidates = @(
             (Join-Path (Split-Path -Parent $Python) "packages"),
@@ -68,9 +76,17 @@ if ($LASTEXITCODE -ne 0) {
 
 New-Item -ItemType Directory -Force -Path $stage, $internal | Out-Null
 
-& $Bun build (Join-Path $root "cli\dashboard\src\main.tsx") `
-    --compile --outfile (Join-Path $stage "$($product.primary_command).exe")
-if ($LASTEXITCODE -ne 0) { throw "Dashboard compilation failed" }
+try {
+    & $Bun build (Join-Path $root "cli\dashboard\src\main.tsx") `
+        --compile --outfile (Join-Path $stage "$($product.primary_command).exe")
+    if ($LASTEXITCODE -ne 0) { throw "Dashboard compilation failed" }
+} finally {
+    # Bun can leave its full-size atomic output beside the repository when an
+    # existing Windows executable was briefly locked. These files are build
+    # products, never source inputs, and would otherwise dirty every release.
+    Get-ChildItem -LiteralPath $root -File -Filter ".*.bun-build" `
+        -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
 
 $pyInstallerArguments = @(
     "--noconfirm", "--clean", "--onedir",
@@ -89,6 +105,12 @@ if ($LASTEXITCODE -ne 0) { throw "Native Host compilation failed" }
 
 Copy-Item -LiteralPath $productPath `
     -Destination (Join-Path $stage "product.json") -Force
+
+$packagedHost = Join-Path $internal "gitgo-host\gitgo-host.exe"
+& $Python -B (Join-Path $root "scripts\smoke_packaged_runtime.py") --host $packagedHost
+if ($LASTEXITCODE -ne 0) {
+    throw "Packaged Host/Daemon/tool-runner smoke test failed"
+}
 Write-Host "Terminal release staged at $stage"
 
 foreach ($alias in @($product.command_aliases)) {

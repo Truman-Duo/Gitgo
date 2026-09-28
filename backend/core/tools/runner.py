@@ -21,7 +21,7 @@ import os
 import sys
 import traceback
 from typing import Callable
-from backend.core.protocol_io import write_utf8_line
+from backend.core.protocol_io import dump_protocol_json, write_utf8_line
 
 
 # ── Tool Registry ──────────────────────────────────────────
@@ -101,13 +101,17 @@ def main() -> None:
 
 
 def _emit_success(data: dict) -> None:
-    write_utf8_line(sys.stdout, json.dumps({"success": True, "data": data},
-                   ensure_ascii=False, default=str))
+    write_utf8_line(
+        sys.stdout,
+        dump_protocol_json({"success": True, "data": data}, default=str),
+    )
 
 
 def _emit_error(message: str) -> None:
-    write_utf8_line(sys.stdout, json.dumps({"success": False, "error": message},
-                   ensure_ascii=False))
+    write_utf8_line(
+        sys.stdout,
+        dump_protocol_json({"success": False, "error": message}),
+    )
 
 
 if __name__ == "__main__":

@@ -23,6 +23,8 @@ from backend.core.process_control import (
     creation_flags,
     terminate_tree,
 )
+from backend.core.child_process import daemon_command, owned_child_cwd
+from backend.core.protocol_io import dump_protocol_json
 
 
 class DaemonCommandError(RuntimeError):
@@ -100,23 +102,15 @@ class DaemonClient:
             else:
                 self._fail_if_existing()
 
-            # Execute the repository entry point directly.  The bundled
-            # portable Python deliberately pins ``sys.path`` to the Gitgo
-            # repository so ``python -m gitgo`` cannot resolve the repository
-            # as a package from its parent directory.  A script entry point is
-            # stable for both that runtime and ordinary Python installations.
-            cmd = [
-                sys.executable, str(self._project_root / "__main__.py"),
-                "--mode", "daemon",
-                "--project", self.project_name,
-                "--daemon-action", "start",
-                "--trial-interval", "9999",
-                "--debounce", "2.0",
-            ]
+            # In a source checkout sys.executable is Python.  In a PyInstaller
+            # distribution it is gitgo-host.exe, which must be invoked through
+            # its explicit internal-role multiplexer instead of being treated
+            # as a Python interpreter.
+            cmd = daemon_command(self.project_name, self._project_root)
 
             self._process = subprocess.Popen(
                 cmd,
-                cwd=str(self._project_root),
+                cwd=str(owned_child_cwd(self._project_root)),
                 env={
                     **os.environ,
                     "PYTHONIOENCODING": "utf-8",
@@ -520,7 +514,7 @@ class DaemonClient:
         with self._lock:
             if not self._running or self._process is None or self._process.stdin is None:
                 raise RuntimeError("Daemon is not running")
-            line = json.dumps(cmd, ensure_ascii=False)
+            line = dump_protocol_json(cmd)
             self._process.stdin.write(line + "\n")
             self._process.stdin.flush()
 

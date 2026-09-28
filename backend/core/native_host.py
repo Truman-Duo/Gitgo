@@ -20,7 +20,8 @@ from typing import Any
 
 from backend.core.application import ApplicationServices, OperationError
 from backend.core.daemon.client import DaemonClient, DaemonCommandError
-from backend.core.protocol_io import write_utf8_line
+from backend.core.protocol_io import dump_protocol_json, write_utf8_line
+from backend.core.unicode_safety import normalize_unicode_text
 
 
 PROTOCOL_VERSION = 1
@@ -64,6 +65,8 @@ class NativeHost:
         self.stdout = stdout or sys.stdout
         self._daemon_factory = daemon_factory
         self._daemons: dict[str, DaemonClient] = {}
+        self._daemon_starting: dict[str, tuple[DaemonClient, threading.Event]] = {}
+        self._daemon_start_errors: dict[str, str] = {}
         self._daemon_lock = threading.RLock()
         self._write_lock = threading.Lock()
         self._task_requests: dict[str, tuple[str, str]] = {}
@@ -170,7 +173,7 @@ class NativeHost:
 
     def _emit(self, payload: dict) -> None:
         envelope = {"protocol_version": PROTOCOL_VERSION, **payload}
-        line = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+        line = dump_protocol_json(envelope, separators=(",", ":"))
         with self._write_lock:
             write_utf8_line(self.stdout, line)
 
@@ -185,31 +188,72 @@ class NativeHost:
         self._emit(payload)
 
     def _get_daemon(self, project: str, *, start: bool) -> DaemonClient | None:
+        owns_start = False
         with self._daemon_lock:
             client = self._daemons.get(project)
             if client is not None and client.is_running():
                 return client
             if not start:
                 return None
-            client = self._daemon_factory(project)
-            client.add_event_listener(
-                lambda event, project_name=project: self._on_daemon_event(project_name, event)
-            )
-            # A cold project performs its initial workspace scan before it is
-            # ready to accept commands.  Keep that readiness timeout separate
-            # from the task deadline; scan progress is already forwarded to
-            # the Dashboard through the registered listener.
-            try:
-                client.start(timeout=self.limits.max_daemon_start_seconds)
-            except Exception as exc:
-                diagnostic = client.diagnostic_tail() if hasattr(client, "diagnostic_tail") else ""
+            starting = self._daemon_starting.get(project)
+            if starting is None:
+                client = self._daemon_factory(project)
+                client.add_event_listener(
+                    lambda event, project_name=project: self._on_daemon_event(project_name, event)
+                )
+                ready = threading.Event()
+                self._daemon_starting[project] = (client, ready)
+                self._daemon_start_errors.pop(project, None)
+                owns_start = True
+            else:
+                client, ready = starting
+
+        # Never hold the global daemon registry lock across cold startup.  UI
+        # projections can report daemon_online=false/starting while one project
+        # scans instead of timing out behind the 120-second readiness barrier.
+        if not owns_start:
+            if not ready.wait(timeout=self.limits.max_daemon_start_seconds):
                 raise OperationError(
                     "DAEMON_START_FAILED",
-                    f"Project '{project}' daemon failed to start: {exc}",
-                    details={"project": project, "diagnostic_tail": diagnostic},
-                ) from exc
-            self._daemons[project] = client
+                    f"Project '{project}' daemon startup is still pending",
+                    details={"project": project, "state": "starting"},
+                )
+            with self._daemon_lock:
+                running = self._daemons.get(project)
+                failure = self._daemon_start_errors.get(project, "")
+            if running is not None and running.is_running():
+                return running
+            raise OperationError(
+                "DAEMON_START_FAILED",
+                failure or f"Project '{project}' daemon did not become ready",
+                details={"project": project},
+            )
+
+        try:
+            # A cold project performs its initial workspace scan before it is
+            # ready to accept commands. Keep that timeout separate from the
+            # task deadline; progress is forwarded through the listener.
+            client.start(timeout=self.limits.max_daemon_start_seconds)
+            with self._daemon_lock:
+                self._daemons[project] = client
+                self._daemon_start_errors.pop(project, None)
             return client
+        except Exception as exc:
+            diagnostic = client.diagnostic_tail() if hasattr(client, "diagnostic_tail") else ""
+            message = f"Project '{project}' daemon failed to start: {exc}"
+            with self._daemon_lock:
+                self._daemon_start_errors[project] = message
+            raise OperationError(
+                "DAEMON_START_FAILED",
+                message,
+                details={"project": project, "diagnostic_tail": diagnostic},
+            ) from exc
+        finally:
+            with self._daemon_lock:
+                current = self._daemon_starting.get(project)
+                if current is not None and current[0] is client:
+                    self._daemon_starting.pop(project, None)
+                    current[1].set()
 
     def _provider_switch(self, provider_id: str) -> dict:
         """Switch the global provider at a safe task boundary.
@@ -802,7 +846,7 @@ class NativeHost:
         )
         request_started_at = request_started_at or datetime.now(timezone.utc).isoformat()
         project = str(arguments.get("project", ""))
-        message = str(arguments.get("message", ""))
+        message = normalize_unicode_text(str(arguments.get("message", "")))
         process_id = str(arguments.get("process_id", ""))
         if not project or (action != "resume" and not message):
             raise OperationError("INVALID_ARGUMENTS", "project and message are required")

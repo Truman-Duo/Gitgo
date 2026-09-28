@@ -112,7 +112,9 @@ class FileHashCache:
                 reverse=True,
             )[:self.MAX_HOT])
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(merged, ensure_ascii=False, indent=2))
+        self._path.write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
         self._cold = merged
         self._hot.clear()
         self._dirty = False
@@ -138,9 +140,9 @@ class FileHashCache:
         if not self._path.exists():
             return
         try:
-            data = json.loads(self._path.read_text())
+            data = json.loads(self._path.read_text(encoding="utf-8"))
             self._cold = dict(list(data.items())[:self.MAX_HOT])
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             self._cold = {}
 
     def _maybe_evict(self):
