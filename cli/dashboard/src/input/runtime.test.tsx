@@ -16,10 +16,14 @@ test("Ink stdin reaches exactly one registered scene/modal owner", async () => {
   const stderr: any = new PassThrough();
   stderr.on("data", () => {});
   const events: string[] = [];
+  const textEvents: string[] = [];
   let modal = false;
   function Probe() {
     useManagedInput((_input, key) => { if (!modal) return false; events.push(key.tab ? "modal-tab" : "modal"); }, {priority: 100});
-    useManagedInput((_input, key) => { if (key.tab) events.push("scene-tab"); });
+    useManagedInput((input, key) => {
+      if (key.tab) events.push("scene-tab");
+      else if (input) textEvents.push(input);
+    });
     return <Text>Input control test</Text>;
   }
   const instance = renderSync(<InputProvider><Probe /></InputProvider>,
@@ -33,6 +37,11 @@ test("Ink stdin reaches exactly one registered scene/modal owner", async () => {
     await new Promise(resolve => setTimeout(resolve, 25));
     if (!events.length) throw new Error(`Renderer did not dispatch input: ${output}`);
     expect(events).toEqual(["scene-tab", "modal-tab"]);
+    modal = false;
+    const unicode = Buffer.from("中文𠮷", "utf8");
+    for (const byte of unicode) stdin.write(Buffer.from([byte]));
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(textEvents.join("")).toBe("中文𠮷");
     stdin.write("\x03"); // Ctrl+C must not reach task cancellation/scene handlers.
     await new Promise(resolve => setTimeout(resolve, 25));
     expect(events).toEqual(["scene-tab", "modal-tab"]);

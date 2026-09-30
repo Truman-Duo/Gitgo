@@ -1,4 +1,5 @@
 import React, { PureComponent, type ReactNode } from 'react';
+import { StringDecoder } from 'node:string_decoder';
 // Business-layer callbacks — replaced with inline defaults so this package
 // has zero dependencies on business code. The business layer can inject
 // implementations via AppCallbacks when needed.
@@ -160,6 +161,10 @@ export default class App extends PureComponent<Props, State> {
 
   internal_eventEmitter = new EventEmitter();
   keyParseState = INITIAL_STATE;
+  // Bun's Windows ReadStream#setEncoding path has produced split surrogate
+  // code units for IME/non-BMP input in compiled executables. Keep stdin as
+  // bytes and own one incremental UTF-8 decoder across readable chunks.
+  stdinDecoder = new StringDecoder('utf8');
   // Timer for flushing incomplete escape sequences
   incompleteEscapeTimer: NodeJS.Timeout | null = null;
   // Timeout durations for incomplete sequences (ms)
@@ -290,8 +295,6 @@ export default class App extends PureComponent<Props, State> {
         );
       }
     }
-
-    stdin.setEncoding('utf8');
 
     if (isEnabled) {
       // Ensure raw mode is enabled only once
@@ -444,9 +447,10 @@ export default class App extends PureComponent<Props, State> {
     this.lastStdinTime = now;
     try {
       let chunk;
-      while ((chunk = this.props.stdin.read() as string | null) !== null) {
+      while ((chunk = this.props.stdin.read() as Buffer | string | null) !== null) {
         // Process the input chunk
-        this.processInput(chunk);
+        const decoded = typeof chunk === 'string' ? chunk : this.stdinDecoder.write(chunk);
+        if (decoded) this.processInput(decoded);
       }
     } catch (error) {
       // In Bun, an uncaught throw inside a stream 'readable' handler can

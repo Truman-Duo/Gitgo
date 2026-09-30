@@ -76,6 +76,16 @@ if ($pyInstallerImportExit -ne 0) {
 
 New-Item -ItemType Directory -Force -Path $stage, $internal | Out-Null
 
+Push-Location (Join-Path $root "cli\dashboard")
+try {
+    & $Bun test src\input\runtime.test.tsx src\backend\client.test.ts
+    if ($LASTEXITCODE -ne 0) {
+        throw "Dashboard Unicode/input integrity release gate failed"
+    }
+} finally {
+    Pop-Location
+}
+
 try {
     & $Bun build (Join-Path $root "cli\dashboard\src\main.tsx") `
         --compile --outfile (Join-Path $stage "$($product.primary_command).exe")

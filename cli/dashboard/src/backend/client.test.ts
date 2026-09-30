@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { buildNativeTaskCall, nativeHostCommand, NativeHostClient } from "./client.js";
+import {
+  buildNativeTaskCall, nativeHostCommand, NativeHostClient, stringifyProtocolJson,
+} from "./client.js";
 
 describe("native task routing", () => {
   test("correlated Host ACK adjusts the transport deadline and UTF8 chunks stay intact", async () => {
@@ -23,7 +25,23 @@ describe("native task routing", () => {
   test("ordinary chat is never reclassified from project state", () => {
     const call = buildNativeTaskCall({ project: "demo", message: "new task" });
     expect(call.operation).toBe("runtime.chat");
-    expect(call.arguments).toEqual({ project: "demo", message: "new task" });
+    expect(call.arguments).toEqual({
+      project: "demo", message: "new task",
+      message_utf8_sha256: "90fa7fff4709814127b689289a22f0491d4c3577636ab42caa91b8a52dc886d1",
+    });
+  });
+
+  test("rejects malformed UTF-16 before it reaches the Host", () => {
+    expect(() => buildNativeTaskCall({project: "demo", message: "bad\udcaf"}))
+      .toThrow("INPUT_ENCODING_CORRUPTED");
+  });
+
+  test("writes the process protocol as ASCII while preserving Unicode scalars", () => {
+    const value = {message: "中文与罕见字符𠮷", nested: ["天气"]};
+    const wire = stringifyProtocolJson(value);
+    expect(Buffer.from(wire, "utf8").every(byte => byte < 0x80)).toBe(true);
+    expect(wire).toContain("\\ud842\\udfb7");
+    expect(JSON.parse(wire)).toEqual(value);
   });
 
   test("decision submission requires the full explicit identity", () => {

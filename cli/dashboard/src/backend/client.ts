@@ -1,6 +1,7 @@
 // Native Gitgo Host client. This is the Dashboard's production transport.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { StreamEvent } from "../daemon/streamEvents.js";
@@ -33,6 +34,8 @@ type PendingRequest = {
 export type NativeTaskRequest = {
   project: string;
   message: string;
+  expected_project_id?: string;
+  expected_workspace?: string;
   max_steps?: number;
   task_kind?: string;
   manual_delegation?: boolean;
@@ -40,14 +43,51 @@ export type NativeTaskRequest = {
   decision?: Pick<PendingDecision, "task_id" | "process_id" | "decision_id">;
 };
 
+export function assertWellFormedPrompt(value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        throw new Error(`INPUT_ENCODING_CORRUPTED: unpaired high surrogate at offset ${index}`);
+      }
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw new Error(`INPUT_ENCODING_CORRUPTED: unpaired low surrogate at offset ${index}`);
+    }
+  }
+}
+
+/**
+ * Serialize the Dashboard/Host JSON-lines protocol as ASCII-only bytes.
+ *
+ * Bun's compiled Windows child-process stream has corrupted non-ASCII string
+ * writes on some machines even when the terminal input itself was decoded
+ * correctly.  Escaping every non-ASCII UTF-16 code unit keeps the pipe byte
+ * stream locale- and runtime-independent; Python's JSON decoder reconstructs
+ * BMP characters and surrogate pairs as the original Unicode scalar values.
+ */
+export function stringifyProtocolJson(value: unknown): string {
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new TypeError("Protocol value is not JSON serializable");
+  return encoded.replace(/[^\x00-\x7f]/g, (unit) =>
+    `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 export function buildNativeTaskCall(args: NativeTaskRequest): {
   operation: "runtime.chat" | "runtime.decision";
   arguments: Record<string, unknown>;
 } {
+  assertWellFormedPrompt(args.message);
   const { decision, ...taskArgs } = args;
+  const integrity = {
+    ...taskArgs,
+    message_utf8_sha256: createHash("sha256").update(args.message, "utf8").digest("hex"),
+  };
   return decision
-    ? { operation: "runtime.decision", arguments: { ...taskArgs, ...decision } }
-    : { operation: "runtime.chat", arguments: taskArgs };
+    ? { operation: "runtime.decision", arguments: { ...integrity, ...decision } }
+    : { operation: "runtime.chat", arguments: integrity };
 }
 
 export function nativeHostCommand(
@@ -160,7 +200,7 @@ export class NativeHostClient implements BackendClient {
       };
       const timer = setTimeout(expire, timeoutSec * 1000);
       this.pending.set(requestId, { operation, resolve, reject, timer, expire, timeoutSeconds: timeoutSec, onEvent });
-      this.proc!.stdin!.write(JSON.stringify({
+      this.proc!.stdin!.write(stringifyProtocolJson({
         protocol_version: NATIVE_PROTOCOL_VERSION,
         type: "request",
         request_id: requestId,

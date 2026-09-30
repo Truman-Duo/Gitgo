@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -162,6 +163,30 @@ def smoke(executable: Path) -> None:
             projects = overview.get("result", {}).get("projects", [])
             if not overview.get("ok") or not any(p.get("name") == project.name for p in projects):
                 raise RuntimeError(f"packaged project overview failed: {overview}")
+
+            # These requests must fail before a Provider or Daemon is touched.
+            # They prove that the frozen Host contains the same Unicode and
+            # byte-integrity boundary as the source runtime.
+            corrupt = client.call(
+                "runtime.chat",
+                {"project": project.name, "message": "bad\udcaf"},
+            )
+            corrupt_code = str((corrupt.get("error") or {}).get("code") or "")
+            if corrupt.get("ok") or corrupt_code != "INPUT_ENCODING_CORRUPTED":
+                raise RuntimeError(f"packaged Host accepted corrupt Unicode: {corrupt}")
+
+            canary = "请解释罕见字符𠮷"
+            digest_mismatch = client.call(
+                "runtime.chat",
+                {
+                    "project": project.name,
+                    "message": canary,
+                    "message_utf8_sha256": hashlib.sha256(b"different").hexdigest(),
+                },
+            )
+            mismatch_code = str((digest_mismatch.get("error") or {}).get("code") or "")
+            if digest_mismatch.get("ok") or mismatch_code != "INPUT_INTEGRITY_MISMATCH":
+                raise RuntimeError(f"packaged Host accepted a mismatched prompt digest: {digest_mismatch}")
 
             # Manual compaction starts an offline project's Daemon before it
             # checks the process id. PROCESS_NOT_FOUND is expected; a Host or

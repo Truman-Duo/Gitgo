@@ -612,6 +612,8 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
           manualCreateRef={manualCreateRef}
           visible={scene === "workspace" && (!topOverlay || inlineOverlay)}
           project={activeProject}
+          projectId={projects.find((item) => item.name === activeProject)?.project_id}
+          workspace={projects.find((item) => item.name === activeProject)?.workspace}
           client={client}
           loopData={loopData}
           cols={w}

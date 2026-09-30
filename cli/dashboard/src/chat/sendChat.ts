@@ -113,7 +113,7 @@ export async function sendChat(
   startTime: string,
   pendingDecision: PendingDecision | null,
   cb: ChatSendCallbacks,
-  options: {manualDelegation?: boolean} = {},
+  options: {manualDelegation?: boolean; projectId?: string; workspace?: string} = {},
 ): Promise<void> {
   // --mock mode: simulate a token stream so the live dashboard is demoed.
   if ((client as unknown) instanceof MockMcpClient) {
@@ -128,6 +128,8 @@ export async function sendChat(
         {
           project,
           message: text,
+          expected_project_id: options.projectId || undefined,
+          expected_workspace: options.workspace || undefined,
           decision: pendingDecision || undefined,
           ...(options.manualDelegation ? {manual_delegation: true} : {}),
         },

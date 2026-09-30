@@ -8,6 +8,7 @@ operations, and lazily supervises one daemon runtime per project.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 import threading
@@ -21,7 +22,7 @@ from typing import Any
 from backend.core.application import ApplicationServices, OperationError
 from backend.core.daemon.client import DaemonClient, DaemonCommandError
 from backend.core.protocol_io import dump_protocol_json, write_utf8_line
-from backend.core.unicode_safety import normalize_unicode_text
+from backend.core.unicode_safety import normalize_unicode_text, unicode_integrity_error
 
 
 PROTOCOL_VERSION = 1
@@ -846,7 +847,14 @@ class NativeHost:
         )
         request_started_at = request_started_at or datetime.now(timezone.utc).isoformat()
         project = str(arguments.get("project", ""))
-        message = normalize_unicode_text(str(arguments.get("message", "")))
+        raw_message = str(arguments.get("message", ""))
+        integrity_error = unicode_integrity_error(raw_message)
+        if integrity_error:
+            raise OperationError(
+                "INPUT_ENCODING_CORRUPTED",
+                integrity_error + "; the prompt was not sent to the provider",
+            )
+        message = raw_message
         process_id = str(arguments.get("process_id", ""))
         if not project or (action != "resume" and not message):
             raise OperationError("INVALID_ARGUMENTS", "project and message are required")
@@ -871,6 +879,53 @@ class NativeHost:
             raise OperationError(
                 "INVALID_ARGUMENTS", "runtime.recovery.resume requires process_id",
             )
+        supplied_digest = str(arguments.get("message_utf8_sha256") or "").lower()
+        actual_digest = hashlib.sha256(message.encode("utf-8", "strict")).hexdigest()
+        if supplied_digest and supplied_digest != actual_digest:
+            raise OperationError(
+                "INPUT_INTEGRITY_MISMATCH",
+                "The prompt changed between the terminal and Native Host; it was not sent to the provider",
+                details={"expected_sha256": supplied_digest, "actual_sha256": actual_digest},
+            )
+
+        project_info = next(
+            (item for item in self.services.project_list()
+             if str(item.get("name", "")) == project),
+            None,
+        )
+        expected_project_id = str(arguments.get("expected_project_id") or "")
+        expected_workspace = str(arguments.get("expected_workspace") or "")
+        if (project_info is None or not project_info.get("workspace")) and (
+            expected_project_id or expected_workspace
+        ):
+            raise OperationError("PROJECT_NOT_FOUND", f"Project '{project}' was not found")
+        workspace = (
+            os.path.normcase(os.path.realpath(str(project_info["workspace"])))
+            if project_info and project_info.get("workspace") else ""
+        )
+        existing_paths = None
+        if workspace:
+            from backend.core.storage import resolve_existing_storage_paths
+            try:
+                existing_paths = resolve_existing_storage_paths(workspace)
+            except (OSError, ValueError):
+                existing_paths = None
+        project_id = str(existing_paths.project_id if existing_paths is not None else "")
+        if expected_project_id and expected_project_id != project_id:
+            raise OperationError(
+                "PROJECT_IDENTITY_MISMATCH",
+                "The active Dashboard project no longer matches the Host project identity",
+                details={"project": project, "expected_project_id": expected_project_id,
+                         "actual_project_id": project_id},
+            )
+        if expected_workspace and os.path.normcase(os.path.realpath(expected_workspace)) != workspace:
+            raise OperationError(
+                "PROJECT_WORKSPACE_MISMATCH",
+                "The active Dashboard workspace no longer matches the Host project workspace",
+                details={"project": project, "expected_workspace": expected_workspace,
+                         "actual_workspace": workspace},
+            )
+
         task_id = str(arguments.get("task_id", "")) or str(uuid.uuid4())
         hard_seconds = max(self.limits.max_task_seconds, self.limits.max_task_hard_seconds)
         self._task_requests[task_id] = (request_id, project)
@@ -884,6 +939,7 @@ class NativeHost:
             "payload": {
                 "event": "runtime_ack", "stage": "accepted",
                 "task_id": task_id, "process_id": "",
+                "project_id": project_id, "workspace": workspace,
                 "wait_timeout_seconds": hard_seconds + 30,
             },
         })
@@ -894,11 +950,6 @@ class NativeHost:
             self._sessions.pop(project, None)
             self._conversation_processes.pop(project, None)
         if session_mode == "continue" and project not in self._sessions:
-            project_info = next(
-                (item for item in self.services.project_list()
-                 if str(item.get("name", "")) == project),
-                None,
-            )
             if project_info and project_info.get("workspace"):
                 from backend.core.storage import get_storage
                 durable = get_storage(
@@ -979,6 +1030,7 @@ class NativeHost:
             self._emit({"type": "event", "project": project,
                         "request_id": request_id,
                         "payload": {"event": "runtime_ack", "stage": "admitted", **ack,
+                                    "project_id": project_id, "workspace": workspace,
                                     "wait_timeout_seconds": hard_seconds + 30}})
             if request_id in self._cancelled_requests and process_id:
                 self._runtime_stop(
