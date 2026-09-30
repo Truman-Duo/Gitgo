@@ -9,6 +9,7 @@ import { projectRuntimeRank } from "../projectRuntimeState.js";
 export type ProjectInfo = {
   name: string;
   workspace: string;
+  project_id?: string;
   backup: string;
   commit_prefix: string;
 };

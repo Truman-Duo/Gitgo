@@ -10,6 +10,8 @@ import { colors } from "../theme/index.js";
 
 type Props = {
   project: string;
+  projectId?: string;
+  workspace?: string;
   client: BackendClient;
   loopData: LoopData;
   cols: number;
@@ -34,7 +36,7 @@ type Props = {
 };
 
 export const ProjectWorkspace = memo(function ProjectWorkspace({
-  project, client, loopData, cols, sendChatRef, sendChatReadyRef, manualCreateRef, scrollChatRef,
+  project, projectId, workspace, client, loopData, cols, sendChatRef, sendChatReadyRef, manualCreateRef, scrollChatRef,
   decisionSelection, decisionComposing, decisionSubmitting,
   onDecisionChange, onSendSettled, onBusyChange, onActiveProcessChange, onActiveRequestChange,
   verbose = false,
@@ -54,6 +56,7 @@ export const ProjectWorkspace = memo(function ProjectWorkspace({
   const { messages, streaming, pendingDecision, activeProcessId, activeRequestId, send, submitManual } = useChat(
     client,
     project,
+    {projectId, workspace},
     mainConversation,
     routedDecision,
   );

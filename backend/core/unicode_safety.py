@@ -22,6 +22,22 @@ def normalize_unicode_text(value: str) -> str:
     )
 
 
+def unicode_integrity_error(value: str) -> str:
+    """Return a deterministic explanation when fresh text is not UTF-8 safe.
+
+    ``normalize_unicode_text`` remains useful for quarantining legacy durable
+    data, but applying it to a newly submitted prompt silently changes user
+    intent.  Fresh transport input must fail closed before any provider spend.
+    """
+    match = _UNPAIRED_SURROGATE.search(value)
+    if match is None:
+        return ""
+    return (
+        "input contains an unpaired UTF-16 surrogate at code-unit offset "
+        f"{match.start()} (U+{ord(match.group(0)):04X})"
+    )
+
+
 def normalize_unicode_value(value: Any) -> Any:
     """Recursively normalize strings in JSON-shaped data."""
     if isinstance(value, str):

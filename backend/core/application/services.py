@@ -265,16 +265,25 @@ class ApplicationServices:
     def project_list(self) -> list[dict]:
         with self._write_lock:
             cfg = ConfigManager.load()
-        return [
-            {
+        from backend.core.storage import resolve_existing_storage_paths
+        projects: list[dict] = []
+        for p in cfg.projects:
+            if p.archived:
+                continue
+            try:
+                paths = resolve_existing_storage_paths(p.workspace_path)
+                project_id = str(paths.project_id if paths is not None else "")
+            except (OSError, ValueError):
+                project_id = ""
+            projects.append({
                 "name": p.name,
                 "workspace": p.workspace_path,
+                "project_id": project_id,
                 "backup": p.backup_path,
                 "commit_prefix": p.commit_format.get("prefix", ""),
                 "daemonOnline": self._daemon_online(p.name),
-            }
-            for p in cfg.projects if not p.archived
-        ]
+            })
+        return projects
 
     def project_create(self, name: str, workspace_path: str,
                        release_url: str = "", llm_provider: str = "",

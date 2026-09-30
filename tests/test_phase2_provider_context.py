@@ -856,6 +856,33 @@ def test_context_estimate_includes_provider_continuation_state():
     assert session.estimate_tokens() >= baseline + 1000
 
 
+def test_restored_legacy_surrogate_markers_remain_visible_but_not_provider_visible():
+    session = AgentSession.from_durable_state({
+        "session_id": "legacy-corrupt",
+        "messages": [
+            {"role": "user", "content": "bad \\udcaf text \\udc80"},
+            {"role": "assistant", "content": "answer derived from corrupt input"},
+            {"role": "user", "content": "clean follow-up"},
+        ],
+    })
+    assert session.messages[0]["integrity_status"] == "quarantined_legacy_unicode"
+    assert session.messages[1]["integrity_status"] == "quarantined_legacy_unicode"
+    assert [item["content"] for item in session.to_provider_messages()] == ["clean follow-up"]
+
+
+def test_live_session_quarantines_legacy_unicode_chain_without_daemon_restart():
+    session = AgentSession()
+    session.messages = [
+        {"role": "system", "content": "stable"},
+        {"role": "user", "content": "bad \\udcaf text \\udc80"},
+        {"role": "assistant", "content": "derived diagnosis"},
+        {"role": "user", "content": "what now"},
+    ]
+    assert [item["content"] for item in session.to_provider_messages()] == [
+        "stable", "what now",
+    ]
+
+
 def test_canonical_executor_records_reasoning_usage_and_cache_telemetry():
     process = AgentRuntimeFactory.create(RuntimeSpec(
         role="worker", actor_kind="worker", capability_profile_id="text.only",
@@ -945,6 +972,113 @@ def test_executor_continues_typed_provider_truncation_without_repeating_work():
         state.get("response_output_items", [{}])[0].get("encrypted_content") == "opaque"
         for state in process.session.provider_state.values()
         if state.get("response_output_items")
+    )
+
+
+def test_direct_answer_bounds_reasoning_only_recovery_and_isolates_failed_turn():
+    process = AgentRuntimeFactory.create(RuntimeSpec(
+        role="worker", actor_kind="worker", capability_profile_id="text.only",
+        ring_level=RingLevel.RING_3, tool_registry=ToolRegistry([]), max_steps=3,
+        task_kind="answer", task_id="reasoning-only-incomplete",
+    ))
+
+    class ReasoningOnlyProvider:
+        protocol = SimpleNamespace(value="openai_responses")
+        capabilities = SimpleNamespace(prompt_cache="automatic")
+        context_window = 128_000
+        max_output_tokens = 16_384
+        calls = 0
+        requested_max_tokens = 0
+
+        def stream_events(self, *_args, **kwargs):
+            self.calls += 1
+            self.requested_max_tokens = kwargs["max_tokens"]
+            yield ProviderEvent(
+                ProviderEventType.REASONING_DELTA, reasoning="inconclusive recovery attempt",
+            )
+            yield ProviderEvent(
+                ProviderEventType.RESPONSE_INCOMPLETE,
+                artifact={"reason": "max_output_tokens"},
+            )
+
+    provider = ReasoningOnlyProvider()
+    outcome = TaskOutcome.from_dict(agent_step(
+        process, provider, instruction="explain this character",
+    ))
+
+    assert outcome.status == OutcomeStatus.FAILED
+    assert outcome.error is not None
+    assert outcome.error.code == "PROVIDER_NO_PROGRESS"
+    assert provider.calls == 2
+    assert provider.requested_max_tokens == 8192
+    recovery_messages = [
+        message for message in process.session.messages
+        if message.get("message_type") == "host_provider_continuation"
+    ]
+    assert recovery_messages
+    assert all(message.get("provider_visible") is False for message in recovery_messages)
+    assert process.session.provider_state == {}
+    assert process.session.host_ledger[-1]["event"] == "provider_turn_quarantined"
+    failed_user = next(
+        message for message in process.session.messages
+        if message.get("content") == "explain this character"
+    )
+    assert failed_user["provider_visible"] is False
+
+    process.session.append_user("你好", message_type="conversation")
+    visible = process.session.to_provider_messages()
+    visible_user_text = [
+        message.get("content") for message in visible
+        if message.get("role") == "user"
+    ]
+    assert "你好" in visible_user_text
+    assert "explain this character" not in visible_user_text
+    assert not any("NO-PROGRESS RECOVERY" in str(text) for text in visible_user_text)
+
+
+def test_direct_answer_no_progress_recovery_can_finish_the_same_user_turn():
+    process = AgentRuntimeFactory.create(RuntimeSpec(
+        role="worker", actor_kind="worker", capability_profile_id="text.only",
+        ring_level=RingLevel.RING_3, tool_registry=ToolRegistry([]), max_steps=3,
+        task_kind="answer", task_id="reasoning-recovery-success",
+    ))
+
+    class RecoveringProvider:
+        protocol = SimpleNamespace(value="openai_responses")
+        capabilities = SimpleNamespace(prompt_cache="automatic")
+        context_window = 128_000
+        max_output_tokens = 16_384
+        calls = 0
+
+        def stream_events(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield ProviderEvent(
+                    ProviderEventType.REASONING_DELTA,
+                    reasoning="unnecessarily long hidden analysis",
+                )
+                yield ProviderEvent(
+                    ProviderEventType.RESPONSE_INCOMPLETE,
+                    artifact={"reason": "max_output_tokens"},
+                )
+                return
+            yield ProviderEvent(
+                ProviderEventType.TEXT_DELTA,
+                text="literal concise answer",
+            )
+            yield ProviderEvent(ProviderEventType.RESPONSE_COMPLETED)
+
+    provider = RecoveringProvider()
+    outcome = TaskOutcome.from_dict(agent_step(
+        process, provider, instruction="explain the quoted text literally",
+    ))
+
+    assert outcome.status == OutcomeStatus.COMPLETED
+    assert outcome.response == "literal concise answer"
+    assert provider.calls == 2
+    assert not any(
+        item.get("event") == "provider_turn_quarantined"
+        for item in process.session.host_ledger
     )
 
 

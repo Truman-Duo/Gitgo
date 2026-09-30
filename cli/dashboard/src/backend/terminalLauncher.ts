@@ -11,6 +11,20 @@ export type TerminalLauncherConfig = {
   args: string[];
 };
 
+/** Make Windows console input bytes deterministic before Bun/Ink reads stdin. */
+export function ensureWindowsUtf8Console(platform: NodeJS.Platform = process.platform): void {
+  if (platform !== "win32") return;
+  try {
+    execFileSync("chcp.com", ["65001"], {
+      encoding: "utf8", windowsHide: true, timeout: 2500,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch {
+    // The strict prompt digest/Host validation still fails closed if a custom
+    // terminal does not expose chcp (for example an SSH pseudo-terminal).
+  }
+}
+
 const DEFAULT_CONFIG: TerminalLauncherConfig = {
   terminal: "auto",
   command: "",

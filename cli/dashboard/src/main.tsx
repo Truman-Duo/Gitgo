@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { resolvePythonRuntime } from "./backend/pythonRuntime.js";
 import {
   loadTerminalLauncherConfig,
+  ensureWindowsUtf8Console,
   relaunchInConfiguredTerminal,
   shouldRelaunchInConfiguredTerminal,
   windowsParentProcessName,
@@ -108,6 +109,7 @@ function startupSmokeTask(): {
 }
 
 async function main() {
+  ensureWindowsUtf8Console();
   const launcherConfig = loadTerminalLauncherConfig();
   if (shouldRelaunchInConfiguredTerminal({
     compiled: COMPILED,

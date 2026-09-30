@@ -7,11 +7,66 @@ A Agent 通过 ContextBuilder 注入治理简报作为 system prompt。
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
 
 from backend.core.loop.provider_protocol import CacheIntent, deterministic_hash
+from backend.core.unicode_safety import unicode_integrity_error
+
+
+_LITERAL_SURROGATE = re.compile(r"\\u[dD][89a-fA-F][0-9a-fA-F]{2}")
+_INTERNAL_USER_PREFIXES = (
+    "[HOST ", "[USER DECISION ", "[GOVERNANCE ", "[治理建议]",
+    "[系统提示]", "[系统]", "[系统告警]",
+)
+
+
+def _looks_transport_corrupted(content: str) -> bool:
+    return bool(unicode_integrity_error(content)) or len(
+        _LITERAL_SURROGATE.findall(content)
+    ) >= 2
+
+
+def _mark_legacy_unicode_chain(messages: list[dict]) -> list[dict]:
+    """Hide a corrupt user turn and its derived assistant/tool tail.
+
+    Old compiled Dashboard builds could persist mojibake containing literal
+    ``\\udcXX`` byte markers.  Keeping the rows is important for audit/UI
+    history, but replaying either the broken request or an assistant answer
+    derived from it repeatedly derails otherwise simple future questions.
+    A subsequent clean user/Host turn is a deterministic recovery boundary.
+    """
+    result: list[dict] = []
+    contaminated = False
+    for raw in messages:
+        item = dict(raw)
+        role = str(item.get("role") or "")
+        corrupted = _looks_transport_corrupted(str(item.get("content") or ""))
+        if role == "user" and not corrupted:
+            contaminated = False
+        if corrupted:
+            contaminated = True
+        if corrupted or (contaminated and role in {"assistant", "tool"}):
+            item["provider_visible"] = False
+            item["integrity_status"] = "quarantined_legacy_unicode"
+        result.append(item)
+    return result
+
+
+def _is_conversation_user(message: dict) -> bool:
+    if str(message.get("role") or "") != "user":
+        return False
+    message_type = str(message.get("message_type") or "")
+    if message_type and message_type != "conversation":
+        return False
+    if message.get("host_authority"):
+        return False
+    content = str(message.get("content") or "")
+    return bool(content.strip()) and not content.lstrip().startswith(
+        _INTERNAL_USER_PREFIXES
+    )
 
 
 @dataclass
@@ -60,7 +115,9 @@ class AgentSession:
     def from_durable_state(cls, state: dict) -> "AgentSession":
         """Rebuild a provider-valid session from the authoritative checkpoint."""
         session = cls(session_id=str(state.get("session_id") or uuid.uuid4()))
-        session.messages = [dict(item) for item in (state.get("messages") or [])]
+        session.messages = _mark_legacy_unicode_chain([
+            dict(item) for item in (state.get("messages") or [])
+        ])
         session.provider_state = {
             str(key): dict(value)
             for key, value in dict(state.get("provider_state") or {}).items()
@@ -299,6 +356,45 @@ class AgentSession:
                 state["provider_route"] = self.active_provider_route
             self.provider_state[state_id] = state
 
+    def quarantine_failed_provider_turn(self, reason: str) -> bool:
+        """Close one failed user turn without deleting its public audit record.
+
+        A reasoning-only provider response previously removed only the empty
+        assistant message.  Its user request therefore remained as an
+        unanswered instruction, and the next ordinary message could cause the
+        model to answer that stale request.  Keep the complete turn in durable
+        history/UI, but make the user message, Host recovery prompts and empty
+        provider states invisible to later Provider calls.
+        """
+        start_index = next((
+            index for index in range(len(self.messages) - 1, -1, -1)
+            if _is_conversation_user(self.messages[index])
+        ), -1)
+        if start_index < 0:
+            return False
+        quarantined_state_ids: list[str] = []
+        for message in self.messages[start_index:]:
+            message["provider_visible"] = False
+            message["turn_status"] = "failed"
+            message["quarantine_reason"] = str(
+                reason or "provider_no_progress"
+            )
+            state_id = str(message.get("provider_state_id") or "")
+            if state_id:
+                quarantined_state_ids.append(state_id)
+                self.provider_state.pop(state_id, None)
+        self.host_ledger.append({
+            "event": "provider_turn_quarantined",
+            "reason": str(reason or "provider_no_progress"),
+            "message_index": start_index,
+            "provider_state_ids": quarantined_state_ids,
+        })
+        return True
+
+    def discard_last_empty_provider_turn(self, reason: str) -> bool:
+        """Backward-compatible alias for the failed-turn quarantine."""
+        return self.quarantine_failed_provider_turn(reason)
+
     def append_host_steering(
         self, content: str, *, steering_type: str, version: str = "",
     ) -> dict:
@@ -480,7 +576,12 @@ class AgentSession:
         """
         result = []
         excluded_call_ids = self._excluded_provider_call_ids(provider_route)
-        for message in self.messages:
+        # Re-evaluate at each Provider boundary as well as restore time.  This
+        # also repairs a daemon that kept a pre-fix session alive while a new
+        # Dashboard executable connected to it.
+        for message in _mark_legacy_unicode_chain(self.messages):
+            if message.get("provider_visible") is False:
+                continue
             if (
                 message.get("role") == "tool"
                 and str(message.get("tool_call_id") or "") in excluded_call_ids

@@ -110,6 +110,7 @@ export function knowledgeHarvestMessage(
 export function useChat(
   client: BackendClient,
   project: string,
+  projectIdentity?: {projectId?: string; workspace?: string},
   seed?: ChatMessage[] | null,
   recoveredDecision?: PendingDecision | null,
 ) {
@@ -295,12 +296,12 @@ export function useChat(
           setActiveRequestId("");
           setStreaming(null);
         },
-      }, options);
+      }, {...options, projectId: projectIdentity?.projectId, workspace: projectIdentity?.workspace});
     } finally {
       if (isDecisionSubmission) decisionInFlightRef.current = false;
       else inFlightRef.current = false;
     }
-  }, [client, project, pendingDecision]);
+  }, [client, project, projectIdentity?.projectId, projectIdentity?.workspace, pendingDecision]);
 
   const submitManual = useCallback((text: string): boolean => {
     if (!text.trim() || inFlightRef.current || pendingDecision) return false;

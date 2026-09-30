@@ -544,6 +544,44 @@ def test_native_host_correlates_streams_and_owns_one_daemon():
     host.close()
 
 
+def test_native_host_rejects_corrupt_prompt_before_provider_or_daemon():
+    host = NativeHost(stdout=io.StringIO(), daemon_factory=FakeDaemon)
+    with pytest.raises(OperationError) as raised:
+        host._runtime_chat("bad-input", {"project": "demo", "message": "bad\udcaf"})
+    assert raised.value.code == "INPUT_ENCODING_CORRUPTED"
+    assert host._daemons == {}
+    host.close()
+
+
+def test_native_host_rejects_prompt_digest_mismatch_before_provider():
+    host = NativeHost(stdout=io.StringIO(), daemon_factory=FakeDaemon)
+    with pytest.raises(OperationError) as raised:
+        host._runtime_chat("bad-digest", {
+            "project": "demo", "message": "中文",
+            "message_utf8_sha256": "0" * 64,
+        })
+    assert raised.value.code == "INPUT_INTEGRITY_MISMATCH"
+    assert host._daemons == {}
+    host.close()
+
+
+def test_native_host_rejects_stale_dashboard_project_identity(monkeypatch):
+    host = NativeHost(stdout=io.StringIO(), daemon_factory=FakeDaemon)
+    host.services.project_list = lambda: [{"name": "demo", "workspace": "C:/demo"}]
+    monkeypatch.setattr(
+        "backend.core.storage.resolve_existing_storage_paths",
+        lambda _workspace: SimpleNamespace(project_id="actual-project-id"),
+    )
+    with pytest.raises(OperationError) as raised:
+        host._runtime_chat("wrong-project", {
+            "project": "demo", "message": "hello",
+            "expected_project_id": "stale-project-id",
+        })
+    assert raised.value.code == "PROJECT_IDENTITY_MISMATCH"
+    assert host._daemons == {}
+    host.close()
+
+
 def test_native_host_binds_host_search_configuration_to_task_preferences():
     class RecordingDaemon(FakeDaemon):
         def send_task(self, command, timeout=300, on_ack=None):

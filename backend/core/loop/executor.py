@@ -62,6 +62,16 @@ prevents the requested result. Internal execution evidence belongs in the
 runtime timeline, not in the final answer. Keep the delivery proportionate:
 do not enumerate individual test cases, repeat a code walkthrough, or restate
 internal acceptance criteria unless the user asked for those details.
+For stable general knowledge that you can answer confidently, answer in the
+current model turn without calling search merely to demonstrate diligence. If
+an optional detail is uncertain, omit or qualify that detail instead of
+expanding the user's request into research. Use external search when freshness,
+requested citations, or uncertainty about the core answer materially requires
+it, and respect an explicit request for a direct answer.
+Treat quoted or user-provided text literally unless the user asks you to decode,
+repair, or reconstruct hidden source text. If a literal explanation needs
+verification, make one bounded tool call promptly instead of spending the
+output budget reverse-engineering an unstated transformation.
 """
 
 
@@ -277,6 +287,7 @@ def _iter_provider_events(
     metadata: dict | None = None,
     timeout: int = 45,
     current_turn_envelope: str = _BASE_CURRENT_TURN_ENVELOPE,
+    max_tokens: int | None = None,
 ):
     """Use canonical events, with a compatibility bridge for test/legacy providers."""
     if hasattr(llm_provider, "stream_events"):
@@ -292,9 +303,9 @@ def _iter_provider_events(
             # even after provider probing had established a larger safe output
             # limit.  Reasoning tokens and long tool arguments share this
             # budget, so the hidden default could truncate ordinary writes.
-            max_tokens=max(
-                1, int(getattr(llm_provider, "max_output_tokens", 4096)),
-            ),
+            max_tokens=max(1, int(max_tokens or getattr(
+                llm_provider, "max_output_tokens", 4096,
+            ))),
         )
         return
     started: set[int] = set()
@@ -305,9 +316,9 @@ def _iter_provider_events(
         ),
         tools=tools, cancel_event=cancel_event,
         timeout=timeout,
-        max_tokens=max(
-            1, int(getattr(llm_provider, "max_output_tokens", 4096)),
-        ),
+        max_tokens=max(1, int(max_tokens or getattr(
+            llm_provider, "max_output_tokens", 4096,
+        ))),
     ):
         if chunk.get("usage"):
             from backend.core.loop.provider_protocol import normalize_usage
@@ -512,7 +523,7 @@ def agent_step(
 
     # 追加用户指令
     if instruction:
-        session.append_user(instruction)
+        session.append_user(instruction, message_type="conversation")
     elif not session.messages:
         process.status = ProcessStatus.FAILED
         return _error_result(
@@ -926,6 +937,7 @@ def agent_step(
 
     # ── 多步循环 ──
     _stream_recoveries = 0  # v0.44: 流中断恢复计数（局部变量，非 AgentProcess 字段）
+    _no_progress_recoveries = 0
     while process.steps_used < process.max_steps:
         _refresh_governance_snapshot()
         # ── 取消检查（kill 置位 cancel_requested，真停线程）──
@@ -1083,6 +1095,14 @@ def agent_step(
                 )
             budget_stream_prefix = f"provider-{budget_call_index}:"
             provider_idle_timeout = _provider_idle_timeout(process)
+            provider_output_limit = max(
+                1, int(getattr(llm_provider, "max_output_tokens", 4096)),
+            )
+            if process.task_kind == "answer":
+                # A direct answer must not spend an action-sized output budget
+                # on hidden reasoning. Complex work can be admitted as action,
+                # plan or review and retains the configured provider limit.
+                provider_output_limit = min(provider_output_limit, 8192)
             if process.steps_used == 0:
                 _emit_observation({
                     "event": "progress_summary",
@@ -1137,6 +1157,7 @@ def agent_step(
                 },
                 timeout=provider_idle_timeout,
                 current_turn_envelope=current_turn_envelope,
+                max_tokens=provider_output_limit,
             ):
                 if event.type == ProviderEventType.PROVIDER_CAPABILITY_FALLBACK:
                     artifact = dict(event.artifact or {})
@@ -1596,6 +1617,42 @@ def agent_step(
                 )
 
         if provider_incomplete_reason and not tool_calls:
+            if process.task_kind == "answer" and not accumulated_text.strip():
+                if _no_progress_recoveries < 1:
+                    _no_progress_recoveries += 1
+                    session.append_user(
+                        "[HOST NO-PROGRESS RECOVERY] The prior direct-answer turn "
+                        "spent its output budget without public text or a tool call. "
+                        "Do not repeat or extend the hidden analysis. Treat quoted input "
+                        "literally unless the user explicitly asked for decoding. Either "
+                        "make one bounded evidence call now, or provide the concise public "
+                        "answer immediately.",
+                        message_type="host_provider_continuation",
+                    )
+                    _emit_observation({
+                        "event": "provider_no_progress_recovery",
+                        "attempt": _no_progress_recoveries,
+                        "max_attempts": 1,
+                        "reason": provider_incomplete_reason,
+                    })
+                    continue
+                session.quarantine_failed_provider_turn(
+                    "answer_incomplete_without_public_text",
+                )
+                process.status = ProcessStatus.FAILED
+                return _make_result(
+                    process,
+                    session,
+                    "The model exhausted two bounded direct-answer attempts without "
+                    "producing a reply.",
+                    duration_ms=duration_ms,
+                    error_code="PROVIDER_NO_PROGRESS",
+                    error_message=(
+                        "A direct-answer provider turn remained incomplete after one "
+                        "bounded recovery; the failed turn was isolated from future input"
+                    ),
+                    outcome_status=OutcomeStatus.FAILED,
+                )
             unfinished_names = sorted({
                 str(item.get("name") or "unknown")
                 for item in pending_tool_calls.values()
