@@ -540,7 +540,7 @@ def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
     if not remaining:
         return python_command(interpreter_flags)
 
-    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r});"
+    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r})\n"
     mode = remaining[0]
     if mode == "-c" and len(remaining) >= 2:
         return python_command([
