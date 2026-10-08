@@ -516,7 +516,7 @@ def test_native_child_home_and_caches_stay_inside_workspace(tmp_path_factory, mo
                 "TMPDIR", "PSModuleAnalysisCachePath"):
         # Restore the process environment after exercising the child bootstrap.
         monkeypatch.setenv(key, os.environ.get(key, ""))
-    prepare_child_environment(str(tmp_path_factory))
+    prepare_child_environment(str(SandboxPolicy(tmp_path_factory).workspace))
     for key in ("USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
                 "TMPDIR", "PSModuleAnalysisCachePath"):
         assert Path(os.environ[key]).resolve().is_relative_to(tmp_path_factory.resolve())

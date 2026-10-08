@@ -89,6 +89,9 @@ class ProcessToolRunner:
                 )
                 child_env = sandbox_environment(child_env)
                 input_data["_native_sandbox_workspace"] = str(policy.workspace)
+                # Normalize DOS short aliases before entering AppContainer,
+                # where probing the inaccessible parent directories is denied.
+                input_data["args"] = {**args, "_workspace": str(policy.workspace)}
             spawn = (
                 lambda argv, **options: sandbox_popen(argv, policy, **options)
             ) if native else subprocess.Popen
