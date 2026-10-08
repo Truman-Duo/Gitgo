@@ -314,7 +314,16 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
         "purpose": "verify native PowerShell execution", "timeout": 60,
     })
     assert shell.success, shell
-    assert shell.data.get("success"), json.dumps(shell.data)
+    if not shell.data.get("success"):
+        diagnostic = runner.run("shell_script", {
+            "_workspace": str(workspace), "timeout": 60,
+            "purpose": "diagnose native PowerShell module initialization",
+            "script": ('[Console]::WriteLine($env:PSModulePath);'
+                       '[Console]::WriteLine($PSHOME);'
+                       'Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop;'
+                       'Write-Output module-loaded'),
+        })
+        pytest.fail(json.dumps({"shell": shell.data, "diagnostic": diagnostic.data}))
     assert shell.data["stdout"].strip() == "native-shell"
     authored = "def run(args):\n    return {'native': args['value']}\n"
     result = runner.run("authored_privileged_python", {
