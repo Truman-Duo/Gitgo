@@ -599,7 +599,22 @@ def shell_script(args: dict) -> dict:
         # MSYS Bash requires a shared global object namespace, incompatible
         # with AppContainer. Use a Windows-native engine without weakening it.
         engine = Path(os.environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        shell_argv = [str(engine), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]
+        # Server images may not autoload even the built-in modules in an
+        # AppContainer. Load known system manifests before executing the script.
+        bootstrap = "$env:PSModulePath=$PSHOME+'\\Modules';"
+        for module in ("Microsoft.PowerShell.Utility", "Microsoft.PowerShell.Management"):
+            bootstrap += (f"Import-Module ($PSHOME+'\\Modules\\{module}\\{module}.psd1') "
+                          "-ErrorAction Stop;")
+        # PowerShell's provider location can fall back to the drive root in
+        # AppContainer even when CreateProcess has the correct native cwd.
+        literal_cwd = str(cwd).replace("'", "''")
+        bootstrap += (f"$null=New-PSDrive -Name Gitgo -PSProvider FileSystem "
+                      f"-Root '{literal_cwd}' -ErrorAction Stop;"
+                      "Set-Location -LiteralPath 'Gitgo:\\' -ErrorAction Stop;")
+        command = ("[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding;"
+                   "try {" + bootstrap + "} catch { [Console]::Error.WriteLine($_);exit 1 };\n" + script)
+        shell_argv = [str(engine), "-NoLogo", "-NoProfile", "-NonInteractive",
+                      "-Command", command]
     else:
         bash = _find_bash()
         if bash is None:

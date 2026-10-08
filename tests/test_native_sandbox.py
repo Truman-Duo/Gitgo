@@ -310,7 +310,8 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
     assert result.data["stdout"].strip() == "executed"
     assert (workspace / "runner.txt").read_text() == "ok"
     shell = runner.run("shell_script", {
-        "_workspace": str(workspace), "script": "Write-Output native-shell",
+        "_workspace": str(workspace),
+        "script": "Set-Content -LiteralPath shell.txt -Value native-file;Write-Output native-shell",
         "purpose": "verify native PowerShell execution", "timeout": 60,
     })
     assert shell.success, shell
@@ -325,6 +326,8 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
         })
         pytest.fail(json.dumps({"shell": shell.data, "diagnostic": diagnostic.data}))
     assert shell.data["stdout"].strip() == "native-shell"
+    assert not shell.data["stderr"], json.dumps(shell.data)
+    assert (workspace / "shell.txt").read_text().strip() == "native-file"
     authored = "def run(args):\n    return {'native': args['value']}\n"
     result = runner.run("authored_privileged_python", {
         "_workspace": str(workspace), "value": 7,

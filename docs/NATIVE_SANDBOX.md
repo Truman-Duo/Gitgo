@@ -45,7 +45,8 @@ Windows shell_script 使用系统 PowerShell（NoProfile、NonInteractive），
 Linux 使用 Bash（noprofile、norc）。Windows 调用方必须把 Bash 脚本迁移到
 PowerShell 语法并重新获得参数绑定的授权。Git Bash/MSYS 的共享全局对象
 命名空间与 AppContainer 不兼容，不能通过退出沙箱来兼容。
-PowerShell 模块搜索固定到系统引擎的 Modules 目录，避免访问用户模块路径或误载 PowerShell 7 模块。
+PowerShell 模块搜索固定到系统引擎的 Modules 目录，并显式加载系统 Utility/Management 模块；避免用户模块路径、PowerShell 7 模块及 Windows Server 自动加载差异。
+基础模块加载后建立仅以本次工作目录为根的 Gitgo: provider drive 并进入该目录；无需读取磁盘根目录或项目祖先。输出使用 UTF-8，初始化失败会中止脚本。
 exec_command 仍接受明确的 argv；不兼容的外部程序返回执行错误。
 
 ## Linux：bubblewrap
