@@ -28,7 +28,7 @@ def seatbelt_profile(workspace: Path) -> str:
     return ('(version 1) (deny default (with message "GitgoMacAudit")) '
             "(allow process-exec process-fork) (allow sysctl-read) "
             "(allow process-info* (target self)) (allow signal (target self)) "
-            "(allow file-read-metadata) "
+            '(allow file-read-metadata) (allow file-read* (literal "/")) '
             f"(allow file-map-executable {read_rules}) "
             f"(allow file-read* {read_rules} (literal \"/dev/urandom\") (literal \"/dev/random\") (literal \"/dev/null\")) "
             f"(allow file-write* (subpath {quoted(str(workspace))}) (literal \"/dev/null\"))")
@@ -59,7 +59,7 @@ def run(profile: str, workspace: Path, source: str) -> str:
 
 
 def detached_probe(profile: str, workspace: Path) -> bool:
-    child = ("import os,time;open('detached-ready','w').write(str(os.getpid()));"
+    child = ("import os,time;open('detached-pid.tmp','w').write(str(os.getpid()));os.replace('detached-pid.tmp','detached-ready');"
              "time.sleep(0.8);open('survived-group-kill','w').write('yes');time.sleep(60)")
     source = ("import subprocess,sys,time;"
               f"subprocess.Popen([sys.executable,'-I','-c',{child!r}],start_new_session=True,"
@@ -163,6 +163,7 @@ def main():
     report = {'os': platform.mac_ver()[0], 'architecture': platform.machine(),
               'interpreter': str(Path(sys.executable).resolve()),
               'base_prefix': str(Path(sys.base_prefix).resolve()),
+              'hypervisor_available': subprocess.check_output(['/usr/sbin/sysctl', '-n', 'kern.hv_support'], text=True).strip() == '1',
               'production_backend': 'unavailable', 'macos_support_complete': False, 'audit_passed': False}
     try:
         audit(report)

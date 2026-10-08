@@ -58,7 +58,7 @@ jobs:
       - name: Diagnose native launch failures
         if: failure()
         run: |
-          sudo /usr/bin/log show --last 3m --style compact --predicate 'eventMessage CONTAINS "GitgoMacAudit" OR eventMessage CONTAINS "Sandbox:"' | tail -80
+          sudo /usr/bin/log show --last 3m --style compact --predicate 'eventMessage CONTAINS "GitgoMacAudit"' | tail -80
           python - <<'PY'
           import json
           from pathlib import Path
