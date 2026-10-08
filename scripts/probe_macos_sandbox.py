@@ -1,7 +1,8 @@
 """Audit native macOS primitives. A passing audit does NOT enable a backend.
 
-Only disposable directories, an unprivileged interpreter and a loopback listener
-are used. No installation, entitlements or system configuration is changed.
+Uses disposable directories, an unprivileged interpreter, a loopback listener
+and a temporary ad-hoc-signed Hypervisor/Virtualization probe. No guest is
+booted, and no installed application or system configuration is changed.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import json
 import os
 from pathlib import Path
 import platform
-import resource
+import plistlib
 import signal
 import socket
 import subprocess
@@ -93,6 +94,47 @@ def detached_probe(profile: str, workspace: Path) -> bool:
         proc.stderr.close()
 
 
+
+def virtualization_probe() -> dict:
+    """Exercise a signed native VM allocation, not just the hv_support sysctl.
+
+    No guest image, network adapter, directory share or persistent VM is used.
+    An unsupported machine is an observation; compile/sign/cleanup failures
+    are audit errors and must not be misreported as unsupported hardware.
+    """
+    source = Path(__file__).with_name('probe_macos_virtualization.swift')
+    with tempfile.TemporaryDirectory(prefix='gitgo-macos-hypervisor-') as raw:
+        root = Path(raw)
+        executable = root / 'virtualization-probe'
+        entitlements = root / 'entitlements.plist'
+        entitlements.write_bytes(plistlib.dumps({
+            'com.apple.security.hypervisor': True,
+            'com.apple.security.virtualization': True,
+        }))
+        commands = [
+            ['/usr/bin/xcrun', 'swiftc', str(source), '-o', str(executable),
+             '-framework', 'Hypervisor', '-framework', 'Virtualization'],
+            ['/usr/bin/codesign', '--force', '--sign', '-', '--identifier',
+             'org.gitgo.sandbox.virtualization-probe', '--entitlements',
+             str(entitlements), str(executable)],
+            [str(executable)],
+        ]
+        result = None
+        for command in commands:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+            if result.returncode:
+                raise RuntimeError(f'Virtualization probe {Path(command[0]).name} failed '
+                                   f'({result.returncode}): {result.stderr[-1600:]}')
+        report = json.loads(result.stdout)
+        assert report['schema_version'] == 1
+        assert report['native_macos_guest_ready'] is False
+        assert report['guest_os_boot_tested'] is False
+        assert report['production_backend_enabled'] is False
+        if report['hypervisor_vm_created']:
+            assert report['hypervisor_destroy_status'] == 0
+        return report
+
+
 def audit(report: dict):
     from backend.core.sandbox import SandboxDenied, SandboxPolicy, sandbox_popen
     with tempfile.TemporaryDirectory(prefix='gitgo-macos-audit-') as raw:
@@ -168,6 +210,7 @@ def main():
               'hypervisor_available': {'1': True, '0': False}.get(hv_value),
               'production_backend': 'unavailable', 'macos_support_complete': False, 'audit_passed': False}
     try:
+        report['virtualization'] = virtualization_probe()
         audit(report)
         report['audit_passed'] = True
     except Exception as exc:

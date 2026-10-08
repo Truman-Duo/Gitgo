@@ -11,6 +11,7 @@ on:
       - "backend/core/child_process.py"
       - "backend/core/native_host_entry.py"
       - "scripts/*sandbox*.py"
+      - "scripts/probe_macos_virtualization.swift"
       - "tests/test_native_sandbox.py"
       - "tests/conftest.py"
       - ".github/workflows/native-sandbox.yml"
