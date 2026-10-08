@@ -36,6 +36,7 @@ class SubprocessResult:
     duration_ms: float = 0.0
     timed_out: bool = False
     stderr: str = ""
+    effect_state: str = ""
 
 
 class ProcessToolRunner:
@@ -63,6 +64,15 @@ class ProcessToolRunner:
         effective_timeout = timeout if timeout is not None else self._timeout
         input_data = {"tool_name": tool_name, "args": args}
         start = time.monotonic()
+
+        # A cancellation already observed by the Host must not launch any
+        # code. Checking only after Popen permits avoidable side effects.
+        if cancellation_event is not None and cancellation_event.is_set():
+            return SubprocessResult(
+                success=False, error=f"tool '{tool_name}' cancelled before execution",
+                duration_ms=(time.monotonic() - start) * 1000,
+                effect_state="not_committed",
+            )
 
         try:
             from backend.core.process_control import attach_kill_job, close_job, creation_flags
@@ -131,6 +141,7 @@ class ProcessToolRunner:
                         return SubprocessResult(
                             success=False,
                             error=f"tool '{tool_name}' cancelled",
+                            effect_state="ambiguous",
                             exit_code=-1,
                             duration_ms=(time.monotonic() - start) * 1000,
                         )
@@ -185,6 +196,7 @@ class ProcessToolRunner:
                     exit_code=-1,
                     duration_ms=duration_ms,
                     timed_out=True,
+                    effect_state="ambiguous",
                     stderr="",
                 )
 

@@ -26,6 +26,10 @@ from backend.core.loop.operation_policy import (
 class ToolExecutionCancelled(RuntimeError):
     """An isolated/cooperative tool acknowledged cancellation."""
 
+    def __init__(self, message, *, effect_state=""):
+        super().__init__(message)
+        self.effect_state = effect_state if effect_state in {"not_committed", "ambiguous"} else ""
+
 if TYPE_CHECKING:
     from backend.core.loop.agent_tool import AgentTool
     from backend.core.loop.event_bus import EventBus
@@ -396,7 +400,7 @@ class ToolPipeline:
                 result_data = tool.finalize_result(result_data)
         except ToolExecutionCancelled as exc:
             effect_value = getattr(tool.effect, "value", str(tool.effect))
-            effect_state = (
+            effect_state = exc.effect_state or (
                 "not_committed" if not is_effectful_mutation(effect_value)
                 else "ambiguous"
             )
@@ -811,7 +815,8 @@ class ToolPipeline:
         )
         if not result.success:
             if "cancelled" in (result.error or "").lower():
-                raise ToolExecutionCancelled(result.error)
+                raise ToolExecutionCancelled(result.error,
+                    effect_state=getattr(result, "effect_state", ""))
             if result.timed_out:
                 raise TimeoutError(
                     f"Tool '{tool_name}' timed out after {timeout}s"

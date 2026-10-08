@@ -742,6 +742,7 @@ def test_native_runner_stops_detached_children_with_blocked_io(
         assert not worker.is_alive(), 'Stopping a sandbox must also unblock stdin/stdout writers'
         assert len(results) == 1 and not results[0].success, results
         assert results[0].timed_out == (reason == 'timeout'), results
+        assert results[0].effect_state == 'ambiguous'
         if reason == 'cancel':
             assert 'cancelled' in results[0].error
         time.sleep(max(0, ready + 8.3 - time.monotonic()))
@@ -766,3 +767,33 @@ def test_native_runner_enforces_output_budget_and_unknown_effects(
     assert result.success and result.data['error'] == 'SANDBOX_OUTPUT_LIMIT', result
     assert result.data['effect_state'] == 'ambiguous'
     assert (workspace / 'executed.txt').read_text() == 'ok'
+
+
+def test_cancel_between_pipeline_admission_and_spawn_never_executes(tmp_path_factory, monkeypatch):
+    from backend.core.loop.agent_tool import AgentTool, ToolEffect
+    from backend.core.loop.event_bus import EventBus
+    from backend.core.loop.execution_context import ExecutionContext
+    from backend.core.loop.manager import AgentProcessManager
+    from backend.core.loop.models import RingLevel
+    from backend.core.loop.tool_pipeline import ToolPipeline
+    from backend.core.loop.tools import ToolRegistry
+    monkeypatch.setattr('backend.core.history.HistoryManager.add_operation', lambda *a, **k: None)
+    def forbidden_launch(*args, **kwargs):
+        pytest.fail('A cancellation observed before launch must never start executable code')
+    monkeypatch.setattr('backend.core.sandbox.sandbox_popen', forbidden_launch)
+    process = AgentProcessManager().fork(
+        parent_id=None, role='worker', tool_registry=ToolRegistry(['command']), max_steps=2,
+        ring_level=RingLevel.RING_3, workspace_path=str(tmp_path_factory), task_id='pre-cancel')
+    bus = EventBus()
+    bus.subscribe('ToolExecuteStarted', lambda _: process.cancellation_event.set())
+    tool = AgentTool('command', 'test', {}, lambda _: pytest.fail('Inline execution'),
+                     isolated=True, runner_name='exec_command', effect=ToolEffect.PROCESS,
+                     read_only=False)
+    ctx = ExecutionContext(process=process, session=process.session,
+        workspace_path=str(tmp_path_factory), event_bus=bus, cancellation=process.cancellation_event)
+    result = ToolPipeline().execute({'name': 'command', 'args': {'argv': ['python', '-c', 'print(1)']}},
+                                    tool, ctx, 'pre-cancel', 0)
+    assert result.is_error and result.diagnostics['code'] == 'TOOL_CANCELLED', result
+    assert result.receipt['effect_state'] == 'not_committed'
+    journal = json.loads(Path(result.receipt['invocation_path']).read_text(encoding='utf-8'))
+    assert journal['state'] == 'cancelled' and journal['effect_state'] == 'not_committed'
