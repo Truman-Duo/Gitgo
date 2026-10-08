@@ -662,3 +662,46 @@ def test_linux_cpu_budget_counts_all_descendants(linux_box):
     code, out, err = finished(proc, timeout=10)
     assert code != 0, (out, err)
     assert out.strip() == 'ran'
+
+
+@pytest.mark.parametrize("scenario", ["outside_read", "network"])
+def test_packaged_host_denies_external_access(cross_platform_box, scenario):
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Source job; packaged acceptance requires an actual built Host')
+    host = Path(configured).resolve(strict=True)
+    # Establish the forbidden operation succeeds outside the boundary first.
+    listener = None
+    try:
+        if scenario == 'outside_read':
+            outside = workspace.parent / 'packaged-host-only.txt'
+            outside.write_text('host-secret')
+            assert outside.read_text() == 'host-secret'
+            attempt = f"open({str(outside)!r}).read()"
+        else:
+            import socket
+            listener = socket.socket()
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(2)
+            address = listener.getsockname()
+            with socket.create_connection(address, timeout=2):
+                pass
+            attempt = f"__import__('socket').create_connection({address!r},timeout=2)"
+        script = ("try:\n " + attempt + "\nexcept OSError:\n print('blocked')"
+                  "\nelse:\n print('escaped')")
+        invocation = {"_workspace": str(policy.workspace), "argv": ["python", "-c", script]}
+        source = (
+            "import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;"
+            f"r=ProcessToolRunner(timeout=30).run('exec_command',{invocation!r});"
+            "print(json.dumps({'success':r.success,'data':r.data,'error':r.error,'stderr':r.stderr}))"
+        )
+        result = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-c', source],
+            capture_output=True, text=True, encoding='utf-8', timeout=60)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload['success'] and payload['data'].get('success'), payload
+        assert payload['data']['stdout'].strip() == 'blocked', payload
+    finally:
+        if listener is not None:
+            listener.close()

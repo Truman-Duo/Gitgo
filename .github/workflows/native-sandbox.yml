@@ -31,6 +31,6 @@ jobs:
       - name: Windows source and packaged isolation
         if: runner.os == 'Windows'
         run: python -B scripts/run_sandbox_acceptance.py
-      - name: Linux source and packaged isolation in delegated scope
+      - name: Linux source and packaged isolation in delegated service
         if: runner.os == 'Linux'
-        run: sudo -E systemd-run --quiet --scope --uid="$(id -u)" --unit=gitgo-sandbox-ci -p Delegate=yes "$(which python)" -B scripts/run_linux_sandbox_scope.py -- "$(which python)" -B scripts/run_sandbox_acceptance.py
+        run: sudo systemd-run --quiet --wait --pipe --collect --uid="$(id -u)" --working-directory="$PWD" --setenv="LD_LIBRARY_PATH=$LD_LIBRARY_PATH" --unit=gitgo-sandbox-ci -p Delegate=yes "$(which python)" -B scripts/run_linux_sandbox_scope.py -- "$(which python)" -B scripts/run_sandbox_acceptance.py

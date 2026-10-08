@@ -17,8 +17,8 @@ def main():
     entry = next(line.split(':', 2)[2] for line in Path('/proc/self/cgroup').read_text().splitlines()
                  if line.startswith('0::'))
     root = (Path('/sys/fs/cgroup') / entry.lstrip('/')).resolve(strict=True)
-    if root == Path('/sys/fs/cgroup') or not root.name.endswith('.scope'):
-        raise SystemExit('Run in an explicitly delegated systemd scope')
+    if root == Path('/sys/fs/cgroup') or not root.name.endswith(('.scope', '.service')):
+        raise SystemExit('Run in an explicitly delegated systemd scope or service')
     host = root / 'host'
     host.mkdir(mode=0o700, exist_ok=True)
     (host / 'cgroup.procs').write_text('0')
