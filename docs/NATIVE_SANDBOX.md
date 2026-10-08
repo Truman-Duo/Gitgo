@@ -57,7 +57,7 @@ tmpfs，/proc 对应私有 PID namespace。网络、IPC、用户等 namespace �
 删除所有 capabilities，使用 die-with-parent/new-session。
 每次调用使用独立 cgroup v2：整棵树的 memory.max/memory.swap.max、pids.max、cpu.max；Host 根据 cpu.stat 汇总累计 CPU 预算。执行前加入 cgroup，再设置地址空间、每进程 CPU 和 core dump 的补充限制。取消使用 cgroup.kill；原生 PID namespace 负责 Host 崩溃时的后代清理。不使用共享 UID 的 RLIMIT_NPROC 作为调用级限额。
 
-受信任的 Host 必须运行在已授权委派的 cgroup scope 内，并设置 GITGO_SANDBOX_CGROUP_ROOT。缺失 cpu/memory/pids 委派或 cgroup.kill 时明确拒绝，不降低隔离。
+受信任的 Host 必须运行在已授权委派的 cgroup scope 或 service 内，并设置 GITGO_SANDBOX_CGROUP_ROOT。缺失 cpu/memory/pids 委派或 cgroup.kill 时明确拒绝，不降低隔离。
 
 例如，在支持用户 cgroup 委派的系统中：
 
@@ -65,12 +65,14 @@ tmpfs，/proc 对应私有 PID namespace。网络、IPC、用户等 namespace �
 systemd-run --user --scope -p Delegate=yes python scripts/run_linux_sandbox_scope.py -- python -m backend.core.native_host_entry
 ```
 
-包装器仅将自身移入 scope 的 host 子组、启用已委派控制器，并启动指定 Host；不会申请 root 或修改祖先 cgroup。若系统管理员未委派控制器，需要管理员先配置。scripts/provision_linux_sandbox.py 可预览显式独立子树配置；独立子树还需管理员将受信任 Host 置于该子树内，不能仅导出变量后跨委派边界迁移。
+包装器仅将自身移入委派单位的 host 子组、启用已委派控制器，并启动指定 Host；不会申请 root 或修改祖先 cgroup。若系统管理员未委派控制器，需要管理员先配置。scripts/provision_linux_sandbox.py 可预览显式独立子树配置；独立子树还需管理员将受信任 Host 置于该子树内，不能仅导出变量后跨委派边界迁移。
 
 cgroup namespace 保留 Host 所在的命名空间以便加入委派的兄弟组；沙箱不挂载 /sys，只暴露本次 cgroup.procs，可将可见进程移入本次组，不能修改限制或迁出。
 
 Linux source/frozen 使用同一私有 Python role 启动协议。macOS 后端尚未完成，保持 SANDBOX_UNAVAILABLE。
 Linux 集成验收由专用 CI 执行；Windows 本地验证不能替代该验收。
+
+系统级 systemd 服务必须设置 User= 为运行用户并启用 Delegate=yes；仅对系统级 scope 指定 --uid 并不保证目录所有权委派。CI 使用委派服务启动非 root 验收。
 
 ## 授权与收据
 
