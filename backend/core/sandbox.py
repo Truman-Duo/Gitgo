@@ -113,3 +113,23 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
         command += [sys.executable, "-I", "-c", bootstrap, *argv]
         return subprocess.Popen(command, **kwargs)
     raise SandboxDenied("SANDBOX_UNAVAILABLE", "No native sandbox backend is available on this platform.")
+
+def prepare_child_environment(workspace: str) -> None:
+    """Put shell/profile/cache/temp writes inside the already isolated workspace.
+
+    The outer Windows CreateProcess needs the real LOCALAPPDATA to locate its
+    AppContainer profile. Rebind user folders only after entering the container.
+    """
+    # Host already canonicalized this path before launch. Strict resolution
+    # here would probe ancestors that AppContainer intentionally cannot read.
+    root = Path(workspace)
+    home = (root / ".gitgo" / "sandbox" / "home").resolve(strict=False)
+    if not home.is_relative_to(root):
+        raise SandboxDenied("SANDBOX_POLICY_INVALID", "Sandbox home escapes the workspace.")
+    folders = {"USERPROFILE": home, "HOME": home, "APPDATA": home / "Roaming",
+               "LOCALAPPDATA": home / "Local", "TEMP": home / "Temp",
+               "TMP": home / "Temp", "TMPDIR": home / "Temp"}
+    for folder in set(folders.values()):
+        folder.mkdir(parents=True, exist_ok=True)
+    os.environ.update({key: str(value) for key, value in folders.items()})
+    os.environ["PSModuleAnalysisCachePath"] = str(home / "Local" / "ModuleAnalysisCache")

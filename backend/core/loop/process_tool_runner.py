@@ -88,6 +88,7 @@ class ProcessToolRunner:
                     cpu_seconds=max(1, min(int(effective_timeout), 1800)),
                 )
                 child_env = sandbox_environment(child_env)
+                input_data["_native_sandbox_workspace"] = str(policy.workspace)
             spawn = (
                 lambda argv, **options: sandbox_popen(argv, policy, **options)
             ) if native else subprocess.Popen

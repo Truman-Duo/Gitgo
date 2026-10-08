@@ -312,7 +312,7 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
         "purpose": "verify native PowerShell execution", "timeout": 10,
     })
     assert shell.success, shell
-    assert shell.data.get("success"), shell
+    assert shell.data.get("success"), json.dumps(shell.data)
     assert shell.data["stdout"].strip() == "native-shell"
     authored = "def run(args):\n    return {'native': args['value']}\n"
     result = runner.run("authored_privileged_python", {
@@ -400,7 +400,7 @@ def test_external_resource_grant_cannot_survive_tool_replacement(tmp_path_factor
     from backend.core.loop.permission_broker import (
         arguments_digest, authorize_external_resources, tool_contract_digest,
     )
-    target = tmp_path_factory / "outside"
+    target = (tmp_path_factory / "outside").resolve(strict=False)
     target.mkdir()
     tool = AgentTool("write_external", "test", {}, lambda args: {}, resources=[str(target)])
     grant = {
@@ -425,7 +425,7 @@ def test_missing_workspace_is_a_stable_policy_denial(tmp_path_factory):
     assert error.value.code == "SANDBOX_POLICY_INVALID"
 
 
-def test_model_cannot_inject_host_resource_roots(tmp_path_factory):
+def test_model_cannot_inject_host_resource_roots(tmp_path_factory, monkeypatch):
     from backend.core.loop.event_bus import EventBus
     from backend.core.loop.execution_context import ExecutionContext
     from backend.core.loop.manager import AgentProcessManager
@@ -436,6 +436,10 @@ def test_model_cannot_inject_host_resource_roots(tmp_path_factory):
     workspace = tmp_path_factory / "project"
     workspace.mkdir()
     (tmp_path_factory / "private.txt").write_text("private")
+    # This admission test does not exercise history/storage. Keep the SQLite
+    # safety guard intact while avoiding an unrelated persistence side effect.
+    monkeypatch.setattr("backend.core.history.HistoryManager.add_operation",
+                        lambda *args, **kwargs: None)
     process = AgentProcessManager().fork(
         parent_id=None, role="worker", tool_registry=ToolRegistry(["read_file"]),
         max_steps=2, ring_level=RingLevel.RING_3, actor_kind="worker",
@@ -485,6 +489,9 @@ def test_pipeline_rechecks_consumption_before_execution(tmp_path_factory, monkey
     from backend.core.loop.models import RingLevel
     from backend.core.loop.tool_pipeline import ToolPipeline
     from backend.core.loop.tools import ToolRegistry
+    # Test only approval admission; persistence has separate runtime tests.
+    monkeypatch.setattr("backend.core.history.HistoryManager.add_operation",
+                        lambda *args, **kwargs: None)
     process = AgentProcessManager().fork(
         parent_id=None, role="worker", tool_registry=ToolRegistry(["sensitive"]),
         max_steps=2, ring_level=RingLevel.RING_3, actor_kind="worker",
@@ -502,3 +509,14 @@ def test_pipeline_rechecks_consumption_before_execution(tmp_path_factory, monkey
     assert result.is_error
     assert result.diagnostics["code"] == "APPROVAL_GRANT_INVALID"
     assert calls == []
+
+def test_native_child_home_and_caches_stay_inside_workspace(tmp_path_factory, monkeypatch):
+    from backend.core.sandbox import prepare_child_environment
+    for key in ("USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+                "TMPDIR", "PSModuleAnalysisCachePath"):
+        # Restore the process environment after exercising the child bootstrap.
+        monkeypatch.setenv(key, os.environ.get(key, ""))
+    prepare_child_environment(str(tmp_path_factory))
+    for key in ("USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+                "TMPDIR", "PSModuleAnalysisCachePath"):
+        assert Path(os.environ[key]).resolve().is_relative_to(tmp_path_factory.resolve())

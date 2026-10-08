@@ -72,6 +72,8 @@ Linux 集成验收由专用 CI 执行；Windows 本地验证不能替代该验�
 尚未启动的拒绝记录 not_committed；已执行后被取消、输出超限或异常退出，
 收据保留 ambiguous（未知），不能宣称副作用已回滚。
 
+进入 OS 沙箱后，runner 将 Home、AppData、Temp 与 PowerShell 模块缓存重定向到工作区 .gitgo/sandbox，避免启动时尝试写入真实用户目录。原始 LOCALAPPDATA 仅用于 Windows 建立 AppContainer profile。
+
 Host 持续排空 stdout/stderr，每路最多保留 2 MB；超过预算终止进程树，
 避免子进程无限输出耗尽 Host 内存。输入写入和输出读取均可被取消。
 

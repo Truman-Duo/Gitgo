@@ -71,8 +71,6 @@ def main() -> None:
     由 ProcessToolRunner 通过 subprocess 调用。
     所有异常都被捕获并返回 error——不会让子进程崩溃传播到 daemon。
     """
-    _auto_import_registrations()
-
     try:
         buffer = getattr(sys.stdin, "buffer", None)
         raw = buffer.read().decode("utf-8") if buffer is not None else sys.stdin.read()
@@ -81,6 +79,20 @@ def main() -> None:
         _emit_error(f"invalid stdin JSON: {exc}")
         return
 
+    sandbox_workspace = request.get("_native_sandbox_workspace")
+    if sandbox_workspace:
+        from backend.core.sandbox import SandboxDenied, prepare_child_environment
+        try:
+            prepare_child_environment(str(sandbox_workspace))
+        except SandboxDenied as exc:
+            _emit_success(exc.result())
+            return
+        except OSError as exc:
+            _emit_success(SandboxDenied("SANDBOX_LAUNCH_DENIED",
+                f"Cannot prepare private sandbox home: {exc}").result())
+            return
+
+    _auto_import_registrations()
     tool_name = request.get("tool_name", "")
     args = request.get("args", {})
 
