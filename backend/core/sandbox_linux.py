@@ -35,9 +35,10 @@ class LinuxCgroup:
             raise SandboxDenied('SANDBOX_UNAVAILABLE', f'Linux cgroup configuration is unavailable: {exc}') from exc
 
     def kill(self):
-        if self.path is not None:
+        path = self.path
+        if path is not None:
             try:
-                (self.path / 'cgroup.kill').write_text('1')
+                (path / 'cgroup.kill').write_text('1')
             except FileNotFoundError:
                 pass
 
@@ -60,6 +61,7 @@ class LinuxCgroup:
 class LinuxSandboxProcess(subprocess.Popen):
     def __init__(self, argv, *, cgroup, cpu_seconds, **kwargs):
         self._gitgo_cgroup = cgroup
+        self.sandbox_failure = ""
         try:
             super().__init__(argv, **kwargs)
         except BaseException:
@@ -71,13 +73,31 @@ class LinuxSandboxProcess(subprocess.Popen):
                 while self.poll() is None:
                     values = dict(line.split() for line in cpu_path.read_text().splitlines())
                     if int(values.get('usage_usec', 0)) >= cpu_seconds * 1_000_000:
+                        self.sandbox_failure = 'The invocation exceeded its aggregate user+kernel CPU budget.'
                         cgroup.kill()
                         return
                     time.sleep(0.05)
             except OSError:
                 if self.poll() is None:
+                    self.sandbox_failure = 'Native cgroup CPU accounting became unavailable.'
                     cgroup.kill()  # Loss of resource accounting must fail closed.
-        threading.Thread(target=guard_cpu, daemon=True).start()
+        try:
+            threading.Thread(target=guard_cpu, daemon=True).start()
+        except BaseException as exc:
+            try:
+                self.kill()
+                self.wait(timeout=5)
+            finally:
+                cgroup.close()
+                for stream in (self.stdin, self.stdout, self.stderr):
+                    if stream is not None:
+                        stream.close()
+            if not isinstance(exc, (RuntimeError, OSError)):
+                raise
+            denial = SandboxDenied('SANDBOX_LAUNCH_DENIED',
+                                   f'Native resource accounting monitor could not start: {exc}')
+            denial.effect_state = 'ambiguous'
+            raise denial from exc
 
     def kill(self):
         self._gitgo_cgroup.kill()

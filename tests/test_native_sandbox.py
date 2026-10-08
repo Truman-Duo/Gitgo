@@ -815,3 +815,46 @@ def test_windows_cpu_budget_counts_descendants(native_box):
     assert code != 0, (out, err)
     assert out.strip() == 'ran'
     assert all((workspace / f'cpu-{i}').read_text() == 'ready' for i in range(2))
+
+
+def test_failed_resource_monitor_kills_started_tool(cross_platform_box, monkeypatch):
+    workspace, policy, executable = cross_platform_box
+    source = ("import time;open('before-monitor-failure','w').write('ran');"
+              "time.sleep(1);open('after-monitor-failure','w').write('escaped')")
+    def fail_start(_):
+        deadline = time.monotonic() + 3
+        while not (workspace / 'before-monitor-failure').exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (workspace / 'before-monitor-failure').read_text() == 'ran'
+        raise RuntimeError('Host thread resource unavailable')
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, 'start', fail_start)
+        with pytest.raises(SandboxDenied) as error:
+            sandbox_popen([executable, '-I', '-c', source], policy, cwd=str(workspace),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=sandbox_environment(os.environ), start_new_session=sys.platform != 'win32')
+    assert error.value.result()['effect_state'] == 'ambiguous'
+    time.sleep(1.2)
+    assert not (workspace / 'after-monitor-failure').exists()
+
+
+def test_cpu_violation_cannot_be_hidden_by_success_json(cross_platform_box, monkeypatch):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, policy, executable = cross_platform_box
+    child = ("import sys,time;open(sys.argv[1],'w').write('ready');t=time.process_time();"
+             "exec('while time.process_time()-t<0.7: pass');time.sleep(60)")
+    source = ("import subprocess,sys,time;print('{\"success\":true,\"data\":{\"ok\":true}}',flush=True);"
+              f"[subprocess.Popen([sys.executable,'-c',{child!r},'cpu-'+str(i)]) for i in range(2)];"
+              "time.sleep(60)")
+    # Keep wall timeout above the CPU budget so only aggregate accounting can
+    # stop the sleeping root; run the real OS launch and communication paths.
+    monkeypatch.setattr('backend.core.sandbox.SandboxPolicy',
+                        lambda workspace, **_: SandboxPolicy(workspace, cpu_seconds=1))
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.tool_runner_command',
+                        lambda: [executable, '-I', '-c', source])
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.owned_child_cwd', lambda _: workspace)
+    result = ProcessToolRunner(timeout=10).run('exec_command', {'_workspace': str(policy.workspace)})
+    assert result.success and result.data['error'] == 'SANDBOX_EXECUTION_FAILED', result
+    assert result.data['effect_state'] == 'ambiguous'
+    assert 'CPU' in result.data['message']
+    assert all((workspace / f'cpu-{i}').read_text() == 'ready' for i in range(2))

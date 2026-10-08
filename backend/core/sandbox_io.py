@@ -48,6 +48,11 @@ class BoundedCommunication:
             self.threads.append(thread)
         deadline = time.monotonic() + timeout if timeout is not None else float("inf")
         while True:
+            failure = getattr(self.proc, "sandbox_failure", "")
+            if failure:
+                denial = SandboxDenied("SANDBOX_EXECUTION_FAILED", failure)
+                denial.effect_state = "ambiguous"
+                raise denial
             if self.exceeded.is_set():
                 denial = SandboxDenied("SANDBOX_OUTPUT_LIMIT", "Output exceeded the Host capture budget.")
                 # Code ran: never claim its side effects were rolled back.

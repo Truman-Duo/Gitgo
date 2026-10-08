@@ -10,6 +10,8 @@ from ctypes import wintypes as W
 import os
 import subprocess
 import sys
+import threading
+import time
 
 from backend.core.sandbox import SandboxDenied, SandboxPolicy
 
@@ -33,6 +35,56 @@ class ExtendedLimits(C.Structure):
     _fields_ = [("basic", BasicLimits), ("io", IoCounters),
                 ("process_memory", SIZE), ("job_memory", SIZE),
                 ("peak_process_memory", SIZE), ("peak_job_memory", SIZE)]
+
+
+class BasicAccounting(C.Structure):
+    _fields_ = [("user_time", C.c_longlong), ("kernel_time", C.c_longlong),
+                ("period_user_time", C.c_longlong), ("period_kernel_time", C.c_longlong),
+                ("page_faults", W.DWORD), ("total_processes", W.DWORD),
+                ("active_processes", W.DWORD), ("terminated_processes", W.DWORD)]
+
+
+class NativeJobHandle(int):
+    """One owned handle; synchronize accounting and close to prevent reuse races."""
+    def __new__(cls, value, api):
+        handle = super().__new__(cls, value)
+        handle._api = api
+        handle._lock = threading.Lock()
+        handle._closed = False
+        handle._failure_reason = ""
+        return handle
+
+    def _close_locked(self):
+        if not self._closed:
+            self._closed = True
+            self._api.close(self)  # Sole, non-inheritable handle: kills the tree.
+
+    def close(self):
+        with self._lock:
+            self._close_locked()
+
+    @property
+    def failure_reason(self):
+        with self._lock:
+            return self._failure_reason
+
+    def _fail_locked(self, reason):
+        self._failure_reason = reason
+        self._api.terminate_job(self, 1)
+        self._close_locked()  # Kill-on-close also covers a failed termination call.
+
+    def check_cpu(self, seconds):
+        with self._lock:
+            if self._closed:
+                return False
+            accounting = BasicAccounting()
+            if not self._api.query_job(self, 1, C.byref(accounting), C.sizeof(accounting), None):
+                self._fail_locked("Native Job CPU accounting became unavailable.")
+                return False
+            if accounting.user_time + accounting.kernel_time >= seconds * 10_000_000:
+                self._fail_locked("The invocation exceeded its aggregate user+kernel CPU budget.")
+                return False
+            return True
 
 
 class SecurityCapabilities(C.Structure):
@@ -69,6 +121,9 @@ class WindowsApi:
         self.userenv = C.WinDLL("userenv", use_last_error=True)
         self.advapi = C.WinDLL("advapi32", use_last_error=True)
         self.close = _function(self.kernel, "CloseHandle", [W.HANDLE], W.BOOL)
+        self.terminate_job = _function(self.kernel, "TerminateJobObject", [W.HANDLE, W.DWORD], W.BOOL)
+        self.query_job = _function(self.kernel, "QueryInformationJobObject",
+            [W.HANDLE, C.c_int, PTR, W.DWORD, PTR], W.BOOL)
         self.free_sid = _function(self.advapi, "FreeSid", [PTR], PTR)
         self.create_profile = _function(self.userenv, "CreateAppContainerProfile",
             [W.LPCWSTR, W.LPCWSTR, W.LPCWSTR, PTR, W.DWORD, C.POINTER(PTR)], C.c_long)
@@ -105,16 +160,40 @@ class WindowsSandboxProcess(subprocess.Popen):
     def __init__(self, args, *, policy: SandboxPolicy, **kwargs):
         self._sandbox_policy = policy
         self._gitgo_job_handle = None
+        self._sandbox_job = None
         if sys.platform != "win32":
             raise SandboxDenied("SANDBOX_UNAVAILABLE", "Windows AppContainer requires Windows.")
         try:
             super().__init__(args, **kwargs)
-        except (OSError, ValueError, AttributeError) as exc:
+            job = self._gitgo_job_handle
+            def guard_cpu():
+                # The kernel Job time limit counts user time only. Read native
+                # aggregate user+kernel counters, as Linux does with cpu.stat.
+                while self.poll() is None and job.check_cpu(policy.cpu_seconds):
+                    time.sleep(0.05)
+            threading.Thread(target=guard_cpu, daemon=True).start()
+        except BaseException as exc:
             from backend.core.process_control import close_job
             close_job(self._gitgo_job_handle)
             self._gitgo_job_handle = None
-            raise SandboxDenied("SANDBOX_LAUNCH_DENIED",
-                f"AppContainer could not start the runtime. Check profile ACL provisioning and Windows Job support: {exc}") from exc
+            if self._child_created:
+                try:
+                    self.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            for stream in (self.stdin, self.stdout, self.stderr):
+                if stream is not None:
+                    stream.close()
+            if not isinstance(exc, (OSError, ValueError, AttributeError, RuntimeError)):
+                raise
+            denial = SandboxDenied("SANDBOX_LAUNCH_DENIED",
+                f"AppContainer runtime or accounting monitor could not start. Check runtime ACLs, Job support and Host resources: {exc}")
+            denial.effect_state = "ambiguous" if self._child_created else "not_committed"
+            raise denial from exc
+
+    @property
+    def sandbox_failure(self):
+        return self._sandbox_job.failure_reason if self._sandbox_job is not None else ""
 
     def _execute_child(self, args, executable, preexec_fn, close_fds, pass_fds,
                        cwd, env, startupinfo, creationflags, shell,
@@ -174,7 +253,8 @@ class WindowsSandboxProcess(subprocess.Popen):
             self._child_created = True
             self._handle = Handle(info.process)
             self.pid = info.pid
-            self._gitgo_job_handle = job
+            self._gitgo_job_handle = NativeJobHandle(job, api)
+            self._sandbox_job = self._gitgo_job_handle
             job = None
             api.close(info.thread)
         finally:

@@ -91,6 +91,10 @@ def attach_kill_job(proc: subprocess.Popen):
 def close_job(job_handle) -> None:
     if sys.platform != "win32" or not job_handle:
         return
+    owned_close = getattr(job_handle, "close", None)
+    if owned_close is not None:
+        owned_close()
+        return
     try:
         import ctypes
         from ctypes import wintypes
