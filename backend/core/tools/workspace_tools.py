@@ -607,6 +607,10 @@ def shell_script(args: dict) -> dict:
         shell_argv = [str(bash), "--noprofile", "--norc", "-c", script]
     timeout = max(1, min(int(args.get("timeout", 120) or 120), 1800))
     env = _safe_shell_environment()
+    if sys.platform == "win32":
+        # Do not discover modules through the real user's registry/profile or
+        # inherit PowerShell 7 module paths into the Windows PowerShell engine.
+        env["PSModulePath"] = str(engine.parent / "Modules")
     env["GITGO_AGENT_TOOL"] = "1"
     started = None
     job_handle = None
