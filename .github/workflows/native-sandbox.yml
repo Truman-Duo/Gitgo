@@ -58,12 +58,12 @@ jobs:
       - name: Diagnose native launch failures
         if: failure()
         run: |
-          sudo /usr/bin/log show --last 3m --style compact --predicate 'process == "sandboxd"' | tail -80
+          sudo /usr/bin/log show --last 3m --style compact --predicate 'eventMessage CONTAINS "GitgoMacAudit" OR eventMessage CONTAINS "Sandbox:"' | tail -80
           python - <<'PY'
           import json
           from pathlib import Path
           for p in sorted((Path.home() / 'Library/Logs/DiagnosticReports').glob('*'))[-12:]:
-              if p.suffix == '.ips' and ('Python' in p.name or 'sandbox-exec' in p.name):
+              if p.suffix == '.ips' and ('Python' in p.name or 'sandbox-exec' in p.name or 'echo' in p.name):
                   try:
                       payload = json.loads(p.read_text().split('\n', 1)[1])
                       print(p.name, json.dumps({k: payload.get(k) for k in ('exception', 'termination', 'asi')}))

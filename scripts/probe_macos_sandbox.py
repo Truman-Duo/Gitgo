@@ -25,7 +25,7 @@ def seatbelt_profile(workspace: Path) -> str:
              str(Path(sys.executable).resolve().parent), str(workspace)]
     quoted = lambda value: json.dumps(value, ensure_ascii=False)
     read_rules = " ".join(f"(subpath {quoted(root)})" for root in dict.fromkeys(roots))
-    return ("(version 1) (deny default) "
+    return ('(version 1) (deny default (with message "GitgoMacAudit")) '
             "(allow process-exec process-fork) (allow sysctl-read) "
             "(allow process-info* (target self)) (allow signal (target self)) "
             "(allow file-read-metadata) "
@@ -106,7 +106,7 @@ def audit(report: dict):
         profile = seatbelt_profile(workspace)
         control = subprocess.run(['/usr/bin/sandbox-exec', '-p', profile, '/bin/echo', 'seatbelt'],
             capture_output=True, text=True, cwd=workspace, timeout=8)
-        assert control.returncode == 0 and control.stdout.strip() == 'seatbelt', control.stderr
+        assert control.returncode == 0 and control.stdout.strip() == 'seatbelt', (control.returncode, control.stdout, control.stderr)
         report['seatbelt_launcher_control'] = True
         assert run(profile, workspace, "open('allowed','w').write('ok');print('executed')") == 'executed'
         assert (workspace / 'allowed').read_text() == 'ok'
