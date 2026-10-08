@@ -9,7 +9,10 @@ ProcessToolRunner 启动时进入 OS 沙箱。Git、搜索、patch、formalize �
 CreateProcessW 的 SECURITY_CAPABILITIES 创建无网络 capability 的 AppContainer。
 HANDLE_LIST 只继承三个标准输入输出管道；JOB_LIST 在用户代码执行前绑定 Job，
 防止“先运行、后绑定”窗口。Job 限制整棵树的进程数（32）、提交内存（512 MiB）
-及累计 CPU 时间，并启用 kill-on-close，禁止 breakaway。终端或 Host 消失、
+及累计用户态 CPU 时间，并将 CPU 带宽硬上限设为不超过系统一颗逻辑 CPU 的份额；
+嵌套的父 Job 若已限流，实际份额可能更小。启用 kill-on-close，禁止 breakaway。
+Host 根据原生 Job accounting 的用户态与内核态计数检查整组总 CPU 预算；
+超额或查询失败关闭 Job，不能只依赖用户态计时。终端或 Host 消失、
 取消、超时和正常退出都会关闭 Job；沙箱及输出预算失败没有无隔离回退。
 
 文件访问由 AppContainer SID 与 DACL 双重检查。只给专用运行时 RX，
@@ -74,6 +77,10 @@ Linux 集成验收由专用 CI 执行；Windows 本地验证不能替代该验�
 
 系统级 systemd 服务必须设置 User= 为运行用户并启用 Delegate=yes；仅对系统级 scope 指定 --uid 并不保证目录所有权委派。CI 使用委派服务启动非 root 验收。
 
+整组累计总 CPU 的 Host 检查间隔为 50 ms（Windows Job accounting、Linux cpu.stat）；调度和检查间隔可能带来超额，不能宣称逐 CPU tick 精确终止。内存、进程数和 CPU 带宽等内核硬限制与累计 CPU 检查分别验证。
+
+Windows 的 CPU rate control 在部分启用 DFSS 的远程桌面服务环境中不可用；无法应用所需 Job 限额时拒绝启动，不放宽策略。
+
 ## 授权与收据
 
 新 grant 同时绑定 process/task、工具契约摘要（含 authored 版本和源摘要）、
@@ -109,7 +116,29 @@ Windows 测试使用临时独立 Python 与项目 ACL，覆盖正常执行、读
 ## 原语参考
 
 - [Microsoft AppContainer launch contract](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+- [Microsoft Job accounting](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information) 与 [CPU bandwidth control](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information)
 - [Microsoft process attributes: SECURITY_CAPABILITIES, HANDLE_LIST, JOB_LIST](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
 - [bubblewrap security model and namespace options](https://github.com/containers/bubblewrap)
 
 新增验收使用真实 Host 强制退出，以及实际 PyInstaller onedir 产物；打包测试不通过伪造 sys.frozen 冒充。三平台完整原生发行验收尚需补齐 macOS 及签名/安装环境。
+
+## 验收矩阵与 macOS 边界
+
+| 验收边界 | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| 工作区执行、文件越界、链接、网络 | 原生安全测试 | 原生安全测试 | 独立系统能力探针；生产入口未开放 |
+| 整组内存、进程数、CPU 预算 | AppContainer/Job 原生测试 | namespace/cgroup 原生测试 | 尚未实现 |
+| 取消、超时、输入堵塞、输出超限 | 真实 ProcessToolRunner 测试 | 真实 ProcessToolRunner 测试 | 尚未实现 |
+| Host 强制退出与脱离会话的后代 | 原生安全测试 | 原生安全测试 | 尚未实现 |
+| 实际 onedir Host 执行、越界读取、网络 | 实际构建后验收 | 实际构建后验收 | 尚未实现 |
+| 完整安装、签名、公证、升级卸载、终端矩阵 | 本 PR 未覆盖 | 本 PR 未覆盖 | 本 PR 未覆盖 |
+
+Host 已观察到取消时不会启动工具；此时收据为 not_committed。工具启动后再取消或超时，副作用仍为 ambiguous。回归包含流水线准入后、实际启动前收到取消的场景，不能只检查流水线最初的任务状态。
+
+macOS CI 的 capability audit 在 Intel、Apple Silicon 与不同系统版本上运行 scripts/probe_macos_sandbox.py，输出独立报告。探针验证执行正向对照、文件/符号链接与网络拒绝，观察脱离会话的后代能否在仅 killpg 后存活，以及地址空间限额在当前内核和解释器上的行为。它还确认生产入口保持 SANDBOX_UNAVAILABLE。该任务通过只表示审计成功，不表示 macOS 后端通过验收。
+
+当前 macOS 15 Intel、macOS 15 Apple Silicon、macOS 26 Apple Silicon 的实测均观察到：仅 killpg 后脱离会话的后代仍存活，当前 Python 运行时将 RLIMIT_AS 设置为 512 MiB 被系统拒绝。这些结果说明当前方案不能直接提供生产所需的边界，不代表所有系统版本和运行时都无法设置地址空间限额。
+
+Seatbelt 的文件/网络限制不能单独证明完整进程树清理或整组资源限制。不能用进程组清理、轮询累计内存或只设置每进程 rlimit 冒充 Windows Job/Linux cgroup 的全部语义。探针的加载器规则只允许读取根目录本身，不开放其全部后代；文件与网络负向测试必须在真实解释器成功运行后执行。
+
+若后续采用 macOS 虚拟化来提供这些强边界，还需配置可用的 Mac 测试环境与原生 macOS guest，验证原生工具兼容、仅工作区共享、无外部网络、Host 崩溃时整个 guest 的退出，以及进程数、内存、CPU 的实际限额。报告中的 hypervisor_available 只是系统能力信号，不能代替实际启动和安全验收。

@@ -37,6 +37,10 @@ class ExtendedLimits(C.Structure):
                 ("peak_process_memory", SIZE), ("peak_job_memory", SIZE)]
 
 
+class CpuRateControl(C.Structure):
+    _fields_ = [("flags", W.DWORD), ("rate", W.DWORD)]
+
+
 class BasicAccounting(C.Structure):
     _fields_ = [("user_time", C.c_longlong), ("kernel_time", C.c_longlong),
                 ("period_user_time", C.c_longlong), ("period_kernel_time", C.c_longlong),
@@ -125,6 +129,7 @@ class WindowsApi:
         self.query_job = _function(self.kernel, "QueryInformationJobObject",
             [W.HANDLE, C.c_int, PTR, W.DWORD, PTR], W.BOOL)
         self.free_sid = _function(self.advapi, "FreeSid", [PTR], PTR)
+        self.active_cpu_count = _function(self.kernel, "GetActiveProcessorCount", [W.WORD], W.DWORD)
         self.create_profile = _function(self.userenv, "CreateAppContainerProfile",
             [W.LPCWSTR, W.LPCWSTR, W.LPCWSTR, PTR, W.DWORD, C.POINTER(PTR)], C.c_long)
         self.derive_sid = _function(self.userenv, "DeriveAppContainerSidFromAppContainerName",
@@ -223,6 +228,13 @@ class WindowsSandboxProcess(subprocess.Popen):
             limits.basic.job_time = self._sandbox_policy.cpu_seconds * 10_000_000
             limits.job_memory = self._sandbox_policy.memory_bytes
             api.check(api.set_job(job, 9, C.byref(limits), C.sizeof(limits)))
+            processors = api.active_cpu_count(0xFFFF)  # ALL_PROCESSOR_GROUPS
+            if not processors:
+                raise OSError("Native CPU capacity is unavailable")
+            # Hard bandwidth cap, at most one logical CPU's system share.
+            # Nested jobs with a capped parent can receive a smaller share.
+            rate = CpuRateControl(0x1 | 0x4, max(1, 10000 // processors))
+            api.check(api.set_job(job, 15, C.byref(rate), C.sizeof(rate)))
             length = SIZE()
             api.init_attrs(None, 3, 0, C.byref(length))
             attributes = C.create_string_buffer(length.value)
