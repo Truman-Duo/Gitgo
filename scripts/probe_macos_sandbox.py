@@ -160,10 +160,12 @@ def main():
     if not Path('/usr/bin/sandbox-exec').is_file():
         raise SystemExit('Seatbelt launcher is unavailable; audit cannot pass')
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    hv = subprocess.run(['/usr/sbin/sysctl', '-n', 'kern.hv_support'], capture_output=True, text=True, timeout=3)
+    hv_value = hv.stdout.strip() if hv.returncode == 0 else ''
     report = {'os': platform.mac_ver()[0], 'architecture': platform.machine(),
               'interpreter': str(Path(sys.executable).resolve()),
               'base_prefix': str(Path(sys.base_prefix).resolve()),
-              'hypervisor_available': subprocess.check_output(['/usr/sbin/sysctl', '-n', 'kern.hv_support'], text=True).strip() == '1',
+              'hypervisor_available': {'1': True, '0': False}.get(hv_value),
               'production_backend': 'unavailable', 'macos_support_complete': False, 'audit_passed': False}
     try:
         audit(report)
