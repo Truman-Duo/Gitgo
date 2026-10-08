@@ -60,4 +60,5 @@ jobs:
         with:
           name: macos-capabilities-${{ matrix.os }}
           path: .gitgo/macos-capabilities.json
+          include-hidden-files: true
           if-no-files-found: error

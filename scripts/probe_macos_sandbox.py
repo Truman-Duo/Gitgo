@@ -29,6 +29,7 @@ def seatbelt_profile(workspace: Path) -> str:
             "(allow process-exec process-fork) (allow sysctl-read) "
             "(allow process-info* (target self)) (allow signal (target self)) "
             "(allow file-read-metadata) "
+            f"(allow file-map-executable {read_rules}) "
             f"(allow file-read* {read_rules} (literal \"/dev/urandom\") (literal \"/dev/random\") (literal \"/dev/null\")) "
             f"(allow file-write* (subpath {quoted(str(workspace))}) (literal \"/dev/null\"))")
 
@@ -47,7 +48,7 @@ def run(profile: str, workspace: Path, source: str) -> str:
     try:
         out, err = proc.communicate(timeout=8)
         if proc.returncode:
-            raise RuntimeError(f'Native probe did not execute: {err[-1000:]}')
+            raise RuntimeError(f'Native probe exit {proc.returncode}: {err[-1000:]}')
         return out.strip()
     finally:
         if proc.poll() is None:
@@ -156,7 +157,7 @@ def main():
         raise SystemExit('Seatbelt launcher is unavailable; audit cannot pass')
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     report = {'os': platform.mac_ver()[0], 'architecture': platform.machine(),
-              'production_backend': 'unavailable', 'macos_support_complete': False}
+              'production_backend': 'unavailable', 'macos_support_complete': False, 'audit_passed': False}
     try:
         audit(report)
         report['audit_passed'] = True

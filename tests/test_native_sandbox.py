@@ -797,3 +797,15 @@ def test_cancel_between_pipeline_admission_and_spawn_never_executes(tmp_path_fac
     assert result.receipt['effect_state'] == 'not_committed'
     journal = json.loads(Path(result.receipt['invocation_path']).read_text(encoding='utf-8'))
     assert journal['state'] == 'cancelled' and journal['effect_state'] == 'not_committed'
+
+
+def test_windows_cpu_budget_counts_descendants(native_box):
+    workspace, _, spawn = native_box
+    child = "open('cpu-child-ready','w').write('ok');exec('while True: pass')"
+    source = ("import subprocess,sys,time;from pathlib import Path;"
+              f"subprocess.Popen([sys.executable,'-c',{child!r}]);"
+              "exec(\"while not Path('cpu-child-ready').exists(): time.sleep(0.01)\");"
+              "print('ran',flush=True);exec('while True: pass')")
+    code, out, err = finished(spawn(source, override=SandboxPolicy(workspace, cpu_seconds=1)), timeout=12)
+    assert code != 0, (out, err)
+    assert out.strip() == 'ran'
