@@ -149,7 +149,11 @@ def native_box(isolated_python, tmp_path_factory):
     free.restype = C.c_void_p
     free(C.cast(value, C.c_void_p))
     api.free_sid(sid)
-    for path, access in ((isolated_python, "RX"), (workspace, "M")):
+    runtime_paths = [isolated_python]
+    packaged = os.environ.get("GITGO_SANDBOX_TEST_HOST")
+    if packaged:
+        runtime_paths.append(Path(packaged).resolve(strict=True).parent)
+    for path, access in [*((path, "RX") for path in runtime_paths), (workspace, "M")]:
         subprocess.run(["icacls", str(path), "/grant", f"*{sid_string}:(OI)(CI){access}"],
                        check=True, capture_output=True)
     subprocess.run(["icacls", str(workspace), "/setintegritylevel", "(OI)(CI)L"],
@@ -163,8 +167,9 @@ def native_box(isolated_python, tmp_path_factory):
     try:
         yield workspace, policy, spawn
     finally:
-        subprocess.run(["icacls", str(isolated_python), "/remove:g", f"*{sid_string}"],
-                       check=True, capture_output=True)
+        for runtime in runtime_paths:
+            subprocess.run(["icacls", str(runtime), "/remove:g", f"*{sid_string}"],
+                           check=True, capture_output=True)
         delete = api.userenv.DeleteAppContainerProfile
         delete.argtypes = [W.LPCWSTR]
         delete.restype = C.c_long
@@ -534,3 +539,126 @@ def test_native_child_home_and_caches_stay_inside_workspace(tmp_path_factory, mo
     for key in ("USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
                 "TMPDIR", "PSModuleAnalysisCachePath"):
         assert Path(os.environ[key]).resolve().is_relative_to(tmp_path_factory.resolve())
+
+
+def test_linux_process_limit_is_per_invocation(linux_box):
+    workspace, _ = linux_box
+    limited = SandboxPolicy(workspace, process_limit=1)
+    proc = sandbox_popen([sys.executable, "-I", "-c",
+        "import subprocess,sys;print('ran',flush=True);"
+        "subprocess.Popen([sys.executable,'-c','print(1)']);print('escaped')"],
+        limited, cwd=str(workspace), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=sandbox_environment(os.environ),
+        start_new_session=True)
+    code, out, err = finished(proc)
+    assert code != 0, (out, err)
+    assert out.strip() == "ran"
+    assert "escaped" not in out
+
+
+def test_linux_invocation_memory_cannot_be_split_across_children(linux_box):
+    workspace, _ = linux_box
+    # Each child stays below RLIMIT_AS; together they exceed memory.max.
+    child = "import time;x=bytearray(80*1024*1024);time.sleep(10)"
+    source = ("import subprocess,sys,time;print('ran',flush=True);"
+              f"children=[subprocess.Popen([sys.executable,'-c',{child!r}]) for _ in range(3)];"
+              "[p.wait() for p in children];print('escaped')")
+    proc = sandbox_popen([sys.executable, "-I", "-c", source],
+        SandboxPolicy(workspace, memory_bytes=192*1024*1024), cwd=str(workspace),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=sandbox_environment(os.environ), start_new_session=True)
+    code, out, err = finished(proc, timeout=20)
+    assert code != 0, (out, err)
+    assert out.strip() == "ran"
+    assert "escaped" not in out
+
+
+@pytest.fixture
+def cross_platform_box(request):
+    if sys.platform == "win32":
+        workspace, policy, spawn = request.getfixturevalue("native_box")
+        executable = request.getfixturevalue("isolated_python") / "python.exe"
+        return workspace, policy, str(executable)
+    if sys.platform == "linux":
+        workspace, _ = request.getfixturevalue("linux_box")
+        return workspace, SandboxPolicy(workspace), sys.executable
+    pytest.skip("Native process lifecycle acceptance requires a supported backend")
+
+
+def test_host_crash_kills_detached_descendants(cross_platform_box):
+    workspace, policy, executable = cross_platform_box
+    child = "import time;open('grandchild-ready.txt','w').write('ok');time.sleep(2);open('orphan.txt','w').write('escaped')"
+    detach = "creationflags=0x00000200" if sys.platform == "win32" else "start_new_session=True"
+    tool = ("import subprocess,time;from pathlib import Path;"
+            f"subprocess.Popen([{executable!r},'-c',{child!r}],{detach});"
+            "exec(\"while not Path('grandchild-ready.txt').exists(): time.sleep(0.01)\");"
+            "open('started.txt','w').write('started');print('ready',flush=True);time.sleep(60)")
+    host_code = (
+        "import os,subprocess;from pathlib import Path;"
+        "from backend.core.sandbox import SandboxPolicy,sandbox_popen,sandbox_environment;"
+        f"p=sandbox_popen([{executable!r},'-I','-c',{tool!r}],SandboxPolicy(Path({str(workspace)!r})),"
+        f"cwd={str(policy.workspace)!r},stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,"
+        "text=True,env=sandbox_environment(os.environ),start_new_session=os.name!='nt');"
+        "print(p.stdout.readline().strip(),flush=True);p.wait()"
+    )
+    host = subprocess.Popen([sys.executable, '-B', '-c', host_code],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        # Bounded read: a broken loader must fail, not hang the entire suite.
+        ready = []
+        reader = threading.Thread(target=lambda: ready.append(host.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(timeout=15)
+        assert ready and ready[0].strip() == 'ready', ready
+        assert (workspace / 'started.txt').read_text() == 'started'
+        # Kill only the Host, with no cooperative sandbox/job cleanup.
+        host.kill()
+        host.wait(timeout=5)
+        time.sleep(2.4)
+        assert not (workspace / 'orphan.txt').exists()
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.wait(timeout=5)
+        for stream in (host.stdout, host.stderr):
+            stream.close()
+
+
+def test_packaged_host_executes_inside_native_boundary(cross_platform_box):
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Source job; packaged acceptance runs with an actual built Host')
+    host = Path(configured).resolve(strict=True)
+    # This driver runs INSIDE the real frozen executable. Patching sys.frozen
+    # in a source interpreter would not exercise bootloader/child-role behavior.
+    invocation = {"_workspace": str(policy.workspace), "argv": ["python", "-c",
+        "open('packaged.txt','w').write('ok');print('packaged')"]}
+    source = (
+        "import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;"
+        f"r=ProcessToolRunner(timeout=30).run('exec_command',{invocation!r});"
+        "print(json.dumps({'success':r.success,'data':r.data,'error':r.error,'stderr':r.stderr}))"
+    )
+    result = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-c', source],
+        capture_output=True, text=True, encoding='utf-8', timeout=60)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload['success'], payload
+    assert payload['data'].get('success'), payload
+    assert payload['data']['stdout'].strip() == 'packaged'
+    assert (workspace / 'packaged.txt').read_text() == 'ok'
+
+
+def test_linux_cpu_budget_counts_all_descendants(linux_box):
+    workspace, _ = linux_box
+    source = ("import subprocess,sys,time;print('ran',flush=True);"
+              "subprocess.Popen([sys.executable,'-c','while True: pass']);"
+              "exec('while True: pass')")
+    proc = sandbox_popen([sys.executable, '-I', '-c', source],
+        SandboxPolicy(workspace, cpu_seconds=1), cwd=str(workspace),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=sandbox_environment(os.environ), start_new_session=True)
+    code, out, err = finished(proc, timeout=10)
+    assert code != 0, (out, err)
+    assert out.strip() == 'ran'

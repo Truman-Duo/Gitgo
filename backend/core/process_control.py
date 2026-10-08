@@ -103,8 +103,13 @@ def close_job(job_handle) -> None:
 
 def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
     """Terminate descendants and wait until the root process is reaped."""
+    cgroup = getattr(proc, "_gitgo_cgroup", None)
+    if cgroup is not None:
+        cgroup.kill()
     if proc.poll() is not None:
         close_job(job_handle)
+        if cgroup is not None:
+            cgroup.close()
         return
     try:
         if sys.platform == "win32":
@@ -131,3 +136,5 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
             proc.wait(timeout=5)
     finally:
         close_job(job_handle)
+        if cgroup is not None:
+            cgroup.close()

@@ -80,9 +80,12 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
         bwrap = shutil.which("bwrap")
         if not bwrap:
             raise SandboxDenied("SANDBOX_UNAVAILABLE", "Install bubblewrap; no unsandboxed fallback is permitted.")
+        from backend.core.sandbox_linux import LinuxCgroup, LinuxSandboxProcess
+        from backend.core.child_process import python_command
         # Empty root, private PID/network/user namespaces and private tmpfs.
         # Mount runtime trees read-only, never the host home, /etc or /run.
-        command = [bwrap, "--die-with-parent", "--new-session", "--unshare-all",
+        command = [bwrap, "--die-with-parent", "--new-session",
+                   "--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts",
                    "--cap-drop", "ALL", "--proc", "/proc", "--dev", "/dev",
                    "--tmpfs", "/tmp"]
         for name in ("/usr", "/bin", "/lib", "/lib64"):
@@ -93,25 +96,33 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
             if Path(name).is_file():
                 command += ["--ro-bind", name, name]
         source_root = Path(__file__).resolve().parents[2]
-        for root in dict.fromkeys((source_root, Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve())):
+        runtime_roots = (source_root, Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve())
+        if getattr(sys, "frozen", False):
+            runtime_roots += (Path(sys.executable).resolve().parent,
+                              Path(getattr(sys, "_MEIPASS", sys.prefix)).resolve())
+        for root in dict.fromkeys(runtime_roots):
             if not any(root.is_relative_to(Path(tree)) for tree in ("/usr", "/bin", "/lib", "/lib64")):
                 command += ["--ro-bind", str(root), str(root)]
-        command += ["--bind", str(policy.workspace), str(policy.workspace),
+        cgroup = LinuxCgroup(policy)
+        command += ["--dir", "/run",
+                    "--bind", str(cgroup.path / "cgroup.procs"), "/run/gitgo-cgroup.procs",
+                    "--bind", str(policy.workspace), str(policy.workspace),
                     "--chdir", str(kwargs.pop("cwd")), "--"]
         # Set limits inside the new PID namespace before loading tool code.
         bootstrap = (
             "import os,resource,sys;"
+            # This is the only cgroup file exposed: it can move a visible
+            # process INTO this invocation, never change limits or move out.
+            "f=os.open('/run/gitgo-cgroup.procs',os.O_WRONLY);os.write(f,b'0');os.close(f);"
             f"resource.setrlimit(resource.RLIMIT_AS,({policy.memory_bytes},{policy.memory_bytes}));"
-            f"resource.setrlimit(resource.RLIMIT_NPROC,({policy.process_limit},{policy.process_limit}));"
             f"resource.setrlimit(resource.RLIMIT_CPU,({policy.cpu_seconds},{policy.cpu_seconds}));"
             "resource.setrlimit(resource.RLIMIT_CORE,(0,0));"
             "os.execv(sys.argv[1],sys.argv[1:])"
         )
-        # frozen runtimes have no general -c mode; refuse rather than weaken.
-        if getattr(sys, "frozen", False):
-            raise SandboxDenied("SANDBOX_UNAVAILABLE", "Linux frozen runtime sandbox bootstrap is unavailable.")
-        command += [sys.executable, "-I", "-c", bootstrap, *argv]
-        return subprocess.Popen(command, **kwargs)
+        # The packaged Host exposes a private Python role; do not treat its
+        # executable as a general system interpreter.
+        command += python_command(["-I", "-c", bootstrap, *argv])
+        return LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
     raise SandboxDenied("SANDBOX_UNAVAILABLE", "No native sandbox backend is available on this platform.")
 
 def prepare_child_environment(workspace: str) -> None:

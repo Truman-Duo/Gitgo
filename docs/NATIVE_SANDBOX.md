@@ -55,11 +55,21 @@ exec_command 仍接受明确的 argv；不兼容的外部程序返回执行错�
 系统运行时、专用 Python/Gitgo source，以及可写项目工作区；/tmp 为私有
 tmpfs，/proc 对应私有 PID namespace。网络、IPC、用户等 namespace 独立，
 删除所有 capabilities，使用 die-with-parent/new-session。
-执行前设置地址空间、CPU、进程数和 core dump 的硬限制。
-进程数限制遵循 Linux RLIMIT_NPROC 的 UID 语义；CPU 为每进程限制，
-Host 另有整次调用的墙钟期限。不可用时拒绝，不回退。
+每次调用使用独立 cgroup v2：整棵树的 memory.max/memory.swap.max、pids.max、cpu.max；Host 根据 cpu.stat 汇总累计 CPU 预算。执行前加入 cgroup，再设置地址空间、每进程 CPU 和 core dump 的补充限制。取消使用 cgroup.kill；原生 PID namespace 负责 Host 崩溃时的后代清理。不使用共享 UID 的 RLIMIT_NPROC 作为调用级限额。
 
-Linux frozen bootstrap 与 macOS 后端暂不可用，返回 SANDBOX_UNAVAILABLE。
+受信任的 Host 必须运行在已授权委派的 cgroup scope 内，并设置 GITGO_SANDBOX_CGROUP_ROOT。缺失 cpu/memory/pids 委派或 cgroup.kill 时明确拒绝，不降低隔离。
+
+例如，在支持用户 cgroup 委派的系统中：
+
+```text
+systemd-run --user --scope -p Delegate=yes python scripts/run_linux_sandbox_scope.py -- python -m backend.core.native_host_entry
+```
+
+包装器仅将自身移入 scope 的 host 子组、启用已委派控制器，并启动指定 Host；不会申请 root 或修改祖先 cgroup。若系统管理员未委派控制器，需要管理员先配置。scripts/provision_linux_sandbox.py 可预览显式独立子树配置；独立子树还需管理员将受信任 Host 置于该子树内，不能仅导出变量后跨委派边界迁移。
+
+cgroup namespace 保留 Host 所在的命名空间以便加入委派的兄弟组；沙箱不挂载 /sys，只暴露本次 cgroup.procs，可将可见进程移入本次组，不能修改限制或迁出。
+
+Linux source/frozen 使用同一私有 Python role 启动协议。macOS 后端尚未完成，保持 SANDBOX_UNAVAILABLE。
 Linux 集成验收由专用 CI 执行；Windows 本地验证不能替代该验收。
 
 ## 授权与收据
@@ -99,3 +109,5 @@ Windows 测试使用临时独立 Python 与项目 ACL，覆盖正常执行、读
 - [Microsoft AppContainer launch contract](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
 - [Microsoft process attributes: SECURITY_CAPABILITIES, HANDLE_LIST, JOB_LIST](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
 - [bubblewrap security model and namespace options](https://github.com/containers/bubblewrap)
+
+新增验收使用真实 Host 强制退出，以及实际 PyInstaller onedir 产物；打包测试不通过伪造 sys.frozen 冒充。三平台完整原生发行验收尚需补齐 macOS 及签名/安装环境。

@@ -19,7 +19,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,5 +27,10 @@ jobs:
           python-version: "3.14"
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - run: python -m pip install -r requirements-portable.txt
-      - run: python -B -m pytest tests/test_native_sandbox.py -q
+      - run: python -m pip install -r requirements-portable.txt pyinstaller
+      - name: Windows source and packaged isolation
+        if: runner.os == 'Windows'
+        run: python -B scripts/run_sandbox_acceptance.py
+      - name: Linux source and packaged isolation in delegated scope
+        if: runner.os == 'Linux'
+        run: sudo -E systemd-run --quiet --scope --uid="$(id -u)" --unit=gitgo-sandbox-ci -p Delegate=yes "$(which python)" -B scripts/run_linux_sandbox_scope.py -- "$(which python)" -B scripts/run_sandbox_acceptance.py

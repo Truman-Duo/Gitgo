@@ -222,6 +222,8 @@ class ProcessToolRunner:
                 from backend.core.process_control import close_job
                 close_job(getattr(spawned, "_gitgo_job_handle", None))
                 spawned._gitgo_job_handle = None
+                if hasattr(spawned, "close_sandbox"):
+                    spawned.close_sandbox()
                 for stream in (spawned.stdin, spawned.stdout, spawned.stderr):
                     if stream is not None:
                         try:
