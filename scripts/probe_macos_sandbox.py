@@ -20,7 +20,7 @@ import time
 
 
 def seatbelt_profile(workspace: Path) -> str:
-    roots = ["/System", "/usr/lib", "/usr/share", "/private/var/db/dyld",
+    roots = ["/System", "/bin", "/usr/lib", "/usr/share", "/private/var/db/dyld",
              str(Path(sys.base_prefix).resolve()), str(Path(sys.prefix).resolve()),
              str(Path(sys.executable).resolve().parent), str(workspace)]
     quoted = lambda value: json.dumps(value, ensure_ascii=False)
@@ -104,6 +104,10 @@ def audit(report: dict):
         assert outside.read_text() == 'host-only'
         (workspace / 'escape').symlink_to(outside)
         profile = seatbelt_profile(workspace)
+        control = subprocess.run(['/usr/bin/sandbox-exec', '-p', profile, '/bin/echo', 'seatbelt'],
+            capture_output=True, text=True, cwd=workspace, timeout=8)
+        assert control.returncode == 0 and control.stdout.strip() == 'seatbelt', control.stderr
+        report['seatbelt_launcher_control'] = True
         assert run(profile, workspace, "open('allowed','w').write('ok');print('executed')") == 'executed'
         assert (workspace / 'allowed').read_text() == 'ok'
         report['native_execution_control'] = True
@@ -157,10 +161,15 @@ def main():
         raise SystemExit('Seatbelt launcher is unavailable; audit cannot pass')
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     report = {'os': platform.mac_ver()[0], 'architecture': platform.machine(),
+              'interpreter': str(Path(sys.executable).resolve()),
+              'base_prefix': str(Path(sys.base_prefix).resolve()),
               'production_backend': 'unavailable', 'macos_support_complete': False, 'audit_passed': False}
     try:
         audit(report)
         report['audit_passed'] = True
+    except Exception as exc:
+        report['audit_error'] = str(exc)[-2000:]
+        raise
     finally:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')

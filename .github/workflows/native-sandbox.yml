@@ -55,6 +55,21 @@ jobs:
       - run: python -m pip install -r requirements-portable.txt
       - name: Audit native primitives and verify production stays closed
         run: python -B scripts/probe_macos_sandbox.py --output .gitgo/macos-capabilities.json
+      - name: Diagnose native launch failures
+        if: failure()
+        run: |
+          sudo /usr/bin/log show --last 3m --style compact --predicate 'process == "sandboxd"' | tail -80
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted((Path.home() / 'Library/Logs/DiagnosticReports').glob('*'))[-12:]:
+              if p.suffix == '.ips' and ('Python' in p.name or 'sandbox-exec' in p.name):
+                  try:
+                      payload = json.loads(p.read_text().split('\n', 1)[1])
+                      print(p.name, json.dumps({k: payload.get(k) for k in ('exception', 'termination', 'asi')}))
+                  except (OSError, ValueError):
+                      pass
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
