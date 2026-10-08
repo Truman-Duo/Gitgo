@@ -705,3 +705,64 @@ def test_packaged_host_denies_external_access(cross_platform_box, scenario):
     finally:
         if listener is not None:
             listener.close()
+
+
+@pytest.mark.parametrize("reason,input_size", [("cancel", 0), ("cancel", 4_000_000), ("timeout", 0)])
+def test_native_runner_stops_detached_children_with_blocked_io(
+        cross_platform_box, monkeypatch, reason, input_size):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, policy, executable = cross_platform_box
+    child = ("import time;open('child-ready.txt','w').write('ok');"
+             "time.sleep(8);open('after-stop.txt','w').write('escaped')")
+    detach = "creationflags=0x00000200" if sys.platform == 'win32' else "start_new_session=True"
+    source = ("import subprocess,time;from pathlib import Path;"
+              f"subprocess.Popen([{executable!r},'-c',{child!r}],{detach});"
+              "time.sleep(60)")
+    # Substitute only the payload command; OS launch, pipe handling, timeouts
+    # and cleanup remain the real production implementation.
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.tool_runner_command',
+                        lambda: [executable, '-I', '-c', source])
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.owned_child_cwd',
+                        lambda _: workspace)
+    cancellation = threading.Event()
+    results = []
+    worker = threading.Thread(target=lambda: results.append(ProcessToolRunner(timeout=5).run(
+        'exec_command', {'_workspace': str(policy.workspace), 'payload': 'x' * input_size},
+        cancellation_event=cancellation)), daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 4
+    try:
+        while not (workspace / 'child-ready.txt').exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (workspace / 'child-ready.txt').exists(), results
+        ready = time.monotonic()
+        if reason == 'cancel':
+            cancellation.set()
+        worker.join(timeout=7)
+        assert not worker.is_alive(), 'Stopping a sandbox must also unblock stdin/stdout writers'
+        assert len(results) == 1 and not results[0].success, results
+        assert results[0].timed_out == (reason == 'timeout'), results
+        if reason == 'cancel':
+            assert 'cancelled' in results[0].error
+        time.sleep(max(0, ready + 8.3 - time.monotonic()))
+        assert not (workspace / 'after-stop.txt').exists()
+    finally:
+        cancellation.set()
+        worker.join(timeout=10)
+
+
+@pytest.mark.parametrize('stream', [1, 2])
+def test_native_runner_enforces_output_budget_and_unknown_effects(
+        cross_platform_box, monkeypatch, stream):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, policy, executable = cross_platform_box
+    source = ("import os,time;open('executed.txt','w').write('ok');"
+              f"[os.write({stream},b'x'*65536) for _ in range(40)];time.sleep(60)")
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.tool_runner_command',
+                        lambda: [executable, '-I', '-c', source])
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.owned_child_cwd',
+                        lambda _: workspace)
+    result = ProcessToolRunner(timeout=10).run('exec_command', {'_workspace': str(policy.workspace)})
+    assert result.success and result.data['error'] == 'SANDBOX_OUTPUT_LIMIT', result
+    assert result.data['effect_state'] == 'ambiguous'
+    assert (workspace / 'executed.txt').read_text() == 'ok'
