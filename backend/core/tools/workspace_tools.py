@@ -611,7 +611,7 @@ def shell_script(args: dict) -> dict:
         bootstrap += (f"$null=New-PSDrive -Name Gitgo -PSProvider FileSystem "
                       f"-Root '{literal_cwd}' -ErrorAction Stop;"
                       "Set-Location -LiteralPath 'Gitgo:\\' -ErrorAction Stop;")
-        command = ("[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding;"
+        command = ("[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
                    "try {" + bootstrap + "} catch { [Console]::Error.WriteLine($_);exit 1 };\n" + script)
         shell_argv = [str(engine), "-NoLogo", "-NoProfile", "-NonInteractive",
                       "-Command", command]
