@@ -298,7 +298,9 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
     monkeypatch.setattr("backend.core.loop.process_tool_runner.tool_runner_command",
                         lambda: [str(isolated_python / "python.exe"), "-X", "utf8", "-c", bootstrap])
     monkeypatch.setattr("backend.core.loop.process_tool_runner.owned_child_cwd", lambda _: source)
-    runner = ProcessToolRunner(timeout=15)
+    # Cold PowerShell/module initialization on hosted Windows can exceed 10s.
+    # Keep a finite acceptance budget without changing production limits.
+    runner = ProcessToolRunner(timeout=90)
     result = runner.run("exec_command", {
         "_workspace": str(workspace),
         "argv": ["python", "-c", "open('runner.txt','w').write('ok');print('executed')"],
@@ -309,7 +311,7 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
     assert (workspace / "runner.txt").read_text() == "ok"
     shell = runner.run("shell_script", {
         "_workspace": str(workspace), "script": "Write-Output native-shell",
-        "purpose": "verify native PowerShell execution", "timeout": 10,
+        "purpose": "verify native PowerShell execution", "timeout": 60,
     })
     assert shell.success, shell
     assert shell.data.get("success"), json.dumps(shell.data)
