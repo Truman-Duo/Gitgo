@@ -652,9 +652,13 @@ def test_packaged_host_executes_inside_native_boundary(cross_platform_box):
 
 def test_linux_cpu_budget_counts_all_descendants(linux_box):
     workspace, _ = linux_box
+    child = ("import sys,time;open(sys.argv[1],'w').write('ready');t=time.process_time();"
+             "exec('while time.process_time()-t<0.7: pass');time.sleep(60)")
     source = ("import subprocess,sys,time;print('ran',flush=True);"
-              "subprocess.Popen([sys.executable,'-c','while True: pass']);"
-              "exec('while True: pass')")
+              f"[subprocess.Popen([sys.executable,'-c',{child!r},'cpu-'+str(i)]) for i in range(2)];"
+              "time.sleep(60)")
+    # Neither child reaches its inherited per-process one-second rlimit. Only
+    # the aggregate budget can stop the sleeping root before the timeout.
     proc = sandbox_popen([sys.executable, '-I', '-c', source],
         SandboxPolicy(workspace, cpu_seconds=1), cwd=str(workspace),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -662,6 +666,7 @@ def test_linux_cpu_budget_counts_all_descendants(linux_box):
     code, out, err = finished(proc, timeout=10)
     assert code != 0, (out, err)
     assert out.strip() == 'ran'
+    assert all((workspace / f'cpu-{i}').read_text() == 'ready' for i in range(2))
 
 
 @pytest.mark.parametrize("scenario", ["outside_read", "network"])
@@ -801,11 +806,12 @@ def test_cancel_between_pipeline_admission_and_spawn_never_executes(tmp_path_fac
 
 def test_windows_cpu_budget_counts_descendants(native_box):
     workspace, _, spawn = native_box
-    child = "open('cpu-child-ready','w').write('ok');exec('while True: pass')"
-    source = ("import subprocess,sys,time;from pathlib import Path;"
-              f"subprocess.Popen([sys.executable,'-c',{child!r}]);"
-              "exec(\"while not Path('cpu-child-ready').exists(): time.sleep(0.01)\");"
-              "print('ran',flush=True);exec('while True: pass')")
+    child = ("import sys,time;open(sys.argv[1],'w').write('ready');t=time.process_time();"
+             "exec('while time.process_time()-t<0.7: pass');time.sleep(60)")
+    source = ("import subprocess,sys,time;print('ran',flush=True);"
+              f"[subprocess.Popen([sys.executable,'-c',{child!r},'cpu-'+str(i)]) for i in range(2)];"
+              "time.sleep(60)")
     code, out, err = finished(spawn(source, override=SandboxPolicy(workspace, cpu_seconds=1)), timeout=12)
     assert code != 0, (out, err)
     assert out.strip() == 'ran'
+    assert all((workspace / f'cpu-{i}').read_text() == 'ready' for i in range(2))
