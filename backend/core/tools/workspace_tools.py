@@ -570,13 +570,13 @@ def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
 
 
 def shell_script(args: dict) -> dict:
-    """Execute one explicitly approved Bash program in the workspace.
+    """Execute one approved native shell program in the workspace.
 
     Approval is enforced by ToolPipeline before this isolated handler starts.
     The runner still confines cwd, strips likely credentials from the inherited
     environment, bounds input/output/time, and owns the spawned process tree.
-    It deliberately does not pretend to be an OS sandbox: the exact script is
-    the unit the user reviewed and approved.
+    ProcessToolRunner applies native OS isolation before loading this handler;
+    the exact script remains the unit the user reviewed and approved.
     """
     from backend.core.process_control import attach_kill_job, close_job, creation_flags
 
@@ -595,12 +595,16 @@ def shell_script(args: dict) -> dict:
         return {"error": "PURPOSE_REQUIRED"}
     if "\x00" in script or len(script.encode("utf-8")) > 100_000:
         return {"error": "SCRIPT_INVALID", "detail": "script exceeds the 100KB boundary or contains NUL"}
-    bash = _find_bash()
-    if bash is None:
-        return {
-            "error": "BASH_UNAVAILABLE",
-            "detail": "Install Git for Windows Bash or provide GITGO_BASH_PATH",
-        }
+    if sys.platform == "win32":
+        # MSYS Bash requires a shared global object namespace, incompatible
+        # with AppContainer. Use a Windows-native engine without weakening it.
+        engine = Path(os.environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        shell_argv = [str(engine), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]
+    else:
+        bash = _find_bash()
+        if bash is None:
+            return {"error": "BASH_UNAVAILABLE", "detail": "Install Bash in the sandbox runtime."}
+        shell_argv = [str(bash), "--noprofile", "--norc", "-c", script]
     timeout = max(1, min(int(args.get("timeout", 120) or 120), 1800))
     env = _safe_shell_environment()
     env["GITGO_AGENT_TOOL"] = "1"
@@ -608,7 +612,7 @@ def shell_script(args: dict) -> dict:
     job_handle = None
     try:
         started = subprocess.Popen(
-            [str(bash), "--noprofile", "--norc", "-c", script],
+            shell_argv,
             cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", env=env,
             creationflags=creation_flags(), start_new_session=sys.platform != "win32",

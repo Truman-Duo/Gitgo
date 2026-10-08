@@ -59,7 +59,7 @@ def test_tool_parameter_schema_rejects_required_names_without_properties():
         normalize_tool_parameters({"type": "object", "required": ["path"]})
 
 
-def test_custom_tool_versions_survive_source_changes_and_archive(tmp_path_factory: Path):
+def test_custom_tool_versions_survive_source_changes_and_archive(tmp_path_factory: Path, runner_transport_only):
     tmp_path = tmp_path_factory
     source_path = tmp_path / "count_values.py"
     source_path.write_text(

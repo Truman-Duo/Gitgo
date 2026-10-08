@@ -276,7 +276,7 @@ def test_dynamic_tool_cannot_compose_unapproved_or_noncomposable_tool(tmp_path_f
         }, {"unsafe": unsafe})
 
 
-def test_dynamic_tool_executes_through_isolated_registry(tmp_path_factory: Path):
+def test_dynamic_tool_executes_through_isolated_registry(tmp_path_factory: Path, runner_transport_only):
     (tmp_path_factory / "note.txt").write_text("composite works", encoding="utf-8")
     spec = validate_definition({
         "name": "read_named_file",
@@ -299,7 +299,7 @@ def test_dynamic_tool_executes_through_isolated_registry(tmp_path_factory: Path)
     assert result.data["steps"]["read_note"]["content"] == "composite works"
 
 
-def test_dynamic_tool_host_plan_reuses_canonical_pipeline_once(tmp_path_factory: Path):
+def test_dynamic_tool_host_plan_reuses_canonical_pipeline_once(tmp_path_factory: Path, runner_transport_only):
     (tmp_path_factory / "note.txt").write_text("TODO host pipeline", encoding="utf-8")
     base_tools = build_workspace_tools(tmp_path_factory)
     spec = validate_definition({
@@ -589,7 +589,7 @@ def test_define_tool_lifecycle_is_host_compiled_and_task_scoped(tmp_path_factory
     assert not process.tool_registry.has("read_note")
 
 
-def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Path):
+def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Path, runner_transport_only):
     from backend.core.loop import executor as executor_module
 
     source = tmp_path_factory / "word_count.py"
@@ -641,7 +641,7 @@ def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Pa
 
 
 def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
-    tmp_path_factory: Path,
+    tmp_path_factory: Path, runner_transport_only,
 ):
     from backend.core.loop import executor as executor_module
     from backend.core.loop.permission_broker import (
@@ -725,7 +725,7 @@ def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
 
 
 def test_permission_tool_resolves_authored_tools_mounted_after_construction(
-    tmp_path_factory: Path,
+    tmp_path_factory: Path, runner_transport_only,
 ):
     """The model-facing broker must see the live task-scoped tool surface."""
     from backend.core.loop import executor as executor_module
@@ -879,19 +879,19 @@ def test_shell_is_sensitive_and_available_to_worker_or_explicit_a_lease(tmp_path
     assert "escalate_to_supervisor" not in leased
 
 
-def test_approved_shell_handler_uses_bash_without_shell_true(tmp_path_factory):
+def test_approved_shell_handler_uses_native_shell_without_shell_true(tmp_path_factory, runner_transport_only):
     from backend.core.tools import workspace_tools
-    if workspace_tools._find_bash() is None:
+    if sys.platform != "win32" and workspace_tools._find_bash() is None:
         pytest.skip("Bash is not installed on this host")
     result = ProcessToolRunner(timeout=15).run("shell_script", {
         "_workspace": str(tmp_path_factory),
-        "script": "printf 'gitgo-shell-ok'",
+        "script": "Write-Output 'gitgo-shell-ok'" if sys.platform == "win32" else "printf 'gitgo-shell-ok'",
         "purpose": "exercise the isolated Bash handler",
         "timeout": 10,
     })
     assert result.success is True
     assert result.data["success"] is True
-    assert result.data["stdout"] == "gitgo-shell-ok"
+    assert result.data["stdout"].strip() == "gitgo-shell-ok"
 
 
 def test_supervisor_and_worker_share_question_and_tool_authoring_shortcuts():
@@ -920,8 +920,8 @@ def test_tool_catalog_mutations_are_journaled_as_process_effects(tmp_path_factor
     assert tools["author_tool"].read_only is False
 
 
-def test_process_runner_cancels_command_process_tree():
-    marker = Path(tempfile.gettempdir()) / f"gitgo-cancel-{time.time_ns()}.txt"
+def test_process_runner_cancels_command_process_tree(tmp_path_factory, runner_transport_only):
+    marker = tmp_path_factory / "cancel-marker.txt"
     event = threading.Event()
     runner = ProcessToolRunner(timeout=20)
 
@@ -933,7 +933,7 @@ def test_process_runner_cancels_command_process_tree():
     result = runner.run(
         "exec_command",
         {
-            "_workspace": str(Path.cwd()),
+            "_workspace": str(tmp_path_factory),
             "argv": [
                 sys.executable, "-c",
                 (

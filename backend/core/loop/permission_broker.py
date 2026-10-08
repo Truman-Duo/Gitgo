@@ -10,14 +10,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import importlib.util
+import marshal
+import threading
+from functools import wraps
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.core.errors import error_payload
 
 
 PATH_ARGUMENTS = ("path", "cwd")
+_GRANT_LOCK = threading.RLock()
+
+
+def _locked_grants(fn):
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        with _GRANT_LOCK:
+            return fn(*args, **kwargs)
+    return guarded
 
 
 def arguments_digest(arguments: dict) -> str:
@@ -31,8 +44,68 @@ def arguments_digest(arguments: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _runtime_implementation_digest() -> str:
+    """Invalidate built-in approvals when source or frozen handler code changes."""
+    digest = hashlib.sha256()
+    for name in ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner"):
+        module_name = f"backend.core.tools.{name}"
+        spec = importlib.util.find_spec(module_name)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Cannot identify tool implementation: {module_name}")
+        source = Path(spec.origin or "")
+        if source.is_file() and source.suffix == ".py":
+            body = source.read_bytes()
+        else:
+            code = spec.loader.get_code(module_name)
+            if code is None:
+                raise RuntimeError(f"Cannot identify frozen tool implementation: {module_name}")
+            body = marshal.dumps(code)
+        digest.update(module_name.encode())
+        digest.update(hashlib.sha256(body).digest())
+    return digest.hexdigest()
+
+
+def tool_contract_digest(tool) -> str:
+    """Bind approval to the Host definition, including authored source version."""
+    spec = dict(getattr(tool, "composite_spec", None) or {})
+    contract = {
+        "name": tool.name,
+        "runner_name": getattr(tool, "runner_name", ""),
+        "runtime_implementation": _runtime_implementation_digest(),
+        "parameters": tool.parameters,
+        "effect": getattr(getattr(tool, "effect", ""), "value", str(getattr(tool, "effect", ""))),
+        "resources": sorted(getattr(tool, "resources", None) or []),
+        "version": spec.get("version"),
+        "source_sha256": spec.get("source_sha256"),
+        "definition_digest": spec.get("digest"),
+    }
+    return hashlib.sha256(json.dumps(contract, sort_keys=True, default=str,
+                                    separators=(",", ":")).encode()).hexdigest()
+
+
+def grant_is_current(grant: dict, process, tool=None) -> bool:
+    if grant.get("process_id") != process.process_id:
+        return False
+    expires = grant.get("expires_at")
+    if expires:
+        try:
+            deadline = datetime.fromisoformat(str(expires))
+            if deadline.tzinfo is None or deadline <= datetime.now(timezone.utc):
+                return False
+        except (ValueError, TypeError):
+            return False
+    elif grant.get("tool_contract_digest"):
+        return False
+    if tool is not None:
+        # Legacy approvals cannot authorize sensitive native code.
+        if grant.get("tool_contract_digest") != tool_contract_digest(tool):
+            return not getattr(tool, "approval_per_invocation", False) and not grant.get("tool_contract_digest")
+    return True
+
+
+@_locked_grants
 def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: bool,
-                   consume: bool = False) -> dict | None:
+                   consume: bool = False, tool=None) -> dict | None:
     """Find one task-bound grant using the same rule at preflight and execute.
 
     Keeping this match in one function prevents the Host suspension gate and
@@ -42,7 +115,8 @@ def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: 
     digest = arguments_digest(arguments)
     task_id = process.active_task_id or process.process_id
     grant = next((item for item in list(process.approval_grants or []) if (
-        item.get("tool_name") == tool_name
+        grant_is_current(item, process, tool)
+        and item.get("tool_name") == tool_name
         and item.get("task_id") == task_id
         and (
             item.get("arguments_digest") == digest
@@ -189,6 +263,8 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
     request_id = str(uuid.uuid4())
     technical = {
         "request_id": request_id,
+        "tool_contract_digest": tool_contract_digest(tool),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
         "tool_name": tool_name,
         "effect": effect,
         "resource": str(target),
@@ -217,7 +293,7 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
             },
             *([] if invocation_only else [{
                 "label": "Allow for this task",
-                "principle": "Grant the same tool and exact resource until this task ends.",
+                "principle": "Grant the same tool and exact resource until this task ends or 30 minutes elapse.",
                 "immediate_effect": f"Repeated {tool_name} calls may use {target}.",
                 "downstream_effect": "The grant is not inherited by other tasks or processes.",
                 "risks": "Repeated access within the displayed scope is possible.",
@@ -246,6 +322,7 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
     })
 
 
+@_locked_grants
 def grant_from_decision(process, pending: dict, action: str) -> dict | None:
     request = dict(pending.get("permission_request") or {})
     if not request or action not in {"allow_once", "allow_task"}:
@@ -263,12 +340,15 @@ def grant_from_decision(process, pending: dict, action: str) -> dict | None:
         "arguments_digest": str(request.get("arguments_digest") or ""),
         "scope": "once" if action == "allow_once" else "task",
         "remaining_uses": 1 if action == "allow_once" else None,
+        "tool_contract_digest": str(request.get("tool_contract_digest") or ""),
+        "expires_at": str(request.get("expires_at") or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     process.approval_grants.append(grant)
     return grant
 
 
+@_locked_grants
 def consume_exact_grant(process, tool_name: str, arguments: dict) -> dict | None:
     """Consume one exact, task-bound approval at a non-ToolPipeline admission gate.
 
@@ -279,7 +359,8 @@ def consume_exact_grant(process, tool_name: str, arguments: dict) -> dict | None
     digest = arguments_digest(arguments)
     task_id = process.active_task_id or process.process_id
     grant = next((item for item in list(process.approval_grants or []) if (
-        item.get("task_id") == task_id
+        grant_is_current(item, process)
+        and item.get("task_id") == task_id
         and item.get("tool_name") == tool_name
         and item.get("arguments_digest") == digest
         and (item.get("remaining_uses") is None or int(item.get("remaining_uses") or 0) > 0)
@@ -301,8 +382,9 @@ def _arguments_preview(arguments: dict, *, limit: int = 1200) -> str:
     return rendered if len(rendered) <= limit else rendered[:limit] + "\n…"
 
 
+@_locked_grants
 def authorize_external_resources(process, tool_name: str, effect: str, arguments: dict,
-                                 resources: list[str]) -> tuple[list[str], dict | None]:
+                                 resources: list[str], *, tool=None) -> tuple[list[str], dict | None]:
     if not resources:
         return [], None
     digest = arguments_digest(arguments)
@@ -311,7 +393,8 @@ def authorize_external_resources(process, tool_name: str, effect: str, arguments
     for raw_resource in resources:
         target = Path(raw_resource).resolve(strict=False)
         grant = next((item for item in list(process.approval_grants or []) if (
-            item.get("task_id") == (process.active_task_id or process.process_id)
+            grant_is_current(item, process, tool)
+            and item.get("task_id") == (process.active_task_id or process.process_id)
             and item.get("tool_name") == tool_name
             and item.get("effect") == effect
             and _is_within(target, Path(str(item.get("resource") or "")).resolve(strict=False))

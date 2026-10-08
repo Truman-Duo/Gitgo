@@ -107,3 +107,14 @@ def factory():
     from tests.factory import TestDataFactory
     return TestDataFactory(seed=42)
 
+
+@pytest.fixture
+def runner_transport_only(monkeypatch):
+    """Test runner/protocol semantics independently of machine ACL provisioning.
+
+    Native containment is separately exercised without this mock in
+    test_native_sandbox.py. This fixture is opt-in, never applied globally.
+    """
+    def launch(argv, policy, **kwargs):
+        return subprocess.Popen(argv, **kwargs)
+    monkeypatch.setattr("backend.core.sandbox.sandbox_popen", launch)

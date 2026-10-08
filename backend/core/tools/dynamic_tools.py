@@ -98,7 +98,7 @@ def validate_authored_definition(raw: dict, workspace: str) -> dict:
 def validate_privileged_authored_definition(raw: dict, workspace: str) -> dict:
     """Compile an unrestricted Python tool whose authority comes from the user.
 
-    Gitgo does not pretend this is an OS sandbox.  The immutable source digest,
+    ProcessToolRunner applies native isolation. The immutable source digest,
     purpose and declared resource/effect contract are approval and audit data;
     every registration and every invocation is explicitly approved.
     """

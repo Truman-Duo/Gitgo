@@ -74,7 +74,14 @@ class ToolPipeline:
     ) -> ToolResult:
         """执行单次工具调用。"""
         tool_name = tool_call.get("name", tool.name)
-        raw_args = tool_call.get("args", {})
+        # Leading-underscore fields are Host authority, never model input.
+        # Strip before prepare_args so injected roots/config cannot survive a
+        # public relative path such as ../private merely by avoiding preflight.
+        supplied_args = tool_call.get("args", {})
+        raw_args = {
+            key: value for key, value in supplied_args.items()
+            if not str(key).startswith("_")
+        } if isinstance(supplied_args, dict) else supplied_args
 
         start = time.time()
 
@@ -106,7 +113,7 @@ class ToolPipeline:
             digest = arguments_digest(public_raw)
             grant = matching_grant(
                 ctx.process, tool_name, public_raw,
-                per_invocation=bool(getattr(tool, "approval_per_invocation", False)),
+                per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool,
             )
             legacy_approved = (
                 tool_name in approvals
@@ -150,11 +157,17 @@ class ToolPipeline:
                     },
                 )
             if grant is not None:
-                matching_grant(
+                consumed_grant = matching_grant(
                     ctx.process, tool_name, public_raw,
-                    per_invocation=bool(getattr(tool, "approval_per_invocation", False)),
+                    per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool,
                     consume=True,
                 )
+                if consumed_grant is None:
+                    return self._error_result(
+                        tool_name, execution_id, call_index, start,
+                        "approval expired or was consumed before execution",
+                        diagnostics={"nature": "governance", "code": "APPROVAL_GRANT_INVALID"},
+                    )
             explicit_user_grant = grant
 
         # Step 1: prepare_args
@@ -205,7 +218,7 @@ class ToolPipeline:
                 allowed_roots, scope_error = authorize_external_resources(
                     ctx.process, tool_name, effect_value,
                     {key: value for key, value in args.items() if not str(key).startswith("_")},
-                    outside,
+                    outside, tool=tool,
                 )
                 if scope_error is not None:
                     return self._error_result(
@@ -218,8 +231,7 @@ class ToolPipeline:
                             "error_info": scope_error,
                         },
                     )
-                if allowed_roots:
-                    args["_allowed_roots"] = allowed_roots
+                args["_allowed_roots"] = allowed_roots
         except Exception as exc:
             return self._error_result(
                 tool_name, execution_id, call_index, start,
@@ -375,7 +387,7 @@ class ToolPipeline:
             elif getattr(tool, "isolated", False):
                 result_data = self._execute_isolated(
                     getattr(tool, "runner_name", "") or tool_name,
-                    args, effective_timeout,
+                    {**args, "_workspace": str(ctx.workspace_path)}, effective_timeout,
                     cancellation_event=ctx.cancellation,
                 )
             else:

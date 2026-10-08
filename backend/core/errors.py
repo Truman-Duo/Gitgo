@@ -22,6 +22,21 @@ class ErrorDefinition:
 
 
 _DEFINITIONS = (
+    ErrorDefinition("GITGO-E3601", "SANDBOX_UNAVAILABLE",
+                    "Native isolation is unavailable; execution was refused.",
+                    False, "configure_native_sandbox"),
+    ErrorDefinition("GITGO-E3602", "SANDBOX_LAUNCH_DENIED",
+                    "The OS refused the sandbox launch; execution was refused.",
+                    False, "configure_native_sandbox"),
+    ErrorDefinition("GITGO-E3603", "SANDBOX_POLICY_INVALID",
+                    "The Host sandbox policy is invalid; execution was refused.",
+                    False, "correct_sandbox_policy"),
+    ErrorDefinition("GITGO-E3605", "SANDBOX_EXECUTION_FAILED",
+                    "The sandboxed runtime exited without a result; side effects are unknown.",
+                    False, "inspect_sandbox_runtime"),
+    ErrorDefinition("GITGO-E3604", "SANDBOX_OUTPUT_LIMIT",
+                    "The sandbox output budget was exceeded; the process tree was terminated.",
+                    False, "reduce_tool_output"),
     ErrorDefinition("GITGO-E3106", "PROCESS_PRESENTATION_INVALID",
                     "Select an existing B process and provide a valid display name or archive action.",
                     True, "correct_process_selection_or_name"),

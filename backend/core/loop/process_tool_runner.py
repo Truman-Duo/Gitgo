@@ -23,6 +23,7 @@ from typing import Any
 
 from backend.core.child_process import owned_child_cwd, tool_runner_command
 from backend.core.protocol_io import dump_protocol_json
+from backend.core.sandbox import SandboxDenied
 
 
 @dataclass
@@ -61,18 +62,36 @@ class ProcessToolRunner:
         """
         effective_timeout = timeout if timeout is not None else self._timeout
         input_data = {"tool_name": tool_name, "args": args}
-        start = time.time()
+        start = time.monotonic()
 
         try:
             from backend.core.process_control import attach_kill_job, close_job, creation_flags
-            # Inherit parent env so GITGO_TOOL_REGISTRY_MODULE etc. propagate
+            # Ordinary tools retain the trusted Host registry configuration.
+            # Arbitrary-code handlers receive only the sandbox allowlist.
             child_env = os.environ.copy()
             child_env.update({
                 "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1",
             })
             source_root = Path(__file__).resolve().parents[3]
-            proc = subprocess.Popen(
+            from backend.core.sandbox import (
+                SANDBOXED_HANDLERS, SandboxPolicy, sandbox_environment, sandbox_popen,
+            )
+            native = tool_name in SANDBOXED_HANDLERS
+            policy = None
+            if native:
+                workspace = args.get("_workspace") or args.get("workspace_path")
+                if not workspace:
+                    raise SandboxDenied("SANDBOX_POLICY_INVALID", "Host execution workspace is required.")
+                policy = SandboxPolicy(
+                    Path(str(workspace)),
+                    cpu_seconds=max(1, min(int(effective_timeout), 1800)),
+                )
+                child_env = sandbox_environment(child_env)
+            spawn = (
+                lambda argv, **options: sandbox_popen(argv, policy, **options)
+            ) if native else subprocess.Popen
+            proc = spawn(
                 tool_runner_command(),
                 # DaemonClient starts ``python -m gitgo`` from the package's
                 # parent directory.  Relying on inherited cwd therefore makes
@@ -89,7 +108,13 @@ class ProcessToolRunner:
                 creationflags=creation_flags(),
                 start_new_session=sys.platform != "win32",
             )
-            proc._gitgo_job_handle = attach_kill_job(proc)
+            if not getattr(proc, "_gitgo_job_handle", None):
+                proc._gitgo_job_handle = attach_kill_job(proc)
+            if native:
+                from backend.core.sandbox_io import BoundedCommunication
+                communication = BoundedCommunication(proc)
+            else:
+                communication = proc
 
             try:
                 payload = dump_protocol_json(input_data)
@@ -103,13 +128,13 @@ class ProcessToolRunner:
                             success=False,
                             error=f"tool '{tool_name}' cancelled",
                             exit_code=-1,
-                            duration_ms=(time.time() - start) * 1000,
+                            duration_ms=(time.monotonic() - start) * 1000,
                         )
-                    elapsed = time.time() - start
+                    elapsed = time.monotonic() - start
                     if elapsed >= effective_timeout:
                         raise subprocess.TimeoutExpired(proc.args, effective_timeout)
                     try:
-                        stdout_str, stderr_str = proc.communicate(
+                        stdout_str, stderr_str = communication.communicate(
                             input=payload if first else None,
                             timeout=min(0.2, effective_timeout - elapsed),
                         )
@@ -117,11 +142,18 @@ class ProcessToolRunner:
                     except subprocess.TimeoutExpired:
                         first = False
                         continue
-                duration_ms = (time.time() - start) * 1000
+                duration_ms = (time.monotonic() - start) * 1000
                 close_job(getattr(proc, "_gitgo_job_handle", None))
                 proc._gitgo_job_handle = None
 
                 if proc.returncode != 0:
+                    if native:
+                        denial = SandboxDenied("SANDBOX_EXECUTION_FAILED",
+                            "Sandboxed runtime exited without a tool result. Inspect runtime ACLs and captured diagnostics.")
+                        denial.effect_state = "ambiguous"
+                        return SubprocessResult(success=True, data=denial.result(),
+                            exit_code=proc.returncode, duration_ms=duration_ms,
+                            stderr=stderr_str)
                     return SubprocessResult(
                         success=False,
                         error=f"subprocess exit {proc.returncode}: {stderr_str[:500]}",
@@ -141,7 +173,7 @@ class ProcessToolRunner:
                 )
 
             except subprocess.TimeoutExpired:
-                duration_ms = (time.time() - start) * 1000
+                duration_ms = (time.monotonic() - start) * 1000
                 self._kill_tree(proc)
                 return SubprocessResult(
                     success=False,
@@ -152,8 +184,16 @@ class ProcessToolRunner:
                     stderr="",
                 )
 
+        except SandboxDenied as exc:
+            spawned = locals().get("proc")
+            if spawned is not None:
+                self._kill_tree(spawned)
+            return SubprocessResult(
+                success=True, data=exc.result(),
+                duration_ms=(time.monotonic() - start) * 1000,
+            )
         except FileNotFoundError:
-            duration_ms = (time.time() - start) * 1000
+            duration_ms = (time.monotonic() - start) * 1000
             return SubprocessResult(
                 success=False,
                 error="runner module not found: backend.core.tools.runner",
@@ -164,13 +204,26 @@ class ProcessToolRunner:
             spawned = locals().get("proc")
             if spawned is not None and spawned.poll() is None:
                 self._kill_tree(spawned)
-            duration_ms = (time.time() - start) * 1000
+            duration_ms = (time.monotonic() - start) * 1000
             return SubprocessResult(
                 success=False,
                 error=f"subprocess spawn failed: {exc}",
                 exit_code=-1,
                 duration_ms=duration_ms,
             )
+
+        finally:
+            spawned = locals().get("proc")
+            if spawned is not None:
+                from backend.core.process_control import close_job
+                close_job(getattr(spawned, "_gitgo_job_handle", None))
+                spawned._gitgo_job_handle = None
+                for stream in (spawned.stdin, spawned.stdout, spawned.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
 
     @staticmethod
     def _kill_tree(proc: subprocess.Popen) -> None:
