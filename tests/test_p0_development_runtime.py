@@ -920,31 +920,34 @@ def test_tool_catalog_mutations_are_journaled_as_process_effects(tmp_path_factor
     assert tools["author_tool"].read_only is False
 
 
-def test_process_runner_cancels_command_process_tree(tmp_path_factory, runner_transport_only):
+def test_process_runner_cancels_transport_process_tree(tmp_path_factory, runner_transport_only, monkeypatch):
     marker = tmp_path_factory / "cancel-marker.txt"
     event = threading.Event()
     runner = ProcessToolRunner(timeout=20)
+    # This fixture intentionally disables the native boundary. Exercise its
+    # own process group with an inheriting descendant; real exec handlers may
+    # start a new session and require the native Job/cgroup tests instead.
+    ready = tmp_path_factory / "transport-descendant-ready"
+    child = (f"import pathlib,time;pathlib.Path({str(ready)!r}).write_text('ran');time.sleep(2);"
+             f"pathlib.Path({str(marker)!r}).write_text('survived')")
+    source = ("import subprocess,sys,time;"
+              f"subprocess.Popen([sys.executable,'-c',{child!r}]);time.sleep(60)")
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.tool_runner_command',
+                        lambda: [sys.executable, '-c', source])
 
     def cancel_soon():
-        time.sleep(0.25)
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
         event.set()
 
     threading.Thread(target=cancel_soon, daemon=True).start()
     result = runner.run(
         "exec_command",
-        {
-            "_workspace": str(tmp_path_factory),
-            "argv": [
-                sys.executable, "-c",
-                (
-                    "import pathlib,time; time.sleep(2); "
-                    f"pathlib.Path({str(marker)!r}).write_text('survived')"
-                ),
-            ],
-            "timeout": 15,
-        },
+        {"_workspace": str(tmp_path_factory)},
         cancellation_event=event,
     )
+    assert ready.read_text() == 'ran'
     assert result.success is False
     assert "cancelled" in result.error
     time.sleep(2.2)

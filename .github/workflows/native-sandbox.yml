@@ -12,6 +12,7 @@ on:
       - "backend/core/child_process.py"
       - "backend/core/native_host_entry.py"
       - "scripts/*sandbox*.py"
+      - "scripts/provision_ci_sqlite.py"
       - "scripts/probe_macos_virtualization.swift"
       - "tests/test_native_sandbox.py"
       - "tests/conftest.py"
@@ -32,8 +33,10 @@ jobs:
         with:
           python-version: "3.14"
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap gcc patchelf
       - run: python -m pip install -r requirements-portable.txt pyinstaller
+      - name: Provision and validate pinned patched SQLite in CI
+        run: python -B scripts/provision_ci_sqlite.py
       - name: Windows source and packaged isolation
         if: runner.os == 'Windows'
         run: python -B scripts/run_sandbox_acceptance.py

@@ -156,3 +156,11 @@ Linux 原生监控会终止剩余 cgroup 成员，不依赖调用方开始读取
 或执行最终清理。这补齐正常返回、取消、超时和 Host 崩溃的生命周期保护；
 持有输出管道的后代不能无限延长调用。Host 退出检测与资源核算均使用 50 ms
 轮询间隔，因此不能保证主进程退出后没有任何调度延迟。
+
+
+安全 CI 的 Windows/Linux 恢复验收使用固定 SQLite 3.53.4；下载来自 SQLite
+官方站点并校验发布 SHA3-256。scripts/provision_ci_sqlite.py 仅在可丢弃的
+GitHub-hosted runner 中配置本次 Python，不修改系统 SQLite，也不禁用项目的
+SQLite 安全检查。Linux 为本次 Python 扩展设置私有库路径，不给模型注入
+LD_LIBRARY_PATH 的权限。实际构建的 frozen Host 还必须验证打包后的 SQLite
+版本及安全检查，不能以源码解释器的结果代替。

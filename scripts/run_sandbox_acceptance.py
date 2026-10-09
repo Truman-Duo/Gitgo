@@ -1,6 +1,7 @@
 """Build and exercise an actual onedir Host; source mocks are not package evidence."""
 from __future__ import annotations
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -24,6 +25,15 @@ def main():
     host = root / '.gitgo/sandbox-dist/gitgo-host' / ('gitgo-host' + suffix)
     if not host.is_file():
         raise SystemExit('Build did not produce the declared Host artifact')
+    # The real artifact must contain the patched database dependency too;
+    # a passing source interpreter does not verify the frozen runtime.
+    probe = (
+        "import sqlite3;from backend.core.storage.runtime import validate_sqlite_runtime;"
+        f"assert sqlite3.sqlite_version == {sqlite3.sqlite_version!r};"
+        "validate_sqlite_runtime();print('Packaged SQLite',sqlite3.sqlite_version)"
+    )
+    subprocess.run([str(host), '--gitgo-internal-role', 'python', '-I', '-c', probe],
+                   cwd=host.parent, check=True)
     environment = dict(os.environ, GITGO_SANDBOX_TEST_HOST=str(host))
     subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests/test_native_sandbox.py',
                     '-k', 'packaged', '-q'], cwd=root, env=environment, check=True)
