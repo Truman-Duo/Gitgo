@@ -1047,8 +1047,9 @@ def test_pipeline_preserves_command_failure_output_for_model(tmp_path_factory: P
     assert result.data["exit_code"] == 2
 
 
+@pytest.mark.parametrize("failure", ["writer_failure", "workspace_state"])
 def test_effectful_tool_fails_closed_when_invocation_journal_is_unavailable(
-    tmp_path_factory: Path, monkeypatch,
+    tmp_path_factory: Path, monkeypatch, failure,
 ):
     called = []
     manager = AgentProcessManager()
@@ -1068,7 +1069,11 @@ def test_effectful_tool_fails_closed_when_invocation_journal_is_unavailable(
         workspace_path=str(tmp_path_factory), event_bus=EventBus(),
         cancellation=process.cancellation_event,
     )
-    monkeypatch.setattr(ToolPipeline, "_write_invocation_state", lambda *_a, **_k: None)
+    if failure == "writer_failure":
+        monkeypatch.setattr(ToolPipeline, "_write_invocation_state", lambda *_a, **_k: None)
+    else:
+        # Exercise the real writer and policy with an unsafe Host configuration.
+        monkeypatch.setenv("GITGO_STATE_HOME", str(tmp_path_factory / "unsafe-state"))
 
     result = ToolPipeline().execute(
         {"name": "write", "args": {}}, tool, ctx, "execution", 0,

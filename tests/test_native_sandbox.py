@@ -934,3 +934,46 @@ def test_linux_workspace_cannot_select_fake_bwrap(linux_box, monkeypatch):
     assert out.strip() == 'isolated'
     assert (workspace / 'positive-control').read_text() == 'ok'
     assert not (workspace / 'fake-helper-ran').exists()
+
+
+def test_native_tool_cannot_rewrite_host_invocation_journal(cross_platform_box):
+    from backend.core.storage.invocation_journal import invocation_journal_root
+    workspace, policy, executable = cross_platform_box
+    host_state = workspace.parent / 'host-owned-state'
+    host_state.mkdir()
+    journal_dir = invocation_journal_root(workspace, paths=SimpleNamespace(project_root=host_state))
+    journal_dir.mkdir(parents=True)
+    journal = journal_dir / 'invocation.json'
+    journal.write_text('{"state":"running"}', encoding='utf-8')
+    source = ("open('positive-control','w').write('ok')\ntry:\n "
+              f"open({str(journal)!r},'w').write('forged')"
+              "\nexcept OSError:\n print('blocked')\nelse:\n print('escaped')")
+    proc = sandbox_popen([executable, '-I', '-c', source], policy, cwd=str(workspace),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=sandbox_environment(os.environ), start_new_session=sys.platform != 'win32')
+    code, out, err = finished(proc)
+    assert code == 0, err
+    assert (workspace / 'positive-control').read_text() == 'ok'
+    assert out.strip() == 'blocked'
+    assert journal.read_text() == '{"state":"running"}'
+
+
+def test_root_exit_does_not_leave_a_pipe_holding_descendant(cross_platform_box, monkeypatch):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, _, executable = cross_platform_box
+    child = ("import time;open('descendant-ready','w').write('ran');"
+             "time.sleep(2);open('after-root-exit','w').write('escaped');time.sleep(60)")
+    source = ("import os,subprocess,time;from pathlib import Path;"
+              f"subprocess.Popen([{executable!r},'-I','-c',{child!r}]);"
+              "exec('while not Path(\"descendant-ready\").exists(): time.sleep(0.01)');"
+              "print('{\"success\":true,\"data\":{\"root\":\"exited\"}}',flush=True);os._exit(0)")
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.tool_runner_command',
+                        lambda: [executable, '-I', '-c', source])
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.owned_child_cwd', lambda _: workspace)
+    result = ProcessToolRunner(timeout=8).run('exec_command', {'_workspace': str(workspace)})
+    assert result.success and result.data == {'root': 'exited'}, result
+    assert result.exit_code == 0 and not result.timed_out, result
+    assert result.duration_ms < 7000, result
+    assert (workspace / 'descendant-ready').read_text() == 'ran'
+    time.sleep(2.3)
+    assert not (workspace / 'after-root-exit').exists(), result

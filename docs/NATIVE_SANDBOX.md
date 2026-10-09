@@ -90,6 +90,8 @@ Windows 的 CPU rate control 在部分启用 DFSS 的远程桌面服务环境中
 不能绕过文件 ACL、网络 namespace 或资源限额。对外部资源的审批也不会自动
 修改 OS ACL；当前原生执行配置仅支持已配置的本项目工作区，额外访问保持拒绝。
 
+调用证据写入绑定项目的外部 Host 状态目录，按工作区真实路径区分 worktree；不再把工作区 .gitgo/tool_invocations 当成权威日志。生产写入和恢复均使用已绑定的 StorageRuntime 路径；若状态目录落入可写工作区或被挂载的可信运行时树则拒绝建立日志，工具不得启动。旧工作区日志保留供人工核对，不自动搬迁为可信证据；恢复遇到旧日志会标记 LEGACY_INVOCATION_JOURNAL_UNTRUSTED、unknown/ambiguous 并要求人工核验。这只解决调用日志真实性边界，Git hooks/config、项目身份及其他工作区元数据仍需独立 OS 保护。
+
 授权期限是调用准入期限；已启动工具仍受调用超时和任务取消约束。
 尚未启动的拒绝记录 not_committed；已执行后被取消、输出超限或异常退出，
 收据保留 ambiguous（未知），不能宣称副作用已回滚。

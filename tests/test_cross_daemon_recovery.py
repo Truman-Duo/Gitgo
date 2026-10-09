@@ -122,7 +122,8 @@ def test_post_checkpoint_effect_requires_manual_verification(tmp_path_factory: P
     checkpoint_at = store.load_process_state(process_id)["session_checkpoint"]["checkpoint_at"]
     store.close()
 
-    journal_dir = workspace / ".gitgo" / "tool_invocations"
+    from backend.core.storage.invocation_journal import invocation_journal_root
+    journal_dir = invocation_journal_root(workspace, state_home=state_home)
     journal_dir.mkdir(parents=True)
     (journal_dir / "effect.json").write_text(json.dumps({
         "execution_id": "effect-after-checkpoint",
@@ -135,7 +136,7 @@ def test_post_checkpoint_effect_requires_manual_verification(tmp_path_factory: P
         "updated_at": datetime.fromisoformat(checkpoint_at).timestamp() + 1,
     }), encoding="utf-8")
     assert inspect_post_checkpoint_invocations(
-        workspace, process_id, checkpoint_at,
+        workspace, process_id, checkpoint_at, state_home=state_home,
     )
 
     reopened = SessionStore(str(workspace), state_home=state_home)
@@ -605,3 +606,69 @@ def test_real_daemon_process_restart_keeps_candidate_explicit(
     final_store = SessionStore(str(workspace), state_home=state_home)
     assert process_id not in final_store.list_incomplete()
     final_store.close()
+
+
+def test_workspace_cannot_forge_committed_host_evidence(tmp_path_factory):
+    workspace = _workspace(tmp_path_factory)
+    legacy = workspace / '.gitgo' / 'tool_invocations'
+    legacy.mkdir(parents=True)
+    (legacy / 'forged.json').write_text(json.dumps({
+        'process_id': 'victim', 'updated_at': 9999999999,
+        'state': 'committed', 'effect_state': 'committed', 'effect': 'workspace',
+    }), encoding='utf-8')
+    findings = inspect_post_checkpoint_invocations(workspace, 'victim', '')
+    assert len(findings) == 1
+    assert findings[0]['code'] == 'LEGACY_INVOCATION_JOURNAL_UNTRUSTED'
+    assert findings[0]['state'] == 'unknown'
+    assert findings[0]['effect_state'] == 'ambiguous'
+    assert not any(item['code'] == 'EFFECT_COMMITTED_AFTER_CHECKPOINT' for item in findings)
+
+
+def test_host_journal_refuses_state_inside_workspace(tmp_path_factory):
+    from backend.core.storage.invocation_journal import invocation_journal_root
+    from types import SimpleNamespace
+    import pytest
+    workspace = _workspace(tmp_path_factory)
+    nested = workspace / 'unsafe-state'
+    nested.mkdir()
+    with pytest.raises(OSError, match='outside the execution workspace'):
+        invocation_journal_root(workspace, paths=SimpleNamespace(project_root=nested))
+
+
+def test_unavailable_host_evidence_requires_repair_before_resume(tmp_path_factory):
+    workspace = _workspace(tmp_path_factory)
+    _, original = _running_supervisor(workspace)
+    store = SessionStore(str(workspace), state_home=workspace / 'unsafe-state')
+    store.save_process_checkpoint(original)
+    manager = AgentProcessManager()
+    restore_incomplete_processes(store, manager, workspace)
+    restored = manager.get(original.process_id)
+    assert restored.status is ProcessStatus.RECOVERY_REVIEW_REQUIRED
+    assert restored.recovery['resume_forbidden']
+    assert restored.recovery['reasons'][0]['code'] == 'INVOCATION_EVIDENCE_UNAVAILABLE'
+    store.close()
+
+
+def test_corrupt_host_evidence_cannot_silently_allow_resume(tmp_path_factory):
+    from backend.core.storage.invocation_journal import invocation_journal_root
+    workspace = _workspace(tmp_path_factory)
+    root = invocation_journal_root(workspace)
+    root.mkdir(parents=True)
+    (root / 'invalid.json').write_text('{truncated', encoding='utf-8')
+    (root / 'wrong-shape.json').write_text('[]', encoding='utf-8')
+    (root / 'invalid-time.json').write_text('{"updated_at":"nan"}', encoding='utf-8')
+    findings = inspect_post_checkpoint_invocations(workspace, 'victim', '')
+    assert len(findings) == 3
+    assert all(item['code'] == 'INVOCATION_EVIDENCE_UNAVAILABLE' for item in findings)
+    assert all(item['effect_state'] == 'ambiguous' for item in findings)
+
+
+def test_non_directory_host_journal_cannot_silently_allow_resume(tmp_path_factory):
+    from backend.core.storage.invocation_journal import invocation_journal_root
+    workspace = _workspace(tmp_path_factory)
+    root = invocation_journal_root(workspace)
+    root.parent.mkdir(parents=True)
+    root.write_text('not a journal', encoding='utf-8')
+    findings = inspect_post_checkpoint_invocations(workspace, 'victim', '')
+    assert len(findings) == 1
+    assert findings[0]['code'] == 'INVOCATION_EVIDENCE_UNAVAILABLE'

@@ -27,16 +27,15 @@ def isolate_default_gitgo_state(
     boundaries so a cached runtime cannot outlive the temporary directory.
     """
     close_owned_storage()
-    monkeypatch.setenv(
-        "GITGO_STATE_HOME", str(tmp_path_factory / "default-gitgo-state"),
-    )
-    monkeypatch.setenv(
-        "GITGO_CONFIG_PATH", str(tmp_path_factory / "config" / "config.json"),
-    )
-    try:
-        yield
-    finally:
-        close_owned_storage()
+    # Runtime evidence must remain outside every tool execution workspace.
+    with tempfile.TemporaryDirectory(prefix="gitgo_host_state_") as state_dir:
+        root = Path(state_dir)
+        monkeypatch.setenv("GITGO_STATE_HOME", str(root / "state"))
+        monkeypatch.setenv("GITGO_CONFIG_PATH", str(root / "config" / "config.json"))
+        try:
+            yield
+        finally:
+            close_owned_storage()
 
 
 @pytest.fixture

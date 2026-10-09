@@ -896,9 +896,13 @@ class ToolPipeline:
             return path
         try:
             from pathlib import Path
-            root = Path(ctx.workspace_path) / ".gitgo" / "tool_invocations"
-            root.mkdir(parents=True, exist_ok=True)
-            target = Path(path) if path else root / f"{execution_id}_{call_index}.json"
+            from backend.core.storage.invocation_journal import invocation_journal_root
+            root = invocation_journal_root(ctx.workspace_path,
+                paths=getattr(getattr(ctx, "storage", None), "paths", None))
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            target = (Path(path) if path else root / f"{execution_id}_{call_index}.json").resolve(strict=False)
+            if target.parent != root or target.suffix != ".json":
+                raise OSError("Invocation evidence path escapes the bound Host journal")
             previous = {}
             if target.exists():
                 try:
@@ -926,7 +930,7 @@ class ToolPipeline:
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(str(tmp), str(target))
             return str(target)
-        except OSError:
+        except (OSError, RuntimeError, ValueError):
             return path
 
     def _error_result(self, tool_name, execution_id, call_index, start, error,

@@ -6,6 +6,7 @@ on:
     paths:
       - "backend/core/sandbox*.py"
       - "backend/core/loop/**"
+      - "backend/core/storage/**"
       - "backend/core/tools/**"
       - "backend/core/process_control.py"
       - "backend/core/child_process.py"
