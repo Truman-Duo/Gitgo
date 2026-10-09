@@ -53,6 +53,9 @@ jobs:
           "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Provision and validate pinned official ripgrep in CI
         run: python -B scripts/provision_ci_ripgrep.py
+      - name: Diagnose native descriptor controls in owned Windows tree
+        if: runner.os == 'Windows'
+        run: python -B scripts/probe_windows_acl_restore.py
       - name: Windows ACL recovery preflight
         if: runner.os == 'Windows'
         run: python -B -m pytest tests/test_windows_acl_provisioning.py -q -x
