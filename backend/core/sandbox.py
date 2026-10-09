@@ -12,7 +12,7 @@ from pathlib import Path
 SANDBOXED_HANDLERS = frozenset({
     "exec_command", "shell_script", "run_command", "run_test",
     "authored_python", "authored_privileged_python", "dynamic_composite",
-    "apply_patch", "search_text", "list_files", "git_status", "git_diff", "git_log", "git_branch",
+    "apply_patch", "search_text", "list_files", "document_open", "git_status", "git_diff", "git_log", "git_branch",
     "formalize",
 })
 

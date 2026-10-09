@@ -27,7 +27,7 @@ from backend.core.sandbox_io import BoundedCommunication
 
 def test_sensitive_handlers_have_no_model_selectable_opt_out():
     assert {"shell_script", "exec_command", "run_command", "run_test",
-            "authored_python", "authored_privileged_python", "search_text", "list_files"} <= SANDBOXED_HANDLERS
+            "authored_python", "authored_privileged_python", "search_text", "list_files", "document_open"} <= SANDBOXED_HANDLERS
 
 
 def test_environment_is_an_allowlist():
@@ -1283,3 +1283,46 @@ def test_packaged_host_search_preserves_workspace_protocol(cross_platform_box, h
     assert payload['data']['engine'] == 'ripgrep', json.dumps(payload, ensure_ascii=False)
     row = payload['data']['files' if handler == 'list_files' else 'matches'][0]
     assert row['path' if handler == 'list_files' else 'file'] == 'search.txt'
+
+
+@pytest.mark.parametrize('suffix', ['txt', 'docx'])
+def test_packaged_host_document_extraction_is_native(cross_platform_box, suffix):
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Requires an actual built Host')
+    host = Path(configured).resolve(strict=True)
+    text = 'document native 中文'
+    path = workspace / ('document.' + suffix)
+    if suffix == 'docx':
+        from docx import Document
+        document = Document(); document.add_paragraph(text); document.save(path)
+    else:
+        path.write_text(text, encoding='utf-8')
+    outside = workspace.parent / 'host-only.txt'
+    outside.write_text('Host-only secret', encoding='utf-8')
+    assert outside.read_text(encoding='utf-8') == 'Host-only secret'
+    commands = [
+        {'_workspace': str(policy.workspace), 'path': path.name},
+        {'_workspace': str(policy.workspace), 'path': str(outside),
+         '_allowed_roots': [str(outside.parent)]},
+    ]
+    from backend.core.tools.document_tools import document_open
+    assert document_open(commands[1])['content'] == 'Host-only secret'
+    # The same logical extra root is accepted by the unsandboxed adapter.
+    # Native OS access must still refuse the external Host file.
+    source = (
+        'import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;'
+        f'commands={commands!r};'
+        "results=[ProcessToolRunner(timeout=30).run('document_open',a) for a in commands];"
+        "print(json.dumps([{'success':r.success,'data':r.data,'error':r.error,'stderr':r.stderr} "
+        "for r in results]))"
+    )
+    result = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-c', source],
+        capture_output=True, text=True, encoding='utf-8', timeout=80)
+    assert result.returncode == 0, result.stderr
+    results = json.loads(result.stdout)
+    assert results[0]['success'] and results[0]['data'].get('content') == text, results
+    assert 'Host-only secret' not in json.dumps(results[1]), results
+    assert not results[1]['success'] or (results[1]['data'] or {}).get('error'), results
+    assert 'path escapes approved resource scope' not in json.dumps(results[1]), results

@@ -210,3 +210,12 @@ Windows hosted AppContainer 曾拒绝打开 NUL，导致真实 frozen 搜索在�
 安全 CI 检出仓库时关闭 persist-credentials，避免 GitHub HTTP 凭据留在
 工具可读的运行时代码树中。专用运行时仍不得携带用户秘密；此设置不构成
 通用运行时目录内容审计，也不补齐工作区 Git 元数据的 OS 保护。
+
+
+文档读取 document_open 也进入统一原生入口；旧版 .doc 的 antiword 子进程
+不能以普通 Host 用户权限运行。转换器只从绝对 Host PATH 目录或真实 frozen
+运行时目录选择，解析后的路径落在工作区内则拒绝，不使用 Windows cwd 的
+同名程序或相对 PATH 条目。转换器也接收私有 EOF 输入，不继承 Host stdin。
+真实 frozen 验收覆盖 UTF-8 文本与 DOCX 提取，并用 Host 能读的外部文件及
+逻辑额外读授权作对照，确认原生 OS 权限仍拒绝越界。未验证所有旧版 Office
+转换器发行包；安装的适配器和资源需落在已有的原生可读运行时范围内。

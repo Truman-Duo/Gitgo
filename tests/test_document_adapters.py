@@ -89,3 +89,46 @@ def test_document_create_requires_hash_bound_overwrite(tmp_path_factory: Path):
     assert rejected["error"] == "DOCUMENT_WRITE_FAILED"
     assert rejected["error_info"]["catalog_id"] == "GITGO-E3405"
     assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_doc_converter_rejects_workspace_and_relative_path_candidates(tmp_path_factory, monkeypatch):
+    import os
+    from backend.core.tools.document_tools import _document_converter
+    workspace = tmp_path_factory / 'workspace'
+    workspace.mkdir()
+    name = 'antiword.exe' if os.name == 'nt' else 'antiword'
+    fake = workspace / name
+    fake.write_bytes(b'workspace executable')
+    fake.chmod(0o755)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('PATH', str(workspace) + os.pathsep + '.')
+    assert _document_converter(workspace) is None
+    (workspace / 'legacy.doc').write_bytes(b'legacy document')
+    result = document_open({'_workspace': str(workspace), 'path': 'legacy.doc'})
+    assert result['error'] == 'DOCUMENT_FORMAT_UNSUPPORTED'
+
+
+def test_doc_converter_selects_absolute_host_installation(tmp_path_factory, monkeypatch):
+    import os
+    from backend.core.tools.document_tools import _document_converter
+    workspace = tmp_path_factory / 'workspace'
+    runtime = tmp_path_factory / 'runtime'
+    workspace.mkdir(); runtime.mkdir()
+    converter = runtime / ('antiword.exe' if os.name == 'nt' else 'antiword')
+    converter.write_bytes(b'installed executable identity'); converter.chmod(0o755)
+    monkeypatch.setenv('PATH', str(runtime))
+    assert _document_converter(workspace) == str(converter.resolve())
+
+
+def test_doc_converter_receives_private_eof(tmp_path_factory, monkeypatch):
+    import subprocess
+    from backend.core.tools import document_tools
+    path = tmp_path_factory / 'legacy.doc'
+    path.write_bytes(b'legacy document')
+    monkeypatch.setattr(document_tools, '_document_converter', lambda _: '/installed/antiword')
+    def convert(argv, **kwargs):
+        assert kwargs['input'] == b''
+        assert argv[1] == str(path)
+        return subprocess.CompletedProcess(argv, 0, b'converted document', b'')
+    monkeypatch.setattr(document_tools.subprocess, 'run', convert)
+    assert document_open({'_workspace': str(tmp_path_factory), 'path': path.name})['content'] == 'converted document'
