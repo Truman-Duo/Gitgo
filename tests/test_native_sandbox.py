@@ -977,3 +977,30 @@ def test_root_exit_does_not_leave_a_pipe_holding_descendant(cross_platform_box, 
     assert (workspace / 'descendant-ready').read_text() == 'ran'
     time.sleep(2.3)
     assert not (workspace / 'after-root-exit').exists(), result
+
+
+def test_root_exit_cleans_descendants_before_host_drains_pipes(cross_platform_box):
+    workspace, policy, executable = cross_platform_box
+    child = ("import time;open('descendant-ready','w').write('ran');"
+             "time.sleep(2);open('after-root-exit','w').write('escaped');time.sleep(60)")
+    source = ("import os,subprocess,time;from pathlib import Path;"
+              f"subprocess.Popen([{executable!r},'-I','-c',{child!r}]);"
+              "exec('while not Path(\"descendant-ready\").exists(): time.sleep(0.01)');"
+              "print('root-exited',flush=True);os._exit(0)")
+    proc = sandbox_popen([executable, '-I', '-c', source], policy, cwd=str(workspace),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=sandbox_environment(os.environ), start_new_session=sys.platform != 'win32')
+    try:
+        assert proc.wait(timeout=5) == 0
+        assert (workspace / 'descendant-ready').read_text() == 'ran'
+        # Do not call BoundedCommunication or close the Job here: the native
+        # owner must clean up even when its consumer has not begun pipe reads.
+        time.sleep(2.3)
+        assert not (workspace / 'after-root-exit').exists()
+        out, err = proc.communicate(timeout=2)
+        assert out.strip() == 'root-exited', err
+    finally:
+        terminate_tree(proc, getattr(proc, '_gitgo_job_handle', None))
+        proc._gitgo_job_handle = None
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            stream.close()

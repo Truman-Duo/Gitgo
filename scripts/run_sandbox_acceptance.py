@@ -9,6 +9,9 @@ def main():
     root = Path(__file__).resolve().parents[1]
     subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests/test_native_sandbox.py', '-q'],
                    cwd=root, check=True)
+    subprocess.run([sys.executable, '-B', '-m', 'pytest',
+                    'tests/test_cross_daemon_recovery.py', 'tests/test_p0_development_runtime.py', '-q'],
+                   cwd=root, check=True)
     extra = ['--hidden-import', 'resource'] if sys.platform == 'linux' else []
     subprocess.run([sys.executable, '-m', 'PyInstaller', *extra, '--noconfirm', '--clean', '--onedir',
         '--name', 'gitgo-host', '--paths', str(root), '--collect-submodules', 'backend',

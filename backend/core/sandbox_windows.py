@@ -174,7 +174,12 @@ class WindowsSandboxProcess(subprocess.Popen):
             def guard_cpu():
                 # The kernel Job time limit counts user time only. Read native
                 # aggregate user+kernel counters, as Linux does with cpu.stat.
-                while self.poll() is None and job.check_cpu(policy.cpu_seconds):
+                while job.check_cpu(policy.cpu_seconds):
+                    if self.poll() is not None:
+                        # Lifecycle ownership does not depend on a caller
+                        # beginning pipe reads or reaching its finally block.
+                        job.close()
+                        return
                     time.sleep(0.05)
             threading.Thread(target=guard_cpu, daemon=True).start()
         except BaseException as exc:

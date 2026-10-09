@@ -147,3 +147,12 @@ Seatbelt 的文件/网络限制不能单独证明完整进程树清理或整组�
 若后续采用 macOS 虚拟化来提供这些强边界，还需配置可用的 Mac 测试环境与原生 macOS guest，验证原生工具兼容、仅工作区共享、无外部网络、Host 崩溃时整个 guest 的退出，以及进程数、内存、CPU 的实际限额。报告中的 hypervisor_available 只是系统能力信号，不能代替实际启动和安全验收。
 
 能力审计还会编译并临时 ad-hoc 签名 scripts/probe_macos_virtualization.swift，直接调用 Hypervisor 的 hv_vm_create/hv_vm_destroy，记录 Virtualization.framework 的 isSupported。编译、签名或清理失败必须使审计失败，不能伪装成硬件不支持；创建被拒绝则记录原生状态码。该探针不启动 guest、不添加网络或共享目录，也不改变系统配置。成功创建空 VM 仍不等于 macOS guest 启动或生产后端验收。Apple Virtualization 的原生 macOS guest API 面向 Apple Silicon；Intel 的 Hypervisor 创建成功不能证明其具备该 macOS guest 后端。
+
+
+### 主进程退出
+
+调用主进程退出后，Windows 原生监控会关闭唯一的 kill-on-close Job 句柄，
+Linux 原生监控会终止剩余 cgroup 成员，不依赖调用方开始读取 stdout/stderr
+或执行最终清理。这补齐正常返回、取消、超时和 Host 崩溃的生命周期保护；
+持有输出管道的后代不能无限延长调用。Host 退出检测与资源核算均使用 50 ms
+轮询间隔，因此不能保证主进程退出后没有任何调度延迟。

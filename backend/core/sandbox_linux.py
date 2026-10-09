@@ -96,7 +96,12 @@ class LinuxSandboxProcess(subprocess.Popen):
         cpu_path = cgroup.path / "cpu.stat"
         def guard_cpu():
             try:
-                while self.poll() is None:
+                while True:
+                    if self.poll() is not None:
+                        # Do not leave remaining group members waiting for
+                        # the consumer to drain pipes or release the boundary.
+                        cgroup.kill()
+                        return
                     values = dict(line.split() for line in cpu_path.read_text().splitlines())
                     if int(values.get('usage_usec', 0)) >= cpu_seconds * 1_000_000:
                         self.sandbox_failure = 'The invocation exceeded its aggregate user+kernel CPU budget.'
