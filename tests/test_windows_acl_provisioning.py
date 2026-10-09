@@ -189,3 +189,38 @@ def test_held_parent_and_object_handles_prevent_replacement(provisioning_tree):
             with pytest.raises(PermissionError):
                 path.rename(path.with_name(path.name + '-replaced'))
     assert (workspace / 'nested' / 'data.txt').read_text() == 'workspace data'
+
+
+@pytest.mark.parametrize('protected', [False, True])
+@pytest.mark.parametrize('change_protection', [False, True])
+def test_restore_explicit_owner_rights_without_adding_parent_permissions(
+        provisioning_tree, protected, change_protection):
+    workspace, runtime, _ = provisioning_tree
+    with SecurityTree([workspace, runtime]) as tree:
+        def write_acl(sddl, protection):
+            descriptor, dacl = C.c_void_p(), C.c_void_p()
+            present, defaulted = W.BOOL(), W.BOOL()
+            tree.check(tree.from_sddl(sddl, 1, C.byref(descriptor), None))
+            try:
+                tree.check(tree.dacl(descriptor, C.byref(present), C.byref(dacl), C.byref(defaulted)))
+                for handle in tree.handles.values():
+                    status = tree.set_security(handle, 1, 4 | protection, None, None, dacl, None)
+                    assert status == 0
+                    # Establish the explicit hosted-runner OWNER_RIGHTS ACL
+                    # after the native protection transition adds inheritance.
+                    assert tree.set_security(handle, 1, 4, None, None, dacl, None) == 0
+            finally:
+                tree.free(descriptor)
+        original_acl = 'D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)'
+        write_acl(original_acl, 0x80000000 if protected else 0x20000000)
+        original = tree.snapshot()
+        assert all('(A;;FA;;;OW)' in r['sddl'] for r in original)
+        assert all(bool('D:P' in r['sddl']) == protected for r in original)
+        modified_protection = not protected if change_protection else protected
+        write_acl(original_acl + '(A;;FR;;;WD)',
+                  0x80000000 if modified_protection else 0x20000000)
+        assert [canonical_security(r['sddl']) for r in tree.snapshot()] != [
+            canonical_security(r['sddl']) for r in original]
+        tree.restore(original)
+        assert [canonical_security(r['sddl']) for r in tree.snapshot()] == [
+            canonical_security(r['sddl']) for r in original]

@@ -176,11 +176,34 @@ class SecurityTree:
                 if not sacl:
                     self.check(self.initialize_acl(empty, 8, 2))
                     sacl = C.cast(empty, C.c_void_p)
-                protection = 0x80000000 if control.value & 0x1000 else 0x20000000
-                status = self.set_security(self.handles[record['path']], 1,
+                handle = self.handles[record['path']]
+                live = C.c_void_p()
+                status = self.get_security(handle, 1, DACL, None, None, None, None, C.byref(live))
+                if status:
+                    raise C.WinError(status)
+                try:
+                    live_control, live_revision = W.WORD(), W.DWORD()
+                    self.check(self.control(live, C.byref(live_control), C.byref(live_revision)))
+                    changed_protection = bool((control.value ^ live_control.value) & 0x1000)
+                finally:
+                    self.free(live)
+                # Reasserting UNPROTECTED causes Windows to add parent ACEs,
+                # even when the saved unprotected DACL was entirely explicit.
+                # Preserve the live protection state unless it must change.
+                protection = 0
+                if changed_protection:
+                    protection = 0x80000000 if control.value & 0x1000 else 0x20000000
+                status = self.set_security(handle, 1,
                     DACL | LABEL | protection, None, None, dacl, sacl)
                 if status:
                     raise C.WinError(status)
+                if changed_protection and not control.value & 0x1000:
+                    # Unprotecting necessarily recomputes inheritance first.
+                    # Write the recorded ACEs again without an inheritance
+                    # transition; never accept additional inherited access.
+                    status = self.set_security(handle, 1, DACL, None, None, dacl, None)
+                    if status:
+                        raise C.WinError(status)
         finally:
             for descriptor in descriptors:
                 self.free(descriptor)
