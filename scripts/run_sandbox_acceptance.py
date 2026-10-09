@@ -27,8 +27,7 @@ def main():
         raise SystemExit('Build did not produce the declared Host artifact')
     # Exercise the bundled search-engine lookup inside the real frozen Host.
     # This disposable security-test artifact is not a release/installer package.
-    from backend.core.tools.workspace_search import resolve_ripgrep
-    engine = resolve_ripgrep()
+    engine = os.environ.get('GITGO_RIPGREP_PATH') or shutil.which('rg')
     if not engine:
         raise SystemExit('Packaged search acceptance requires the pinned CI engine')
     shutil.copy2(engine, host.parent / ('rg.exe' if os.name == 'nt' else 'rg'))
