@@ -96,6 +96,8 @@ run_dashboard_native.bat
 - [安装与启动](docs/INSTALL.md)
 - [Provider 与项目配置](docs/CONFIGURATION.md)
 - [贡献与提交规范](CONTRIBUTING.md)
+- [多人、多仓库协作模型（设计）](docs/collaboration-workflow.md)
+- [本轮可用性候选与对齐说明](docs/usability-baseline-handoff.md)
 - [安全与隐私](docs/SECURITY_AND_PRIVACY.md)
 - [已知限制](docs/KNOWN_ISSUES.md)
 
