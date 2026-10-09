@@ -38,6 +38,42 @@ from .maintenance import StorageLease
 DatabaseName = Literal["state", "observability"]
 
 
+def open_usability_source(project_root: str | Path) -> sqlite3.Connection:
+    """Open committed traces read-only without a writer runtime or migrations.
+
+    The caller owns and closes this thread-local connection. Collection must
+    not create authoritative databases or acquire a second StorageRuntime.
+    """
+    validate_sqlite_runtime()
+    path = Path(project_root) / "observability.sqlite3"
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=.25)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def open_usability_statistics(project_root: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
+    """Open only the separate derived metrics store; never create directories.
+
+    Schema, quotas and retention belong to the collector. SQLite connection
+    creation and runtime validation remain inside the storage boundary.
+    """
+    validate_sqlite_runtime()
+    path = Path(project_root) / "usability" / "metrics.sqlite3"
+    if read_only:
+        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=.25)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+    return sqlite3.connect(path, timeout=.25)
+
+
 def read_project_list_status(workspace: str | Path) -> dict | None:
     """Read the list projection without constructing a writer runtime.
 

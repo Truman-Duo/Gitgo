@@ -151,11 +151,18 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
                 finally:
                     connection.close()
             assert sorted(origins) == ["git_bash", "windows_console", "windows_console"], origins
+            from backend.core.usability.collector import read_summary
+            summary = read_summary(stores[0])
+            statistics = {event: sum(row["total"] for row in summary["daily"] if row["metric"] == "events" and row["event"] == event)
+                          for event in ("task_admitted", "provider_request_started", "provider_usage", "agent_complete")}
+            assert all(count == 3 for count in statistics.values()), statistics
+            assert summary["health"]["incomplete_samples"] == 0, summary["health"]
             return {"status": "passed", "protocol_host": str(host), "host_kind": "source" if source else "packaged", "provider_requests": len(requests),
                     "shared_session": True, "shared_store_count": len(stores), "origins": origins,
                     "duplicate_host_rejected": True, "save_kept_current_host": True,
                     "git_bash_detected_and_verified": git_bash_detected, "saved_preference": preference,
                     "packaged_frontend_rejection_verified": bool(dashboard),
+                    "automatic_usability_statistics": statistics,
                     "visible_terminal_rendering_verified": False}
     finally:
         server.shutdown()
@@ -166,7 +173,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", type=Path, required=True)
     parser.add_argument("--dashboard", type=Path)
-    parser.add_argument("--source", action="store_true", help="Use a Python executable as Host")
+    parser.add_argument("--source", action="store_true", help="Use a Python executable as Host and verify automatic statistics")
     parser.add_argument("--report", type=Path)
     arguments = parser.parse_args()
     result = check(arguments.host.resolve(), arguments.dashboard.resolve() if arguments.dashboard else None, source=arguments.source)

@@ -610,6 +610,7 @@ def _cmd_loop_status(cmd, session, project, daemon_ctx, emit):
     emit({"event": "command_result", "cmd": "loop_status",
           "result": {
               "daemon_online": True,
+              "usability_statistics": daemon_ctx["usability"].status() if (daemon_ctx or {}).get("usability") else {"state": "unavailable"},
               "processes": processes,
               "pending_questions": pending_question_rows,
               "recent_tool_executed": recent_tools,
