@@ -54,7 +54,7 @@ def main():
     if sys.platform != 'win32':
         raise SystemExit('Windows only')
     results = []
-    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00), ('dacl-only', 0), ('label-then-dacl', 0), ('dacl-then-label', 0), ('set-file', 0), ('empty-label', 0), ('empty-label-then-dacl', 0), ('label-then-protected-dacl', 0), ('label-then-ai-dacl', 0), ('full-sacl', None), ('full-sacl-then-dacl', None), ('protect-label-exact', 0), ('label-protect-exact', 0)]:
+    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00), ('dacl-only', 0), ('label-then-dacl', 0), ('dacl-then-label', 0), ('set-file', 0), ('empty-label', 0), ('empty-label-then-dacl', 0), ('label-then-protected-dacl', 0), ('label-then-ai-dacl', 0), ('full-sacl', None), ('full-sacl-then-dacl', None), ('protect-label-exact', 0), ('label-protect-exact', 0), ('model-converter', None)]:
         with tempfile.TemporaryDirectory(prefix='gitgo_acl_probe_') as temporary:
             workspace = Path(temporary).resolve() / 'workspace'
             workspace.mkdir(); (workspace / 'nested').mkdir()
@@ -74,6 +74,7 @@ def main():
                 change = _fn(tree.advapi, 'SetSecurityDescriptorControl',
                              [C.c_void_p, W.WORD, W.WORD], W.BOOL)
                 evidence = []
+                models = []
                 extra_handles = []
                 privilege = security_privilege(tree) if mode.startswith('full-sacl') else None
                 assigned = privilege.__enter__() if privilege else True
@@ -84,7 +85,7 @@ def main():
                     for original in originals:
                         raw = C.c_void_p()
                         handle = tree.handles[original['path']]
-                        query = 4 | 16
+                        query = 1 | 2 | 4 | 16
                         if mode.startswith('full-sacl'):
                             handle = tree._open(Path(original['path']), tree.access | 0x1000000)
                             extra_handles.append(handle)
@@ -106,6 +107,38 @@ def main():
                                                  'roundtrip': safe(text.value)})
                             finally:
                                 tree.free(C.cast(text, C.c_void_p))
+                            if mode == 'model-converter':
+                                class Mapping(C.Structure):
+                                    _fields_ = [('read', W.DWORD), ('write', W.DWORD),
+                                                ('execute', W.DWORD), ('all', W.DWORD)]
+                                mapping = Mapping(0x120089, 0x120116, 0x1200A0, 0x1F01FF)
+                                convert = _fn(tree.advapi, 'ConvertToAutoInheritPrivateObjectSecurity',
+                                    [C.c_void_p, C.c_void_p, C.POINTER(C.c_void_p), C.c_void_p,
+                                     C.c_ubyte, C.POINTER(Mapping)], W.BOOL)
+                                destroy = _fn(tree.advapi, 'DestroyPrivateObjectSecurity',
+                                    [C.POINTER(C.c_void_p)], W.BOOL)
+                                parent_handle = tree._open(Path(original['path']).parent, 0x200A0)
+                                parent, model = C.c_void_p(), C.c_void_p()
+                                try:
+                                    status = tree.get_security(parent_handle, 1, 1 | 2 | 4 | 16,
+                                        None, None, None, None, C.byref(parent))
+                                    if status:
+                                        raise C.WinError(status)
+                                    tree.check(convert(parent, raw, C.byref(model), None,
+                                        bool(tree._information(tree.handles[original['path']]).attributes & 0x10), C.byref(mapping)))
+                                    text = W.LPWSTR()
+                                    tree.check(tree.to_sddl(model, 1, 4, C.byref(text), None))
+                                    try:
+                                        model_text = text.value + (('S:' + original['sddl'].split('S:', 1)[1]) if 'S:' in original['sddl'] else '')
+                                        models.append(model_text)
+                                        evidence[-1]['model'] = safe(model_text)
+                                    finally:
+                                        tree.free(C.cast(text, C.c_void_p))
+                                finally:
+                                    if model:
+                                        tree.check(destroy(C.byref(model)))
+                                    tree.free(parent)
+                                    tree.close_handle(parent_handle)
                             if mask:
                                 tree.check(change(desc, mask, mask))
                             steps = [4 | 16]
@@ -150,6 +183,9 @@ def main():
                              for before, after in zip(originals, actual)]
                     matched = all(canonical_security(before['sddl']) == canonical_security(after['sddl'])
                                   for before, after in zip(originals, actual))
+                    if models:
+                        matched = all(canonical_security(expected) == canonical_security(after['sddl'])
+                                      for expected, after in zip(models, actual))
                     results.append({'mode': mode, 'matched': matched, 'descriptor_metadata': evidence,
                                     'descriptors': pairs})
                 finally:
