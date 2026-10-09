@@ -62,6 +62,8 @@ class NativeHost:
     """Owns native request correlation and per-project daemon lifecycles."""
 
     def __init__(self, *, stdin=None, stdout=None, daemon_factory=DaemonClient):
+        from backend.core.frontend_origin import frontend_origin
+        self.frontend_origin = frontend_origin()
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
         self._daemon_factory = daemon_factory
@@ -984,6 +986,7 @@ class NativeHost:
             "max_steps": max_steps,
             "task_description": message[:200],
             "runtime_preferences": {
+                "frontend_origin": dict(self.frontend_origin),
                 "auto_compact": bool(host_config.get("auto_compact", True)),
                 "agent_routing": host_config.get("agent_routing", "owner"),
                 "web_search_mode": str(host_config.get("web_search_mode") or "auto"),
@@ -1323,6 +1326,7 @@ class NativeHost:
                 "web_search_endpoint": str(host_config.get("web_search_endpoint") or ""),
                 "web_search_engine": str(host_config.get("web_search_engine") or "duckduckgo"),
                 "user_direct_continuation": True,
+                "frontend_origin": dict(self.frontend_origin),
                 "predecessor_process_id": process_id,
             },
             "task_budget": {
@@ -1638,7 +1642,16 @@ class NativeHost:
 
 
 def main() -> int:
-    return NativeHost().serve_forever()
+    from backend.core.host_profile_lease import HostProfileLease
+    from backend.core.storage.paths import _default_state_home
+    try:
+        with HostProfileLease(_default_state_home()):
+            return NativeHost().serve_forever()
+    except (RuntimeError, ValueError, OSError) as error:
+        write_utf8_line(sys.stdout, dump_protocol_json({"protocol_version": PROTOCOL_VERSION,
+                        "type": "host_rejected", "message": str(error)}))
+        print(str(error), file=sys.stderr, flush=True)
+        return 1
 
 
 if __name__ == "__main__":

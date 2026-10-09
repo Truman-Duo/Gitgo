@@ -284,6 +284,7 @@ class PromptCompiler:
                 task_contract.get("delegation_attempts") or []
             )[-8:],
             "upstream_outcomes": upstream,
+            "engineering_workflow": dict(task_contract.get("engineering_workflow") or {}),
         }
         from backend.core.loop.decision_support import confirmed_user_state
         confirmed_state = confirmed_user_state(

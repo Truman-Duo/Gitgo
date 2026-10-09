@@ -459,16 +459,24 @@ def agent_step(
             "Capability references unavailable tools: "
             + ", ".join(unavailable_tools),
         )
-    event_bus = EventBus()
+    def _notify_event_failure(failure):
+        from backend.core.loop.engineering_workflow import EngineeringWorkflow
+        EngineeringWorkflow(process, on_stream_event).notice(
+            "EVENT_DELIVERY_FAILED", "内部事件的一位订阅者处理失败；其他订阅者继续运行，失败已记录。", **failure,
+        )
+
+    event_bus = EventBus(on_error=_notify_event_failure)
     ctx = ExecutionContext(
         process=process,
         session=session,
         workspace_path=workspace_path,
         event_bus=event_bus,
         cancellation=process.cancellation_event,
-        storage=getattr(getattr(process, "_manager", None), "storage", None),
+        storage=process.bound_storage,
     )
     ctx.artifacts["tool_catalog"] = tools_dict
+    from backend.core.loop.engineering_workflow import EngineeringWorkflow
+    ctx.artifacts["engineering_workflow"] = EngineeringWorkflow(process, on_stream_event)
     transcript = TaskTranscriptBuilder(task_id=process.process_id)
     loop_guard = LoopGuard()
     incomplete_tool_call_counts: dict[str, int] = {}
@@ -549,6 +557,11 @@ def agent_step(
         if detail is not None:
             payload["_trace_detail"] = detail
         on_stream_event(payload)
+
+    def _on_tool_notice(event):
+        _emit_observation({"event": "progress_summary", "phase": "tool_notice", **dict(event.data or {})})
+
+    event_bus.subscribe("ToolNotice", _on_tool_notice)
 
     if provider_route_changed:
         _emit_observation({
@@ -705,6 +718,8 @@ def agent_step(
                         r.tool_name, error_code, tool_call.get("args", {}),
                     )
                     recorded_storm_errors.add(error_key)
+
+        ctx.artifacts["engineering_workflow"].invoke({"operation": "status"})
 
     def _missing_permission(calls: list[dict]):
         """Return the first sensitive call that still lacks an exact grant."""
@@ -2248,6 +2263,38 @@ def _build_internal_tools(
     tools: dict[str, AgentTool] = build_context_tools(process, workspace_path)
     available_tools = available_tools or {}
 
+    from backend.core.loop.engineering_workflow import EngineeringWorkflow
+    engineering = EngineeringWorkflow(process, on_stream_event)
+    tools["engineering_workflow"] = AgentTool(
+        name="engineering_workflow",
+        description=(
+            "Manage Host-enforced engineering practices, not prompt-only skills. "
+            "Built-in presets accept profiles plus concrete test_id/target_files, "
+            "questions(id,state_topic,depends_on), glossary_path or agent_document_path; "
+            "check_argv/check_cwd bind non-pytest checks; preparation_files permits "
+            "building evidence harnesses before red without permitting product fixes. "
+            "omit nodes to compile a preset. "
+            "configure accepts a bounded dependency graph with profiles alignment, "
+            "domain_modeling, diagnosis, tdd, architecture, retrospective or agent_documentation. "
+            "Nodes use decision(state_topic), observation(tools), check(test_id,passed), "
+            "change(files), document(path), or report(format). depends_on controls the ready "
+            "frontier; before_mutation enforces prerequisites. status returns outstanding "
+            "evidence; ask routes one ready decision through the existing user broker. "
+            "record saves a document hash or structured report. Receipts and user answers "
+            "are observed by Host. retrospective derives findings from current task receipts. "
+            "Existing permissions remain mandatory; unavailable checks never become passes. "
+            "propose_amendment(plan,reason) offers a concrete scope change to the user; "
+            "only the matching user decision can weaken an active plan."
+        ),
+        parameters={"type": "object", "properties": {
+            "operation": {"type": "string", "enum": ["configure", "status", "ask", "record", "retrospective", "propose_amendment"]},
+            "plan": {"type": "object"}, "node_id": {"type": "string"},
+            "content": {"type": "object"}, "request": {"type": "object"}, "reason": {"type": "string"},
+        }, "required": []},
+        execute=engineering.invoke, read_only=True, effect=ToolEffect.READ,
+        idempotent=False,
+    )
+
     if workspace_path:
         from backend.core.loop.code_dossier import (
             build_code_dossier,
@@ -2338,7 +2385,7 @@ def _build_internal_tools(
             "properties": {
                 "focus": {
                     "type": "string",
-                    "enum": ["all", "completion", "gates", "children", "tests", "governance", "budget", "capabilities"],
+                    "enum": ["all", "completion", "gates", "children", "tests", "governance", "budget", "capabilities", "engineering"],
                 },
             },
         },
@@ -2968,6 +3015,8 @@ def _build_internal_tools(
                     },
                 }
             from backend.core.loop.task_contract import routing_advice
+            if proposal.get("engineering_workflow"):
+                engineering.notice("WORKFLOW_CONFIGURED", "工程工作流已随任务契约启用；未完成证据会进入 Host 完成检查。")
             with process._coordination_lock:
                 for child_id in adopted:
                     process.delegated_contracts[child_id]["required_for_parent_completion"] = True
@@ -3050,6 +3099,7 @@ def _build_internal_tools(
                         "type": "array", "items": {"type": "string"},
                     },
                     "requires_user_decision": {"type": "boolean"},
+                    "engineering_workflow": {"type": "object", "description": "Optional Host-enforced practice plan: profiles and evidence nodes with depends_on; use engineering_workflow status to discover supported practices."},
                     "estimated_complexity": {
                         "type": "string", "enum": ["bounded", "moderate", "high"],
                     },
@@ -5673,7 +5723,7 @@ def _select_authorized_tools(
             "send_feedback", "cancel_agent", "request_review",
             "review_child_outcome", "request_user_decision", "request_permission",
             "acknowledge_governance_signal",
-            "define_tool", "author_tool",
+            "define_tool", "author_tool", "engineering_workflow",
             "promote_agent_changes", "complete_supervision",
         }
         declared = [name for name in declared if name in delegated_mode]

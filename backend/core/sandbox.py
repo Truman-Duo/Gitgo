@@ -12,7 +12,7 @@ from pathlib import Path
 SANDBOXED_HANDLERS = frozenset({
     "exec_command", "shell_script", "run_command", "run_test",
     "authored_python", "authored_privileged_python", "dynamic_composite",
-    "apply_patch", "search_text", "git_status", "git_diff", "git_log", "git_branch",
+    "apply_patch", "search_text", "list_files", "git_status", "git_diff", "git_log", "git_branch",
     "formalize",
 })
 
@@ -93,6 +93,8 @@ def sandbox_environment(source: dict[str, str]) -> dict[str, str]:
     allowed = {
         "SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT",
         "LANG", "LC_ALL", "TZ", "PYTHONIOENCODING", "PYTHONUTF8", "LOCALAPPDATA",
+        # Host-selected search engine path; native filesystem policy still applies.
+        "GITGO_RIPGREP_PATH",
     }
     env = {k: v for k, v in source.items() if k.upper() in allowed}
     env.update(PYTHONIOENCODING="utf-8", PYTHONUTF8="1",

@@ -62,6 +62,7 @@ export interface OverlayCtx {
   processes: Record<string, ProcessInfo>;
   sendChat: (text: string) => void;
   verbose: boolean;
+  onSettingSaved?: (key: string) => Promise<string | void>;
 }
 
 function enterCommandMode(
@@ -119,6 +120,8 @@ export function renderOverlay(
       return (
         <ConfigPanel client={ctx.client} project={llmProject}
           initialTab={overlay.props?.initialTab ?? "general"}
+          initialSetting={overlay.props?.initialSetting}
+          onSettingSaved={ctx.onSettingSaved}
           cmdInput={ctx.llmCmdInput}
           onFooter={ctx.setFooterOverride}
           onBack={ctx.popOverlay}

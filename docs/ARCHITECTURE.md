@@ -151,4 +151,6 @@ Dashboard 默认通过版本化原生协议连接 Native Host。MCP 仅服务于
 
 ## 仍在演进的部分
 
+workspace、trial、formal 的多人、多仓库协作模型与上下游同步/并发边界见 [协作设计](collaboration-workflow.md)。角色不限定物理仓库数量；该设计的自动生命周期尚未实现，当前贡献者按 [贡献规范](../CONTRIBUTING.md) 提交候选。
+
 自动 Provider failover/circuit breaker、原生沙箱、Node.js 兼容路径、跨机器 backend、其他平台发行包和桌面端仍在路线图中。以 [Open Issues](https://github.com/Truman-Duo/Gitgo/issues) 为准，不把规划描述成已经实现。

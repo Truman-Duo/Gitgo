@@ -117,7 +117,7 @@ Windows 的 CPU rate control 在部分启用 DFSS 的远程桌面服务环境中
 Host 持续排空 stdout/stderr，每路最多保留 2 MB；超过预算终止进程树，
 避免子进程无限输出耗尽 Host 内存。输入写入和输出读取均可被取消。
 
-稳定错误码：GITGO-E3601..E3605，分别对应不可用、启动拒绝、策略无效、
+稳定错误码：GITGO-E3801..E3805，分别对应不可用、启动拒绝、策略无效、
 输出超限和执行失败。结果包含配置建议与 request_permission 恢复入口。
 网络被拒绝不意味着可授权关闭沙箱。
 
@@ -182,3 +182,13 @@ GitHub-hosted runner 中配置本次 Python，不修改系统 SQLite，也不禁
 SQLite 安全检查。Linux 为本次 Python 扩展设置私有库路径，不给模型注入
 LD_LIBRARY_PATH 的权限。实际构建的 frozen Host 还必须验证打包后的 SQLite
 版本及安全检查，不能以源码解释器的结果代替。
+
+
+上游 usability-baseline 集成：list_files 与 search_text 共享 ripgrep adapter，
+两者均由原生沙箱启动。Host 配置的 GITGO_RIPGREP_PATH 只作为引擎路径传入，
+不扩展文件系统权限；不可访问时保留显式、有界的 literal fallback。
+精确授权在参数和工程前置条件通过后核验当前工具版本并消费，不重复消费。
+沙箱错误使用 GITGO-E3801..E3805，保留上游搜索的 E3601..E3605。
+搜索协议/外部授权逻辑测试使用显式 transport fixture；它们不构成原生隔离验收。
+原生及真实 frozen 验收另行覆盖工作区列表、literal 搜索与正向对照。
+当前原生文件系统策略尚不支持通过授权扩展外部搜索目录；授权不会绕过 OS 拒绝。

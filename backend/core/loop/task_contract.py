@@ -142,6 +142,11 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
             "include_composite_steps": bool(item.get("include_composite_steps", False)),
         })
 
+    workflow = None
+    if args.get("engineering_workflow") is not None:
+        from backend.core.loop.engineering_workflow import compile_plan
+        workflow = compile_plan(args["engineering_workflow"], workspace)
+
     return {
         "schema_version": 1,
         "authority": "llm_proposed_host_validated",
@@ -171,6 +176,7 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
         "ignored_protocol_requirements": list(dict.fromkeys(
             ignored_protocol_requirements
         )),
+        **({"engineering_workflow": workflow} if workflow is not None else {}),
     }
 
 
@@ -330,6 +336,9 @@ def _update_contract(process, update) -> dict:
         context = dict(process.context_snapshot or {})
         contract = dict(context.get("task_contract") or {})
         contract = update(contract)
+        if contract.get("engineering_workflow"):
+            from .engineering_workflow import EngineeringWorkflow, KEY
+            context[KEY] = EngineeringWorkflow(process).configured_state(contract[KEY])
         context["task_contract"] = contract
         process.context_snapshot = context
         process.context_version += 1

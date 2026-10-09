@@ -89,84 +89,16 @@ def list_files(args: dict) -> dict:
         }
     if not root.is_dir():
         return {"error": "NOT_A_DIRECTORY", "path": _rel(workspace, root)}
-    pattern = str(args.get("pattern", "**/*") or "**/*")
-    max_results = max(1, min(int(args.get("max_results", 500) or 500), 5000))
-    include_hidden = bool(args.get("include_hidden", False))
-    files = []
-    try:
-        candidates = root.glob(pattern)
-        for path in candidates:
-            if not path.is_file():
-                continue
-            rel_parts = path.relative_to(root).parts
-            if any(part in _IGNORED_DIRS for part in rel_parts):
-                continue
-            if not include_hidden and any(part.startswith(".") for part in rel_parts):
-                continue
-            files.append({
-                "path": _rel(workspace, path),
-                "size": path.stat().st_size,
-                "modified_ns": path.stat().st_mtime_ns,
-            })
-            if len(files) >= max_results:
-                break
-    except (OSError, ValueError) as exc:
-        return {"error": "LIST_ERROR", "detail": str(exc)}
-    files.sort(key=lambda item: item["path"])
-    return {"files": files, "count": len(files), "truncated": len(files) >= max_results}
+    from .workspace_search import search
+    return search(args, workspace, root, _IGNORED_DIRS, listing=True)
 
 
 def search_text(args: dict) -> dict:
     workspace = _workspace(args)
     root = _confined_path(workspace, args.get("path", "."), must_exist=True,
                           allowed_roots=_allowed_roots(args))
-    pattern = str(args.get("pattern", ""))
-    if not pattern:
-        return {"error": "MISSING_PATTERN"}
-    literal = bool(args.get("literal", False))
-    case_sensitive = bool(args.get("case_sensitive", False))
-    include = list(args.get("include", []) or [])
-    max_results = max(1, min(int(args.get("max_results", 200) or 200), 2000))
-    rg = shutil.which("rg")
-    if rg:
-        command = [rg, "--json", "--line-number", "--no-heading"]
-        if literal:
-            command.append("--fixed-strings")
-        if not case_sensitive:
-            command.append("--ignore-case")
-        for item in include:
-            command.extend(["--glob", str(item)])
-        for ignored in sorted(_IGNORED_DIRS):
-            command.extend(["--glob", f"!{ignored}/**"])
-        command.extend([pattern, str(root)])
-        try:
-            completed = subprocess.run(
-                command, capture_output=True, text=True, timeout=30,
-                creationflags=_hidden_window_flags(),
-            )
-            if completed.returncode not in (0, 1):
-                return {"error": "SEARCH_ERROR", "detail": completed.stderr[:1000]}
-            matches = []
-            for line in completed.stdout.splitlines():
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if item.get("type") != "match":
-                    continue
-                data = item.get("data", {})
-                absolute = Path(data.get("path", {}).get("text", ""))
-                matches.append({
-                    "file": _rel(workspace, absolute),
-                    "line": int(data.get("line_number", 0)),
-                    "text": data.get("lines", {}).get("text", "").rstrip("\r\n")[:500],
-                })
-                if len(matches) >= max_results:
-                    break
-            return {"matches": matches, "count": len(matches), "truncated": len(matches) >= max_results}
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {"error": "SEARCH_ERROR", "detail": str(exc)}
-    return _search_text_fallback(workspace, root, pattern, literal, case_sensitive, include, max_results)
+    from .workspace_search import search
+    return search(args, workspace, root, _IGNORED_DIRS)
 
 
 def edit_file(args: dict) -> dict:
@@ -595,10 +527,12 @@ def shell_script(args: dict) -> dict:
         return {"error": "PURPOSE_REQUIRED"}
     if "\x00" in script or len(script.encode("utf-8")) > 100_000:
         return {"error": "SCRIPT_INVALID", "detail": "script exceeds the 100KB boundary or contains NUL"}
+    resolution = {}
     if sys.platform == "win32":
         # MSYS Bash requires a shared global object namespace, incompatible
         # with AppContainer. Use a Windows-native engine without weakening it.
-        engine = Path(os.environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        from backend.core.executable_identity import windows_system_executable
+        engine = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")
         # Server images may not autoload even the built-in modules in an
         # AppContainer. Load known system manifests before executing the script.
         bootstrap = "$env:PSModulePath=$PSHOME+'\\Modules';"
@@ -616,9 +550,11 @@ def shell_script(args: dict) -> dict:
         shell_argv = [str(engine), "-NoLogo", "-NoProfile", "-NonInteractive",
                       "-Command", command]
     else:
-        bash = _find_bash()
-        if bash is None:
-            return {"error": "BASH_UNAVAILABLE", "detail": "Install Bash in the sandbox runtime."}
+        resolution = _resolve_bash()
+        if not resolution.get("path"):
+            return {"error": resolution.get("error", "BASH_UNAVAILABLE"),
+                    "detail": resolution.get("detail", "Install Bash in the sandbox runtime.")}
+        bash = Path(resolution["path"])
         shell_argv = [str(bash), "--noprofile", "--norc", "-c", script]
     timeout = max(1, min(int(args.get("timeout", 120) or 120), 1800))
     env = _safe_shell_environment()
@@ -630,6 +566,12 @@ def shell_script(args: dict) -> dict:
     started = None
     job_handle = None
     try:
+        if resolution.get("identity"):
+            from backend.core.executable_identity import assert_identity_unchanged
+            try:
+                assert_identity_unchanged(resolution["identity"])
+            except (OSError, ValueError) as exc:
+                return {"error": "BASH_IDENTITY_UNVERIFIED", "detail": str(exc)}
         started = subprocess.Popen(
             shell_argv,
             cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -664,32 +606,46 @@ def shell_script(args: dict) -> dict:
 
 
 def _find_bash() -> Path | None:
+    resolved = _resolve_bash()
+    return Path(resolved["path"]) if resolved.get("path") else None
+
+
+def _resolve_bash() -> dict:
     configured = str(os.environ.get("GITGO_BASH_PATH") or "").strip()
-    if configured:
-        candidate = Path(configured).resolve(strict=False)
-        if candidate.is_file():
-            return candidate
     if sys.platform == "win32":
-        candidates: list[Path] = []
-        git = shutil.which("git")
-        if git:
-            git_path = Path(git).resolve(strict=False)
-            candidates.extend([
-                git_path.parent.parent / "bin" / "bash.exe",
-                git_path.parent.parent / "usr" / "bin" / "bash.exe",
-            ])
-        for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
-            base = str(os.environ.get(variable) or "").strip()
-            if not base:
+        from backend.core.terminal_launcher import git_install_roots
+        from backend.core.executable_identity import verify_git_bash
+        roots = git_install_roots()
+        if configured:
+            candidate = Path(configured)
+            if not candidate.is_absolute():
+                return {"error": "BASH_IDENTITY_UNVERIFIED", "detail": "GITGO_BASH_PATH must be absolute; no implicit fallback"}
+            candidate = candidate.resolve(strict=False)
+            root = candidate.parent.parent
+            if candidate.parent.name.lower() == "bin" and root.name.lower() == "usr":
+                root = root.parent
+            roots = [root]
+        failures = []
+        for root in roots:
+            if not configured and not (root / "git-bash.exe").exists():
                 continue
-            root = Path(base)
-            candidates.extend([
-                root / "Git" / "bin" / "bash.exe",
-                root / "Programs" / "Git" / "bin" / "bash.exe",
-            ])
-        return next((candidate for candidate in candidates if candidate.is_file()), None)
+            identity = verify_git_bash(root)
+            if not identity["verified"]:
+                failures.append(identity["message"])
+                continue
+            checked = {Path(file["path"]) for file in identity["files"]}
+            if configured and candidate not in checked - {(root / "git-bash.exe").resolve()}:
+                return {"error": "BASH_IDENTITY_UNVERIFIED", "detail": "Configured Bash is not a verified engine/wrapper; no implicit fallback"}
+            return {"path": str(root / "bin/bash.exe"), "identity": identity}
+        return {"error": "BASH_IDENTITY_UNVERIFIED" if failures or configured else "BASH_UNAVAILABLE",
+                "detail": "; ".join(failures) or "No verified Git for Windows Bash found; no implicit WSL or project executable fallback"}
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute() or not candidate.is_file():
+            return {"error": "BASH_UNAVAILABLE", "detail": "Configured Bash must be an existing absolute executable; no implicit fallback"}
+        return {"path": str(candidate.resolve())}
     resolved = shutil.which("bash")
-    return Path(resolved).resolve(strict=False) if resolved else None
+    return {"path": str(Path(resolved).resolve())} if resolved else {"error": "BASH_UNAVAILABLE"}
 
 
 def _safe_shell_environment() -> dict[str, str]:
@@ -701,6 +657,8 @@ def _safe_shell_environment() -> dict[str, str]:
     return {
         key: value for key, value in os.environ.items()
         if not any(fragment in key.upper() for fragment in sensitive_fragments)
+        and key.upper() not in {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "LD_PRELOAD", "LD_LIBRARY_PATH"}
+        and not key.upper().startswith("BASH_FUNC_")
     }
 
 
@@ -729,33 +687,6 @@ def rebuild_dependency_graph(args: dict) -> dict:
         "edges": active,
         "dismissed_edges": len(graph.edges) - active,
     }
-
-
-def _search_text_fallback(workspace, root, pattern, literal, case_sensitive, include, limit):
-    flags = 0 if case_sensitive else re.I
-    try:
-        regex = re.compile(re.escape(pattern) if literal else pattern, flags)
-    except re.error as exc:
-        return {"error": "INVALID_REGEX", "detail": str(exc)}
-    matches = []
-    candidates = [root] if root.is_file() else root.rglob("*")
-    for path in candidates:
-        try:
-            if not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
-                continue
-            parts = path.relative_to(root).parts
-            if any(part in _IGNORED_DIRS for part in parts):
-                continue
-            if include and not any(path.match(item) for item in include):
-                continue
-            for line_no, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                if regex.search(line):
-                    matches.append({"file": _rel(workspace, path), "line": line_no, "text": line[:500]})
-                    if len(matches) >= limit:
-                        return {"matches": matches, "count": len(matches), "truncated": True}
-        except (OSError, ValueError):
-            continue
-    return {"matches": matches, "count": len(matches), "truncated": False}
 
 
 def _workspace(args: dict) -> Path:

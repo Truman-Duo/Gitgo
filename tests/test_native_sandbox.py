@@ -27,7 +27,7 @@ from backend.core.sandbox_io import BoundedCommunication
 
 def test_sensitive_handlers_have_no_model_selectable_opt_out():
     assert {"shell_script", "exec_command", "run_command", "run_test",
-            "authored_python", "authored_privileged_python"} <= SANDBOXED_HANDLERS
+            "authored_python", "authored_privileged_python", "search_text", "list_files"} <= SANDBOXED_HANDLERS
 
 
 def test_environment_is_an_allowlist():
@@ -46,7 +46,7 @@ def test_no_backend_fails_closed(monkeypatch, tmp_path_factory):
         sandbox_popen(["untrusted"], SandboxPolicy(tmp_path_factory))
     result = SandboxDenied("SANDBOX_UNAVAILABLE", "blocked").result()
     assert result["effect_state"] == "not_committed"
-    assert result["error_info"]["catalog_id"] == "GITGO-E3601"
+    assert result["error_info"]["catalog_id"] == "GITGO-E3801"
 
 
 def test_root_workspace_is_rejected():
@@ -314,6 +314,15 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
     assert result.data.get("success"), result
     assert result.data["stdout"].strip() == "executed"
     assert (workspace / "runner.txt").read_text() == "ok"
+    # Host override remains data inside the native boundary. An unavailable
+    # engine must keep the author's explicit, bounded literal fallback usable.
+    monkeypatch.setenv('GITGO_RIPGREP_PATH', str(workspace / 'missing-rg.exe'))
+    for handler, arguments in [('list_files', {'pattern': '*.txt'}),
+                               ('search_text', {'pattern': 'ok', 'literal': True})]:
+        result = runner.run(handler, {'_workspace': str(workspace), **arguments})
+        assert result.success and 'error' not in result.data, result
+        assert result.data['engine'] == 'python' and result.data['complete'], result
+        assert result.data['count'] == 1, result
     shell = runner.run("shell_script", {
         "_workspace": str(workspace),
         "script": "Set-Content -LiteralPath shell.txt -Value native-file;Write-Output native-shell",
@@ -1211,3 +1220,30 @@ def test_linux_socket_policy_survives_descendant_exec(linux_box):
     code,out,err=finished(spawn(source))
     assert code == 0,err
     assert out.splitlines() == ['child-blocked','parent-ran']
+
+
+@pytest.mark.parametrize('handler,arguments', [
+    ('list_files', {'pattern': '*.txt'}),
+    ('search_text', {'pattern': 'needle', 'literal': True}),
+])
+def test_packaged_host_search_preserves_workspace_protocol(cross_platform_box, handler, arguments):
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Source job; packaged search requires an actual built Host')
+    host = Path(configured).resolve(strict=True)
+    (workspace / 'search.txt').write_text('needle', encoding='utf-8')
+    invocation = {'_workspace': str(policy.workspace), **arguments}
+    source = (
+        "import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;"
+        f"r=ProcessToolRunner(timeout=30).run({handler!r},{invocation!r});"
+        "print(json.dumps({'success':r.success,'data':r.data,'error':r.error,'stderr':r.stderr}))"
+    )
+    result = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-c', source],
+        capture_output=True, text=True, encoding='utf-8', timeout=60)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload['success'] and 'error' not in payload['data'], payload
+    assert payload['data']['complete'] and payload['data']['count'] == 1, payload
+    row = payload['data']['files' if handler == 'list_files' else 'matches'][0]
+    assert row['path' if handler == 'list_files' else 'file'] == 'search.txt'

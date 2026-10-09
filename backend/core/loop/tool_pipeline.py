@@ -160,18 +160,6 @@ class ToolPipeline:
                         "error_info": info["error_info"],
                     },
                 )
-            if grant is not None:
-                consumed_grant = matching_grant(
-                    ctx.process, tool_name, public_raw,
-                    per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool,
-                    consume=True,
-                )
-                if consumed_grant is None:
-                    return self._error_result(
-                        tool_name, execution_id, call_index, start,
-                        "approval expired or was consumed before execution",
-                        diagnostics={"nature": "governance", "code": "APPROVAL_GRANT_INVALID"},
-                    )
             explicit_user_grant = grant
 
         # Step 1: prepare_args
@@ -259,6 +247,36 @@ class ToolPipeline:
                     "source": "llm",
                 },
             )
+
+        # Validate prepared arguments before checking engineering prerequisites.
+        # Invalid model arguments remain correctable business errors. Exact
+        # approval is independent of prerequisite evidence and is consumed only
+        # after both checks succeed. Wrappers defer this guard to their leaves.
+        spec = getattr(tool, "composite_spec", None) or {}
+        if getattr(ctx.process, "read_context_snapshot", None) and (not spec or spec.get("execution_mode") in {"authored_pure_python", "authored_privileged_python"}):
+            from backend.core.loop.engineering_workflow import EngineeringWorkflow
+            workflow = ctx.artifacts.get("engineering_workflow") or EngineeringWorkflow(ctx.process)
+            try:
+                with ctx.process._context_lock:
+                    guard = workflow.guard(tool_name, getattr(tool.effect, "value", tool.effect), dict(args or {}))
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                workflow.notice("WORKFLOW_RECOVERY_REQUIRED", f"工程前置检查不可用：{exc}；操作尚未开始。")
+                guard = {"allowed": False, "reason": "engineering prerequisite check unavailable"}
+            if not guard.get("allowed", True):
+                return self._error_result(
+                    tool_name, execution_id, call_index, start, guard["reason"],
+                    diagnostics={"nature": "governance", "code": "ENGINEERING_PREREQUISITE_REQUIRED"},
+                )
+        if explicit_user_grant is not None:
+            consumed = matching_grant(
+                ctx.process, tool_name, public_raw,
+                per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool, consume=True,
+            )
+            if consumed is None:
+                return self._error_result(
+                    tool_name, execution_id, call_index, start, "approval is no longer available",
+                    diagnostics={"nature": "governance", "code": "APPROVAL_GRANT_INVALID"},
+                )
 
         # One canonical governance path.  Composite wrappers are transparent:
         # their compiled component calls are authorized below, so the same
@@ -448,6 +466,7 @@ class ToolPipeline:
             })
             return result
 
+        self._publish_tool_notices(ctx, tool_name, execution_id, call_index, result_data)
         business_error = ""
         if isinstance(result_data, dict):
             business_error = str(result_data.get("error", ""))
@@ -542,7 +561,9 @@ class ToolPipeline:
                 "cancellation": getattr(tool.cancellation, "value", str(tool.cancellation)),
                 "effect_state": effect_state,
                 "invocation_path": invocation_path,
+                "task_id": str(getattr(ctx.process, "active_task_id", "") or getattr(ctx.process, "process_id", "")),
             })
+            self._attach_result_facts(result.receipt, tool_name, result_data, args)
             if isinstance(error_info, dict):
                 result.receipt.update({
                     "error_catalog_id": str(error_info.get("catalog_id") or ""),
@@ -586,7 +607,7 @@ class ToolPipeline:
             getattr(ctx.process, "active_task_id", "")
             or getattr(ctx.process, "process_id", "")
         )
-        self._attach_result_facts(receipt, tool_name, result_data)
+        self._attach_result_facts(receipt, tool_name, result_data, args)
         if spill:
             receipt["tool_result_locator"] = spill["locator"]
             receipt["tool_result_digest"] = spill["digest"]
@@ -619,8 +640,25 @@ class ToolPipeline:
         )
 
     @staticmethod
+    def _publish_tool_notices(ctx, tool_name, execution_id, call_index, result_data):
+        """Warnings are successful-result facts, never authority grants."""
+        if not isinstance(result_data, dict) or not isinstance(result_data.get("warnings"), list):
+            return
+        from .event_bus import ToolEvent
+        for warning in result_data["warnings"][:16]:
+            if not isinstance(warning, dict) or not warning.get("message"):
+                continue
+            notice = {"code": str(warning.get("code") or "TOOL_WARNING")[:80],
+                      "message": str(warning["message"])[:1200], "tool_name": tool_name,
+                      "execution_id": execution_id, "call_index": call_index,
+                      "task_id": str(getattr(ctx.process, "active_task_id", "") or getattr(ctx.process, "process_id", ""))}
+            if getattr(ctx.session, "host_ledger", None) is not None:
+                ctx.session.host_ledger.append({"event": "tool_notice", **notice})
+            ctx.event_bus.emit(ToolEvent("ToolNotice", execution_id, tool_name, call_index, data=notice))
+
+    @staticmethod
     def _attach_result_facts(
-        receipt: dict, tool_name: str, result_data: dict | None,
+        receipt: dict, tool_name: str, result_data: dict | None, arguments: dict | None = None,
     ) -> None:
         """Project narrow Host-observed facts into a durable receipt.
 
@@ -631,10 +669,25 @@ class ToolPipeline:
         """
         if not isinstance(result_data, dict):
             return
+        if tool_name in {"search_text", "list_files"}:
+            receipt.update(search_engine=result_data.get("engine"), search_complete=result_data.get("complete"),
+                           search_partial=result_data.get("partial"),
+                           search_warning_codes=[str(w.get("code")) for w in result_data.get("warnings", []) if isinstance(w, dict)])
+        if receipt.get("effect") == "workspace_write":
+            receipt["files"] = sorted(path.replace("\\", "/") for path in ToolPipeline._result_files(result_data))
+        if tool_name == "exec_command":
+            from .engineering_workflow import command_digest
+            receipt["command_digest"] = command_digest(arguments or {})
+            receipt["command_exit_code"] = result_data.get("exit_code")
+            receipt["command_completed"] = type(result_data.get("exit_code")) is int and not result_data.get("error")
         if tool_name == "run_test":
             receipt["test_id"] = str(result_data.get("test_id") or "")
             receipt["test_target"] = str(result_data.get("target") or "")
             receipt["test_passed"] = result_data.get("passed") is True
+            codes = [item.get("exit_code") for item in (result_data.get("seed_results") or []) if isinstance(item, dict)]
+            receipt["test_completed"] = (type(result_data.get("passed")) is bool and bool(codes)
+                                         and all(type(code) is int and code in (0, 1) for code in codes)
+                                         and result_data["passed"] == all(code == 0 for code in codes))
             receipt["test_seeds"] = [
                 int(item.get("seed", 0))
                 for item in list(result_data.get("seed_results") or [])

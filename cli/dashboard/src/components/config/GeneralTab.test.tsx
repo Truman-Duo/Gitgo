@@ -78,3 +78,54 @@ describe("General network configuration", () => {
     }
   });
 });
+
+describe("General terminal choices", () => {
+  for (const firstLaunch of [true, false]) test(`${firstLaunch ? "first launch" : "later General"} selects a discovered terminal using arrow keys`, async () => {
+    const saved: any[] = [];
+    const notices: string[] = [];
+    let scans = 0;
+    const client: BackendClient = {ready: true, close() {}, async callTool(operation, args = {}) {
+      if (operation === "config.get") return {launcher: {terminal: "auto"}};
+      if (operation === "config.terminals") {
+        scans++;
+        return {options: [
+          {id: "auto", label: "Automatic", available: true},
+          {id: "current", label: "Current terminal", available: true},
+          {id: "fake_bash", label: "Fake Bash", available: false},
+          {id: "git_bash", label: "Discovered Git Bash", available: true},
+        ], warnings: ["Fake Bash rejected: invalid signature"]};
+      }
+      if (operation === "config.set") { saved.push(args); return {ok: true}; }
+      return {};
+    }};
+    const streams = terminalStreams();
+    let output = "";
+    streams.stdout.on("data", (data: Buffer) => { output += data.toString(); });
+    function Fixture() {
+      const input = useTextInput();
+      return <InputProvider><GeneralTab client={client} project="test" cmdInput={input}
+        onFooter={() => {}} report={() => {}} contentFocused
+        initialSetting={firstLaunch ? "terminal" : undefined}
+        onSettingSaved={async key => { notices.push(key); return "Terminal is ready"; }}
+        shell={{back() {}, goToTab() {}, tabPrev() {}, tabNext() {}, leaveContent() {}}}
+      /></InputProvider>;
+    }
+    const root = renderSync(<Fixture/>, {...streams, patchConsole: false, exitOnCtrlC: false});
+    const wait = () => new Promise(resolve => setTimeout(resolve, 40));
+    try {
+      await wait();
+      if (!firstLaunch) for (let i = 0; i < 8; i++) { streams.stdin.write("\x1b[B"); await wait(); }
+      streams.stdin.write("r"); await wait();
+      streams.stdin.write("\x1b[C"); await wait();
+      streams.stdin.write("\x1b[C"); await wait();
+      streams.stdin.write("\r"); await wait(); await wait();
+      expect(saved).toEqual([{key: "launcher.terminal", value: "git_bash"}]);
+      expect(notices).toEqual(["launcher.terminal"]);
+      expect(scans).toBe(2);
+      expect(output).toContain("invalid signature");
+    } finally {
+      root.unmount(); root.cleanup();
+      streams.stdin.destroy(); streams.stdout.destroy(); streams.stderr.destroy();
+    }
+  });
+});

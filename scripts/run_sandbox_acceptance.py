@@ -8,10 +8,9 @@ import sys
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests/test_native_sandbox.py', '-q'],
-                   cwd=root, check=True)
-    subprocess.run([sys.executable, '-B', '-m', 'pytest',
-                    'tests/test_cross_daemon_recovery.py', 'tests/test_p0_development_runtime.py', '-q'],
+    # Upstream integration changes broader runtime/search/storage behavior.
+    # Validate the complete source suite in the same delegated native context.
+    subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests', '-q'],
                    cwd=root, check=True)
     extra = ['--hidden-import', 'resource'] if sys.platform == 'linux' else []
     subprocess.run([sys.executable, '-m', 'PyInstaller', *extra, '--noconfirm', '--clean', '--onedir',

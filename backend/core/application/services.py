@@ -120,6 +120,7 @@ class ApplicationServices:
             "deletion.run": self.deletion.run,
             "config.get": self.config_get,
             "config.set": self.config_set,
+            "config.terminals": self.config_terminals,
             "config.web_search.test": self.config_web_search_test,
             "publish.get": self.publish_get,
             "publish.set": self.publish_set,
@@ -445,6 +446,10 @@ class ApplicationServices:
                 raise OperationError("INVALID_KEY", f"Invalid config key: {key}")
         return {"key": key, "value": value}
 
+    def config_terminals(self) -> dict:
+        from backend.core.terminal_launcher import terminal_inventory
+        return terminal_inventory(ConfigManager.load().launcher)
+
     def config_set(self, key: str, value: Any) -> dict:
         with self._write_lock:
             cfg = ConfigManager.load()
@@ -487,13 +492,25 @@ class ApplicationServices:
             elif key.startswith("launcher."):
                 field_name = key.split(".", 1)[1]
                 if field_name == "terminal":
+                    from backend.core.terminal_launcher import TERMINAL_IDS, terminal_inventory
                     terminal = str(value or "auto").strip().lower()
-                    if terminal not in {"auto", "current", "windows_terminal", "custom"}:
+                    if terminal not in TERMINAL_IDS:
                         raise OperationError(
                             "INVALID_TERMINAL_MODE",
-                            "Terminal must be auto, current, windows_terminal, or custom",
+                            "Choose a supported terminal from config.terminals",
                         )
+                    inventory = terminal_inventory({**cfg.launcher, "terminal": terminal})
+                    choice = next(c for c in inventory["options"] if c["id"] == terminal)
+                    if not choice["available"]:
+                        raise OperationError("TERMINAL_UNAVAILABLE",
+                                             "The selected terminal is missing or could not be verified; refresh the terminal choices.",
+                                             details={"warnings": inventory["warnings"]})
                     cfg.launcher["terminal"] = terminal
+                    cfg.launcher["configured"] = True
+                    if terminal != "custom":
+                        cfg.launcher["command"] = choice["command"]
+                        cfg.launcher["args"] = list(choice["args"])
+                        cfg.launcher["identity"] = choice.get("identity")
                     value = terminal
                 elif field_name == "command":
                     cfg.launcher["command"] = str(value or "").strip().strip('"')

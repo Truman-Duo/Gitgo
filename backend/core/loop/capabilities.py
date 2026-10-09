@@ -78,6 +78,7 @@ class CapabilityProfiles:
     )
     _USER_BRIDGE = (
         "request_user_decision", "request_permission", "configure_capability",
+        "engineering_workflow",
     )
     _WORKER_COORDINATION = (
         "publish_interface_update", "escalate_to_supervisor",
@@ -224,7 +225,7 @@ class CapabilityProfiles:
         """
         return tuple(dict.fromkeys(
             cls._OBSERVE
-            + ("request_user_decision", "declare_task_contract", "configure_capability")
+            + ("request_user_decision", "declare_task_contract", "configure_capability", "engineering_workflow")
         ))
 
     @classmethod
