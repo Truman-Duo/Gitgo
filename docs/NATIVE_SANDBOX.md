@@ -201,3 +201,12 @@ LD_LIBRARY_PATH 的权限。实际构建的 frozen Host 还必须验证打包后
 测试临时目录统一 canonicalize，保留生产的 junction/重定向拒绝；中文 fixture 显式 UTF-8。
 上游凭据持久化当前仅有 Windows DPAPI。其正向验收标记 Windows 专属；Linux 检查
 缺失后端时拒绝建立存储且不落盘。此项通过不代表已实现 Linux/macOS 凭据存储。
+
+
+搜索子进程使用专用输入管道，父进程立即关闭写端，让引擎收到 EOF。
+Windows hosted AppContainer 曾拒绝打开 NUL，导致真实 frozen 搜索在引擎
+启动前回退；不通过开放设备 ACL 修复。回归包含禁止打开 null device 时的
+真实子进程 EOF、原生 Windows 搜索二进制，以及真实 frozen 列表/搜索协议。
+安全 CI 检出仓库时关闭 persist-credentials，避免 GitHub HTTP 凭据留在
+工具可读的运行时代码树中。专用运行时仍不得携带用户秘密；此设置不构成
+通用运行时目录内容审计，也不补齐工作区 Git 元数据的 OS 保护。

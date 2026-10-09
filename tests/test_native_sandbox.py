@@ -205,6 +205,41 @@ def test_windows_filesystem_escape_and_workspace_write(native_box):
     assert secret.read_text() == "private"
 
 
+def test_windows_search_binary_runs_inside_native_boundary(native_box, isolated_python):
+    """A real external engine must run with the same pipes as workspace search."""
+    configured = os.environ.get('GITGO_RIPGREP_PATH')
+    if not configured:
+        pytest.skip('Requires a Host-selected, provisioned search engine')
+    engine = Path(configured).resolve(strict=True)
+    workspace, _, spawn = native_box
+    target = isolated_python / 'rg.exe'
+    shutil.copy2(engine, target)
+    (workspace / 'search.txt').write_text('needle', encoding='utf-8')
+    commands = [
+        [str(target), '--version'],
+        [str(target), '--no-config', '--files', '--null', '.'],
+        [str(target), '--no-config', '--json', '--fixed-strings', 'needle', '.'],
+    ]
+    source = (
+        'import json,subprocess;'
+        f'commands={commands!r};'
+        "results=[subprocess.run(c,input='',stdout=subprocess.PIPE,"
+        "stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW|"
+        "subprocess.CREATE_NEW_PROCESS_GROUP,text=True,encoding='utf-8',timeout=10) "
+        "for c in commands];"
+        "print(json.dumps([{'code':r.returncode,'stdout':r.stdout,'stderr':r.stderr} "
+        "for r in results]))"
+    )
+    code, out, err = finished(spawn(source), timeout=40)
+    assert code == 0, err
+    results = json.loads(out)
+    assert all(r['code'] == 0 for r in results), results
+    assert results[0]['stdout'].startswith('ripgrep '), results
+    assert 'search.txt' in results[1]['stdout'], results
+    assert any(event.get('type') == 'match' for event in
+               map(json.loads, results[2]['stdout'].splitlines())), results
+
+
 def test_windows_junction_cannot_bypass_acl(native_box):
     workspace, policy, spawn = native_box
     outside = workspace.parent / "outside"

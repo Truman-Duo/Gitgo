@@ -383,3 +383,20 @@ def test_external_search_requires_exact_host_permission_and_keeps_absolute_ident
     assert not allowed.is_error, allowed.formatted
     assert allowed.data["matches"][0]["file"] == str(target)
     assert allowed.receipt["search_complete"] is True
+
+
+def test_search_stdin_is_private_eof_without_null_device(tmp_path_factory, monkeypatch):
+    # Reproduce the hosted AppContainer device denial even on a Host where
+    # NUL is accessible. The real subprocess must still execute and see EOF.
+    original = os.open
+    def deny_null(path, *args, **kwargs):
+        if os.fspath(path).lower() == os.devnull.lower():
+            raise PermissionError('Sandbox cannot open the null device')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'open', deny_null)
+    rows = []
+    source = "import sys;print('private-eof' if sys.stdin.read()=='' else 'unexpected-input')"
+    outcome = adapter.stream_process([sys.executable, '-c', source], tmp_path_factory,
+        b'\n', lambda raw: rows.append(raw.strip()) or True, time.monotonic() + 10)
+    assert outcome.exit_code == 0 and not outcome.stopped, outcome
+    assert rows == [b'private-eof']
