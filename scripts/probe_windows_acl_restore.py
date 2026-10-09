@@ -22,7 +22,7 @@ def main():
     if sys.platform != 'win32':
         raise SystemExit('Windows only')
     results = []
-    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00), ('dacl-only', 0), ('label-then-dacl', 0), ('dacl-then-label', 0), ('set-file', 0)]:
+    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00), ('dacl-only', 0), ('label-then-dacl', 0), ('dacl-then-label', 0), ('set-file', 0), ('empty-label', 0), ('empty-label-then-dacl', 0), ('label-then-protected-dacl', 0), ('label-then-ai-dacl', 0)]:
         with tempfile.TemporaryDirectory(prefix='gitgo_acl_probe_') as temporary:
             workspace = Path(temporary).resolve() / 'workspace'
             workspace.mkdir(); (workspace / 'nested').mkdir()
@@ -53,7 +53,7 @@ def main():
                     for original, raw in zip(originals, native):
                         desc = raw if mask is None else C.c_void_p()
                         if mask is not None:
-                            tree.check(tree.from_sddl(original['sddl'], 1, C.byref(desc), None))
+                            tree.check(tree.from_sddl(original['sddl'] + ('S:' if mode.startswith('empty-label') else ''), 1, C.byref(desc), None))
                         try:
                             text = W.LPWSTR()
                             tree.check(tree.to_sddl(desc, 1, 4 | 16, C.byref(text), None))
@@ -71,12 +71,18 @@ def main():
                                 steps = [16, 4]
                             elif mode == 'dacl-then-label':
                                 steps = [4, 16]
+                            elif mode in ('empty-label-then-dacl', 'label-then-protected-dacl', 'label-then-ai-dacl'):
+                                steps = [16, 4]
                             if mode == 'set-file':
                                 set_file = _fn(tree.advapi, 'SetFileSecurityW',
                                                [W.LPCWSTR, W.DWORD, C.c_void_p], W.BOOL)
                                 tree.check(set_file(original['path'], 4 | 16, desc))
                             else:
                                 for flags in steps:
+                                    if flags == 4 and mode == 'label-then-protected-dacl':
+                                        tree.check(change(desc, 0x1000, 0x1000))
+                                    if flags == 4 and mode == 'label-then-ai-dacl':
+                                        tree.check(change(desc, 0x400, 0x400))
                                     status = tree.set_object_security(tree.handles[original['path']], flags, desc)
                                     if status != 0:
                                         raise C.WinError(tree.status_to_error(status))
