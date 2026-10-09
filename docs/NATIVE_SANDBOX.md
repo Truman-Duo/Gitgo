@@ -53,9 +53,11 @@ DACL、MIC 及原生 volume/file ID，并 flush/fsync 到新文件后才创建 p
 然后重新读取核验；回滚失败必须报告不完整并保留记录，不能当成配置成功。
 Windows API 会重新计算 AI 继承记账标志；核验保持每个 ACE、ACE 继承位、
 DACL protected 标志和实际 MIC，不声称描述符二进制逐字节相同。
-恢复时只在保护状态发生变化时切换继承；取消保护后再次写入记录中的 ACE，
-避免 Windows 重新继承父目录权限而扩大原始授权。显式 OWNER_RIGHTS ACL
-和 protected/unprotected 双向变化都有真实对象回归，不接受额外 ACE 作为恢复成功。
+恢复逐对象调用用户态 NtSetSecurityObject，将已验证的描述符写到原生句柄；
+不使用会重新传播整树继承的 SetSecurityInfo 恢复，避免给旧显式子 ACL 加入父目录 ACE。
+参见 [Microsoft 原生安全对象 API 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwsetsecurityobject)。
+显式 OWNER_RIGHTS ACL、protected/unprotected 双向变化、可继承父目录与显式子 ACL
+及 Medium/默认 MIC 都有真实对象回归，不接受额外 ACE 作为恢复成功。
 空/不存在的标签使用系统默认 MIC，绝不把允许所有访问的 null DACL 与拒绝
 所有访问的 empty DACL 等同。操作不修改 owner/group，LABEL 更新不恢复或替换审计 ACE。
 

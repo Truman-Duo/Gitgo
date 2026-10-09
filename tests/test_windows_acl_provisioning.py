@@ -224,3 +224,47 @@ def test_restore_explicit_owner_rights_without_adding_parent_permissions(
         tree.restore(original)
         assert [canonical_security(r['sddl']) for r in tree.snapshot()] == [
             canonical_security(r['sddl']) for r in original]
+
+
+@pytest.mark.parametrize('medium', [False, True])
+def test_restore_explicit_children_without_recalculating_parent_inheritance(
+        provisioning_tree, medium):
+    workspace, runtime, _ = provisioning_tree
+    editor = str(windows_system_executable('System32/icacls.exe'))
+    with SecurityTree([workspace, runtime]) as tree:
+        # Represent both naturally inherited and legacy explicit child ACLs.
+        # They authorize the same identities but have different ACE flags.
+        for path, handle in tree.handles.items():
+            inherited = path == str(workspace)
+            flags = 'OICI' if inherited else ''
+            text = 'D:' + ('P' if inherited else '') + ''.join(
+                f'(A;{flags};FA;;;{sid})' for sid in ('SY', 'BA', 'OW'))
+            desc = C.c_void_p()
+            tree.check(tree.from_sddl(text, 1, C.byref(desc), None))
+            try:
+                assert tree.set_object_security(handle,
+                    4 | (0x80000000 if inherited else 0x20000000), desc) == 0
+            finally:
+                tree.free(desc)
+        if medium:
+            subprocess.run([editor, str(workspace), '/setintegritylevel', '(OI)(CI)M'],
+                           check=True, capture_output=True)
+        # LABEL propagation may have recalculated child ACEs; establish one
+        # explicit child as found in legacy/Python-created directory trees.
+        child = workspace / 'nested' / 'data.txt'
+        desc = C.c_void_p()
+        text = 'D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)'
+        tree.check(tree.from_sddl(text, 1, C.byref(desc), None))
+        try:
+            assert tree.set_object_security(tree.handles[str(child)], 4 | 0x20000000, desc) == 0
+        finally:
+            tree.free(desc)
+        original = tree.snapshot()
+        assert next(r for r in original if r['path'] == str(child))['sddl'].startswith(text)
+        subprocess.run([editor, str(workspace), '/grant', '*S-1-1-0:(OI)(CI)R'],
+                       check=True, capture_output=True)
+        subprocess.run([editor, str(workspace), '/setintegritylevel', '(OI)(CI)L'],
+                       check=True, capture_output=True)
+        tree.restore(original)
+        assert [canonical_security(r['sddl']) for r in tree.snapshot()] == [
+            canonical_security(r['sddl']) for r in original]

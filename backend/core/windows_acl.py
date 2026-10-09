@@ -37,6 +37,7 @@ class SecurityTree:
             raise OSError('Windows security descriptors are required')
         self.kernel = C.WinDLL('kernel32', use_last_error=True)
         self.advapi = C.WinDLL('advapi32', use_last_error=True)
+        self.ntdll = C.WinDLL('ntdll', use_last_error=True)
         self.handles = {}
         self.ancestors = {}
         self.children = {}
@@ -63,7 +64,9 @@ class SecurityTree:
             [C.c_void_p, C.POINTER(W.BOOL), C.POINTER(C.c_void_p), C.POINTER(W.BOOL)], W.BOOL)
         self.sacl = _fn(self.advapi, 'GetSecurityDescriptorSacl',
             [C.c_void_p, C.POINTER(W.BOOL), C.POINTER(C.c_void_p), C.POINTER(W.BOOL)], W.BOOL)
-        self.initialize_acl = _fn(self.advapi, 'InitializeAcl', [C.c_void_p, W.DWORD, W.DWORD], W.BOOL)
+        self.set_object_security = _fn(self.ntdll, 'NtSetSecurityObject',
+            [W.HANDLE, W.DWORD, C.c_void_p], C.c_long)
+        self.status_to_error = _fn(self.ntdll, 'RtlNtStatusToDosError', [C.c_long], W.DWORD)
         self.access = 0x20001 | (0x40000 | 0x80000 if writable else 0)  # READ_DATA/LIST_DIRECTORY, READ_CONTROL, WRITE_DAC/OWNER
         try:
             for root in roots:
@@ -166,44 +169,17 @@ class SecurityTree:
             for record, descriptor in zip(records, descriptors):
                 control, revision = W.WORD(), W.DWORD()
                 self.check(self.control(descriptor, C.byref(control), C.byref(revision)))
-                present, defaulted = W.BOOL(), W.BOOL()
-                dacl, sacl = C.c_void_p(), C.c_void_p()
-                self.check(self.dacl(descriptor, C.byref(present), C.byref(dacl), C.byref(defaulted)))
-                self.check(self.sacl(descriptor, C.byref(present), C.byref(sacl), C.byref(defaulted)))
-                # LABEL updates preserve unrelated audit ACEs. An empty label
-                # removes provisioning MIC, restoring the default Medium MIC.
-                empty = C.create_string_buffer(8)
-                if not sacl:
-                    self.check(self.initialize_acl(empty, 8, 2))
-                    sacl = C.cast(empty, C.c_void_p)
-                handle = self.handles[record['path']]
-                live = C.c_void_p()
-                status = self.get_security(handle, 1, DACL, None, None, None, None, C.byref(live))
-                if status:
-                    raise C.WinError(status)
-                try:
-                    live_control, live_revision = W.WORD(), W.DWORD()
-                    self.check(self.control(live, C.byref(live_control), C.byref(live_revision)))
-                    changed_protection = bool((control.value ^ live_control.value) & 0x1000)
-                finally:
-                    self.free(live)
-                # Reasserting UNPROTECTED causes Windows to add parent ACEs,
-                # even when the saved unprotected DACL was entirely explicit.
-                # Preserve the live protection state unless it must change.
-                protection = 0
-                if changed_protection:
-                    protection = 0x80000000 if control.value & 0x1000 else 0x20000000
-                status = self.set_security(handle, 1,
-                    DACL | LABEL | protection, None, None, dacl, sacl)
-                if status:
-                    raise C.WinError(status)
-                if changed_protection and not control.value & 0x1000:
-                    # Unprotecting necessarily recomputes inheritance first.
-                    # Write the recorded ACEs again without an inheritance
-                    # transition; never accept additional inherited access.
-                    status = self.set_security(handle, 1, DACL, None, None, dacl, None)
-                    if status:
-                        raise C.WinError(status)
+                # SetSecurityInfo propagates inheritance across descendants,
+                # rewriting explicit ACEs even without UNPROTECTED. Recovery
+                # must restore each recorded object, not recalculate its ACL.
+                # The documented user-mode NtSetSecurityObject entry applies
+                # this validated self-relative descriptor to the held handle.
+                # LABEL replaces only MIC, leaving audit ACEs untouched.
+                protection = 0x80000000 if control.value & 0x1000 else 0x20000000
+                status = self.set_object_security(self.handles[record['path']],
+                    DACL | LABEL | protection, descriptor)
+                if status != 0:
+                    raise C.WinError(self.status_to_error(status))
         finally:
             for descriptor in descriptors:
                 self.free(descriptor)
@@ -228,7 +204,7 @@ class SecurityTree:
 def canonical_security(value):
     """Compare authorization, preserving every ACE and protected-DACL flag.
 
-    SetSecurityInfo recomputes the AI bookkeeping flag. An absent/empty/null
+    Native descriptor updates can recompute the AI bookkeeping flag. An absent/empty/null
     *label* ACL has the same default MIC policy. Never normalize a null DACL:
     it allows access, whereas an empty DACL denies access.
     """
