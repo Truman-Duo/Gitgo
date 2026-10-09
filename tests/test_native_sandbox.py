@@ -1245,6 +1245,6 @@ def test_packaged_host_search_preserves_workspace_protocol(cross_platform_box, h
     payload = json.loads(result.stdout)
     assert payload['success'] and 'error' not in payload['data'], payload
     assert payload['data']['complete'] and payload['data']['count'] == 1, payload
-    assert payload['data']['engine'] == 'ripgrep', payload
+    assert payload['data']['engine'] == 'ripgrep', json.dumps(payload, ensure_ascii=False)
     row = payload['data']['files' if handler == 'list_files' else 'matches'][0]
     assert row['path' if handler == 'list_files' else 'file'] == 'search.txt'
