@@ -3,11 +3,37 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import stat
 import time
 import threading
 import uuid
 
 from backend.core.sandbox import SandboxDenied
+
+
+def trusted_bwrap(workspace: Path) -> str:
+    """Only root-owned system helpers; PATH and workspace cannot select one."""
+    for candidate in (Path('/usr/bin/bwrap'), Path('/bin/bwrap')):
+        try:
+            path = candidate.resolve(strict=True)
+            if path.is_relative_to(workspace.resolve(strict=True)):
+                continue
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111:
+                continue
+            for component in (path, *path.parents):
+                info = component.stat()
+                if info.st_uid != 0 or info.st_mode & 0o022:
+                    break
+            else:
+                return str(path)
+        except (OSError, RuntimeError):
+            continue
+    raise SandboxDenied('SANDBOX_UNAVAILABLE',
+        'Install root-owned system bubblewrap at /usr/bin/bwrap or /bin/bwrap. '
+        'The helper and its parent directories must not be group/world writable; '
+        'PATH-selected helpers and unsandboxed fallback are forbidden.')
+
 
 class LinuxCgroup:
     def __init__(self, policy):

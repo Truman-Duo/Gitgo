@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -36,6 +35,34 @@ class SandboxDenied(RuntimeError):
         }
 
 
+
+def trusted_runtime_roots() -> tuple[Path, ...]:
+    """Host-selected code and Python roots, never a model-supplied allowlist."""
+    roots = [Path(__file__).resolve().parents[2], Path(sys.base_prefix), Path(sys.prefix)]
+    if getattr(sys, "frozen", False):
+        roots += [Path(sys.executable).parent, Path(getattr(sys, "_MEIPASS", sys.prefix))]
+    try:
+        return tuple(dict.fromkeys(root.resolve(strict=True) for root in roots))
+    except (OSError, RuntimeError) as exc:
+        raise SandboxDenied("SANDBOX_POLICY_INVALID", "Trusted runtime paths are unavailable.") from exc
+
+
+def validate_runtime_separation(workspace: Path, roots) -> None:
+    """A writable workspace cannot contain or sit inside trusted runtime roots."""
+    try:
+        workspace = workspace.resolve(strict=True)
+        for raw in roots:
+            root = Path(raw).resolve(strict=True)
+            if workspace.is_relative_to(root) or root.is_relative_to(workspace):
+                raise SandboxDenied("SANDBOX_POLICY_INVALID",
+                    "The writable workspace overlaps trusted runtime code. "
+                    "Use a separate runtime installation outside the execution workspace.")
+    except (OSError, RuntimeError) as exc:
+        if isinstance(exc, SandboxDenied):
+            raise
+        raise SandboxDenied("SANDBOX_POLICY_INVALID", "Trusted runtime paths are unavailable.") from exc
+
+
 @dataclass(frozen=True)
 class SandboxPolicy:
     workspace: Path
@@ -50,6 +77,7 @@ class SandboxPolicy:
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "The execution workspace is unavailable.") from exc
         if not root.is_dir() or root == Path(root.anchor):
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "A concrete workspace directory is required.")
+        validate_runtime_separation(root, trusted_runtime_roots())
         object.__setattr__(self, "workspace", root)
         if min(self.memory_bytes, self.process_limit, self.cpu_seconds) <= 0:
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "Sandbox resource limits must be positive.")
@@ -73,14 +101,13 @@ def sandbox_environment(source: dict[str, str]) -> dict[str, str]:
 
 
 def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
+    validate_runtime_separation(policy.workspace, trusted_runtime_roots())
     if sys.platform == "win32":
         from backend.core.sandbox_windows import WindowsSandboxProcess
         return WindowsSandboxProcess(argv, policy=policy, **kwargs)
     if sys.platform == "linux":
-        bwrap = shutil.which("bwrap")
-        if not bwrap:
-            raise SandboxDenied("SANDBOX_UNAVAILABLE", "Install bubblewrap; no unsandboxed fallback is permitted.")
-        from backend.core.sandbox_linux import LinuxCgroup, LinuxSandboxProcess
+        from backend.core.sandbox_linux import LinuxCgroup, LinuxSandboxProcess, trusted_bwrap
+        bwrap = trusted_bwrap(policy.workspace)
         from backend.core.child_process import python_command
         # Empty root, private PID/network/user namespaces and private tmpfs.
         # Mount runtime trees read-only, never the host home, /etc or /run.
@@ -95,12 +122,7 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
         for name in ("/etc/ld.so.cache", "/etc/localtime"):
             if Path(name).is_file():
                 command += ["--ro-bind", name, name]
-        source_root = Path(__file__).resolve().parents[2]
-        runtime_roots = (source_root, Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve())
-        if getattr(sys, "frozen", False):
-            runtime_roots += (Path(sys.executable).resolve().parent,
-                              Path(getattr(sys, "_MEIPASS", sys.prefix)).resolve())
-        for root in dict.fromkeys(runtime_roots):
+        for root in trusted_runtime_roots():
             if not any(root.is_relative_to(Path(tree)) for tree in ("/usr", "/bin", "/lib", "/lib64")):
                 command += ["--ro-bind", str(root), str(root)]
         cgroup = LinuxCgroup(policy)

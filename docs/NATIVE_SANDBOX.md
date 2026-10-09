@@ -26,6 +26,7 @@ Windows 本身向 ALL APPLICATION PACKAGES 开放的系统资源仍可访问，
 磁盘根目录或包含密钥的通用 Python 环境授予沙箱。Source 模式还需对独立
 Gitgo source root 授予 RX；运行时必须包含标准库、DLL 与项目依赖。
 venv 模式还需其专用 base Python 运行时；冻结版需要安装目录。
+Host 在构造策略和实际启动前拒绝工作区与可信源码、Python 或冻结运行时目录的父子重叠，按真实路径检查链接/目录联接别名。配置脚本同样在创建 profile 或修改 ACL 前检查显式运行时路径。开发 Gitgo 自身也必须从工作区外的可信安装启动 Host，不能让正在编辑的检出副本同时充当受信任运行时。此路径检查不等于完整的安装供应链或硬链接审计。
 
 先在受信任的操作员终端预览配置：
 
@@ -54,7 +55,7 @@ exec_command 仍接受明确的 argv；不兼容的外部程序返回执行错�
 
 ## Linux：bubblewrap
 
-安装系统 bubblewrap 并启用其所需的用户 namespace。空根目录中只挂载只读
+安装系统 bubblewrap 并启用其所需的用户 namespace。Host 固定查找 /usr/bin/bwrap 或 /bin/bwrap，解析真实路径并要求可执行常规文件、文件及所有父目录由 root 所有且不可被组/其他用户写入；不从 PATH、工作区或模型参数选择启动器。此检查建立文件系统来源边界，不声称验证软件包签名。空根目录中只挂载只读
 系统运行时、专用 Python/Gitgo source，以及可写项目工作区；/tmp 为私有
 tmpfs，/proc 对应私有 PID namespace。网络、IPC、用户等 namespace 独立，
 删除所有 capabilities，使用 die-with-parent/new-session。

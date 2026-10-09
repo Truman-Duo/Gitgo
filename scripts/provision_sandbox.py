@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend.core.sandbox import SandboxPolicy
+from backend.core.sandbox import SandboxPolicy, validate_runtime_separation
 
 
 def main():
@@ -30,6 +30,7 @@ def main():
     for root in roots:
         if not root.is_dir() or root == Path(root.anchor):
             parser.error("Runtime access requires a concrete directory, never a drive root.")
+    validate_runtime_separation(policy.workspace, roots)
     from backend.core.sandbox_windows import WindowsApi
     api = WindowsApi()
     sid = api.profile_sid(policy.profile_name)

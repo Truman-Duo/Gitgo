@@ -869,3 +869,68 @@ def test_cpu_violation_cannot_be_hidden_by_success_json(cross_platform_box, monk
     assert result.data['effect_state'] == 'ambiguous'
     assert 'CPU' in result.data['message']
     assert all((workspace / f'cpu-{i}').read_text() == 'ready' for i in range(2))
+
+
+@pytest.mark.parametrize("relation", ["same", "workspace_parent", "runtime_parent"])
+def test_workspace_cannot_overlap_host_runtime(tmp_path_factory, monkeypatch, relation):
+    runtime = tmp_path_factory / 'runtime'
+    runtime.mkdir()
+    nested = runtime / 'nested'
+    nested.mkdir()
+    if relation == 'same':
+        workspace = runtime
+    elif relation == 'workspace_parent':
+        workspace, runtime = runtime, nested
+    else:
+        workspace = nested
+    monkeypatch.setattr('backend.core.sandbox.trusted_runtime_roots', lambda: (runtime,))
+    with pytest.raises(SandboxDenied) as denied:
+        SandboxPolicy(workspace)
+    assert denied.value.code == 'SANDBOX_POLICY_INVALID'
+    assert denied.value.result()['effect_state'] == 'not_committed'
+
+
+def test_runtime_alias_cannot_hide_workspace_overlap(tmp_path_factory):
+    from backend.core.sandbox import validate_runtime_separation
+    runtime = tmp_path_factory / 'runtime'
+    runtime.mkdir()
+    workspace = runtime / 'project'
+    workspace.mkdir()
+    alias = tmp_path_factory / 'alias'
+    if os.name == 'nt':
+        subprocess.run(['cmd', '/c', 'mklink', '/J', str(alias), str(runtime)],
+                       check=True, capture_output=True)
+    else:
+        alias.symlink_to(runtime, target_is_directory=True)
+    try:
+        with pytest.raises(SandboxDenied):
+            validate_runtime_separation(workspace, [alias])
+    finally:
+        if os.name == 'nt':
+            alias.rmdir()
+        else:
+            alias.unlink()
+
+
+def test_disjoint_runtime_directory_is_allowed(tmp_path_factory):
+    from backend.core.sandbox import validate_runtime_separation
+    runtime, workspace = tmp_path_factory / 'runtime', tmp_path_factory / 'runtime-project'
+    runtime.mkdir()
+    workspace.mkdir()
+    validate_runtime_separation(workspace, [runtime])
+
+
+def test_linux_workspace_cannot_select_fake_bwrap(linux_box, monkeypatch):
+    workspace, spawn = linux_box
+    fake_dir = workspace / 'bin'
+    fake_dir.mkdir()
+    helper = fake_dir / 'bwrap'
+    helper.write_text('#!/bin/sh\necho escaped > "' + str(workspace / 'fake-helper-ran') + '"\n')
+    helper.chmod(0o755)
+    monkeypatch.setenv('PATH', str(fake_dir) + os.pathsep + os.environ['PATH'])
+    assert shutil.which('bwrap') == str(helper)  # Real positive control for PATH spoofing.
+    code, out, err = finished(spawn("open('positive-control','w').write('ok');print('isolated')"))
+    assert code == 0, err
+    assert out.strip() == 'isolated'
+    assert (workspace / 'positive-control').read_text() == 'ok'
+    assert not (workspace / 'fake-helper-ran').exists()
