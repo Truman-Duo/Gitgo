@@ -16,7 +16,7 @@ let created = hv_vm_create(nil)
 #elseif arch(x86_64)
 // Hypervisor supports Intel, but VZ's macOS guest platform is Apple silicon only.
 report["native_macos_guest_api_available"] = false
-let created = hv_vm_create(HV_VM_DEFAULT)
+let created = hv_vm_create(hv_vm_options_t(HV_VM_DEFAULT))
 #else
 #error("Unsupported macOS architecture")
 #endif
