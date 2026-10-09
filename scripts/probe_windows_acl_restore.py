@@ -22,36 +22,64 @@ def main():
     if sys.platform != 'win32':
         raise SystemExit('Windows only')
     results = []
-    for mode, mask in [('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00)]:
+    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00)]:
         with tempfile.TemporaryDirectory(prefix='gitgo_acl_probe_') as temporary:
             workspace = Path(temporary).resolve() / 'workspace'
             workspace.mkdir(); (workspace / 'nested').mkdir()
             (workspace / 'nested' / 'file').write_text('test-owned probe', encoding='utf-8')
             with SecurityTree([workspace]) as tree:
                 originals = tree.snapshot()
-                controls = []
+                native = []
+                def metadata(desc):
+                    control, revision = W.WORD(), W.DWORD()
+                    tree.check(tree.control(desc, C.byref(control), C.byref(revision)))
+                    dacl = C.c_void_p(); present, defaulted = W.BOOL(), W.BOOL()
+                    tree.check(tree.dacl(desc, C.byref(present), C.byref(dacl), C.byref(defaulted)))
+                    header = C.string_at(dacl, 8)
+                    return {'control': control.value, 'dacl_revision': header[0],
+                            'dacl_size': int.from_bytes(header[2:4], 'little'),
+                            'dacl_defaulted': bool(defaulted.value)}
                 change = _fn(tree.advapi, 'SetSecurityDescriptorControl',
                              [C.c_void_p, W.WORD, W.WORD], W.BOOL)
-                for original in originals:
-                    desc = C.c_void_p(); control = W.WORD(); revision = W.DWORD()
-                    tree.check(tree.from_sddl(original['sddl'], 1, C.byref(desc), None))
-                    try:
-                        tree.check(tree.control(desc, C.byref(control), C.byref(revision)))
-                        controls.append(control.value)
-                        if mask:
-                            tree.check(change(desc, mask, mask))
-                        status = tree.set_object_security(tree.handles[original['path']], 4 | 16, desc)
-                        if status != 0:
-                            raise C.WinError(tree.status_to_error(status))
-                    finally:
-                        tree.free(desc)
-                actual = tree.snapshot()
-                pairs = [{'original': safe(before['sddl']), 'actual': safe(after['sddl'])}
-                         for before, after in zip(originals, actual)]
-                matched = all(canonical_security(before['sddl']) == canonical_security(after['sddl'])
-                              for before, after in zip(originals, actual))
-                results.append({'mode': mode, 'matched': matched, 'input_controls': controls,
-                                'descriptors': pairs})
+                evidence = []
+                try:
+                    for original in originals:
+                        raw = C.c_void_p()
+                        status = tree.get_security(tree.handles[original['path']], 1,
+                            4 | 16, None, None, None, None, C.byref(raw))
+                        if status:
+                            raise C.WinError(status)
+                        native.append(raw)
+                    for original, raw in zip(originals, native):
+                        desc = raw if mask is None else C.c_void_p()
+                        if mask is not None:
+                            tree.check(tree.from_sddl(original['sddl'], 1, C.byref(desc), None))
+                        try:
+                            text = W.LPWSTR()
+                            tree.check(tree.to_sddl(desc, 1, 4 | 16, C.byref(text), None))
+                            try:
+                                evidence.append({'native': metadata(raw), 'input': metadata(desc),
+                                                 'roundtrip': safe(text.value)})
+                            finally:
+                                tree.free(C.cast(text, C.c_void_p))
+                            if mask:
+                                tree.check(change(desc, mask, mask))
+                            status = tree.set_object_security(tree.handles[original['path']], 4 | 16, desc)
+                            if status != 0:
+                                raise C.WinError(tree.status_to_error(status))
+                        finally:
+                            if mask is not None:
+                                tree.free(desc)
+                    actual = tree.snapshot()
+                    pairs = [{'original': safe(before['sddl']), 'actual': safe(after['sddl'])}
+                             for before, after in zip(originals, actual)]
+                    matched = all(canonical_security(before['sddl']) == canonical_security(after['sddl'])
+                                  for before, after in zip(originals, actual))
+                    results.append({'mode': mode, 'matched': matched, 'descriptor_metadata': evidence,
+                                    'descriptors': pairs})
+                finally:
+                    for raw in native:
+                        tree.free(raw)
     print(json.dumps(results, indent=2))
 
 
