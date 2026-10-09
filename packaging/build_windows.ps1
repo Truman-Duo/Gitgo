@@ -2,6 +2,8 @@ param(
     [string]$Python = "",
     [string]$Bun = "$env:USERPROFILE\.bun\bun.exe",
     [string]$PyInstallerPackages = "",
+    [string]$Ripgrep = "",
+    [string]$RipgrepNotices = "",
     [string]$Output = "",
     [string]$InnoSetupCompiler = "",
     [switch]$BuildInstaller
@@ -33,6 +35,17 @@ if (-not $Python -or -not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $Bun -PathType Leaf)) {
     throw "Bun runtime not found: $Bun"
+}
+if (-not $Ripgrep -and $env:GITGO_RIPGREP_PATH) { $Ripgrep = $env:GITGO_RIPGREP_PATH }
+if (-not $Ripgrep) {
+    $rgCommand = Get-Command rg.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($rgCommand) { $Ripgrep = $rgCommand.Source }
+}
+if (-not $Ripgrep -or -not (Test-Path -LiteralPath $Ripgrep -PathType Leaf)) {
+    throw "Release requires ripgrep; pass -Ripgrep. A degraded fallback is not a release search engine."
+}
+if (-not $RipgrepNotices -or -not (Test-Path -LiteralPath $RipgrepNotices -PathType Leaf)) {
+    throw "Pass -RipgrepNotices with the complete notices matching the supplied binary."
 }
 
 & $Python -B -c (
@@ -75,10 +88,14 @@ if ($pyInstallerImportExit -ne 0) {
 }
 
 New-Item -ItemType Directory -Force -Path $stage, $internal | Out-Null
+& $Python -B (Join-Path $root "scripts\check_terminal_build_runtime.py") $PyInstallerPackages
+if ($LASTEXITCODE -ne 0) { throw "Selected build runtime is missing core application dependencies" }
 
 Push-Location (Join-Path $root "cli\dashboard")
 try {
-    & $Bun test src\input\runtime.test.tsx src\backend\client.test.ts
+    & $Bun test src\input\runtime.test.tsx src\backend\client.test.ts `
+        src\backend\terminalLauncher.test.ts src\components\config\GeneralTab.test.tsx `
+        src\components\promptRepaint.test.tsx
     if ($LASTEXITCODE -ne 0) {
         throw "Dashboard Unicode/input integrity release gate failed"
     }
@@ -98,12 +115,17 @@ try {
         -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
+$terminalReferences = Join-Path $root "backend\resources\terminal_provenance"
+if (-not (Get-ChildItem -LiteralPath $terminalReferences -Filter "git-for-windows-*.json" -File -ErrorAction SilentlyContinue)) {
+    throw "Official terminal provenance references are missing; stage references before packaging"
+}
 $pyInstallerArguments = @(
     "--noconfirm", "--clean", "--onedir",
     "--name", "gitgo-host",
     "--distpath", $internal,
     "--workpath", (Join-Path $root "build\terminal-host"),
     "--specpath", (Join-Path $root "build\terminal-host"),
+    "--add-data", "$terminalReferences;backend/resources/terminal_provenance",
     (Join-Path $root "backend\core\native_host_entry.py")
 )
 if ($useExternalPyInstaller) {
@@ -117,10 +139,16 @@ Copy-Item -LiteralPath $productPath `
     -Destination (Join-Path $stage "product.json") -Force
 
 $packagedHost = Join-Path $internal "gitgo-host\gitgo-host.exe"
+& $Python -B (Join-Path $root "scripts\stage_search_engine.py") `
+    --binary $Ripgrep --notices $RipgrepNotices --destination (Split-Path -Parent $packagedHost)
+if ($LASTEXITCODE -ne 0) { throw "Bundled search engine staging failed" }
 & $Python -B (Join-Path $root "scripts\smoke_packaged_runtime.py") --host $packagedHost
 if ($LASTEXITCODE -ne 0) {
     throw "Packaged Host/Daemon/tool-runner smoke test failed"
 }
+& $Python -B (Join-Path $root "scripts\check_terminal_continuity.py") --host $packagedHost `
+    --dashboard (Join-Path $stage "$($product.primary_command).exe")
+if ($LASTEXITCODE -ne 0) { throw "Packaged conversation continuity/ownership gate failed" }
 Write-Host "Terminal release staged at $stage"
 
 foreach ($alias in @($product.command_aliases)) {

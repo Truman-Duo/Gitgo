@@ -2019,6 +2019,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             "capability_profile_id": process.capability_profile_id,
             "required_test_ids": list(process.required_test_ids),
             "budget": dict(cmd.get("task_budget") or {}),
+            "frontend_origin": dict(process.runtime_preferences.get("frontend_origin") or {}),
         })
 
         def _run_task_body():

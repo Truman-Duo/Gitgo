@@ -2,6 +2,8 @@ param(
     [string]$Python = "",
     [string]$Bun = "$env:USERPROFILE\.bun\bun.exe",
     [string]$PyInstallerPackages = "",
+    [string]$Ripgrep = "",
+    [string]$RipgrepNotices = "",
     [string]$Output = "",
     [string]$InnoSetupCompiler = "",
     [string]$BaseRef = "origin/master",
@@ -78,6 +80,8 @@ try {
             "-Python", $Python, "-Bun", $Bun
         )
         if ($PyInstallerPackages) { $arguments += @("-PyInstallerPackages", $PyInstallerPackages) }
+        if ($Ripgrep) { $arguments += @("-Ripgrep", $Ripgrep) }
+        if ($RipgrepNotices) { $arguments += @("-RipgrepNotices", $RipgrepNotices) }
         if ($Output) { $arguments += @("-Output", $Output) }
         if ($BuildInstaller) {
             $arguments += "-BuildInstaller"

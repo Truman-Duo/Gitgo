@@ -107,6 +107,7 @@ export const discardRecovery = (
   c: BackendClient, project: string, processId: string, reason = "",
 ) => c.callTool("runtime.recovery.discard", { project, process_id: processId, reason });
 export const configGet = (c: BackendClient) => c.callTool("config.get");
+export const detectTerminals = (c: BackendClient) => c.callTool("config.terminals", {}, 15);
 export const configSet = (c: BackendClient, key: string, value: any) => c.callTool("config.set", { key, value });
 export const testWebSearchConfig = (c: BackendClient) => c.callTool("config.web_search.test", {}, 35);
 export const templateList = (c: BackendClient) => c.callTool("template.list");

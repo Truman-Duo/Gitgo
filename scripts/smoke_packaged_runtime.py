@@ -199,6 +199,11 @@ def smoke(executable: Path) -> None:
 
         client = ProtocolClient(executable, env)
         try:
+            if os.name == "nt":
+                terminals = client.call("config.terminals", timeout=30)
+                if (not terminals.get("ok") or
+                        terminals.get("result", {}).get("verification", {}).get("reference_packages", 0) < 1):
+                    raise RuntimeError("Frozen Host cannot read bundled terminal provenance references")
             overview = client.call("project.overview", timeout=10)
             projects = overview.get("result", {}).get("projects", [])
             if not overview.get("ok") or not any(p.get("name") == project.name for p in projects):

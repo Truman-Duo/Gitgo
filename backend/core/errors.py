@@ -23,6 +23,8 @@ class ErrorDefinition:
 
 _DEFINITIONS = (
     ErrorDefinition("GITGO-E3701", "BASH_IDENTITY_UNVERIFIED", "Bash identity could not be verified; the script was not executed.", True, "repair_bash_installation_then_retry"),
+    ErrorDefinition("GITGO-E3702", "TERMINAL_IDENTITY_UNVERIFIED", "Terminal identity could not be verified; continuing in the current terminal.", True, "rescan_or_select_verified_terminal"),
+    ErrorDefinition("GITGO-E3703", "TERMINAL_UNAVAILABLE", "The selected terminal is missing or unverified; continuing in the current terminal.", True, "rescan_or_select_verified_terminal"),
     ErrorDefinition("GITGO-E3601", "SEARCH_ENGINE_REQUIRED", "This query requires ripgrep; repair the engine or explicitly narrow the query.", True, "repair_search_engine_or_narrow_query"),
     ErrorDefinition("GITGO-E3602", "SEARCH_INCOMPLETE", "Search did not cover its declared scope; absence cannot be inferred from partial results.", True, "narrow_search_scope"),
     ErrorDefinition("GITGO-E3603", "INVALID_SEARCH_ARGUMENTS", "Search arguments are invalid or exceed their bounded limits.", True, "correct_search_arguments"),

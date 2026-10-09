@@ -1,21 +1,35 @@
 // src/main.tsx
 import React from "react";
+import {createInterface} from "node:readline";
 import { renderSync, AlternateScreen, Box, useTerminalSize } from "@anthropic/ink";
 import { NativeHostClient, type BackendClient } from "./backend/client.js";
 import { MockMcpClient } from "./mock/MockMcpClient.js";
 import { setBackendClient } from "./clients.js";
 import { App } from "./components/App.js";
-import { InputProvider } from "./input/runtime.js";
+import { InputProvider, type VerificationInput } from "./input/runtime.js";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { resolvePythonRuntime } from "./backend/pythonRuntime.js";
 import {
-  loadTerminalLauncherConfig,
+  acceptTerminalHandoff,
+  currentFrontendOrigin,
+  transferTerminalOwner,
+  assertInteractiveTerminal,
+  launcherFromInventory,
+  type TerminalInventory,
   ensureWindowsUtf8Console,
   relaunchInConfiguredTerminal,
   shouldRelaunchInConfiguredTerminal,
   windowsParentProcessName,
 } from "./backend/terminalLauncher.js";
+import { detectTerminals } from "./backend/tools.js";
+import { registerLaunchSession } from "./backend/launchSession.js";
+
+const acknowledgeHandoff = acceptTerminalHandoff();
+process.env.GITGO_FRONTEND_ORIGIN = currentFrontendOrigin();
+const temporaryLaunch = registerLaunchSession();
+if (acknowledgeHandoff) assertInteractiveTerminal(process.stdin, process.stdout);
+if (acknowledgeHandoff) process.stdout.write("\x1b]0;Gitgo - selected terminal\x07");
 
 const EXECUTABLE_DIR = dirname(process.execPath);
 const COMPILED = Boolean(
@@ -108,21 +122,22 @@ function startupSmokeTask(): {
   };
 }
 
+function verificationInput(): VerificationInput[] | undefined {
+  const encoded = argumentValue("--smoke-input-b64");
+  if (!encoded) return;
+  const events = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  const keys = new Set(["upArrow", "downArrow", "leftArrow", "rightArrow", "return", "escape"]);
+  if (!Array.isArray(events) || events.length > 60 || events.some(event =>
+    !Number.isInteger(event.afterMs) || event.afterMs < 0 || event.afterMs > 60000 ||
+    typeof event.input !== "string" || event.input.length > 100 ||
+    !event.key || Object.keys(event.key).some(key => !keys.has(key) || event.key[key] !== true))) {
+    throw new Error("Invalid bounded verification input sequence");
+  }
+  return events;
+}
+
 async function main() {
   ensureWindowsUtf8Console();
-  const launcherConfig = loadTerminalLauncherConfig();
-  if (shouldRelaunchInConfiguredTerminal({
-    compiled: COMPILED,
-    platform: process.platform,
-    argv: process.argv,
-    parentProcessName: windowsParentProcessName(),
-    config: launcherConfig,
-  })) {
-    if (relaunchInConfiguredTerminal(launcherConfig)) return;
-    process.stderr.write(
-      "[gitgo-dashboard] Configured terminal unavailable; continuing in the current console.\n",
-    );
-  }
   const useMock = process.argv.includes("--mock");
   const client: BackendClient = useMock
     ? (new MockMcpClient() as unknown as BackendClient)
@@ -132,6 +147,29 @@ async function main() {
     process.stderr.write("[gitgo-dashboard] Native host mode\n");
   }
   setBackendClient(client);
+
+  let terminals: TerminalInventory | undefined;
+  let startupNotice = "";
+  if (!useMock) {
+    try {
+      terminals = await detectTerminals(client) as TerminalInventory;
+      startupNotice = (terminals.warnings || []).join(" ");
+    } catch {
+      startupNotice = "Terminal detection unavailable; continuing here. Retry in /config → General.";
+    }
+  }
+  if (terminals?.configured && shouldRelaunchInConfiguredTerminal({
+    compiled: COMPILED, platform: process.platform, argv: process.argv,
+    parentProcessName: windowsParentProcessName(), config: launcherFromInventory(terminals),
+  })) {
+    process.stderr.write("[gitgo-dashboard] Opening configured terminal…\n");
+    const handoff = client instanceof NativeHostClient
+      ? await transferTerminalOwner(client, () => relaunchInConfiguredTerminal(launcherFromInventory(terminals!)))
+      : await relaunchInConfiguredTerminal(launcherFromInventory(terminals));
+    if (handoff.launched) { await client.close(); process.exit(0); }
+    startupNotice = handoff.message;
+  }
+  if (temporaryLaunch) startupNotice = ["Temporary terminal test · isolated chat history; settings and conversations are removed when this test closes.", startupNotice].filter(Boolean).join(" ");
 
   let shutdownPromise: Promise<void> | null = null;
   const shutdown = (exitCode: number): Promise<void> => {
@@ -146,25 +184,56 @@ async function main() {
   process.once("SIGHUP", () => { void shutdown(129); });
   process.stdin.once("end", () => { void shutdown(0); });
 
-  const { waitUntilExit } = renderSync(
+  let root: ReturnType<typeof renderSync>;
+  const completeTerminalSetup = async () => {
+    const selected = await detectTerminals(client) as TerminalInventory;
+    const config = launcherFromInventory(selected);
+    if (config.terminal === "current") return {completed: true, message: "Saved · continuing in the current terminal"};
+    const handoff = client instanceof NativeHostClient
+      ? await transferTerminalOwner(client, () => relaunchInConfiguredTerminal(config))
+      : await relaunchInConfiguredTerminal(config);
+    if (handoff.launched) {
+      root.unmount(); root.cleanup();
+      await shutdown(0);
+    }
+    return {completed: handoff.launched, message: handoff.message};
+  };
+  root = renderSync(
     <ScreenWrapper>
-      <InputProvider><App
+      <InputProvider verificationInput={verificationInput()}><App
         client={client}
         refreshSec={REFRESH_SEC}
         startupSmokeTask={startupSmokeTask()}
+        startupTerminalSetup={!useMock && (!terminals || !terminals.configured)}
+        startupNotice={startupNotice}
+        onTerminalSetupComplete={completeTerminalSetup}
       /></InputProvider>
     </ScreenWrapper>,
     { exitOnCtrlC: false }
   );
+  // Child readiness is acknowledged only after the real Host and complete
+  // renderer have started, never by a hidden smoke renderer or process spawn.
+  acknowledgeHandoff?.();
 
-  await waitUntilExit();
+  await root.waitUntilExit();
   if (!shutdownPromise) await client.close();
   // Ink and terminal observers may retain timers after the renderer exits.
   // The backend is already closed, so make the CLI lifecycle deterministic.
   process.exit(0);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("Dashboard error:", err);
+  // An Explorer-created console otherwise disappears before a startup failure
+  // (including duplicate profile ownership) can be read. Never hold a pipe/CI.
+  if (COMPILED && process.stdin.isTTY && process.stdout.isTTY) {
+    process.stdin.setRawMode?.(false);
+    const input = createInterface({input: process.stdin, output: process.stderr});
+    process.stderr.write("\nPress Enter to close this window.\n");
+    await new Promise<void>(resolve => {
+      input.once("line", () => { input.close(); resolve(); });
+      input.once("close", resolve);
+    });
+  }
   process.exit(1);
 });
