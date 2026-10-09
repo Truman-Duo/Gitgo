@@ -54,7 +54,7 @@ def main():
     if sys.platform != 'win32':
         raise SystemExit('Windows only')
     results = []
-    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00), ('dacl-only', 0), ('label-then-dacl', 0), ('dacl-then-label', 0), ('set-file', 0), ('empty-label', 0), ('empty-label-then-dacl', 0), ('label-then-protected-dacl', 0), ('label-then-ai-dacl', 0), ('full-sacl', None), ('full-sacl-then-dacl', None)]:
+    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00), ('dacl-only', 0), ('label-then-dacl', 0), ('dacl-then-label', 0), ('set-file', 0), ('empty-label', 0), ('empty-label-then-dacl', 0), ('label-then-protected-dacl', 0), ('label-then-ai-dacl', 0), ('full-sacl', None), ('full-sacl-then-dacl', None), ('protect-label-exact', 0), ('label-protect-exact', 0)]:
         with tempfile.TemporaryDirectory(prefix='gitgo_acl_probe_') as temporary:
             workspace = Path(temporary).resolve() / 'workspace'
             workspace.mkdir(); (workspace / 'nested').mkdir()
@@ -113,7 +113,11 @@ def main():
                                 steps = [4 | 8]
                             elif mode == 'full-sacl-then-dacl':
                                 steps = [8, 4]
-                            if mode == 'dacl-only':
+                            if mode == 'protect-label-exact':
+                                steps = [4, 16, 4]
+                            elif mode == 'label-protect-exact':
+                                steps = [16, 4, 4]
+                            elif mode == 'dacl-only':
                                 steps = [4]
                             elif mode == 'label-then-dacl':
                                 steps = [16, 4]
@@ -126,7 +130,11 @@ def main():
                                                [W.LPCWSTR, W.DWORD, C.c_void_p], W.BOOL)
                                 tree.check(set_file(original['path'], 4 | 16, desc))
                             else:
-                                for flags in steps:
+                                for step_index, flags in enumerate(steps):
+                                    if mode == 'protect-label-exact' and step_index == 0 or mode == 'label-protect-exact' and step_index == 1:
+                                        tree.check(change(desc, 0x1000, 0x1000))
+                                    if mode in ('protect-label-exact', 'label-protect-exact') and step_index == 2:
+                                        tree.check(change(desc, 0x1000, evidence[-1]['input']['control'] & 0x1000))
                                     if flags == 4 and mode == 'label-then-protected-dacl':
                                         tree.check(change(desc, 0x1000, 0x1000))
                                     if flags == 4 and mode == 'label-then-ai-dacl':
