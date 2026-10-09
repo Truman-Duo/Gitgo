@@ -2,6 +2,8 @@ from __future__ import annotations
 import ctypes as C
 from ctypes import wintypes as W
 import json
+import hashlib
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +17,29 @@ from backend.core.windows_acl import SecurityTree, canonical_security
 from scripts.provision_sandbox import provision, restore_record
 
 pytestmark = pytest.mark.skipif(sys.platform != 'win32', reason='Native Windows DACL/MIC recovery')
+
+
+@pytest.fixture(autouse=True)
+def recovery_diagnostics(monkeypatch):
+    restore = SecurityTree.restore
+    def diagnose(tree, records):
+        try:
+            return restore(tree, records)
+        except OSError as error:
+            # Only ephemeral test descriptors; never log paths or raw user /
+            # generated AppContainer SIDs. Retain ACE flags and MIC levels.
+            def safe(sddl):
+                return re.sub(r'S-1-[0-9-]+', lambda match:
+                    'principal-' + hashlib.sha256(match[0].encode()).hexdigest()[:12], sddl)
+            try:
+                for expected, actual in zip(records, tree.snapshot()):
+                    if canonical_security(expected['sddl']) != canonical_security(actual['sddl']):
+                        error.add_note('Test ACL expected=' + safe(expected['sddl']) +
+                                       ' actual=' + safe(actual['sddl']))
+            except OSError:
+                error.add_note('Test descriptor diagnostics unavailable')
+            raise
+    monkeypatch.setattr(SecurityTree, 'restore', diagnose)
 
 
 def descriptors(roots):
