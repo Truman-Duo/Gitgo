@@ -39,6 +39,15 @@ jobs:
       - run: python -m pip install -r requirements-portable.txt pyinstaller
       - name: Provision and validate pinned patched SQLite in CI
         run: python -B scripts/provision_ci_sqlite.py
+      - uses: oven-sh/setup-bun@v2
+        if: runner.os == 'Windows'
+        with:
+          bun-version: "1.4.2"
+      - name: Configure owned Windows handoff lifecycle runtime
+        if: runner.os == 'Windows'
+        run: |
+          bun --version
+          "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Provision and validate pinned official ripgrep in CI
         run: python -B scripts/provision_ci_ripgrep.py
       - name: Windows source and packaged isolation

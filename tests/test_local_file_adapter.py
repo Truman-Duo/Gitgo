@@ -141,4 +141,4 @@ def test_workspace_scan_excludes_linked_host_file(tmp_path_factory):
     except (OSError, NotImplementedError):
         pytest.skip('OS symlink creation unavailable')
     assert linked.read_text(encoding='utf-8') == 'host-only-content'
-    assert scan_workspace(workspace) == ['safe.txt']
+    assert [Path(item).as_posix() for item in scan_workspace(workspace)] == ['safe.txt']
