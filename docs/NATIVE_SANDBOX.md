@@ -66,7 +66,7 @@ Host 在启动前用受信任的系统 libseccomp.so.2 生成匿名 BPF，并交
 限制；禁止 AF_UNIX、AF_VSOCK、netlink、packet 及其他 socket domain，防止
 工具连接工作区内的 Host Unix socket 或绕过 IP 网络 namespace。socketpair
 只允许 AF_UNIX 的 stream 对，保留 asyncio 和本次调用内部 IPC；禁用可重新
-连接的 datagram/seqpacket 对。io_uring 的三个入口均被拒绝，防止其异步
+连接的 datagram 对及未支持的 seqpacket 对。io_uring 的三个入口均被拒绝，防止其异步
 socket 操作绕开 socket syscall 规则。过滤继承到 exec/所有后代，不能由授权
 或模型参数撤销；其他 syscall 仍由现有 OS 边界管理，这不是完整 syscall 白名单。
 

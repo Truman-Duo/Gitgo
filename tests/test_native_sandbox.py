@@ -1105,7 +1105,8 @@ def test_linux_native_filter_cannot_be_bypassed_with_x32_abi(linux_box):
     source = ("import ctypes;print('ran',flush=True);"
               f"ctypes.CDLL(None).syscall({number | 0x40000000},2,1,0);print('escaped')")
     code, out, err = finished(spawn(source))
-    assert code == -31, (code, out, err)  # SIGSYS, unsupported ABI is fail closed.
+    # bubblewrap can translate the sandbox child's SIGSYS to 128 + signal.
+    assert code in (-31, 159), (code, out, err)
     assert out.strip() == 'ran'
 
 
@@ -1150,3 +1151,36 @@ def test_missing_socket_filter_never_loads_into_host_or_yields_fallback(tmp_path
             pytest.fail('A missing filter must never yield a launch descriptor')
     assert denied.value.code == 'SANDBOX_UNAVAILABLE'
     assert denied.value.result()['effect_state'] == 'not_committed'
+
+
+def test_linux_stream_pair_cannot_reconnect_to_host_socket(linux_box):
+    workspace, spawn = linux_box
+    address = str(workspace / 'host.sock')
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as listener:
+        listener.bind(address)
+        listener.listen()
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as control:
+            control.connect(address)
+            peer,_=listener.accept()
+            peer.close()
+        source = f"""import errno,socket
+for shutdown in (False,True):
+    left,right=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
+    if shutdown:
+        left.shutdown(socket.SHUT_RDWR)
+    try:
+        left.connect({address!r})
+    except OSError as e:
+        assert e.errno==errno.EISCONN,e
+    else:
+        left.send(b'escaped')
+        raise AssertionError('Stream pair reconnected to Host')
+    left.close();right.close()
+print('paired-only')
+"""
+        code,out,err=finished(spawn(source))
+        assert code == 0, err
+        assert out.strip() == 'paired-only'
+        listener.settimeout(0.1)
+        with pytest.raises(socket.timeout):
+            listener.accept()

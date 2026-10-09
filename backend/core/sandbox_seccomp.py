@@ -88,7 +88,8 @@ def socket_filter(workspace: Path):
             deny('socket', _Comparison(0, _EQ, domain, 0))
         deny('socket', _Comparison(0, _GT, socket.AF_INET6, 0))
         # AF_UNIX stream pairs have no pathname/abstract address to a Host
-        # endpoint. Datagram/seqpacket pairs can be reconnected, so deny them.
+        # endpoint. Datagram pairs can reconnect; only stream pairs are in
+        # the supported IPC policy, so all other kinds remain denied.
         deny('socketpair', _Comparison(0, _NE, socket.AF_UNIX, 0))
         for kind in range(16):  # Linux SOCK_TYPE_MASK; retain CLOEXEC/NONBLOCK.
             if kind != socket.SOCK_STREAM:
