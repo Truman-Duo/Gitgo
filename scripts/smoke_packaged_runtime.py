@@ -24,9 +24,9 @@ def _read_lines(stream, output: queue.Queue) -> None:
 
 
 class ProtocolClient:
-    def __init__(self, executable: Path, env: dict[str, str]):
+    def __init__(self, executable: Path, env: dict[str, str], *, arguments: list[str] | None = None):
         self.process = subprocess.Popen(
-            [str(executable)],
+            [str(executable), *(arguments or [])],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -40,9 +40,15 @@ class ProtocolClient:
             target=_read_lines, args=(self.process.stdout, self.lines), daemon=True,
         )
         self.reader.start()
-        started = self._next_message(30)
-        if started.get("type") != "host_started":
-            raise RuntimeError(f"packaged Host handshake failed: {started}")
+        try:
+            started = self._next_message(30)
+            if started.get("type") != "host_started":
+                raise RuntimeError(f"packaged Host handshake failed: {started}")
+        except BaseException:
+            if self.process.poll() is None:
+                self.process.kill()
+            self.process.wait(timeout=5)
+            raise
 
     def _next_message(self, timeout: float) -> dict:
         try:
@@ -82,10 +88,25 @@ class ProtocolClient:
             raise RuntimeError("packaged Host did not terminate its Daemon tree")
 
 
+def validate_search_bundle(executable: Path) -> None:
+    """A developer PATH must never mask a missing or mismatched release asset."""
+    directory = executable.resolve().parent
+    name = "rg.exe" if os.name == "nt" else "rg"
+    manifest = json.loads((directory / "ripgrep-manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("binary") != name:
+        raise ValueError("Packaged search manifest names an unexpected binary")
+    for filename, field in ((name, "sha256"), ("ripgrep-notices.txt", "notices_sha256")):
+        with (directory / filename).open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if digest != manifest.get(field):
+            raise ValueError(f"Packaged search asset integrity mismatch: {filename}")
+
+
 def smoke(executable: Path) -> None:
     executable = executable.resolve()
     if not executable.is_file():
         raise FileNotFoundError(executable)
+    validate_search_bundle(executable)
 
     with tempfile.TemporaryDirectory(prefix="gitgo-packaged-smoke-") as raw:
         root = Path(raw)
@@ -96,14 +117,20 @@ def smoke(executable: Path) -> None:
         project = ProjectConfig(name="Packaged Smoke")
         project.workspace_path = str(workspace)
         ConfigManager.save(Config(projects=[project]), config_path, allow_empty=True)
+        llm_path = root / "llm_config.json"
+        llm_path.write_text('{"providers":[],"active_provider":""}', encoding="utf-8")
 
         env = os.environ.copy()
         env.update({
             "GITGO_CONFIG_PATH": str(config_path),
             "GITGO_STATE_HOME": str(root / "state"),
+            "GITGO_LLM_CONFIG_PATH": str(llm_path),
+            "GITGO_LLM_SECRET_PATH": str(root / "provider_secrets.json"),
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
         })
+        # Development overrides must not hide a missing bundled release asset.
+        env.pop("GITGO_RIPGREP_PATH", None)
 
         tool = subprocess.run(
             [str(executable), INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE],
@@ -123,6 +150,19 @@ def smoke(executable: Path) -> None:
         names = {item["name"] for item in tool_result.get("data", {}).get("files", [])}
         if not tool_result.get("success") or "smoke.txt" not in names:
             raise RuntimeError(f"packaged tool runner returned invalid result: {tool_result}")
+
+        search = subprocess.run(
+            [str(executable), INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE],
+            input=json.dumps({"tool_name": "search_text", "args": {
+                "_workspace": str(workspace), "pattern": "packaged runtime", "literal": True}}),
+            cwd=workspace, env=env, text=True, encoding="utf-8", errors="replace",
+            capture_output=True, timeout=30, check=False,
+        )
+        search_result = json.loads(search.stdout)
+        data = search_result.get("data", {})
+        if (search.returncode or not search_result.get("success") or data.get("engine") != "ripgrep"
+                or data.get("complete") is not True or data.get("count") != 1):
+            raise RuntimeError(f"packaged ripgrep search failed: {search_result}")
 
         nested_python = subprocess.run(
             [str(executable), INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE],

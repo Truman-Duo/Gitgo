@@ -659,6 +659,10 @@ class ToolPipeline:
         """
         if not isinstance(result_data, dict):
             return
+        if tool_name in {"search_text", "list_files"}:
+            receipt.update(search_engine=result_data.get("engine"), search_complete=result_data.get("complete"),
+                           search_partial=result_data.get("partial"),
+                           search_warning_codes=[str(w.get("code")) for w in result_data.get("warnings", []) if isinstance(w, dict)])
         if receipt.get("effect") == "workspace_write":
             receipt["files"] = sorted(path.replace("\\", "/") for path in ToolPipeline._result_files(result_data))
         if tool_name == "exec_command":

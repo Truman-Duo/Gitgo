@@ -22,6 +22,12 @@ class ErrorDefinition:
 
 
 _DEFINITIONS = (
+    ErrorDefinition("GITGO-E3701", "BASH_IDENTITY_UNVERIFIED", "Bash identity could not be verified; the script was not executed.", True, "repair_bash_installation_then_retry"),
+    ErrorDefinition("GITGO-E3601", "SEARCH_ENGINE_REQUIRED", "This query requires ripgrep; repair the engine or explicitly narrow the query.", True, "repair_search_engine_or_narrow_query"),
+    ErrorDefinition("GITGO-E3602", "SEARCH_INCOMPLETE", "Search did not cover its declared scope; absence cannot be inferred from partial results.", True, "narrow_search_scope"),
+    ErrorDefinition("GITGO-E3603", "INVALID_SEARCH_ARGUMENTS", "Search arguments are invalid or exceed their bounded limits.", True, "correct_search_arguments"),
+    ErrorDefinition("GITGO-E3604", "INVALID_REGEX", "The search regular expression is invalid for ripgrep.", True, "correct_pattern_or_use_literal"),
+    ErrorDefinition("GITGO-E3605", "SEARCH_ERROR", "The search engine failed; inspect the preserved diagnostic.", True, "inspect_search_diagnostic"),
     ErrorDefinition("GITGO-E6201", "ENGINEERING_WORKFLOW_RECOVERY_REQUIRED",
                     "Engineering evidence could not be recorded; existing requirements remain active.",
                     True, "inspect_workflow_frontier_or_amend_scope"),
