@@ -207,6 +207,11 @@ class HostCompletionEvaluator:
 
         def classify(reason: str) -> tuple[str, list[str], bool]:
             lowered = reason.casefold()
+            if lowered.startswith("engineering workflow"):
+                return "engineering_evidence", [
+                    "inspect engineering_workflow status and satisfy the ready evidence nodes",
+                    "if unavailable, preserve the missing facts and request a scope decision",
+                ], "(decision)" not in lowered
             if "test" in lowered:
                 return "test_evidence", [
                     "run the required test through the registered test system",
@@ -264,6 +269,13 @@ class HostCompletionEvaluator:
     @classmethod
     def evaluate(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
         reasons: list[str] = []
+        from backend.core.loop.engineering_workflow import EngineeringWorkflow
+        try:
+            if getattr(process, "read_context_snapshot", None):
+                with process._context_lock:
+                    reasons.extend(EngineeringWorkflow(process).completion_reasons())
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            reasons.append(f"engineering workflow recovery requires inspection: {exc}")
         try:
             task_kind = TaskKind(getattr(process, "task_kind", TaskKind.ANSWER.value))
         except ValueError:

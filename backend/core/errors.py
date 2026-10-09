@@ -22,6 +22,12 @@ class ErrorDefinition:
 
 
 _DEFINITIONS = (
+    ErrorDefinition("GITGO-E6201", "ENGINEERING_WORKFLOW_RECOVERY_REQUIRED",
+                    "Engineering evidence could not be recorded; existing requirements remain active.",
+                    True, "inspect_workflow_frontier_or_amend_scope"),
+    ErrorDefinition("GITGO-E6202", "ENGINEERING_PREREQUISITE_REQUIRED",
+                    "The operation requires current engineering prerequisite evidence.",
+                    True, "satisfy_ready_workflow_nodes"),
     ErrorDefinition("GITGO-E3106", "PROCESS_PRESENTATION_INVALID",
                     "Select an existing B process and provide a valid display name or archive action.",
                     True, "correct_process_selection_or_name"),

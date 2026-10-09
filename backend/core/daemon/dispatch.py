@@ -983,6 +983,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     capability_profile_id=profile_id,
                     task_kind="answer",
                     runtime_preferences={"auto_compact": True},
+                    storage=getattr(apm, "storage", None),
                 ))
                 sidecar.cancellation_event = cancel_event
                 with lock:
@@ -1031,9 +1032,17 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     dict(sidecar.session.provider_usage[-1])
                     if sidecar.session.provider_usage else {}
                 )
+                task_error = (outcome or {}).get("error")
+                if isinstance(task_error, dict):
+                    emit_sidecar_event({
+                        "event": "error", "code": task_error.get("code"),
+                        "message": str(task_error.get("message") or "BTW task failed"),
+                    })
                 result = {
                     "sidecar_id": sidecar_id,
-                    "answer": str((outcome or {}).get("response") or ""),
+                    "answer": str((outcome or {}).get("response")
+                                  or (task_error or {}).get("message") or ""),
+                    "error": task_error,
                     "reasoning_content": "".join(reasoning_parts),
                     "usage": usage,
                     "status": str((outcome or {}).get("status") or sidecar.status.value),

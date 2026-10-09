@@ -25,6 +25,19 @@ def compact_tool_summary(
             return str(info.get("code") or info.get("catalog_id") or "failed")[:120]
         return (str(error).strip().splitlines()[0] if error else "failed")[:120]
 
+    if tool_name in {"search_text", "list_files"}:
+        for key, noun in (("matches", "matches"), ("files", "files"), ("counts", "file counts")):
+            if isinstance(payload.get(key), list):
+                flags = []
+                if payload.get("partial"):
+                    flags.append("partial")
+                elif payload.get("truncated"):
+                    flags.append("more")
+                if payload.get("degraded"):
+                    flags.append("fallback")
+                suffix = " · " + " · ".join(flags) if flags else ""
+                return f"{len(payload[key])} {noun}{suffix}"
+
     for key, noun in (
         ("matches", "matches"),
         ("results", "results"),
