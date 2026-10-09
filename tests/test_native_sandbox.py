@@ -669,7 +669,9 @@ def test_linux_cpu_budget_counts_all_descendants(linux_box):
     assert all((workspace / f'cpu-{i}').read_text() == 'ready' for i in range(2))
 
 
-@pytest.mark.parametrize("scenario", ["outside_read", "network"])
+@pytest.mark.parametrize("scenario", ["outside_read", "network",
+    pytest.param("unix_socket", marks=pytest.mark.skipif(sys.platform != 'linux',
+        reason='Linux socket domain policy'))])
 def test_packaged_host_denies_external_access(cross_platform_box, scenario):
     workspace, policy, _ = cross_platform_box
     configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
@@ -684,8 +686,18 @@ def test_packaged_host_denies_external_access(cross_platform_box, scenario):
             outside.write_text('host-secret')
             assert outside.read_text() == 'host-secret'
             attempt = f"open({str(outside)!r}).read()"
+        elif scenario == 'unix_socket':
+            listener = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            address = str(workspace / 'packaged-host.sock')
+            listener.bind(address)
+            listener.listen(2)
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as control:
+                control.connect(address)
+                peer,_=listener.accept()
+                peer.close()
+            attempt = ("__import__('socket').socket(__import__('socket').AF_UNIX,"
+                       f"__import__('socket').SOCK_STREAM).connect({address!r})")
         else:
-            import socket
             listener = socket.socket()
             listener.bind(('127.0.0.1', 0))
             listener.listen(2)
@@ -695,6 +707,9 @@ def test_packaged_host_denies_external_access(cross_platform_box, scenario):
             attempt = f"__import__('socket').create_connection({address!r},timeout=2)"
         script = ("try:\n " + attempt + "\nexcept OSError:\n print('blocked')"
                   "\nelse:\n print('escaped')")
+        if scenario == 'unix_socket':
+            script = "import errno\n" + script.replace('except OSError:',
+                'except OSError as e:\n assert e.errno==errno.EPERM')
         invocation = {"_workspace": str(policy.workspace), "argv": ["python", "-c", script]}
         source = (
             "import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;"
@@ -1184,3 +1199,15 @@ print('paired-only')
         listener.settimeout(0.1)
         with pytest.raises(socket.timeout):
             listener.accept()
+
+
+def test_linux_socket_policy_survives_descendant_exec(linux_box):
+    _,spawn=linux_box
+    child=("import errno,socket\ntry:\n socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)"
+           "\nexcept OSError as e:\n assert e.errno==errno.EPERM;print('child-blocked')"
+           "\nelse:\n raise AssertionError('Descendant lost its filter')")
+    source=("import subprocess,sys;"
+            f"subprocess.run([sys.executable,'-I','-c',{child!r}],check=True);print('parent-ran')")
+    code,out,err=finished(spawn(source))
+    assert code == 0,err
+    assert out.splitlines() == ['child-blocked','parent-ran']
