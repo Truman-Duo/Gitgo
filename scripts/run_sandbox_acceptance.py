@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import sqlite3
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -24,6 +25,13 @@ def main():
     host = root / '.gitgo/sandbox-dist/gitgo-host' / ('gitgo-host' + suffix)
     if not host.is_file():
         raise SystemExit('Build did not produce the declared Host artifact')
+    # Exercise the bundled search-engine lookup inside the real frozen Host.
+    # This disposable security-test artifact is not a release/installer package.
+    from backend.core.tools.workspace_search import resolve_ripgrep
+    engine = resolve_ripgrep()
+    if not engine:
+        raise SystemExit('Packaged search acceptance requires the pinned CI engine')
+    shutil.copy2(engine, host.parent / ('rg.exe' if os.name == 'nt' else 'rg'))
     # The real artifact must contain the patched database dependency too;
     # a passing source interpreter does not verify the frozen runtime.
     probe = (
@@ -34,6 +42,7 @@ def main():
     subprocess.run([str(host), '--gitgo-internal-role', 'python', '-I', '-c', probe],
                    cwd=host.parent, check=True)
     environment = dict(os.environ, GITGO_SANDBOX_TEST_HOST=str(host))
+    environment.pop('GITGO_RIPGREP_PATH', None)
     subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests/test_native_sandbox.py',
                     '-k', 'packaged', '-q'], cwd=root, env=environment, check=True)
 

@@ -360,6 +360,7 @@ def test_unknown_application_operation_is_stable_error():
     assert exc.value.code == "UNKNOWN_OPERATION"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DPAPI credential persistence")
 def test_provider_secret_is_not_round_tripped_and_blank_can_retain(tmp_path_factory):
     config_path = tmp_path_factory / "llm_config.json"
     with patch.object(LLMConfigManager, "_config_path", return_value=config_path):
@@ -398,6 +399,7 @@ def test_provider_secret_is_not_round_tripped_and_blank_can_retain(tmp_path_fact
         assert '"secret_ref"' in metadata
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DPAPI credential persistence")
 def test_plaintext_provider_config_is_migrated_to_encrypted_store(tmp_path_factory):
     config_path = tmp_path_factory / "llm_config.json"
     fake_key = "sk-" + "legacy-plaintext-must-disappear"
@@ -1203,3 +1205,12 @@ def test_replace_existing_daemon_uses_windows_process_tree_termination(
 
     assert calls[0][0] == ["taskkill", "/PID", "12345", "/T", "/F"]
     assert not pid_path.exists()
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Non-Windows credential boundary')
+def test_unsupported_credential_backend_refuses_without_plaintext_fallback(tmp_path_factory):
+    from backend.core.secret_store import EncryptedSecretStore, SecretStoreError
+    path = tmp_path_factory / 'unavailable-secrets.json'
+    with pytest.raises(SecretStoreError, match='DPAPI is unavailable'):
+        EncryptedSecretStore(path)
+    assert not path.exists()

@@ -151,6 +151,8 @@ def test_explicit_fake_bash_override_is_rejected_by_identity_resolver(tmp_path_f
     monkeypatch.setattr(workspace_tools.sys, "platform", "win32")
     monkeypatch.setattr(executable_identity, "verify_git_bash", lambda _: {
         "verified": False, "message": "invalid publisher"})
+    # Simulate Windows inventory without importing winreg on a Linux runner.
+    monkeypatch.setattr("backend.core.terminal_launcher.git_install_roots", lambda: [root])
     result = workspace_tools._resolve_bash()
     assert result["error"] == "BASH_IDENTITY_UNVERIFIED"
     assert "invalid publisher" in result["detail"]

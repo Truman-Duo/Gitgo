@@ -42,7 +42,7 @@ def isolate_default_gitgo_state(
 def tmp_path_factory() -> Iterator[Path]:
     """创建临时目录，测试后自动清理。"""
     with tempfile.TemporaryDirectory(prefix="gitgo_test_") as d:
-        yield Path(d)
+        yield Path(d).resolve()
 
 
 @pytest.fixture

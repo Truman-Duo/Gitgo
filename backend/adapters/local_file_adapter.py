@@ -37,7 +37,8 @@ class LocalFileAdapter(FileAdapter):
         return self._resolve(path).is_dir()
 
     def is_symlink(self, path: str) -> bool:
-        return self._resolve(path).is_symlink()
+        # Inspect the directory entry, before resolve follows the link.
+        return (self._root / path).is_symlink()
 
     def stat(self, path: str) -> os.stat_result:
         return self._resolve(path).stat()

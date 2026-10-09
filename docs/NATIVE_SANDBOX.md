@@ -192,3 +192,12 @@ LD_LIBRARY_PATH 的权限。实际构建的 frozen Host 还必须验证打包后
 搜索协议/外部授权逻辑测试使用显式 transport fixture；它们不构成原生隔离验收。
 原生及真实 frozen 验收另行覆盖工作区列表、literal 搜索与正向对照。
 当前原生文件系统策略尚不支持通过授权扩展外部搜索目录；授权不会绕过 OS 拒绝。
+
+
+跨平台全量回归的 CI 搜索引擎固定为官方 ripgrep 15.2.0；分别验证 Windows/Linux
+发行归档的 SHA-256，只取已验证归档中的 rg 二进制，供可丢弃 hosted runner 使用。
+真实 frozen 安全测试包携带该引擎，删除 Host 路径覆盖后验证 bundled engine 实际运行。
+这是测试产物，不替代包含完整第三方通知的正式 staging/Installer 验收。
+测试临时目录统一 canonicalize，保留生产的 junction/重定向拒绝；中文 fixture 显式 UTF-8。
+上游凭据持久化当前仅有 Windows DPAPI。其正向验收标记 Windows 专属；Linux 检查
+缺失后端时拒绝建立存储且不落盘。此项通过不代表已实现 Linux/macOS 凭据存储。

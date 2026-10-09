@@ -13,6 +13,7 @@ on:
       - "backend/core/native_host_entry.py"
       - "scripts/*sandbox*.py"
       - "scripts/provision_ci_sqlite.py"
+      - "scripts/provision_ci_ripgrep.py"
       - "scripts/probe_macos_virtualization.swift"
       - "cli/dashboard/**"
       - "tests/**"
@@ -38,12 +39,14 @@ jobs:
       - run: python -m pip install -r requirements-portable.txt pyinstaller
       - name: Provision and validate pinned patched SQLite in CI
         run: python -B scripts/provision_ci_sqlite.py
+      - name: Provision and validate pinned official ripgrep in CI
+        run: python -B scripts/provision_ci_ripgrep.py
       - name: Windows source and packaged isolation
         if: runner.os == 'Windows'
         run: python -B scripts/run_sandbox_acceptance.py
       - name: Linux source and packaged isolation in delegated service
         if: runner.os == 'Linux'
-        run: sudo systemd-run --quiet --wait --pipe --collect --uid="$(id -u)" --working-directory="$PWD" --setenv="LD_LIBRARY_PATH=$LD_LIBRARY_PATH" --unit=gitgo-sandbox-ci -p Delegate=yes "$(which python)" -B scripts/run_linux_sandbox_scope.py -- "$(which python)" -B scripts/run_sandbox_acceptance.py
+        run: sudo systemd-run --quiet --wait --pipe --collect --uid="$(id -u)" --working-directory="$PWD" --setenv="LD_LIBRARY_PATH=$LD_LIBRARY_PATH" --setenv="GITGO_RIPGREP_PATH=$GITGO_RIPGREP_PATH" --unit=gitgo-sandbox-ci -p Delegate=yes "$(which python)" -B scripts/run_linux_sandbox_scope.py -- "$(which python)" -B scripts/run_sandbox_acceptance.py
 
   macos-audit:
     name: macOS capability audit (not backend acceptance) (${{ matrix.os }})
