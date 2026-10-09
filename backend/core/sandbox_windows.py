@@ -151,6 +151,14 @@ class WindowsApi:
         if not ok:
             raise C.WinError(C.get_last_error())
 
+    def preview_profile_sid(self, name):
+        """Derive the deterministic SID without creating a profile or folders."""
+        sid = PTR()
+        status = self.derive_sid(name, C.byref(sid))
+        if status < 0:
+            raise OSError(f"AppContainer SID failed (HRESULT 0x{status & 0xffffffff:08x})")
+        return sid
+
     def profile_sid(self, name):
         sid = PTR()
         status = self.create_profile(name, name, "Gitgo isolated tools", None, 0, C.byref(sid))

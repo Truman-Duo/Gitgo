@@ -34,14 +34,42 @@ Host 在构造策略和实际启动前拒绝工作区与可信源码、Python �
 python scripts/provision_sandbox.py --workspace PROJECT --runtime DEDICATED_RUNTIME --runtime GITGO_SOURCE
 ```
 
-检查路径后添加 --apply。预览只建立 AppContainer profile，不修改 ACL。
-应用会为该 profile 增加继承 ACE，并把工作区设为 Low integrity。
-这会改变工作区安全描述符，必须使用专用工作区；Agent 工具不会自动执行配置。
-不继承 ACL 的已有文件需要操作员另行审查配置，失败时工具保持拒绝。
+预览只派生确定的 AppContainer SID，不创建 profile、恢复记录或修改 ACL。
+应用前必须停止项目进程，并指定一个现有、私有的外部 Host 目录中的新恢复文件；
+该文件不得落入工作区或任何暴露的运行时树，已有文件不得覆盖：
 
-清理时先停止所有项目进程，再删除专用工作区和运行时；若需保留目录，
-使用配置输出的 SID 撤销其 ACE，并恢复原始 integrity label。
-不要未经记录地覆盖已有 ACL；配置脚本不承担通用 ACL 备份/恢复。
+```text
+python scripts/provision_sandbox.py --workspace PROJECT --runtime DEDICATED_RUNTIME --runtime GITGO_SOURCE --record PRIVATE_HOST_DIR/project-acl.json --apply
+```
+
+应用先打开全部目录/文件，确认读取安全描述符、写 DACL/MIC 的权限；记录原始
+DACL、MIC 及原生 volume/file ID，并 flush/fsync 到新文件后才创建 profile 和改 ACL。
+使用 OS 返回的系统 icacls 路径，不从 cwd/PATH 查找。原生句柄锁住父目录和对象，
+防止配置期间改名/删除；拒绝任何 reparse point 和多链接文件，以免改到范围外的对象。
+树最多 100000 个对象，记录最多 64 MiB；需要更大/带链接的安装树应另行审查，不放宽检查。
+恢复数据含私有路径和 SID，保留在 Host 私有目录，不提交、发布或作为工具输入。
+
+修改失败立即通过同一批对象句柄回滚原始 DACL 授权、DACL 保护标志和 MIC，
+然后重新读取核验；回滚失败必须报告不完整并保留记录，不能当成配置成功。
+Windows API 会重新计算 AI 继承记账标志；核验保持每个 ACE、ACE 继承位、
+DACL protected 标志和实际 MIC，不声称描述符二进制逐字节相同。
+空/不存在的标签使用系统默认 MIC，绝不把允许所有访问的 null DACL 与拒绝
+所有访问的 empty DACL 等同。操作不修改 owner/group，LABEL 更新不恢复或替换审计 ACE。
+
+若树中对象和身份未变化，可以先预览、再显式恢复：
+
+```text
+python scripts/provision_sandbox.py --restore PRIVATE_HOST_DIR/project-acl.json
+python scripts/provision_sandbox.py --restore PRIVATE_HOST_DIR/project-acl.json --apply
+```
+
+恢复前对照完整路径和原生 file ID；新增、删除、原子替换文件或重定向时明确拒绝，
+在人工核验前不对新对象套用旧 ACL。恢复记录已完成时拒绝再次套用。
+这支持配置失败回滚及未变化树的恢复，不是已使用工作区的通用卸载器：内容编辑
+保留，但产生新对象后还需独立的生命周期迁移方案。profile 保留，因为可能已有
+其他配置共享该 profile；撤销全部相关 ACE、停止所有使用者后再由操作员审查删除。
+不继承 ACL 的已有文件仍需操作员审查配置，工具保持失败关闭。
+Agent 工具不会自动执行配置或恢复，也不会为启动工具修改 Host ACL。
 
 ### Shell 迁移
 
@@ -219,3 +247,10 @@ Windows hosted AppContainer 曾拒绝打开 NUL，导致真实 frozen 搜索在�
 真实 frozen 验收覆盖 UTF-8 文本与 DOCX 提取，并用 Host 能读的外部文件及
 逻辑额外读授权作对照，确认原生 OS 权限仍拒绝越界。未验证所有旧版 Office
 转换器发行包；安装的适配器和资源需落在已有的原生可读运行时范围内。
+
+
+Windows 配置恢复验收使用真实安全描述符和 icacls，不以命令 mock 代替 ACL
+结果。包括每个修改阶段失败的回滚、protected 子目录及显式 Medium 标签恢复、
+只读预览、对象新增/替换拒绝、junction/hardlink 拒绝、私有记录不覆盖、损坏后续
+描述符不先部分恢复，以及真实 AppContainer 在 apply 前后/restore 后的访问行为。
+这补齐配置事务边界；工作区 Git hooks/config、项目身份仍需独立 OS 保护。

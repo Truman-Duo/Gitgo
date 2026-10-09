@@ -1326,3 +1326,54 @@ def test_packaged_host_document_extraction_is_native(cross_platform_box, suffix)
     assert 'Host-only secret' not in json.dumps(results[1]), results
     assert not results[1]['success'] or (results[1]['data'] or {}).get('error'), results
     assert 'path escapes approved resource scope' not in json.dumps(results[1]), results
+
+
+def test_windows_operator_apply_restore_controls_real_native_access(isolated_python, tmp_path_factory):
+    from ctypes import wintypes as W
+    from scripts.provision_sandbox import provision, restore_record
+    from backend.core.sandbox_windows import WindowsApi
+    workspace = tmp_path_factory / 'workspace'
+    workspace.mkdir()
+    runtime = tmp_path_factory / 'runtime'
+    shutil.copytree(isolated_python, runtime,
+                    ignore=shutil.ignore_patterns('packages', 'source', '__pycache__'))
+    target = workspace / 'allowed.txt'
+    target.write_text('before', encoding='utf-8')
+    secret = tmp_path_factory / 'Host-only.txt'
+    secret.write_text('Host secret', encoding='utf-8')
+    assert secret.read_text(encoding='utf-8') == 'Host secret'
+    record = tmp_path_factory / 'host-recovery.json'
+    policy = SandboxPolicy(workspace)
+    source = (
+        'from pathlib import Path;'
+        "Path('allowed.txt').write_text('executed',encoding='utf-8');"
+        f"assert Path({str(runtime / f'python{sys.version_info.major}{sys.version_info.minor}.zip')!r}).exists();"
+        '\ntry:\n' + f" Path({str(secret)!r}).read_text()"
+        "\nexcept PermissionError:\n print('ran-without-Host-access')"
+        "\nelse:\n raise AssertionError('External Host file was exposed')"
+    )
+    def launch():
+        return sandbox_popen([str(runtime / 'python.exe'), '-I', '-X', 'utf8', '-c', source],
+            policy, cwd=str(workspace), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding='utf-8', env=sandbox_environment(os.environ))
+    try:
+        provision(workspace, [runtime], record=record, apply=True)
+        code, out, err = finished(launch())
+        assert code == 0 and out.strip() == 'ran-without-Host-access', err
+        assert target.read_text(encoding='utf-8') == 'executed'
+        restore_record(record, apply=True)
+        # Content edits survived: this restores ACL/MIC, not workspace data.
+        assert target.read_text(encoding='utf-8') == 'executed'
+        try:
+            process = launch()
+        except SandboxDenied:
+            pass
+        else:
+            code, out, err = finished(process)
+            assert code != 0 and 'ran-without-Host-access' not in out, (code, out, err)
+    finally:
+        api = WindowsApi()
+        delete = api.userenv.DeleteAppContainerProfile
+        delete.argtypes, delete.restype = [W.LPCWSTR], C.c_long
+        status = delete(policy.profile_name)
+        assert status >= 0 or status == -2147024894

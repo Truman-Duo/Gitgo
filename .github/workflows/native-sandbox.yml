@@ -12,6 +12,7 @@ on:
       - "backend/core/child_process.py"
       - "backend/core/native_host_entry.py"
       - "scripts/*sandbox*.py"
+      - "backend/core/windows_acl.py"
       - "scripts/provision_ci_sqlite.py"
       - "scripts/provision_ci_ripgrep.py"
       - "scripts/probe_macos_virtualization.swift"
