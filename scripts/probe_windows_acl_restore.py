@@ -22,7 +22,7 @@ def main():
     if sys.platform != 'win32':
         raise SystemExit('Windows only')
     results = []
-    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00)]:
+    for mode, mask in [('native-original', None), ('recorded', 0), ('dacl-ai', 0x400), ('dacl-sacl-ai', 0xC00), ('dacl-only', 0), ('label-then-dacl', 0), ('dacl-then-label', 0), ('set-file', 0)]:
         with tempfile.TemporaryDirectory(prefix='gitgo_acl_probe_') as temporary:
             workspace = Path(temporary).resolve() / 'workspace'
             workspace.mkdir(); (workspace / 'nested').mkdir()
@@ -64,9 +64,22 @@ def main():
                                 tree.free(C.cast(text, C.c_void_p))
                             if mask:
                                 tree.check(change(desc, mask, mask))
-                            status = tree.set_object_security(tree.handles[original['path']], 4 | 16, desc)
-                            if status != 0:
-                                raise C.WinError(tree.status_to_error(status))
+                            steps = [4 | 16]
+                            if mode == 'dacl-only':
+                                steps = [4]
+                            elif mode == 'label-then-dacl':
+                                steps = [16, 4]
+                            elif mode == 'dacl-then-label':
+                                steps = [4, 16]
+                            if mode == 'set-file':
+                                set_file = _fn(tree.advapi, 'SetFileSecurityW',
+                                               [W.LPCWSTR, W.DWORD, C.c_void_p], W.BOOL)
+                                tree.check(set_file(original['path'], 4 | 16, desc))
+                            else:
+                                for flags in steps:
+                                    status = tree.set_object_security(tree.handles[original['path']], flags, desc)
+                                    if status != 0:
+                                        raise C.WinError(tree.status_to_error(status))
                         finally:
                             if mask is not None:
                                 tree.free(desc)
