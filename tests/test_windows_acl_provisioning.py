@@ -267,8 +267,7 @@ def test_restore_explicit_children_without_recalculating_parent_inheritance(
             desc = C.c_void_p()
             tree.check(tree.from_sddl(text, 1, C.byref(desc), None))
             try:
-                assert tree.set_object_security(handle,
-                    4 | (0x80000000 if inherited else 0x20000000), desc) == 0
+                assert tree.set_object_security(handle, 4, desc) == 0
             finally:
                 tree.free(desc)
         if medium:
@@ -281,7 +280,7 @@ def test_restore_explicit_children_without_recalculating_parent_inheritance(
         text = 'D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)'
         tree.check(tree.from_sddl(text, 1, C.byref(desc), None))
         try:
-            assert tree.set_object_security(tree.handles[str(child)], 4 | 0x20000000, desc) == 0
+            assert tree.set_object_security(tree.handles[str(child)], 4, desc) == 0
         finally:
             tree.free(desc)
         original = tree.snapshot()

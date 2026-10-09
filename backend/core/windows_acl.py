@@ -167,17 +167,17 @@ class SecurityTree:
                 if not present.value:
                     raise ValueError('Recovery descriptor has no recorded DACL')
             for record, descriptor in zip(records, descriptors):
-                control, revision = W.WORD(), W.DWORD()
-                self.check(self.control(descriptor, C.byref(control), C.byref(revision)))
                 # SetSecurityInfo propagates inheritance across descendants,
                 # rewriting explicit ACEs even without UNPROTECTED. Recovery
                 # must restore each recorded object, not recalculate its ACL.
                 # The documented user-mode NtSetSecurityObject entry applies
                 # this validated self-relative descriptor to the held handle.
                 # LABEL replaces only MIC, leaving audit ACEs untouched.
-                protection = 0x80000000 if control.value & 0x1000 else 0x20000000
+                # Protection is carried by the descriptor control itself.
+                # Do not pass Win32 UNPROTECTED flags: on Server these request
+                # reinheritance and change explicit ACEs to inherited ACEs.
                 status = self.set_object_security(self.handles[record['path']],
-                    DACL | LABEL | protection, descriptor)
+                    DACL | LABEL, descriptor)
                 if status != 0:
                     raise C.WinError(self.status_to_error(status))
         finally:

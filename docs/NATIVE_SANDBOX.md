@@ -54,6 +54,7 @@ DACL、MIC 及原生 volume/file ID，并 flush/fsync 到新文件后才创建 p
 Windows API 会重新计算 AI 继承记账标志；核验保持每个 ACE、ACE 继承位、
 DACL protected 标志和实际 MIC，不声称描述符二进制逐字节相同。
 恢复逐对象调用用户态 NtSetSecurityObject，将已验证的描述符写到原生句柄；
+仅传 DACL/LABEL 信息位，保护状态使用已记录描述符的 control，不请求强制重新继承。
 不使用会重新传播整树继承的 SetSecurityInfo 恢复，避免给旧显式子 ACL 加入父目录 ACE。
 参见 [Microsoft 原生安全对象 API 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwsetsecurityobject)。
 显式 OWNER_RIGHTS ACL、protected/unprotected 双向变化、可继承父目录与显式子 ACL
