@@ -349,7 +349,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
     if not workspace_path or process.session is None:
         return {}
     store = ContextObjectStore(workspace_path)
-    runtime_storage = getattr(getattr(process, "_manager", None), "storage", None)
+    runtime_storage = getattr(process, "bound_storage", getattr(getattr(process, "_manager", None), "storage", None))
 
     def context_open(args: dict) -> dict:
         return store.materialize(

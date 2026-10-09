@@ -13,6 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
+import logging
+
+LOG = logging.getLogger(__name__)
 
 
 # ── 事件类型 ────────────────────────────────────────────────
@@ -52,9 +55,11 @@ class EventBus:
         bus.emit(ToolEvent("ToolResultReady", execution_id="..."))
     """
 
-    def __init__(self):
+    def __init__(self, on_error: Callable | None = None):
         self._subscribers: dict[str, list[Callable]] = {}
         self._wildcard_subscribers: list[Callable] = []
+        self._on_error = on_error
+        self.delivery_failures: list[dict] = []
 
     def subscribe(self, event_type: str, handler: Callable) -> None:
         """订阅特定事件类型。handler 接收 ToolEvent | ExecutionEvent。"""
@@ -72,8 +77,19 @@ class EventBus:
         for handler in handlers + self._wildcard_subscribers:
             try:
                 handler(event)
-            except Exception:
-                pass  # 单个订阅者不应影响其他
+            except Exception as exc:
+                failure = {"event_type": event.event_type,
+                           "execution_id": event.execution_id,
+                           "handler": getattr(handler, "__name__", type(handler).__name__),
+                           "error_type": type(exc).__name__}
+                self.delivery_failures.append(failure)
+                del self.delivery_failures[:-64]
+                LOG.error("event delivery failed: %s", failure)
+                if self._on_error is not None:
+                    try:
+                        self._on_error(failure)
+                    except Exception:
+                        LOG.exception("event failure notification failed; retained in delivery_failures")
 
     def unsubscribe(self, event_type: str, handler: Callable) -> None:
         """取消订阅。"""

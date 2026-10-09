@@ -117,7 +117,7 @@ def collect_decision_evidence(process, focus: str = "all") -> dict:
     """Return compact Host-owned facts so the LLM does not manually aggregate them."""
     allowed = {
         "all", "completion", "gates", "children", "tests",
-        "governance", "budget", "capabilities",
+        "governance", "budget", "capabilities", "engineering",
     }
     if focus not in allowed:
         raise ValueError(f"focus must be one of: {', '.join(sorted(allowed))}")
@@ -136,6 +136,9 @@ def collect_decision_evidence(process, focus: str = "all") -> dict:
         result["outstanding_gates"] = HostCompletionEvaluator.outstanding_gates(
             process, list(context.get("signals") or []),
         )
+    if focus in {"all", "engineering"}:
+        from .engineering_workflow import EngineeringWorkflow
+        result["engineering"] = EngineeringWorkflow(process).status()
     if focus in {"all", "children"}:
         manager = getattr(process, "_manager", None)
         child_ids, contracts, reviews = process.coordination_snapshot()

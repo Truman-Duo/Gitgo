@@ -601,6 +601,7 @@ def test_native_host_binds_host_search_configuration_to_task_preferences():
     preferences = host._daemons["demo"].last_task["runtime_preferences"]
     request_started_at = preferences.pop("request_started_at_utc")
     assert request_started_at.endswith("+00:00")
+    assert preferences.pop("frontend_origin") == host.frontend_origin
     assert preferences == {
         "auto_compact": True,
         "agent_routing": "owner",

@@ -240,6 +240,19 @@ def _start_background_harvest(
     return True
 
 
+def _start_usability_collector(storage, event_queue):
+    """Optional measurement initialization must never prevent task admission."""
+    try:
+        from backend.core.usability import UsabilityCollector
+        collector = UsabilityCollector(storage.paths.project_root, on_warning=event_queue.put)
+        collector.start()
+        return collector
+    except Exception:
+        event_queue.put({"event": "error", "code": "USABILITY_COLLECTION_START_FAILED",
+            "message": "Background usage statistics could not start; task execution is unaffected."})
+        return None
+
+
 def run_daemon(
     cfg: Config,
     project: ProjectConfig,
@@ -806,6 +819,8 @@ def run_daemon(
     }, priority="immediate")
 
     # Background threads
+    usability = _start_usability_collector(storage_runtime, evq)
+    daemon_ctx["usability"] = usability
     # The watcher and the scanner must share one exclusion policy.  Using only
     # project.force_exclude here omitted host-private paths such as .gitgo/;
     # every checkpoint/tool receipt then dirtied the workspace and recursively
@@ -1220,6 +1235,8 @@ def run_daemon(
                 },
             }, priority="immediate")
         hash_cache.flush()
+        if usability is not None:
+            usability.stop()
         if storage_runtime is not None and not storage_writers_alive:
             storage_runtime.close()
         _release_pid_file(project)

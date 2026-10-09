@@ -45,11 +45,15 @@ type Props = {
   client: BackendClient;
   refreshSec?: number;
   startupSmokeTask?: StartupSmokeTask;
+  startupTerminalSetup?: boolean;
+  startupNotice?: string;
+  onTerminalSetupComplete?: () => Promise<{completed: boolean; message: string}>;
 };
 
 const appStore = createReducerStore<AppState, AppAction>(reducer, initialAppState());
 
-export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
+export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalSetup = false,
+  startupNotice = "", onTerminalSetupComplete }: Props) {
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
@@ -108,6 +112,28 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
     dispatch({ type: "pop_overlay" });
   }, [dispatch, llmCmdInput]);
 
+  const [terminalSetupNeeded, setTerminalSetupNeeded] = useState(startupTerminalSetup);
+  const terminalSetupShown = useRef(false);
+  const terminalSetupObserved = useRef(false);
+  useEffect(() => {
+    if (terminalSetupNeeded && !terminalSetupShown.current) {
+      terminalSetupShown.current = true;
+      pushOverlay("configPanel", {initialTab: "general", initialSetting: "terminal"});
+    }
+  }, [terminalSetupNeeded, pushOverlay]);
+  const initialTerminalPanelOpen = overlayStack.some(overlay =>
+    overlay.type === "configPanel" && overlay.props?.initialSetting === "terminal");
+  useEffect(() => {
+    if (initialTerminalPanelOpen) terminalSetupObserved.current = true;
+    else if (terminalSetupObserved.current) setTerminalSetupNeeded(false);
+  }, [initialTerminalPanelOpen]);
+  const onSettingSaved = useCallback(async (key: string) => {
+    if (key !== "launcher.terminal" || !terminalSetupNeeded || !initialTerminalPanelOpen) return;
+    const result = await onTerminalSetupComplete?.();
+    if (result?.completed) setTerminalSetupNeeded(false);
+    return result?.message;
+  }, [terminalSetupNeeded, initialTerminalPanelOpen, onTerminalSetupComplete]);
+
   // First-launch: if no projects AND no global LLM provider, force LLM config.
   // Global provider fetch is async, so gate the decision on its completion.
   const [firstLaunchChecked, setFirstLaunchChecked] = useState(false);
@@ -119,15 +145,15 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
   }, [fetchGlobalLLM]);
 
   useEffect(() => {
-    if (!loading && globalLLMFetched && !firstLaunchChecked &&
+    if (!terminalSetupNeeded && overlayStack.length === 0 && !loading && globalLLMFetched && !firstLaunchChecked &&
         projects.length === 0 && !activeProject && globalProviders.length === 0) {
       setFirstLaunchChecked(true);
-      pushOverlay("configPanel");
+      pushOverlay("configPanel", {initialTab: "providers"});
     }
-  }, [loading, globalLLMFetched, firstLaunchChecked, projects.length, activeProject, globalProviders.length, pushOverlay]);
+  }, [terminalSetupNeeded, overlayStack.length, loading, globalLLMFetched, firstLaunchChecked, projects.length, activeProject, globalProviders.length, pushOverlay]);
 
   // ── Status text derivation ──────────────────────────────
-  const [screenStatusText, setScreenStatusText] = useState("");
+  const [screenStatusText, setScreenStatusText] = useState(startupNotice);
   const [footerOverride, setFooterOverride] = useState<FooterConfig | null>(null);
   const [pendingDecision, setPendingDecision] = useState<PendingDecision | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
@@ -342,7 +368,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
   const startupSmokeSent = useRef(false);
   const startupSmokeDecisionsAnswered = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!startupSmokeTask || startupSmokeSent.current || loading || loopData.loading) return;
+    if (!startupSmokeTask || terminalSetupNeeded || overlayStack.length || startupSmokeSent.current || loading || loopData.loading) return;
     if (!projects.some((item) => item.name === startupSmokeTask.project)) return;
     if (scene !== "workspace" || activeProject !== startupSmokeTask.project) {
       navigate("workspace", { activeProject: startupSmokeTask.project });
@@ -381,7 +407,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
     }, 100);
     return () => clearInterval(timer);
   }, [
-    startupSmokeTask, loading, loopData.loading, projects, scene,
+    startupSmokeTask, terminalSetupNeeded, overlayStack.length, loading, loopData.loading, projects, scene,
     activeProject, navigate, pendingDecision,
   ]);
 
@@ -551,6 +577,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
     processes: loopData.processes,
     sendChat: (text: string) => sendChatRef.current(text),
     verbose: generalConfig.verbose,
+    onSettingSaved,
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");

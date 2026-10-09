@@ -24,15 +24,17 @@ type Props = {
   onBack: () => void;
   onStatusUpdate?: (text: string) => void;
   onRefresh?: () => void;
+  initialSetting?: string;
+  onSettingSaved?: (key: string) => Promise<string | void>;
 };
 
 export const ConfigPanel = memo(function ConfigPanel({
-  client, project, initialTab, cmdInput, onFooter, onBack, onStatusUpdate, onRefresh,
+  client, project, initialTab, cmdInput, onFooter, onBack, onStatusUpdate, onRefresh, initialSetting, onSettingSaved,
 }: Props) {
   const requestedTab = initialTab === "bin" ? "general" : initialTab;
   const [tab, setTab] = useState<ConfigTabId>((requestedTab as ConfigTabId) || "general");
   const [tabReport, setTabReport] = useState<TabReport>({ sub: false, fullscreen: false });
-  const [contentFocused, setContentFocused] = useState(false);
+  const [contentFocused, setContentFocused] = useState(Boolean(initialSetting));
 
   const goToTab = useCallback((id: ConfigTabId) => {
     setTabReport({ sub: false, fullscreen: false });
@@ -100,6 +102,8 @@ export const ConfigPanel = memo(function ConfigPanel({
           report={report}
           shell={shell}
           contentFocused={contentFocused}
+          initialSetting={initialSetting}
+          onSettingSaved={onSettingSaved}
         />
       </Box>
     </Box>

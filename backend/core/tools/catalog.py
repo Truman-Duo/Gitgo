@@ -57,14 +57,21 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         ),
         "list_files": AgentTool(
             name="list_files",
-            description="List workspace files with a glob, stable paths and bounded output.",
+            description=("Find workspace files using ripgrep globs and bounded, sorted pages. "
+                         "Default scope respects local ignore files and excludes hidden/generated files. "
+                         "Use include_hidden/respect_ignore explicitly to change that scope. "
+                         "Warnings and partial coverage are never proof a file does not exist."),
             parameters={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "pattern": {"type": "string"},
-                    "max_results": {"type": "integer"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 5000},
                     "include_hidden": {"type": "boolean"},
+                    "respect_ignore": {"type": "boolean"},
+                    "exclude": {"type": "array", "items": {"type": "string"}},
+                    "offset": {"type": "integer", "minimum": 0, "maximum": 10000},
+                    "timeout": {"type": "integer", "minimum": 1, "maximum": 30},
                 },
                 "required": [],
             },
@@ -79,8 +86,14 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "search_text": AgentTool(
             name="search_text",
             description=(
-                "Search text across workspace files. Uses ripgrep when available and "
-                "returns structured file/line matches."
+                "Search workspace text with ripgrep. Return file/line content, matching "
+                "files, or per-file matching-line counts using output_mode. Prefer literal=true "
+                "for ordinary text. Sorted offset pages and context_lines support follow-up reads. "
+                "Default scope excludes hidden/generated/binary and files over 2MB, and respects "
+                "local ignore files. Explicit include globs can override ignore rules; exclude "
+                "globs and Host-generated-directory exclusions take precedence. "
+                "Inspect engine/complete/partial/warnings before concluding no match. "
+                "Unavailable ripgrep only permits a limited, visible literal fallback."
             ),
             parameters={
                 "type": "object",
@@ -90,7 +103,14 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "literal": {"type": "boolean"},
                     "case_sensitive": {"type": "boolean"},
                     "include": {"type": "array", "items": {"type": "string"}},
-                    "max_results": {"type": "integer"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 2000},
+                    "output_mode": {"type": "string", "enum": ["content", "files", "count"]},
+                    "context_lines": {"type": "integer", "minimum": 0, "maximum": 5},
+                    "offset": {"type": "integer", "minimum": 0, "maximum": 10000},
+                    "exclude": {"type": "array", "items": {"type": "string"}},
+                    "include_hidden": {"type": "boolean"},
+                    "respect_ignore": {"type": "boolean"},
+                    "timeout": {"type": "integer", "minimum": 1, "maximum": 30},
                 },
                 "required": ["pattern"],
             },

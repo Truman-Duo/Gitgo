@@ -81,6 +81,7 @@ class AgentProcess:
     model_id: str = ""                 # LLM model id
     runtime_preferences: dict[str, Any] = field(default_factory=dict, repr=False)
     session: Any = field(default=None, repr=False)   # AgentSession, 避免循环 import
+    runtime_storage: Any = field(default=None, repr=False)
     mailbox: Any = field(default=None, repr=False)   # AgentMailbox, 进程内控制消息
     task_budget: Any = field(default=None, repr=False)
     budget_lease: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -103,6 +104,13 @@ class AgentProcess:
     lifecycle_finalized: bool = False
         # Set after Host post-processing (for example worktree sealing). A
         # model-visible COMPLETED status alone is not a scheduler barrier.
+
+    @property
+    def bound_storage(self):
+        """Host-bound storage, independent of coordination/parent authority."""
+        if self.runtime_storage is not None:
+            return self.runtime_storage
+        return getattr(getattr(self, "_manager", None), "storage", None)
 
     def read_context_snapshot(self) -> tuple[dict, int]:
         """Read one coherent governance snapshot and its monotonic version."""

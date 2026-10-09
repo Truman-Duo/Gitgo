@@ -908,8 +908,15 @@ export default class Ink {
     this.isPaused = true;
   }
 
-  resume(): void {
+  resume(options: { redraw?: boolean } = {}): void {
     this.isPaused = false;
+    if (options.redraw) {
+      if (this.options.stdout.isTTY && !this.isUnmounted) {
+        this.forceRedraw();
+        return;
+      }
+      this.repaint();
+    }
     this.onRender();
   }
 
@@ -919,6 +926,14 @@ export default class Ink {
    * an external process (e.g. tmux, shell, full-screen TUI).
    */
   repaint(): void {
+    // A 0-height previous frame in the alternate screen makes log-update
+    // treat a repaint as growing output. Its last CR+LF scrolls the physical
+    // screen by one row while the virtual frame stays put. Keep both frames
+    // at viewport size, just as resize/forceRedraw already do.
+    if (this.altScreenActive) {
+      this.resetFramesForAltScreen();
+      return;
+    }
     this.frontFrame = emptyFrame(
       this.frontFrame.viewport.height,
       this.frontFrame.viewport.width,
@@ -938,6 +953,8 @@ export default class Ink {
     // Clear displayCursor so the cursor preamble doesn't emit a stale
     // relative move from where we last parked it.
     this.displayCursor = null;
+    // The per-node blit cache must never copy from a freshly blank frame.
+    this.prevFrameContaminated = true;
   }
 
   /**
