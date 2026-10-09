@@ -107,6 +107,10 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
         return WindowsSandboxProcess(argv, policy=policy, **kwargs)
     if sys.platform == "linux":
         from backend.core.sandbox_linux import LinuxCgroup, LinuxSandboxProcess, trusted_bwrap
+        if kwargs.get('pass_fds') or kwargs.get('close_fds') is False:
+            raise SandboxDenied('SANDBOX_POLICY_INVALID', 'Sandbox children cannot inherit Host descriptors.')
+        if any(kwargs.get(stream) != subprocess.PIPE for stream in ('stdin', 'stdout', 'stderr')):
+            raise SandboxDenied('SANDBOX_POLICY_INVALID', 'Sandbox requires private stdio pipes.')
         bwrap = trusted_bwrap(policy.workspace)
         from backend.core.child_process import python_command
         # Empty root, private PID/network/user namespaces and private tmpfs.
@@ -144,7 +148,17 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
         # The packaged Host exposes a private Python role; do not treat its
         # executable as a general system interpreter.
         command += python_command(["-I", "-c", bootstrap, *argv])
-        return LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
+        from backend.core.sandbox_seccomp import socket_filter
+        try:
+            with socket_filter(policy.workspace) as program:
+                # bubblewrap consumes/closes this descriptor before tool exec.
+                # No Host descriptor other than the three stdio pipes survives.
+                command[1:1] = ['--seccomp', str(program.fileno())]
+                kwargs.update(pass_fds=(program.fileno(),), close_fds=True)
+                return LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
+        except BaseException:
+            cgroup.close()
+            raise
     raise SandboxDenied("SANDBOX_UNAVAILABLE", "No native sandbox backend is available on this platform.")
 
 def prepare_child_environment(workspace: str) -> None:

@@ -1004,3 +1004,149 @@ def test_root_exit_cleans_descendants_before_host_drains_pipes(cross_platform_bo
         proc._gitgo_job_handle = None
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             stream.close()
+
+
+@pytest.mark.parametrize('kind', ['stream', 'datagram'])
+def test_linux_cannot_connect_to_host_unix_socket_in_workspace(linux_box, kind):
+    workspace, spawn = linux_box
+    address = str(workspace / 'host.sock')
+    mode = socket.SOCK_STREAM if kind == 'stream' else socket.SOCK_DGRAM
+    with socket.socket(socket.AF_UNIX, mode) as listener:
+        listener.bind(address)
+        listener.settimeout(0.2)
+        if kind == 'stream':
+            listener.listen()
+        with socket.socket(socket.AF_UNIX, mode) as control:
+            control.connect(address)
+            control.send(b'control')
+            if kind == 'stream':
+                peer, _ = listener.accept()
+                with peer:
+                    assert peer.recv(7) == b'control'
+            else:
+                assert listener.recv(7) == b'control'
+        source = ("import socket,errno;open('positive-control','w').write('ran')\ntry:\n "
+                  f"s=socket.socket(socket.AF_UNIX,{int(mode)});s.connect({address!r});s.send(b'escaped')"
+                  "\nexcept OSError as e:\n assert e.errno==errno.EPERM;print('blocked')"
+                  "\nelse:\n print('escaped')")
+        code, out, err = finished(spawn(source))
+        assert code == 0, err
+        assert out.strip() == 'blocked'
+        assert (workspace / 'positive-control').read_text() == 'ran'
+        with pytest.raises(socket.timeout):
+            listener.accept() if kind == 'stream' else listener.recv(7)
+
+
+def test_linux_socket_filter_preserves_private_stream_ipc(linux_box):
+    _, spawn = linux_box
+    source = """import asyncio,errno,socket
+for family in (socket.AF_INET,socket.AF_INET6):
+    with socket.socket(family,socket.SOCK_STREAM): pass
+for flags in (0,socket.SOCK_CLOEXEC,socket.SOCK_NONBLOCK,socket.SOCK_CLOEXEC|socket.SOCK_NONBLOCK):
+    left,right=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM|flags)
+    left.send(b'local')
+    assert right.recv(5)==b'local'
+    left.close();right.close()
+async def task():
+    await asyncio.sleep(0.01)
+    return 'async'
+assert asyncio.run(task())=='async'
+for kind in (socket.SOCK_DGRAM,socket.SOCK_SEQPACKET):
+    try:
+        socket.socketpair(socket.AF_UNIX,kind)
+    except OSError as e:
+        assert e.errno==errno.EPERM
+    else:
+        raise AssertionError('Reconnectable Unix pair was allowed')
+print('private-ipc')
+"""
+    code, out, err = finished(spawn(source))
+    assert code == 0, err
+    assert out.strip() == 'private-ipc'
+
+
+def test_linux_other_socket_domains_and_io_uring_are_denied(linux_box):
+    from backend.core.sandbox_seccomp import _load_library
+    workspace, spawn = linux_box
+    # Netlink is available without elevated privileges on the Host, rather
+    # than relying only on domains already unavailable on a hosted kernel.
+    with socket.socket(socket.AF_NETLINK,socket.SOCK_RAW,0):
+        pass
+    api = _load_library(workspace)
+    numbers = [api.seccomp_syscall_resolve_name(name.encode())
+               for name in ('io_uring_setup','io_uring_enter','io_uring_register')]
+    assert all(number >= 0 for number in numbers)
+    source = f"""import ctypes,errno,socket
+for family in (socket.AF_UNIX,socket.AF_NETLINK,socket.AF_PACKET,40,0,9999):
+    try:
+        socket.socket(family,socket.SOCK_STREAM)
+    except OSError as e:
+        assert e.errno==errno.EPERM,(family,e.errno)
+    else:
+        raise AssertionError('Unexpected socket domain allowed')
+call=ctypes.CDLL(None,use_errno=True).syscall
+call.restype=ctypes.c_long
+for number in {numbers!r}:
+    assert call(number,0,0,0,0,0,0)==-1
+    assert ctypes.get_errno()==errno.EPERM
+print('domain-policy')
+"""
+    code, out, err = finished(spawn(source))
+    assert code == 0, err
+    assert out.strip() == 'domain-policy'
+
+
+def test_linux_native_filter_cannot_be_bypassed_with_x32_abi(linux_box):
+    from backend.core.sandbox_seccomp import _load_library
+    workspace, spawn = linux_box
+    if os.uname().machine != 'x86_64':
+        pytest.skip('x32 syscall encoding is x86_64-specific')
+    number = _load_library(workspace).seccomp_syscall_resolve_name(b'socket')
+    source = ("import ctypes;print('ran',flush=True);"
+              f"ctypes.CDLL(None).syscall({number | 0x40000000},2,1,0);print('escaped')")
+    code, out, err = finished(spawn(source))
+    assert code == -31, (code, out, err)  # SIGSYS, unsupported ABI is fail closed.
+    assert out.strip() == 'ran'
+
+
+def test_linux_cannot_inherit_host_file_descriptors(linux_box):
+    import fcntl
+    workspace, spawn = linux_box
+    secret = workspace.parent / 'descriptor-secret'
+    secret.write_text('Host-private-secret')
+    with secret.open('rb') as stream:
+        descriptor = fcntl.fcntl(stream.fileno(),fcntl.F_DUPFD,200)
+        try:
+            os.set_inheritable(descriptor,True)
+            source = ("import os,errno\ntry:\n "
+                      f"os.read({descriptor},100)"
+                      "\nexcept OSError as e:\n assert e.errno==errno.EBADF;print('closed')"
+                      "\nelse:\n print('escaped')")
+            code,out,err=finished(spawn(source))
+            assert code == 0, err
+            assert out.strip() == 'closed'
+        finally:
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize('options', [{'close_fds': False}, {'pass_fds': (123,)}])
+def test_linux_rejects_host_descriptor_inheritance_before_launch(linux_box, options):
+    workspace, _ = linux_box
+    with pytest.raises(SandboxDenied) as denied:
+        sandbox_popen([sys.executable,'-c',"open('escaped','w').write('ran')"],
+            SandboxPolicy(workspace),cwd=str(workspace),**options)
+    assert denied.value.code == 'SANDBOX_POLICY_INVALID'
+    assert denied.value.result()['effect_state'] == 'not_committed'
+    assert not (workspace / 'escaped').exists()
+
+
+def test_missing_socket_filter_never_loads_into_host_or_yields_fallback(tmp_path_factory, monkeypatch):
+    from backend.core.sandbox_seccomp import socket_filter
+    def unavailable(_):
+        raise OSError('System libseccomp is unavailable')
+    monkeypatch.setattr('backend.core.sandbox_seccomp._load_library',unavailable)
+    with pytest.raises(SandboxDenied) as denied:
+        with socket_filter(tmp_path_factory):
+            pytest.fail('A missing filter must never yield a launch descriptor')
+    assert denied.value.code == 'SANDBOX_UNAVAILABLE'
+    assert denied.value.result()['effect_state'] == 'not_committed'

@@ -61,6 +61,22 @@ tmpfs，/proc 对应私有 PID namespace。网络、IPC、用户等 namespace �
 删除所有 capabilities，使用 die-with-parent/new-session。
 每次调用使用独立 cgroup v2：整棵树的 memory.max/memory.swap.max、pids.max、cpu.max；Host 根据 cpu.stat 汇总累计 CPU 预算。执行前加入 cgroup，再设置地址空间、每进程 CPU 和 core dump 的补充限制。取消使用 cgroup.kill；原生 PID namespace 负责 Host 崩溃时的后代清理。不使用共享 UID 的 RLIMIT_NPROC 作为调用级限额。
 
+Host 在启动前用受信任的系统 libseccomp.so.2 生成匿名 BPF，并交给 bubblewrap
+在执行工具前加载。socket 只允许 AF_INET/AF_INET6，仍受私有网络 namespace
+限制；禁止 AF_UNIX、AF_VSOCK、netlink、packet 及其他 socket domain，防止
+工具连接工作区内的 Host Unix socket 或绕过 IP 网络 namespace。socketpair
+只允许 AF_UNIX 的 stream 对，保留 asyncio 和本次调用内部 IPC；禁用可重新
+连接的 datagram/seqpacket 对。io_uring 的三个入口均被拒绝，防止其异步
+socket 操作绕开 socket syscall 规则。过滤继承到 exec/所有后代，不能由授权
+或模型参数撤销；其他 syscall 仍由现有 OS 边界管理，这不是完整 syscall 白名单。
+
+Linux 只支持当前运行时的 syscall ABI，其他 ABI（含 x32/兼容 32 位）由
+seccomp 终止；不能为了运行旧二进制而移除过滤。libseccomp 必须位于固定
+系统目录，文件及祖先 root-owned 且不可由 group/world 修改。策略构建或加载
+失败保持拒绝。只有三个专用 stdio 管道和供 bubblewrap 消费的过滤 FD 进入
+启动器；工具不能继承 Host 文件/socket FD。需要 Unix socket 服务、io_uring
+或其他 ABI 的工具当前会失败，尚未提供可安全授权的 Host 通信代理。
+
 受信任的 Host 必须运行在已授权委派的 cgroup scope 或 service 内，并设置 GITGO_SANDBOX_CGROUP_ROOT。缺失 cpu/memory/pids 委派或 cgroup.kill 时明确拒绝，不降低隔离。
 
 例如，在支持用户 cgroup 委派的系统中：
@@ -122,6 +138,8 @@ Windows 测试使用临时独立 Python 与项目 ACL，覆盖正常执行、读
 - [Microsoft Job accounting](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information) 与 [CPU bandwidth control](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information)
 - [Microsoft process attributes: SECURITY_CAPABILITIES, HANDLE_LIST, JOB_LIST](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
 - [bubblewrap security model and namespace options](https://github.com/containers/bubblewrap)
+- [libseccomp policy/export API](https://github.com/seccomp/libseccomp/blob/v2.5.3/include/seccomp.h.in)
+- [Linux io_uring socket implementation](https://github.com/torvalds/linux/blob/master/io_uring/net.c)
 
 新增验收使用真实 Host 强制退出，以及实际 PyInstaller onedir 产物；打包测试不通过伪造 sys.frozen 冒充。三平台完整原生发行验收尚需补齐 macOS 及签名/安装环境。
 
