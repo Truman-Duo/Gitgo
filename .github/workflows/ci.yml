@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+
 concurrency:
   group: gitgo-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -91,6 +95,19 @@ jobs:
           bun-version: '1.4.2'
       - name: Install test dependencies
         run: python -m pip install -r requirements-portable.txt pytest
+      - name: Prepare canonical test temporary directory
+        run: |
+          @'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']).resolve(strict=True) / 'gitgo-tests'
+          root.mkdir(exist_ok=True)
+          root = root.resolve(strict=True)
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
+              output.write(f'TEMP={root}\nTMP={root}\n')
+          print(f'Test temporary directory: {root}')
+          '@ | python -I -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Validate pinned SQLite and ripgrep
         run: |
           python -B scripts/provision_ci_sqlite.py
@@ -151,6 +168,20 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bubblewrap gcc patchelf libseccomp2
       - run: python -m pip install -r requirements-portable.txt pytest pyinstaller
+      - name: Prepare canonical Windows temporary directory
+        if: runner.os == 'Windows'
+        run: |
+          @'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']).resolve(strict=True) / 'gitgo-tests'
+          root.mkdir(exist_ok=True)
+          root = root.resolve(strict=True)
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
+              output.write(f'TEMP={root}\nTMP={root}\n')
+          print(f'Test temporary directory: {root}')
+          '@ | python -I -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: python -B scripts/provision_ci_sqlite.py
       - run: python -B scripts/provision_ci_ripgrep.py
       - name: Windows ACL preflight

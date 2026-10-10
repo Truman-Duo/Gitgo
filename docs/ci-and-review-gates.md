@@ -13,6 +13,8 @@ scripts/provision_ci_sqlite.py 与 provision_ci_ripgrep.py 单独复用 PR #25 �
 
 ## CI 自身的权限边界
 
+Windows 测试使用 runner 自有临时目录的规范绝对路径，并启用 Python UTF-8 模式，避免 hosted 环境的 RUNNER~1 别名和 cp1252 默认编码影响测试身份。删除与终端清理仍拒绝重定向路径；这不表示产品已经支持所有 Windows 短路径别名。首次全量运行也暴露了 LocalFileAdapter.is_symlink 先 resolve 后检查的真实缺陷，本 PR 仅修复目录项判断，并用现有测试验证正常文件和悬空链接；不接入 PR #25 的其余生产实现。
+
 只运行 GitHub-hosted 临时 runner，顶层 token 为 contents:read；checkout 不保存凭据，不注入项目 provider/API key，不缓存 PR 执行后可污染的依赖产物，不上传整个 .gitgo、trace 或原生安装包。第三方 Actions 固定完整 commit SHA，并注明版本；下载工具是验证用，不冒充正式 release staging。
 
 使用 pull_request 执行候选组合，不使用带高权限的 pull_request_target 执行 fork 代码。不可信标题/正文从 JSON 读取，不直接插入 shell。fork 首次/外部贡献运行所需的 GitHub 人工批准保留；批准 CI 执行不等于批准 PR 或沙箱越权。

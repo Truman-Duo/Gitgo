@@ -39,6 +39,9 @@ class TestLocalFileAdapter:
         except (OSError, NotImplementedError):
             pytest.skip("No symlink permission on this system")
         assert file_adapter.is_symlink("link")
+        assert not file_adapter.is_symlink("target")
+        target.unlink()
+        assert file_adapter.is_symlink("link")  # A dangling link is still a link.
 
     def test_walk(self, file_adapter: LocalFileAdapter, tmp_path_factory: Path):
         (tmp_path_factory / "a").mkdir()
