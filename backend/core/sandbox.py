@@ -8,15 +8,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# These handlers can execute arbitrary code, including registration tests.
-SANDBOXED_HANDLERS = frozenset({
-    "exec_command", "shell_script", "run_command", "run_test",
-    "authored_python", "authored_privileged_python", "dynamic_composite",
-    "apply_patch", "search_text", "list_files", "document_open", "git_status", "git_diff", "git_log", "git_branch",
-    "formalize",
-})
-
-
 class SandboxDenied(RuntimeError):
     def __init__(self, code: str, detail: str):
         super().__init__(detail)

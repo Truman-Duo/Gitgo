@@ -10,6 +10,8 @@ The main loop owns the SyncSession and dispatches events to step methods.
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import atexit
 import os
 import queue
@@ -392,6 +394,7 @@ def run_daemon(
 
     tool_executors = {
         "scan": AgentTool(
+            execution_contract=data_broker("host.daemon.scan"),
             name="scan",
             description="扫描项目工作区，检测文件变更和 git 状态。当需要了解项目当前状态、检查哪些文件被修改时使用。",
             parameters={"type": "object", "properties": {"files": {"type": "array", "items": {"type": "string"}, "description": "可选，指定要扫描的文件列表"}}, "required": []},
@@ -399,6 +402,7 @@ def run_daemon(
             read_only=True,
         ),
         "status": AgentTool(
+            execution_contract=data_broker("host.daemon.status"),
             name="status",
             description="获取工作区语义化状态摘要（文件变更、合同漂移、治理信号）。",
             parameters={"type": "object", "properties": {"semantic": {"type": "boolean", "description": "是否返回语义化摘要"}}, "required": []},
@@ -406,6 +410,7 @@ def run_daemon(
             read_only=True,
         ),
         "formalize": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="formalize",
             description="基于选中的工作区文件创建正式的结构化提交（formal commit）。需要 indices 和 message 参数。",
             parameters={"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}}, "message": {"type": "string"}}, "required": ["message"]},
@@ -418,6 +423,7 @@ def run_daemon(
             runner_name="formalize",
         ),
         "recall_grep": AgentTool(
+            execution_contract=data_broker("host.daemon.recall_grep"),
             name="recall_grep",
             description="全文搜索知识库中的历史教训（lessons），按关键词匹配。用于查找相似问题的处理经验。",
             parameters={"type": "object", "properties": {"query": {"type": "string", "description": "搜索关键词"}, "top_k": {"type": "integer"}, "agent_context": {"type": "string"}}, "required": ["query"]},
@@ -425,6 +431,7 @@ def run_daemon(
             read_only=True,
         ),
         "recall_semantic": AgentTool(
+            execution_contract=data_broker("host.daemon.recall_semantic"),
             name="recall_semantic",
             description="语义搜索知识库中的历史教训，按向量相似度匹配。",
             parameters={"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}, "agent_context": {"type": "string"}}, "required": ["query"]},
@@ -432,6 +439,7 @@ def run_daemon(
             read_only=True,
         ),
         "recall_rag": AgentTool(
+            execution_contract=data_broker("host.daemon.recall_rag"),
             name="recall_rag",
             description="RAG（检索增强生成）搜索知识库。",
             parameters={"type": "object", "properties": {"query": {"type": "string"}, "agent_context": {"type": "string"}}, "required": ["query"]},
@@ -442,6 +450,7 @@ def run_daemon(
 
     tool_executors.update({
         "assemble_context": AgentTool(
+            execution_contract=data_broker("host.daemon.assemble_context"),
             name="assemble_context",
             description="汇编上下文：从 policy signals + recall + dependency graph 三层收集相关上下文。需要 task 和 files 参数。",
             parameters={"type": "object", "properties": {"task": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}, "required": ["task"]},
@@ -449,6 +458,7 @@ def run_daemon(
             read_only=True,
         ),
         "assemble_return_context": AgentTool(
+            execution_contract=data_broker("host.daemon.assemble_return_context"),
             name="assemble_return_context",
             description="构建 B Agent 返回给 A Agent 的上下文转录。需要 process_id 参数。",
             parameters={"type": "object", "properties": {"process_id": {"type": "string"}}, "required": ["process_id"]},
@@ -456,6 +466,7 @@ def run_daemon(
             read_only=True,
         ),
         "decompose_task": AgentTool(
+            execution_contract=data_broker("host.daemon.decompose_task"),
             name="decompose_task",
             description=(
                 "将当前复杂任务分析并建议拆分为多个子任务。"
@@ -475,6 +486,7 @@ def run_daemon(
             read_only=True,
         ),
         "run_test": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="run_test",
             description=(
                 "Run one registered pytest file/node under deterministic seeds and "
@@ -562,6 +574,7 @@ def run_daemon(
     # ── v0.45: 差异化后端工具 ──
     tool_executors.update({
         "contract_detect_drift": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="contract_detect_drift",
             description="检测本轮文件变更与项目合约的偏差。返回告警列表（feature_deleted, signature_changed 等）。当需要验证变更是否符合合约时使用。",
             parameters={
@@ -577,6 +590,7 @@ def run_daemon(
             read_only=True,
         ),
         "contract_get_impact": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="contract_get_impact",
             description="查询文件的影响面：哪些文件依赖它（dependents），哪些函数调用了它（callers）。修改文件前评估爆炸半径时使用。",
             parameters={
@@ -592,6 +606,7 @@ def run_daemon(
             read_only=True,
         ),
         "contract_get_changed_symbols": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="contract_get_changed_symbols",
             description="对比文件两个版本的 AST，返回变更的函数/类名列表。用于精确判断代码变更的符号级影响。",
             parameters={
@@ -607,6 +622,7 @@ def run_daemon(
             read_only=True,
         ),
         "lesson_search": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="lesson_search",
             description="在知识库中搜索历史经验教训（lessons）。同时搜索抽象层和实例层。用于查找相似问题的处理经验、避免重复错误。",
             parameters={
@@ -623,6 +639,7 @@ def run_daemon(
             read_only=True,
         ),
         "lesson_discard": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="lesson_discard",
             description="删除一条经验教训（从 pending 或 instance 中移除）。用于清理过时或错误的 lesson。",
             parameters={
@@ -639,6 +656,7 @@ def run_daemon(
             resources=["filesystem:*"],
         ),
         "lesson_verify": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="lesson_verify",
             description="确认一条经验教训（从 pending 提升为正式，或增加 verified_count）。需要 Ring 0 权限。",
             parameters={
@@ -655,6 +673,7 @@ def run_daemon(
             resources=["filesystem:*"],
         ),
         "lesson_harvest": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="lesson_harvest",
             description="从 git log、CLAUDE.md、scan history、governance signals 四个数据源收割新经验教训。操作较重（扫描 4 源），需要 Ring 0 权限。",
             parameters={
@@ -672,6 +691,7 @@ def run_daemon(
             resources=["filesystem:*"],
         ),
         "privacy_scan": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="privacy_scan",
             description="扫描变更文件的隐私风险（敏感信息泄露、AI 痕迹、密钥硬编码等）。push 前或代码审查时使用。",
             parameters={
@@ -688,6 +708,7 @@ def run_daemon(
             read_only=True,
         ),
         "memory_snapshot": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="memory_snapshot",
             description="将工作区工具记忆（CLAUDE.md 等）快照到 backup 目录，并列出所有可用快照。用于备份当前记忆状态。",
             parameters={
@@ -703,6 +724,7 @@ def run_daemon(
             resources=["filesystem:*"],
         ),
         "memory_restore": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="memory_restore",
             description="从 backup 目录的快照恢复工具记忆到工作区。snapshot_timestamp 为空时使用最新快照。",
             parameters={
@@ -719,6 +741,7 @@ def run_daemon(
             resources=["filesystem:*"],
         ),
         "lesson_promote": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="lesson_promote",
             description="将一条实例层经验教训提升为抽象层（跨项目复用）。需要 Ring 0 权限。",
             parameters={
@@ -736,6 +759,7 @@ def run_daemon(
             resources=["filesystem:*"],
         ),
         "lesson_list": AgentTool(
+            execution_contract=NATIVE_PROCESS,
             name="lesson_list",
             description="列出所有经验教训（抽象层 + 实例层 + 待确认）。用于查看知识库全貌、盘点现有 lessons。",
             parameters={

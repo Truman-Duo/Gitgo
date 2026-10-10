@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import hashlib
 import json
 import sys
@@ -264,7 +266,7 @@ def test_dynamic_tool_cannot_compose_unapproved_or_noncomposable_tool(tmp_path_f
     assert spec["effect"] == "read"
 
     unsafe = AgentTool(
-        name="unsafe", description="unsafe", parameters={"type": "object"},
+        execution_contract=NATIVE_PROCESS, name="unsafe", description="unsafe", parameters={"type": "object"},
         execute=lambda args: {}, read_only=False, effect=ToolEffect.EXTERNAL,
         isolated=True, runner_name="unsafe",
     )
@@ -320,7 +322,7 @@ def test_dynamic_tool_host_plan_reuses_canonical_pipeline_once(tmp_path_factory:
         ],
     }, base_tools)
     dynamic = AgentTool(
-        name=spec["name"], description=spec["description"],
+        execution_contract=data_broker("host.composite"), name=spec["name"], description=spec["description"],
         parameters=spec["parameters"], execute=lambda _args: {},
         effect=spec["effect"], resources=spec["resources"],
         composite_spec=spec,
@@ -361,7 +363,7 @@ def test_dynamic_tool_host_plan_reuses_canonical_pipeline_once(tmp_path_factory:
     assert result.receipt["definition_digest"] == spec["digest"]
 
 
-def test_dynamic_tool_rebinds_private_workspace_to_child_execution(tmp_path_factory: Path):
+def test_dynamic_tool_rebinds_private_workspace_to_child_execution(tmp_path_factory: Path, runner_transport_only):
     root = tmp_path_factory / "root"
     child = tmp_path_factory / "child"
     root.mkdir()
@@ -388,7 +390,7 @@ def test_dynamic_tool_rebinds_private_workspace_to_child_execution(tmp_path_fact
         ],
     }, base_tools)
     dynamic = AgentTool(
-        name=spec["name"], description=spec["description"],
+        execution_contract=data_broker("host.composite"), name=spec["name"], description=spec["description"],
         parameters=spec["parameters"], execute=lambda _args: {},
         effect=spec["effect"], resources=spec["resources"],
         composite_spec=spec,
@@ -415,7 +417,7 @@ def test_dynamic_tool_rebinds_private_workspace_to_child_execution(tmp_path_fact
     assert not (root / "only-child.txt").exists()
 
 
-def test_dynamic_post_write_verification_failure_rolls_back(tmp_path_factory: Path):
+def test_dynamic_post_write_verification_failure_rolls_back(tmp_path_factory: Path, runner_transport_only):
     target = tmp_path_factory / "note.txt"
     target.write_text("before", encoding="utf-8")
     base_tools = build_workspace_tools(tmp_path_factory)
@@ -439,7 +441,7 @@ def test_dynamic_post_write_verification_failure_rolls_back(tmp_path_factory: Pa
         ],
     }, base_tools)
     dynamic = AgentTool(
-        name=spec["name"], description=spec["description"],
+        execution_contract=data_broker("host.composite"), name=spec["name"], description=spec["description"],
         parameters=spec["parameters"], execute=lambda _args: {},
         effect=spec["effect"], resources=spec["resources"],
         composite_spec=spec,
@@ -512,7 +514,7 @@ def test_dynamic_write_snapshot_uses_effect_not_tool_name(tmp_path_factory: Path
         }],
     }, base_tools)
     dynamic = AgentTool(
-        name=spec["name"], description=spec["description"],
+        execution_contract=data_broker("host.composite"), name=spec["name"], description=spec["description"],
         parameters=spec["parameters"], execute=lambda _args: {},
         read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
         resources=spec["resources"], composite_spec=spec,
@@ -795,7 +797,7 @@ def test_explicit_user_grant_overrides_ordinary_governance_for_its_scope(
         workspace_path=str(tmp_path_factory), task_id="user-authority",
     )
     tool = AgentTool(
-        name="sensitive", description="approved action",
+        execution_contract=data_broker("test.fixture"), name="sensitive", description="approved action",
         parameters={"type": "object"},
         execute=lambda args: {"done": args["value"]},
         approval=ApprovalMode.ASK, effect=ToolEffect.PROCESS,
@@ -838,7 +840,7 @@ def test_document_open_reads_text_through_unified_adapter(tmp_path_factory: Path
 
 
 def test_process_runner_does_not_depend_on_caller_working_directory(
-    tmp_path_factory: Path, monkeypatch,
+    tmp_path_factory: Path, monkeypatch, runner_transport_only,
 ):
     workspace = tmp_path_factory / "workspace"
     workspace.mkdir()
@@ -966,7 +968,7 @@ def test_pipeline_executes_before_inspecting_result(tmp_path_factory: Path):
         workspace_path=str(tmp_path), task_id="task",
     )
     tool = AgentTool(
-        name="read", description="read", parameters={"type": "object", "properties": {}},
+        execution_contract=data_broker("test.fixture"), name="read", description="read", parameters={"type": "object", "properties": {}},
         execute=lambda args: {"ok": True}, read_only=True,
     )
     ctx = ExecutionContext(
@@ -990,7 +992,7 @@ def test_pipeline_treats_nonzero_command_as_failed_action(tmp_path_factory: Path
         workspace_path=str(tmp_path), task_id="task",
     )
     tool = AgentTool(
-        name="command", description="command",
+        execution_contract=data_broker("test.fixture"), name="command", description="command",
         parameters={"type": "object", "properties": {}},
         execute=lambda args: {"success": False, "exit_code": 7},
         read_only=False, effect=ToolEffect.PROCESS,
@@ -1023,7 +1025,7 @@ def test_pipeline_preserves_command_failure_output_for_model(tmp_path_factory: P
         workspace_path=str(tmp_path_factory), task_id="task-diagnostic",
     )
     tool = AgentTool(
-        name="command", description="command",
+        execution_contract=data_broker("test.fixture"), name="command", description="command",
         parameters={"type": "object", "properties": {}},
         execute=lambda args: {
             "success": False,
@@ -1062,7 +1064,7 @@ def test_effectful_tool_fails_closed_when_invocation_journal_is_unavailable(
         workspace_path=str(tmp_path_factory), task_id="task-journal-fail",
     )
     tool = AgentTool(
-        name="write", description="write",
+        execution_contract=data_broker("test.fixture"), name="write", description="write",
         parameters={"type": "object", "properties": {}},
         execute=lambda args: called.append(args) or {"success": True},
         read_only=False, effect=ToolEffect.WORKSPACE_WRITE,

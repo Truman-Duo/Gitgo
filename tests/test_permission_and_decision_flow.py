@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 from pathlib import Path
 
 import pytest
@@ -30,7 +34,7 @@ def _read_tool(root: Path) -> AgentTool:
         return {**args, "_workspace": str(root)}
 
     return AgentTool(
-        name="read_file", description="read", parameters={
+        execution_contract=data_broker("test.fixture"), name="read_file", description="read", parameters={
             "type": "object", "properties": {"path": {"type": "string"}},
             "required": ["path"],
         },
@@ -131,7 +135,7 @@ def test_sensitive_tool_requires_a_new_exact_grant_for_every_invocation(tmp_path
     process.tool_registry = ToolRegistry(["read_file", "shell_script"])
     calls = []
     tool = AgentTool(
-        name="shell_script", description="sensitive shell",
+        execution_contract=data_broker("test.fixture"), name="shell_script", description="sensitive shell",
         parameters={
             "type": "object",
             "properties": {
@@ -193,10 +197,11 @@ def test_host_suspends_and_resumes_the_exact_sensitive_call_without_model_retry(
     # is low-risk by default, so this test explicitly upgrades the fixture.
     catalog["web_search"].approval = ApprovalMode.ASK
     calls: list[str] = []
-    catalog["web_search"].isolated = False
-    catalog["web_search"].execute = lambda args: (
-        calls.append(str(args["query"])) or {"answer": "approved result"}
-    )
+    # Explicit protocol-only Host fixture; this does not disable production
+    # native authority or serve as OS containment evidence.
+    catalog["web_search"] = replace(catalog["web_search"], isolated=False,
+        execution_contract=data_broker("test.fixture"), execute=lambda args: (
+            calls.append(str(args["query"])) or {"answer": "approved result"}))
     dispatcher = type("Dispatcher", (), {"_executors": catalog})()
 
     class Provider:
@@ -273,10 +278,9 @@ def test_sensitive_batch_pauses_at_each_distinct_invocation_without_error_driven
     catalog = build_workspace_tools(root)
     catalog["web_search"].approval = ApprovalMode.ASK
     calls: list[str] = []
-    catalog["web_search"].isolated = False
-    catalog["web_search"].execute = lambda args: (
-        calls.append(str(args["query"])) or {"answer": f"result for {args['query']}"}
-    )
+    catalog["web_search"] = replace(catalog["web_search"], isolated=False,
+        execution_contract=data_broker("test.fixture"), execute=lambda args: (
+            calls.append(str(args["query"])) or {"answer": f"result for {args['query']}"}))
     dispatcher = type("Dispatcher", (), {"_executors": catalog})()
 
     class Provider:

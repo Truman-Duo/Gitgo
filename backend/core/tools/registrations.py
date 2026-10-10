@@ -14,71 +14,73 @@ import subprocess
 import sys
 from pathlib import Path
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS
+
 
 def register_all(register) -> None:
     """注册所有子进程安全的基础工具。
 
     由 runner._auto_import_registrations() 调用。
-    register 是一个 Callable(name, fn)，将工具加入 runner 的注册表。
+    register 是一个 Callable(name, fn, execution_contract)，将工具加入 runner 的注册表。
     """
-    register("file_read", file_read)
-    register("file_write", file_write)
-    register("file_edit", file_edit)
-    register("file_delete", file_delete)
-    register("file_list", file_list)
-    register("file_search", file_search)
-    register("git_status", git_status)
-    register("git_diff", git_diff)
-    register("git_log", git_log)
-    register("git_branch", git_branch)
-    register("run_command", run_command)
+    register("file_read", file_read, NATIVE_PROCESS)
+    register("file_write", file_write, NATIVE_PROCESS)
+    register("file_edit", file_edit, NATIVE_PROCESS)
+    register("file_delete", file_delete, NATIVE_PROCESS)
+    register("file_list", file_list, NATIVE_PROCESS)
+    register("file_search", file_search, NATIVE_PROCESS)
+    register("git_status", git_status, NATIVE_PROCESS)
+    register("git_diff", git_diff, NATIVE_PROCESS)
+    register("git_log", git_log, NATIVE_PROCESS)
+    register("git_branch", git_branch, NATIVE_PROCESS)
+    register("run_command", run_command, NATIVE_PROCESS)
 
     # Canonical Agent development tools.  Legacy names above remain available
     # for compatibility, but new capability profiles use these confined,
     # receipt-friendly implementations.
     from backend.core.tools import workspace_tools
-    register("read_file", workspace_tools.read_file)
-    register("list_files", workspace_tools.list_files)
-    register("search_text", workspace_tools.search_text)
-    register("edit_file", workspace_tools.edit_file)
-    register("write_file", workspace_tools.write_file)
-    register("delete_file", workspace_tools.delete_file)
-    register("apply_patch", workspace_tools.apply_patch)
-    register("exec_command", workspace_tools.exec_command)
-    register("shell_script", workspace_tools.shell_script)
-    register("dependency_feedback", workspace_tools.dependency_feedback)
-    register("rebuild_dependency_graph", workspace_tools.rebuild_dependency_graph)
+    register("read_file", workspace_tools.read_file, NATIVE_PROCESS)
+    register("list_files", workspace_tools.list_files, NATIVE_PROCESS)
+    register("search_text", workspace_tools.search_text, NATIVE_PROCESS)
+    register("edit_file", workspace_tools.edit_file, NATIVE_PROCESS)
+    register("write_file", workspace_tools.write_file, NATIVE_PROCESS)
+    register("delete_file", workspace_tools.delete_file, NATIVE_PROCESS)
+    register("apply_patch", workspace_tools.apply_patch, NATIVE_PROCESS)
+    register("exec_command", workspace_tools.exec_command, NATIVE_PROCESS)
+    register("shell_script", workspace_tools.shell_script, NATIVE_PROCESS)
+    register("dependency_feedback", workspace_tools.dependency_feedback, NATIVE_PROCESS)
+    register("rebuild_dependency_graph", workspace_tools.rebuild_dependency_graph, NATIVE_PROCESS)
     from backend.core.tools.document_tools import document_create, document_open
-    register("document_open", document_open)
-    register("document_create", document_create)
+    register("document_open", document_open, NATIVE_PROCESS)
+    register("document_create", document_create, NATIVE_PROCESS)
     from backend.core.tools.web_tools import web_fetch, web_search
-    register("web_search", web_search)
-    register("web_fetch", web_fetch)
+    register("web_search", web_search, NATIVE_PROCESS)
+    register("web_fetch", web_fetch, NATIVE_PROCESS)
 
     # Existing governance tools are also available to the isolated runner.  The
     # daemon keeps the original public names, so profiles and old transcripts do
     # not break while their execution boundary becomes cancellable.
     from backend.core.loop import tool_wrappers
-    register("contract_detect_drift", tool_wrappers.contract_detect_drift)
-    register("contract_get_impact", tool_wrappers.contract_get_impact)
-    register("contract_get_changed_symbols", tool_wrappers.contract_get_changed_symbols)
-    register("lesson_search", tool_wrappers.lesson_search)
-    register("lesson_discard", tool_wrappers.lesson_discard)
-    register("lesson_verify", tool_wrappers.lesson_verify)
-    register("lesson_harvest", tool_wrappers.lesson_harvest)
-    register("lesson_promote", tool_wrappers.lesson_promote)
-    register("lesson_list", tool_wrappers.lesson_list)
-    register("privacy_scan", tool_wrappers.privacy_scan)
-    register("memory_snapshot", tool_wrappers.memory_snapshot)
-    register("memory_restore", tool_wrappers.memory_restore)
-    register("run_test", _run_test_isolated)
-    register("formalize", _formalize_isolated)
+    register("contract_detect_drift", tool_wrappers.contract_detect_drift, NATIVE_PROCESS)
+    register("contract_get_impact", tool_wrappers.contract_get_impact, NATIVE_PROCESS)
+    register("contract_get_changed_symbols", tool_wrappers.contract_get_changed_symbols, NATIVE_PROCESS)
+    register("lesson_search", tool_wrappers.lesson_search, NATIVE_PROCESS)
+    register("lesson_discard", tool_wrappers.lesson_discard, NATIVE_PROCESS)
+    register("lesson_verify", tool_wrappers.lesson_verify, NATIVE_PROCESS)
+    register("lesson_harvest", tool_wrappers.lesson_harvest, NATIVE_PROCESS)
+    register("lesson_promote", tool_wrappers.lesson_promote, NATIVE_PROCESS)
+    register("lesson_list", tool_wrappers.lesson_list, NATIVE_PROCESS)
+    register("privacy_scan", tool_wrappers.privacy_scan, NATIVE_PROCESS)
+    register("memory_snapshot", tool_wrappers.memory_snapshot, NATIVE_PROCESS)
+    register("memory_restore", tool_wrappers.memory_restore, NATIVE_PROCESS)
+    register("run_test", _run_test_isolated, NATIVE_PROCESS)
+    register("formalize", _formalize_isolated, NATIVE_PROCESS)
     from backend.core.tools.dynamic_tools import (
         execute_authored_python, execute_authored_privileged_python, execute_composite,
     )
-    register("dynamic_composite", execute_composite)
-    register("authored_python", execute_authored_python)
-    register("authored_privileged_python", execute_authored_privileged_python)
+    register("dynamic_composite", execute_composite, NATIVE_PROCESS)
+    register("authored_python", execute_authored_python, NATIVE_PROCESS)
+    register("authored_privileged_python", execute_authored_privileged_python, NATIVE_PROCESS)
 
 
 # ── File Tools ─────────────────────────────────────────────

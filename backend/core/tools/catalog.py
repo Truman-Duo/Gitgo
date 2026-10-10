@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS
+
 from backend.core.loop.agent_tool import (
     AgentTool,
     ApprovalMode,
@@ -28,6 +30,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
     common = {
         "prepare_args": inject_workspace,
         "isolated": True,
+        "execution_contract": NATIVE_PROCESS,
         "cancellation": CancellationMode.ISOLATED_PROCESS,
         "composable": True,
     }

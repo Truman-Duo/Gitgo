@@ -187,6 +187,32 @@ A–D 与 E 中启用能力所需边界均是合并门槛，不能先发布默�
 未实现矩阵项保持 BLOCKED；不能把 skip 算通过，也不能“全部都启动失败”冒充安全。
 mock 仅用于协议/故障注入，真实 OS/后代 exec/实际 frozen 单独给证据。
 
+### A1 当前实现边界（2026-10-10）
+
+AgentTool 的 Host 注册声明现在区分 host_compute、data_broker、native_process、
+external_service；声明不可从工具 JSON 注入，未声明拒绝。Host 计算和具名数据入口保留
+既有运行时职责，作者代码仅允许原生执行；external_service 尚未实现，执行被拒绝。
+Pipeline 在预处理前、授权消费前及执行前校验已绑定的声明和 callable。
+这些对象仍在可信 Host Python 内；对象身份检查不是抵御 Host 任意代码的安全机制。
+
+全部子进程 handler 在发行注册代码中显式声明 native_process。Runner 和旧 composite
+共用同一注册构建；重复/部分失败拒绝，环境不能选择注册模块。ProcessToolRunner
+必须调用 sandbox_popen，旧 file_read/write/edit/delete 与新注册名均无普通 Popen 回退。
+原生路径由执行声明决定，不能通过 read_only/effect 或 isolated=False 改成 Host 内联。
+直接调用原生 AgentTool 也要求进入 Pipeline；TCB 内直接使用 execute 属性仍需代码审计。
+
+此交付只完成注册和子进程路由这一部分。data_broker 的具名声明不是安全文件/Git
+代理的实现证明：现有 scan/status/context 等仍必须在 B 阶段限制参数、稳定对象身份及
+诱导执行。单一 effective manifest/compiler、完整 broker allowlist、恢复准入及有效策略
+绑定仍待完成。新增声明进入 grant digest，使已有带旧 digest 的 grant 失效；历史无 digest
+兼容路径仍待统一迁移，不能称旧 grant 迁移完成。当前网络 handler 被原生无网络边界约束，
+没有授权服务代理或可用后端时保持拒绝，不以普通 Host 重试恢复网络。
+
+合同测试覆盖未知入口、声明/函数替换、预处理前拒绝、一次性授权保留、直接调用、
+旧别名、新 handler 及原生路由；mock 只证实调度协议。Windows 真实 AppContainer 的
+工作区文件读写/删除和 Host 文件拒绝已验证；Linux 源码和实际 packaged 的旧别名
+验收已加入，须按平台对应候选 CI 分别核对。所有 B1–B6 仍未完成闭环。
+
 每次候选记录 head、target、观察时间/upstream、merge-base、组合树、策略/协议版本、
 接口对齐、源码/frozen/OS/helper 版本、正向/拒绝/故障/跳过、run/artifact 和剩余风险。
 审计脚本只生成版本/格式事实，不证明运行过测试：

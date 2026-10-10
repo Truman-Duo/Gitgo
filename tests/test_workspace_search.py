@@ -1,3 +1,4 @@
+from dataclasses import replace
 """Search contracts tested against real ripgrep, fallback and the Host pipeline."""
 from pathlib import Path
 import json
@@ -194,8 +195,9 @@ def test_fallback_notices_and_coverage_survive_the_tool_pipeline(tmp_path_factor
     p = AgentProcess(process_id="search", role="worker", ring_level=RingLevel.RING_3,
                      active_task_id="task", session=AgentSession(), tool_registry=ToolRegistry(["search_text"]))
     tool = build_workspace_tools(tmp_path_factory)["search_text"]
-    tool.isolated = False
-    tool.execute = search_text
+    # Protocol-only fixture, distinct from production/native authority.
+    from backend.core.loop.execution_contract import data_broker
+    tool = replace(tool, isolated=False, execution_contract=data_broker("test.fixture"), execute=search_text)
     bus, notices = EventBus(), []
     bus.subscribe("ToolNotice", lambda e: notices.append(e.data))
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=bus)

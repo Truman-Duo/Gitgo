@@ -359,10 +359,9 @@ def execute_composite(args: dict) -> dict:
 def _handlers() -> dict:
     # Compatibility runner for old persisted definitions.  Reuse the canonical
     # registration function instead of maintaining a second handler map.
-    from backend.core.tools.registrations import register_all
+    from backend.core.tools.runner import handler_bindings
 
-    handlers: dict[str, Any] = {}
-    register_all(lambda name, fn: handlers.__setitem__(name, fn))
+    handlers = {name: binding.function for name, binding in handler_bindings().items()}
     handlers.pop("dynamic_composite", None)
     return handlers
 

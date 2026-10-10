@@ -1,4 +1,5 @@
 """Malformed/precondition-blocked calls must not spend an exact user grant."""
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
 from backend.core.loop.agent_tool import AgentTool, ToolEffect, ApprovalMode
 from backend.core.loop.models import AgentProcess, RingLevel
 from backend.core.loop.session import AgentSession
@@ -21,7 +22,7 @@ def test_one_use_grant_survives_invalid_arguments_and_missing_prerequisites(tmp_
         {"id": "green", "kind": "check", "test_id": "regression", "passed": True, "depends_on": ["change"]},
     ]})
     calls = []
-    tool = AgentTool(name="shell_script", description="test", parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    tool = AgentTool(execution_contract=data_broker("test.fixture"), name="shell_script", description="test", parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
                      execute=lambda args: calls.append(args) or {"success": True}, read_only=False,
                      effect=ToolEffect.PROCESS, approval=ApprovalMode.ASK, approval_per_invocation=True)
     args = {"script": "printf approved", "purpose": "preflight acceptance", "path": "app.py"}
@@ -55,7 +56,7 @@ def test_exact_grant_rechecks_contract_changed_during_preparation(tmp_path_facto
                            active_task_id='task', worktree_path=str(tmp_path_factory), session=AgentSession())
     process.tool_registry = ToolRegistry(['shell_script'])
     calls = []
-    tool = AgentTool(name='shell_script', description='test', parameters={'type': 'object'},
+    tool = AgentTool(execution_contract=data_broker("test.fixture"), name='shell_script', description='test', parameters={'type': 'object'},
                      execute=lambda args: calls.append(args), read_only=False,
                      effect=ToolEffect.PROCESS, approval=ApprovalMode.ASK, approval_per_invocation=True,
                      resources=['process:shell'])

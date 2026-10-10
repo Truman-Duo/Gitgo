@@ -96,6 +96,20 @@ class ToolPipeline:
                 diagnostics={"nature": "system", "code": "TOOL_CANCELLED"},
             )
 
+        # Validate Host registration before prepare hooks, approval consumption,
+        # or any mutation. Caller-provided arguments never select authority.
+        try:
+            if tool_name != tool.name:
+                raise ValueError("Tool call does not match its Host registration identity")
+            execution_contract = tool.validate_execution_contract()
+        except (AttributeError, ValueError) as exc:
+            result = self._error_result(
+                tool_name, execution_id, call_index, start, str(exc),
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+            )
+            result.receipt["effect_state"] = "not_committed"
+            return result
+
         from backend.core.loop.operation_policy import (
             PolicyDisposition, decide_tool_operation,
         )
@@ -267,6 +281,17 @@ class ToolPipeline:
                     tool_name, execution_id, call_index, start, guard["reason"],
                     diagnostics={"nature": "governance", "code": "ENGINEERING_PREREQUISITE_REQUIRED"},
                 )
+        # Preparation/prerequisite callbacks must not replace execution authority
+        # before an exact grant is spent.
+        try:
+            tool.validate_execution_contract()
+        except (AttributeError, ValueError) as exc:
+            result = self._error_result(
+                tool_name, execution_id, call_index, start, str(exc),
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+            )
+            result.receipt["effect_state"] = "not_committed"
+            return result
         if explicit_user_grant is not None:
             consumed = matching_grant(
                 ctx.process, tool_name, public_raw,
@@ -324,6 +349,18 @@ class ToolPipeline:
                 gate_result.error or "blocked by gate",
             )
 
+        # Governance/before-hook callbacks must not replace execution authority
+        # before execution or its journal starts.
+        try:
+            tool.validate_execution_contract()
+        except (AttributeError, ValueError) as exc:
+            result = self._error_result(
+                tool_name, execution_id, call_index, start, str(exc),
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+            )
+            result.receipt["effect_state"] = "not_committed"
+            return result
+
         # Step 4: execute
         ctx.event_bus.emit(
             __import__("backend.core.loop.event_bus", fromlist=["ToolEvent"]).ToolEvent(
@@ -356,6 +393,9 @@ class ToolPipeline:
                 })
                 return result
         try:
+            # prepare hooks and mutable registry objects cannot substitute a new
+            # callable/authority after the initial admission check.
+            tool.validate_execution_contract()
             effective_timeout = float(tool.timeout)
             if tool.timeout_argument:
                 requested_timeout = float(args.get(tool.timeout_argument) or tool.timeout_default)
@@ -405,8 +445,8 @@ class ToolPipeline:
                     result_data = self._execute_composite_plan(
                         tool, args, ctx, execution_id, call_index,
                     )
-            # v0.45: isolated=True → 子进程隔离执行
-            elif getattr(tool, "isolated", False):
+            # Host registration selects native execution independently of business effect.
+            elif execution_contract.kind.value == "native_process":
                 result_data = self._execute_isolated(
                     getattr(tool, "runner_name", "") or tool_name,
                     {**args, "_workspace": str(ctx.workspace_path)}, effective_timeout,

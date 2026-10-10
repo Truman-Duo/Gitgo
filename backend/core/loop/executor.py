@@ -13,6 +13,8 @@ v0.44: 流式响应 —— on_stream_event 回调注入；stream_chat 替代同�
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import HOST_COMPUTE, NATIVE_PROCESS, data_broker
+
 import json
 import time
 from pathlib import Path
@@ -2266,6 +2268,7 @@ def _build_internal_tools(
     from backend.core.loop.engineering_workflow import EngineeringWorkflow
     engineering = EngineeringWorkflow(process, on_stream_event)
     tools["engineering_workflow"] = AgentTool(
+        execution_contract=data_broker("host.runtime.engineering_workflow"),
         name="engineering_workflow",
         description=(
             "Manage Host-enforced engineering practices, not prompt-only skills. "
@@ -2332,6 +2335,7 @@ def _build_internal_tools(
             }
 
         tools["code_dossier"] = AgentTool(
+            execution_contract=data_broker("host.runtime.code_dossier"),
             name="code_dossier",
             description=(
                 "Build a deterministic, content-addressed code dossier containing "
@@ -2357,6 +2361,7 @@ def _build_internal_tools(
         safe_calculate,
     )
     tools["calculate"] = AgentTool(
+        execution_contract=HOST_COMPUTE,
         name="calculate",
         description=(
             "Deterministically evaluate bounded arithmetic or numeric comparisons; "
@@ -2375,6 +2380,7 @@ def _build_internal_tools(
         idempotent=True,
     )
     tools["decision_evidence"] = AgentTool(
+        execution_contract=data_broker("host.runtime.decision_evidence"),
         name="decision_evidence",
         description=(
             "Ask the Host to aggregate completion, child, test, governance, or budget "
@@ -2409,6 +2415,7 @@ def _build_internal_tools(
         )
 
     tools["capability_status"] = AgentTool(
+        execution_contract=data_broker("host.runtime.capability_status"),
         name="capability_status",
         description=(
             "Read the Host's current model, provider protocol and capability/fallback "
@@ -2537,6 +2544,7 @@ def _build_internal_tools(
         }
 
     tools["configure_capability"] = AgentTool(
+        execution_contract=data_broker("host.runtime.configure_capability"),
         name="configure_capability",
         description=(
             "Apply a Host capability strategy only after the user has explicitly chosen "
@@ -2629,6 +2637,7 @@ def _build_internal_tools(
         }
 
     tools["acknowledge_governance_signal"] = AgentTool(
+        execution_contract=data_broker("host.runtime.acknowledge_governance_signal"),
         name="acknowledge_governance_signal",
         description=(
             "Acknowledge one active rejection signal after semantically addressing it. "
@@ -2652,6 +2661,7 @@ def _build_internal_tools(
     )
     if process.actor_kind in {"supervisor", "worker", "reviewer"}:
         tools["request_user_decision"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_user_decision"),
             name="request_user_decision",
             description=(
                 "Ask one classified, durable user question after checking Host facts and "
@@ -2711,6 +2721,7 @@ def _build_internal_tools(
         )
         from backend.core.loop.permission_broker import create_permission_request
         tools["request_permission"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_permission"),
             name="request_permission",
             description=(
                 "Request authority only when a structured Host error explicitly prescribes "
@@ -2773,6 +2784,7 @@ def _build_internal_tools(
             return {"accepted": True, **result}
 
         tools["publish_interface_update"] = AgentTool(
+            execution_contract=data_broker("host.runtime.publish_interface_update"),
             name="publish_interface_update",
             description=(
                 "Inspect this B's declared output interfaces and publish any changed "
@@ -2832,6 +2844,7 @@ def _build_internal_tools(
             return {"accepted": True, **event}
 
         tools["escalate_to_supervisor"] = AgentTool(
+            execution_contract=data_broker("host.runtime.escalate_to_supervisor"),
             name="escalate_to_supervisor",
             description=(
                 "Escalate a semantic boundary, dependency, blocking, or stale-intent issue "
@@ -2882,6 +2895,7 @@ def _build_internal_tools(
             return {"events": events[-64:], "count": len(events)}
 
         tools["list_coordination_events"] = AgentTool(
+            execution_contract=data_broker("host.runtime.list_coordination_events"),
             name="list_coordination_events",
             description=(
                 "List Host-routed worker escalation and dependency-interface events owned "
@@ -2954,6 +2968,7 @@ def _build_internal_tools(
             return response
 
         tools["resolve_coordination_event"] = AgentTool(
+            execution_contract=data_broker("host.runtime.resolve_coordination_event"),
             name="resolve_coordination_event",
             description=(
                 "Resolve a Host-routed coordination event. Interface revisions require "
@@ -3034,6 +3049,7 @@ def _build_internal_tools(
             }
 
         tools["declare_task_contract"] = AgentTool(
+            execution_contract=data_broker("host.runtime.declare_task_contract"),
             name="declare_task_contract",
             description=(
                 "Compile your semantic understanding of a non-trivial user request "
@@ -3200,6 +3216,7 @@ def _build_internal_tools(
             return response
 
         tools["complete_supervision"] = AgentTool(
+            execution_contract=data_broker("host.runtime.complete_supervision"),
             name="complete_supervision",
             description=(
                 "Submit the final A-level synthesis. The Host verifies every "
@@ -3299,6 +3316,7 @@ def _build_internal_tools(
             return response
 
         tools["request_self_execute"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_self_execute"),
             name="request_self_execute",
             description=(
                 "Explicitly request the task-scoped capability lease selected by an "
@@ -3357,6 +3375,7 @@ def _build_internal_tools(
             return {**dossier_result, "bundle": plan}
 
         tools["prepare_task_bundle"] = AgentTool(
+            execution_contract=data_broker("host.runtime.prepare_task_bundle"),
             name="prepare_task_bundle",
             description=(
                 "Ask the Host to size a code task and deterministically suggest stable "
@@ -3420,6 +3439,7 @@ def _build_internal_tools(
             }
 
         tools["read_child_artifact"] = AgentTool(
+            execution_contract=data_broker("host.runtime.read_child_artifact"),
             name="read_child_artifact",
             description=(
                 "Read a file produced by an owned completed subprocess before review. "
@@ -4149,6 +4169,7 @@ def _build_internal_tools(
                 )
 
         tools["delegate_task"] = AgentTool(
+            execution_contract=data_broker("host.runtime.delegate_task"),
             name="delegate_task",
             description=(
                 "Delegate an executor-ready task contract to an independent B Agent. "
@@ -4464,6 +4485,7 @@ def _build_internal_tools(
             }
 
         tools["delegate_task_dag"] = AgentTool(
+            execution_contract=data_broker("host.runtime.delegate_task_dag"),
             name="delegate_task_dag",
             description=(
                 "Admit a complete sibling DAG in one Host-validated operation. Use "
@@ -4697,6 +4719,7 @@ def _build_internal_tools(
                                         })}
 
         tools["delegate_task_bundle"] = AgentTool(
+            execution_contract=data_broker("host.runtime.delegate_task_bundle"),
             name="delegate_task_bundle",
             description=(
                 "Build one deterministic dossier, shard a large task, and start all "
@@ -4760,6 +4783,7 @@ def _build_internal_tools(
             }
 
         tools["list_agents"] = AgentTool(
+            execution_contract=data_broker("host.runtime.list_agents"),
             name="list_agents",
             description="List this supervisor's B Agents and their durable execution states.",
             parameters={"type": "object", "properties": {}, "required": []},
@@ -4823,6 +4847,7 @@ def _build_internal_tools(
             }
 
         tools["wait_agents"] = AgentTool(
+            execution_contract=data_broker("host.runtime.wait_agents"),
             name="wait_agents",
             description="Wait for selected B Agents with a bounded, cancellation-aware timeout.",
             parameters={
@@ -4965,6 +4990,7 @@ def _build_internal_tools(
             return {"accepted": True, "process_id": child_id, "review": review}
 
         tools["review_child_outcome"] = AgentTool(
+            execution_contract=data_broker("host.runtime.review_child_outcome"),
             name="review_child_outcome",
             description=(
                 "Record A's structured review of a terminal owned B outcome. "
@@ -5009,6 +5035,7 @@ def _build_internal_tools(
                 return {"promoted": False, "error": str(exc)}
 
         tools["promote_agent_changes"] = AgentTool(
+            execution_contract=data_broker("host.runtime.promote_agent_changes"),
             name="promote_agent_changes",
             description=(
                 "Promote an A-approved, sealed DAG result into the user working "
@@ -5050,6 +5077,7 @@ def _build_internal_tools(
             )
 
         tools["send_feedback"] = AgentTool(
+            execution_contract=data_broker("host.runtime.send_feedback"),
             name="send_feedback",
             description=(
                 "Send corrective or additional instructions to a B Agent mailbox. "
@@ -5075,6 +5103,7 @@ def _build_internal_tools(
             }
 
         tools["cancel_agent"] = AgentTool(
+            execution_contract=data_broker("host.runtime.cancel_agent"),
             name="cancel_agent",
             description="Request cancellation of one delegated B Agent without faking a terminal state.",
             parameters={
@@ -5146,6 +5175,7 @@ def _build_internal_tools(
             return {"reviewer_process_id": child.process_id, "target_process_id": target_id}
 
         tools["request_review"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_review"),
             name="request_review",
             description=(
                 "Start an independent read-only Reviewer B for a completed B result or "
@@ -5226,6 +5256,7 @@ def _build_internal_tools(
                 return {"error": str(exc), "defined": False}
 
             dynamic = AgentTool(
+                execution_contract=data_broker("host.composite"),
                 name=spec["name"],
                 description=spec["description"],
                 parameters=spec["parameters"],
@@ -5251,6 +5282,7 @@ def _build_internal_tools(
             }
 
         tools["define_tool"] = AgentTool(
+            execution_contract=data_broker("host.runtime.define_tool"),
             name="define_tool",
             description=(
                 "Define one task-scoped composite tool from tools already authorized in "
@@ -5331,6 +5363,7 @@ def _build_internal_tools(
                 privileged = spec.get("execution_mode") == "authored_privileged_python"
                 effect = ToolEffect(str(spec.get("effect") or ("process" if privileged else "read")))
                 dynamic = AgentTool(
+                    execution_contract=NATIVE_PROCESS,
                     name=name, description=str(spec.get("description") or ""),
                     parameters=spec.get("parameters"),
                     execute=lambda _args: {"error": "AUTHORED_TOOL_REQUIRES_PIPELINE"},
@@ -5513,6 +5546,7 @@ def _build_internal_tools(
                     "tests_passed": len(spec["tests"])}
 
         tools["author_tool"] = AgentTool(
+            execution_contract=data_broker("host.runtime.author_tool"),
             name="author_tool",
             description=(
                 "Manage project-saved Python shortcuts. Pure mode is statically confined. "
@@ -5560,6 +5594,7 @@ def _build_internal_tools(
             return {"accepted": True, **process.review_claim}
 
         tools["complete_review"] = AgentTool(
+            execution_contract=data_broker("host.runtime.complete_review"),
             name="complete_review",
             description="Submit the independent review verdict and evidence to the host gate.",
             parameters={
@@ -5586,6 +5621,7 @@ def _build_internal_tools(
         return {"accepted": True, "claim": claim.to_dict()}
 
     tools["complete_task"] = AgentTool(
+        execution_contract=data_broker("host.runtime.complete_task"),
         name="complete_task",
         description=(
             "Submit the action result and verification evidence for deterministic "

@@ -71,6 +71,10 @@ def tool_contract_digest(tool) -> str:
     contract = {
         "name": tool.name,
         "runner_name": getattr(tool, "runner_name", ""),
+        "execution_contract": (
+            tool.execution_contract.to_dict()
+            if getattr(tool, "execution_contract", None) is not None else None
+        ),
         "runtime_implementation": _runtime_implementation_digest(),
         "parameters": tool.parameters,
         "effect": getattr(getattr(tool, "effect", ""), "value", str(getattr(tool, "effect", ""))),

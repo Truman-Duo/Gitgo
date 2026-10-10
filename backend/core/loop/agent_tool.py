@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
+from backend.core.loop.execution_contract import ExecutionContract, ExecutionType
+
 
 _OBJECT_SCHEMA_KEYS = {
     "$schema", "$id", "$defs", "definitions", "title", "description", "type",
@@ -135,12 +137,20 @@ class AgentTool:
     # projection of existing AgentTools; ToolPipeline expands this plan and
     # sends every component through the same permission/receipt/signal path.
     composite_spec: dict | None = None
+    # None is intentionally unregistered authority, never a legacy Host default.
+    execution_contract: ExecutionContract | None = None
 
     def __post_init__(self) -> None:
+        self._bound_executor = self.execute
+        self._bound_execution_contract = self.execution_contract
+        if self.execution_contract is not None and not isinstance(self.execution_contract, ExecutionContract):
+            raise ValueError("Execution authority must be a Host contract object")
         self.parameters = normalize_tool_parameters(self.parameters)
         # Backward-compatible normalization while ``read_only`` is migrated.
         if not self.read_only and self.effect == ToolEffect.READ:
             self.effect = ToolEffect.WORKSPACE_WRITE
+        if self.execution_contract is not None and self.execution_contract.kind == ExecutionType.NATIVE_PROCESS:
+            self.isolated = True
         if self.isolated:
             self.cancellation = CancellationMode.ISOLATED_PROCESS
         elif (
@@ -157,6 +167,25 @@ class AgentTool:
         if self.isolated and not self.runner_name:
             self.runner_name = self.name
 
+    def validate_execution_contract(self) -> ExecutionContract:
+        contract = self.execution_contract
+        if not isinstance(contract, ExecutionContract):
+            raise ValueError("Tool has no Host-declared execution contract")
+        if contract is not self._bound_execution_contract or self.execute is not self._bound_executor:
+            raise ValueError("Registered execution authority or callable changed")
+        mode = (self.composite_spec or {}).get("execution_mode")
+        if mode in {"authored_pure_python", "authored_privileged_python"}:
+            if contract.kind != ExecutionType.NATIVE_PROCESS:
+                raise ValueError("Authored code requires native process authority")
+        elif self.composite_spec is not None:
+            if mode != "host_pipeline" or contract != ExecutionContract(ExecutionType.DATA_BROKER, "host.composite"):
+                raise ValueError("Composite execution requires Host pipeline authority")
+        if self.isolated and contract.kind != ExecutionType.NATIVE_PROCESS:
+            raise ValueError("A process cannot run with Host/broker authority")
+        if contract.kind == ExecutionType.EXTERNAL_SERVICE:
+            raise ValueError("Named external service execution is not implemented")
+        return contract
+
     @property
     def guarantees_cancellation(self) -> bool:
         """Whether stop can terminate work that has already started."""
@@ -167,6 +196,9 @@ class AgentTool:
 
     def __call__(self, args: dict) -> dict:
         """直接调用 AgentTool 实例 = 执行工具。兼容旧 dict[str, Callable] 接口。"""
+        contract = self.validate_execution_contract()
+        if contract.kind == ExecutionType.NATIVE_PROCESS or self.composite_spec is not None:
+            raise RuntimeError("Process/composite execution requires ToolPipeline")
         return self.execute(args)
 
     def to_openai_function(self) -> dict:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import ctypes as C
 import json
 import os
@@ -18,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.core.sandbox import (
-    SANDBOXED_HANDLERS, SandboxDenied, SandboxPolicy,
+    SandboxDenied, SandboxPolicy,
     sandbox_environment, sandbox_popen,
 )
 from backend.core.process_control import close_job, terminate_tree
@@ -26,8 +28,12 @@ from backend.core.sandbox_io import BoundedCommunication
 
 
 def test_sensitive_handlers_have_no_model_selectable_opt_out():
+    from backend.core.tools.runner import handler_bindings
+    from backend.core.loop.execution_contract import NATIVE_PROCESS
+    bindings = handler_bindings()
+    assert all(binding.execution_contract == NATIVE_PROCESS for binding in bindings.values())
     assert {"shell_script", "exec_command", "run_command", "run_test",
-            "authored_python", "authored_privileged_python", "search_text", "list_files", "document_open"} <= SANDBOXED_HANDLERS
+            "authored_python", "authored_privileged_python", "search_text", "list_files", "document_open"} <= bindings.keys()
 
 
 def test_environment_is_an_allowlist():
@@ -58,7 +64,7 @@ def test_grant_is_bound_to_source_resources_process_and_expiry(tmp_path_factory)
     from backend.core.loop.agent_tool import AgentTool
     from backend.core.loop.permission_broker import matching_grant, tool_contract_digest
     tool = AgentTool("sensitive", "test", {}, lambda args: {},
-                     approval_per_invocation=True, resources=["process:python"],
+                     execution_contract=NATIVE_PROCESS, approval_per_invocation=True, resources=["process:python"],
                      composite_spec={"version": 1, "source_sha256": "first"})
     from backend.core.loop.permission_broker import arguments_digest
     grant = {"tool_name": tool.name, "task_id": "task", "process_id": "worker",
@@ -358,6 +364,7 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
         assert result.success and 'error' not in result.data, result
         assert result.data['engine'] == 'python' and result.data['complete'], result
         assert result.data['count'] == 1, result
+    _assert_legacy_file_aliases_are_native(runner, workspace)
     shell = runner.run("shell_script", {
         "_workspace": str(workspace),
         "script": "Set-Content -LiteralPath shell.txt -Value native-file;Write-Output native-shell",
@@ -465,7 +472,7 @@ def test_external_resource_grant_cannot_survive_tool_replacement(tmp_path_factor
     )
     target = (tmp_path_factory / "outside").resolve(strict=False)
     target.mkdir()
-    tool = AgentTool("write_external", "test", {}, lambda args: {}, resources=[str(target)])
+    tool = AgentTool("write_external", "test", {}, lambda args: {}, execution_contract=data_broker("test.fixture"), resources=[str(target)])
     grant = {
         "tool_name": tool.name, "effect": "read", "task_id": "task", "process_id": "worker",
         "resource": str(target), "scope": "task", "remaining_uses": None,
@@ -522,7 +529,7 @@ def test_model_cannot_inject_host_resource_roots(tmp_path_factory, monkeypatch):
 def test_exact_grant_can_be_consumed_by_only_one_thread():
     from backend.core.loop.agent_tool import AgentTool
     from backend.core.loop.permission_broker import arguments_digest, matching_grant, tool_contract_digest
-    tool = AgentTool("sensitive", "test", {}, lambda args: {}, approval_per_invocation=True)
+    tool = AgentTool("sensitive", "test", {}, lambda args: {}, execution_contract=data_broker("test.fixture"), approval_per_invocation=True)
     grant = {"tool_name": tool.name, "task_id": "task", "process_id": "worker",
              "arguments_digest": arguments_digest({}), "remaining_uses": 1,
              "tool_contract_digest": tool_contract_digest(tool),
@@ -561,7 +568,7 @@ def test_pipeline_rechecks_consumption_before_execution(tmp_path_factory, monkey
         workspace_path=str(tmp_path_factory), task_id="grant-race")
     calls = []
     tool = AgentTool("sensitive", "test", {}, lambda args: calls.append(args),
-                     approval=ApprovalMode.ASK, approval_per_invocation=True)
+                     execution_contract=data_broker("test.fixture"), approval=ApprovalMode.ASK, approval_per_invocation=True)
     def match(*args, **kwargs):
         return None if kwargs.get("consume") else {"grant_id": "already-consumed"}
     monkeypatch.setattr("backend.core.loop.permission_broker.matching_grant", match)
@@ -851,7 +858,7 @@ def test_cancel_between_pipeline_admission_and_spawn_never_executes(tmp_path_fac
     bus = EventBus()
     bus.subscribe('ToolExecuteStarted', lambda _: process.cancellation_event.set())
     tool = AgentTool('command', 'test', {}, lambda _: pytest.fail('Inline execution'),
-                     isolated=True, runner_name='exec_command', effect=ToolEffect.PROCESS,
+                     execution_contract=NATIVE_PROCESS, isolated=True, runner_name='exec_command', effect=ToolEffect.PROCESS,
                      read_only=False)
     ctx = ExecutionContext(process=process, session=process.session,
         workspace_path=str(tmp_path_factory), event_bus=bus, cancellation=process.cancellation_event)
@@ -1377,3 +1384,62 @@ def test_windows_operator_apply_restore_controls_real_native_access(isolated_pyt
         delete.argtypes, delete.restype = [W.LPCWSTR], C.c_long
         status = delete(policy.profile_name)
         assert status >= 0 or status == -2147024894
+
+
+def _assert_legacy_file_aliases_are_native(runner, workspace):
+    # Host can read this positive-control secret; the actual child cannot.
+    secret = workspace.parent / "legacy-host-only.txt"
+    secret.write_text("host-private-marker", encoding="utf-8")
+    assert secret.read_text() == "host-private-marker"
+    target = workspace / "legacy-alias.txt"
+    result = runner.run("file_write", {"_workspace": str(workspace), "path": str(target), "content": "alias-data"})
+    assert result.success and "error" not in result.data, result
+    assert target.read_text() == "alias-data"
+    result = runner.run("file_read", {"_workspace": str(workspace), "path": str(target)})
+    assert result.success and result.data.get("content") == "alias-data", result
+    blocked = runner.run("file_read", {"_workspace": str(workspace), "path": str(secret)})
+    assert blocked.data and "error" in blocked.data and "content" not in blocked.data, blocked
+    assert "host-private-marker" not in json.dumps(blocked.data)
+    result = runner.run("file_delete", {"_workspace": str(workspace), "path": str(target)})
+    assert result.success and "error" not in result.data and not target.exists(), result
+    assert secret.read_text() == "host-private-marker"
+
+
+def test_linux_real_runner_legacy_file_aliases(linux_box):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, _ = linux_box
+    _assert_legacy_file_aliases_are_native(ProcessToolRunner(timeout=30), workspace)
+
+
+def test_packaged_host_legacy_file_aliases_are_native(cross_platform_box):
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get("GITGO_SANDBOX_TEST_HOST")
+    if not configured:
+        pytest.skip("Requires an actual built Host")
+    host = Path(configured).resolve(strict=True)
+    secret = workspace.parent / "legacy-packaged-secret.txt"
+    secret.write_text("host-private-marker", encoding="utf-8")
+    target = workspace / "legacy-packaged-alias.txt"
+    commands = [
+        ("file_write", {"path": str(target), "content": "alias-data"}),
+        ("file_read", {"path": str(target)}),
+        ("file_read", {"path": str(secret)}),
+        ("file_delete", {"path": str(target)}),
+    ]
+    commands = [(name, {"_workspace": str(policy.workspace), **args}) for name, args in commands]
+    source = (
+        "import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;"
+        f"commands={commands!r};"
+        "results=[ProcessToolRunner(timeout=30).run(name,args) for name,args in commands];"
+        "print(json.dumps([{'success':r.success,'data':r.data,'error':r.error,'stderr':r.stderr} for r in results]))"
+    )
+    result = subprocess.run([str(host), "--gitgo-internal-role", "python", "-c", source],
+                            capture_output=True, text=True, encoding="utf-8", timeout=150)
+    assert result.returncode == 0, result.stderr
+    written, read, blocked, deleted = json.loads(result.stdout)
+    for payload in (written, read, deleted):
+        assert payload["success"] and "error" not in payload["data"], payload
+    assert read["data"]["content"] == "alias-data", read
+    assert blocked["data"] and "error" in blocked["data"] and "content" not in blocked["data"], blocked
+    assert "host-private-marker" not in json.dumps(blocked["data"])
+    assert not target.exists() and secret.read_text() == "host-private-marker"

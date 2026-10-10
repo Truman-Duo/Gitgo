@@ -1,12 +1,9 @@
-"""ProcessToolRunner —— 子进程工具执行器。
+"""Native-only tool process entry.
 
-通过 subprocess.Popen 在独立进程中执行工具，提供真正的进程隔离：
-- 超时 → kill_tree（Windows: taskkill /F /T, Unix: os.killpg）
-- 崩溃 → 子进程异常不会污染 daemon 进程
-- stdin/stdout JSON 协议
-
-与 ToolPipeline 的关系：ToolPipeline 的 Step 4 可选使用 ProcessToolRunner
-替代 tool.execute(args) 内联调用，获得进程隔离保证。
+Every child handler comes from the trusted typed registry and is launched via
+sandbox_popen. Unsupported platforms/capabilities and unknown handlers fail
+closed; there is no ordinary-user subprocess retry. JSON transport remains a
+legacy tool protocol, not a trusted Host execution envelope.
 """
 
 from __future__ import annotations
@@ -76,37 +73,25 @@ class ProcessToolRunner:
 
         try:
             from backend.core.process_control import attach_kill_job, close_job, creation_flags
-            # Ordinary tools retain the trusted Host registry configuration.
-            # Arbitrary-code handlers receive only the sandbox allowlist.
+            from backend.core.tools.runner import handler_bindings
+            binding = handler_bindings().get(tool_name)
+            if binding is None:
+                raise SandboxDenied("SANDBOX_POLICY_INVALID", "Unknown Host-registered process handler.")
+            # Every registered child handler is native; missing names or future
+            # registrations can never fall through to ordinary subprocess.Popen.
             child_env = os.environ.copy()
-            child_env.update({
-                "PYTHONIOENCODING": "utf-8",
-                "PYTHONUTF8": "1",
-            })
             source_root = Path(__file__).resolve().parents[3]
-            from backend.core.sandbox import (
-                SANDBOXED_HANDLERS, SandboxPolicy, sandbox_environment, sandbox_popen,
-            )
-            native = tool_name in SANDBOXED_HANDLERS
-            policy = None
-            if native:
-                workspace = args.get("_workspace") or args.get("workspace_path")
-                if not workspace:
-                    raise SandboxDenied("SANDBOX_POLICY_INVALID", "Host execution workspace is required.")
-                policy = SandboxPolicy(
-                    Path(str(workspace)),
-                    cpu_seconds=max(1, min(int(effective_timeout), 1800)),
-                )
-                child_env = sandbox_environment(child_env)
-                input_data["_native_sandbox_workspace"] = str(policy.workspace)
-                # Normalize DOS short aliases before entering AppContainer,
-                # where probing the inaccessible parent directories is denied.
-                input_data["args"] = {**args, "_workspace": str(policy.workspace)}
-            spawn = (
-                lambda argv, **options: sandbox_popen(argv, policy, **options)
-            ) if native else subprocess.Popen
-            proc = spawn(
-                tool_runner_command(),
+            from backend.core.sandbox import SandboxPolicy, sandbox_environment, sandbox_popen
+            workspace = args.get("_workspace") or args.get("workspace_path")
+            if not workspace:
+                raise SandboxDenied("SANDBOX_POLICY_INVALID", "Host execution workspace is required.")
+            policy = SandboxPolicy(Path(str(workspace)),
+                cpu_seconds=max(1, min(int(effective_timeout), 1800)))
+            child_env = sandbox_environment(child_env)
+            input_data["_native_sandbox_workspace"] = str(policy.workspace)
+            input_data["args"] = {**args, "_workspace": str(policy.workspace)}
+            proc = sandbox_popen(
+                tool_runner_command(), policy,
                 # DaemonClient starts ``python -m gitgo`` from the package's
                 # parent directory.  Relying on inherited cwd therefore makes
                 # the top-level ``backend`` module disappear only in real
@@ -124,11 +109,8 @@ class ProcessToolRunner:
             )
             if not getattr(proc, "_gitgo_job_handle", None):
                 proc._gitgo_job_handle = attach_kill_job(proc)
-            if native:
-                from backend.core.sandbox_io import BoundedCommunication
-                communication = BoundedCommunication(proc)
-            else:
-                communication = proc
+            from backend.core.sandbox_io import BoundedCommunication
+            communication = BoundedCommunication(proc)
 
             try:
                 payload = dump_protocol_json(input_data)
@@ -162,20 +144,12 @@ class ProcessToolRunner:
                 proc._gitgo_job_handle = None
 
                 if proc.returncode != 0:
-                    if native:
-                        denial = SandboxDenied("SANDBOX_EXECUTION_FAILED",
-                            "Sandboxed runtime exited without a tool result. Inspect runtime ACLs and captured diagnostics.")
-                        denial.effect_state = "ambiguous"
-                        return SubprocessResult(success=True, data=denial.result(),
-                            exit_code=proc.returncode, duration_ms=duration_ms,
-                            stderr=stderr_str)
-                    return SubprocessResult(
-                        success=False,
-                        error=f"subprocess exit {proc.returncode}: {stderr_str[:500]}",
-                        exit_code=proc.returncode,
-                        duration_ms=duration_ms,
-                        stderr=stderr_str,
-                    )
+                    denial = SandboxDenied("SANDBOX_EXECUTION_FAILED",
+                        "Sandboxed runtime exited without a tool result. Inspect captured diagnostics.")
+                    denial.effect_state = "ambiguous"
+                    return SubprocessResult(success=True, data=denial.result(),
+                        exit_code=proc.returncode, duration_ms=duration_ms,
+                        stderr=stderr_str)
 
                 result = json.loads(stdout_str)
                 return SubprocessResult(
