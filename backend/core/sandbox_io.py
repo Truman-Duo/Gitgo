@@ -36,6 +36,10 @@ class BoundedCommunication:
         except (BrokenPipeError, OSError, ValueError):
             pass
 
+    def stderr_snapshot(self) -> str:
+        """Best-effort bounded capture, without claiming pipes/cleanup finished."""
+        return bytes(self.output[1]).decode("utf-8", errors="replace")
+
     def communicate(self, input=None, timeout=None):
         if not self.started:
             self.started = True

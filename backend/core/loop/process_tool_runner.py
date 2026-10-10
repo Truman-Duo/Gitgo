@@ -33,6 +33,7 @@ class SubprocessResult:
     duration_ms: float = 0.0
     timed_out: bool = False
     stderr: str = ""
+    stderr_partial: bool = False
     effect_state: str = ""
 
 
@@ -124,6 +125,7 @@ class ProcessToolRunner:
                             success=False,
                             error=f"tool '{tool_name}' cancelled",
                             effect_state="ambiguous",
+                            stderr=communication.stderr_snapshot(), stderr_partial=True,
                             exit_code=-1,
                             duration_ms=(time.monotonic() - start) * 1000,
                         )
@@ -171,7 +173,7 @@ class ProcessToolRunner:
                     duration_ms=duration_ms,
                     timed_out=True,
                     effect_state="ambiguous",
-                    stderr="",
+                    stderr=communication.stderr_snapshot(), stderr_partial=True,
                 )
 
         except SandboxDenied as exc:
@@ -180,6 +182,8 @@ class ProcessToolRunner:
                 self._kill_tree(spawned)
             return SubprocessResult(
                 success=True, data=exc.result(),
+                stderr=communication.stderr_snapshot() if "communication" in locals() else "",
+                stderr_partial=True,
                 duration_ms=(time.monotonic() - start) * 1000,
             )
         except FileNotFoundError:
@@ -198,6 +202,8 @@ class ProcessToolRunner:
             return SubprocessResult(
                 success=False,
                 error=f"subprocess spawn failed: {exc}",
+                stderr=communication.stderr_snapshot() if "communication" in locals() else "",
+                stderr_partial=True,
                 exit_code=-1,
                 duration_ms=duration_ms,
             )

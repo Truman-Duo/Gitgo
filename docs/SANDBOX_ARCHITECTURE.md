@@ -2,7 +2,7 @@
 
 状态：设计候选，待实现与复评，不是安全验收通过证明。2026-10-10。
 适用 PR #25 / Issue #17；按维护者 2026-10-09 的架构审查修订。
-当前公开代码快照 `1a2da14fc6e9879a7ead6fd471f53b409659ddcc`；
+owner 审查参考快照 `1a2da14fc6e9879a7ead6fd471f53b409659ddcc`；
 观察目标为 `Truman-Duo/Gitgo:refs/heads/master`，
 `fbeab2c5280c4eb1380f98f359e8f36536454af7`。
 版本只是此次观察，后续交付重新读取，不冻结主线。
@@ -204,14 +204,33 @@ Pipeline 在预处理前、授权消费前及执行前校验已绑定的声明�
 此交付只完成注册和子进程路由这一部分。data_broker 的具名声明不是安全文件/Git
 代理的实现证明：现有 scan/status/context 等仍必须在 B 阶段限制参数、稳定对象身份及
 诱导执行。单一 effective manifest/compiler、完整 broker allowlist、恢复准入及有效策略
-绑定仍待完成。新增声明进入 grant digest，使已有带旧 digest 的 grant 失效；历史无 digest
-兼容路径仍待统一迁移，不能称旧 grant 迁移完成。当前网络 handler 被原生无网络边界约束，
+绑定仍待完成。新增声明进入 grant digest，使已有带旧 digest 的 grant 失效；旧无 digest、
+无有效期限的 grant 和工具名缓存批准已拒绝，旧 pending decision 不能生成这些 grant。
+旧 checkpoint 保持可读，但需新的用户批准。有效 manifest 绑定仍未完成。
+当前网络 handler 被原生无网络边界约束，
 没有授权服务代理或可用后端时保持拒绝，不以普通 Host 重试恢复网络。
 
 合同测试覆盖未知入口、声明/函数替换、预处理前拒绝、一次性授权保留、直接调用、
 旧别名、新 handler 及原生路由；mock 只证实调度协议。Windows 真实 AppContainer 的
 工作区文件读写/删除和 Host 文件拒绝已验证；Linux 源码和实际 packaged 的旧别名
 验收已加入，须按平台对应候选 CI 分别核对。所有 B1–B6 仍未完成闭环。
+
+### 简单问题修复的范围（2026-10-10）
+
+permission_broker 的普通调用、外部资源和 authored 注册入口统一拒绝无摘要、无期限、
+过期或格式损坏的 grant；Pipeline 不再接受 artifacts 中仅按工具名缓存的批准。
+这关闭了旧授权兼容入口，但不是有效 manifest/当前工具注册绑定及持久化消费已完成。
+
+Runner 的已捕获 stderr 经 Pipeline 写入独立 diagnostics.runner，并进入现有 formatted、
+ToolResultReady、executor/Trace 结果路径；保留 exit_code、耗时、timeout 和部分捕获标志。
+正常、业务失败、崩溃、超时、取消及坏 JSON 均覆盖。原生真实退出失败有独立正向对照。
+输出限定为 8192 字符，去除终端控制序列，复用存储脱敏并补已知 GitHub token 格式；
+不能据此声称任意文本里的秘密都可识别。超时/取消/异常取有界快照并标 stderr_partial，
+不宣称线程、输出或整树清理完成。该诊断不是可信 effect/lineage/cleanup envelope。
+
+B6 的 stderr 传输缺口修复；监督/清理 outcome、正式终端、错误阶段及是否启动事实仍待
+统一 Host envelope。ACL 继承恢复、未来父权限变化和并发事务仍是需要专项设计的障碍，
+不能通过放宽权限、跳过验证或接受“看似等价”的 DACL 消除。
 
 每次候选记录 head、target、观察时间/upstream、merge-base、组合树、策略/协议版本、
 接口对齐、源码/frozen/OS/helper 版本、正向/拒绝/故障/跳过、run/artifact 和剩余风险。

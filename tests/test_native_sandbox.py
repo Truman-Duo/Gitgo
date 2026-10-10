@@ -1443,3 +1443,29 @@ def test_packaged_host_legacy_file_aliases_are_native(cross_platform_box):
     assert blocked["data"] and "error" in blocked["data"] and "content" not in blocked["data"], blocked
     assert "host-private-marker" not in json.dumps(blocked["data"])
     assert not target.exists() and secret.read_text() == "host-private-marker"
+
+
+def test_native_runner_crash_diagnostics_reach_pipeline(cross_platform_box, monkeypatch):
+    from backend.core.loop.execution_context import ExecutionContext
+    from backend.core.loop.models import AgentProcess, RingLevel
+    from backend.core.loop.session import AgentSession
+    from backend.core.loop.tool_pipeline import ToolPipeline
+    from backend.core.loop.permission_broker import create_permission_request, grant_from_decision
+    from backend.core.tools.catalog import build_workspace_tools
+    workspace, _, executable = cross_platform_box
+    source = "import sys;sys.stderr.write('native-crash-marker\\n');sys.stderr.flush();sys.exit(23)"
+    monkeypatch.setattr("backend.core.loop.process_tool_runner.tool_runner_command", lambda: [executable, "-I", "-c", source])
+    monkeypatch.setattr("backend.core.loop.process_tool_runner.owned_child_cwd", lambda _: workspace)
+    process = AgentProcess(process_id="native-diagnostic", role="worker", ring_level=RingLevel.RING_0,
+                           worktree_path=str(workspace), session=AgentSession())
+    tool = build_workspace_tools(workspace)["exec_command"]
+    args = {"argv": ["python", "-c", "pass"]}
+    create_permission_request(process, {"purpose": "native diagnostic test", "tool_name": tool.name,
+                                       "arguments": args}, {tool.name: tool}, str(workspace))
+    assert grant_from_decision(process, process.pending_decision, "allow_once")
+    ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(workspace))
+    result = ToolPipeline().execute({"name": tool.name, "args": args}, tool, ctx, "native-crash")
+    assert result.is_error and result.diagnostics["code"] == "SANDBOX_EXECUTION_FAILED"
+    assert "native-crash-marker" in result.formatted
+    assert result.diagnostics["runner"]["exit_code"] == 23
+    assert result.receipt["effect_state"] == "ambiguous"

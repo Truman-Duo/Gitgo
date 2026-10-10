@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import importlib.util
 import marshal
 import threading
@@ -88,22 +89,24 @@ def tool_contract_digest(tool) -> str:
 
 
 def grant_is_current(grant: dict, process, tool=None) -> bool:
-    if grant.get("process_id") != process.process_id:
+    # Old checkpoints remain readable, but unbound/undated approvals never
+    # confer execution authority. Require a new user decision instead.
+    if not isinstance(grant, dict) or grant.get("process_id") != process.process_id:
+        return False
+    digest = grant.get("tool_contract_digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         return False
     expires = grant.get("expires_at")
-    if expires:
-        try:
-            deadline = datetime.fromisoformat(str(expires))
-            if deadline.tzinfo is None or deadline <= datetime.now(timezone.utc):
-                return False
-        except (ValueError, TypeError):
-            return False
-    elif grant.get("tool_contract_digest"):
+    if not isinstance(expires, str) or not expires:
         return False
-    if tool is not None:
-        # Legacy approvals cannot authorize sensitive native code.
-        if grant.get("tool_contract_digest") != tool_contract_digest(tool):
-            return not getattr(tool, "approval_per_invocation", False) and not grant.get("tool_contract_digest")
+    try:
+        deadline = datetime.fromisoformat(expires)
+        if deadline.tzinfo is None or deadline <= datetime.now(timezone.utc):
+            return False
+    except (ValueError, TypeError):
+        return False
+    if tool is not None and digest != tool_contract_digest(tool):
+        return False
     return True
 
 
@@ -348,6 +351,8 @@ def grant_from_decision(process, pending: dict, action: str) -> dict | None:
         "expires_at": str(request.get("expires_at") or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if not grant_is_current(grant, process):
+        return None
     process.approval_grants.append(grant)
     return grant
 

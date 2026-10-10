@@ -360,7 +360,10 @@ def test_exact_command_check_still_requires_normal_permission(tmp_path_factory):
     call = {"name": "exec_command", "args": {"argv": ["python", "test_app.py"]}}
     denied = pipeline.execute(call, command, ctx, "no-permission")
     assert denied.is_error and not calls
-    ctx.artifacts["approvals"] = {"exec_command"}
+    from backend.core.loop.permission_broker import create_permission_request, grant_from_decision
+    create_permission_request(p, {"purpose": "approved command check", "tool_name": command.name,
+                                  "arguments": call["args"]}, {command.name: command}, str(tmp_path_factory))
+    assert grant_from_decision(p, p.pending_decision, "allow_once")
     red = pipeline.execute(call, command, ctx, "red")
     assert red.receipt["command_completed"]
     assert red.receipt["command_exit_code"] == 1
