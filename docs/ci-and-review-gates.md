@@ -13,6 +13,8 @@ scripts/provision_ci_sqlite.py 与 provision_ci_ripgrep.py 单独复用 PR #25 �
 
 ## CI 自身的权限边界
 
+第二轮发现测试终端 keeper 在交接时提前退出。WindowsProcess 的进程退出竞态修复参考 PR #25：先检查 OS handle 是否已 signaled；身份查询失败后仅在该 handle 已退出时按退出处理，活进程身份读取错误继续拒绝。新增真实已退出进程回归，交接测试显式输出 keeper 的错误报告；不隐藏失败、不放宽 PID/镜像/出生时间检查。
+
 Windows 测试使用 runner 自有临时目录的规范绝对路径，并启用 Python UTF-8 模式，避免 hosted 环境的 RUNNER~1 别名和 cp1252 默认编码影响测试身份。删除与终端清理仍拒绝重定向路径；这不表示产品已经支持所有 Windows 短路径别名。首次全量运行也暴露了 LocalFileAdapter.is_symlink 先 resolve 后检查的真实缺陷，本 PR 仅修复目录项判断，并用现有测试验证正常文件和悬空链接；不接入 PR #25 的其余生产实现。
 
 只运行 GitHub-hosted 临时 runner，顶层 token 为 contents:read；checkout 不保存凭据，不注入项目 provider/API key，不缓存 PR 执行后可污染的依赖产物，不上传整个 .gitgo、trace 或原生安装包。第三方 Actions 固定完整 commit SHA，并注明版本；下载工具是验证用，不冒充正式 release staging。
