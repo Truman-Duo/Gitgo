@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS
+
 from backend.core.loop.agent_tool import (
     AgentTool,
     ApprovalMode,
@@ -28,6 +30,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
     common = {
         "prepare_args": inject_workspace,
         "isolated": True,
+        "execution_contract": NATIVE_PROCESS,
         "cancellation": CancellationMode.ISOLATED_PROCESS,
         "composable": True,
     }
@@ -358,7 +361,8 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "shell_script": AgentTool(
             name="shell_script",
             description=(
-                "Run one Bash script inside the workspace when argv-based exec_command "
+                "Run one native shell script (PowerShell on Windows, Bash on Linux) inside "
+                "the workspace when argv-based exec_command "
                 "cannot express the required pipes, redirections or shell control flow. "
                 "This is a sensitive capability: explain the user-visible purpose with "
                 "request_permission and obtain approval for these exact arguments before "

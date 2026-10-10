@@ -27,23 +27,22 @@ def isolate_default_gitgo_state(
     boundaries so a cached runtime cannot outlive the temporary directory.
     """
     close_owned_storage()
-    monkeypatch.setenv(
-        "GITGO_STATE_HOME", str(tmp_path_factory / "default-gitgo-state"),
-    )
-    monkeypatch.setenv(
-        "GITGO_CONFIG_PATH", str(tmp_path_factory / "config" / "config.json"),
-    )
-    try:
-        yield
-    finally:
-        close_owned_storage()
+    # Runtime evidence must remain outside every tool execution workspace.
+    with tempfile.TemporaryDirectory(prefix="gitgo_host_state_") as state_dir:
+        root = Path(state_dir)
+        monkeypatch.setenv("GITGO_STATE_HOME", str(root / "state"))
+        monkeypatch.setenv("GITGO_CONFIG_PATH", str(root / "config" / "config.json"))
+        try:
+            yield
+        finally:
+            close_owned_storage()
 
 
 @pytest.fixture
 def tmp_path_factory() -> Iterator[Path]:
     """创建临时目录，测试后自动清理。"""
     with tempfile.TemporaryDirectory(prefix="gitgo_test_") as d:
-        yield Path(d)
+        yield Path(d).resolve()
 
 
 @pytest.fixture
@@ -107,3 +106,14 @@ def factory():
     from tests.factory import TestDataFactory
     return TestDataFactory(seed=42)
 
+
+@pytest.fixture
+def runner_transport_only(monkeypatch):
+    """Test runner/protocol semantics independently of machine ACL provisioning.
+
+    Native containment is separately exercised without this mock in
+    test_native_sandbox.py. This fixture is opt-in, never applied globally.
+    """
+    def launch(argv, policy, **kwargs):
+        return subprocess.Popen(argv, **kwargs)
+    monkeypatch.setattr("backend.core.sandbox.sandbox_popen", launch)

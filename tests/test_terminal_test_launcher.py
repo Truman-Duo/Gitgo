@@ -16,6 +16,13 @@ from scripts import terminal_test_launcher as launcher
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows terminal test lifecycle")
 
 
+@pytest.fixture(autouse=True)
+def isolate_credential_sources(tmp_path_factory, monkeypatch):
+    # Lifecycle acceptance must not copy the operator's actual credentials.
+    monkeypatch.setenv('GITGO_LLM_CONFIG_PATH', str(tmp_path_factory / 'providers.json'))
+    monkeypatch.setenv('GITGO_LLM_SECRET_PATH', str(tmp_path_factory / 'provider-secrets.json'))
+
+
 def eventually(predicate, timeout=8):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -80,8 +87,9 @@ def test_cleanup_retries_after_partial_deletion(tmp_path_factory, monkeypatch):
             (path / "session.json").unlink()
             raise PermissionError("sqlite handle still closing")
         real_rmtree(path)
-    monkeypatch.setattr(launcher.shutil, "rmtree", partially_locked)
-    launcher.cleanup(root, session["token"], base=base, retry_seconds=2)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(launcher.shutil, "rmtree", partially_locked)
+        launcher.cleanup(root, session["token"], base=base, retry_seconds=2)
     assert len(calls) == 2 and not root.exists()
 
 
@@ -118,7 +126,9 @@ def test_real_bun_handoff_and_abrupt_close_keep_then_remove_profile(tmp_path_fac
         owner.kill()
         owner.wait(timeout=5)
         time.sleep(1.5)
-        assert root.exists() and keeper.poll() is None and dashboards[1].poll() is None
+        report_path = base / f'{root.name}.cleanup-error.json'
+        diagnostics = report_path.read_text(encoding='utf-8') if report_path.exists() else 'no keeper error report'
+        assert root.exists() and keeper.poll() is None and dashboards[1].poll() is None, diagnostics
         # Abrupt kill deliberately prevents exit callbacks from running.
         dashboards[1].kill()
         dashboards[1].wait(timeout=5)
@@ -148,3 +158,18 @@ def test_wrong_live_process_is_reported_instead_of_waiting_or_deleting(tmp_path_
     error = json.loads((base / f"{root.name}.cleanup-error.json").read_text())
     assert "identity mismatch" in error["errors"][0]
     launcher.cleanup(root, session["token"], base=base)
+
+
+
+def test_exited_process_with_retained_handle_is_already_gone():
+    child = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.DEVNULL)
+    try:
+        assert child.wait(timeout=5) == 0
+        # Popen retains its process handle, so OpenProcess may succeed even
+        # though image queries on that exited process fail with WinError 31.
+        with pytest.raises(ProcessLookupError):
+            launcher.WindowsProcess(child.pid)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)

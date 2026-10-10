@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import json
 
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
@@ -29,7 +31,7 @@ def test_oversized_tool_result_uses_cas_locator_and_pages_without_recursion(tmp_
     try:
         process = _process()
         tool = AgentTool(
-            name="large_result",
+            execution_contract=data_broker("test.fixture"), name="large_result",
             description="fixture",
             parameters={"type": "object", "properties": {}},
             execute=lambda _args: {"items": [f"row-{i}-" + "x" * 120 for i in range(600)]},

@@ -37,9 +37,13 @@ class StreamOutcome:
 
 def stream_process(argv, cwd, separator, consume, deadline):
     """Drain both pipes concurrently, with bounded queues and record sizes."""
-    proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             creationflags=creation_flags(), start_new_session=os.name != "nt")
+    # Opening the Windows NUL device can be denied inside AppContainer.
+    # Search never reads caller input: a private pipe closed by the parent
+    # supplies EOF without device access or inheriting the Host's stdin.
+    proc.stdin.close()
     job = attach_kill_job(proc)
     chunks = queue.Queue(maxsize=4)
     stop = threading.Event()

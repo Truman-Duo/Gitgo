@@ -1,4 +1,6 @@
+from dataclasses import replace
 """Public Host boundaries: ordering, recovery, authority and durable evidence."""
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
 import copy
 
 import pytest
@@ -238,11 +240,11 @@ def test_real_pipeline_keeps_failed_check_evidence_and_gates_product_changes(tmp
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     pipeline = ToolPipeline()
     writes = []
-    edit = AgentTool(name="edit_file", description="edit", parameters={"type": "object"},
+    edit = AgentTool(execution_contract=data_broker("test.fixture"), name="edit_file", description="edit", parameters={"type": "object"},
                      execute=lambda args: writes.append(args) or {"path": "app.py"}, effect=ToolEffect.WORKSPACE_WRITE)
     blocked = pipeline.execute({"name": "edit_file", "args": {}}, edit, ctx, "blocked")
     assert blocked.is_error and not writes
-    run = AgentTool(name="run_test", description="test", parameters={"type": "object"}, effect=ToolEffect.PROCESS,
+    run = AgentTool(execution_contract=data_broker("test.fixture"), name="run_test", description="test", parameters={"type": "object"}, effect=ToolEffect.PROCESS,
                     execute=lambda _args: {"test_id": "regression", "target": "tests/test_app.py",
                                            "passed": False, "seed_results": [{"seed": 42, "exit_code": 1}]})
     red = pipeline.execute({"name": "run_test", "args": {}}, run, ctx, "red")
@@ -253,8 +255,8 @@ def test_real_pipeline_keeps_failed_check_evidence_and_gates_product_changes(tmp
     changed = pipeline.execute({"name": "edit_file", "args": {}}, edit, ctx, "change")
     assert not changed.is_error and writes
     p.tool_receipts.append(changed.receipt)
-    run.execute = lambda _args: {"test_id": "regression", "target": "tests/test_app.py", "passed": True,
-                                 "seed_results": [{"seed": 42, "exit_code": 0}]}
+    run = replace(run, execute=lambda _args: {"test_id": "regression", "target": "tests/test_app.py", "passed": True,
+                                 "seed_results": [{"seed": 42, "exit_code": 0}]})
     green = pipeline.execute({"name": "run_test", "args": {}}, run, ctx, "green")
     p.tool_receipts.append(green.receipt)
     assert workflow.status()["complete"]
@@ -350,7 +352,7 @@ def test_exact_command_check_still_requires_normal_permission(tmp_path_factory):
     workflow.configure({"profiles": ["tdd"], "test_id": "regression", "target_files": ["app.py"],
                         "check_argv": ["python", "test_app.py"]})
     calls = []
-    command = AgentTool(name="exec_command", description="check", parameters={"type": "object"},
+    command = AgentTool(execution_contract=data_broker("test.fixture"), name="exec_command", description="check", parameters={"type": "object"},
                         execute=lambda args: calls.append(args) or {"exit_code": 1},
                         effect=ToolEffect.PROCESS, approval=ApprovalMode.ASK)
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
@@ -358,7 +360,10 @@ def test_exact_command_check_still_requires_normal_permission(tmp_path_factory):
     call = {"name": "exec_command", "args": {"argv": ["python", "test_app.py"]}}
     denied = pipeline.execute(call, command, ctx, "no-permission")
     assert denied.is_error and not calls
-    ctx.artifacts["approvals"] = {"exec_command"}
+    from backend.core.loop.permission_broker import create_permission_request, grant_from_decision
+    create_permission_request(p, {"purpose": "approved command check", "tool_name": command.name,
+                                  "arguments": call["args"]}, {command.name: command}, str(tmp_path_factory))
+    assert grant_from_decision(p, p.pending_decision, "allow_once")
     red = pipeline.execute(call, command, ctx, "red")
     assert red.receipt["command_completed"]
     assert red.receipt["command_exit_code"] == 1
@@ -418,11 +423,11 @@ def test_composite_cannot_hide_an_unready_leaf_write(tmp_path_factory):
     p.tool_registry = ToolRegistry(["bundle", "edit_file"])
     EngineeringWorkflow(p).configure(tdd_plan())
     writes = []
-    leaf = AgentTool(name="edit_file", description="edit", parameters={"type": "object"},
+    leaf = AgentTool(execution_contract=data_broker("test.fixture"), name="edit_file", description="edit", parameters={"type": "object"},
                      effect=ToolEffect.WORKSPACE_WRITE, execute=lambda args: writes.append(args) or {"path": "app.py"})
-    bundle = AgentTool(name="bundle", description="bundle", parameters={"type": "object"},
+    bundle = AgentTool(execution_contract=data_broker("host.composite"), name="bundle", description="bundle", parameters={"type": "object"},
                        effect=ToolEffect.WORKSPACE_WRITE, execute=lambda _args: {},
-                       composite_spec={"steps": [{"id": "edit", "tool": "edit_file", "arguments": {"path": "app.py"}}]})
+                       composite_spec={"execution_mode": "host_pipeline", "steps": [{"id": "edit", "tool": "edit_file", "arguments": {"path": "app.py"}}]})
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     ctx.artifacts["tool_catalog"] = {"bundle": bundle, "edit_file": leaf}
     result = ToolPipeline().execute({"name": "bundle", "args": {}}, bundle, ctx, "bundle")

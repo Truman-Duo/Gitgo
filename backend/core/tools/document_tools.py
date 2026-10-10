@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 
 from backend.core.errors import error_payload
@@ -23,6 +23,28 @@ def _document_error(name: str, *, message: str = "", details: dict | None = None
     return error_payload(
         name, message=message, details=details, next_actions=next_actions,
     )
+
+
+def _document_converter(workspace: Path) -> str | None:
+    """Select an installed Host adapter, never a cwd/workspace executable."""
+    name = 'antiword.exe' if os.name == 'nt' else 'antiword'
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        candidates.append(Path(sys.executable).resolve().parent / name)
+    for raw in os.environ.get('PATH', '').split(os.pathsep):
+        directory = Path(raw.strip('"'))
+        if directory.is_absolute():
+            candidates.append(directory / name)
+    root = workspace.resolve(strict=True)
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            if (not resolved.is_relative_to(root) and resolved.is_file()
+                    and os.access(resolved, os.X_OK)):
+                return str(resolved)
+        except (OSError, RuntimeError):
+            continue
+    return None
 
 
 def document_open(args: dict) -> dict:
@@ -85,7 +107,7 @@ def document_open(args: dict) -> dict:
             finally:
                 book.release_resources()
         elif suffix == ".doc":
-            antiword = shutil.which("antiword")
+            antiword = _document_converter(workspace)
             if not antiword:
                 return _document_error(
                     "DOCUMENT_FORMAT_UNSUPPORTED",
@@ -96,7 +118,7 @@ def document_open(args: dict) -> dict:
                                   {"action": "install_adapter", "adapter": "antiword"}],
                 )
             completed = subprocess.run(
-                [antiword, str(path)], capture_output=True, timeout=60,
+                [antiword, str(path)], input=b"", capture_output=True, timeout=60,
                 check=False,
             )
             if completed.returncode != 0:

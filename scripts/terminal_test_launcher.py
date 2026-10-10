@@ -52,13 +52,25 @@ class WindowsProcess:
             raise OSError(error, f"Cannot inspect process {pid}")
         self.pid = pid
         try:
+            if not self.alive():
+                raise ProcessLookupError(pid)
             name = ctypes.create_unicode_buffer(32768)
             size = wintypes.DWORD(len(name))
             if not self.api.QueryFullProcessImageNameW(self.handle, 0, name, ctypes.byref(size)):
-                raise ctypes.WinError(ctypes.get_last_error())
+                error = ctypes.get_last_error()
+                # Exit can race the identity query. A signaled OS handle is
+                # authoritative; query failures on live processes still deny.
+                if not self.alive():
+                    raise ProcessLookupError(pid)
+                raise ctypes.WinError(error)
             times = [wintypes.FILETIME() for _ in range(4)]
             if not self.api.GetProcessTimes(self.handle, *(ctypes.byref(item) for item in times)):
-                raise ctypes.WinError(ctypes.get_last_error())
+                error = ctypes.get_last_error()
+                # Exit can race the identity query. A signaled OS handle is
+                # authoritative; query failures on live processes still deny.
+                if not self.alive():
+                    raise ProcessLookupError(pid)
+                raise ctypes.WinError(error)
             self.executable = str(Path(name.value).resolve())
             self.started_at = ((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime) / 10000 - 11644473600000
         except BaseException:

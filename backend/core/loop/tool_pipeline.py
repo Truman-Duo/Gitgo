@@ -26,6 +26,10 @@ from backend.core.loop.operation_policy import (
 class ToolExecutionCancelled(RuntimeError):
     """An isolated/cooperative tool acknowledged cancellation."""
 
+    def __init__(self, message, *, effect_state=""):
+        super().__init__(message)
+        self.effect_state = effect_state if effect_state in {"not_committed", "ambiguous"} else ""
+
 if TYPE_CHECKING:
     from backend.core.loop.agent_tool import AgentTool
     from backend.core.loop.event_bus import EventBus
@@ -74,7 +78,14 @@ class ToolPipeline:
     ) -> ToolResult:
         """执行单次工具调用。"""
         tool_name = tool_call.get("name", tool.name)
-        raw_args = tool_call.get("args", {})
+        # Leading-underscore fields are Host authority, never model input.
+        # Strip before prepare_args so injected roots/config cannot survive a
+        # public relative path such as ../private merely by avoiding preflight.
+        supplied_args = tool_call.get("args", {})
+        raw_args = {
+            key: value for key, value in supplied_args.items()
+            if not str(key).startswith("_")
+        } if isinstance(supplied_args, dict) else supplied_args
 
         start = time.time()
 
@@ -84,6 +95,20 @@ class ToolPipeline:
                 "tool execution cancelled before start",
                 diagnostics={"nature": "system", "code": "TOOL_CANCELLED"},
             )
+
+        # Validate Host registration before prepare hooks, approval consumption,
+        # or any mutation. Caller-provided arguments never select authority.
+        try:
+            if tool_name != tool.name:
+                raise ValueError("Tool call does not match its Host registration identity")
+            execution_contract = tool.validate_execution_contract()
+        except (AttributeError, ValueError) as exc:
+            result = self._error_result(
+                tool_name, execution_id, call_index, start, str(exc),
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+            )
+            result.receipt["effect_state"] = "not_committed"
+            return result
 
         from backend.core.loop.operation_policy import (
             PolicyDisposition, decide_tool_operation,
@@ -97,7 +122,6 @@ class ToolPipeline:
                 diagnostics={"nature": "governance", "code": "TOOL_DENIED"},
             )
         if operation_policy.requires_user:
-            approvals = ctx.artifacts.get("approvals", set())
             from backend.core.loop.permission_broker import arguments_digest, matching_grant
             public_raw = {
                 key: value for key, value in dict(raw_args or {}).items()
@@ -106,13 +130,9 @@ class ToolPipeline:
             digest = arguments_digest(public_raw)
             grant = matching_grant(
                 ctx.process, tool_name, public_raw,
-                per_invocation=bool(getattr(tool, "approval_per_invocation", False)),
+                per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool,
             )
-            legacy_approved = (
-                tool_name in approvals
-                and not getattr(tool, "approval_per_invocation", False)
-            )
-            if not legacy_approved and grant is None:
+            if grant is None:
                 from backend.core.errors import error_payload
                 sensitive = bool(getattr(tool, "approval_per_invocation", False))
                 public_args = {
@@ -199,7 +219,7 @@ class ToolPipeline:
                 allowed_roots, scope_error = authorize_external_resources(
                     ctx.process, tool_name, effect_value,
                     {key: value for key, value in args.items() if not str(key).startswith("_")},
-                    outside,
+                    outside, tool=tool,
                 )
                 if scope_error is not None:
                     return self._error_result(
@@ -212,8 +232,7 @@ class ToolPipeline:
                             "error_info": scope_error,
                         },
                     )
-                if allowed_roots:
-                    args["_allowed_roots"] = allowed_roots
+                args["_allowed_roots"] = allowed_roots
         except Exception as exc:
             return self._error_result(
                 tool_name, execution_id, call_index, start,
@@ -257,10 +276,21 @@ class ToolPipeline:
                     tool_name, execution_id, call_index, start, guard["reason"],
                     diagnostics={"nature": "governance", "code": "ENGINEERING_PREREQUISITE_REQUIRED"},
                 )
+        # Preparation/prerequisite callbacks must not replace execution authority
+        # before an exact grant is spent.
+        try:
+            tool.validate_execution_contract()
+        except (AttributeError, ValueError) as exc:
+            result = self._error_result(
+                tool_name, execution_id, call_index, start, str(exc),
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+            )
+            result.receipt["effect_state"] = "not_committed"
+            return result
         if explicit_user_grant is not None:
             consumed = matching_grant(
                 ctx.process, tool_name, public_raw,
-                per_invocation=bool(getattr(tool, "approval_per_invocation", False)), consume=True,
+                per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool, consume=True,
             )
             if consumed is None:
                 return self._error_result(
@@ -314,6 +344,18 @@ class ToolPipeline:
                 gate_result.error or "blocked by gate",
             )
 
+        # Governance/before-hook callbacks must not replace execution authority
+        # before execution or its journal starts.
+        try:
+            tool.validate_execution_contract()
+        except (AttributeError, ValueError) as exc:
+            result = self._error_result(
+                tool_name, execution_id, call_index, start, str(exc),
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+            )
+            result.receipt["effect_state"] = "not_committed"
+            return result
+
         # Step 4: execute
         ctx.event_bus.emit(
             __import__("backend.core.loop.event_bus", fromlist=["ToolEvent"]).ToolEvent(
@@ -345,7 +387,11 @@ class ToolPipeline:
                     "invocation_path": None,
                 })
                 return result
+        runner_diagnostics = {}
         try:
+            # prepare hooks and mutable registry objects cannot substitute a new
+            # callable/authority after the initial admission check.
+            tool.validate_execution_contract()
             effective_timeout = float(tool.timeout)
             if tool.timeout_argument:
                 requested_timeout = float(args.get(tool.timeout_argument) or tool.timeout_default)
@@ -390,17 +436,19 @@ class ToolPipeline:
                             {**args, "_workspace": str(ctx.workspace_path), "_dynamic_spec": dynamic_spec},
                             effective_timeout,
                             cancellation_event=ctx.cancellation,
+                            diagnostics=runner_diagnostics,
                         )
                 else:
                     result_data = self._execute_composite_plan(
                         tool, args, ctx, execution_id, call_index,
                     )
-            # v0.45: isolated=True → 子进程隔离执行
-            elif getattr(tool, "isolated", False):
+            # Host registration selects native execution independently of business effect.
+            elif execution_contract.kind.value == "native_process":
                 result_data = self._execute_isolated(
                     getattr(tool, "runner_name", "") or tool_name,
-                    args, effective_timeout,
+                    {**args, "_workspace": str(ctx.workspace_path)}, effective_timeout,
                     cancellation_event=ctx.cancellation,
+                    diagnostics=runner_diagnostics,
                 )
             else:
                 result_data = tool.execute(args)
@@ -408,7 +456,7 @@ class ToolPipeline:
                 result_data = tool.finalize_result(result_data)
         except ToolExecutionCancelled as exc:
             effect_value = getattr(tool.effect, "value", str(tool.effect))
-            effect_state = (
+            effect_state = exc.effect_state or (
                 "not_committed" if not is_effectful_mutation(effect_value)
                 else "ambiguous"
             )
@@ -428,7 +476,7 @@ class ToolPipeline:
                 "effect_state": effect_state,
                 "invocation_path": invocation_path,
             })
-            return result
+            return self._attach_runner_diagnostics(result, runner_diagnostics)
         except Exception as exc:
             self._write_invocation_state(
                 ctx, tool, tool_name, execution_id, call_index,
@@ -454,7 +502,7 @@ class ToolPipeline:
                 "effect_state": "ambiguous",
                 "invocation_path": invocation_path,
             })
-            return result
+            return self._attach_runner_diagnostics(result, runner_diagnostics)
 
         self._publish_tool_notices(ctx, tool_name, execution_id, call_index, result_data)
         business_error = ""
@@ -567,7 +615,7 @@ class ToolPipeline:
             self._attach_child_lineage(result.receipt, result_data)
             if not getattr(tool, "composite_spec", None):
                 self._record_dependency_observation(ctx, tool_name, args, result_data)
-            return result
+            return self._attach_runner_diagnostics(result, runner_diagnostics)
 
         # Step 5: after_hooks + format_result
         duration = (time.time() - start) * 1000
@@ -578,18 +626,6 @@ class ToolPipeline:
             storage=ctx.storage,
             process_id=str(getattr(ctx.process, "process_id", "")),
             task_id=str(getattr(ctx.process, "active_task_id", "")),
-        )
-
-        ctx.event_bus.emit(
-            __import__("backend.core.loop.event_bus", fromlist=["ToolEvent"]).ToolEvent(
-                "ToolResultReady", execution_id, tool_name, call_index,
-                data={
-                    "truncated": truncated, "duration_ms": duration,
-                    "formatted": formatted,
-                    "allowed": True, "is_error": False, "error": "",
-                    "tool_result": spill,
-                },
-            )
         )
 
         receipt = self._receipt(tool, tool_name, execution_id, call_index, True)
@@ -613,7 +649,7 @@ class ToolPipeline:
         self._attach_child_lineage(receipt, result_data)
         if not getattr(tool, "composite_spec", None):
             self._record_dependency_observation(ctx, tool_name, args, result_data)
-        return ToolResult(
+        result = ToolResult(
             id=f"{execution_id}_{call_index}",
             tool_name=tool_name,
             execution_id=execution_id,
@@ -628,6 +664,22 @@ class ToolPipeline:
             artifacts={"tool_result": spill} if spill else {},
             receipt=receipt,
         )
+
+        result = self._attach_runner_diagnostics(result, runner_diagnostics)
+        ctx.event_bus.emit(
+            __import__("backend.core.loop.event_bus", fromlist=["ToolEvent"]).ToolEvent(
+                "ToolResultReady", execution_id, tool_name, call_index,
+                data={
+                    "truncated": truncated, "duration_ms": duration,
+                    "formatted": result.formatted,
+                    "diagnostics": dict(result.diagnostics),
+                    "allowed": True, "is_error": False, "error": "",
+                    "tool_result": spill,
+                },
+            )
+        )
+
+        return result
 
     @staticmethod
     def _publish_tool_notices(ctx, tool_name, execution_id, call_index, result_data):
@@ -845,7 +897,7 @@ class ToolPipeline:
 
     def _execute_isolated(self, tool_name: str, args: dict,
                           timeout: float = 60.0,
-                          cancellation_event=None) -> dict:
+                          cancellation_event=None, diagnostics=None) -> dict:
         """通过 ProcessToolRunner 在子进程中执行工具。
 
         子进程崩溃→异常传播到 Step 4 的 catch 块→被 classify_tool_error 捕获。
@@ -856,15 +908,33 @@ class ToolPipeline:
         result = runner.run(
             tool_name, args, cancellation_event=cancellation_event,
         )
+        from backend.core.loop.runner_diagnostics import capture_runner_diagnostics, safe_runner_text
+        if diagnostics is not None:
+            diagnostics.update(capture_runner_diagnostics(result))
+        error = safe_runner_text(getattr(result, "error", "") or "")
         if not result.success:
-            if "cancelled" in (result.error or "").lower():
-                raise ToolExecutionCancelled(result.error)
+            if "cancelled" in error.lower():
+                raise ToolExecutionCancelled(error,
+                    effect_state=getattr(result, "effect_state", ""))
             if result.timed_out:
                 raise TimeoutError(
                     f"Tool '{tool_name}' timed out after {timeout}s"
                 )
-            raise RuntimeError(result.error or f"Tool '{tool_name}' failed")
+            raise RuntimeError(error or f"Tool '{tool_name}' failed")
         return result.data or {}
+
+    @staticmethod
+    def _attach_runner_diagnostics(result: ToolResult, diagnostics: dict) -> ToolResult:
+        if diagnostics:
+            result.diagnostics["runner"] = dict(diagnostics)
+            # The existing model/trace/dashboard result path consumes formatted
+            # text and diagnostics. Keep child data intact; these observations
+            # are not a trusted effect/lineage/cleanup envelope.
+            if result.is_error or diagnostics.get("stderr"):
+                result.formatted += "\n[Host-captured runner diagnostics]\n" + json.dumps(
+                    diagnostics, ensure_ascii=False, sort_keys=True,
+                )
+        return result
 
     @staticmethod
     def _record_dependency_observation(ctx, tool_name: str, args: dict,
@@ -938,9 +1008,13 @@ class ToolPipeline:
             return path
         try:
             from pathlib import Path
-            root = Path(ctx.workspace_path) / ".gitgo" / "tool_invocations"
-            root.mkdir(parents=True, exist_ok=True)
-            target = Path(path) if path else root / f"{execution_id}_{call_index}.json"
+            from backend.core.storage.invocation_journal import invocation_journal_root
+            root = invocation_journal_root(ctx.workspace_path,
+                paths=getattr(getattr(ctx, "storage", None), "paths", None))
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            target = (Path(path) if path else root / f"{execution_id}_{call_index}.json").resolve(strict=False)
+            if target.parent != root or target.suffix != ".json":
+                raise OSError("Invocation evidence path escapes the bound Host journal")
             previous = {}
             if target.exists():
                 try:
@@ -968,7 +1042,7 @@ class ToolPipeline:
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(str(tmp), str(target))
             return str(target)
-        except OSError:
+        except (OSError, RuntimeError, ValueError):
             return path
 
     def _error_result(self, tool_name, execution_id, call_index, start, error,

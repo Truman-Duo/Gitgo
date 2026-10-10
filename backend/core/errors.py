@@ -22,6 +22,21 @@ class ErrorDefinition:
 
 
 _DEFINITIONS = (
+    ErrorDefinition("GITGO-E3801", "SANDBOX_UNAVAILABLE",
+                    "Native isolation is unavailable; execution was refused.",
+                    False, "configure_native_sandbox"),
+    ErrorDefinition("GITGO-E3802", "SANDBOX_LAUNCH_DENIED",
+                    "The OS refused the sandbox launch; execution was refused.",
+                    False, "configure_native_sandbox"),
+    ErrorDefinition("GITGO-E3803", "SANDBOX_POLICY_INVALID",
+                    "The Host sandbox policy is invalid; execution was refused.",
+                    False, "correct_sandbox_policy"),
+    ErrorDefinition("GITGO-E3805", "SANDBOX_EXECUTION_FAILED",
+                    "The sandboxed runtime exited without a result; side effects are unknown.",
+                    False, "inspect_sandbox_runtime"),
+    ErrorDefinition("GITGO-E3804", "SANDBOX_OUTPUT_LIMIT",
+                    "The sandbox output budget was exceeded; the process tree was terminated.",
+                    False, "reduce_tool_output"),
     ErrorDefinition("GITGO-E3701", "BASH_IDENTITY_UNVERIFIED", "Bash identity could not be verified; the script was not executed.", True, "repair_bash_installation_then_retry"),
     ErrorDefinition("GITGO-E3702", "TERMINAL_IDENTITY_UNVERIFIED", "Terminal identity could not be verified; continuing in the current terminal.", True, "rescan_or_select_verified_terminal"),
     ErrorDefinition("GITGO-E3703", "TERMINAL_UNAVAILABLE", "The selected terminal is missing or unverified; continuing in the current terminal.", True, "rescan_or_select_verified_terminal"),

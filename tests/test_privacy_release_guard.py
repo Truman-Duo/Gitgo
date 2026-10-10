@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import pytest
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,7 +143,7 @@ def test_sync_purges_previously_tracked_and_content_renamed_private_files(
     (release / "docs").mkdir()
     (release / "docs" / "CLAUDE.md").write_text("# CLAUDE.md\nold private\n")
     (release / "renamed-guide.md").write_text(
-        "详情请见 docs 中真正的 " + "CLAUDE.md\n"
+        "详情请见 docs 中真正的 " + "CLAUDE.md\n", encoding="utf-8"
     )
     assert looks_like_private_tool_content(
         (release / "renamed-guide.md").read_bytes()
@@ -259,6 +261,7 @@ def test_privacy_gate_is_mandatory_even_when_contract_disables_it(tmp_path_facto
         assert privacy[0].fail_action == "block"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows DPAPI credential migration")
 def test_legacy_repo_local_provider_config_migrates_to_canonical_user_path(
     tmp_path_factory,
 ):

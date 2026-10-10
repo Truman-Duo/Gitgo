@@ -1,0 +1,131 @@
+name: Native sandbox security
+on:
+  push:
+    branches: ["codex/issue-17-native-sandbox"]
+  pull_request:
+    paths:
+      - "backend/core/sandbox*.py"
+      - "backend/core/loop/**"
+      - "backend/core/storage/**"
+      - "backend/core/tools/**"
+      - "backend/core/process_control.py"
+      - "backend/core/child_process.py"
+      - "backend/core/native_host_entry.py"
+      - "scripts/*sandbox*.py"
+      - "backend/core/windows_acl.py"
+      - "scripts/provision_ci_sqlite.py"
+      - "scripts/provision_ci_ripgrep.py"
+      - "scripts/probe_macos_virtualization.swift"
+      - "cli/dashboard/**"
+      - "tests/**"
+      - "tests/conftest.py"
+      - ".github/workflows/native-sandbox.yml"
+permissions:
+  contents: read
+jobs:
+  security:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap gcc patchelf libseccomp2 ripgrep
+      - run: python -m pip install -r requirements-portable.txt pyinstaller
+      - name: Provision and validate pinned patched SQLite in CI
+        run: python -B scripts/provision_ci_sqlite.py
+      - uses: oven-sh/setup-bun@v2
+        if: runner.os == 'Windows'
+        with:
+          bun-version: "1.4.2"
+      - name: Configure owned Windows handoff lifecycle runtime
+        if: runner.os == 'Windows'
+        run: |
+          bun --version
+          "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Provision and validate pinned official ripgrep in CI
+        run: python -B scripts/provision_ci_ripgrep.py
+      - name: Diagnose native descriptor controls in owned Windows tree
+        if: runner.os == 'Windows'
+        run: python -B scripts/probe_windows_acl_restore.py
+      - name: Windows ACL recovery preflight
+        if: runner.os == 'Windows'
+        run: python -B -m pytest tests/test_windows_acl_provisioning.py -q -x
+      - name: Windows source and packaged isolation
+        if: runner.os == 'Windows'
+        run: python -B scripts/run_sandbox_acceptance.py
+      - name: Linux source and packaged isolation in delegated service
+        if: runner.os == 'Linux'
+        run: sudo systemd-run --quiet --wait --pipe --collect --uid="$(id -u)" --working-directory="$PWD" --setenv="LD_LIBRARY_PATH=$LD_LIBRARY_PATH" --setenv="GITGO_RIPGREP_PATH=$GITGO_RIPGREP_PATH" --unit=gitgo-sandbox-ci -p Delegate=yes "$(which python)" -B scripts/run_linux_sandbox_scope.py -- "$(which python)" -B scripts/run_sandbox_acceptance.py
+
+  macos-audit:
+    name: macOS capability audit (not backend acceptance) (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements-portable.txt
+      - name: Audit native primitives and verify production stays closed
+        run: python -B scripts/probe_macos_sandbox.py --output .gitgo/macos-capabilities.json
+      - name: Diagnose native launch failures
+        if: failure()
+        run: |
+          sudo /usr/bin/log show --last 3m --style compact --predicate 'eventMessage CONTAINS "GitgoMacAudit"' | tail -80
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted((Path.home() / 'Library/Logs/DiagnosticReports').glob('*'))[-12:]:
+              if p.suffix == '.ips' and ('Python' in p.name or 'sandbox-exec' in p.name or 'echo' in p.name):
+                  try:
+                      payload = json.loads(p.read_text().split('\n', 1)[1])
+                      print(p.name, json.dumps({k: payload.get(k) for k in ('exception', 'termination', 'asi')}))
+                  except (OSError, ValueError):
+                      pass
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-capabilities-${{ matrix.os }}
+          path: .gitgo/macos-capabilities.json
+          include-hidden-files: true
+          if-no-files-found: error
+
+  dashboard:
+    name: Dashboard regression and production build
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - name: Verify runtime and install locked dependencies
+        working-directory: cli/dashboard
+        run: |
+          bun --version
+          bun install --frozen-lockfile
+      - name: Dashboard tests
+        working-directory: cli/dashboard
+        run: bun test
+      - name: Dashboard production build
+        working-directory: cli/dashboard
+        run: bun run build

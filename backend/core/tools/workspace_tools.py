@@ -472,7 +472,7 @@ def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
     if not remaining:
         return python_command(interpreter_flags)
 
-    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r});"
+    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r})\n"
     mode = remaining[0]
     if mode == "-c" and len(remaining) >= 2:
         return python_command([
@@ -502,13 +502,13 @@ def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
 
 
 def shell_script(args: dict) -> dict:
-    """Execute one explicitly approved Bash program in the workspace.
+    """Execute one approved native shell program in the workspace.
 
     Approval is enforced by ToolPipeline before this isolated handler starts.
     The runner still confines cwd, strips likely credentials from the inherited
     environment, bounds input/output/time, and owns the spawned process tree.
-    It deliberately does not pretend to be an OS sandbox: the exact script is
-    the unit the user reviewed and approved.
+    ProcessToolRunner applies native OS isolation before loading this handler;
+    the exact script remains the unit the user reviewed and approved.
     """
     from backend.core.process_control import attach_kill_job, close_job, creation_flags
 
@@ -527,15 +527,41 @@ def shell_script(args: dict) -> dict:
         return {"error": "PURPOSE_REQUIRED"}
     if "\x00" in script or len(script.encode("utf-8")) > 100_000:
         return {"error": "SCRIPT_INVALID", "detail": "script exceeds the 100KB boundary or contains NUL"}
-    resolution = _resolve_bash()
-    if not resolution.get("path"):
-        return {
-            "error": resolution.get("error", "BASH_UNAVAILABLE"),
-            "detail": resolution.get("detail", "Install a verified Git for Windows Bash"),
-        }
-    bash = Path(resolution["path"])
+    resolution = {}
+    if sys.platform == "win32":
+        # MSYS Bash requires a shared global object namespace, incompatible
+        # with AppContainer. Use a Windows-native engine without weakening it.
+        from backend.core.executable_identity import windows_system_executable
+        engine = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")
+        # Server images may not autoload even the built-in modules in an
+        # AppContainer. Load known system manifests before executing the script.
+        bootstrap = "$env:PSModulePath=$PSHOME+'\\Modules';"
+        for module in ("Microsoft.PowerShell.Utility", "Microsoft.PowerShell.Management"):
+            bootstrap += (f"Import-Module ($PSHOME+'\\Modules\\{module}\\{module}.psd1') "
+                          "-ErrorAction Stop;")
+        # PowerShell's provider location can fall back to the drive root in
+        # AppContainer even when CreateProcess has the correct native cwd.
+        literal_cwd = str(cwd).replace("'", "''")
+        bootstrap += (f"$null=New-PSDrive -Name Gitgo -PSProvider FileSystem "
+                      f"-Root '{literal_cwd}' -ErrorAction Stop;"
+                      "Set-Location -LiteralPath 'Gitgo:\\' -ErrorAction Stop;")
+        command = ("[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+                   "try {" + bootstrap + "} catch { [Console]::Error.WriteLine($_);exit 1 };\n" + script)
+        shell_argv = [str(engine), "-NoLogo", "-NoProfile", "-NonInteractive",
+                      "-Command", command]
+    else:
+        resolution = _resolve_bash()
+        if not resolution.get("path"):
+            return {"error": resolution.get("error", "BASH_UNAVAILABLE"),
+                    "detail": resolution.get("detail", "Install Bash in the sandbox runtime.")}
+        bash = Path(resolution["path"])
+        shell_argv = [str(bash), "--noprofile", "--norc", "-c", script]
     timeout = max(1, min(int(args.get("timeout", 120) or 120), 1800))
     env = _safe_shell_environment()
+    if sys.platform == "win32":
+        # Do not discover modules through the real user's registry/profile or
+        # inherit PowerShell 7 module paths into the Windows PowerShell engine.
+        env["PSModulePath"] = str(engine.parent / "Modules")
     env["GITGO_AGENT_TOOL"] = "1"
     started = None
     job_handle = None
@@ -547,7 +573,7 @@ def shell_script(args: dict) -> dict:
             except (OSError, ValueError) as exc:
                 return {"error": "BASH_IDENTITY_UNVERIFIED", "detail": str(exc)}
         started = subprocess.Popen(
-            [str(bash), "--noprofile", "--norc", "-c", script],
+            shell_argv,
             cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", env=env,
             creationflags=creation_flags(), start_new_session=sys.platform != "win32",

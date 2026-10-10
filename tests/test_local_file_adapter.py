@@ -39,6 +39,11 @@ class TestLocalFileAdapter:
         except (OSError, NotImplementedError):
             pytest.skip("No symlink permission on this system")
         assert file_adapter.is_symlink("link")
+        # A broken link remains a link, and an ordinary file is not one.
+        target.unlink()
+        assert file_adapter.is_symlink('link')
+        assert not file_adapter.exists('link')
+        assert not file_adapter.is_symlink('missing-ordinary-file')
 
     def test_walk(self, file_adapter: LocalFileAdapter, tmp_path_factory: Path):
         (tmp_path_factory / "a").mkdir()
@@ -120,3 +125,20 @@ class TestLocalFileAdapter:
         # 空 path 应当解析为 root
         adapter = LocalFileAdapter(tmp_path_factory)
         assert adapter._resolve("") == tmp_path_factory.resolve()
+
+
+
+def test_workspace_scan_excludes_linked_host_file(tmp_path_factory):
+    from backend.core.operations.scan import scan_workspace
+    workspace = tmp_path_factory / 'workspace'
+    workspace.mkdir()
+    (workspace / 'safe.txt').write_text('workspace content', encoding='utf-8')
+    outside = tmp_path_factory / 'host-only.txt'
+    outside.write_text('host-only-content', encoding='utf-8')
+    linked = workspace / 'linked.txt'
+    try:
+        linked.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip('OS symlink creation unavailable')
+    assert linked.read_text(encoding='utf-8') == 'host-only-content'
+    assert [Path(item).as_posix() for item in scan_workspace(workspace)] == ['safe.txt']
