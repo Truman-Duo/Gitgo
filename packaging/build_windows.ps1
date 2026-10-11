@@ -90,6 +90,16 @@ try {
     & $Bun build (Join-Path $root "cli\dashboard\src\main.tsx") `
         --compile --outfile (Join-Path $stage "$($product.primary_command).exe")
     if ($LASTEXITCODE -ne 0) { throw "Dashboard compilation failed" }
+    Push-Location (Join-Path $root "cli\dashboard")
+    try {
+        & $Bun run build
+        if ($LASTEXITCODE -ne 0) { throw "Dashboard portable bundle failed" }
+    } finally { Pop-Location }
+    $dashboardScripts = Join-Path $stage "dashboard\scripts"
+    $dashboardDist = Join-Path $stage "dashboard\dist"
+    New-Item -ItemType Directory -Force -Path $dashboardScripts, $dashboardDist | Out-Null
+    Copy-Item (Join-Path $root "cli\dashboard\scripts\launch.mjs"), (Join-Path $root "cli\dashboard\scripts\runtime.mjs") $dashboardScripts
+    Copy-Item (Join-Path $root "cli\dashboard\dist\cli.js"), (Join-Path $root "cli\dashboard\dist\trace.js") $dashboardDist
 } finally {
     # Bun can leave its full-size atomic output beside the repository when an
     # existing Windows executable was briefly locked. These files are build
