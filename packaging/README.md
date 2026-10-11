@@ -32,4 +32,4 @@ powershell -ExecutionPolicy Bypass -File packaging/release_windows.ps1 -BuildIns
 
 ## 验收边界
 
-冻结后端的协议 smoke 不证明可见 Dashboard 正常。发布前仍需完整产品在真实终端进行输入、颜色、卡片、流式显示、滚动和复制检查。版本与当前结果见 [版本](../docs/VERSION.md) 和 [测试说明](../docs/VALIDATION.md)。本次最新全部源码尚未重新打包发布。
+冻结后端的协议 smoke 不证明可见 Dashboard 正常。发布前仍需完整产品在真实终端进行输入、颜色、卡片、流式显示、滚动和复制检查。版本与当前结果见 [版本](../docs/VERSION.md) 和 [测试说明](../docs/VALIDATION.md)。Alpha 2 ZIP 已完成正式终端主流程确认，公开发布分别记录。

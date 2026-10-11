@@ -4,7 +4,7 @@ Gitgo 是面向真实项目开发的终端 Agent harness，将模型、工具、
 
 模型负责理解、规划和发起操作；工具提供文件、搜索、命令等能力；运行时、授权与存储组件负责执行、权限和证据。正式界面使用 Bun、React 和 Ink，通过 Native Host 连接项目运行服务。
 
-当前提供 Windows Terminal Preview。**最新源码候选与已发布预览包分别记录版本和验收范围。**
+当前源码为 **1.0.0-alpha.2**，已生成 Windows x64 完整 ZIP 并验证冻结运行时和真实 API。**正式终端主流程已人工确认，发布状态见版本页；已有下载入口对应此前的预览包。**
 
 [下载预览版](https://github.com/Truman-Duo/Gitgo/releases/tag/terminal-preview-2026-09-28) · [安装](docs/INSTALL.md) · [配置](docs/CONFIGURATION.md) · [版本](docs/VERSION.md) · [贡献](CONTRIBUTING.md)
 
@@ -35,7 +35,7 @@ Gitgo 是面向真实项目开发的终端 Agent harness，将模型、工具、
 - **交互：**流式消息、需求问题卡、权限审批、思考与正文区分、折叠、滚动、复制和粘贴。
 - **持久化与观察：**SQLite 与内容寻址存储保存状态和证据；持久事件支持消费恢复；后台用量统计与架构增长告警。
 
-2026-10-11 源码候选已有后端 **1382 passed / 2 skipped**、Dashboard **173 passed / 0 failed**、类型检查、真实 API 和正式 Git Bash 人工验收记录。最新全部改动的安装包验收待完成；下载包的具体范围以其版本说明为准。
+2026-10-11 Alpha 2 候选已有后端 **1395 passed / 2 skipped**、Dashboard **173 passed / 0 failed**、类型检查及源码正式 Git Bash 人工验收记录。Alpha 2 ZIP 的冻结 Host/daemon/工具、历史连续性及真实 API 验收通过，解压包的正式终端主流程已由用户确认，扩展测试 Trace 另行核对；下载包的具体范围以其版本说明为准。
 
 完整能力清单见 [当前功能](docs/IMPLEMENTATION_STATUS.md)，失败案例和平台边界见 [已知限制](docs/KNOWN_ISSUES.md)。
 

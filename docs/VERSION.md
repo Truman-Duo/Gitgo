@@ -11,14 +11,25 @@
 | 原生协议 | `1` | Dashboard 与 Native Host 的通信协议 |
 | 关系状态 migration | 最高 `13` | 当前源码的状态数据库迁移序列 |
 | 可观测状态 migration | 最高 `2` | 当前源码的可观测数据库迁移序列 |
-| 集成状态 | `feat/alpha2` 功能分支 | 已包含上游 CI 基线；PR 与发布验收进行中 |
-| 最新安装包 | 待构建与安装验收 | 当前源码全部改动尚未形成已验收的新包 |
+| 集成状态 | `feat/alpha2` 功能分支 | 已包含上游 CI 基线；PR 与发布流程分别跟踪 |
+| Alpha 2 ZIP | 已构建，主流程验收通过 | 冻结运行时、连续性、真实 API 及人工终端主流程通过；尚未发布 |
 
 组件版本、协议与 migration 各自表达不同兼容边界。数据库迁移按实现中的追加序列执行；组件声明版本不能单独确定某个构建包含哪些功能。
 
 候选包含 Provider 故障转移、需求问题与答案采用、权限及恢复、状态与事件、交付证据、工具/Shell 改进和终端交互修复。详细范围见 [当前功能](IMPLEMENTATION_STATUS.md)。
 
-已有验证包含后端 1382 passed / 2 skipped、Dashboard 173 passed / 0 failed、类型检查、真实 API 及正式 Git Bash 人工验收。各项覆盖与未通过案例见 [测试结果](VALIDATION.md)。这些记录对应源码候选，安装包另行验收。
+已有验证包含后端 1395 passed / 2 skipped、Dashboard 173 passed / 0 failed、类型检查、真实 API 及正式 Git Bash 人工验收。各项覆盖与未通过案例见 [测试结果](VALIDATION.md)。源码回归与冻结产物分别验收；正式终端视觉结果单独记录。
+
+## Alpha 2 构建产物
+
+- 产品：`1.0.0-alpha.2`；Windows 文件版本：`1.0.0.2`。
+- 构建源码：`56e6b1039e7b1fe6fac6be5549fe3201b8d5958b`；工作树干净。
+- ZIP：`gitgo-1.0.0-alpha.2-win-x64-56e6b103.zip`。
+- SHA256：`7ad6fa8812e504c76cfa236ce7d280ef82370614a626b0b6585bf42484de706a`。
+- 包内 `build-manifest.json` 记录 commit/tree 与 174 个文件的摘要；解压后逐文件核对通过。
+- `gitgo.exe --version` 显示产品版本，两个 EXE 的 Windows 文件版本一致。
+- 该 ZIP 正式终端主流程已由用户确认，扩展 Trace 另行核对；尚未生成 Installer，构建机缺少 Inno Setup。
+- 集成入口：[Alpha 2 PR](https://github.com/Truman-Duo/Gitgo/pull/28)。源码合入与公开 Release 分别确认。
 
 ## 已发布预览
 

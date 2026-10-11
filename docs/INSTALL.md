@@ -4,7 +4,7 @@
 
 从 [GitHub Releases](https://github.com/Truman-Duo/Gitgo/releases) 下载 Windows x64 ZIP 和对应校验文件。校验后完整解压，再运行 `gitgo.exe`；主 EXE 需要包内的内部组件，不能单独复制。
 
-已有预览资产与当前源码候选可能不同。当前候选没有为本次全部修改重新打包或安装，见 [版本](VERSION.md)。
+已有预览资产与当前源码候选可能不同。Alpha 2 已构建 ZIP 并完成冻结与真实 API 验证，正式终端及发布状态见 [版本](VERSION.md)。
 
 首次启动选择检测到的终端并保存，然后在 `/config` 添加 Provider。Windows 凭据按当前用户加密保存。之后修改终端在下次启动生效，历史仍使用相同项目数据。
 
