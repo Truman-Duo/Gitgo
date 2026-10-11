@@ -113,23 +113,6 @@ def _has_cross_dependency(files: list[str]) -> bool:
 
 # ── LLM 自主分解层 ──────────────────────────────────────
 
-def suggest_split(
-    task_description: str,
-    files: list[str],
-    dep_graph: dict | None = None,
-) -> list[SplitSuggestion]:
-    """LLM 调 decompose_task 工具建议拆分后，经 structural 验证。
-
-    当前为 stub：Phase 1 中 LLM 通过 decompose_task AgentTool 输出
-    SplitSuggestion 列表，Scheduler 在 Partition 阶段验证 input/output 接口
-    是否能形成完整依赖链。
-
-    本函数可由 LLM 的输出直接填充 SplitSuggestion 列表——不需要此处的启发式。
-    保留此函数作为未来非 LLM 启发式分解的入口。
-    """
-    return []
-
-
 # ── 过度分解防护 ────────────────────────────────────────
 
 class DecompositionGuard:

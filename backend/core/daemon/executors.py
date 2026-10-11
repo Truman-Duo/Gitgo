@@ -150,21 +150,16 @@ def _exec_decompose_task(daemon_ctx, session, project, args: dict) -> dict:
 
     LLM 调用此工具建议拆分方案。Scheduler 进行 structural 验证。
     """
-    from backend.core.loop.decomposition import suggest_split
+    from backend.core.loop.code_dossier import build_code_dossier, suggest_task_shards
     task = args.get("task", "")
     files = args.get("files", [])
-    suggestions = suggest_split(task, files)
+    dossier = build_code_dossier(str(session.workspace_path), files)
+    proposal = suggest_task_shards(dossier, goal=str(task))
     return {
-        "suggested_splits": [
-            {
-                "task_description": s.task_description,
-                "target_files": s.target_files,
-                "estimated_steps": s.estimated_steps,
-            }
-            for s in suggestions
-        ],
-        "total_suggestions": len(suggestions),
-        "note": "拆分建议需经 Scheduler structural 验证后才能执行。",
+        "suggested_splits": proposal["shards"],
+        "total_suggestions": len(proposal["shards"]),
+        "basis": "host_code_dossier",
+        "note": "Host 按代码事实分片；这不是业务责任划分或执行授权。请经现有任务契约与 DAG 验证。",
     }
 
 

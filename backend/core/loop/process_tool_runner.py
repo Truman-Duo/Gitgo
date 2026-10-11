@@ -66,7 +66,8 @@ class ProcessToolRunner:
         try:
             from backend.core.process_control import attach_kill_job, close_job, creation_flags
             # Inherit parent env so GITGO_TOOL_REGISTRY_MODULE etc. propagate
-            child_env = os.environ.copy()
+            from backend.core.tools.execution_profile import safe_environment
+            child_env = safe_environment()
             child_env.update({
                 "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1",
@@ -93,30 +94,14 @@ class ProcessToolRunner:
 
             try:
                 payload = dump_protocol_json(input_data)
-                stdout_str = ""
-                stderr_str = ""
-                first = True
-                while True:
-                    if cancellation_event is not None and cancellation_event.is_set():
-                        self._kill_tree(proc)
-                        return SubprocessResult(
-                            success=False,
-                            error=f"tool '{tool_name}' cancelled",
-                            exit_code=-1,
-                            duration_ms=(time.time() - start) * 1000,
-                        )
-                    elapsed = time.time() - start
-                    if elapsed >= effective_timeout:
-                        raise subprocess.TimeoutExpired(proc.args, effective_timeout)
-                    try:
-                        stdout_str, stderr_str = proc.communicate(
-                            input=payload if first else None,
-                            timeout=min(0.2, effective_timeout - elapsed),
-                        )
-                        break
-                    except subprocess.TimeoutExpired:
-                        first = False
-                        continue
+                from backend.core.process_output import collect_output, ProcessCancelled
+                try:
+                    stdout_str, stderr_str, _ = collect_output(proc, timeout=effective_timeout,
+                        input=payload, limit=4 * 1024 * 1024, reject_overflow=True,
+                        cancel_event=cancellation_event, terminate=lambda: self._kill_tree(proc))
+                except ProcessCancelled:
+                    return SubprocessResult(success=False, error=f"tool '{tool_name}' cancelled",
+                        exit_code=-1, duration_ms=(time.time() - start) * 1000)
                 duration_ms = (time.time() - start) * 1000
                 close_job(getattr(proc, "_gitgo_job_handle", None))
                 proc._gitgo_job_handle = None

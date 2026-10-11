@@ -15,11 +15,16 @@ def _save_session_checkpoint(daemon_ctx: dict, process) -> None:
         return
     if getattr(process, "session", None) is None:
         return
-    store.save_process_checkpoint(process)
-    store.append_event(process.process_id, "agent_complete", {
-        "status": process.status.value,
-        "steps_used": process.steps_used,
-    })
+    from backend.core.loop.lifecycle import TERMINAL
+    previous = getattr(process, "lifecycle_finalized", False)
+    if process.status.value in TERMINAL:
+        process.lifecycle_finalized = True
+    try:
+        # State, revision, immutable fact and terminal barrier commit together.
+        store.save_process_checkpoint(process)
+    except BaseException:
+        process.lifecycle_finalized = previous
+        raise
 
 
 def _scan_incomplete_sessions(session_store, apm) -> list[str]:

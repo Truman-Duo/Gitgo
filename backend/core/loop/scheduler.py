@@ -100,7 +100,10 @@ class SlotScheduler:
                 for spec in specs
             ]
 
-        # 2. Build DAG（已在 _resolve_depends 中完成）
+        # Spec identities describe dependencies; execution uses slot identities.
+        spec_slots = {slot.spec.spec_id: slot.slot_id for slot in slots}
+        for slot in slots:
+            slot.depends_on = [spec_slots.get(item, item) for item in slot.depends_on]
 
         # 3. Assemble Context（L1 + L2）
         self._assemble_contexts(slots, dep_graph)
@@ -163,7 +166,8 @@ class SlotScheduler:
     ) -> list["TaskSpec"]:
         """简单文件边界拆分——每个文件一个 slot。
 
-        Phase 1 简化实现。未来增强：按依赖图分组（关联文件打包到一个 slot）。
+        Compatibility partitioner: one declared file per slot, with dependency
+        edges resolved separately. Production uses the durable Agent DAG.
         """
         from backend.core.loop.task_slot import TaskSpec
         specs = []
@@ -172,6 +176,7 @@ class SlotScheduler:
                 spec_id=f"split-{i}",
                 task_description=f"{task_description}——仅处理 {f}",
                 expected_output="TASK_COMPLETE",
+                target_files=[f],
             ))
         return specs
 
@@ -186,9 +191,14 @@ class SlotScheduler:
         如果 dep_graph 显示 spec 涉及的文件 import 了另一个 spec 涉及的文件的符号，
         则另一个 spec 是上游依赖。
         """
-        if not dep_graph:
-            return []
-        return []  # Phase 1 简化：不自动解析跨文件依赖
+        interfaces = set(spec.input_interfaces)
+        upstream_files = set()
+        for edge in (dep_graph or {}).get("edges", []):
+            if not edge.get("dismissed") and edge.get("dependent") in spec.target_files:
+                upstream_files.add(edge.get("dependency"))
+        return sorted({other.spec_id for other in all_specs if other is not spec
+            and (interfaces.intersection(other.output_interfaces)
+                 or upstream_files.intersection(other.target_files))})
 
     def _assemble_contexts(
         self,

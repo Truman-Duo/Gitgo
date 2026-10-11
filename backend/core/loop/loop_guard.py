@@ -33,6 +33,7 @@ class GuardResult:
     need_reentry: bool = False
     reason_code: str = ""
     degraded: bool = False
+    gates: list[dict] = field(default_factory=list)
 
 
 class LoopGuard:
@@ -86,63 +87,25 @@ class LoopGuard:
                 process.completion_claim = CompletionClaim.from_response(
                     response, step=process.steps_used,
                 )
+            completion_result = None
             if signal_bus is not None and signals is not None:
-                from backend.core.loop.harness.completion import CompletionGuard
-                completion_result = signal_bus.dispatch(
-                    signals, process, context="completion",
-                )
-                if completion_result.blocked and completion_result.missing_tools:
-                    return GuardResult(
-                        blocked=True,
-                        reason_code="required_tools",
-                        nudge_text=(
-                            f"[完成前需先调用以下工具] "
-                            f"{', '.join(completion_result.missing_tools)}"
-                        ),
-                    )
-                if completion_result.warnings:
-                    return GuardResult(
-                        blocked=True,
-                        reason_code="governance_resolution",
-                        nudge_text=(
-                            f"[完成检查] 以下历史纠正指令未被处理: "
-                            f"{'; '.join(completion_result.warnings)}"
-                        ),
-                    )
-
+                completion_result = signal_bus.dispatch(signals, process, context="completion")
             from backend.core.loop.completion_protocol import HostCompletionEvaluator
-            host_result = HostCompletionEvaluator.evaluate(process, response, signals)
-            if not host_result.allowed:
-                gate_status = HostCompletionEvaluator.outstanding_gates(process, signals)
-                exception = dict(
-                    getattr(process, "runtime_preferences", {}).get(
-                        "completion_exception", {}
-                    ) or {}
-                )
-                accepted = set(exception.get("gate_ids") or [])
-                gates = list(gate_status.get("gates") or [])
-                current = {str(item.get("gate_id") or "") for item in gates}
-                if (
-                    gates
-                    and all(
-                        item.get("degradable_by_explicit_user_decision") is True
-                        for item in gates
-                    )
-                    and current.issubset(accepted)
-                ):
-                    return GuardResult(
-                        is_complete=True,
-                        degraded=True,
-                        reason_code="user_accepted_completion_exception",
-                    )
+            gate_status = HostCompletionEvaluator.outstanding_gates(process, signals, completion_result, candidate=response)
+            if not gate_status["ready"]:
+                from .completion_gates import accepts_partial
+                if accepts_partial(process, gate_status["gates"]):
+                    return GuardResult(is_complete=True, degraded=True,
+                        reason_code="user_accepted_completion_exception")
                 process.completion_rejections.append({
                     "step": process.steps_used,
-                    "reasons": list(host_result.reasons),
+                    "reasons": [g["message"] for g in gate_status["gates"]],
                 })
                 return GuardResult(
                     blocked=True,
                     reason_code="host_completion",
-                    nudge_text="[Host 完成硬门] " + "; ".join(host_result.reasons),
+                    gates=gate_status["gates"],
+                    nudge_text="[Host 完成硬门] " + "; ".join(g["message"] for g in gate_status["gates"]),
                 )
 
             # TaskGate state must live for the whole execution, not one check.
@@ -362,10 +325,8 @@ def check_repeat_success(
 
 def _is_completion(response: str) -> bool:
     """Only protocol-shaped markers may request host completion evaluation."""
-    return bool(
-        re.search(r"(?m)^\s*TASK_COMPLETE\s*$", response)
-        or re.search(r"(?m)^\s*FINAL_ANSWER\s*:", response)
-    )
+    from .completion_protocol import CompletionClaim
+    return CompletionClaim.is_explicit_response(response)
 
 
 def _repeated_plain_text(session: "AgentSession | None", response: str,

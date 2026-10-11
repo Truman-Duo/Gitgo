@@ -11,6 +11,7 @@ from backend.core.loop.provider_protocol import (
     ProviderEventType,
     ProviderProtocol,
     ProviderRequest,
+    ProviderResponseIncomplete,
     normalize_usage,
 )
 from backend.core.loop.agent_tool import normalize_tool_parameters
@@ -237,6 +238,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         }
         if instructions:
             body["instructions"] = "\n\n".join(instructions)
+        if request.reasoning_effort is not None:
+            body["reasoning"] = {"effort": request.reasoning_effort}
         if request.tools:
             canonical = _canonical_tools(request.tools)
             hosted_search = bool(request.metadata.get("hosted_web_search"))
@@ -260,6 +263,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         status = str(data.get("status", ""))
         if status in {"failed", "incomplete"}:
             details = data.get("error") or data.get("incomplete_details")
+            if status == "incomplete":
+                raise ProviderResponseIncomplete(
+                    (details or {}).get("reason", "unknown"),
+                    normalize_usage(data["usage"]).to_dict() if data.get("usage") else None,
+                )
             raise RuntimeError(
                 f"Responses API terminated with response.{status}: "
                 f"{json.dumps(details, ensure_ascii=False)}"

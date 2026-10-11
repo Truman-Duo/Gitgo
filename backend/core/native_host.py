@@ -76,6 +76,8 @@ class NativeHost:
         self._active_processes: dict[str, tuple[str, str]] = {}
         self._admission_requests: dict[str, tuple[str, str]] = {}
         self._cancelled_requests: set[str] = set()
+        from backend.core.application.request_memo import RequestMemo
+        self._request_memo = RequestMemo()
         self._btw_requests: dict[str, tuple[str, str]] = {}
         self._active_btw: dict[str, tuple[str, str]] = {}
         self._sessions: dict[str, str] = {}
@@ -259,6 +261,9 @@ class NativeHost:
                     current[1].set()
 
     def _provider_switch(self, provider_id: str) -> dict:
+        return self._provider_change("provider.switch", {"provider_id": provider_id})
+
+    def _provider_change(self, operation: str, arguments: dict) -> dict:
         """Switch the global provider at a safe task boundary.
 
         Daemons own concrete provider clients, so changing only the metadata
@@ -278,7 +283,8 @@ class NativeHost:
                         "active_sidecars": len(self._active_btw),
                     },
                 )
-            result = self.services.provider_switch(provider_id)
+            result = (self.services.provider_switch(str(arguments.get("provider_id", "")))
+                      if operation == "provider.switch" else self.services.invoke(operation, arguments))
             clients = list(self._daemons.items())
             self._daemons.clear()
         stopped_projects: list[str] = []
@@ -291,8 +297,9 @@ class NativeHost:
                 stop_errors.append({"project": project, "message": str(exc)[:500]})
         self._emit({
             "type": "event", "project": "", "payload": {
-                "event": "provider_switched",
-                "provider_id": provider_id,
+                "event": "provider_switched" if operation == "provider.switch" else "provider_configuration_changed",
+                "provider_id": str(arguments.get("provider_id", "")),
+                "operation": operation,
                 "runtime_reload": True,
                 "retired_projects": stopped_projects,
                 "stop_errors": stop_errors,
@@ -470,10 +477,15 @@ class NativeHost:
                 "message": "Loading durable conversation and process state",
             }
         provider_state = self.services.provider_status()
+        live_routes = {p["id"]: p for p in result.get("provider_routes", [])}
         result["providers"] = [
-            {"id": provider["id"], "breaker_state": "unsupported",
-             "failures": 0, "available": provider.get("api_key_present", False),
-             "health_supported": False}
+            {"id": provider["id"], "breaker_state": "unobserved",
+             "failures": None, "available": provider.get("api_key_present", False) or provider.get("auth_mode") == "none",
+             "health_supported": bool(provider_state["failover_enabled"]),
+             **live_routes.get(provider["id"], {}),
+             **({"available": False} if live_routes.get(provider["id"], {}).get("breaker_state") in {"open", "unavailable"}
+                or live_routes.get(provider["id"], {}).get("probe_inflight") else {}),
+             "health_scope": project}
             for provider in provider_state["providers"]
         ]
         result["active_provider"] = provider_state["active_provider"]
@@ -978,6 +990,7 @@ class NativeHost:
         host_config = self.services.config_get()
         command: dict[str, Any] = {
             "cmd": "task", "action": action, "task_id": task_id,
+            "command_id": "native:" + (request_id or str(uuid.uuid4())),
             "instruction": message, "role": "supervisor",
             "actor_kind": "supervisor",
             "capability_profile_id": admission.capability_profile_id,
@@ -1520,6 +1533,8 @@ class NativeHost:
             )
         if operation == "provider.switch":
             return self._provider_switch(str(arguments.get("provider_id", "")))
+        if operation in {"provider.save", "provider.delete", "provider.failover.configure"}:
+            return self._provider_change(operation, arguments)
         if operation == "lesson.harvest.resolve":
             result = self.services.invoke(operation, arguments)
             if str(result.get("status") or "") == "accepted" and int(result.get("count", 0) or 0) > 0:
@@ -1538,13 +1553,31 @@ class NativeHost:
 
     def _handle_request(self, request: dict) -> None:
         request_id = str(request.get("request_id", ""))
+        operation = str(request.get("operation") or "")
+        protected = operation in {"runtime.chat", "runtime.decision", "runtime.resume", "runtime.discard"}
+        if protected:
+            try:
+                admitted, previous = self._request_memo.claim(request_id, operation, request.get("arguments") or {})
+            except ValueError as exc:
+                self._response(request_id, error={"code": str(exc), "message": str(exc), "details": {}})
+                return
+            if not admitted:
+                previous = previous or {"error": {"code": "REQUEST_IN_PROGRESS",
+                    "message": "The original request is still active; execution was not repeated.", "details": {}}}
+                self._response(request_id, **previous)
+                return
+        def respond(*, result=None, error=None):
+            reply = {"error": error} if error is not None else {"result": result}
+            if protected:
+                self._request_memo.complete(request_id, reply)
+            self._response(request_id, **reply)
         try:
             result = self._dispatch(request)
-            self._response(request_id, result=result)
+            respond(result=result)
         except OperationError as exc:
-            self._response(request_id, error=exc.to_dict())
+            respond(error=exc.to_dict())
         except DaemonCommandError as exc:
-            self._response(request_id, error={
+            respond(error={
                 "code": exc.code,
                 "message": exc.message,
                 "details": {**exc.details, "error_info": exc.error_info},
@@ -1561,12 +1594,12 @@ class NativeHost:
                 if isinstance(exc, StorageRuntimeUnsupported):
                     details["sqlite_version"] = exc.version
                 payload = error_payload(code, message=str(exc), details=details)
-                self._response(request_id, error={
+                respond(error={
                     "code": code, "message": str(exc), "details": details,
                     "error_info": payload["error_info"],
                 })
             else:
-                self._response(request_id, error={"code": "INTERNAL_ERROR",
+                respond(error={"code": "INTERNAL_ERROR",
                                                    "message": str(exc), "details": {}})
 
     def serve_forever(self) -> int:

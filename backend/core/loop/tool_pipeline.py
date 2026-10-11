@@ -42,6 +42,7 @@ class ToolResult:
     call_index: int = 0
     allowed: bool = True
     is_error: bool = False
+    suspended: bool = False
     data: dict | None = None
     formatted: str = ""
     error: str = ""
@@ -75,8 +76,23 @@ class ToolPipeline:
         """执行单次工具调用。"""
         tool_name = tool_call.get("name", tool.name)
         raw_args = tool_call.get("args", {})
+        if isinstance(raw_args, dict):
+            # Reserved fields are never model authority. Preparation may add
+            # Host-owned fields after this common boundary, including for
+            # composite leaves and authored tools.
+            raw_args = {key: value for key, value in raw_args.items() if not str(key).startswith("_")}
 
         start = time.time()
+        from .composite_runtime import call_key, state_for
+        continuation_key = call_key(tool_call, execution_id, call_index)
+        resume_state = None
+        if (getattr(tool, "composite_spec", None) or {}).get("execution_mode") in {"host_pipeline", "authored_host_python"}:
+            try:
+                resume_state = state_for(ctx.process, continuation_key, tool, raw_args,
+                    ctx.artifacts.get("tool_catalog") or {})
+            except ValueError as exc:
+                return self._error_result(tool_name, execution_id, call_index, start, str(exc),
+                    diagnostics={"nature": "governance", "code": "COMPOSITE_CONTINUATION_STALE"})
 
         if ctx.is_cancelled() or getattr(ctx.process, "cancel_requested", False):
             return self._error_result(
@@ -96,7 +112,7 @@ class ToolPipeline:
                 "tool is denied by its execution contract",
                 diagnostics={"nature": "governance", "code": "TOOL_DENIED"},
             )
-        if operation_policy.requires_user:
+        if operation_policy.requires_user and resume_state is None:
             approvals = ctx.artifacts.get("approvals", set())
             from backend.core.loop.permission_broker import arguments_digest, matching_grant
             public_raw = {
@@ -185,7 +201,10 @@ class ToolPipeline:
                         args["_web_search_mode"] = str(
                             ctx.process.runtime_preferences.get("web_search_mode") or "auto"
                         )
-                        args["_web_search_provider_id"] = str(ctx.process.provider_id or "")
+                        args["_web_search_provider_id"] = str(
+                            ctx.process.runtime_preferences.get("effective_provider_id")
+                            or ctx.process.provider_id or ""
+                        )
                 from backend.core.loop.permission_broker import (
                     authorize_external_resources,
                     out_of_scope_resources,
@@ -242,6 +261,27 @@ class ToolPipeline:
         # Invalid model arguments remain correctable business errors. Exact
         # approval is independent of prerequisite evidence and is consumed only
         # after both checks succeed. Wrappers defer this guard to their leaves.
+        if is_effectful_mutation(tool.effect) and getattr(ctx.process, 'read_context_snapshot', None):
+            from .alignment_evidence import alignment_input_digest
+            from .alignment_routing import uses_on_demand_review
+            context, _ = ctx.process.read_context_snapshot()
+            state = context.get('alignment_runtime') or {}
+            ready = state.get('admission_review') or {}
+            expected_contract = None
+            if uses_on_demand_review(state) and tool.alignment_contract is not None:
+                try:
+                    expected_contract = tool.alignment_contract(dict(args or {}))
+                except (ValueError, TypeError, KeyError) as exc:
+                    return self._error_result(tool_name, execution_id, call_index, start, str(exc),
+                        diagnostics={'nature': 'business', 'code': 'INVALID_TOOL_ARGUMENTS'})
+            if (uses_on_demand_review(state)
+                    and state.get('task_id') == (ctx.process.active_task_id or ctx.process.process_id)
+                    and state.get('process_id') == ctx.process.process_id
+                    and (ready.get('status') != 'ready' or ready.get('input_digest') != alignment_input_digest(
+                        ctx.process, contract_override=expected_contract))):
+                return self._error_result(tool_name, execution_id, call_index, start,
+                    'Current requirement evidence must be reviewed before this effect; no effect started and no grant consumed.',
+                    diagnostics={'nature': 'governance', 'code': 'ALIGNMENT_REVIEW_REQUIRED'})
         spec = getattr(tool, "composite_spec", None) or {}
         if getattr(ctx.process, "read_context_snapshot", None) and (not spec or spec.get("execution_mode") in {"authored_pure_python", "authored_privileged_python"}):
             from backend.core.loop.engineering_workflow import EngineeringWorkflow
@@ -357,7 +397,7 @@ class ToolPipeline:
             if getattr(tool, "composite_spec", None):
                 dynamic_spec = dict(tool.composite_spec or {})
                 if dynamic_spec.get("execution_mode") in {
-                    "authored_pure_python", "authored_privileged_python",
+                    "authored_pure_python", "authored_privileged_python", "authored_host_python",
                 }:
                     source_ref = str(dynamic_spec.get("source_ref") or "")
                     try:
@@ -381,19 +421,23 @@ class ToolPipeline:
                                           {"action": "inspect_storage"}],
                         )
                     else:
-                        result_data = self._execute_isolated(
-                            (
-                                "authored_privileged_python"
-                                if dynamic_spec.get("execution_mode") == "authored_privileged_python"
-                                else "authored_python"
-                            ),
-                            {**args, "_workspace": str(ctx.workspace_path), "_dynamic_spec": dynamic_spec},
-                            effective_timeout,
-                            cancellation_event=ctx.cancellation,
-                        )
+                        if dynamic_spec.get("execution_mode") == "authored_host_python":
+                            from .authored_runtime import run
+                            result_data = run(self, tool, args, ctx, execution_id, call_index, continuation_key, dynamic_spec)
+                        else:
+                            result_data = self._execute_isolated(
+                                (
+                                    "authored_privileged_python"
+                                    if dynamic_spec.get("execution_mode") == "authored_privileged_python"
+                                    else "authored_python"
+                                ),
+                                {**args, "_workspace": str(ctx.workspace_path), "_dynamic_spec": dynamic_spec},
+                                effective_timeout,
+                                cancellation_event=ctx.cancellation,
+                            )
                 else:
                     result_data = self._execute_composite_plan(
-                        tool, args, ctx, execution_id, call_index,
+                        tool, args, ctx, execution_id, call_index, continuation_key,
                     )
             # v0.45: isolated=True → 子进程隔离执行
             elif getattr(tool, "isolated", False):
@@ -457,6 +501,12 @@ class ToolPipeline:
             return result
 
         self._publish_tool_notices(ctx, tool_name, execution_id, call_index, result_data)
+        if isinstance(result_data, dict) and result_data.get("_suspended"):
+            self._write_invocation_state(ctx, tool, tool_name, execution_id, call_index,
+                state="awaiting_user", effect_state="partial", path=invocation_path)
+            return ToolResult(tool_name=tool_name, execution_id=execution_id,
+                call_index=call_index, suspended=True, data={"execution_state": "awaiting_user"})
+
         business_error = ""
         if isinstance(result_data, dict):
             business_error = str(result_data.get("error", ""))
@@ -719,98 +769,9 @@ class ToolPipeline:
             diagnostics=diagnostics,
         )
 
-    def _execute_composite_plan(
-        self, tool, args: dict, ctx, execution_id: str, call_index: int,
-    ) -> dict:
-        """Expand a declarative tool through this same canonical pipeline."""
-        from backend.core.tools.dynamic_tools import resolve_step_arguments
-
-        spec = dict(getattr(tool, "composite_spec", None) or {})
-        catalog = ctx.artifacts.get("tool_catalog") or {}
-        inputs = {
-            key: value for key, value in args.items()
-            if not str(key).startswith("_")
-        }
-        step_data: dict[str, dict] = {}
-        step_receipts: list[dict] = []
-        files: set[str] = set()
-        child_execution_id = f"{execution_id}__composite_{call_index}"
-
-        for step_index, step in enumerate(spec.get("steps", [])):
-            step_id = str(step.get("id", f"step_{step_index + 1}"))
-            base_name = str(step.get("tool", ""))
-            base_tool = catalog.get(base_name)
-            if base_tool is None or base_tool is tool:
-                return {
-                    "error": "DYNAMIC_COMPONENT_UNAVAILABLE",
-                    "failed_step": step_id,
-                    "tool": base_name,
-                    "steps": step_data,
-                    "_child_receipts": step_receipts,
-                }
-            try:
-                step_args = resolve_step_arguments(
-                    step.get("arguments", {}), inputs=inputs, steps=step_data,
-                )
-            except ValueError as exc:
-                return {
-                    "error": "DYNAMIC_ARGUMENT_RESOLUTION_FAILED",
-                    "failed_step": step_id,
-                    "detail": str(exc),
-                    "steps": step_data,
-                    "_child_receipts": step_receipts,
-                }
-            child = self.execute(
-                {"name": base_name, "args": step_args},
-                base_tool,
-                ctx,
-                child_execution_id,
-                step_index,
-            )
-            child_receipt = dict(child.receipt or {})
-            child_receipt["composite_tool"] = tool.name
-            child_receipt["composite_step"] = step_id
-            step_receipts.append(child_receipt)
-            data = dict(child.data or {})
-            step_data[step_id] = data
-            files.update(self._result_files(data))
-            ctx.event_bus.emit(
-                __import__("backend.core.loop.event_bus", fromlist=["ToolEvent"]).ToolEvent(
-                    "CompositeStepCompleted", child_execution_id, base_name, step_index,
-                    data={
-                        "composite_tool": tool.name,
-                        "step_id": step_id,
-                        "is_error": child.is_error,
-                        "error": child.error,
-                        "duration_ms": child.duration_ms,
-                        "receipt": child_receipt,
-                    },
-                )
-            )
-            if child.is_error:
-                committed_effect = any(
-                    is_effectful_mutation(str(receipt.get("effect", "read")))
-                    and bool(receipt.get("committed"))
-                    for receipt in step_receipts
-                )
-                return {
-                    "error": "DYNAMIC_STEP_FAILED",
-                    "failed_step": step_id,
-                    "step_error": child.error,
-                    "step_diagnostics": dict(child.diagnostics or {}),
-                    "steps": step_data,
-                    "_child_receipts": step_receipts,
-                    "files": sorted(files),
-                    "_rollback_required": committed_effect,
-                }
-        return {
-            "completed": True,
-            "definition_digest": spec.get("digest", ""),
-            "definition_version": spec.get("version", 1),
-            "steps": step_data,
-            "_child_receipts": step_receipts,
-            "files": sorted(files),
-        }
+    def _execute_composite_plan(self, tool, args, ctx, execution_id, call_index, key):
+        from .composite_runtime import run
+        return run(self, tool, args, ctx, execution_id, call_index, key)
 
     @staticmethod
     def _attach_child_lineage(receipt: dict, result_data: dict | None) -> None:
@@ -968,7 +929,13 @@ class ToolPipeline:
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(str(tmp), str(target))
             return str(target)
-        except OSError:
+        except OSError as exc:
+            from .event_bus import ToolEvent
+            ctx.event_bus.emit(ToolEvent("ToolNotice", execution_id, tool_name, call_index,
+                data={"code": "INVOCATION_JOURNAL_UNAVAILABLE" if not path else "INVOCATION_JOURNAL_UPDATE_FAILED",
+                      "message": ("Tool execution was blocked because its invocation journal could not be created."
+                                  if not path else "Invocation journal update failed; retained results remain auditable and restart requires inspection."),
+                      "severity": "warning", "error_type": type(exc).__name__}))
             return path
 
     def _error_result(self, tool_name, execution_id, call_index, start, error,
