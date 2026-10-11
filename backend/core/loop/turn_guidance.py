@@ -146,4 +146,3 @@ def _build_current_turn_envelope(
         + "does not create one. Call request_user_decision to actually ask. Reconsider "
         + "needs after the answer, including any delegation of remaining choices.\n"
     )
-

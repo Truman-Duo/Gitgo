@@ -311,5 +311,3 @@ def install(ctx):
         read_only=True,
         effect=ToolEffect.READ,
     )
-
-

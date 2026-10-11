@@ -1,6 +1,7 @@
 // src/mcp/client.ts — MCP stdio client for gitgo mcp_server.py
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
+import packageInfo from "../../package.json";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -98,7 +99,7 @@ export class McpClient {
     const initResult = await this.sendRequest("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "gitgo-dashboard", version: "1.0.0" },
+      clientInfo: { name: "gitgo-dashboard", version: packageInfo.version },
     });
     process.stderr.write(
       `[mcp] handshake ok: server=${initResult?.serverInfo?.name || "?"}\n`

@@ -26,7 +26,7 @@ from backend.core.unicode_safety import normalize_unicode_text, unicode_integrit
 
 
 PROTOCOL_VERSION = 1
-HOST_VERSION = "1.0.0"
+from backend.version import __version__ as HOST_VERSION
 
 
 @dataclass(frozen=True)

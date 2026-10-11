@@ -184,4 +184,3 @@ class AlignmentReview:
         transition(process, ProcessStatus.FAILED)
         return hooks.result('需求检查暂未完成，已保留任务和答案，未将其标记为完成。',
             error_code='ALIGNMENT_REVIEW_FAILED', error_message=type(exc).__name__, outcome_status=OutcomeStatus.FAILED)
-

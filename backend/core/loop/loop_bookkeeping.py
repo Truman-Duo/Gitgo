@@ -88,5 +88,3 @@ def _inc_nudge_counter(process: AgentProcess, nudge_type: str) -> None:
 
 def _get_nudge_count(process: AgentProcess, nudge_type: str) -> int:
     return process._nudge_counters.get(nudge_type, 0)
-
-

@@ -30,7 +30,7 @@ def initialize(root: Path, _session: dict):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-    print("[gitgo-test] Formal alignment UI test: see docs/alignment-workflow.md for the exact task.", flush=True)
+    print("[gitgo-test] Formal alignment UI test: see docs/VALIDATION.md for the task and acceptance scope.", flush=True)
     print("[gitgo-test] Select a terminal, save, enter project 2920. Reply in NORMAL; each answer goes to Host before another question is selected.", flush=True)
     print("[gitgo-test] This profile uses the existing model credential; original state is unchanged.", flush=True)
 

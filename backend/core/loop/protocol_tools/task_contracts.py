@@ -381,5 +381,3 @@ def install(ctx):
         effect=ToolEffect.READ,
         idempotent=False,
     )
-
-

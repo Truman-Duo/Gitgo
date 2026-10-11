@@ -92,5 +92,3 @@ def _build_system_message_for_llm(process: AgentProcess,
         f"- {c}" for c in process.task_constraints
     )
     return base_system + constraint_block
-
-

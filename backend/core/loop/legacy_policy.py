@@ -35,5 +35,3 @@ def _policy_pre_check(tool_name: str, args: dict, process: AgentProcess) -> dict
                 }
 
     return {"allowed": True}
-
-

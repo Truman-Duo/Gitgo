@@ -238,5 +238,3 @@ def _resolve_retention(msg: dict, harness_data=None) -> float:
         msg.get("_retention_priority", 0.0),       # RetentionAdvisor
         msg.get("_nudge_priority", 0.0),            # pending nudge
     )
-
-

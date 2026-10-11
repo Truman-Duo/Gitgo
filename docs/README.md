@@ -23,6 +23,7 @@
 - [贡献与提交要求](../CONTRIBUTING.md)
 - [Dashboard 开发要求](../cli/dashboard/README.md)
 - [Windows 构建要求](../packaging/README.md)
+- [CI 与 PR 合并要求](ci-and-review-gates.md)
 - [安全报告](../SECURITY.md)
 - [安全与隐私边界](SECURITY_AND_PRIVACY.md)
 

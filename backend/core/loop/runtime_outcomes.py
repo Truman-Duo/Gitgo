@@ -271,4 +271,3 @@ def _status_result(process: AgentProcess, session: "AgentSession") -> dict:
         error_message=f"Agent process is {process.status.value}",
         outcome_status=OutcomeStatus.FAILED,
     )
-

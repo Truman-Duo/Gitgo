@@ -222,4 +222,3 @@ def _provider_idle_timeout(process, *, cap_seconds: int = 120) -> int:
     # Keep a small tail for cancellation, outcome persistence and A review.
     usable = max(1.0, remaining)
     return max(1, min(cap_seconds, int(usable)))
-

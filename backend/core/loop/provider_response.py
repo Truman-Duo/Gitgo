@@ -253,4 +253,3 @@ class ProviderResponseCollector:
                 "tool_name": p["name"],
                 "output_index": idx,
             }, detail={"arguments": args, "arguments_raw": p["partial_json"]})
-

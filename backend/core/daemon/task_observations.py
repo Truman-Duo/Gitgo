@@ -80,4 +80,3 @@ class TaskObservations:
         except Exception as trace_exc:
             event["trace_error"] = str(trace_exc)[:300]
         self.queue.put(event)
-

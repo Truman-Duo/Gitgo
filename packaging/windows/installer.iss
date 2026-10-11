@@ -13,15 +13,22 @@
 #ifndef PrimaryCommand
   #define PrimaryCommand "gitgo"
 #endif
+#ifndef ProductVersion
+  #error ProductVersion must come from product.json
+#endif
+#ifndef WindowsVersion
+  #error WindowsVersion must come from product.json
+#endif
 
 [Setup]
 AppId={{A36173A9-1621-40B6-9918-7E4FA277CE62}
 AppName={#ProductName}
-AppVersion=0.1.0
+AppVersion={#ProductVersion}
+VersionInfoVersion={#WindowsVersion}
 DefaultDirName={localappdata}\Programs\{#ProductId}
 DefaultGroupName={#ProductName}
 OutputDir={#OutputDir}
-OutputBaseFilename={#PrimaryCommand}-setup
+OutputBaseFilename={#PrimaryCommand}-{#ProductVersion}-setup
 Compression=lzma2/max
 SolidCompression=yes
 PrivilegesRequired=lowest

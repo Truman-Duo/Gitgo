@@ -154,4 +154,3 @@ def _apply_host_task_transitions(process: AgentProcess, results: list) -> bool:
         process.task_kind = "supervisor"
         return True
     return False
-

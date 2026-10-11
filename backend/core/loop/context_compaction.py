@@ -113,4 +113,3 @@ class ContextCompaction:
         )
         process.result = result
         return False, result
-

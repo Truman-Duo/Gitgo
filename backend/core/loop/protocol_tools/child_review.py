@@ -457,5 +457,3 @@ def install(ctx):
         },
         execute=request_review, read_only=True, effect=ToolEffect.READ,
     )
-
-
