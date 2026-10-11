@@ -1,83 +1,31 @@
-# Terminal release boundary
+# Windows 构建与发布要求
 
-Gitgo v1 is one terminal product with one public command. The installed
-dashboard may start an internal Native Host process, but the Host is not a
-second user-facing application and is versioned atomically with the dashboard.
+Gitgo 的 Windows 产品包包含 Dashboard 与内部 Native Host，必须一起构建、校验和分发。源码合入不等于二进制已经发布。
 
-The installer adds its installation directory to the current user's `PATH`, so
-`gitgo` works in an existing terminal. A shortcut/double-click launcher opens
-the terminal selected in the user configuration; an attached TTY or SSH
-session is always reused. The final public command and optional aliases come
-from `product.json`, so packaging does not freeze the eventual product name in
-runtime code.
+## 构建环境
 
-The launcher reads `~/.gitgo/config.json` before starting the Host. Its stable
-JSON shape is:
+需要 Bun 和通过 Gitgo SQLite WAL 安全检查的 Python。运行时由 `GITGO_PYTHON` 或用户级 Gitgo 安装位置选择；脚本不自动改用不安全系统 Python。PyInstaller 可以由 `-PyInstallerPackages` 指定构建依赖目录。安装器还需要已安装的 Inno Setup。
 
-```json
-{
-  "launcher": {
-    "terminal": "auto",
-    "command": "",
-    "args": []
-  }
-}
+搜索资产需要独立 ripgrep >=14 及匹配的完整第三方许可；可用 `-Ripgrep`、`-RipgrepNotices` 指定。终端验证参考资产通过既有构建参数提供，缺失不能用本机 PATH 掩盖。
+
+## 统一验证入口
+
+```text
+powershell -ExecutionPolicy Bypass -File packaging/release_windows.ps1 -VerifyOnly
+powershell -ExecutionPolicy Bypass -File packaging/release_windows.ps1
+powershell -ExecutionPolicy Bypass -File packaging/release_windows.ps1 -BuildInstaller
 ```
 
-`terminal` accepts `auto`, `current`, `windows_terminal`, or `custom`. `auto`
-prefers Windows Terminal only for Explorer/shortcut launches. `current` always
-keeps the console Windows assigned to the executable. A custom terminal runs
-`command` with `args`, followed by `gitgo.exe --attached`; for example WezTerm
-can use `{"terminal":"custom","command":"wezterm.exe","args":["start","--"]}`.
-Changing this file is picked up by a running Host for runtime settings; launcher
-selection naturally applies on the next product launch.
+分别进行验证、验证后生成 staging、验证后生成 staging 和安装器。流程包括工作树/提交格式、运行时安全、被跟踪内容扫描、后端/前端测试、构建及冻结后端 smoke。既有扫描未覆盖全部隐私引用，发布候选仍需人工核对。
 
-The Windows installer also registers the primary executable under the current
-user's `App Paths`. PATH removal is segment-based and removes only the exact
-installation directory; it never restores an old whole-PATH snapshot over
-changes made by other applications. Inno Setup supplies the dedicated
-uninstaller. `build_windows.ps1 -BuildInstaller` creates it when an Inno Setup
-compiler is available; staging the product does not silently install one.
+脚本不会推送、安装、重写 Git 历史或下载构建工具。`-AllowDirty` 只用于本地演练，不能作为正式发布证明。输出目录和 EXE 不进入源码提交。
 
-The uninstaller owns only the installation and user configuration/credential
-files. Runtime/session databases are retained for recovery. It must never
-traverse configured workspace paths, remove repositories, delete worktrees, or
-remove a project's `.gitgo`/`.git/gitgo` directory. Automatic update is
-intentionally out of scope for the first installer.
+## 启动与卸载
 
-Platform packages are built independently. Windows uses an `.exe` launcher and
-installer; macOS and Linux expose the same command/protocol/config contracts but
-use native package and credential-store adapters.
+正常启动使用用户终端偏好；首次配置和以后更改的区别见 [终端说明](../docs/terminal-launcher.md)。安装入口应保留整包组件，用户级 PATH/App Paths 的增删只针对实际安装目录。
 
-## Release build prerequisites
+卸载不得遍历用户项目、仓库、worktree 或删除运行历史。
 
-`build_windows.ps1` selects `GITGO_PYTHON`, `~/.gitgo/runtime/python`, or the
-per-user LocalAppData Gitgo runtime, in that order. The selected build runtime
-must pass Gitgo's SQLite WAL-safety guard. PyInstaller may be installed in that
-runtime or supplied as a separate build-only package directory with
-`-PyInstallerPackages`; the script also recognizes the runtime's inactive
-`packages/` build directory. It fails closed instead of falling back to a
-system Python with an unsafe SQLite build. Bun is resolved from
-`~/.bun/bun.exe` unless passed explicitly.
+## 验收边界
 
-The compiled Native Host is smoke-tested through the versioned stdio protocol
-before publication. Release artifacts remain under ignored `dist-terminal/`
-and `dist-installer/` directories; executables and runtime databases are never
-committed to Git.
-
-The repository-root `build.py` is retained only to archive the early Qt Git
-manager. It requires an explicit `--legacy-qt` flag and is not part of the
-terminal release pipeline.
-
-## One-command release verification
-
-Run `packaging/release_windows.ps1` from PowerShell for the maintained release
-flow. It fails closed on a dirty tree, invalid commit messages, an unsafe
-SQLite runtime, tracked secrets/private state, Python or Dashboard test
-failures, and build failures. By default it then stages the Windows product;
-`-VerifyOnly` performs every check without packaging, while `-BuildInstaller`
-also invokes Inno Setup when its compiler is already installed.
-
-The script never pushes, installs, rewrites Git history, downloads build tools,
-or deletes project/runtime data. `-AllowDirty` exists only for a local rehearsal
-and should not be used as release evidence.
+冻结后端的协议 smoke 不证明可见 Dashboard 正常。发布前仍需完整产品在真实终端进行输入、颜色、卡片、流式显示、滚动和复制检查。版本与当前结果见 [版本](../docs/VERSION.md) 和 [测试说明](../docs/VALIDATION.md)。本次最新全部源码尚未重新打包发布。
