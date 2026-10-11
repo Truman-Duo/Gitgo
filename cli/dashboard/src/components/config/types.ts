@@ -34,6 +34,8 @@ export type ConfigTabProps = {
   report: (r: TabReport) => void;
   shell: ShellControls;
   contentFocused: boolean;
+  initialSetting?: string;
+  onSettingSaved?: (key: string) => Promise<string | void>;
 };
 
 export type ConfigTabModule = {

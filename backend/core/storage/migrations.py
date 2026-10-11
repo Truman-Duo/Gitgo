@@ -355,6 +355,7 @@ CREATE TABLE process_presentation (
 )
 
 
+
 STATE_MIGRATIONS += (
     Migration(8, "explicit_deletion_lifecycle", """
 CREATE TABLE deletion_plans (
@@ -424,6 +425,8 @@ CREATE TABLE session_lineage_heads (
 );
 """),
 )
+
+
 
 OBSERVABILITY_MIGRATIONS = (
     Migration(
@@ -524,5 +527,54 @@ CREATE INDEX idx_custom_tools_state_name
     ON custom_tools(state, name);
 CREATE INDEX idx_custom_tool_versions_created
     ON custom_tool_versions(tool_id, created_at DESC);
+"""),
+)
+
+STATE_MIGRATIONS += (
+    Migration(11, "versioned_runtime_facts_outbox", """
+ALTER TABLE session_processes ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE runtime_outbox (
+    event_id TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    process_id TEXT NOT NULL,
+    stream_id TEXT NOT NULL,
+    stream_sequence INTEGER NOT NULL,
+    producer TEXT NOT NULL,
+    correlation_id TEXT NOT NULL,
+    causation_id TEXT NOT NULL,
+    payload_ref TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    UNIQUE(stream_id, stream_sequence)
+);
+CREATE INDEX runtime_outbox_order ON runtime_outbox(occurred_at, event_id);
+CREATE TABLE runtime_consumers (
+    consumer_id TEXT NOT NULL,
+    stream_id TEXT NOT NULL,
+    last_sequence INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(consumer_id, stream_id)
+);
+"""),
+)
+
+STATE_MIGRATIONS += (
+    Migration(12, "durable_command_admission", """
+CREATE TABLE command_receipts (
+    command_key TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    result_ref TEXT,
+    created_at TEXT NOT NULL
+);
+"""),
+)
+
+STATE_MIGRATIONS += (
+    Migration(13, "command_receipt_process_privacy", """
+ALTER TABLE command_receipts ADD COLUMN process_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE command_receipts ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX command_receipts_process ON command_receipts(process_id);
 """),
 )

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useId, useLayoutEffect, useRef } from "react";
+import React, { createContext, useContext, useId, useLayoutEffect, useRef, useEffect } from "react";
 import { useInput, useSelection, ScrollBox } from "@anthropic/ink";
 import type { ScrollBoxHandle } from "@anthropic/ink";
 import { InputRouter, applicationBindings, type InputKey, type BindingSettings } from "./router.js";
@@ -7,10 +7,22 @@ import { readClipboard } from "../utils/clipboard.js";
 const RouterContext = createContext<InputRouter | null>(null);
 const PriorityContext = createContext(0);
 
-export function InputProvider({ children, settings }: { children: React.ReactNode; settings?: BindingSettings }) {
+export type VerificationInput = {afterMs: number; input: string; key: InputKey};
+
+export function InputProvider({ children, settings, verificationInput }: {
+  children: React.ReactNode; settings?: BindingSettings; verificationInput?: VerificationInput[];
+}) {
   const router = useRef(new InputRouter(applicationBindings)).current;
   const selection = useSelection();
   useLayoutEffect(() => { if (settings) router.bindings.configure(settings); }, [router, settings]);
+  // Explicit acceptance flags automate keys through the production router.
+  // They never replace the renderer, scene, backend calls or approval policy.
+  useEffect(() => {
+    const timers = (verificationInput || []).map(event => setTimeout(() => {
+      router.dispatch({input: event.input, key: event.key});
+    }, event.afterMs));
+    return () => timers.forEach(clearTimeout);
+  }, [router, verificationInput]);
   useLayoutEffect(() => router.register({ id: "clipboard.copy", priority: 10000, enabled: () => true,
     handle: ({ input, key }) => {
       if (!key.ctrl || input !== "c") return false;

@@ -1,14 +1,15 @@
 import React, { memo, useCallback, useEffect, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../../input/runtime.js";
-import { configGet, configSet, testWebSearchConfig } from "../../backend/tools.js";
+import { configGet, configSet, detectTerminals, testWebSearchConfig } from "../../backend/tools.js";
+import type { TerminalInventory, TerminalOption } from "../../backend/terminalLauncher.js";
 import { matchChord, chordLabel } from "../../input/bindings.js";
 import { colors } from "../../theme/index.js";
 import type { ConfigTabProps } from "./types.js";
 import { notifyGeneralConfigChanged } from "../../hooks/useGeneralConfig.js";
 import { applyTextOp } from "../../hooks/useTextInput.js";
 
-type SettingId = "verbose" | "language" | "auto_compact" | "agent_routing" | "external_editor" | "web_search_mode" | "web_search_engine" | "web_search_endpoint";
+type SettingId = "verbose" | "language" | "auto_compact" | "agent_routing" | "external_editor" | "web_search_mode" | "web_search_engine" | "web_search_endpoint" | "terminal";
 type Settings = {
   verbose: boolean;
   language: "en" | "zh";
@@ -18,6 +19,7 @@ type Settings = {
   web_search_mode: "auto" | "provider" | "searxng" | "disabled";
   web_search_endpoint: string;
   web_search_engine: "google" | "bing" | "baidu" | "yandex" | "duckduckgo";
+  terminal: string;
 };
 
 const ROWS: { id: SettingId; label: string }[] = [
@@ -29,8 +31,9 @@ const ROWS: { id: SettingId; label: string }[] = [
   { id: "web_search_mode", label: "Web Search" },
   { id: "web_search_engine", label: "Fallback Engine" },
   { id: "web_search_endpoint", label: "SearXNG Fallback" },
+  { id: "terminal", label: "Terminal" },
 ];
-const OPTIONS: Record<Exclude<SettingId, "external_editor" | "web_search_endpoint">, readonly (string | number | boolean)[]> = {
+const OPTIONS: Record<Exclude<SettingId, "external_editor" | "web_search_endpoint" | "terminal">, readonly (string | number | boolean)[]> = {
   verbose: [false, true],
   language: ["en", "zh"],
   auto_compact: [false, true],
@@ -45,18 +48,36 @@ function isTextSetting(id: SettingId): id is TextSettingId {
 }
 
 export const GeneralTab = memo(function GeneralTab({
-  client, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused,
+  client, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused, initialSetting, onSettingSaved,
 }: ConfigTabProps) {
   const [settings, setSettings] = useState<Settings>({
     verbose: false, language: "en", auto_compact: true, agent_routing: "owner",
     external_editor: "", web_search_mode: "auto", web_search_endpoint: "",
-    web_search_engine: "duckduckgo",
+    web_search_engine: "duckduckgo", terminal: "auto",
   });
-  const [row, setRow] = useState(0);
-  const [editing, setEditing] = useState<SettingId | null>(null);
+  const [row, setRow] = useState(Math.max(0, ROWS.findIndex(r => r.id === initialSetting)));
+  const [editing, setEditing] = useState<SettingId | null>(initialSetting === "terminal" ? "terminal" : null);
   const [draft, setDraft] = useState<string | number | boolean>("");
   const [saving, setSaving] = useState<SettingId | null>(null);
   const [message, setMessage] = useState("");
+  const [terminals, setTerminals] = useState<TerminalOption[]>([]);
+  const [terminalWarning, setTerminalWarning] = useState("");
+  const [detectingTerminals, setDetectingTerminals] = useState(true);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const refreshTerminals = useCallback(async () => {
+    setDetectingTerminals(true);
+    try {
+      const inventory = await detectTerminals(client) as TerminalInventory;
+      if (!Array.isArray(inventory?.options)) throw new Error("Terminal inventory unavailable");
+      setTerminals(inventory.options);
+      setTerminalWarning((inventory.warnings || []).join(" "));
+      return inventory;
+    } catch (error) {
+      setTerminalWarning(`Terminal detection failed: ${String(error)} · R retry`);
+      return undefined;
+    } finally { setDetectingTerminals(false); }
+  }, [client]);
+  useEffect(() => { void refreshTerminals(); }, [refreshTerminals]);
   // The dot describes the complete runnable search profile, not merely a
   // syntactically valid engine name. Without an endpoint the tool is offline,
   // never an ambiguous gray "unknown" success.
@@ -89,12 +110,15 @@ export const GeneralTab = memo(function GeneralTab({
         web_search_endpoint: String(result?.web_search_endpoint || ""),
         web_search_engine: (["google", "bing", "baidu", "yandex", "duckduckgo"].includes(String(result?.web_search_engine))
           ? String(result.web_search_engine) : "duckduckgo") as Settings["web_search_engine"],
+        terminal: String(result?.launcher?.terminal || "auto"),
       });
+      if (initialSetting === "terminal") setDraft(String(result?.launcher?.terminal || "auto"));
+      setSettingsLoaded(true);
       if (result?.web_search_endpoint) void testSearch();
       else setSearchHealth("offline");
-    }).catch((error) => { if (active) setMessage(String(error)); });
+    }).catch((error) => { if (active) { setMessage(`Config load failed: ${String(error)} · reopen General to retry`); setSettingsLoaded(false); } });
     return () => { active = false; };
-  }, [client, testSearch]);
+  }, [client, testSearch, initialSetting]);
 
   useEffect(() => { report({ sub: editing !== null, fullscreen: false }); }, [editing, report]);
   useEffect(() => {
@@ -110,7 +134,8 @@ export const GeneralTab = memo(function GeneralTab({
     setSaving(id);
     setMessage(`Saving ${ROWS.find((item) => item.id === id)?.label || id}…`);
     try {
-      await configSet(client, id, value);
+      const key = id === "terminal" ? "launcher.terminal" : id;
+      await configSet(client, key, value);
       notifyGeneralConfigChanged();
       setSettings((current) => ({ ...current, [id]: value } as Settings));
       const effectiveEndpoint = String(
@@ -124,19 +149,24 @@ export const GeneralTab = memo(function GeneralTab({
         if (id === "web_search_endpoint" || id === "web_search_engine") {
           setSearchHealth("offline");
           setMessage("Saved · configure a SearXNG endpoint to enable search");
-        } else setMessage("Saved");
+        } else setMessage(id === "terminal" ? "Saved · applies on the next launch" : "Saved");
       }
+      const notice = await onSettingSaved?.(key);
+      if (notice) setMessage(notice);
       setEditing(null);
     } catch (error) {
       setMessage(`Save failed: ${String(error)}`);
     } finally {
       setSaving(null);
     }
-  }, [client, testSearch, settings.web_search_endpoint]);
+  }, [client, testSearch, settings.web_search_endpoint, onSettingSaved]);
 
   useInput((input, key) => {
     if (!contentFocused) return false;
     if (saving) return;
+    if ((editing === "terminal" || ROWS[row]?.id === "terminal") && input.toLowerCase() === "r") {
+      void refreshTerminals(); return;
+    }
     if (editing) {
       if (matchChord("escape", input, key)) { setEditing(null); cmdInput.setValue(""); return; }
       if (isTextSetting(editing)) {
@@ -150,7 +180,8 @@ export const GeneralTab = memo(function GeneralTab({
         else if (input && !key.ctrl && !key.meta) applyTextOp({op: "insert", text: input}, cmdInput);
         return;
       }
-      const options = OPTIONS[editing];
+      const options = editing === "terminal" ? terminals.filter(t => t.available).map(t => t.id) : OPTIONS[editing];
+      if (editing === "terminal" && (!settingsLoaded || detectingTerminals || options.length === 0)) return;
       const index = Math.max(0, options.indexOf(draft));
       if (matchChord("left", input, key)) {
         setDraft(options[(index + options.length - 1) % options.length]!); return;
@@ -164,6 +195,13 @@ export const GeneralTab = memo(function GeneralTab({
     if (matchChord("escape", input, key)) { shell.leaveContent(); return; }
     if (matchChord("up", input, key)) { setRow((value) => Math.max(0, value - 1)); return; }
     if (matchChord("down", input, key)) { setRow((value) => Math.min(ROWS.length - 1, value + 1)); return; }
+    if (ROWS[row]?.id === "terminal" && (matchChord("left", input, key) || matchChord("right", input, key))) {
+      const options = terminals.filter(t => t.available).map(t => t.id);
+      if (detectingTerminals || !options.length) return;
+      const index = Math.max(0, options.indexOf(settings.terminal));
+      setDraft(options[(index + (key.leftArrow ? options.length - 1 : 1)) % options.length]!);
+      setEditing("terminal"); return;
+    }
     if (!matchChord("enter", input, key)) return;
     const id = ROWS[row]!.id;
     setEditing(id);
@@ -174,6 +212,11 @@ export const GeneralTab = memo(function GeneralTab({
   const valueLabel = (id: SettingId) => {
     const value = editing === id ? draft : settings[id];
     if (saving === id) return "SAVING";
+    if (id === "terminal") {
+      if (detectingTerminals) return "Detecting installed terminals…";
+      const option = terminals.find(t => t.id === value);
+      return option ? option.label + (option.available ? "" : " · unavailable") : String(value || "Not selected");
+    }
     if (id === "verbose" || id === "auto_compact") return value ? "ON" : "OFF";
     if (id === "language") return value === "zh" ? "中文" : "English";
     if (id === "agent_routing") return value === "fresh" ? "Fresh agent" : "Original owner";
@@ -215,6 +258,10 @@ export const GeneralTab = memo(function GeneralTab({
             ? `${chordLabel("upDown")} select  ${chordLabel("enter")} change  ${chordLabel("escape")} tabs`
             : `${chordLabel("leftRight")} tabs  ${chordLabel("enter")} open  ${chordLabel("escape")} back`}
       </Text>
+      {ROWS[row]?.id === "terminal" && <Text dimColor>
+        {initialSetting === "terminal" ? "First launch · choose a terminal and press Enter. " : "Changes apply on the next launch. "}R rescan
+      </Text>}
+      {terminalWarning && ROWS[row]?.id === "terminal" ? <Text color={colors.warning}>{terminalWarning}</Text> : null}
     </Box>
   );
 });

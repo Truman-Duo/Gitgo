@@ -1,0 +1,202 @@
+"""Injected storage contracts. Repositories do not open connections or import the facade."""
+from typing import Any, Callable, Protocol
+import sqlite3
+from ..paths import StoragePaths
+from ..models import StoragePolicy
+
+class ObjectsPort(Protocol):
+    _cas_bytes_hint: Any
+    _cas_lock: Any
+    _cas_reference_reasons: Any
+    _encoded_object: Callable
+    _ensure_open: Callable
+    _health_lock: Any
+    _register_object: Callable
+    _reserve_authoritative_write: Callable
+    _restore_canonical_blob: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _write_blob_file: Callable
+    check_health: Callable
+    paths: StoragePaths
+    policy: StoragePolicy
+    read_blob: Callable
+
+class CustomToolsPort(Protocol):
+    _encoded_object: Callable
+    _ensure_open: Callable
+    _read_json_blob: Callable
+    _register_object: Callable
+    _reserve_authoritative_write: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _write_blob_file: Callable
+    read_blob: Callable
+
+class LineagePort(Protocol):
+    _encoded_object: Callable
+    _ensure_open: Callable
+    _read_json_blob: Callable
+    _register_object: Callable
+    _reserve_authoritative_write: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _write_blob_file: Callable
+    load_agent_session_state: Callable
+    preview_session_undo: Callable
+
+class CheckpointsPort(Protocol):
+    _encoded_object: Callable
+    _ensure_open: Callable
+    _read_json_blob: Any
+    _register_object: Callable
+    _reserve_authoritative_write: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _write_blob_file: Callable
+    is_process_deleted: Callable
+    paths: StoragePaths
+
+class UsagePort(Protocol):
+    _ensure_open: Callable
+    _read_json_blob: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+
+class SessionsPort(Protocol):
+    _encoded_object: Callable
+    _ensure_open: Callable
+    _read_json_blob: Callable
+    _register_object: Callable
+    _reserve_authoritative_write: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _write_blob_file: Callable
+    paths: StoragePaths
+
+class PresentationPort(Protocol):
+    _b_conversation_cache: Any
+    _ensure_open: Callable
+    _is_public_user_message: Callable
+    _public_session_messages: Callable
+    _read_json_blob: Callable
+    _reserve_authoritative_write: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _storage_projection_warning: Callable
+    load_agent_process_state: Callable
+    load_latest_root_process_state: Callable
+    read_process_presentation: Callable
+    read_process_presentations: Callable
+
+class RecoveryPort(Protocol):
+    _ensure_open: Callable
+    _read_json_blob: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    load_agent_process_state: Callable
+    load_agent_session_state: Callable
+
+class WorktreesPort(Protocol):
+    _encoded_object: Callable
+    _ensure_open: Callable
+    _read_json_blob: Callable
+    _register_object: Callable
+    _reserve_authoritative_write: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _write_blob_file: Callable
+    load_worktree_state: Callable
+    paths: StoragePaths
+
+class RetirementPort(Protocol):
+    _ensure_open: Callable
+    _exclusive_maintenance: Any
+    _observability: sqlite3.Connection
+    _observability_lock: Any
+    _read_json_blob: Callable
+    _reserve_authoritative_write: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    read_deletion_plan: Callable
+
+class KnowledgePort(Protocol):
+    _encoded_object: Callable
+    _ensure_open: Callable
+    _prepare_state_json: Callable
+    _read_json_blob: Callable
+    _register_object: Callable
+    _reserve_authoritative_write: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _write_blob_file: Callable
+    paths: StoragePaths
+
+class ObservabilityPort(Protocol):
+    _encoded_object: Callable
+    _ensure_open: Callable
+    _estimated_sqlite_write: Callable
+    _global_sqlite_budget: Any
+    _last_metric_sample_at: Any
+    _observability: sqlite3.Connection
+    _observability_budget: Any
+    _observability_lock: Any
+    _publish_degraded: Callable
+    _read_json_blob: Callable
+    _reserve_observability_write: Callable
+    _write_blob_file: Callable
+    check_health: Callable
+    policy: StoragePolicy
+
+class ObservationRetentionPort(Protocol):
+    _ensure_open: Callable
+    _observability: sqlite3.Connection
+    _observability_lock: Any
+    _reserve_observability_write: Callable
+    policy: StoragePolicy
+
+class CasMaintenancePort(Protocol):
+    _cas_bytes_hint: Any
+    _cas_reference_inventory: Callable
+    _cas_reference_reasons: Any
+    _digest_from_ref: Callable
+    _ensure_open: Callable
+    _health_lock: Any
+    _last_cas_gc_at: Any
+    _last_cas_reference_check_at: Any
+    _nested_cas_digests: Callable
+    _observability: sqlite3.Connection
+    _observability_lock: Any
+    _referenced_cas_digests: Callable
+    _reserve_authoritative_write: Callable
+    _restore_canonical_blob: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    paths: StoragePaths
+    policy: StoragePolicy
+
+class HealthPort(Protocol):
+    _cas_bytes_hint: Any
+    _cas_reference_reasons: Any
+    _ensure_open: Callable
+    _health_from_measurement: Callable
+    _health_listener: Callable
+    _health_lock: Any
+    _integrity_reasons: Any
+    _last_cas_scan_at: Any
+    _last_health: Any
+    _last_integrity_check_at: Any
+    _last_stderr_at: Any
+    _measure: Callable
+    _observability: sqlite3.Connection
+    _observability_lock: Any
+    _refresh_cas_reference_status: Callable
+    _refresh_integrity_status: Callable
+    _state: sqlite3.Connection
+    _state_lock: Any
+    _stderr_health: Callable
+    _transient_degradations: Any
+    _write_health_snapshot: Callable
+    check_health: Callable
+    paths: StoragePaths
+    policy: StoragePolicy

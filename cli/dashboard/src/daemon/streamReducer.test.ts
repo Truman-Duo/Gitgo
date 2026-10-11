@@ -2,6 +2,30 @@ import { describe, expect, test } from "bun:test";
 import { finalizeTools, initStreamState, reduceStreamEvent } from "./streamReducer.js";
 
 describe("native stream reducer", () => {
+  test("keeps truncated public fragments together through review without duplicate progress", () => {
+    let state = reduceStreamEvent(initStreamState(), {
+      event: "text_delta", delta: "Modules and data", process_id: "p1", step: 1,
+    });
+    state = reduceStreamEvent(state, {
+      event: "provider_request_started", process_id: "p1", step: 2,
+      task_kind: "answer", answer_continuation: true,
+    });
+    state = reduceStreamEvent(state, {
+      event: "text_delta", delta: " model. Tests.", process_id: "p1", step: 2,
+    });
+    state = reduceStreamEvent(state, {
+      event: "provider_request_started", process_id: "p1", phase: "alignment", step: 3,
+    });
+    expect(state.text).toBe("Modules and data model. Tests.");
+    expect(state.providerStep).toBe(2);
+    expect(state.activity.filter(item => item.kind === "progress")).toHaveLength(0);
+    // A real tool still ends a prose draft, even after a continuation.
+    state = reduceStreamEvent(state, {
+      event: "toolcall_start", process_id: "p1", tool_name: "read_file",
+    });
+    expect(state.text).toBe("");
+    expect(state.activity.find(item => item.kind === "progress")?.text).toBe("Modules and data model. Tests.");
+  });
   test("keeps prior state immutable and uses event time", () => {
     const initial = initStreamState();
     const next = reduceStreamEvent(initial, {
@@ -196,6 +220,24 @@ describe("native stream reducer", () => {
     });
     expect(state.notices[0]?.detail).toContain("provider → searxng");
     expect(state.notices[0]?.detail).toContain("HTTP 400");
+  });
+
+  test("provider failover uses the existing notices without repeating ordinary requests", () => {
+    let state = reduceStreamEvent(initStreamState(), {
+      event: "provider_route_selected", provider_id: "main", attempt: 1,
+    });
+    expect(state.notices).toHaveLength(0);
+    state = reduceStreamEvent(state, {event: "provider_route_failed", provider_id: "main", reason: "HTTP_401"});
+    state = reduceStreamEvent(state, {event: "provider_route_selected", provider_id: "backup", attempt: 2, message: "Using DeepSeek"});
+    expect(state.notices.map(n => n.label)).toEqual(["Provider failed"]);
+    state = reduceStreamEvent(state, {event: "provider_route_activated", provider_id: "backup", route_changed: true, message: "Using DeepSeek"});
+    expect(state.notices.map(n => n.label)).toEqual(["Provider failed", "Provider switched"]);
+    expect(state.notices[1]?.detail).toContain("DeepSeek");
+    state = reduceStreamEvent(state, {event: "provider_route_skipped", provider_id: "main", reason: "circuit_unavailable"});
+    state = reduceStreamEvent(state, {event: "provider_route_activated", provider_id: "backup", route_changed: false, message: "Using DeepSeek"});
+    expect(state.notices).toHaveLength(2);
+    state = reduceStreamEvent(state, {event: "provider_route_activated", provider_id: "main", route_changed: true, message: "Using Main"});
+    expect(state.notices).toHaveLength(3); // actual recovery remains visible
   });
 
   test("surfaces storage degradation through the existing runtime notice path", () => {

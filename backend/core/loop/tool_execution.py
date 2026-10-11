@@ -93,6 +93,10 @@ class ToolExecution:
 
         # 按资源冲突分组
         groups = _build_conflict_groups(resolved)
+        # Approval suspension has an ordered continuation. Nothing after a
+        # composite may start speculatively while one of its leaves waits.
+        if any(tool is not None and tool.composite_spec for _, _, tool, _ in resolved):
+            groups = [[item] for item in resolved]
 
         results: list[ToolResult] = []
 
@@ -108,9 +112,13 @@ class ToolExecution:
                         pipeline, tc, call_index, tools,
                     )
                     results.append(r)
+                    if r.suspended:
+                        break
                 else:
                     r = pipeline.execute(tc, tool, self.ctx, self.execution_id, call_index)
                     results.append(r)
+                    if r.suspended:
+                        break
                     # v0.45: CRASH → rollback entire Execution
                     if r.is_error and self._is_crash_error(r):
                         self.rollback(reason=f"Tool '{r.tool_name}' crashed: {r.error}")

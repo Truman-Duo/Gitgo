@@ -31,8 +31,11 @@ export function DecisionPanel({ decision, selectedIndex, composing, submitting, 
           ? decision.kind === "permission" ? "Permission required" : `${decision.kind || "decision"} required`
           : answer ? "Decision answered" : "Decision"}{!active ? expanded ? " ▾" : " ▸" : ""}</Text>
       </Box>
-      <Text bold>{decision.question}</Text>
-      {answer ? <Text>{answer}</Text> : null}
+      {active || expanded ? <>
+      <Text bold>{decision.round_position ? `${decision.round_position} · ` : ""}{decision.question}</Text>
+      {decision.questions && decision.questions.length > 1 && !decision.round_position ? decision.questions.map(q => <Text key={q.node_id}>{q.question}</Text>) : null}
+      {answer ? <Text>{formatAnswer(answer)}</Text> : null}
+      </> : null}
       {showOptions ? <>
       <Text dimColor>{permission ? "Why approval is needed" : "Why only you can decide"}: {decision.why_user_must_decide}</Text>
       {decision.permission_request ? <Box flexDirection="column">
@@ -64,7 +67,7 @@ export function DecisionPanel({ decision, selectedIndex, composing, submitting, 
                 <Text>   Risk: {option.risks}</Text>
                 <Text dimColor>   Reversibility: {option.reversibility}</Text>
               </> : null}
-            </> : <>
+            </> : decision.kind === "clarification" ? <Text dimColor>   {option.description || option.immediate_effect}</Text> : <>
               <Text dimColor>   Principle: {option.principle}</Text>
               <Text>   Immediate: {option.immediate_effect}</Text>
               <Text>   Downstream: {option.downstream_effect}</Text>
@@ -77,6 +80,7 @@ export function DecisionPanel({ decision, selectedIndex, composing, submitting, 
       </Box>
       </> : null}
       {active ? <Text dimColor>
+        {decision.round_position && !decision.round_position.startsWith("1/") ? "← previous question · " : ""}
         {submitting
           ? "Submitting the selected decision…"
           : composing
@@ -87,4 +91,12 @@ export function DecisionPanel({ decision, selectedIndex, composing, submitting, 
       </Text> : null}
     </Box>
   );
+}
+
+function formatAnswer(answer: string) {
+  try {
+    const value = JSON.parse(answer);
+    if (value.answers) return Object.values(value.answers).join("\n");
+  } catch { /* ordinary text */ }
+  return answer;
 }

@@ -99,8 +99,10 @@ export async function editPromptExternally(content: string, configuredEditor = "
     if (imported) {
       await rm(directory, {recursive: true, force: true}).catch(() => undefined);
     }
-    ink?.resume();
-    ink?.resumeStdin();
-    ink?.repaint();
+    // Reset and render as one resume operation. Rendering first and then
+    // blanking the frame cache leaves the physical screen and cached nodes
+    // disagreeing until resize; alternate-screen output can also scroll.
+    try { ink?.resume({redraw: true}); }
+    finally { ink?.resumeStdin(); }
   }
 }

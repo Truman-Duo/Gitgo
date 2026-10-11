@@ -1,10 +1,19 @@
-import React, {useMemo, useRef} from "react";
-import {Ansi, Box, Text} from "@anthropic/ink";
+import React, {useContext, useMemo, useRef} from "react";
+import {Ansi, Box, Text as InkText, type TextProps} from "@anthropic/ink";
 import {marked} from "marked";
 import {highlight, supportsLanguage} from "cli-highlight";
 import {colors, displayWidth, padEndWidth, wrap} from "../theme/index.js";
 
 type Props = {content: string; width: number; dimColor?: boolean};
+
+// React context crosses both Box and nested Text boundaries. The themed Ink
+// wrapper resolves each span separately, so relying on a parent's terminal
+// color can lose the message tone at an inline span or a table cell.
+const MarkdownForeground = React.createContext<NonNullable<TextProps["color"]>>(colors.chat.assistantFg);
+function Text({color, dimColor, ...props}: TextProps) {
+  const foreground = useContext(MarkdownForeground);
+  return <InkText {...props} color={dimColor ? colors.chat.reasoningFg : color ?? foreground}/>;
+}
 
 const cache = new Map<string, any[]>();
 function lex(content: string): any[] {
@@ -131,7 +140,8 @@ function Blocks({tokens, width, dimColor}: {tokens: any[]; width: number; dimCol
     if (token.type === "paragraph" || token.type === "text") return <Text key={key} wrap="wrap" dimColor={dimColor}><Inline tokens={token.tokens || [{type: "text", text: token.text || token.raw}]}/></Text>;
     if (token.type === "code") return <Box key={key} flexDirection="column" paddingLeft={1} borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor={colors.named.gray}>
       {token.lang ? <Text dimColor>{token.lang}</Text> : null}
-      <Ansi>{highlightedCode(String(token.text || ""), String(token.lang || ""))}</Ansi>
+      {dimColor ? <Text dimColor>{String(token.text || "")}</Text>
+        : <Ansi>{highlightedCode(String(token.text || ""), String(token.lang || ""))}</Ansi>}
     </Box>;
     if (token.type === "blockquote") return <Box key={key} paddingLeft={1} borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor={colors.named.gray}>
       <Blocks tokens={token.tokens || []} width={Math.max(8, width - 2)} dimColor/>
@@ -150,7 +160,9 @@ function Blocks({tokens, width, dimColor}: {tokens: any[]; width: number; dimCol
 
 export function MarkdownText({content, width, dimColor}: Props) {
   const tokens = useMemo(() => lex(content), [content]);
-  return <Box flexDirection="column" width={Math.max(8, width)}><Blocks tokens={tokens} width={width} dimColor={dimColor}/></Box>;
+  return <MarkdownForeground.Provider value={dimColor ? colors.chat.reasoningFg : colors.chat.assistantFg}>
+    <Box flexDirection="column" width={Math.max(8, width)}><Blocks tokens={tokens} width={width} dimColor={dimColor}/></Box>
+  </MarkdownForeground.Provider>;
 }
 
 /** Reparse only the growing final top-level block during token streaming. */

@@ -7,6 +7,8 @@ injecting ``emit`` shim instead of capturing a closure-local ``_emit``.
 
 from __future__ import annotations
 
+from backend.core.loop.lifecycle import transition
+
 import json
 import threading
 import traceback
@@ -21,7 +23,7 @@ from backend.core.storage import StorageReferenceMissing
 from backend.core.daemon.emit import _emit as _emit_global
 from backend.core.daemon.persist import _save_session_checkpoint
 from backend.core.daemon.policy_helpers import (
-    _snapshot_workspace, _harvest_from_rejection_chain, _resolve_llm_config,
+    _snapshot_workspace, _harvest_from_rejection_chain, _resolve_llm_config, _runtime_llm_from_config,
 )
 from backend.core.loop.models import ProcessStatus, RingLevel
 from backend.core.loop.tools import ToolRegistry
@@ -426,6 +428,7 @@ def _process_status_payload(proc, *, presentation: dict | None = None) -> dict:
         "session_id": str(getattr(proc_session, "session_id", "")),
         "ring_level": proc.ring_level.value,
         "status": proc.status.value,
+        "state_revision": int(getattr(proc, "durable_revision", 0)),
         "steps_used": proc.steps_used,
         "max_steps": proc.max_steps,
         "parent_id": proc.parent_id,
@@ -610,6 +613,8 @@ def _cmd_loop_status(cmd, session, project, daemon_ctx, emit):
     emit({"event": "command_result", "cmd": "loop_status",
           "result": {
               "daemon_online": True,
+              "provider_routes": daemon_ctx["llm"].status() if hasattr((daemon_ctx or {}).get("llm"), "status") else [],
+              "usability_statistics": daemon_ctx["usability"].status() if (daemon_ctx or {}).get("usability") else {"state": "unavailable"},
               "processes": processes,
               "pending_questions": pending_question_rows,
               "recent_tool_executed": recent_tools,
@@ -933,10 +938,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         if llm_provider is None:
             cfg = _resolve_llm_config(str(session.workspace_path))
             if cfg:
-                from backend.core.loop.llm import LLMProvider
-                llm_provider = LLMProvider(
-                    cfg[0], cfg[1], cfg[2], protocol=cfg[3], capabilities=cfg[4],
-                )
+                llm_provider = _runtime_llm_from_config(cfg)
         if llm_provider is None:
             emit({"event": "command_result", "cmd": "task",
                   "error": "LLM provider not configured"})
@@ -983,6 +985,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     capability_profile_id=profile_id,
                     task_kind="answer",
                     runtime_preferences={"auto_compact": True},
+                    storage=getattr(apm, "storage", None),
                 ))
                 sidecar.cancellation_event = cancel_event
                 with lock:
@@ -1031,9 +1034,17 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     dict(sidecar.session.provider_usage[-1])
                     if sidecar.session.provider_usage else {}
                 )
+                task_error = (outcome or {}).get("error")
+                if isinstance(task_error, dict):
+                    emit_sidecar_event({
+                        "event": "error", "code": task_error.get("code"),
+                        "message": str(task_error.get("message") or "BTW task failed"),
+                    })
                 result = {
                     "sidecar_id": sidecar_id,
-                    "answer": str((outcome or {}).get("response") or ""),
+                    "answer": str((outcome or {}).get("response")
+                                  or (task_error or {}).get("message") or ""),
+                    "error": task_error,
                     "reasoning_content": "".join(reasoning_parts),
                     "usage": usage,
                     "status": str((outcome or {}).get("status") or sidecar.status.value),
@@ -1149,10 +1160,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         if llm_provider is None:
             cfg = _resolve_llm_config(str(session.workspace_path))
             if cfg:
-                from backend.core.loop.llm import LLMProvider
-                llm_provider = LLMProvider(
-                    cfg[0], cfg[1], cfg[2], protocol=cfg[3], capabilities=cfg[4],
-                )
+                llm_provider = _runtime_llm_from_config(cfg)
         if llm_provider is None and not cmd.get("choice"):
             emit({"event": "command_result", "cmd": "task",
                   "error": "LLM not configured. Set env vars or configure in Dashboard."})
@@ -1165,12 +1173,13 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             decision_id=str(cmd.get("decision_id") or ""),
             choice=str(cmd.get("choice") or ""),
         )
-        session_store.save_restored_session_checkpoint(
+        checkpoint_ref = session_store.save_restored_session_checkpoint(
             durable_process_id, restored_session, state,
         )
         apm._sessions[restored_session.session_id] = restored_session
         if process is not None:
             process.session = restored_session
+            process.durable_revision = checkpoint_ref.revision
         if evq is not None:
             evq.put({
                 "event": "context_compaction_completed" if result["status"] == "completed" else "context_compaction_failed",
@@ -1335,7 +1344,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                 "completed", "failed", "cancelled", "timed_out", "killed", "orphaned",
             }:
                 continue
-            target.status = ProcessStatus.CANCELLED
+            transition(target, ProcessStatus.CANCELLED)
             target.recovery = {
                 **dict(target.recovery or {}),
                 "state": "discarded",
@@ -1448,7 +1457,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         if process.task_budget is not None:
             process.task_budget.resume_from_user()
         process.result = None
-        process.status = ProcessStatus.RECOVERING
+        transition(process, ProcessStatus.RECOVERING)
         process.recovery = {
             **dict(process.recovery),
             "state": "recovering",
@@ -1477,7 +1486,11 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             emit({"event": "command_result", "cmd": "task",
                   "error": f"RECOVERY_CHECKPOINT_FAILED:{exc}"})
             return
-        process.status = ProcessStatus.RUNNING
+        transition(process, ProcessStatus.RUNNING)
+        process.session.host_ledger.append({
+            "event": "recovery_resume_claimed", "process_id": process.process_id,
+            "task_id": process.active_task_id, "created_at": datetime.now().isoformat(),
+        })
         cmd = {
             **cmd,
             "action": "chat",
@@ -1533,6 +1546,25 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             emit({"event": "command_result", "cmd": "task",
                   "error": "decision instruction is required"})
             return
+        round_answers = None
+        if pending.get("questions"):
+            from backend.core.loop.decision_support import validate_round_answer
+            try:
+                round_answers = validate_round_answer(pending, answer)
+            except (ValueError, TypeError, KeyError) as exc:
+                emit({"event": "command_result", "cmd": "task",
+                      "error": f"DECISION_ROUND_INVALID:{exc}"})
+                return
+        import copy
+        decision_before = {
+            "preferences": copy.deepcopy(process.runtime_preferences),
+            "batch": copy.deepcopy(process.pending_tool_batch),
+            "grants": copy.deepcopy(process.approval_grants),
+            "result": process.result,
+            "ledger_length": len(process.session.host_ledger),
+            "force_compact": process.session.force_compact_requested,
+            "context_abort": process.session.context_abort_requested,
+        }
         options = list(pending.get("options") or [])
         selected_index = None
         selected_option = None
@@ -1575,8 +1607,15 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                       "error": "COMPLETION_DECISION_SELECTION_REQUIRED"})
                 return
             selected_action = str(selected_option.get("action", ""))
+            from backend.core.loop.completion_control import validate_decision
+            try:
+                validate_decision(process, pending, selected_action)
+            except ValueError as exc:
+                emit({"event": "command_result", "cmd": "task", "error": str(exc)})
+                return
             if selected_action == "accept_partial":
                 process.runtime_preferences["completion_exception"] = {
+                    "contract_digest": pending["contract_digest"],
                     "decision_id": decision_id,
                     "gate_ids": list(pending.get("completion_gate_ids") or []),
                     "accepted_at": datetime.now().isoformat(),
@@ -1592,6 +1631,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             "process_id": process.process_id,
             "decision_id": decision_id,
             "answer": answer,
+            **({"answers": round_answers} if round_answers is not None else {}),
             "kind": str(pending.get("kind") or "choice"),
             "state_topic": str(pending.get("state_topic") or ""),
             "selected_index": selected_index,
@@ -1602,9 +1642,34 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         })
         process.pending_decision = None
         process.result = None
+        if pending.get("kind") == "completion_exception" and selected_action in {"accept_partial", "stop", "amend_scope"}:
+            process.runtime_preferences["completion_control_action"] = {
+                "action": selected_action, "request": dict(pending),
+            }
+        if pending.get("kind") == "completion_exception" and selected_action == "continue":
+            process.runtime_preferences.pop("completion_gate_fingerprint", None)
+            process.runtime_preferences.pop("completion_gate_repeats", None)
+        transition(process, ProcessStatus.RUNNING)
+        # Admission of a decision means its answer/grant is durable before a
+        # resumed effect or an admitted acknowledgement can reach the UI.
+        store = (daemon_ctx or {}).get("session_store")
+        try:
+            if store is not None:
+                store.save_process_checkpoint(process)
+        except Exception as exc:
+            process.status = ProcessStatus.AWAITING_USER  # Uncommitted prepare rollback.
+            process.pending_decision = pending
+            process.result = decision_before["result"]
+            process.runtime_preferences = decision_before["preferences"]
+            process.pending_tool_batch = decision_before["batch"]
+            process.approval_grants = decision_before["grants"]
+            del process.session.host_ledger[decision_before["ledger_length"]:]
+            process.session.force_compact_requested = decision_before["force_compact"]
+            process.session.context_abort_requested = decision_before["context_abort"]
+            emit({"event": "command_result", "cmd": "task", "error": f"DECISION_CHECKPOINT_FAILED:{exc}"})
+            return
         if process.task_budget is not None:
             process.task_budget.resume_from_user()
-        process.status = ProcessStatus.RUNNING
         cmd = {
             **cmd,
             "action": "chat",
@@ -1680,10 +1745,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         if llm is None:
             cfg = _resolve_llm_config(str(session.workspace_path))
             if cfg:
-                from backend.core.loop.llm import LLMProvider
-                llm = LLMProvider(
-                    cfg[0], cfg[1], cfg[2], protocol=cfg[3], capabilities=cfg[4],
-                )
+                llm = _runtime_llm_from_config(cfg)
         if llm is None:
             emit({"event": "command_result", "cmd": "task",
                   "error": "LLM not configured. Set env vars or configure in Dashboard."})
@@ -1959,6 +2021,8 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                   "error": f"PROCESS_BUSY:{process.process_id}"})
             return
 
+        process.runtime_preferences["runtime_command_id"] = str(cmd.get("command_id") or "")
+
         # A process/session may continue across public turns.  Record immutable
         # task-local boundaries before this turn mutates telemetry, receipts or
         # inherited coordination so terminal outcomes never copy the complete
@@ -2010,80 +2074,16 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             "capability_profile_id": process.capability_profile_id,
             "required_test_ids": list(process.required_test_ids),
             "budget": dict(cmd.get("task_budget") or {}),
+            "frontend_origin": dict(process.runtime_preferences.get("frontend_origin") or {}),
         })
 
         def _run_task_body():
             # v0.44: on_stream_event 闭包 —— 流式事件即时入队
             delta_coalescer = DeltaCoalescer()
 
-            def _persist_stream_event(event):
-                event = dict(event)
-                detail = event.pop("_trace_detail", None)
-                # Persist only semantic safe boundaries, never token deltas.
-                # These points capture complete provider continuation state,
-                # committed tool receipts, decisions, or context epochs.
-                if event.get("event") in {
-                    "governance_snapshot",
-                    "mailbox_applied",
-                    "provider_response_completed",
-                    "provider_response_incomplete",
-                    "tool_result",
-                    "decision_required",
-                    "context_compaction_completed",
-                    "agent_started",
-                    "agent_dag_admitted",
-                    "worktree_leased",
-                    "worktree_sealed",
-                    "worktree_promoted",
-                    "agent_terminal",
-                    "coordination_event",
-                    "coordination_event_resolved",
-                }:
-                    store = (daemon_ctx or {}).get("session_store")
-                    if store is not None:
-                        event_process_id = str(event.get("process_id") or "")
-                        event_process = (
-                            apm.get(event_process_id) if event_process_id else None
-                        ) or process
-                        store.save_process_checkpoint(event_process)
-                        # Delegation mutates both the child row and A's durable
-                        # coordination contract.  Persist both at admission so
-                        # a daemon crash before the first Provider response
-                        # cannot erase an already-started B or its DAG edges.
-                        if event.get("event") == "agent_started" and event_process.parent_id:
-                            owner = apm.get(event_process.parent_id)
-                            if owner is not None:
-                                store.save_process_checkpoint(owner)
-                        if event.get("event") == "agent_dag_admitted":
-                            for child_id in dict(event.get("nodes") or {}).values():
-                                child = apm.get(str(child_id))
-                                if child is not None:
-                                    store.save_process_checkpoint(child)
-                        if event.get("event") == "agent_terminal":
-                            store.append_event(event_process.process_id, "agent_complete", {
-                                "status": event_process.status.value,
-                                "outcome": event_process.result,
-                            })
-                        if event.get("event") in {
-                            "coordination_event", "coordination_event_resolved",
-                        }:
-                            related_ids = list(dict.fromkeys([
-                                str(event.get("owner_process_id") or ""),
-                                str(event.get("source_process_id") or ""),
-                                *[
-                                    str(item) for item in
-                                    list(event.get("affected_process_ids") or [])
-                                ],
-                            ]))
-                            for related_id in related_ids:
-                                related = apm.get(related_id) if related_id else None
-                                if related is not None:
-                                    store.save_process_checkpoint(related)
-                try:
-                    event = trace.append(event, detail=detail)
-                except Exception as trace_exc:
-                    event["trace_error"] = str(trace_exc)[:300]
-                evq.put(event)
+            from .task_observations import TaskObservations
+            observations = TaskObservations(process, apm, (daemon_ctx or {}).get("session_store"), trace, evq)
+            _persist_stream_event = observations.persist
 
             def _emit_stream_event(event):
                 event = dict(event)
@@ -2128,7 +2128,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     list(task_contract.get("output_interfaces") or []),
                 )
                 if output_violations and process.status == ProcessStatus.COMPLETED:
-                    process.status = ProcessStatus.FAILED
+                    transition(process, ProcessStatus.FAILED)
                     process.result = {
                         "status": "failed",
                         "process_id": process.process_id,
@@ -2162,7 +2162,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                 # can duplicate writes/commands. Provider-level retry remains in
                 # LLMProvider; an unexpected task crash is terminal and explicit.
                 from backend.core.loop.outcome import TaskOutcome
-                process.status = ProcessStatus.FAILED
+                transition(process, ProcessStatus.FAILED)
                 outcome = TaskOutcome.failed(
                     task_id=task_id,
                     process_id=process.process_id,
@@ -2189,7 +2189,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                 # agent_complete record in SQLite; absence of that barrier is
                 # what makes the process conservatively recoverable.
                 from backend.core.loop.outcome import TaskOutcome
-                process.status = ProcessStatus.FAILED
+                transition(process, ProcessStatus.FAILED)
                 outcome = TaskOutcome.failed(
                     task_id=task_id,
                     process_id=process.process_id,
@@ -2321,8 +2321,20 @@ def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
 
     # v0.44: 注入 request_id 到所有 command_result 事件，使 JS sendCommand 能匹配响应
     request_id = cmd.get("request_id", "")
+    command_claim = None
+    storage = (daemon_ctx or {}).get("storage")
 
     def emit(ev: dict) -> None:
+        if ev.get("event") == "command_result" and command_claim is not None:
+            key, digest, _ = command_claim
+            try:
+                storage.complete_command(key, digest, {k: v for k, v in ev.items() if k != "request_id"})
+            except Exception as exc:
+                _emit_global({"event": "command_result", "cmd": cmd_name, "request_id": request_id,
+                    "error": "COMMAND_RECEIPT_WRITE_FAILED", "details": {
+                        "command_id": key, "automatic_replay_suppressed": True,
+                        "error_type": type(exc).__name__}})
+                return
         if ev.get("event") == "command_result" and request_id:
             ev = dict(ev)
             ev["request_id"] = request_id
@@ -2341,6 +2353,19 @@ def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
         return
 
     try:
+        from .command_admission import admit
+        admitted = admit(storage, cmd)
+        if admitted is not None:
+            key, digest, claim = admitted
+            if not claim["admitted"]:
+                previous = claim.get("result")
+                if previous is None:
+                    previous = {"event": "command_result", "cmd": cmd_name,
+                                "error": "COMMAND_PROCESS_DELETED" if claim.get("deleted") else "COMMAND_RECOVERY_REQUIRED", "details": {
+                                    "command_id": key, "automatic_replay_suppressed": True}}
+                emit(previous)
+                return
+            command_claim = admitted
         handler(cmd, session, project, daemon_ctx, emit)
     except StorageReferenceMissing as exc:
         payload = error_payload(

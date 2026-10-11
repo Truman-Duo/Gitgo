@@ -94,3 +94,24 @@ def test_invalid_spill_locator_uses_recovery_catalog(tmp_path_factory):
         assert result["error_info"]["next_actions"][1]["action"] == "rerun_source_tool"
     finally:
         storage.close()
+
+
+def test_isolated_runtime_binds_result_storage_without_coordination_manager(tmp_path_factory):
+    from backend.core.loop.runtime import AgentRuntimeFactory, RuntimeSpec
+    storage = StorageRuntime(tmp_path_factory)
+    try:
+        process = AgentRuntimeFactory.create(RuntimeSpec(
+            role="btw-sidecar", ring_level=RingLevel.RING_3,
+            tool_registry=ToolRegistry(["tool_result_open"]), max_steps=2,
+            task_id="isolated", workspace_path=str(tmp_path_factory),
+            actor_kind="supervisor", capability_profile_id="supervisor.answer",
+            storage=storage,
+        ))
+        assert not hasattr(process, "_manager")
+        assert process.bound_storage is storage
+        descriptor = storage.put_tool_result("isolated evidence", process_id=process.process_id,
+                                             task_id="isolated", tool_name="search_text")
+        tool = build_context_tools(process, str(tmp_path_factory))["tool_result_open"]
+        assert "isolated evidence" in tool.execute({"locator": descriptor["locator"]})["content"]
+    finally:
+        storage.close()

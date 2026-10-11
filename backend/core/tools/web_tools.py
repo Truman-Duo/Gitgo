@@ -227,6 +227,20 @@ def web_search(args: dict) -> dict:
         if mode == "provider":
             return provider_result
 
+        fallback = _searxng_search(args)
+        # Preserve the first failure even if the fallback also fails. Otherwise
+        # callers misdiagnose a provider rejection as a local search outage.
+        fallback["provider_fallback"] = {
+            "from": "provider", "to": "searxng",
+            "reason": str(provider_result.get("error") or "provider_search_unavailable"),
+            "provider_id": str(args.get("_web_search_provider_id") or ""),
+        }
+        return fallback
+    return _searxng_search(args)
+
+
+def _searxng_search(args: dict) -> dict:
+
     endpoint = str(
         args.get("_web_search_endpoint")
         or os.getenv("GITGO_SEARCH_ENDPOINT", "")
@@ -359,6 +373,13 @@ def _provider_hosted_search(args: dict) -> dict:
         providers = LLMConfigManager.get_providers()
         requested_id = str(args.get("_web_search_provider_id") or "")
         configured = next((item for item in providers if item.id == requested_id), None)
+        if requested_id and configured is None:
+            return error_payload(
+                "WEB_SEARCH_PROVIDER_NOT_CONFIGURED",
+                message="The effective provider is no longer configured; search cannot borrow another provider's credentials.",
+                details={"provider_id": requested_id},
+                next_actions=[{"action": "refresh_provider_configuration"}],
+            )
         configured = configured or LLMConfigManager.get_active()
         if configured is None:
             raise RuntimeError("no active LLM provider is configured")
@@ -491,6 +512,21 @@ def _is_deepseek_official(configured) -> bool:
     except ValueError:
         return False
     return host == "api.deepseek.com" or host.endswith(".api.deepseek.com")
+
+
+def provider_search_transport(configured) -> str:
+    """Project adapter availability separately from in-turn wire capabilities.
+
+    An auxiliary provider endpoint can support search even when the selected
+    conversation protocol cannot. This is availability, not a promise that the
+    provider's plan or network will accept a particular request.
+    """
+    if _is_deepseek_official(configured):
+        return "deepseek_messages"
+    caps = configured.runtime_capabilities()
+    if configured.protocol in {"openai_responses", "anthropic_messages", "auto"} and caps.hosted_web_search:
+        return "provider_native"
+    return "unavailable"
 
 
 def _deepseek_search_endpoint(base_url: str) -> str:

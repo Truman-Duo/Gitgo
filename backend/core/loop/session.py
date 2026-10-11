@@ -564,6 +564,40 @@ class AgentSession:
                 excluded.update(self._provider_call_ids(state))
         return excluded
 
+    @classmethod
+    def _ordered_tool_transactions(cls, messages: list[dict]) -> list[dict]:
+        """Project complete tool batches before intervening Host/user deltas.
+
+        The durable log stays append-only. Providers require every output of
+        an assistant function-call batch before the next conversational turn;
+        semantic checks, permission updates and other Host work may append
+        steering while that batch is being resolved. Never synthesize outputs,
+        discard messages, or move outputs across an assistant-turn boundary.
+        """
+        result = []
+        index = 0
+        while index < len(messages):
+            head = messages[index]
+            result.append(head)
+            index += 1
+            if head.get('role') != 'assistant':
+                continue
+            call_ids = cls._provider_call_ids(head.get('provider_state') or head)
+            if not call_ids:
+                continue
+            end = index
+            while end < len(messages) and messages[end].get('role') != 'assistant':
+                end += 1
+            tail = messages[index:end]
+            outputs = [m for m in tail if m.get('role') == 'tool' and m.get('tool_call_id') in call_ids]
+            if len(outputs) == len(call_ids) and {m['tool_call_id'] for m in outputs} == call_ids:
+                result.extend(outputs)
+                result.extend(m for m in tail if not (m.get('role') == 'tool' and m.get('tool_call_id') in call_ids))
+            else:
+                result.extend(tail)
+            index = end
+        return result
+
     def to_provider_messages(
         self, *, dynamic_envelope: str = "", provider_route: str = "",
     ) -> list[dict]:
@@ -600,6 +634,7 @@ class AgentSession:
                 if not str(wire.get("content") or "").strip():
                     continue
             result.append(wire)
+        result = self._ordered_tool_transactions(result)
         if dynamic_envelope.strip():
             result.append({
                 "role": "user",
@@ -909,6 +944,7 @@ class AgentSession:
             if message.get("role") == "tool" and message.get("tool_call_id"):
                 wire["tool_call_id"] = message["tool_call_id"]
             result.append(wire)
+        result = self._ordered_tool_transactions(result)
         if dynamic_envelope.strip():
             result.append({"role": "user", "content": dynamic_envelope.strip()})
         return result

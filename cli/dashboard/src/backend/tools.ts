@@ -107,6 +107,7 @@ export const discardRecovery = (
   c: BackendClient, project: string, processId: string, reason = "",
 ) => c.callTool("runtime.recovery.discard", { project, process_id: processId, reason });
 export const configGet = (c: BackendClient) => c.callTool("config.get");
+export const detectTerminals = (c: BackendClient) => c.callTool("config.terminals", {}, 15);
 export const configSet = (c: BackendClient, key: string, value: any) => c.callTool("config.set", { key, value });
 export const testWebSearchConfig = (c: BackendClient) => c.callTool("config.web_search.test", {}, 35);
 export const templateList = (c: BackendClient) => c.callTool("template.list");
@@ -114,7 +115,8 @@ export const templateAdd = (c: BackendClient, p: { name: string; description: st
 export const templateEdit = (c: BackendClient, name: string, description: string) => c.callTool("template.edit", { name, description });
 export const templateDelete = (c: BackendClient, name: string) => c.callTool("template.delete", { name });
 export const llmStatus = (c: BackendClient) => c.callTool("provider.status");
-export const llmSave = (c: BackendClient, p: { id?: string; name: string; base_url: string; api_key: string; model_id: string; protocol: string; context_window: number; max_output_tokens: number; retain_api_key?: boolean }) => c.callTool("provider.save", { provider_id: p.id || "", name: p.name, base_url: p.base_url, api_key: p.api_key, model_id: p.model_id, protocol: p.protocol, context_window: p.context_window, max_output_tokens: p.max_output_tokens, retain_api_key: p.retain_api_key || false });
+export const llmSave = (c: BackendClient, p: { id?: string; name: string; base_url: string; api_key: string; model_id: string; protocol: string; context_window: number; max_output_tokens: number; retain_api_key?: boolean; kind?: "local" | "remote"; auth_mode?: "none" | "api_key" }) => c.callTool("provider.save", { provider_id: p.id || "", name: p.name, base_url: p.base_url, api_key: p.api_key, model_id: p.model_id, protocol: p.protocol, context_window: p.context_window, max_output_tokens: p.max_output_tokens, retain_api_key: p.retain_api_key || false, kind: p.kind || "remote", auth_mode: p.auth_mode || "api_key" });
+export const llmFailoverConfigure = (c: BackendClient, enabled: boolean, order: string[]) => c.callTool("provider.failover.configure", {enabled, order});
 export const llmSwitch = (c: BackendClient, providerId: string) => c.callTool("provider.switch", { provider_id: providerId });
 export const llmDelete = (c: BackendClient, providerId: string) => c.callTool("provider.delete", { provider_id: providerId });
 export const llmTest = (c: BackendClient, providerId: string) => c.callTool("provider.test", { provider_id: providerId }, 70);

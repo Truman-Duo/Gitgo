@@ -120,6 +120,7 @@ class ApplicationServices:
             "deletion.run": self.deletion.run,
             "config.get": self.config_get,
             "config.set": self.config_set,
+            "config.terminals": self.config_terminals,
             "config.web_search.test": self.config_web_search_test,
             "publish.get": self.publish_get,
             "publish.set": self.publish_set,
@@ -155,6 +156,7 @@ class ApplicationServices:
             "provider.switch": self.provider_switch,
             "provider.delete": self.provider_delete,
             "provider.test": self.provider_test,
+            "provider.failover.configure": self.provider_failover_configure,
             "project.export": self.project_export,
         }
 
@@ -445,6 +447,10 @@ class ApplicationServices:
                 raise OperationError("INVALID_KEY", f"Invalid config key: {key}")
         return {"key": key, "value": value}
 
+    def config_terminals(self) -> dict:
+        from backend.core.terminal_launcher import terminal_inventory
+        return terminal_inventory(ConfigManager.load().launcher)
+
     def config_set(self, key: str, value: Any) -> dict:
         with self._write_lock:
             cfg = ConfigManager.load()
@@ -487,13 +493,25 @@ class ApplicationServices:
             elif key.startswith("launcher."):
                 field_name = key.split(".", 1)[1]
                 if field_name == "terminal":
+                    from backend.core.terminal_launcher import TERMINAL_IDS, terminal_inventory
                     terminal = str(value or "auto").strip().lower()
-                    if terminal not in {"auto", "current", "windows_terminal", "custom"}:
+                    if terminal not in TERMINAL_IDS:
                         raise OperationError(
                             "INVALID_TERMINAL_MODE",
-                            "Terminal must be auto, current, windows_terminal, or custom",
+                            "Choose a supported terminal from config.terminals",
                         )
+                    inventory = terminal_inventory({**cfg.launcher, "terminal": terminal})
+                    choice = next(c for c in inventory["options"] if c["id"] == terminal)
+                    if not choice["available"]:
+                        raise OperationError("TERMINAL_UNAVAILABLE",
+                                             "The selected terminal is missing or could not be verified; refresh the terminal choices.",
+                                             details={"warnings": inventory["warnings"]})
                     cfg.launcher["terminal"] = terminal
+                    cfg.launcher["configured"] = True
+                    if terminal != "custom":
+                        cfg.launcher["command"] = choice["command"]
+                        cfg.launcher["args"] = list(choice["args"])
+                        cfg.launcher["identity"] = choice.get("identity")
                     value = terminal
                 elif field_name == "command":
                     cfg.launcher["command"] = str(value or "").strip().strip('"')
@@ -712,11 +730,9 @@ class ApplicationServices:
                 "PROVIDER_NOT_CONFIGURED",
                 "Configure and test an active Provider before semantic lesson harvest.",
             )
-        llm = LLMProvider(
-            configured.base_url, configured.api_key, configured.model_id,
-            protocol=configured.protocol,
-            capabilities=configured.runtime_capabilities(),
-        )
+        from backend.core.daemon.policy_helpers import _runtime_llm_from_config
+        llm = _runtime_llm_from_config((configured.base_url, configured.api_key, configured.model_id,
+                                      configured.protocol, configured.runtime_capabilities()))
         source_event_id = "manual:" + uuid.uuid4().hex
         with HistoryManager.workspace_scope(str(workspace)):
             signal_id = capture_signal(
@@ -1090,21 +1106,35 @@ class ApplicationServices:
         return {"providers": [_public_provider(p) for p in config.get("providers", [])],
                 "active_provider": config.get("active_provider", ""),
                 "failover_enabled": config.get("failover_enabled", False),
-                "failover_order": config.get("failover_order", [])}
+                "failover_order": config.get("failover_order", []),
+                "circuit_breaker": config.get("circuit_breaker", {}),
+                "health_scope": "owning_project_daemon"}
+
+    def provider_failover_configure(self, enabled: bool, order: list[str], circuit_breaker: dict | None = None) -> dict:
+        from backend.core.llm_config import LLMConfigManager
+        try:
+            return LLMConfigManager.configure_failover(enabled, order, circuit_breaker)
+        except (ValueError, TypeError) as exc:
+            raise OperationError("INVALID_FAILOVER_CONFIG", str(exc)) from exc
 
     def provider_save(self, provider_id: str = "", name: str = "", base_url: str = "",
                       api_key: str = "", model_id: str = "",
                       retain_api_key: bool = False,
                       protocol: str = "openai_chat",
                       context_window: int = 128000,
-                      max_output_tokens: int = 4096) -> dict:
+                      max_output_tokens: int = 4096,
+                      kind: str = "remote", auth_mode: str = "api_key") -> dict:
         from backend.core.llm_config import LLMConfigManager, LLMProvider
         from backend.core.loop.provider_protocol import ProviderProtocol
         name = str(name or "").strip()
         model_id = str(model_id or "").strip()
         if not name or not base_url or not model_id:
             raise OperationError("MISSING_FIELDS", "name, base_url, and model_id are required")
-        base_url = _normalize_provider_base_url(base_url)
+        from backend.core.loop.provider_policy import provider_endpoint
+        try:
+            base_url = provider_endpoint(base_url, kind=kind, auth_mode=auth_mode)
+        except ValueError as exc:
+            raise OperationError("INVALID_PROVIDER_URL", str(exc)) from exc
         try:
             protocol = ProviderProtocol(protocol).value
         except ValueError as exc:
@@ -1126,9 +1156,11 @@ class ApplicationServices:
             )
         existing = next((p for p in LLMConfigManager.get_providers()
                          if p.id == provider_id), None) if provider_id else None
-        if existing and retain_api_key:
+        if existing and retain_api_key and auth_mode == "api_key":
             api_key = existing.api_key
-        if not api_key:
+        if auth_mode == "none":
+            api_key = ""
+        if not api_key and auth_mode == "api_key":
             if existing:
                 raise OperationError(
                     "API_KEY_DECISION_REQUIRED",
@@ -1140,11 +1172,13 @@ class ApplicationServices:
                                protocol=protocol,
                                 capabilities=(
                                     existing.capabilities
-                                    if existing and existing.protocol == protocol else {}
+                                    if existing and (existing.protocol, existing.base_url, existing.model_id, existing.kind)
+                                       == (protocol, base_url, model_id, kind) else {}
                                 ),
                                 context_window=context_window,
                                 max_output_tokens=max_output_tokens,
                                 limits_source="configured",
+                                kind=kind, auth_mode=auth_mode,
                                 created_at=existing.created_at if existing else "")
         saved = LLMConfigManager.update(provider) if existing else LLMConfigManager.add(provider)
         if saved is None:
@@ -1179,6 +1213,7 @@ class ApplicationServices:
                 base_url=provider.base_url, api_key=provider.api_key,
                 model_id=provider.model_id, protocol=provider.protocol,
                 timeout=max(1, min(int(timeout), 60)),
+                kind=provider.kind, auth_mode=provider.auth_mode,
             )
         except Exception as exc:
             raise OperationError("PROVIDER_PROBE_FAILED", str(exc)) from exc

@@ -29,6 +29,7 @@ class TaskSpec:
     spec_id: str = ""
     task_description: str = ""        # 要做什么
     expected_output: str = ""          # 期望产出什么格式的结果
+    target_files: list[str] = field(default_factory=list)
     input_interfaces: list[str] = field(default_factory=list)
         # 依赖的上游接口符号，如 ["auth.py:authenticate"]
     output_interfaces: list[str] = field(default_factory=list)

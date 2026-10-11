@@ -553,6 +553,23 @@ def test_native_host_rejects_corrupt_prompt_before_provider_or_daemon():
     host.close()
 
 
+def test_request_entrypoint_preserves_corrupt_prompt_error_and_replay_identity():
+    output = io.StringIO()
+    host = NativeHost(stdout=output, daemon_factory=FakeDaemon)
+    request = {"request_id": "invalid-text", "operation": "runtime.chat",
+               "arguments": {"project": "demo", "message": "bad\udcaf"}}
+    try:
+        host._handle_request(request)
+        host._handle_request(request)
+        host._handle_request({**request, "arguments": {"project": "demo", "message": "你好"}})
+        replies = [json.loads(line) for line in output.getvalue().splitlines()]
+        assert [r['error']['code'] for r in replies] == [
+            'INPUT_ENCODING_CORRUPTED', 'INPUT_ENCODING_CORRUPTED', 'REQUEST_IDENTITY_CONFLICT']
+        assert host._daemons == {}
+    finally:
+        host.close()
+
+
 def test_native_host_rejects_prompt_digest_mismatch_before_provider():
     host = NativeHost(stdout=io.StringIO(), daemon_factory=FakeDaemon)
     with pytest.raises(OperationError) as raised:
@@ -601,6 +618,7 @@ def test_native_host_binds_host_search_configuration_to_task_preferences():
     preferences = host._daemons["demo"].last_task["runtime_preferences"]
     request_started_at = preferences.pop("request_started_at_utc")
     assert request_started_at.endswith("+00:00")
+    assert preferences.pop("frontend_origin") == host.frontend_origin
     assert preferences == {
         "auto_compact": True,
         "agent_routing": "owner",

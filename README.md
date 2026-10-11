@@ -1,104 +1,80 @@
 # Gitgo
 
-Gitgo 是一个为真实项目工作设计的终端 Agent harness。它不只提供一个对话框，而是把任务理解、工具执行、多人协作式 Agent 流程、权限决策、质量验证、上下文管理和长期项目状态组织成一条可观察、可恢复的工作链。
+Gitgo 是面向真实项目开发的终端 Agent harness，将模型、工具、Git 工作区和持久任务状态组织成可观察、可恢复的工作流程。你可以用自然语言调查项目、明确需求、修改文件、执行验证，并在同一项目中持续迭代。
 
-当前版本是 Windows Terminal Preview。正式产品界面使用 Bun、React 与 Ink；Python Native Host 在后台管理 Provider、Agent runtime、工具和持久化状态。
+模型负责理解、规划和发起操作；工具提供文件、搜索、命令等能力；运行时、授权与存储组件负责执行、权限和证据。正式界面使用 Bun、React 和 Ink，通过 Native Host 连接项目运行服务。
 
-[下载 Windows Terminal Preview](https://github.com/Truman-Duo/Gitgo/releases/tag/terminal-preview-2026-09-28) · [安装与启动](docs/INSTALL.md) · [贡献指南](CONTRIBUTING.md) · [Open Issues](https://github.com/Truman-Duo/Gitgo/issues)
+当前源码为 **1.0.0-alpha.2**，已生成 Windows x64 完整 ZIP 并验证冻结运行时和真实 API。**正式终端主流程已人工确认，发布状态见版本页；已有下载入口对应此前的预览包。**
 
-## Gitgo 能做什么
+[下载预览版](https://github.com/Truman-Duo/Gitgo/releases/tag/terminal-preview-2026-09-28) · [安装](docs/INSTALL.md) · [配置](docs/CONFIGURATION.md) · [版本](docs/VERSION.md) · [贡献](CONTRIBUTING.md)
 
-- **持续完成项目任务**：支持对话、文件读写、搜索、Shell、文档处理、网络检索、Diff 和自定义工具，而不是止步于生成建议。
-- **动态组织 Main Process / Subprocess**：Main Process 负责理解用户、路由、协调和审查；复杂工作可交给长期存在、可继续迭代的 Subprocess，并通过 DAG、接口合同和 worktree 协作。
-- **让执行过程可见**：终端时间线展示阶段进展、思考、工具、权限、问题、Diff、上下文占用和最终结果；Verbose 只控制展开程度，不改变事实。
-- **把治理做成运行时能力**：任务合同、权限、测试证据、完成判断、错误恢复和取消由 Host 执行，模型不能用一段文字伪造完成。
-- **支持长会话和长期项目**：上下文压缩、spill 取回、知识收割、依赖证据、跨 Daemon 恢复以及 SQLite/CAS 状态存储共同维护连续性。
-- **适配不同模型服务**：同一 Agent loop 可连接 OpenAI Responses、OpenAI Chat Completions 和 Anthropic Messages 风格的 Provider。
+## Gitgo 提供哪些优势
 
-## 架构一览
+以“模型调用、工具执行、会话历史”组成的基础 harness 为参照，Gitgo 在需求、授权、交付和恢复之间建立了可检查的联系。下表列出当前已实现的能力，以及支持这些能力的证据；具体产品之间的比较需要独立对照试验。
 
-```mermaid
-flowchart TB
-    User["用户"] --> UI["Terminal Dashboard<br/>对话 · 时间线 · Diff · 决策 · Runtime"]
+| 使用中的价值 | 已实现的机制 | 已有证据 |
+|---|---|---|
+| 用户回答真正影响后续任务 | 问题逐题展示；答案绑定任务和问题，更新依赖与完成条件；明确委托剩余选择后继续交付 | 问题依赖、改答失效和回答来源回归；真实 API 与正式终端验证 |
+| 交付结果可以追溯 | 完成检查使用实际调用回执、测试记录和交付文件；无法满足的质量要求可明确选择部分交付或停止，保留缺失事实 | 完成门禁与文件证据回归；真实 API 文件交付验证 |
+| 自定义工具沿用权限边界 | 组合工具逐叶校验权限，保存已完成前缀，批准后恢复；工具发明沿用调用链授权 | 逐叶暂停、冷恢复、过期续跑与重复执行回归；部分真实权限场景验证 |
+| 中断与并发变化有明确处理 | 生命周期守卫、版本条件更新和事务事件；恢复时区分已提交事实与待核实的外部效果 | 过期写入拒绝、事务回滚、事件重放、取消及跨进程恢复回归 |
+| Provider 故障后保持任务连续 | 可配置备用顺序与熔断；路由绑定实际模型身份和能力，保持主配置 | 真实失败首位与备用 API 测试；连续会话、身份和搜索验证 |
+| 终端选择与项目数据相互独立 | 检测并验证终端；设置变更在下次启动生效；同一项目和状态目录共享历史 | 正式 Git Bash 启动与交互验收；配置及持久化回归 |
 
-    subgraph Host["Gitgo Host"]
-        Native["Native Host<br/>版本化原生协议"]
-        Services["Application Services<br/>项目 · 配置 · 发布 · 状态投影"]
-        Daemon["Per-project Daemon<br/>生命周期 · 恢复 · 事件"]
-    end
+普通任务由主模型直接理解和处理。依赖计算、回执校验、权限匹配和状态更新交给相应组件；仍有效的解释可复用。后台统计静默记录用量和运行事件，支持后续分析。
 
-    subgraph Runtime["Agent Runtime"]
-        Main["Main Process<br/>理解 · 路由 · 协调 · 审查"]
-        Subs["Subprocess DAG<br/>执行 · 迭代 · 独立 worktree"]
-        Loop["Provider-neutral Loop<br/>上下文 · 预算 · 完成判断"]
-        Tools["Tool Pipeline<br/>权限 · 隔离 · 收据 · Diff"]
-    end
+这些证据支持已覆盖的机制与行为。**总体回答质量、长任务可靠性和单位任务成本的改善仍是待验证目标**，将通过同模型、同任务的纯 API 与 Gitgo 对照逐步评估。模型已经具备的提问与规划能力也纳入对照。
 
-    subgraph Evidence["State & Evidence"]
-        State["SQLite<br/>任务 · 消息 · Trace · 指标"]
-        CAS["CAS<br/>Prompt · Reasoning · 工具结果"]
-        Project["Project Metadata<br/>合同 · 依赖 · 知识 · 发布策略"]
-    end
+对应测试入口与验收边界见 [测试结果](docs/VALIDATION.md)。
 
-    subgraph External["External Systems"]
-        Providers["LLM Providers"]
-        Workspace["Workspace / Git / Worktrees"]
-        Web["Web & Documents"]
-    end
+## 当前实现
 
-    UI --> Native --> Services --> Daemon --> Main
-    Main --> Loop
-    Main --> Subs --> Loop
-    Loop <--> Providers
-    Loop --> Tools
-    Tools --> Workspace
-    Tools --> Web
-    Daemon <--> State
-    Loop <--> CAS
-    Services <--> Project
+- **项目操作：**文件读取、写入、编辑、追加；默认 ripgrep 搜索；命令执行、文档文本读取和联网检索，失败与能力回退有明确提示。
+- **任务协作：**主任务、子任务、依赖、独立 worktree、审查、取消和显式恢复。
+- **模型接入：**OpenAI Responses、Chat Completions、Anthropic Messages 风格协议；能力探测、自动 failover 与备用队列。
+- **交互：**流式消息、需求问题卡、权限审批、思考与正文区分、折叠、滚动、复制和粘贴。
+- **持久化与观察：**SQLite 与内容寻址存储保存状态和证据；持久事件支持消费恢复；后台用量统计与架构增长告警。
 
-    MCP["MCP compatibility<br/>外部 harness / 自动化"] -.-> Services
-```
+2026-10-11 Alpha 2 候选已有后端 **1395 passed / 2 skipped**、Dashboard **173 passed / 0 failed**、类型检查及源码正式 Git Bash 人工验收记录。Alpha 2 ZIP 的冻结 Host/daemon/工具、历史连续性及真实 API 验收通过，解压包的正式终端主流程已由用户确认，扩展测试 Trace 另行核对；下载包的具体范围以其版本说明为准。
 
-Dashboard 的默认数据面是原生协议，MCP 只是面向其他 harness 和自动化工具的受限兼容入口。更完整的组件职责与协作约束见 [架构说明](docs/ARCHITECTURE.md)。
-
-## 已经完成的工作
-
-截至 2026-09-28，Gitgo 已完成：
-
-- 原生 Dashboard → Native Host → Daemon → Provider → Tool 主链；
-- Main Process / Subprocess DAG、独立 linked worktree、审查与拓扑晋升；
-- 三种 Provider 协议适配、流式响应、Reasoning/工具续接与能力探针；
-- 文件、Shell、文档、联网和可持久化自定义工具底座；
-- 上下文装配/压缩、缓存遥测、知识与依赖证据；
-- 跨 Daemon 显式恢复、强取消、结构化错误和用户决策卡；
-- SQLite/CAS 单一权威状态、写入预算、恢复工具和隐私发布门；
-- Windows staging 构建和 GitHub prerelease。
-
-本次发布快照通过 1084 项 Python 测试（1 项跳过）和 135 项 Dashboard 测试，并完成生产构建。真实 Provider 验收覆盖过多步工具、动态工具、Subprocess、worktree、知识收割和错误恢复；这些结果表示主链已运行，不代表所有 Provider 和平台均已达到稳定版标准。
+完整能力清单见 [当前功能](docs/IMPLEMENTATION_STATUS.md)，失败案例和平台边界见 [已知限制](docs/KNOWN_ISSUES.md)。
 
 ## 开始使用
 
-### 使用预览包
+1. 从 [Releases](https://github.com/Truman-Duo/Gitgo/releases) 下载 Windows x64 ZIP 和校验文件，核对后完整解压，运行 `gitgo.exe`。主 EXE 依赖包内组件。
+2. 首次启动在 Terminal 行用左右方向键选择检测到的终端，按 Enter 保存。
+3. 打开 `/config → Providers`，填写协议、Base URL、模型和凭据。需要备用路由时开启自动 failover 并设置顺序。
+4. 选择项目，输入任务，例如“调查这个项目的启动流程，给出问题和证据”。模型需要澄清时回答问题卡；涉及受限操作时处理审批。
+5. 在同一项目继续对话。以后可在 `/config → General` 更改终端，下次启动使用新选择。
 
-从 [Releases](https://github.com/Truman-Duo/Gitgo/releases) 下载 Windows x64 ZIP 和对应 SHA-256 文件，校验后完整解压，再运行 `gitgo.exe`。不要把它单独移出包内目录；内部 Native Host 是同一产品的一部分。
+配置与凭据保存在本机；Windows 凭据按当前用户加密。项目历史使用对应状态目录，显式设置独立状态目录可隔离测试数据。
 
-### 从源码启动
+从源码运行时，先按 [开发要求](CONTRIBUTING.md#开发入口) 准备 Python、Bun 和依赖，再在仓库根目录启动完整终端界面：
 
 ```text
 run_dashboard_native.bat
 ```
 
-该入口启动完整 Bun/Ink Dashboard。浏览器 smoke 页面、mock 页面和 trace-only renderer 只用于诊断，不能替代正式终端。
+[安装与退出](docs/INSTALL.md) · [配置说明](docs/CONFIGURATION.md) · [终端与历史](docs/terminal-launcher.md) · [Provider 切换](docs/provider-routing.md)
 
-开发环境、Provider 配置和构建流程分别见：
+## 接下来完善什么
 
-- [安装与启动](docs/INSTALL.md)
-- [Provider 与项目配置](docs/CONFIGURATION.md)
-- [贡献与提交规范](CONTRIBUTING.md)
-- [安全与隐私](docs/SECURITY_AND_PRIVACY.md)
-- [已知限制](docs/KNOWN_ISSUES.md)
+| 方向 | 当前状态与目标 |
+|---|---|
+| 行为与效率对照 | 已有小样本 API 对照和后台采集；继续积累自然任务、边界与长任务数据，衡量收益和额外成本 |
+| 信号与恢复 | 持久事件已接入核心路径；继续迁移旧回调与状态通道，验证组合行为 |
+| 隐私与文档维护 | 现有规则覆盖部分凭据和私有内容；完整引用检查、公开候选审批与持续文档维护待实施 |
+| 多人、多仓库 Git 流程 | 已有任务/worktree 能力和贡献规范；workspace、trial、formal 的跨仓库生命周期自动化待实施 |
+| 平台、隔离与运行模式 | macOS/Linux、完整 OS 沙箱及模式切换另行推进，以对应平台和交互验收为准 |
+| 本地模型 | 实际本地模型接入验收延期，后续单独验证 |
 
-## 项目状态
+功能和问题通过 [Issues](https://github.com/Truman-Duo/Gitgo/issues) 跟踪。表中的计划分别验收，并随实现更新 [功能状态](docs/IMPLEMENTATION_STATUS.md)。
 
-Gitgo 目前是 Terminal Preview，而不是稳定版。近期工作集中在 Provider failover/circuit breaker、前端体验、提示词体系、审批模式、原生沙箱和发布自动化。路线图与缺陷统一维护在 [GitHub Issues](https://github.com/Truman-Duo/Gitgo/issues)。
+## 参与贡献
+
+1. 阅读 [当前功能](docs/IMPLEMENTATION_STATUS.md)、[已知限制](docs/KNOWN_ISSUES.md) 和相关 Issue，明确本次范围、依赖与验收目标。
+2. 从上游最新 `master` 创建功能分支；外部贡献者在自己的 fork 开发，再向主仓库 `master` 提交 PR。分支合入后的保留或清理单独确认。
+3. 按 [贡献指南](CONTRIBUTING.md) 使用提交格式，执行相关回归；行为变更补充真实 API 验证，界面变更在完整正式终端中验收。
+4. 使用 [PR 模板](.github/PULL_REQUEST_TEMPLATE.md) 写清变更、实际测试环境、兼容性、迁移和剩余风险。检查候选文件及其引用，移除凭据、私人数据和编程指引。
+
+[Dashboard 开发](cli/dashboard/README.md) · [Windows 构建](packaging/README.md) · [测试与复测](docs/VALIDATION.md) · [安全报告](SECURITY.md) · [安全与隐私](docs/SECURITY_AND_PRIVACY.md)

@@ -76,6 +76,7 @@ export type StreamActivity =
 
 export type DecisionOption = {
   label: string;
+  description?: string;
   principle: string;
   immediate_effect: string;
   downstream_effect: string;
@@ -111,6 +112,8 @@ export type PendingDecision = {
   source_actor_kind?: string;
   source_display_name?: string;
   owner_process_id?: string;
+  questions?: Array<Pick<PendingDecision, "question" | "why_user_must_decide" | "options" | "allow_free_form" | "kind" | "state_topic"> & {node_id: string}>;
+  round_position?: string;
 };
 
 export type ChatMessage = {

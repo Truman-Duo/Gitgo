@@ -366,6 +366,9 @@ export class DaemonClient {
       type === "tool_result" ||
       type === "stream_recovery" ||
       type === "provider_request_started" ||
+      type === "provider_route_activated" || type === "provider_route_selected" ||
+      type === "provider_route_failed" ||
+      type === "provider_route_skipped" ||
       type === "provider_response_completed" ||
       type === "provider_usage" ||
       type === "governance_snapshot" ||

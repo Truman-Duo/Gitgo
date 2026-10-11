@@ -63,6 +63,9 @@ CLAUDE.md
 AGENTS.md
 docs/HANDOFF.md
 docs/technical-reports/
+docs/engineering-action-guide.md
+docs/component-responsibilities.md
+docs/tool-inventory.json
 
 # Local-only legacy material. Only legacy/README.md is published.
 legacy/docs/

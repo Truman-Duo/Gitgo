@@ -96,13 +96,9 @@ def _background_llm_provider(daemon_ctx: dict):
     configured = LLMConfigManager.get_active()
     if configured is None:
         return None
-    current = RuntimeLLMProvider(
-        configured.base_url,
-        configured.api_key,
-        configured.model_id,
-        protocol=configured.protocol,
-        capabilities=configured.runtime_capabilities(),
-    )
+    from backend.core.daemon.policy_helpers import _runtime_llm_from_config
+    current = _runtime_llm_from_config((configured.base_url, configured.api_key, configured.model_id,
+                                        configured.protocol, configured.runtime_capabilities()))
     daemon_ctx["llm"] = current
     return current
 
@@ -194,6 +190,10 @@ def _start_background_harvest(
                 workspace_path,
                 project_name,
                 raise_on_error=True,
+                on_provider_notice=lambda notice: event_queue.put({
+                    **notice, "harvest_id": harvest_id, "origin": "background_harvest",
+                    "time": datetime.now(timezone.utc).isoformat(),
+                }),
             )
             workspace = Path(workspace_path)
             for lesson in lessons:
@@ -238,6 +238,19 @@ def _start_background_harvest(
         })
         return False
     return True
+
+
+def _start_usability_collector(storage, event_queue):
+    """Optional measurement initialization must never prevent task admission."""
+    try:
+        from backend.core.usability import UsabilityCollector
+        collector = UsabilityCollector(storage.paths.project_root, on_warning=event_queue.put)
+        collector.start()
+        return collector
+    except Exception:
+        event_queue.put({"event": "error", "code": "USABILITY_COLLECTION_START_FAILED",
+            "message": "Background usage statistics could not start; task execution is unaffected."})
+        return None
 
 
 def run_daemon(
@@ -358,6 +371,19 @@ def run_daemon(
     # path without reopening SQLite from isolated helper code.
     apm.storage = storage_runtime
     apm.session_store = session_store
+    from backend.core.storage.runtime_events import FactDispatcher
+    fact_dispatcher = FactDispatcher(
+        storage_runtime, "daemon.ui",
+        lambda fact: _emit({"event": "runtime_fact", "process_id": fact["process_id"],
+            "task_id": fact["task_id"], "fact": {key: value for key, value in fact.items() if key != "payload"}}),
+        lambda failure: _emit_v2(failure, priority="immediate"),
+    )
+    from backend.core.messaging import project_fact_to_trace
+    fact_trace_dispatcher = FactDispatcher(
+        storage_runtime, "daemon.trace",
+        lambda fact: project_fact_to_trace(storage_runtime, fact),
+        lambda failure: _emit_v2(failure, priority="immediate"),
+    )
 
     # Context bundle for executors + _handle_command — populated incrementally.
     # executors only need apm/hash_cache at bind time; dispatcher/evq added later.
@@ -806,6 +832,11 @@ def run_daemon(
     }, priority="immediate")
 
     # Background threads
+    usability = _start_usability_collector(storage_runtime, evq)
+    daemon_ctx["usability"] = usability
+    from backend.core.architecture_monitor import ArchitectureMonitor
+    architecture = ArchitectureMonitor(session.workspace_path, evq.put, storage=storage_runtime)
+    architecture.start()
     # The watcher and the scanner must share one exclusion policy.  Using only
     # project.force_exclude here omitted host-private paths such as .gitgo/;
     # every checkpoint/tool receipt then dirtied the workspace and recursively
@@ -846,6 +877,8 @@ def run_daemon(
 
     try:
         while not _shutdown_flag.is_set():
+            fact_dispatcher.drain()
+            fact_trace_dispatcher.drain()
             try:
                 ev = evq.get(timeout=1.0)
             except queue.Empty:
@@ -1121,12 +1154,13 @@ def run_daemon(
                                 "stream_recovery", "agent_started",
                                 "agent_terminal", "decision_required",
                                 "tool_result", "provider_request_started",
+                                "provider_route_activated", "provider_route_selected", "provider_route_failed", "provider_route_skipped",
                                 "provider_response_completed",
                                 "provider_response_incomplete", "provider_usage",
                                 "governance_snapshot", "context_window_action",
                                 "context_compaction_completed", "completion_gate",
                                 "task_bundle_delegated", "storage_health",
-                                "repository_scope_warning",
+                                "repository_scope_warning", "architecture_warning",
                                 "session_recovery_resumed",
                                 "session_recovery_discarded",
                                 "session_recovery_blocked",
@@ -1220,6 +1254,9 @@ def run_daemon(
                 },
             }, priority="immediate")
         hash_cache.flush()
+        architecture.stop()
+        if usability is not None:
+            usability.stop()
         if storage_runtime is not None and not storage_writers_alive:
             storage_runtime.close()
         _release_pid_file(project)

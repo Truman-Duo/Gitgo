@@ -52,6 +52,7 @@ import {
   clearSelection,
   createSelectionState,
   extendSelection,
+  finishSelection,
   type FocusMove,
   findPlainTextUrlAt,
   getSelectedText,
@@ -908,8 +909,15 @@ export default class Ink {
     this.isPaused = true;
   }
 
-  resume(): void {
+  resume(options: { redraw?: boolean } = {}): void {
     this.isPaused = false;
+    if (options.redraw) {
+      if (this.options.stdout.isTTY && !this.isUnmounted) {
+        this.forceRedraw();
+        return;
+      }
+      this.repaint();
+    }
     this.onRender();
   }
 
@@ -919,6 +927,14 @@ export default class Ink {
    * an external process (e.g. tmux, shell, full-screen TUI).
    */
   repaint(): void {
+    // A 0-height previous frame in the alternate screen makes log-update
+    // treat a repaint as growing output. Its last CR+LF scrolls the physical
+    // screen by one row while the virtual frame stays put. Keep both frames
+    // at viewport size, just as resize/forceRedraw already do.
+    if (this.altScreenActive) {
+      this.resetFramesForAltScreen();
+      return;
+    }
     this.frontFrame = emptyFrame(
       this.frontFrame.viewport.height,
       this.frontFrame.viewport.width,
@@ -938,6 +954,8 @@ export default class Ink {
     // Clear displayCursor so the cursor preamble doesn't emit a stale
     // relative move from where we last parked it.
     this.displayCursor = null;
+    // The per-node blit cache must never copy from a freshly blank frame.
+    this.prevFrameContaminated = true;
   }
 
   /**
@@ -1137,6 +1155,12 @@ export default class Ink {
    */
   copySelectionNoClear(): string {
     if (!hasSelection(this.selection)) return '';
+    // Copy is an explicit end to the gesture, including when a console bridge
+    // lost mouse-up. Keep the highlight but stop drag-to-scroll immediately.
+    if (this.selection.isDragging) {
+      finishSelection(this.selection);
+      this.notifySelectionChange();
+    }
     const text = getSelectedText(this.selection, this.frontFrame.screen);
     if (text) {
       // Raw OSC 52, or DCS-passthrough-wrapped OSC 52 inside tmux (tmux

@@ -506,3 +506,23 @@ def test_deepseek_chat_provider_uses_official_anthropic_native_search(monkeypatc
         "provider_reachable": True,
         "empty_reason": "",
     }
+
+
+def test_missing_effective_provider_does_not_borrow_primary_credentials(monkeypatch):
+    from backend.core.llm_config import LLMConfigManager
+    from backend.core.tools.web_tools import web_search
+    monkeypatch.setattr(LLMConfigManager, "get_providers", lambda: [])
+    monkeypatch.setattr(LLMConfigManager, "get_active", lambda: pytest.fail("borrowed primary credentials"))
+    result = web_search({"query": "ripgrep", "_web_search_mode": "provider",
+                         "_web_search_provider_id": "deleted-backup"})
+    assert result["error"] == "WEB_SEARCH_PROVIDER_NOT_CONFIGURED"
+
+
+def test_auto_search_preserves_native_failure_when_fallback_fails(monkeypatch):
+    from backend.core.tools import web_tools
+    monkeypatch.setattr(web_tools, "_provider_hosted_search", lambda _: {"error": "PROVIDER_CAPABILITY_UNAVAILABLE"})
+    monkeypatch.setattr(web_tools, "_searxng_search", lambda _: {"error": "WEB_SEARCH_FAILED"})
+    result = web_tools.web_search({"query": "ripgrep", "_web_search_provider_id": "backup"})
+    assert result["error"] == "WEB_SEARCH_FAILED"
+    assert result["provider_fallback"] == {"from": "provider", "to": "searxng",
+        "reason": "PROVIDER_CAPABILITY_UNAVAILABLE", "provider_id": "backup"}

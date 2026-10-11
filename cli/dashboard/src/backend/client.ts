@@ -257,6 +257,10 @@ export class NativeHostClient implements BackendClient {
         this.startReject = undefined;
         continue;
       }
+      if (message.type === "host_rejected") {
+        this.failAll(new Error(String(message.message || "Native host rejected this launch")));
+        continue;
+      }
       if (message.type === "protocol_error") {
         process.stderr.write(`[native-host] protocol error: ${JSON.stringify(message.error)}\n`);
         continue;
@@ -334,14 +338,16 @@ export class NativeHostClient implements BackendClient {
     this.proc = null;
     this._ready = false;
     proc.stdin?.end();
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       if (proc.exitCode !== null) return resolve();
+      let killedTimer: ReturnType<typeof setTimeout> | undefined;
       const timer = setTimeout(() => {
         proc.kill();
-        resolve();
+        killedTimer = setTimeout(() => reject(new Error("Native host did not exit; terminal handoff was stopped to protect shared state")), 2500);
       }, 5000);
       proc.once("exit", () => {
         clearTimeout(timer);
+        if (killedTimer) clearTimeout(killedTimer);
         resolve();
       });
     });

@@ -36,7 +36,7 @@ COPY_TABLES = (
     "dependency_edges", "object_refs", "storage_kv",
     "session_processes", "session_events", "process_dependencies",
     "history_events", "lessons", "messages", "task_usage", "process_presentation",
-    "deleted_processes", "deletion_plans",
+    "deleted_processes", "deletion_plans", "runtime_outbox", "runtime_consumers",
 )
 
 

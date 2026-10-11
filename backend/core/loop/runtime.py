@@ -36,6 +36,7 @@ class RuntimeSpec:
     required_test_ids: tuple[str, ...] = ()
     task_budget: object | None = None
     runtime_preferences: dict | None = None
+    storage: object | None = None
 
 
 class AgentRuntimeFactory:
@@ -83,6 +84,7 @@ class AgentRuntimeFactory:
             task_budget=spec.task_budget,
             runtime_preferences=dict(spec.runtime_preferences or {}),
             session=runtime_session,
+            runtime_storage=spec.storage,
             mailbox=AgentMailbox(),
         )
         runtime_session.host_ledger.append({

@@ -4,7 +4,7 @@
 import { useState, useCallback } from "react";
 import type { BackendClient } from "../backend/client.js";
 import { useAsyncPoll } from "./useAsyncPoll.js";
-import { llmStatus, llmSave, llmSwitch, llmDelete } from "../backend/tools.js";
+import { llmStatus, llmSave, llmSwitch, llmDelete, llmFailoverConfigure, loopStatus } from "../backend/tools.js";
 import { sortByName } from "../theme/index.js";
 
 export type LLMProvider = {
@@ -21,6 +21,8 @@ export type LLMProvider = {
   max_output_tokens: number;
   limits_source?: "default" | "configured";
   created_at: string;
+  kind?: "remote" | "local";
+  auth_mode?: "api_key" | "none";
 };
 
 export type LLMConfigState = {
@@ -32,20 +34,30 @@ export type LLMConfigState = {
   error: string | null;
 };
 
-export function useLLMConfig(client: BackendClient | null) {
+export function useLLMConfig(client: BackendClient | null, project = "") {
   const [providers, setProviders] = useState<LLMProvider[]>([]);
   const [activeProvider, setActiveProvider] = useState("");
+  const [failoverEnabled, setFailoverEnabled] = useState(false);
+  const [failoverOrder, setFailoverOrder] = useState<string[]>([]);
+  const [health, setHealth] = useState<Record<string, {breaker_state: string; failures: number | null}>>({});
   const { loading, error, run, setError } = useAsyncPoll(true);
 
   const fetchStatus = useCallback(async () => {
     if (!client) return;
     await run(async () => {
       const result: any = await llmStatus(client);
-      if (result?.error) { setError(result.error); return; }
+      if (result?.error) throw new Error(String(result.error));
       setProviders(sortByName((result?.providers || []) as LLMProvider[]));
       setActiveProvider(result?.active_provider || "");
+      setFailoverEnabled(Boolean(result?.failover_enabled));
+      setFailoverOrder(result?.failover_order || []);
+      setError(null);
+      if (project) {
+        const status: any = await loopStatus(client, project);
+        setHealth(Object.fromEntries((status?.providers || []).map((p: any) => [p.id, p])));
+      }
     });
-  }, [client, run, setError]);
+  }, [client, project, run, setError]);
 
   const saveProvider = useCallback(async (p: LLMProvider) => {
     if (!client) return null;
@@ -60,6 +72,7 @@ export function useLLMConfig(client: BackendClient | null) {
         context_window: p.context_window || 128000,
         max_output_tokens: p.max_output_tokens || 4096,
         retain_api_key: Boolean(p.id && !p.api_key),
+        kind: p.kind || "remote", auth_mode: p.auth_mode || "api_key",
       });
       if (result?.error) { setError(result.error); return null; }
       await fetchStatus(); // refresh list
@@ -75,13 +88,13 @@ export function useLLMConfig(client: BackendClient | null) {
     try {
       const result: any = await llmSwitch(client, providerId);
       if (result?.error) { setError(result.error); return false; }
-      setActiveProvider(providerId);
+      await fetchStatus();
       return true;
     } catch (e: any) {
       setError(e.message);
       return false;
     }
-  }, [client, setError]);
+  }, [client, fetchStatus, setError]);
 
   const deleteProvider = useCallback(async (providerId: string) => {
     if (!client) return false;
@@ -96,9 +109,20 @@ export function useLLMConfig(client: BackendClient | null) {
     }
   }, [client, fetchStatus, setError]);
 
+  const configureFailover = useCallback(async (enabled: boolean, order: string[]) => {
+    if (!client) return false;
+    try {
+      const result: any = await llmFailoverConfigure(client, enabled, order);
+      if (result?.error) { setError(result.error); return false; }
+      await fetchStatus();
+      return true;
+    } catch (e: any) { setError(e.message); return false; }
+  }, [client, fetchStatus, setError]);
+
   return {
     providers,
     activeProvider,
+    failoverEnabled, failoverOrder, configureFailover, health,
     loading,
     error,
     fetchStatus,

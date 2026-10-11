@@ -108,6 +108,8 @@ export const colors = {
   chat: {
     userBg: "#262626",   // 用户提示词灰底块
     userFg: "#f0f0f0",
+    assistantFg: "#f0f0f0",
+    reasoningFg: "#a8a8a8",
     gutter: "#6e7681",   // assistant/tool 行首 gutter 标记
     userMarker: "#a8a8a8", // 用户消息行首指针 ❯ 标记
   },

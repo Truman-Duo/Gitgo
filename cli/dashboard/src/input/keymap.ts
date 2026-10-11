@@ -48,6 +48,7 @@ export type EffectAction =
   | { type: "scroll_chat"; delta: number }
   | { type: "scroll_chat_bottom" }
   | { type: "edit_prompt_external" }
+  | { type: "previous_decision_question" }
   | { type: "report_notice"; code: number; params?: Record<string, any> };
 
 // ── InputAction (keymap output) ───────────────────────────
@@ -92,6 +93,7 @@ export type InputContext = {
 
   // Host-owned user decision currently rendered in the A workspace.
   decisionOptionLabels: string[];
+  decisionRoundCanGoBack?: boolean;
   decisionAllowFreeForm: boolean;
   decisionSelection: number;
   decisionComposing: boolean;
@@ -234,6 +236,9 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
   // A pending decision is an explicit interaction mode. Keep the routing
   // identity in useChat/sendChat, while deterministic UI bookkeeping stays in
   // the host instead of consuming model turns.
+  if (isChatScene(ctx.scene) && ctx.decisionRoundCanGoBack && !ctx.decisionSubmitting && !ctx.decisionComposing && !ctx.chatInputFocused && matchChord("left", input, key)) {
+    return [effect({type: "previous_decision_question"})];
+  }
   if (isChatScene(ctx.scene) && ctx.decisionOptionLabels.length > 0) {
     if (ctx.decisionComposing) {
       if (matchChord("escape", input, key)) {
@@ -386,12 +391,16 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
   // P8: Enter in NORMAL
   if (matchChord("enter", input, key)) {
     if (ctx.textValue.trim()) {
-      if (isChatScene(ctx.scene) && ctx.chatBusy) {
+      const decisionReply = ctx.decisionAllowFreeForm;
+      if (isChatScene(ctx.scene) && (decisionReply ? ctx.decisionSubmitting : ctx.chatBusy)) {
         return [effect({ type: "report_notice", code: 2004 })];
       }
       const txt = ctx.textValue.trim();
       const acts: InputAction[] = [text("text", { op: "set_value", text: "" })];
-      if (isChatScene(ctx.scene)) acts.push(effect({ type: "send_chat", text: txt }));
+      if (isChatScene(ctx.scene)) {
+        if (decisionReply) acts.push(state({type: "set_decision_submitting", submitting: true}));
+        acts.push(effect({ type: "send_chat", text: txt, ...(decisionReply ? {decisionSubmission: true} : {}) }));
+      }
       return acts;
     }
     if (ctx.scene === "projects" && ctx.projectsLength > 0) {

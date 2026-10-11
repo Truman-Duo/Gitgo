@@ -14,7 +14,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --python) PYTHON_BIN="$2"; BUILD_ARGS+=("--python" "$2"); shift 2 ;;
     --bun) BUN_BIN="$2"; BUILD_ARGS+=("--bun" "$2"); shift 2 ;;
-    --output|--archive) BUILD_ARGS+=("$1" "$2"); shift 2 ;;
+    --output|--archive|--ripgrep|--ripgrep-notices) BUILD_ARGS+=("$1" "$2"); shift 2 ;;
     --skip-archive) BUILD_ARGS+=("$1"); shift ;;
     --base-ref) BASE_REF="$2"; shift 2 ;;
     --verify-only) VERIFY_ONLY=1; shift ;;
@@ -34,10 +34,10 @@ if [ "$ALLOW_DIRTY" -eq 0 ] && [ -n "$(git status --porcelain --untracked-files=
   exit 1
 fi
 git rev-parse --verify "$BASE_REF^{commit}" >/dev/null
-MESSAGE_PATTERN='^\[GITGO-[0-9]+\] (feat|fix|docs|style|refactor|perf|test|chore)\([a-z0-9_-]+\): .{1,60}$'
+MESSAGE_PATTERN='^(\[GITGO-[0-9]+\] )?(feat|fix|docs|style|refactor|perf|test|chore)\([a-z0-9_-]+\): .{1,60}$'
 while IFS= read -r message; do
   if [[ ! "$message" =~ $MESSAGE_PATTERN ]]; then echo "Invalid release commit message: $message" >&2; exit 1; fi
-done < <(git log --format=%s "$BASE_REF..HEAD")
+done < <(git log --no-merges --format=%s "$BASE_REF..HEAD")
 
 "$PYTHON_BIN" -B -c 'from backend.core.storage.runtime import validate_sqlite_runtime; validate_sqlite_runtime()'
 "$PYTHON_BIN" -B scripts/verify_release_privacy.py --root "$ROOT"

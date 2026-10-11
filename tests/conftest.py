@@ -50,6 +50,12 @@ def isolate_default_gitgo_state(
     monkeypatch.setenv(
         "GITGO_CONFIG_PATH", str(tmp_path_factory / "config" / "config.json"),
     )
+    monkeypatch.setenv(
+        "GITGO_LLM_CONFIG_PATH", str(tmp_path_factory / "config" / "llm_config.json"),
+    )
+    # Let the secret store follow the isolated provider config, including tests
+    # that override _config_path themselves; never inherit a live secret path.
+    monkeypatch.delenv("GITGO_LLM_SECRET_PATH", raising=False)
     # Unit tests must never add records to a developer or CI worker's real
     # DPAPI/Keychain store. Production still selects the native OS backend.
     monkeypatch.setattr(

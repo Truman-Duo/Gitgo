@@ -65,7 +65,7 @@ function outcomeError(outcome: any): string {
   return `[${code}] ${message}`;
 }
 
-function pendingDecisionFromOutcome(outcome: any): PendingDecision | null {
+export function pendingDecisionFromOutcome(outcome: any): PendingDecision | null {
   const raw = outcome?.metadata?.pending_decision;
   if (!raw || !raw.decision_id || !raw.process_id) return null;
   const options = Array.isArray(raw.options) ? raw.options : [];
@@ -103,6 +103,12 @@ function pendingDecisionFromOutcome(outcome: any): PendingDecision | null {
     source_actor_kind: raw.source_actor_kind ? String(raw.source_actor_kind) : undefined,
     source_display_name: raw.source_display_name ? String(raw.source_display_name) : undefined,
     owner_process_id: raw.owner_process_id ? String(raw.owner_process_id) : undefined,
+    // Preserve the Host round identity on the live transport, just as polling
+    // does. Dropping these nodes strands the UI on a generic round heading.
+    questions: Array.isArray(raw.questions) ? raw.questions.map((q: any) => ({
+      ...q, node_id: String(q.node_id), question: String(q.question || ""),
+      options: Array.isArray(q.options) ? q.options : [],
+    })) : undefined,
   };
 }
 

@@ -5,6 +5,8 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 PYTHON_BIN="${GITGO_PYTHON:-}"
 BUN_BIN=""
+RIPGREP_BIN="${GITGO_RIPGREP_PATH:-}"
+RIPGREP_NOTICES="${GITGO_RIPGREP_NOTICES:-}"
 OUTPUT=""
 ARCHIVE=""
 CODESIGN_IDENTITY="-"
@@ -20,6 +22,8 @@ usage() {
 Usage: packaging/build_macos.sh [options]
   --python PATH             Python 3.12 build runtime (default: .venv/bin/python)
   --bun PATH                Bun executable (default: command -v bun)
+  --ripgrep PATH            Standalone ripgrep >=14 binary
+  --ripgrep-notices PATH    Complete third-party notices matching that binary
   --output DIR              Staged release directory
   --archive FILE            Output .tar.gz path
   --codesign-identity ID    codesign identity (default: ad-hoc '-')
@@ -32,6 +36,8 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --python) PYTHON_BIN="$2"; shift 2 ;;
     --bun) BUN_BIN="$2"; shift 2 ;;
+    --ripgrep) RIPGREP_BIN="$2"; shift 2 ;;
+    --ripgrep-notices) RIPGREP_NOTICES="$2"; shift 2 ;;
     --output) OUTPUT="$2"; shift 2 ;;
     --archive) ARCHIVE="$2"; shift 2 ;;
     --codesign-identity) CODESIGN_IDENTITY="$2"; shift 2 ;;
@@ -59,6 +65,12 @@ fi
 if [ -z "$BUN_BIN" ]; then BUN_BIN="$(command -v bun || true)"; fi
 if [ ! -x "$PYTHON_BIN" ]; then echo "Python build runtime not found: $PYTHON_BIN" >&2; exit 1; fi
 if [ ! -x "$BUN_BIN" ]; then echo "Bun runtime not found: $BUN_BIN" >&2; exit 1; fi
+if [ -z "$RIPGREP_BIN" ]; then RIPGREP_BIN="$(command -v rg || true)"; fi
+if [ ! -x "$RIPGREP_BIN" ] || [ ! -f "$RIPGREP_NOTICES" ]; then
+  echo "Release requires standalone ripgrep and matching complete notices; pass --ripgrep and --ripgrep-notices" >&2
+  exit 1
+fi
+"$PYTHON_BIN" -B "$ROOT/scripts/release_artifacts.py" --check
 
 if [ -z "$OUTPUT" ]; then OUTPUT="$ROOT/dist-terminal/macos-$ARCH"; fi
 STAGE="$(dirname "$OUTPUT")/$(basename "$OUTPUT")"
@@ -71,7 +83,10 @@ if ! "$PYTHON_BIN" -B -c 'import PyInstaller; print("PyInstaller", PyInstaller._
   exit 1
 fi
 
-rm -rf "$STAGE"
+if [ -e "$STAGE" ] && { [ ! -d "$STAGE" ] || [ -n "$(ls -A "$STAGE")" ]; }; then
+  echo "Build output must be an empty directory; choose a new --output" >&2
+  exit 1
+fi
 mkdir -p "$STAGE/internal"
 
 (
@@ -96,6 +111,10 @@ HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
   --workpath "$HOST_BUILD" \
   --specpath "$HOST_BUILD" \
   "$ROOT/backend/core/native_host_entry.py"
+
+"$PYTHON_BIN" -B "$ROOT/scripts/stage_search_engine.py" \
+  --binary "$RIPGREP_BIN" --notices "$RIPGREP_NOTICES" \
+  --destination "$STAGE/internal/gitgo-host"
 
 "$PYTHON_BIN" -B "$ROOT/scripts/render_product_manifest.py" \
   --source "$SCRIPT_DIR/product.json" \
@@ -128,7 +147,10 @@ fi
 if [ "$SKIP_ARCHIVE" -eq 0 ]; then
   ARCHIVE_DIR="$(dirname "$ARCHIVE")"
   mkdir -p "$ARCHIVE_DIR"
-  rm -f "$ARCHIVE" "$ARCHIVE.sha256"
+  if [ -e "$ARCHIVE" ] || [ -e "$ARCHIVE.sha256" ]; then
+    echo "Refusing to overwrite an existing archive; choose a new --archive" >&2
+    exit 1
+  fi
   COPYFILE_DISABLE=1 tar -C "$(dirname "$STAGE")" -czf "$ARCHIVE" "$(basename "$STAGE")"
   (cd "$ARCHIVE_DIR" && /usr/bin/shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
   echo "macOS archive: $ARCHIVE"

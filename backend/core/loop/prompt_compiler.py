@@ -15,7 +15,7 @@ from backend.core.loop.provider_protocol import deterministic_hash
 
 PROMPT_MESSAGE_TYPE = "compiled_system_prompt"
 TASK_CONTRACT_MESSAGE_TYPE = "compiled_task_contract"
-PROMPT_SCHEMA_VERSION = 7
+PROMPT_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -92,8 +92,10 @@ class PromptCompiler:
             "answer": (
                 "Answer the user's actual message directly when no project workflow is "
                 "needed. The Host exposes read-only tools for evidence. For any non-trivial "
-                "workflow, the single initial workflow action is declare_task_contract: "
-                "semantically interpret the request and call it once; do not use keyword "
+                "workflow, clarify material user-owned scope before committing to a plan "
+                "unless that choice was delegated; safe evidence gathering may also come "
+                "first. Before protected execution, call declare_task_contract once: "
+                "semantically interpret the known request; do not use keyword "
                 "matching and do not request execution authority or delegation first. Record "
                 "concrete artifacts and whether delegation itself is a requirement. The Host "
                 "then compiles one route and exposes only the appropriate explicit "
@@ -116,9 +118,11 @@ class PromptCompiler:
                 "decode, repair, or reconstruct hidden source text. If verification is "
                 "needed, make a bounded evidence call promptly instead of spending the "
                 "output budget reverse-engineering an unstated transformation. "
-                "A non-empty assistant response without tool calls is terminal at the next "
-                "safe Host boundary; before promotion, do not call complete_supervision and "
-                "do not add TASK_COMPLETE."
+                "For an ordinary answer, deliver the response directly; no completion marker "
+                "or workflow declaration is required. If you judge that a material user input "
+                "is still needed, call request_user_decision: only its real Host event creates "
+                "a question card. Do not announce a card without issuing that tool call. "
+                "Before promotion, do not call complete_supervision."
             ),
             "supervisor": (
                 "For questions, return a substantiated answer. For delegated delivery, "
@@ -284,10 +288,11 @@ class PromptCompiler:
                 task_contract.get("delegation_attempts") or []
             )[-8:],
             "upstream_outcomes": upstream,
+            "engineering_workflow": dict(task_contract.get("engineering_workflow") or {}),
         }
         from backend.core.loop.decision_support import confirmed_user_state
         confirmed_state = confirmed_user_state(
-            list(getattr(process.session, "host_ledger", []) or [])
+            list(getattr(process.session, "host_ledger", []) or []), task_id=process.active_task_id or process.process_id
         )
         sections = [
             PromptSection("Base identity", identity, "host:role-contract"),
@@ -333,13 +338,19 @@ class PromptCompiler:
         sections.append(PromptSection(
             "User collaboration protocol",
             (
-                "Classify questions as clarification, preference, direction, verification, "
-                "choice, recovery, checkpoint, or permission. First inspect Host facts and "
-                "the latest confirmed user state; never ask the user to calculate, copy, or "
-                "look up information a Host shortcut can supply. Ask when product judgement, "
-                "forgotten or stale intent, uncertainty, or a material tradeoff remains. "
-                "Product work may use several incremental questions at natural milestones; "
-                "do not force every question into one initial interview. Any A or B may call "
+                "You decide whether user input is needed. Ask one material user-owned "
+                "unknown at a time, then reconsider the remaining needs using the real answer. "
+                "Do not ask for already supplied facts, optional refinements, or a future "
+                "task the user did not request. When the user delegates choices or asks for "
+                "no questions, use the supplied constraints and label your own assumptions. "
+                "Inspect available tools for observable facts yourself: lack of a dedicated "
+                "tool does not prove the task is unsupported if existing primitives can help. "
+                "Retrieved defaults and environment observations are not user choices. If "
+                "the current requested scope remains ambiguous between materially different "
+                "answers, clarify it rather than silently selecting a source's default or "
+                "carrying over an unrelated historical example. Classify questions as "
+                "clarification, preference, direction, verification, choice, recovery, "
+                "checkpoint, or permission. Any A or B may call "
                 "request_user_decision; the Host routes the card to the user's current A/B "
                 "view and projects a compact question/answer summary to A. Do not manually "
                 "copy or relay a B question through A. For a tool already on your surface, "

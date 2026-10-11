@@ -57,13 +57,13 @@ describe("reconcileChatMessages", () => {
     expect(reconcileChatMessages([], [pending])).toEqual([pending]);
   });
 
-  test("drops a frontend-only transport error on the next authoritative poll", () => {
+  test("retains a frontend-only transport error across authoritative polls", () => {
     const transport = msg({
       message_id: "transport-error:2026-01-01T00:00:00Z",
       role: "assistant", kind: "error", content: "[Error: admission timed out]",
       awaiting_persistence: false,
     });
-    expect(reconcileChatMessages([], [transport])).toEqual([]);
+    expect(reconcileChatMessages([], [transport])).toEqual([transport]);
   });
 
   test("does not consume a repeated new question with an older identical message", () => {

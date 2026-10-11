@@ -11,6 +11,7 @@ import { createReducerStore, reducer, useStore, initialAppState, type AppState, 
 import { getCommands, type CommandContext } from "../commands.js";
 import { resolveSceneKey, type InputContext, type InputAction, type TextBuffer, type TextOp } from "../input/keymap.js";
 import type { ChatScrollHandle, PendingDecision } from "../types.js";
+import {projectRound, answerRound, previousRound} from "../hooks/decisionRound.js";
 import { runCommandEffect, stopProcessEffect, type RunCommandDeps, type StopProcessDeps } from "../effects/run.js";
 import { noticeToActions } from "../notices.js";
 import { useTextInput, type UseTextInputReturn, applyTextOp as applyTextOpToBuf } from "../hooks/useTextInput.js";
@@ -45,11 +46,15 @@ type Props = {
   client: BackendClient;
   refreshSec?: number;
   startupSmokeTask?: StartupSmokeTask;
+  startupTerminalSetup?: boolean;
+  startupNotice?: string;
+  onTerminalSetupComplete?: () => Promise<{completed: boolean; message: string}>;
 };
 
 const appStore = createReducerStore<AppState, AppAction>(reducer, initialAppState());
 
-export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
+export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalSetup = false,
+  startupNotice = "", onTerminalSetupComplete }: Props) {
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
@@ -108,6 +113,28 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
     dispatch({ type: "pop_overlay" });
   }, [dispatch, llmCmdInput]);
 
+  const [terminalSetupNeeded, setTerminalSetupNeeded] = useState(startupTerminalSetup);
+  const terminalSetupShown = useRef(false);
+  const terminalSetupObserved = useRef(false);
+  useEffect(() => {
+    if (terminalSetupNeeded && !terminalSetupShown.current) {
+      terminalSetupShown.current = true;
+      pushOverlay("configPanel", {initialTab: "general", initialSetting: "terminal"});
+    }
+  }, [terminalSetupNeeded, pushOverlay]);
+  const initialTerminalPanelOpen = overlayStack.some(overlay =>
+    overlay.type === "configPanel" && overlay.props?.initialSetting === "terminal");
+  useEffect(() => {
+    if (initialTerminalPanelOpen) terminalSetupObserved.current = true;
+    else if (terminalSetupObserved.current) setTerminalSetupNeeded(false);
+  }, [initialTerminalPanelOpen]);
+  const onSettingSaved = useCallback(async (key: string) => {
+    if (key !== "launcher.terminal" || !terminalSetupNeeded || !initialTerminalPanelOpen) return;
+    const result = await onTerminalSetupComplete?.();
+    if (result?.completed) setTerminalSetupNeeded(false);
+    return result?.message;
+  }, [terminalSetupNeeded, initialTerminalPanelOpen, onTerminalSetupComplete]);
+
   // First-launch: if no projects AND no global LLM provider, force LLM config.
   // Global provider fetch is async, so gate the decision on its completion.
   const [firstLaunchChecked, setFirstLaunchChecked] = useState(false);
@@ -119,17 +146,33 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
   }, [fetchGlobalLLM]);
 
   useEffect(() => {
-    if (!loading && globalLLMFetched && !firstLaunchChecked &&
+    if (!terminalSetupNeeded && overlayStack.length === 0 && !loading && globalLLMFetched && !firstLaunchChecked &&
         projects.length === 0 && !activeProject && globalProviders.length === 0) {
       setFirstLaunchChecked(true);
-      pushOverlay("configPanel");
+      pushOverlay("configPanel", {initialTab: "providers"});
     }
-  }, [loading, globalLLMFetched, firstLaunchChecked, projects.length, activeProject, globalProviders.length, pushOverlay]);
+  }, [terminalSetupNeeded, overlayStack.length, loading, globalLLMFetched, firstLaunchChecked, projects.length, activeProject, globalProviders.length, pushOverlay]);
 
   // ── Status text derivation ──────────────────────────────
-  const [screenStatusText, setScreenStatusText] = useState("");
+  const [screenStatusText, setScreenStatusText] = useState(startupNotice);
   const [footerOverride, setFooterOverride] = useState<FooterConfig | null>(null);
-  const [pendingDecision, setPendingDecision] = useState<PendingDecision | null>(null);
+  const [rawDecision, setPendingDecision] = useState<PendingDecision | null>(null);
+  const [roundDraft, setRoundDraft] = useState<{id: string; answers: Record<string, string>}>({id: "", answers: {}});
+  const roundAnswers = roundDraft.id === rawDecision?.decision_id ? roundDraft.answers : {};
+  const pendingDecision = projectRound(rawDecision, roundAnswers);
+  const submitInput = (text: string) => {
+    if (rawDecision?.questions?.length) {
+      const result = answerRound(rawDecision, roundAnswers, text);
+      if (!result.instruction) {
+        setRoundDraft({id: rawDecision.decision_id, answers: result.answers});
+        dispatch({type: "set_decision_submitting", submitting: false});
+        textInput.setValue("");
+        return;
+      }
+      // Keep the final question editable if Host rejects the submitted round.
+      sendChatRef.current(result.instruction);
+    } else sendChatRef.current(text);
+  };
   const [chatBusy, setChatBusy] = useState(false);
   const [activeChatProcessId, setActiveChatProcessId] = useState("");
   const [activeChatRequestId, setActiveChatRequestId] = useState("");
@@ -277,7 +320,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
 
   const previousDecisionId = useRef("");
   useEffect(() => {
-    const nextId = pendingDecision?.decision_id || "";
+    const nextId = `${pendingDecision?.decision_id || ""}:${pendingDecision?.round_position || ""}`;
     if (nextId === previousDecisionId.current) return;
     previousDecisionId.current = nextId;
     const recommended = pendingDecision?.options.findIndex((option) => option.recommended) ?? -1;
@@ -342,7 +385,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
   const startupSmokeSent = useRef(false);
   const startupSmokeDecisionsAnswered = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!startupSmokeTask || startupSmokeSent.current || loading || loopData.loading) return;
+    if (!startupSmokeTask || terminalSetupNeeded || overlayStack.length || startupSmokeSent.current || loading || loopData.loading) return;
     if (!projects.some((item) => item.name === startupSmokeTask.project)) return;
     if (scene !== "workspace" || activeProject !== startupSmokeTask.project) {
       navigate("workspace", { activeProject: startupSmokeTask.project });
@@ -381,7 +424,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
     }, 100);
     return () => clearInterval(timer);
   }, [
-    startupSmokeTask, loading, loopData.loading, projects, scene,
+    startupSmokeTask, terminalSetupNeeded, overlayStack.length, loading, loopData.loading, projects, scene,
     activeProject, navigate, pendingDecision,
   ]);
 
@@ -463,7 +506,8 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
         const e = a.effect;
         if (e.type === "run_command") void runCommandEffect(e.cmd, runCommandDeps);
         else if (e.type === "stop_process") void stopProcessEffect(e.pid, stopProcessDeps);
-        else if (e.type === "send_chat") sendChatRef.current(e.text);
+        else if (e.type === "send_chat") submitInput(e.text);
+        else if (e.type === "previous_decision_question" && rawDecision) setRoundDraft({id: rawDecision.decision_id, answers: previousRound(rawDecision, roundAnswers)});
         else if (e.type === "scroll_chat") chatScrollRef.current?.scrollBy(e.delta);
         else if (e.type === "scroll_chat_bottom") chatScrollRef.current?.scrollToBottom();
         else if (e.type === "edit_prompt_external") {
@@ -476,7 +520,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
         else if (e.type === "report_notice") for (const a of noticeToActions(e.code, e.params)) dispatch(a);
       }
     }
-  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor]);
+  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput]);
 
   // ── Keyboard dispatch (global) ───────────────────────────
   useInput((input: string, key: any) => {
@@ -499,6 +543,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
       runningBSelIdx,
       statusBarFocused,
       decisionOptionLabels: pendingDecision?.options.map((option) => option.label) || [],
+      decisionRoundCanGoBack: Boolean(rawDecision?.questions?.length && Object.keys(roundAnswers).length),
       decisionAllowFreeForm: Boolean(pendingDecision?.allow_free_form),
       decisionSelection,
       decisionComposing,
@@ -549,8 +594,9 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
     runCommandDeps,
     toolEvents: loopData.toolEvents,
     processes: loopData.processes,
-    sendChat: (text: string) => sendChatRef.current(text),
+    sendChat: (text: string) => submitInput(text),
     verbose: generalConfig.verbose,
+    onSettingSaved,
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");
@@ -595,6 +641,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
           decisionSelection={decisionSelection}
           decisionComposing={decisionComposing}
           decisionSubmitting={decisionSubmitting}
+          decisionView={pendingDecision}
           onDecisionChange={handleDecisionChange}
           onSendSettled={handleSendSettled}
           onContinueAgent={(processId) => navigate("agent_detail", {activeAgentId: processId})}
@@ -628,6 +675,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask }: Props) {
           decisionSelection={decisionSelection}
           decisionComposing={decisionComposing}
           decisionSubmitting={decisionSubmitting}
+          decisionView={pendingDecision}
           onDecisionChange={handleDecisionChange}
           onSendSettled={handleSendSettled}
           onBusyChange={setChatBusy}

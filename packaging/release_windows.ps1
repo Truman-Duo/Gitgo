@@ -2,6 +2,9 @@ param(
     [string]$Python = "",
     [string]$Bun = "$env:USERPROFILE\.bun\bun.exe",
     [string]$PyInstallerPackages = "",
+    [string]$TestPackages = "",
+    [string]$Ripgrep = "",
+    [string]$RipgrepNotices = "",
     [string]$Output = "",
     [string]$InnoSetupCompiler = "",
     [string]$BaseRef = "origin/master",
@@ -32,6 +35,12 @@ if (-not $Python -or -not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $Bun -PathType Leaf)) {
     throw "Bun runtime not found; pass -Bun"
 }
+if (-not $TestPackages) {
+    $testCandidate = Join-Path $root ".gitgo\dev-test-deps"
+    if (Test-Path -LiteralPath (Join-Path $testCandidate "pytest\__init__.py") -PathType Leaf) {
+        $TestPackages = $testCandidate
+    }
+}
 
 Push-Location $root
 try {
@@ -45,7 +54,7 @@ try {
 
     git rev-parse --verify "$BaseRef^{commit}" *> $null
     if ($LASTEXITCODE -ne 0) { throw "Base ref is unavailable: $BaseRef" }
-    $messages = @(git log --format=%s "$BaseRef..HEAD")
+    $messages = @(git log --no-merges --format=%s "$BaseRef..HEAD")
     if ($LASTEXITCODE -ne 0) { throw "Cannot inspect release commit messages" }
     $messagePattern = '^\[GITGO-[0-9]+\] (feat|fix|docs|style|refactor|perf|test|chore)\([a-z0-9_-]+\): .{1,60}$'
     $invalid = @($messages | Where-Object { $_ -notmatch $messagePattern })
@@ -56,11 +65,18 @@ try {
     Invoke-Checked "SQLite runtime safety" {
         & $Python -B -c "import sqlite3; from backend.core.storage.runtime import validate_sqlite_runtime; validate_sqlite_runtime(); print('SQLite', sqlite3.sqlite_version)"
     }
+    Invoke-Checked "Product version consistency" {
+        & $Python -B scripts\release_artifacts.py --check
+    }
     Invoke-Checked "Tracked-file privacy boundary" {
         & $Python -B scripts\verify_release_privacy.py --root $root
     }
     Invoke-Checked "Python test suite" {
-        & $Python -B -m pytest tests -q
+        if ($TestPackages) {
+            & $Python -B scripts\run_source_tests.py --packages $TestPackages tests -q
+        } else {
+            & $Python -B scripts\run_source_tests.py tests -q
+        }
     }
 
     Push-Location (Join-Path $root "cli\dashboard")
@@ -78,6 +94,8 @@ try {
             "-Python", $Python, "-Bun", $Bun
         )
         if ($PyInstallerPackages) { $arguments += @("-PyInstallerPackages", $PyInstallerPackages) }
+        if ($Ripgrep) { $arguments += @("-Ripgrep", $Ripgrep) }
+        if ($RipgrepNotices) { $arguments += @("-RipgrepNotices", $RipgrepNotices) }
         if ($Output) { $arguments += @("-Output", $Output) }
         if ($BuildInstaller) {
             $arguments += "-BuildInstaller"

@@ -55,6 +55,9 @@ jobs:
           python scripts/prepare_linux_sqlite.py --prefix "$sqlite_prefix"
           echo "LD_LIBRARY_PATH=$sqlite_prefix/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
+      - name: Provision verified search engine and bundled notices
+        run: python -B scripts/provision_ci_ripgrep.py
+
       - name: Verify and build Linux release
         run: ./packaging/release_linux.sh --python "$(command -v python)" --bun "$(command -v bun)" --base-ref origin/master
 

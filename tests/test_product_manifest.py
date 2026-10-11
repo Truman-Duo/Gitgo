@@ -8,6 +8,22 @@ import pytest
 from scripts.render_product_manifest import render_manifest, render_shell_contract
 
 
+@pytest.mark.parametrize("platform", ["macos", "linux"])
+def test_unix_build_preserves_alpha2_search_and_version_contract(platform):
+    root = Path(__file__).resolve().parents[1]
+    build = (root / "packaging" / f"build_{platform}.sh").read_text(encoding="utf-8")
+    release = (root / "packaging" / f"release_{platform}.sh").read_text(encoding="utf-8")
+    assert "stage_search_engine.py" in build
+    assert "release_artifacts.py" in build
+    assert "Build output must be an empty directory" in build
+    assert "Refusing to overwrite an existing archive" in build
+    assert "--ripgrep-notices" in release
+    manifest = render_manifest(root / "packaging" / "product.json", platform)
+    dashboard = json.loads((root / "cli/dashboard/package.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == dashboard["version"]
+    assert manifest["windows_version"] == "1.0.0.2"
+
+
 def test_product_manifest_renders_platform_specific_layouts():
     root = Path(__file__).resolve().parents[1]
     source = root / "packaging" / "product.json"
