@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from backend.core.child_process import INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE
@@ -58,7 +59,9 @@ class ProtocolClient:
             raise TimeoutError(f"packaged Host response timed out; stderr={stderr}") from exc
 
     def call(self, operation: str, arguments: dict | None = None, timeout: float = 30) -> dict:
-        request_id = f"smoke-{time.monotonic_ns()}"
+        # Windows clocks can return the same value for consecutive calls.
+        # Request identity must remain unique independently of clock precision.
+        request_id = f"smoke-{uuid.uuid4().hex}"
         assert self.process.stdin is not None
         self.process.stdin.write(json.dumps({
             "protocol_version": 1,
