@@ -11,6 +11,7 @@ import { createReducerStore, reducer, useStore, initialAppState, type AppState, 
 import { getCommands, type CommandContext } from "../commands.js";
 import { resolveSceneKey, type InputContext, type InputAction, type TextBuffer, type TextOp } from "../input/keymap.js";
 import type { ChatScrollHandle, PendingDecision } from "../types.js";
+import {projectRound, answerRound, previousRound} from "../hooks/decisionRound.js";
 import { runCommandEffect, stopProcessEffect, type RunCommandDeps, type StopProcessDeps } from "../effects/run.js";
 import { noticeToActions } from "../notices.js";
 import { useTextInput, type UseTextInputReturn, applyTextOp as applyTextOpToBuf } from "../hooks/useTextInput.js";
@@ -155,7 +156,23 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   // ── Status text derivation ──────────────────────────────
   const [screenStatusText, setScreenStatusText] = useState(startupNotice);
   const [footerOverride, setFooterOverride] = useState<FooterConfig | null>(null);
-  const [pendingDecision, setPendingDecision] = useState<PendingDecision | null>(null);
+  const [rawDecision, setPendingDecision] = useState<PendingDecision | null>(null);
+  const [roundDraft, setRoundDraft] = useState<{id: string; answers: Record<string, string>}>({id: "", answers: {}});
+  const roundAnswers = roundDraft.id === rawDecision?.decision_id ? roundDraft.answers : {};
+  const pendingDecision = projectRound(rawDecision, roundAnswers);
+  const submitInput = (text: string) => {
+    if (rawDecision?.questions?.length) {
+      const result = answerRound(rawDecision, roundAnswers, text);
+      if (!result.instruction) {
+        setRoundDraft({id: rawDecision.decision_id, answers: result.answers});
+        dispatch({type: "set_decision_submitting", submitting: false});
+        textInput.setValue("");
+        return;
+      }
+      // Keep the final question editable if Host rejects the submitted round.
+      sendChatRef.current(result.instruction);
+    } else sendChatRef.current(text);
+  };
   const [chatBusy, setChatBusy] = useState(false);
   const [activeChatProcessId, setActiveChatProcessId] = useState("");
   const [activeChatRequestId, setActiveChatRequestId] = useState("");
@@ -303,7 +320,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
 
   const previousDecisionId = useRef("");
   useEffect(() => {
-    const nextId = pendingDecision?.decision_id || "";
+    const nextId = `${pendingDecision?.decision_id || ""}:${pendingDecision?.round_position || ""}`;
     if (nextId === previousDecisionId.current) return;
     previousDecisionId.current = nextId;
     const recommended = pendingDecision?.options.findIndex((option) => option.recommended) ?? -1;
@@ -489,7 +506,8 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         const e = a.effect;
         if (e.type === "run_command") void runCommandEffect(e.cmd, runCommandDeps);
         else if (e.type === "stop_process") void stopProcessEffect(e.pid, stopProcessDeps);
-        else if (e.type === "send_chat") sendChatRef.current(e.text);
+        else if (e.type === "send_chat") submitInput(e.text);
+        else if (e.type === "previous_decision_question" && rawDecision) setRoundDraft({id: rawDecision.decision_id, answers: previousRound(rawDecision, roundAnswers)});
         else if (e.type === "scroll_chat") chatScrollRef.current?.scrollBy(e.delta);
         else if (e.type === "scroll_chat_bottom") chatScrollRef.current?.scrollToBottom();
         else if (e.type === "edit_prompt_external") {
@@ -502,7 +520,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         else if (e.type === "report_notice") for (const a of noticeToActions(e.code, e.params)) dispatch(a);
       }
     }
-  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor]);
+  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput]);
 
   // ── Keyboard dispatch (global) ───────────────────────────
   useInput((input: string, key: any) => {
@@ -525,6 +543,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       runningBSelIdx,
       statusBarFocused,
       decisionOptionLabels: pendingDecision?.options.map((option) => option.label) || [],
+      decisionRoundCanGoBack: Boolean(rawDecision?.questions?.length && Object.keys(roundAnswers).length),
       decisionAllowFreeForm: Boolean(pendingDecision?.allow_free_form),
       decisionSelection,
       decisionComposing,
@@ -575,7 +594,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     runCommandDeps,
     toolEvents: loopData.toolEvents,
     processes: loopData.processes,
-    sendChat: (text: string) => sendChatRef.current(text),
+    sendChat: (text: string) => submitInput(text),
     verbose: generalConfig.verbose,
     onSettingSaved,
   };
@@ -622,6 +641,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
           decisionSelection={decisionSelection}
           decisionComposing={decisionComposing}
           decisionSubmitting={decisionSubmitting}
+          decisionView={pendingDecision}
           onDecisionChange={handleDecisionChange}
           onSendSettled={handleSendSettled}
           onContinueAgent={(processId) => navigate("agent_detail", {activeAgentId: processId})}
@@ -655,6 +675,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
           decisionSelection={decisionSelection}
           decisionComposing={decisionComposing}
           decisionSubmitting={decisionSubmitting}
+          decisionView={pendingDecision}
           onDecisionChange={handleDecisionChange}
           onSendSettled={handleSendSettled}
           onBusyChange={setChatBusy}

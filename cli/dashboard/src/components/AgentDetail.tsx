@@ -126,6 +126,7 @@ type SceneProps = {
   decisionSelection: number;
   decisionComposing: boolean;
   decisionSubmitting: boolean;
+  decisionView?: PendingDecision | null;
   onDecisionChange: (decision: PendingDecision | null) => void;
   onSendSettled: () => void;
   onContinueAgent?: (processId: string) => void;
@@ -134,6 +135,7 @@ type SceneProps = {
 export const AgentDetailScene = memo(function AgentDetailScene({
   client, loopData, activeProject, activeAgentId, cols, rows, sendChatRef, scrollChatRef, verbose = false,
   decisionSelection, decisionComposing, decisionSubmitting, onDecisionChange, onSendSettled,
+  decisionView,
   onContinueAgent,
 }: SceneProps) {
   const loop = loopData;
@@ -238,7 +240,7 @@ export const AgentDetailScene = memo(function AgentDetailScene({
       scrollChatRef={scrollChatRef}
       feedbackStatus={feedbackStatus}
       verbose={verbose}
-      pendingDecision={pendingDecision}
+      pendingDecision={decisionView?.decision_id === pendingDecision?.decision_id ? decisionView : pendingDecision}
       decisionSelection={decisionSelection}
       decisionComposing={decisionComposing}
       decisionSubmitting={decisionSubmitting}

@@ -52,6 +52,7 @@ import {
   clearSelection,
   createSelectionState,
   extendSelection,
+  finishSelection,
   type FocusMove,
   findPlainTextUrlAt,
   getSelectedText,
@@ -1154,6 +1155,12 @@ export default class Ink {
    */
   copySelectionNoClear(): string {
     if (!hasSelection(this.selection)) return '';
+    // Copy is an explicit end to the gesture, including when a console bridge
+    // lost mouse-up. Keep the highlight but stop drag-to-scroll immediately.
+    if (this.selection.isDragging) {
+      finishSelection(this.selection);
+      this.notifySelectionChange();
+    }
     const text = getSelectedText(this.selection, this.frontFrame.screen);
     if (text) {
       // Raw OSC 52, or DCS-passthrough-wrapped OSC 52 inside tmux (tmux

@@ -133,7 +133,7 @@ export function VirtualConversation({
             {entry.kind === "message" ? (
               entry.message.decision ? (
                 <DecisionPanel
-                  decision={entry.message.decision}
+                  decision={entry.message.decision.decision_id === pendingDecision?.decision_id ? pendingDecision : entry.message.decision}
                   selectedIndex={decisionSelection}
                   composing={decisionComposing}
                   submitting={decisionSubmitting}
