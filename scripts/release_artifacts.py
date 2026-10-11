@@ -60,7 +60,7 @@ def package(root: Path, stage: Path, output: Path) -> dict:
     # This records build identity. Human/API acceptance is recorded separately.
     (stage / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     output.mkdir(parents=True, exist_ok=True)
-    archive = output / f"gitgo-{product['version']}-win-x64.zip"
+    archive = output / f"gitgo-{product['version']}-win-x64-{manifest['source']['commit'][:8]}.zip"
     with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(stage.rglob('*')):
             if path.is_file():

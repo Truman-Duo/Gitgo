@@ -16,6 +16,7 @@ from pathlib import Path
 
 from backend.core.child_process import INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE
 from backend.core.config import Config, ConfigManager, ProjectConfig
+from backend.version import __version__
 
 
 def _read_lines(stream, output: queue.Queue) -> None:
@@ -45,6 +46,7 @@ class ProtocolClient:
             started = self._next_message(30)
             if started.get("type") != "host_started":
                 raise RuntimeError(f"packaged Host handshake failed: {started}")
+            self.host_version = started.get('host_version')
         except BaseException:
             if self.process.poll() is None:
                 self.process.kill()
@@ -202,6 +204,8 @@ def smoke(executable: Path) -> None:
 
         client = ProtocolClient(executable, env)
         try:
+            if client.host_version != __version__:
+                raise RuntimeError('Packaged Host product version differs from source')
             if os.name == "nt":
                 terminals = client.call("config.terminals", timeout=30)
                 if (not terminals.get("ok") or
