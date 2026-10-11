@@ -118,11 +118,19 @@ def test_real_bun_handoff_and_abrupt_close_keep_then_remove_profile(tmp_path_fac
         owner.kill()
         owner.wait(timeout=5)
         time.sleep(1.5)
-        assert root.exists() and keeper.poll() is None and dashboards[1].poll() is None
+        error_report = base / f"{root.name}.cleanup-error.json"
+        assert root.exists() and keeper.poll() is None and dashboards[1].poll() is None, (
+            error_report.read_text(encoding="utf-8") if error_report.exists()
+            else f"keeper={keeper.poll()}, child={dashboards[1].poll()}"
+        )
         # Abrupt kill deliberately prevents exit callbacks from running.
         dashboards[1].kill()
         dashboards[1].wait(timeout=5)
-        assert keeper.wait(timeout=8) == 0
+        keeper_status = keeper.wait(timeout=8)
+        assert keeper_status == 0, (
+            error_report.read_text(encoding="utf-8") if error_report.exists()
+            else f"keeper={keeper_status}"
+        )
         assert not root.exists()
         report = json.loads((base / "last-result.json").read_text())
         assert report["cleaned"] and report["participants"] == 2
@@ -134,6 +142,14 @@ def test_real_bun_handoff_and_abrupt_close_keep_then_remove_profile(tmp_path_fac
             proc.wait(timeout=5)
         if root.exists():
             launcher.cleanup(root, session["token"], base=base)
+
+
+def test_exited_process_is_not_an_identity_inspection_failure():
+    # Keep Popen's OS handle open so the exited process identity cannot be reused.
+    with subprocess.Popen([sys.executable, "-c", "pass"], stdin=subprocess.DEVNULL) as process:
+        process.wait(timeout=5)
+        with pytest.raises(ProcessLookupError):
+            launcher.WindowsProcess(process.pid)
 
 
 def test_wrong_live_process_is_reported_instead_of_waiting_or_deleting(tmp_path_factory):
