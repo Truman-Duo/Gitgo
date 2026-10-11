@@ -14,19 +14,19 @@ def fixture(root: Path):
     (root / 'cli/dashboard/package.json').write_text(json.dumps({'version': __version__}))
 
 
-def test_versions_must_match_actual_host(tmp_path):
-    fixture(tmp_path)
-    assert validate_versions(tmp_path)['version'] == __version__
-    (tmp_path / 'cli/dashboard/package.json').write_text('{"version":"0.1.0"}')
+def test_versions_must_match_actual_host(tmp_path_factory):
+    fixture(tmp_path_factory)
+    assert validate_versions(tmp_path_factory)['version'] == __version__
+    (tmp_path_factory / 'cli/dashboard/package.json').write_text('{"version":"0.1.0"}')
     with pytest.raises(ValueError, match='disagree'):
-        validate_versions(tmp_path)
+        validate_versions(tmp_path_factory)
 
 
-def test_windows_version_rejects_overflow(tmp_path):
-    fixture(tmp_path)
-    p = tmp_path / 'packaging/product.json'
+def test_windows_version_rejects_overflow(tmp_path_factory):
+    fixture(tmp_path_factory)
+    p = tmp_path_factory / 'packaging/product.json'
     product = json.loads(p.read_text())
     product['windows_version'] = '1.0.0.65536'
     p.write_text(json.dumps(product))
     with pytest.raises(ValueError, match='Windows'):
-        validate_versions(tmp_path)
+        validate_versions(tmp_path_factory)
