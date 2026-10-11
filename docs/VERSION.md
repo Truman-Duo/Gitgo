@@ -1,10 +1,44 @@
-# Gitgo Terminal Preview
+# Gitgo 版本
 
-- Dashboard package: `1.0.0`
-- Native protocol: `1`
-- State schema: `1`
-- Release branch: `dev/truman-9/28/2026`
-- Release snapshot date: `2026-09-28`
-- Prerelease: [`terminal-preview-2026-09-28`](https://github.com/Truman-Duo/Gitgo/releases/tag/terminal-preview-2026-09-28)
+记录日期：2026-10-11。Gitgo 分别记录源码候选、组件版本、通信协议、数据库迁移和发布资产。
 
-该版本号描述首个终端产品预览，不继承早期 Qt Git 管理器的发布状态。构建产物、运行时数据库和本地技术报告不属于源码版本。
+## Alpha 2 源码候选
+
+| 标识 | 当前值 | 含义 |
+|---|---|---|
+| Dashboard package | `1.0.0-alpha.2` | 前端包声明版本 |
+| Native Host | `1.0.0-alpha.2` | 原生宿主声明版本 |
+| 原生协议 | `1` | Dashboard 与 Native Host 的通信协议 |
+| 关系状态 migration | 最高 `13` | 当前源码的状态数据库迁移序列 |
+| 可观测状态 migration | 最高 `2` | 当前源码的可观测数据库迁移序列 |
+| 集成状态 | `feat/alpha2` 功能分支 | 已包含上游 CI 基线；PR 与发布流程分别跟踪 |
+| Alpha 2 ZIP | 已构建，主流程验收通过 | 冻结运行时、连续性、真实 API 及人工终端主流程通过；尚未发布 |
+
+组件版本、协议与 migration 各自表达不同兼容边界。数据库迁移按实现中的追加序列执行；组件声明版本不能单独确定某个构建包含哪些功能。
+
+候选包含 Provider 故障转移、需求问题与答案采用、权限及恢复、状态与事件、交付证据、工具/Shell 改进和终端交互修复。详细范围见 [当前功能](IMPLEMENTATION_STATUS.md)。
+
+已有验证包含后端 1395 passed / 2 skipped、Dashboard 173 passed / 0 failed、类型检查、真实 API 及正式 Git Bash 人工验收。各项覆盖与未通过案例见 [测试结果](VALIDATION.md)。源码回归与冻结产物分别验收；正式终端视觉结果单独记录。
+
+## Alpha 2 构建产物
+
+- 产品：`1.0.0-alpha.2`；Windows 文件版本：`1.0.0.2`。
+- 构建源码：`56e6b1039e7b1fe6fac6be5549fe3201b8d5958b`；工作树干净。
+- ZIP：`gitgo-1.0.0-alpha.2-win-x64-56e6b103.zip`。
+- SHA256：`7ad6fa8812e504c76cfa236ce7d280ef82370614a626b0b6585bf42484de706a`。
+- 包内 `build-manifest.json` 记录 commit/tree 与 174 个文件的摘要；解压后逐文件核对通过。
+- `gitgo.exe --version` 显示产品版本，两个 EXE 的 Windows 文件版本一致。
+- 该 ZIP 正式终端主流程已由用户确认，扩展 Trace 另行核对；尚未生成 Installer，构建机缺少 Inno Setup。
+- 集成入口：[Alpha 2 PR](https://github.com/Truman-Duo/Gitgo/pull/28)。源码合入与公开 Release 分别确认。
+
+## 已发布预览
+
+Windows Terminal Preview 的公开入口为 [terminal-preview-2026-09-28](https://github.com/Truman-Duo/Gitgo/releases/tag/terminal-preview-2026-09-28)。下载时核对发布资产及对应校验文件，以该构建的版本说明判断能力范围。
+
+Alpha 2 使用产品版本 `1.0.0-alpha.2`，Windows 文件版本为 `1.0.0.2`，协议和数据库迁移编号保持各自兼容边界。当前候选与已有预览资产分别维护；正式发布以 PR、CI 和产物验收结果为准。
+
+## 后续版本记录
+
+源码合入后记录实际提交 SHA；生成安装包后记录标签、构建来源和校验信息；完成安装与正式终端验证后更新对应结果。功能实现、主线集成与安装包发布分别标记，保持记录可追溯。
+
+[安装](INSTALL.md) · [已知限制](KNOWN_ISSUES.md) · [贡献与发布要求](../CONTRIBUTING.md)

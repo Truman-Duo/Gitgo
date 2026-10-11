@@ -13,6 +13,9 @@ EVENTS = (
     "decision_required", "completion_gate", "agent_complete", "stream_recovery",
     "session_recovery_resumed", "session_recovery_discarded", "session_recovery_blocked",
     "context_compaction_completed", "context_window_action", "governance_snapshot",
+    "alignment_assessment_started", "alignment_assessment_completed", "alignment_assessment_failed",
+    "alignment_assessment_reused", "alignment_assessment_deferred", "alignment_provider_usage", "architecture_warning",
+    "runtime_fact_committed",
 )
 
 
@@ -133,7 +136,10 @@ def project(record: dict, cas: Path) -> tuple[dict, dict, str]:
             detail_status = "ok"
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
             detail_status = str(error) if isinstance(error, DetailUnavailable) else "invalid_detail"
-    if event == "provider_usage":
+    if event in {"provider_usage", "alignment_provider_usage"}:
+        label("purpose", record.get("purpose") or "task")
+        label("stage", record.get("stage"))
+        number("duration_ms", record.get("duration_ms"))
         usage = record.get("usage") or {}
         raw = usage.get("raw")
         known = set(usage)
@@ -152,6 +158,19 @@ def project(record: dict, cas: Path) -> tuple[dict, dict, str]:
         for key in ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens"):
             if key in known:
                 number(key, usage.get(key))
+    if event.startswith("alignment_assessment_"):
+        label("stage", record.get("stage"))
+        label("trigger", record.get("trigger"))
+        label("status", record.get("status"))
+        label("reason", record.get("reason"))
+        number("duration_ms", record.get("duration_ms"))
+    if event == "architecture_warning":
+        label("kind", record.get("kind"))
+        number("lines", record.get("lines"))
+        number("growth", record.get("growth"))
+        number("finding_count", record.get("finding_count"))
+        number("coverage_issue_count", record.get("coverage_issue_count"))
+        number("scanned_files", record.get("scanned_files"))
     if event == "agent_complete":
         outcome = record.get("outcome") or {}
         label("status", outcome.get("status"))

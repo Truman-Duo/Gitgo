@@ -93,6 +93,23 @@ def _harvest_from_rejection_chain(
            "trigger": "rejection_chain"})
 
 
+def _runtime_llm_from_config(cfg):
+    """Honor explicit environment overrides; otherwise use configured routing."""
+    if cfg is None:
+        return None
+    from backend.core.loop.llm import LLMProvider
+    if all(os.environ.get(k) for k in ("GITGO_LLM_BASE_URL", "GITGO_LLM_API_KEY", "GITGO_LLM_MODEL")):
+        return LLMProvider(cfg[0], cfg[1], cfg[2], protocol=cfg[3], capabilities=cfg[4])
+    from backend.core.llm_config import LLMConfigManager
+    from backend.core.loop.provider_router import configured_runtime_provider
+    config = LLMConfigManager.load()
+    active = next((p for p in config.get("providers", []) if p.get("id") == config.get("active_provider")), None)
+    if active and (active.get("base_url"), active.get("api_key"), active.get("model_id")) == cfg[:3]:
+        return configured_runtime_provider(config)
+    # Older embedded callers can still provide the canonical tuple resolver.
+    return LLMProvider(cfg[0], cfg[1], cfg[2], protocol=cfg[3], capabilities=cfg[4])
+
+
 def _resolve_llm_config(workspace: str) -> tuple | None:
     """解析 LLM 配置。优先级：环境变量 > llm_config.json active_provider。"""
     base_url = os.environ.get("GITGO_LLM_BASE_URL", "")

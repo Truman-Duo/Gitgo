@@ -261,7 +261,8 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
     import time
     results: list[SeedResult] = []
     for seed in seeds:
-        env = dict(os.environ)
+        from backend.core.tools.execution_profile import safe_environment
+        env = safe_environment()
         env["GITGO_TEST_SEED"] = str(seed)
         started = time.monotonic()
         try:

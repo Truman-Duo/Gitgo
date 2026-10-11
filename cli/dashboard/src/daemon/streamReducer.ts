@@ -148,11 +148,15 @@ export function reduceStreamEvent(
       // Show the current provider turn. Previous turns remain in the durable
       // trace instead of being concatenated into one repeated chat response.
       {
-        const committed = options.preservePendingText ? state : commitProgress(state);
+        // Semantic review emits provider telemetry, never public answer text.
+        // A typed text continuation appends to the same public answer draft.
+        if (ev.phase === "alignment") return appendNotice(state, ev);
+        const preserveText = options.preservePendingText || ev.answer_continuation === true;
+        const committed = preserveText ? state : commitProgress(state);
         const noticed = appendNotice(committed, ev);
         return {
         ...noticed,
-        text: options.preservePendingText ? state.text : "",
+        text: preserveText ? state.text : "",
         visibility: ev.task_kind === "answer" ? "public" : "verbose",
         providerStep: ev.step ?? (state.providerStep + 1),
         };

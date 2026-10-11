@@ -11,6 +11,7 @@ import { publishProcessStreamEvent } from "../daemon/processStreams.js";
 import type { StreamEvent } from "../daemon/streamEvents.js";
 
 export type ProcessInfo = {
+  state_revision?: number;
   archived?: boolean;
   display_name?: string;
   session_id?: string;
@@ -168,6 +169,8 @@ export function useLoopData(
   const lastProjectionRef = useRef<{project: string; fingerprint: string} | null>(null);
   const eventRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initializationRetryRef = useRef(0);
+  const snapshotRequestRef = useRef(0);
+  const acceptedSnapshotRef = useRef(0);
 
   // 16ms batch window (OpenCode pattern)
   const batchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -206,11 +209,13 @@ export function useLoopData(
 
   const fetchData = useCallback(async () => {
     if (!client || !project) return;
+    const requestSequence = ++snapshotRequestRef.current;
     let projectionStillInitializing = false;
     try {
       const requestedProject = project;
       const result: any = await loopStatus(client, requestedProject);
-      if (projectRef.current !== requestedProject) return;
+      if (projectRef.current !== requestedProject || requestSequence < acceptedSnapshotRef.current) return;
+      acceptedSnapshotRef.current = requestSequence;
       if (String(result?.storage?.level || "") === "initializing") {
         // A cold Native Host intentionally answers before the SQLite projection
         // is ready. That response is a readiness signal, not an authoritative
@@ -274,9 +279,13 @@ export function useLoopData(
       if (batchRef.current) clearTimeout(batchRef.current);
       batchRef.current = setTimeout(flushBatch, 16);
     } catch (e: any) {
-      if (projectRef.current === project) setError(e.message);
+      if (projectRef.current === project && requestSequence >= acceptedSnapshotRef.current) {
+        acceptedSnapshotRef.current = requestSequence;
+        setError(e.message);
+      }
     } finally {
-      if (!projectionStillInitializing) setLoading(false);
+      if (!projectionStillInitializing && projectRef.current === project
+          && requestSequence >= acceptedSnapshotRef.current) setLoading(false);
     }
   }, [client, project, flushBatch]);
 
@@ -286,11 +295,12 @@ export function useLoopData(
       "runtime_ack", "task_admitted", "agent_started", "agent_terminal", "agent_complete",
       "state_changed", "daemon_started", "daemon_stopped",
       "provider_usage", "tool_result", "decision_required", "user_decision_received",
+      "provider_route_activated", "provider_route_selected", "provider_route_failed", "provider_route_skipped",
       "decision_resumed", "context_compaction_requested", "context_compaction_completed",
       "context_compaction_failed", "session_rewound", "session_recovery_resumed",
       "session_recovery_discarded", "session_recovery_blocked", "workspace_dirty",
       "governance_signals", "lessons_harvested", "lesson_harvest_failed", "storage_health",
-      "runtime_projection_ready", "coordination_event",
+      "runtime_projection_ready", "runtime_fact", "runtime_projection_failed", "coordination_event",
       "coordination_event_resolved", "coordination_observation_failed",
     ]);
     const unsubscribe = client.subscribeEvents(event => {

@@ -3,7 +3,7 @@
 Data model mirrors cc-switch's provider pattern (simplified):
   - Multiple named providers, each with base_url/api_key/model_id
   - One active_provider at a time
-  - Optional failover order (for future use)
+  - Explicitly enabled, ordered backup providers
 
 Configuration is GLOBAL (not per-project): stored in the user Gitgo directory
 so all projects share one provider set. Thread-safe for native/MCP transports via _lock.
@@ -39,6 +39,8 @@ class LLMProvider:
     limits_source: str = "default"
     id: str = ""
     created_at: str = ""
+    kind: str = "remote"
+    auth_mode: str = "api_key"
 
     def __post_init__(self):
         if not self.id:
@@ -69,6 +71,8 @@ class LLMProvider:
             ) or 4096),
             limits_source=str(d.get("limits_source", "default")),
             created_at=d.get("created_at", ""),
+            kind=str(d.get("kind", "remote")),
+            auth_mode=str(d.get("auth_mode", "api_key")),
         )
 
     def runtime_capabilities(self) -> dict:
@@ -186,6 +190,9 @@ class LLMConfigManager:
                 provider["id"] = provider_id
             secret_ref = str(provider.get("secret_ref") or f"provider:{provider_id}:api_key")
             raw_key = str(provider.pop("api_key", "") or "")
+            if provider.get("auth_mode") == "none":
+                provider.pop("secret_ref", None)
+                continue
             provider["secret_ref"] = secret_ref
             secret_refs.add(secret_ref)
             if raw_key:
@@ -276,6 +283,8 @@ class LLMConfigManager:
             if len(config["providers"]) == before:
                 return False
 
+            config["failover_order"] = [p for p in config.get("failover_order", []) if p != provider_id]
+
             if config.get("active_provider") == provider_id:
                 config["active_provider"] = config["providers"][0]["id"] if config["providers"] else ""
             LLMConfigManager._save_unlocked(config)
@@ -292,3 +301,22 @@ class LLMConfigManager:
                     LLMConfigManager._save_unlocked(config)
                     return LLMProvider.from_dict(p)
         return None
+
+    @staticmethod
+    def configure_failover(enabled: bool, order: list[str], circuit_breaker: dict | None = None) -> dict:
+        from backend.core.loop.provider_policy import failover_settings
+        if type(enabled) is not bool or not isinstance(order, list) or any(not isinstance(p, str) for p in order):
+            raise ValueError("Failover needs a boolean enabled and a list of provider IDs")
+        if len(order) > 8 or len(set(order)) != len(order):
+            raise ValueError("Select at most eight unique backup providers")
+        with LLMConfigManager._lock:
+            config = LLMConfigManager._load_unlocked()
+            known = {p["id"] for p in config["providers"]}
+            if set(order) - known:
+                raise ValueError("Backup queue contains an unknown provider")
+            config.update(failover_enabled=enabled, failover_order=list(order))
+            if circuit_breaker is not None:
+                config["circuit_breaker"] = dict(circuit_breaker)
+            config["circuit_breaker"] = failover_settings(config)
+            LLMConfigManager._save_unlocked(config)
+            return {k: config[k] for k in ("failover_enabled", "failover_order", "circuit_breaker")}

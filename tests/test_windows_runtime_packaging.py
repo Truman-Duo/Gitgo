@@ -67,7 +67,8 @@ def test_release_entrypoint_is_fail_closed_and_never_pushes():
     root = Path(__file__).resolve().parents[1]
     script = (root / "packaging" / "release_windows.ps1").read_text(encoding="utf-8")
     assert "scripts\\verify_release_privacy.py" in script
-    assert "-m pytest tests -q" in script
+    assert "scripts\\run_source_tests.py" in script
+    assert "--packages $TestPackages tests -q" in script
     assert '"Dashboard test suite"' in script
     assert '"Dashboard production build"' in script
     assert '"build_windows.ps1"' in script

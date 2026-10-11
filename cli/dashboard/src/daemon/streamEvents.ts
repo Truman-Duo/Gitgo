@@ -93,6 +93,8 @@ export type TraceLifecycleEvent = {
   event: "provider_request_started" | "provider_response_completed" |
     "provider_response_incomplete" | "provider_usage" |
     "provider_capability_fallback" |
+    "provider_route_activated" | "provider_route_selected" | "provider_route_failed" | "provider_route_skipped" |
+    "provider_configuration_changed" |
     "governance_snapshot" | "context_window_action" |
     "context_compaction_completed" | "completion_gate" | "agent_started" |
     "agent_terminal" | "agent_complete" | "task_bundle_delegated" |
@@ -110,7 +112,7 @@ export type TraceLifecycleEvent = {
     "decision_resumed" | "context_compaction_requested" |
     "context_compaction_failed" | "stream_recovery" | "progress_summary" |
     "lessons_harvested" | "lesson_harvest_failed" | "lessons_verified" | "lessons_discarded" |
-    "provider_switched";
+    "provider_switched" | "architecture_warning" | "runtime_fact" | "runtime_projection_failed";
   process_id?: string;
   step?: number;
   task_kind?: string;

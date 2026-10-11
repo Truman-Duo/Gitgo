@@ -27,6 +27,8 @@ export function reconcileChatMessages(
 
   const optimistic = current.filter((message) =>
     message.message_id?.startsWith("optimistic:") || message.awaiting_persistence
+    || message.message_id?.startsWith("transport-error:")
+    || message.message_id?.startsWith("child-decision-error:")
     || message.kind === "knowledge_notice",
   );
   for (const pending of optimistic) {
@@ -162,7 +164,10 @@ export function useChat(
         && current.process_id === recoveredDecision.process_id
         && current.decision_id === recoveredDecision.decision_id
       ) {
-        return current;
+        // A live response may have an older projection of the same card.
+        // Reconcile its full payload instead of permanently keeping a heading
+        // that lost the question nodes on the transport boundary.
+        return JSON.stringify(current) === JSON.stringify(recoveredDecision) ? current : recoveredDecision;
       }
       return recoveredDecision;
     });
@@ -201,11 +206,13 @@ export function useChat(
             if (ack.requestId) setActiveRequestId(ack.requestId);
             if (ack.processId) setActiveProcessId(ack.processId);
           }
-          if (pendingDecision) {
+          if (pendingDecision && ack.stage === "admitted") {
             answeredDecisions.current.add(pendingDecision.decision_id);
             setMessages(prev => prev.map(row => row.decision?.decision_id === pendingDecision.decision_id
               ? {...row, decision_answer: text, status: "answered", awaiting_persistence: true} : row));
-            // The Host has durably accepted the choice. Collapse the card now;
+            // Transport "accepted" is not a decision result. Only Host
+            // admission follows durable validation of this exact choice.
+            // Collapse the card now;
             // resumed tool/model work continues as later timeline activity.
             setPendingDecision(null);
           }
@@ -272,7 +279,8 @@ export function useChat(
           setMessages((prev) => [...prev.filter(row => !round?.task_id || row.message_id !== `outcome:${round.task_id}`), {
             // A pre-admission transport error has no durable backend twin.  Do
             // not mark it as an optimistic row awaiting persistence forever;
-            // the next authoritative transcript poll may replace it.
+            // Keep it as a local notice across polls so a rejected answer
+            // cannot disappear while its unchanged decision still awaits input.
             message_id: round?.task_id ? `outcome:${round.task_id}` : `transport-error:${startTime}`,
             turn_id: round?.task_id || optimisticTurn,
             awaiting_persistence: Boolean(round?.task_id),

@@ -38,14 +38,21 @@ class ProviderProbe:
     def probe(
         self, *, base_url: str, api_key: str, model_id: str,
         protocol: str = "auto", timeout: int = 30,
+        kind: str = "remote", auth_mode: str = "api_key",
     ) -> ProviderProbeResult:
+        from .provider_policy import provider_endpoint
+        from .provider_transport import LocalProviderTransport
+        base_url = provider_endpoint(base_url, kind=kind, auth_mode=auth_mode)
+        if auth_mode == "none":
+            api_key = ""
+        transport = self.transport or (LocalProviderTransport() if kind == "local" else None)
         requested = ProviderProtocol(protocol)
         candidates = self._candidates(base_url, requested)
         failures = []
         for candidate in candidates:
             try:
                 return self._probe_one(
-                    base_url, api_key, model_id, candidate, timeout,
+                    base_url, api_key, model_id, candidate, timeout, transport=transport,
                 )
             except Exception as exc:
                 failures.append(f"{candidate.value}: {exc}")
@@ -55,11 +62,11 @@ class ProviderProbe:
 
     def _probe_one(
         self, base_url: str, api_key: str, model_id: str,
-        protocol: ProviderProtocol, timeout: int,
+        protocol: ProviderProtocol, timeout: int, *, transport=None,
     ) -> ProviderProbeResult:
         provider = LLMProvider(
             base_url, api_key, model_id, protocol=protocol.value,
-            transport=self.transport,
+            transport=transport or self.transport,
         )
         response = provider.chat(
             [{"role": "user", "content": "Reply with exactly: pong"}],

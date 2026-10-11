@@ -86,6 +86,8 @@ class AgentProcess:
     task_budget: Any = field(default=None, repr=False)
     budget_lease: dict[str, Any] = field(default_factory=dict, repr=False)
     context_version: int = 1
+    durable_revision: int = 0
+    _checkpoint_lock: Any = field(default_factory=threading.RLock, repr=False)
     _context_lock: Any = field(default_factory=threading.RLock, repr=False)
     _coordination_lock: Any = field(default_factory=threading.RLock, repr=False)
     _child_sequence: int = field(default=0, repr=False)

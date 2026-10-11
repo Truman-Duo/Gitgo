@@ -135,6 +135,9 @@ class AgentTool:
     # projection of existing AgentTools; ToolPipeline expands this plan and
     # sends every component through the same permission/receipt/signal path.
     composite_spec: dict | None = None
+    # Host-only preview of a control operation's prospective requirement state.
+    # Dynamic definitions cannot supply this hook; it grants no permission.
+    alignment_contract: Callable | None = None
 
     def __post_init__(self) -> None:
         self.parameters = normalize_tool_parameters(self.parameters)

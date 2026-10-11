@@ -8,6 +8,7 @@ user choice through a validated, resumable decision request.
 from __future__ import annotations
 
 import ast
+import json
 import math
 import operator
 import uuid
@@ -198,7 +199,8 @@ def create_user_decision(process, args: dict) -> dict:
     if not question or not why:
         raise ValueError("question and why_user_must_decide are required")
     raw_options = args.get("options", []) or []
-    if not isinstance(raw_options, list) or not 2 <= len(raw_options) <= 3:
+    compact = kind == "clarification"
+    if not isinstance(raw_options, list) or not (0 <= len(raw_options) <= 3 if compact else 2 <= len(raw_options) <= 3):
         raise ValueError(
             "request_user_decision requires 2..3 business options; use the Host "
             "free-form Discuss/Amend affordance instead of adding a defer option"
@@ -209,6 +211,8 @@ def create_user_decision(process, args: dict) -> dict:
             f"state_topic is required for {kind}; provide a stable semantic topic "
             "so the newest confirmed answer supersedes stale state"
         )
+    if compact and not raw_options and not args.get("allow_free_form", True):
+        raise ValueError("an open clarification must allow a free-form reply")
     options = []
     labels: set[str] = set()
     recommended_count = 0
@@ -220,13 +224,17 @@ def create_user_decision(process, args: dict) -> dict:
         if not isinstance(raw, dict):
             raise ValueError("every decision option must be an object")
         option = {name: str(raw.get(name, "")).strip() for name in required}
-        missing = [name for name, value in option.items() if not value]
+        if compact:
+            option["description"] = str(raw.get("description") or raw.get("immediate_effect") or "").strip()
+        missing = [name for name, value in option.items() if not value and (not compact or name == "label")]
         if missing:
             raise ValueError("decision option missing: " + ", ".join(missing))
         if option["label"] in labels:
             raise ValueError("decision option labels must be unique")
         labels.add(option["label"])
         option["recommended"] = bool(raw.get("recommended", False))
+        if raw.get("action") and compact:
+            raise ValueError("clarifications cannot carry authority actions")
         if raw.get("action"):
             option["action"] = str(raw.get("action"))
         recommended_count += int(option["recommended"])
@@ -247,6 +255,33 @@ def create_user_decision(process, args: dict) -> dict:
         "task_id": process.active_task_id or process.process_id,
         "process_id": process.process_id,
     }
+    questions = args.get("questions")
+    if questions is not None:
+        if kind != "clarification" or not isinstance(questions, list) or not 1 <= len(questions) <= 8:
+            raise ValueError("a clarification round requires 1..8 questions")
+        if len(json.dumps(questions, ensure_ascii=False).encode()) > 32_000:
+            raise ValueError("clarification round exceeds 32KB")
+        ids = set()
+        for item in questions:
+            if not isinstance(item, dict) or not item.get("node_id") or item["node_id"] in ids:
+                raise ValueError("round questions require unique node_id values")
+            ids.add(item["node_id"])
+            if not item.get("question") or not item.get("state_topic") or item.get("kind") == "permission":
+                raise ValueError("round questions require question, state_topic and non-permission kind")
+            if item.get("kind", "clarification") not in {"clarification", "preference", "direction", "verification", "choice", "checkpoint"} or not item.get("why_user_must_decide"):
+                raise ValueError("round questions require a supported kind and user-decision reason")
+            choices = item.get("options") or []
+            simple = item.get("kind", "clarification") == "clarification"
+            if not isinstance(choices, list) or not (0 <= len(choices) <= 3 if simple else 2 <= len(choices) <= 3):
+                raise ValueError("invalid round question options")
+            if not choices and not item.get("allow_free_form", True):
+                raise ValueError("open questions must allow free-form answers")
+            if any(not isinstance(o, dict) or o.get("action") or not str(o.get("label") or "").strip()
+                   or (not simple and any(not str(o.get(f) or "").strip() for f in required)) for o in choices):
+                raise ValueError("invalid option or authority action in alignment round")
+            if len({o["label"] for o in choices}) != len(choices) or sum(bool(o.get("recommended")) for o in choices) > 1:
+                raise ValueError("round options must be unique with at most one recommendation")
+        request["questions"] = questions
     from backend.core.loop.question_broker import route_question
     request = route_question(process, request)
     if isinstance(args.get("permission_request"), dict):
@@ -261,8 +296,11 @@ def create_user_decision(process, args: dict) -> dict:
     return {"status": "awaiting_user", **request}
 
 
-def confirmed_user_state(ledger: list[dict]) -> list[dict]:
+def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> list[dict]:
     """Project the newest user-confirmed value for each semantic topic."""
+    from .alignment_evidence import resolved_answer, source_answer
+    if task_id is not None:
+        ledger = [e for e in ledger if e.get('task_id') == task_id]
     requests = {
         str(item.get("decision_id")): item
         for item in ledger
@@ -270,19 +308,50 @@ def confirmed_user_state(ledger: list[dict]) -> list[dict]:
     }
     latest: dict[str, dict] = {}
     for event in ledger:
+        if event.get('event') == 'user_decision_interpreted':
+            topic = event.get('state_topic')
+            source = source_answer(ledger, event.get('task_id'), event.get('decision_id'), event.get('source_node_id', ''))
+            resolution = resolved_answer(ledger, source, topic) if source else None
+            if resolution and topic:
+                latest[topic] = {'topic': topic, 'kind': source.get('kind', 'clarification'),
+                    'value': resolution['value'], 'disposition': resolution['disposition'],
+                    'conditions': source['answer'], 'decision_id': source['decision_id'],
+                    'confirmed_at': source.get('created_at', ''), 'supersedes_decision_id': ''}
+            elif topic:
+                latest.pop(topic, None)
+            continue
         if event.get("event") != "user_decision_received":
             continue
         request = requests.get(str(event.get("decision_id") or ""), {})
+        for item in request.get("questions") or []:
+            response = (event.get("answers") or {}).get(item["node_id"])
+            resolution = resolved_answer(ledger, {**event, **(response or {}), 'kind': item.get('kind', 'clarification')}, item['state_topic']) if response else None
+            if resolution:
+                latest[item["state_topic"]] = {
+                    "topic": item["state_topic"], "kind": item.get("kind", "clarification"),
+                    "value": resolution['value'], 'disposition': resolution['disposition'],
+                    "conditions": response["answer"], "decision_id": event["decision_id"],
+                    "confirmed_at": str(event.get("created_at") or ""),
+                    "supersedes_decision_id": item.get("supersedes_decision_id", ""),
+                }
+            elif response:
+                latest.pop(item['state_topic'], None)
         kind = str(request.get("kind") or "choice")
-        if kind in {"permission", "recovery"}:
+        from .alignment_evidence import CONTROL_DECISION_KINDS
+        if kind in CONTROL_DECISION_KINDS:
             continue
         topic = str(request.get("state_topic") or "").strip()
         if not topic:
             continue
+        resolution = resolved_answer(ledger, {**event, 'kind': kind}, topic)
+        if not resolution:
+            # A newer undecided answer supersedes old intent as well.
+            latest.pop(topic, None)
+            continue
         latest[topic] = {
             "topic": topic,
             "kind": kind,
-            "value": str(event.get("selected_label") or event.get("answer") or ""),
+            "value": resolution['value'], 'disposition': resolution['disposition'],
             "conditions": str(event.get("answer") or ""),
             "decision_id": str(event.get("decision_id") or ""),
             "confirmed_at": str(event.get("created_at") or ""),
@@ -355,6 +424,7 @@ def create_completion_exception_decision(process, gate_status: dict) -> dict:
     Facts are never rewritten as successful. The user may accept only gates
     explicitly marked degradable, producing a distinct degraded outcome.
     """
+    from .completion_gates import contract_digest
     gates = [dict(item) for item in list(gate_status.get("gates") or [])]
     all_degradable = bool(gates) and all(
         item.get("degradable_by_explicit_user_decision") is True for item in gates
@@ -369,12 +439,12 @@ def create_completion_exception_decision(process, gate_status: dict) -> dict:
         "immediate_effect": (
             "Finish this task as degraded with every unresolved gate recorded."
             if all_degradable else
-            "Return the task to the main process with your amended scope."
+            "Stop this execution and return the preserved work for a new scope request."
         ),
         "downstream_effect": (
             "History and reports distinguish it from a verified completion."
             if all_degradable else
-            "The task contract must be revised before another completion attempt."
+            "Submit a concrete new task scope; this decision does not waive a safety requirement."
         ),
         "risks": "Some requested verification or deliverables remain incomplete.",
         "reversibility": "A later task can satisfy the preserved gates.",
@@ -404,7 +474,7 @@ def create_completion_exception_decision(process, gate_status: dict) -> dict:
             {
                 "label": "Stop safely",
                 "principle": "Do not spend more work on an unsatisfied contract.",
-                "immediate_effect": "Resume only to produce a truthful incomplete-task report.",
+                "immediate_effect": "The Host stops this task without another model call and preserves its incomplete result.",
                 "downstream_effect": "Durable evidence remains available for a later continuation.",
                 "risks": "The requested task is not delivered in this run.",
                 "reversibility": "A future task can continue from the saved state.",
@@ -417,6 +487,7 @@ def create_completion_exception_decision(process, gate_status: dict) -> dict:
         "task_id": process.active_task_id or process.process_id,
         "process_id": process.process_id,
         "error_catalog_id": "GITGO-E6105",
+        "contract_digest": contract_digest(process),
         "completion_gate_ids": [str(item.get("gate_id") or "") for item in gates],
         "completion_gates": gates,
     }
@@ -433,6 +504,8 @@ def create_completion_exception_decision(process, gate_status: dict) -> dict:
 
 
 def format_decision_request(request: dict) -> str:
+    if request.get("questions"):
+        return "\n\n".join(f"{i + 1}. " + format_decision_request(q) for i, q in enumerate(request["questions"]))
     lines = [
         str(request.get("question", "")),
         "",
@@ -441,6 +514,9 @@ def format_decision_request(request: dict) -> str:
     ]
     for index, option in enumerate(request.get("options", []) or [], start=1):
         marker = "（建议）" if option.get("recommended") else ""
+        if request.get("kind") == "clarification":
+            lines.append(f"{index}. {option.get('label', '')}{marker}：{option.get('description') or option.get('immediate_effect') or ''}")
+            continue
         lines.extend([
             f"{index}. {option.get('label', '')}{marker}",
             f"   原理：{option.get('principle', '')}",
@@ -452,3 +528,29 @@ def format_decision_request(request: dict) -> str:
     if request.get("allow_free_form", True):
         lines.extend(["", "你也可以直接说明自己的选择或补充条件。"])
     return "\n".join(lines).strip()
+
+
+def validate_round_answer(pending: dict, instruction: str) -> dict:
+    """Parse all answers before mutating pending state; identity comes from Host."""
+    raw = json.loads(instruction)
+    answers = raw.get("answers") if isinstance(raw, dict) else None
+    questions = pending.get("questions") or []
+    if not isinstance(answers, dict) or set(answers) != {q["node_id"] for q in questions}:
+        raise ValueError("answer every question in the current round")
+    result = {}
+    for q in questions:
+        value = answers[q["node_id"]]
+        if not isinstance(value, str) or not value.strip() or len(value) > 8_000:
+            raise ValueError("each round answer must be nonempty text of at most 8000 characters")
+        value = value.strip()
+        selected = None
+        if value.startswith("Choose option "):
+            index = value.removeprefix("Choose option ").split(":", 1)[0].strip()
+            if not index.isdigit() or not 1 <= int(index) <= len(q.get("options") or []):
+                raise ValueError("invalid round option")
+            selected = q["options"][int(index) - 1]
+        elif not q.get("allow_free_form", True):
+            raise ValueError("this question requires a listed choice")
+        result[q["node_id"]] = {"answer": value, "state_topic": q["state_topic"],
+                                "selected_label": (selected or {}).get("label", "")}
+    return result

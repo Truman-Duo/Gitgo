@@ -25,10 +25,12 @@ type Mode = "list" | "edit";
 type ProvidersView = "projects" | "detail";
 type FocusCol = "main" | "failover";
 
-const FIELDS = ["name", "base_url", "api_key", "model_id", "protocol", "context_window", "max_output_tokens"] as const;
-const FIELD_LABELS = ["Name", "Base URL", "API Key", "Model ID", "Protocol", "Context", "Max Output"] as const;
-const CONTEXT_PRESETS = [256_000, 512_000, 1_000_000, 2_000_000] as const;
-type EditForm = { name: string; base_url: string; api_key: string; model_id: string; protocol: NonNullable<LLMProvider["protocol"]>; context_window: string; max_output_tokens: string };
+const FIELDS = ["name", "kind", "auth_mode", "base_url", "api_key", "model_id", "protocol", "context_window", "max_output_tokens"] as const;
+const FIELD_LABELS = ["Name", "Location", "Auth", "Base URL", "API Key", "Model ID", "Protocol", "Context", "Max Output"] as const;
+const CONTEXT_PRESETS = [8192, 32768, 64000, 128000, 256_000, 512_000, 1_000_000, 2_000_000] as const;
+type EditForm = { name: string; kind: "remote" | "local"; auth_mode: "api_key" | "none"; base_url: string; api_key: string; model_id: string; protocol: NonNullable<LLMProvider["protocol"]>; context_window: string; max_output_tokens: string };
+const emptyForm = (): EditForm => ({name: "", kind: "remote", auth_mode: "api_key", base_url: "", api_key: "", model_id: "", protocol: "openai_chat", context_window: "128000", max_output_tokens: "4096"});
+const isChoiceField = (field: string) => ["protocol", "context_window", "kind", "auth_mode"].includes(field);
 
 type ProvidersCtx = {
   mode: Mode;
@@ -68,8 +70,8 @@ function resolveProvidersKey(ctx: ProvidersCtx, input: string, key: any): Provid
     if (matchChord("tabAny", input, key)) return [{ type: "editNextField" }];
     if (matchChord("enter", input, key)) return [{ type: "editAdvance" }];
     const field = FIELDS[ctx.editFieldIdx];
-    if ((field === "protocol" || field === "context_window") && matchChord("left", input, key)) return [{ type: "editChoice", delta: -1 }];
-    if ((field === "protocol" || field === "context_window") && matchChord("right", input, key)) return [{ type: "editChoice", delta: 1 }];
+    if (isChoiceField(field) && matchChord("left", input, key)) return [{ type: "editChoice", delta: -1 }];
+    if (isChoiceField(field) && matchChord("right", input, key)) return [{ type: "editChoice", delta: 1 }];
     if (matchChord("backspace", input, key)) return [{ type: "editText", op: "backspace" }];
     if (matchChord("delete", input, key)) return [{ type: "editText", op: "delete" }];
     if (matchChord("left", input, key)) return [{ type: "editText", op: "left" }];
@@ -115,20 +117,22 @@ function resolveProvidersKey(ctx: ProvidersCtx, input: string, key: any): Provid
 }
 
 export const ProvidersTab = memo(function ProvidersTab({
-  client, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused,
+  client, project, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused,
 }: ConfigTabProps) {
   const {
-    providers, activeProvider,
+    providers, activeProvider, failoverEnabled, failoverOrder, configureFailover, error, health,
     loading, saveProvider, switchProvider, deleteProvider, fetchStatus,
-  } = useLLMConfig(client);
+  } = useLLMConfig(client, project);
 
   const [mode, setMode] = useState<Mode>("list");
   const [providersView, setProvidersView] = useState<ProvidersView>("projects");
   const [focusCol, setFocusCol] = useState<FocusCol>("main");
   const [mainSelIdx, setMainSelIdx] = useState(0);
   const [failoverSelIdx, setFailoverSelIdx] = useState(0);
+  const [routingEdit, setRoutingEdit] = useState<{providerId?: string; value: number} | null>(null);
+  const [routingSaving, setRoutingSaving] = useState(false);
 
-  const [editForm, setEditForm] = useState<EditForm>({ name: "", base_url: "", api_key: "", model_id: "", protocol: "openai_chat", context_window: "128000", max_output_tokens: "4096" });
+  const [editForm, setEditForm] = useState<EditForm>(emptyForm);
   const [editFieldIdx, setEditFieldIdx] = useState(0);
   const [editId, setEditId] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
@@ -145,16 +149,28 @@ export const ProvidersTab = memo(function ProvidersTab({
     contentFocused ? "focused" : "non-focused", "row",
   );
   const PROTOCOL_OPTIONS: EditForm["protocol"][] = ["auto", "openai_responses", "openai_chat", "anthropic_messages"];
+  const backupCandidates = useMemo(() => {
+    const selected = failoverOrder.map(id => providers.find(p => p.id === id)).filter((p): p is LLMProvider => Boolean(p) && p!.id !== activeProvider);
+    return [...selected, ...providers.filter(p => p.id !== activeProvider && !failoverOrder.includes(p.id))];
+  }, [providers, failoverOrder, activeProvider]);
+  const selectedProvider = focusCol === "main" ? providers[mainSelIdx] : backupCandidates[failoverSelIdx];
+
+  const updateFailover = useCallback(async (enabled: boolean, order: string[]) => {
+    setStatusMsg("Saving failover...");
+    const ok = await configureFailover(enabled, order);
+    setStatusMsg(ok ? "Failover saved; new requests use this configuration" : "Failover save failed");
+    return ok;
+  }, [configureFailover]);
 
   const suggestions = useMemo<Suggestion[]>(() => {
     if (!cmdInput.value.startsWith("/")) return [];
     const prefix = cmdInput.value.slice(1).toLowerCase();
     const commands: Suggestion[] = [
       {label: "/new", description: "Create provider", inputMode: "execute"},
+      {label: "/local", description: "Create local API provider", inputMode: "execute"},
       {label: "/edit", description: "Edit selected provider", inputMode: "execute"},
       {label: "/delete", description: "Delete selected provider", inputMode: "execute"},
       {label: "/test", description: "Test selected provider", inputMode: "execute"},
-      {label: "/switch", description: "Use selected provider", inputMode: "execute"},
     ];
     return commands.filter((command) => command.label.slice(1).startsWith(prefix));
   }, [cmdInput.value]);
@@ -168,12 +184,11 @@ export const ProvidersTab = memo(function ProvidersTab({
   }, [report, providersView, mode]);
 
   const activeEditField = FIELDS[editFieldIdx];
-  const editUsesNormalBar = mode === "edit" && activeEditField !== "protocol" && activeEditField !== "context_window";
+  const editUsesNormalBar = mode === "edit" && !isChoiceField(activeEditField);
 
-  // Fixed operations use CommandBar; values use NormalBar; finite protocol and
-  // context choices stay in the panel and use left/right.
+  // Commands create/edit/test resources. Finite settings remain panel choices.
   useEffect(() => {
-    if (!contentFocused || (mode === "edit" && !editUsesNormalBar)) {
+    if (!contentFocused || routingEdit || (mode === "edit" && !editUsesNormalBar)) {
       onFooter({ hidden: true });
       return () => onFooter(null);
     }
@@ -185,7 +200,7 @@ export const ProvidersTab = memo(function ProvidersTab({
       });
       return () => onFooter(null);
     }
-    const statusParts = [statusMsg, testResult].filter(Boolean) as string[];
+    const statusParts = [error, statusMsg, testResult].filter(Boolean) as string[];
     onFooter({
       kind: "command",
       cmdInput,
@@ -197,17 +212,17 @@ export const ProvidersTab = memo(function ProvidersTab({
       cmdResult: "",
     });
     return () => onFooter(null);
-  }, [cmdInput.value, cmdInput.cursor, statusMsg, testResult, mode, editUsesNormalBar,
-      suggestions, suggestionIdx, onFooter, cmdInput, contentFocused]);
+  }, [cmdInput.value, cmdInput.cursor, statusMsg, testResult, error, mode, editUsesNormalBar,
+      suggestions, suggestionIdx, onFooter, cmdInput, contentFocused, routingEdit]);
 
   useEffect(() => {
     if (!loading && onStatusUpdate) {
       const activeName = providers.find((p) => p.id === activeProvider)?.name || "none";
       onStatusUpdate(
-        `● ${activeName} active  |  ${providers.length} providers  |  automatic failover unavailable`
+        `● ${activeName} active  |  ${providers.length} providers  |  failover ${failoverEnabled ? "on" : "off"} · ${failoverOrder.filter(id => id !== activeProvider).length} backups`
       );
     }
-  }, [loading, providers, activeProvider, onStatusUpdate]);
+  }, [loading, providers, activeProvider, failoverEnabled, failoverOrder, onStatusUpdate]);
 
   const clampSel = useCallback((idx: number, max: number) => {
     return Math.max(0, Math.min(idx, Math.max(0, max)));
@@ -217,10 +232,10 @@ export const ProvidersTab = memo(function ProvidersTab({
     if (p) {
       // Secrets are never round-tripped from the backend. Empty means retain
       // the existing key; entering text explicitly replaces it.
-      setEditForm({ name: p.name, base_url: p.base_url, api_key: "", model_id: p.model_id, protocol: p.protocol || "openai_chat", context_window: String(p.context_window || 128000), max_output_tokens: String(p.max_output_tokens || 4096) });
+      setEditForm({ name: p.name, kind: p.kind || "remote", auth_mode: p.auth_mode || "api_key", base_url: p.base_url, api_key: "", model_id: p.model_id, protocol: p.protocol || "openai_chat", context_window: String(p.context_window || 128000), max_output_tokens: String(p.max_output_tokens || 4096) });
       setEditId(p.id);
     } else {
-      setEditForm({ name: "", base_url: "", api_key: "", model_id: "", protocol: "openai_chat", context_window: "128000", max_output_tokens: "4096" });
+      setEditForm(emptyForm());
       setEditId("");
     }
     setEditFieldIdx(0);
@@ -232,7 +247,7 @@ export const ProvidersTab = memo(function ProvidersTab({
     setMode("list");
     setEditFieldIdx(0);
     setEditId("");
-    setEditForm({ name: "", base_url: "", api_key: "", model_id: "", protocol: "openai_chat", context_window: "128000", max_output_tokens: "4096" });
+    setEditForm(emptyForm());
     setSuggestionIdx(0);
     cmdInput.setValue("");
     setStatusMsg(status);
@@ -240,7 +255,7 @@ export const ProvidersTab = memo(function ProvidersTab({
 
   const commitTextField = useCallback((fieldIndex: number) => {
     const field = FIELDS[fieldIndex];
-    if (field !== "protocol" && field !== "context_window") {
+    if (!isChoiceField(field)) {
       setEditForm(current => ({...current, [field]: cmdInput.value}));
     }
   }, [cmdInput.value]);
@@ -250,7 +265,7 @@ export const ProvidersTab = memo(function ProvidersTab({
     const bounded = Math.max(0, Math.min(FIELDS.length - 1, nextIndex));
     setEditFieldIdx(bounded);
     const field = FIELDS[bounded];
-    if (field !== "protocol" && field !== "context_window") {
+    if (!isChoiceField(field)) {
       cmdInput.setValue(String(editForm[field] || ""));
     } else {
       cmdInput.setValue("");
@@ -262,11 +277,12 @@ export const ProvidersTab = memo(function ProvidersTab({
       id: editId, name: form.name, base_url: form.base_url,
       api_key: form.api_key, model_id: form.model_id, created_at: "",
       protocol: form.protocol, capabilities: {},
+      kind: form.kind, auth_mode: form.auth_mode,
       context_window: Number(form.context_window),
       max_output_tokens: Number(form.max_output_tokens),
       api_key_present: Boolean(editId), api_key_display: "",
     };
-    if (!p.name || !p.base_url || !p.model_id || (!editId && !p.api_key)
+    if (!p.name || !p.base_url || !p.model_id || (!editId && !p.api_key && p.auth_mode !== "none")
         || !Number.isInteger(p.context_window) || p.context_window < 1024
         || !Number.isInteger(p.max_output_tokens) || p.max_output_tokens < 1
         || p.max_output_tokens >= p.context_window) {
@@ -323,9 +339,13 @@ export const ProvidersTab = memo(function ProvidersTab({
       case "new":
         openEdit();
         break;
+      case "local":
+        openEdit();
+        setEditForm({...emptyForm(), kind: "local", auth_mode: "none", base_url: "http://127.0.0.1:11434/v1", context_window: "32768"});
+        break;
       case "edit": {
         if (providersView === "detail") {
-          const p = focusCol === "main" ? providers[mainSelIdx] : providers[failoverSelIdx];
+          const p = selectedProvider;
           if (p) openEdit(p);
           else setStatusMsg("No provider selected");
         } else {
@@ -337,7 +357,7 @@ export const ProvidersTab = memo(function ProvidersTab({
       }
       case "delete": {
         if (providersView === "detail") {
-          const p = focusCol === "main" ? providers[mainSelIdx] : providers[failoverSelIdx];
+          const p = selectedProvider;
           if (p) handleDelete(p.id);
         } else {
           const active = providers.find((p) => p.id === activeProvider);
@@ -347,7 +367,7 @@ export const ProvidersTab = memo(function ProvidersTab({
       }
       case "test": {
         if (providersView === "detail") {
-          const p = focusCol === "main" ? providers[mainSelIdx] : providers[failoverSelIdx];
+          const p = selectedProvider;
           if (p) handleTest(p);
         } else {
           const active = providers.find((p) => p.id === activeProvider);
@@ -357,7 +377,7 @@ export const ProvidersTab = memo(function ProvidersTab({
       }
       case "switch": {
         if (providersView === "detail") {
-          const p = focusCol === "main" ? providers[mainSelIdx] : providers[failoverSelIdx];
+          const p = selectedProvider;
           if (p) handleSwitch(p.id);
         } else {
           setStatusMsg("Enter provider detail to switch");
@@ -368,7 +388,7 @@ export const ProvidersTab = memo(function ProvidersTab({
         setStatusMsg(`Unknown: ${clean}`);
     }
   }, [providersView, focusCol, mainSelIdx, failoverSelIdx, providers, activeProvider,
-      openEdit, handleDelete, handleTest, handleSwitch, cmdInput]);
+      openEdit, handleDelete, handleTest, handleSwitch, cmdInput, selectedProvider]);
 
   const commandHandlers: CommandHandlers = {
     cmdInput,
@@ -381,6 +401,26 @@ export const ProvidersTab = memo(function ProvidersTab({
   // ── Keyboard ────────────────────────────────────────────
   useInput((input: string, key: any) => {
     if (!contentFocused) return false;
+    if (routingSaving) return true;
+    if (routingEdit) {
+      if (matchChord("escape", input, key)) setRoutingEdit(null);
+      else if (matchChord("left", input, key) || matchChord("right", input, key)) {
+        const maximum = routingEdit.providerId
+          ? failoverOrder.filter(id => id !== activeProvider && id !== routingEdit.providerId).length + 1 : 1;
+        const delta = matchChord("right", input, key) ? 1 : -1;
+        setRoutingEdit({...routingEdit, value: Math.max(0, Math.min(maximum, routingEdit.value + delta))});
+      } else if (matchChord("enter", input, key)) {
+        const edit = routingEdit;
+        const order = edit.providerId ? failoverOrder.filter(id => id !== activeProvider && id !== edit.providerId) : [...failoverOrder];
+        if (edit.providerId && edit.value > 0) order.splice(edit.value - 1, 0, edit.providerId);
+        setRoutingSaving(true);
+        void updateFailover(edit.providerId ? failoverEnabled : Boolean(edit.value), order).finally(() => {
+          setRoutingSaving(false); setRoutingEdit(null);
+          if (edit.providerId) setFailoverSelIdx(edit.value > 0 ? edit.value - 1 : order.length);
+        });
+      }
+      return true;
+    }
     const ctx: ProvidersCtx = {
       mode,
       providersView,
@@ -412,7 +452,7 @@ export const ProvidersTab = memo(function ProvidersTab({
           }
           break;
         case "editText": {
-          if (activeEditField === "protocol" || activeEditField === "context_window") break;
+          if (isChoiceField(activeEditField)) break;
           const operation = a.op === "backspace" ? {op: "delete_back" as const}
             : a.op === "delete" ? {op: "delete_forward" as const}
             : a.op === "left" ? {op: "move_cursor" as const, delta: -1}
@@ -424,7 +464,11 @@ export const ProvidersTab = memo(function ProvidersTab({
           break;
         }
         case "editChoice": {
-          if (activeEditField === "protocol") {
+          if (activeEditField === "kind") {
+            setEditForm(form => ({...form, kind: a.delta > 0 ? "local" : "remote", auth_mode: a.delta < 0 ? "api_key" : form.auth_mode}));
+          } else if (activeEditField === "auth_mode") {
+            setEditForm(form => ({...form, auth_mode: form.kind === "local" && a.delta > 0 ? "none" : "api_key"}));
+          } else if (activeEditField === "protocol") {
             const index = Math.max(0, PROTOCOL_OPTIONS.indexOf(editForm.protocol));
             const next = Math.max(0, Math.min(PROTOCOL_OPTIONS.length - 1, index + a.delta));
             setEditForm(form => ({...form, protocol: PROTOCOL_OPTIONS[next]!}));
@@ -454,26 +498,31 @@ export const ProvidersTab = memo(function ProvidersTab({
           setFocusCol("main");
           break;
         case "detailRight":
-          setStatusMsg("Automatic failover is not implemented in the runtime yet");
+          setFocusCol("failover");
+          setFailoverSelIdx(-1);
           break;
         case "detailMainMove":
           setMainSelIdx((s) => clampSel(s + a.delta, Math.max(0, providers.length - 1)));
           break;
         case "detailMainConfirm": {
           const p = providers[mainSelIdx];
-          if (p) { handleSwitch(p.id); setStatusMsg(`Switched to ${p.name}`); }
+          if (p) void handleSwitch(p.id);
           break;
         }
         case "detailFoMove":
-          setStatusMsg("Automatic failover is not implemented in the runtime yet");
+          setFailoverSelIdx(s => Math.max(-1, Math.min(backupCandidates.length - 1, s + a.delta)));
           break;
         case "detailFoConfirm":
-          setStatusMsg("Automatic failover is not implemented in the runtime yet");
+          if (failoverSelIdx === -1) setRoutingEdit({value: Number(failoverEnabled)});
+          else {
+            const p = backupCandidates[failoverSelIdx];
+            if (p) setRoutingEdit({providerId: p.id, value: failoverOrder.filter(id => id !== activeProvider).indexOf(p.id) + 1});
+          }
           break;
         case "detailOpen":
           setProvidersView("detail");
           setMainSelIdx(Math.max(0, providers.findIndex((p) => p.id === activeProvider)));
-          setFailoverSelIdx(Math.max(0, providers.findIndex((p) => p.id !== activeProvider)));
+          setFailoverSelIdx(-1);
           break;
         case "tabPrev":
           shell.tabPrev();
@@ -499,7 +548,7 @@ export const ProvidersTab = memo(function ProvidersTab({
         </Box>
         {FIELD_LABELS.map((label, i: number) => {
           const field = FIELDS[i];
-          const displayedValue = i === editFieldIdx && field !== "protocol" && field !== "context_window"
+          const displayedValue = i === editFieldIdx && !isChoiceField(field)
             ? cmdInput.value : editForm[field];
           return (
             <Box key={label} flexDirection="row" paddingLeft={1}>
@@ -517,7 +566,7 @@ export const ProvidersTab = memo(function ProvidersTab({
                     {field === "api_key"
                       ? displayedValue
                         ? "•".repeat(Math.min(24, displayedValue.length))
-                        : editId ? "••••••••  leave blank to retain" : ""
+                        : editForm.auth_mode === "none" ? "not required" : editId ? "••••••••  leave blank to retain" : ""
                       : displayedValue}
                   </Text>;
               })()}
@@ -528,7 +577,7 @@ export const ProvidersTab = memo(function ProvidersTab({
           <Text dimColor>{chordLabel("enter")} Next / save on final field  {chordLabel("tab")} Next  {chordLabel("shiftTab")} Previous</Text>
         </Box>
         <Box paddingLeft={1}>
-          <Text dimColor>Context: ←/→ 256K · 512K · 1M · 2M</Text>
+          <Text dimColor>Location, auth, protocol and context: ←/→ · local endpoints must be loopback</Text>
         </Box>
         {statusMsg ? (
           <Box paddingLeft={1}><Text color={colors.warning}>{statusMsg}</Text></Box>
@@ -567,7 +616,7 @@ export const ProvidersTab = memo(function ProvidersTab({
               {activeP ? `● ${activeP.name}` : "● none"}
             </Text>
           </Box>
-          <Text dimColor>automatic failover unavailable</Text>
+          <Text dimColor>automatic failover {failoverEnabled ? "on" : "off"}</Text>
         </Box>
 
         <Box marginTop={1}>
@@ -592,7 +641,10 @@ export const ProvidersTab = memo(function ProvidersTab({
             <Text dimColor bold>Main Model:</Text>
           </Box>
           <Box flexGrow={1}>
-            <Text dimColor bold>Automatic Failover:</Text>
+            <Text bold color={focusCol === "failover" && failoverSelIdx === -1 ? colors.selection.row.fg : undefined}
+              backgroundColor={focusCol === "failover" && failoverSelIdx === -1 ? colors.selection.row.bg : undefined}>
+              Automatic Failover: {routingEdit && !routingEdit.providerId ? (routingEdit.value ? "on" : "off") : failoverEnabled ? "on" : "off"}
+            </Text>
           </Box>
         </Box>
 
@@ -608,9 +660,10 @@ export const ProvidersTab = memo(function ProvidersTab({
                   </Text>
                   <Text
                     color={active ? colors.selection.row.fg : undefined}
+                    backgroundColor={active ? colors.selection.row.bg : undefined}
                     bold={active}
                   >
-                    {" "}{truncate(p.name, 40)}
+                    {" "}{truncate(p.name, 32)} · {health[p.id]?.breaker_state || "unobserved"}
                   </Text>
                 </Box>
               );
@@ -618,9 +671,18 @@ export const ProvidersTab = memo(function ProvidersTab({
           </Box>
 
           <Box flexDirection="column" flexGrow={1}>
-            <Text color={colors.warning}>Not implemented</Text>
-            <Text dimColor>Provider CRUD and manual active switch are available.</Text>
-            <Text dimColor>Circuit state and automatic order will appear here after runtime support.</Text>
+            {backupCandidates.map((p, index) => {
+              const enabled = failoverOrder.includes(p.id);
+              const priority = failoverOrder.filter(id => id !== activeProvider).indexOf(p.id);
+              const selected = focusCol === "failover" && index === failoverSelIdx;
+              return <Text key={p.id} bold={selected} color={selected ? colors.selection.row.fg : undefined} backgroundColor={selected ? colors.selection.row.bg : undefined}>
+                {routingEdit?.providerId === p.id ? (routingEdit.value ? `[${routingEdit.value}]` : "[ ]") : enabled ? `[${priority + 1}]` : "[ ]"} {truncate(p.name, 24)}{p.kind === "local" ? " · local" : ""} · {health[p.id]?.breaker_state || "unobserved"}
+              </Text>;
+            })}
+            {!backupCandidates.length ? <Text dimColor>Create another provider to select a backup.</Text> : null}
+            <Text dimColor>{routingSaving ? "Saving failover…" : routingEdit
+              ? `← → ${routingEdit.providerId ? "disabled / priority" : "off / on"} · Enter save · Esc cancel`
+              : "↑ ↓ select · Enter change · ← → columns"}</Text>
           </Box>
         </Box>
       </Box>

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from backend.core.errors import error_payload
 from backend.core.tools.workspace_tools import _allowed_roots, _confined_path, _rel, _workspace
+from .document_limits import check_input, bounded_join, DocumentLimit, MAX_TEXT_CHARS
 
 
 def _document_error(name: str, *, message: str = "", details: dict | None = None,
@@ -35,23 +36,29 @@ def document_open(args: dict) -> dict:
     start = max(0, int(args.get("offset", 0) or 0))
     limit = max(1_000, min(int(args.get("max_chars", 24_000) or 24_000), 100_000))
     try:
+        check_input(path)
         if suffix in {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".xml"}:
             text = path.read_text(encoding="utf-8-sig", errors="replace")
         elif suffix == ".pdf":
             from pypdf import PdfReader
             pages = PdfReader(str(path)).pages
-            text = "\n\n".join((page.extract_text() or "") for page in pages)
+            if len(pages) > 500:
+                raise DocumentLimit("PDF exceeds 500 pages; split it before extraction")
+            text = bounded_join(((page.extract_text() or "") for page in pages), "\n\n")
         elif suffix == ".docx":
             from docx import Document
             doc = Document(str(path))
-            text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
-            for table in doc.tables:
-                text += "\n" + "\n".join(
-                    "\t".join(cell.text for cell in row.cells) for row in table.rows
-                )
+            def docx_chunks():
+                yield from (paragraph.text for paragraph in doc.paragraphs)
+                for table in doc.tables:
+                    for row in table.rows:
+                        yield bounded_join((cell.text for cell in row.cells), "\t")
+            text = bounded_join(docx_chunks())
         elif suffix in {".pptx"}:
             from pptx import Presentation
             deck = Presentation(str(path))
+            if len(deck.slides) > 500:
+                raise DocumentLimit("presentation exceeds 500 slides")
             chunks = []
             for number, slide in enumerate(deck.slides, 1):
                 chunks.append(f"[Slide {number}]")
@@ -59,17 +66,19 @@ def document_open(args: dict) -> dict:
                     str(shape.text) for shape in slide.shapes
                     if hasattr(shape, "text") and str(shape.text).strip()
                 )
-            text = "\n".join(chunks)
+            text = bounded_join(chunks)
         elif suffix in {".xlsx", ".xlsm"}:
             from openpyxl import load_workbook
             book = load_workbook(str(path), read_only=True, data_only=True)
             try:
-                chunks = []
-                for sheet in book.worksheets:
-                    chunks.append(f"[Sheet {sheet.title}]")
-                    for row in sheet.iter_rows(values_only=True):
-                        chunks.append("\t".join("" if value is None else str(value) for value in row))
-                text = "\n".join(chunks)
+                def sheet_chunks():
+                    for sheet in book.worksheets:
+                        if (sheet.max_row or 0) * (sheet.max_column or 0) > 200_000:
+                            raise DocumentLimit("worksheet exceeds 200000 cells")
+                        yield f"[Sheet {sheet.title}]"
+                        for row in sheet.iter_rows(values_only=True):
+                            yield bounded_join(("" if value is None else str(value) for value in row), "\t")
+                text = bounded_join(sheet_chunks())
             finally:
                 book.close()
         elif suffix == ".xls":
@@ -78,35 +87,50 @@ def document_open(args: dict) -> dict:
             try:
                 chunks = []
                 for sheet in book.sheets():
+                    if sheet.nrows * sheet.ncols > 200_000:
+                        raise DocumentLimit("worksheet exceeds 200000 cells")
                     chunks.append(f"[Sheet {sheet.name}]")
                     for row in range(sheet.nrows):
                         chunks.append("\t".join(str(sheet.cell_value(row, col)) for col in range(sheet.ncols)))
-                text = "\n".join(chunks)
+                text = bounded_join(chunks)
             finally:
                 book.release_resources()
         elif suffix == ".doc":
-            antiword = shutil.which("antiword")
-            if not antiword:
+            from .document_limits import verified_antiword, check_converter
+            try:
+                antiword, expected = verified_antiword()
+                check_converter(antiword, expected)
+            except ValueError as exc:
                 return _document_error(
                     "DOCUMENT_FORMAT_UNSUPPORTED",
-                    message="The .doc converter is not installed.",
+                    message=str(exc),
                     details={"format": "doc", "path": _rel(workspace, path),
                              "missing_adapter": "antiword"},
                     next_actions=[{"action": "convert", "format": "docx"},
                                   {"action": "install_adapter", "adapter": "antiword"}],
                 )
-            completed = subprocess.run(
-                [antiword, str(path)], capture_output=True, timeout=60,
-                check=False,
-            )
+            from backend.core.process_control import creation_flags, attach_kill_job, terminate_tree, close_job
+            from backend.core.process_output import collect_output, OutputLimit
+            from backend.core.tools.execution_profile import safe_environment
+            completed = subprocess.Popen([str(antiword), str(path)], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                env=safe_environment(), creationflags=creation_flags(), start_new_session=os.name != "nt")
+            job = attach_kill_job(completed)
+            try:
+                stdout, stderr, _ = collect_output(completed, timeout=60, limit=MAX_TEXT_CHARS,
+                    reject_overflow=True, terminate=lambda: terminate_tree(completed, job))
+            except OutputLimit as exc:
+                raise DocumentLimit(str(exc)) from exc
+            finally:
+                close_job(job)
             if completed.returncode != 0:
                 return _document_error(
                     "DOCUMENT_READ_FAILED",
                     message="The .doc converter could not read this document.",
                     details={"format": "doc", "path": _rel(workspace, path),
-                             "diagnostic": completed.stderr.decode(errors="replace")[:1000]},
+                             "diagnostic": stderr[:1000]},
                 )
-            text = completed.stdout.decode("utf-8", errors="replace")
+            text = stdout
         elif suffix == ".ppt":
             return _document_error(
                 "DOCUMENT_FORMAT_UNSUPPORTED",
@@ -121,6 +145,12 @@ def document_open(args: dict) -> dict:
                          "supported": ["txt", "md", "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx"]},
                 next_actions=[{"action": "convert_to_supported_format"}],
             )
+        if len(text) > MAX_TEXT_CHARS:
+            raise DocumentLimit("extracted document exceeds 2000000 characters")
+    except DocumentLimit as exc:
+        return _document_error("DOCUMENT_READ_FAILED", message=str(exc),
+            details={"code": "DOCUMENT_RESOURCE_LIMIT", "path": _rel(workspace, path)},
+            next_actions=[{"action": "split_or_convert_document"}])
     except ImportError as exc:
         return _document_error(
             "DOCUMENT_FORMAT_UNSUPPORTED",

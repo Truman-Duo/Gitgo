@@ -7,6 +7,21 @@ Chat Completions can share cancellation, retry, budgeting, and evidence logic.
 
 from __future__ import annotations
 
+
+class ProviderResponseIncomplete(RuntimeError):
+    """A paid, truncated response; no tool or semantic verdict is executable."""
+    def __init__(self, reason, usage=None):
+        super().__init__(f"Responses API terminated with response.incomplete: {reason}")
+        self.reason = str(reason)
+        self.usage = dict(usage or {})
+
+
+class ProviderRequestPreparationFailed(Exception):
+    """Preserve caller preparation errors across transport retry handling."""
+    def __init__(self, cause):
+        self.cause = cause
+        super().__init__(type(cause).__name__)
+
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
@@ -22,6 +37,7 @@ class ProviderProtocol(str, Enum):
 
 
 class ProviderEventType(str, Enum):
+    ROUTING_NOTICE = "routing_notice"
     RESPONSE_STARTED = "response_started"
     TEXT_DELTA = "text_delta"
     REASONING_DELTA = "reasoning_delta"
@@ -121,6 +137,7 @@ class ProviderRequest:
     stream: bool = True
     cache_intent: CacheIntent = field(default_factory=CacheIntent)
     metadata: dict = field(default_factory=dict)
+    reasoning_effort: str | None = None
 
 
 def deterministic_hash(value: Any) -> str:

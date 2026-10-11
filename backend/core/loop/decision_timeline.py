@@ -25,7 +25,7 @@ def decision_timeline(ledger: list[dict]) -> list[dict]:
             "options", "allow_free_form", "created_at", "decision_sequence", "context_epoch",
             "kind", "state_topic", "supersedes_decision_id", "permission_request",
             "source_process_id", "source_actor_kind", "source_display_name",
-            "owner_process_id",
+            "owner_process_id", "questions",
         )}
         cards.append({
             "message_id": f"decision:{identity}", "turn_id": str(request.get("task_id") or ""),

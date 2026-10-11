@@ -592,17 +592,20 @@ export type ParsedInput = ParsedKey | ParsedMouse | ParsedResponse
  */
 function parseMouseEvent(s: string): ParsedMouse | null {
   const match = SGR_MOUSE_RE.exec(s)
-  if (!match) return null
-  const button = parseInt(match[1]!, 10)
+  const legacy = s.length === 6 && s.startsWith('\x1b[M')
+  if (!match && !legacy) return null
+  const button = match ? parseInt(match[1]!, 10) : s.charCodeAt(3) - 32
   // Wheel events (bit 6 set, low bits 0/1 for up/down) stay as ParsedKey
   // so the keybinding system can route them to scroll handlers.
   if ((button & 0x40) !== 0) return null
   return {
     kind: 'mouse',
     button,
-    action: match[4] === 'M' ? 'press' : 'release',
-    col: parseInt(match[2]!, 10),
-    row: parseInt(match[3]!, 10),
+    // Some console bridges retain the legacy no-button release code even
+    // inside SGR. No-button *motion* is hover, not a release.
+    action: match?.[4] === 'm' || (button & 0x23) === 3 ? 'release' : 'press',
+    col: match ? parseInt(match[2]!, 10) : s.charCodeAt(4) - 32,
+    row: match ? parseInt(match[3]!, 10) : s.charCodeAt(5) - 32,
     sequence: s,
   }
 }
@@ -688,8 +691,8 @@ function parseKeypress(s: string = ''): ParsedKey {
   // X10 mouse: CSI M + 3 raw bytes (Cb+32, Cx+32, Cy+32). Terminals that
   // ignore DECSET 1006 (SGR) but honor 1000/1002 emit this legacy encoding.
   // Button bits match SGR: 0x40 = wheel, low bit = direction. Non-wheel
-  // X10 events (clicks/drags) are swallowed here — we only enable mouse
-  // tracking in alt-screen and only need wheel for ScrollBox.
+  // Non-wheel events are normalized by parseMouseEvent above. In particular
+  // release must reach selection handling or drag-to-scroll never stops.
   if (s.length === 6 && s.startsWith('\x1b[M')) {
     const button = s.charCodeAt(3) - 32
     if ((button & 0x43) === 0x40) return createNavKey(s, 'wheelup', false)

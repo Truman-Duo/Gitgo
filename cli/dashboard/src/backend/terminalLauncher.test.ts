@@ -150,26 +150,38 @@ describe("installed terminal launcher", () => {
     }
   });
 
+  // Windows process creation can block before JS receives spawn/exit (measured
+  // ~9s on the real host). Test-runner timeout is not the handoff deadline.
   test("a launcher exiting successfully without a ready child retains the original terminal", async () => {
     const result = await relaunchInConfiguredTerminal({terminal: "custom", command: process.execPath,
       args: ["-e", "process.exit(0)", "--"]}, process.execPath, [], {timeoutMs: 200});
     expect(result.launched).toBeFalse();
     expect(result.message).toContain("did not become ready");
-  });
+  }, 30000);
 
   test("a failing launcher retains the original terminal with an error", async () => {
     const result = await relaunchInConfiguredTerminal({terminal: "custom", command: process.execPath,
       args: ["-e", "process.exit(7)", "--"]}, process.execPath, [], {timeoutMs: 500});
     expect(result.launched).toBeFalse();
     expect(result.message).toContain("exited (7)");
-  });
+  }, 30000);
 
   test("child acknowledgement rather than spawn alone completes the handoff", async () => {
     const program = `const fs = require('node:fs'); const i = process.argv.indexOf('--launcher-handoff');
       const path = process.argv[i+1]; const ticket = JSON.parse(fs.readFileSync(path,'utf8'));
       fs.writeFileSync(path, JSON.stringify({...ticket,status:'ready'}));`;
     const result = await relaunchInConfiguredTerminal({terminal: "custom", command: process.execPath,
-      args: ["-e", program, "--"]}, process.execPath, [], {timeoutMs: 2000});
+      args: ["-e", program, "--"]}, process.execPath, [], {timeoutMs: process.platform === "win32" ? 20000 : 2000});
     expect(result.launched).toBeTrue();
-  });
+  }, 30000);
+
+  test("readiness written after the ticket deadline is rejected", async () => {
+    const program = `const fs = require('node:fs'); const i = process.argv.indexOf('--launcher-handoff');
+      const path = process.argv[i+1]; const ticket = JSON.parse(fs.readFileSync(path,'utf8'));
+      setTimeout(() => fs.writeFileSync(path, JSON.stringify({...ticket,status:'ready'})), 50);`;
+    const result = await relaunchInConfiguredTerminal({terminal: "custom", command: process.execPath,
+      args: ["-e", program, "--"]}, process.execPath, [], {timeoutMs: 1});
+    expect(result.launched).toBeFalse();
+    expect(result.message).toContain("did not become ready");
+  }, 30000);
 });

@@ -7,6 +7,78 @@ import { useTextInput } from "../../hooks/useTextInput.js";
 import { InputProvider } from "../../input/runtime.js";
 import { ProvidersTab } from "./ProvidersTab.js";
 
+test("backup selection, failover switch and health use native config operations", async () => {
+  const {stdin, stdout, stderr, output} = terminal();
+  const mutations: any[] = [];
+  let enabled = false;
+  let order: string[] = [];
+  const client: BackendClient = {
+    ready: true, close() {},
+    async callTool(operation, args: any = {}) {
+      if (operation === "provider.status") return {
+        providers: [{id: "main", name: "Main", model_id: "main"}, {id: "backup", name: "Backup", model_id: "backup"}],
+        active_provider: "main", failover_enabled: enabled, failover_order: order,
+      };
+      if (operation === "runtime.status") return {providers: [{id: "main", breaker_state: "open"}, {id: "backup", breaker_state: "closed"}]};
+      if (operation === "provider.failover.configure") {
+        mutations.push(args); enabled = args.enabled; order = args.order; return {status: "configured"};
+      }
+      throw new Error(operation);
+    },
+  };
+  function Fixture() {
+    const input = useTextInput("");
+    return <InputProvider><ProvidersTab client={client} project="test" cmdInput={input}
+      onFooter={() => {}} report={() => {}} contentFocused
+      shell={{back() {}, goToTab() {}, tabPrev() {}, tabNext() {}, leaveContent() {}}}
+    /></InputProvider>;
+  }
+  const root = renderSync(<Fixture/>, {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
+  const send = async (keys: string) => { stdin.write(keys); await new Promise(resolve => setTimeout(resolve, 100)); };
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await send("\r"); // same entry into existing dual column view
+    await send("\u001b[C");
+    await send("\r");
+    await send("\u001b[C"); // preview on; no command or mutation
+    expect(mutations).toHaveLength(0);
+    await send("\r");
+    expect(mutations.at(-1)).toEqual({enabled: true, order: []});
+    await send("\u001b[B");
+    await send("\r");
+    await send("\u001b[C"); // enabled at priority 1
+    await send("\r");
+    expect(mutations.at(-1)).toEqual({enabled: true, order: ["backup"]});
+    expect(output()).toContain("Automatic Failover: on");
+    expect(output()).toContain("open"); expect(output()).toContain("closed");
+    await send("\u001b[A"); await send("\r"); await send("\u001b[D");
+    await send("\u001b"); // cancel off preview
+    expect(mutations).toHaveLength(2);
+  } finally { root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy(); }
+});
+
+test("local provider opens the existing field form without asking for a fake key", async () => {
+  const {stdin, stdout, stderr, output} = terminal();
+  const client: BackendClient = {
+    ready: true, close() {},
+    async callTool() { return {providers: [], active_provider: ""}; },
+  };
+  function Fixture() {
+    const input = useTextInput("/local");
+    return <InputProvider><ProvidersTab client={client} project="test" cmdInput={input}
+      onFooter={() => {}} report={() => {}} contentFocused
+      shell={{back() {}, goToTab() {}, tabPrev() {}, tabNext() {}, leaveContent() {}}}
+    /></InputProvider>;
+  }
+  const root = renderSync(<Fixture/>, {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
+  try {
+    await new Promise(resolve => setTimeout(resolve, 80)); stdin.write("\r");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(output()).toContain("127.0.0.1:11434/v1");
+    expect(output()).toContain("not required");
+  } finally { root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy(); }
+});
+
 function terminal() {
   const stdin: any = new PassThrough();
   stdin.isTTY = true; stdin.setRawMode = () => stdin;

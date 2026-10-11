@@ -11,10 +11,12 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from backend.core.child_process import INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE
 from backend.core.config import Config, ConfigManager, ProjectConfig
+from backend.version import __version__
 
 
 def _read_lines(stream, output: queue.Queue) -> None:
@@ -44,6 +46,7 @@ class ProtocolClient:
             started = self._next_message(30)
             if started.get("type") != "host_started":
                 raise RuntimeError(f"packaged Host handshake failed: {started}")
+            self.host_version = started.get('host_version')
         except BaseException:
             if self.process.poll() is None:
                 self.process.kill()
@@ -58,7 +61,9 @@ class ProtocolClient:
             raise TimeoutError(f"packaged Host response timed out; stderr={stderr}") from exc
 
     def call(self, operation: str, arguments: dict | None = None, timeout: float = 30) -> dict:
-        request_id = f"smoke-{time.monotonic_ns()}"
+        # Windows clocks can return the same value for consecutive calls.
+        # Request identity must remain unique independently of clock precision.
+        request_id = f"smoke-{uuid.uuid4().hex}"
         assert self.process.stdin is not None
         self.process.stdin.write(json.dumps({
             "protocol_version": 1,
@@ -199,6 +204,8 @@ def smoke(executable: Path) -> None:
 
         client = ProtocolClient(executable, env)
         try:
+            if client.host_version != __version__:
+                raise RuntimeError('Packaged Host product version differs from source')
             if os.name == "nt":
                 terminals = client.call("config.terminals", timeout=30)
                 if (not terminals.get("ok") or

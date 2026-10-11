@@ -7,12 +7,16 @@ SessionStore persists authoritative session state through SQLite + CAS.
 
 from __future__ import annotations
 
+from backend.core.loop.lifecycle import transition
+
 import hashlib
 import json
 import os
 import threading
 import time
 from functools import wraps
+from dataclasses import asdict
+from backend.core.loop.capabilities import CapabilityLease
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -241,7 +245,7 @@ class AgentProcessManager:
                         process.budget_lease = released
             dependency_error = self._wait_for_dependencies(process)
             if dependency_error:
-                process.status = ProcessStatus.FAILED
+                transition(process, ProcessStatus.FAILED)
                 process.result = {
                     "process_id": process.process_id,
                     "status": "failed",
@@ -254,7 +258,7 @@ class AgentProcessManager:
                 return
             with self._slots:
                 if not self._acquire_resources(process, claims, resource_mode):
-                    process.status = ProcessStatus.CANCELLED
+                    transition(process, ProcessStatus.CANCELLED)
                     process.result = {
                         "process_id": process.process_id,
                         "status": "cancelled",
@@ -269,7 +273,7 @@ class AgentProcessManager:
                     if isinstance(result, dict):
                         process.result = result
                 except Exception as exc:
-                    process.status = ProcessStatus.FAILED
+                    transition(process, ProcessStatus.FAILED)
                     process.result = {
                         "process_id": process.process_id,
                         "status": "failed",
@@ -828,7 +832,7 @@ class AgentProcessManager:
                     ProcessStatus.RECOVERY_REVIEW_REQUIRED,
                 } and (thread is None or not thread.is_alive())
                 if parked:
-                    target.status = ProcessStatus.CANCELLED
+                    transition(target, ProcessStatus.CANCELLED)
                     target.result = {
                         "process_id": target.process_id,
                         "task_id": target.active_task_id,
@@ -837,7 +841,7 @@ class AgentProcessManager:
                     target.lifecycle_finalized = True
                     cancelled_parked.append(target.process_id)
                 else:
-                    target.status = ProcessStatus.CANCELLING
+                    transition(target, ProcessStatus.CANCELLING)
                 requested.append(target.process_id)
                 self.notify_state_changed(target.process_id)
             elif target.status == ProcessStatus.CANCELLING:
@@ -1015,7 +1019,24 @@ class SessionStore:
             "session_metadata": self._session_metadata(session),
         })
 
+    def process_revision(self, process_id: str) -> int:
+        return self._storage.process_revision(process_id)
+
     def save_process_checkpoint(self, process: AgentProcess) -> str:
+        lock = getattr(process, "_checkpoint_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            process._checkpoint_lock = lock
+        with lock:
+            restored_source = getattr(process.session, "_restored_checkpoint_source", None)
+            if restored_source is not None and restored_source[0] == process.process_id:
+                process.durable_revision = restored_source[1]
+                del process.session._restored_checkpoint_source
+            ref = self._save_process_checkpoint(process)
+            process.durable_revision = ref.revision
+            return ref
+
+    def _save_process_checkpoint(self, process: AgentProcess) -> str:
         """Persist process, task, messages and receipts in one SQLite commit."""
         session = process.session
         if session is None:
@@ -1031,6 +1052,8 @@ class SessionStore:
         )
         return self._storage.save_agent_checkpoint({
             "process_id": process.process_id,
+            "expected_revision": int(getattr(process, "durable_revision", 0)),
+            "causation_id": str((getattr(process, "runtime_preferences", {}) or {}).get("runtime_command_id") or ""),
             "session_id": session.session_id,
             "checkpoint_at": datetime.now(timezone.utc).isoformat(),
             "status": process.status.value,
@@ -1053,6 +1076,7 @@ class SessionStore:
             "result": process.result,
             "runtime_state": {
                 "estimated_tokens": session.estimate_tokens(),
+                "lifecycle_finalized": bool(getattr(process, "lifecycle_finalized", False)),
                 "context": session.context_view(auto_compact=bool(
                     getattr(process, "runtime_preferences", {}).get("auto_compact", True)
                 )),
@@ -1062,6 +1086,8 @@ class SessionStore:
                 # objects created before permission suspension existed.
                 "pending_tool_batch": getattr(process, "pending_tool_batch", None),
                 "approval_grants": list(getattr(process, "approval_grants", []) or []),
+                "capability_lease_source": (asdict(process.capability_lease)
+                    if isinstance(getattr(process, "capability_lease", None), CapabilityLease) else None),
                 "mailbox": mailbox_state,
                 "task_budget": budget_state,
                 "context_snapshot": process.context_snapshot,
@@ -1149,9 +1175,10 @@ class SessionStore:
         # and make daemon recovery confuse a history rewind with task resume.
         target_process_id = process_id
         target_process_state = state
-        self.save_restored_session_checkpoint(
+        restored_ref = self.save_restored_session_checkpoint(
             target_process_id, restored, target_process_state,
         )
+        restored._restored_checkpoint_source = (target_process_id, restored_ref.revision)
         return {**committed, "process_id": target_process_id}, restored, target
 
     def append_event(
@@ -1187,6 +1214,7 @@ class SessionStore:
         contract = dict(task.get("contract") or {})
         return self._storage.save_agent_checkpoint({
             "process_id": process_id,
+            "expected_revision": int(raw.get("state_revision", 0)),
             "session_id": session.session_id,
             "checkpoint_at": datetime.now(timezone.utc).isoformat(),
             "status": str(raw.get("status") or "completed"),

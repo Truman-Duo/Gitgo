@@ -52,12 +52,29 @@ def file_identity(path):
 
 def assert_identity_unchanged(identity):
     for file in identity["files"]:
+        if file.get("format") == "posix":
+            if posix_file_identity(file["path"]) != file:
+                raise ValueError("Verified shell image changed")
+            continue
         if file_identity(file["path"]) != {"path": file["path"], "sha256": file["sha256"]}:
             raise ValueError("Verified terminal image changed")
     for directory in identity.get("directories", []):
         names = sorted(p.name for p in Path(directory["path"]).iterdir() if p.suffix.lower() == ".dll")
         if names != directory["files"]:
             raise ValueError("Verified terminal dependency directory changed")
+
+
+def posix_file_identity(path):
+    path = Path(path).resolve(strict=True)
+    before = path.stat()
+    if not path.is_file() or not os.access(path, os.X_OK) or not 0 < before.st_size <= 128 * 1024 * 1024:
+        raise ValueError("Invalid POSIX executable")
+    with path.open("rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    after = path.stat()
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise ValueError("Executable changed while identity was checked")
+    return {"path": str(path), "sha256": digest, "format": "posix"}
 
 
 def windows_signatures(paths):

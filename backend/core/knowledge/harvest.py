@@ -930,7 +930,7 @@ def is_testable_proposition(rule: str) -> bool:
 
 def harvest_llm_summary(signals: list[dict], llm_provider,
                         workspace_path: str, project_name: str, *,
-                        raise_on_error: bool = False) -> list[Lesson]:
+                        raise_on_error: bool = False, on_provider_notice=None) -> list[Lesson]:
     """LLM 总结未处理信号 → lesson。降级：失败→重试→退避→废弃。"""
     if not signals:
         return []
@@ -963,6 +963,8 @@ def harvest_llm_summary(signals: list[dict], llm_provider,
         response = llm_provider.chat(
             [{"role": "user", "content": prompt}],
             max_tokens=4096, timeout=30,
+            **({"on_notice": on_provider_notice} if on_provider_notice is not None
+               and hasattr(llm_provider, "stream_session_events") else {}),
         )
         text = response.strip()
         if text.startswith("```json"):

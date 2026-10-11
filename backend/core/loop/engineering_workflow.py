@@ -48,7 +48,8 @@ def practice_plan(config: dict) -> dict:
     if "alignment" in profiles:
         for item in config.get("questions") or []:
             add(item["id"], "decision", state_topic=item["state_topic"],
-                depends_on=item.get("depends_on", []), before_mutation=True)
+                depends_on=item.get("depends_on", []), before_mutation=True,
+                **{k: item[k] for k in ("request", "when") if k in item})
         if nodes:
             prerequisites.extend(n["id"] for n in nodes)
         else:
@@ -130,6 +131,7 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
         raise ValueError("workflow requires 1..64 concrete nodes")
     root = Path(root).resolve()
     ids = set()
+    topics = set()
     for node in nodes:
         if not isinstance(node, dict):
             raise ValueError("workflow nodes must be objects")
@@ -158,6 +160,11 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
                 (root / node["cwd"]).resolve().relative_to(root)
         if kind == "decision" and not str(node.get("state_topic") or "").strip():
             raise ValueError("decision nodes require a stable state_topic")
+        if kind == "decision":
+            node["state_topic"] = str(node["state_topic"]).strip()
+            if node["state_topic"] in topics:
+                raise ValueError("decision state_topics must be unique within a workflow")
+            topics.add(node["state_topic"])
         if kind == "decision" and "alignment" in profiles:
             node["before_mutation"] = True
         if kind == "document":
@@ -201,6 +208,12 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
         # Admitted evidence is mandatory; narrowing it requires a user-visible
         # amendment, rather than an optional flag supplied by the model.
         node["required"] = True
+        if node.get("when"):
+            if node["kind"] != "decision" or not isinstance(node["when"], dict):
+                raise ValueError("conditional branches must be decision nodes")
+            for parent, values in node["when"].items():
+                if parent not in ancestors(node["id"]) or by_id[parent]["kind"] != "decision" or not isinstance(values, list) or not values or not all(isinstance(v, str) and v.strip() for v in values):
+                    raise ValueError("when must match nonempty user answers of ancestor decisions")
         if node.get("format") == "architecture":
             node["before_mutation"] = True
             if not any(by_id[a]["kind"] == "observation" for a in ancestors(node["id"])):
@@ -327,6 +340,16 @@ class EngineeringWorkflow:
         return rows
 
     def _valid_record(self, node, record):
+        if record.get('defaulted'):
+            source = self._answers(node)
+            from .alignment_evidence import answer_digest
+            digest = answer_digest(source[-1]['answer']) if source else ''
+            return bool(record.get('source_digest') == digest and any(
+                e.get('event') == 'alignment_assumption' and e.get('task_id') == task_id(self.process)
+                and e.get('node_id') == node['id'] and e.get('value') == record.get('value')
+                and e.get('source_digest') == digest for e in self.process.session.host_ledger))
+        if record.get("inapplicable"):
+            return True  # dependency digests below invalidate this projection
         if node["kind"] == "document":
             try:
                 path = _path(workspace(self.process), node["path"])
@@ -344,11 +367,37 @@ class EngineeringWorkflow:
             except (KeyError, OSError, ValueError):
                 return False
         if node["kind"] == "decision":
-            answers = [r for r in self.process.session.host_ledger if r.get("event") == "user_decision_received" and r.get("task_id") == task_id(self.process) and r.get("state_topic") == node["state_topic"]]
-            return bool(answers and answers[-1].get("decision_id") == record["decision_id"])
+            answers = self._answers(node)
+            from .alignment_evidence import resolved_answer
+            resolution = resolved_answer(self.process.session.host_ledger, answers[-1], node["state_topic"]) if answers else None
+            return bool(resolution and answers[-1].get("decision_id") == record["decision_id"]
+                        and resolution.get("value") == record.get("value")
+                        and resolution.get('choice_key', resolution['value']) == record.get('choice_key', record['value']))
         ids = record.get("receipt_ids") or [record.get("receipt_id")]
         return all(any(r.get("receipt_id") == rid and (node["kind"] == "check" or r.get("committed") is True)
                        for _, r in self._receipts()) for rid in ids)
+
+    def _answers(self, node):
+        answers = []
+        for event in self.process.session.host_ledger:
+            if event.get("event") != "user_decision_received" or event.get("task_id") != task_id(self.process):
+                continue
+            if event.get("state_topic") == node["state_topic"]:
+                answers.append(event)
+            else:
+                item = (event.get("answers") or {}).get(node["id"])
+                if item and item.get("state_topic") == node["state_topic"]:
+                    answers.append({**event, **item})
+        from .alignment_evidence import source_answer, answer_digest
+        for event in self.process.session.host_ledger:
+            if (event.get('event') == 'user_decision_interpreted' and event.get('node_id') == node['id']
+                    and event.get('state_topic') == node['state_topic'] and event.get('task_id') == task_id(self.process)):
+                source = source_answer(self.process.session.host_ledger, task_id(self.process), event['decision_id'], event.get('source_node_id', ''))
+                if source and answer_digest(source.get('answer', '')) == event['answer_digest'] and not any(a.get('decision_id') == source['decision_id'] for a in answers):
+                    answers.append({**source, 'state_topic': node['state_topic']})
+        order = {e.get('decision_id'): i for i, e in enumerate(self.process.session.host_ledger) if e.get('event') == 'user_decision_received'}
+        answers.sort(key=lambda a: order.get(a.get('decision_id'), -1))
+        return answers
 
     def _refresh(self, state):
         amendment = state.get("amendment")
@@ -401,11 +450,19 @@ class EngineeringWorkflow:
                     for index, r in receipts)
                 if record and (later_write or any(d not in records for d in node["depends_on"]) or record.get("dependencies", {}) != dependency_version(node) or not self._valid_record(node, record)):
                     records.pop(name)
-                    if node["kind"] == "decision":
+                    if node["kind"] == "decision" and (any(d not in records for d in node['depends_on'])
+                            or record.get('dependencies', {}) != dependency_version(node)):
                         state.get("requests", {}).pop(name, None)
                     progress = changed = True
                     self.notice("WORKFLOW_EVIDENCE_STALE", f"步骤 {name} 的证据已失效，需要重新验证。", node_id=name)
                 if name in records or any(d not in records for d in node["depends_on"]):
+                    continue
+                inactive = any(records[d].get("inapplicable") for d in node["depends_on"]) or any(
+                    records[parent].get('choice_key', records[parent].get("value")) not in values for parent, values in (node.get("when") or {}).items())
+                if inactive:
+                    records[name] = {"inapplicable": True, "dependencies": dependency_version(node)}
+                    progress = changed = True
+                    self.notice("ALIGNMENT_BRANCH_INACTIVE", f"根据已确认答案，问题 {name} 的分支不适用。", node_id=name)
                     continue
                 minimum = max([state["receipt_start"] - 1, *[records[d].get("receipt_index", state["receipt_start"] - 1) for d in node["depends_on"]]])
                 if node["kind"] == "check" and node["passed"]:
@@ -440,9 +497,13 @@ class EngineeringWorkflow:
                         break
                 if node["kind"] == "decision":
                     requested = state.get("requests", {}).get(name)
-                    answers = [r for r in self.process.session.host_ledger if r.get("event") == "user_decision_received" and r.get("task_id") == task_id(self.process) and r.get("state_topic") == node["state_topic"] and r.get("answer") and r.get("decision_id") == requested]
-                    if answers:
+                    answers = [r for r in self._answers(node) if r.get("answer") and r.get("decision_id") == requested]
+                    from .alignment_evidence import resolved_answer
+                    resolution = resolved_answer(self.process.session.host_ledger, answers[-1], node["state_topic"]) if answers else None
+                    if resolution:
                         records[name] = {"decision_id": answers[-1]["decision_id"], "receipt_index": len(self.process.tool_receipts) - 1,
+                                         "value": resolution["value"], "disposition": resolution["disposition"],
+                                         **({'choice_key': resolution['choice_key']} if resolution.get('choice_key') else {}),
                                          "dependencies": dependency_version(node)}
                         progress = changed = True
             if not progress:
@@ -476,15 +537,16 @@ class EngineeringWorkflow:
         state = self._refresh(state)
         notices = [n for n in self.process.session.host_ledger if n.get("event") == "engineering_notice" and n.get("task_id") == task_id(self.process)][-16:]
         records = state["records"]
-        nodes = [{**n, "status": "complete" if n["id"] in records else "ready" if all(d in records for d in n["depends_on"]) else "blocked",
+        nodes = [{**n, "status": "assumed" if records.get(n['id'], {}).get('defaulted') else "complete" if n["id"] in records else "ready" if all(d in records for d in n["depends_on"]) else "blocked",
                   "evidence": records.get(n["id"])} for n in state["plan"]["nodes"]]
         return {"active": True, "task_id": state["task_id"], "revision": state["revision"],
                 "plan_digest": state["plan"]["digest"], "profiles": state["plan"]["profiles"],
                 "nodes": nodes, "ready": [n["id"] for n in nodes if n["status"] == "ready"],
+                "question_frontier": [n["id"] for n in nodes if n["kind"] == "decision" and n["status"] == "ready"],
                 "notices": notices,
                 "amendment": ({"decision_id": state["amendment"]["decision_id"],
                                "plan_digest": state["amendment"]["plan"]["digest"]} if state.get("amendment") else None),
-                "complete": all(not n["required"] or n["status"] == "complete" for n in nodes)}
+                "complete": all(not n["required"] or n["status"] == "complete" or (n['status'] == 'assumed' and self.process.task_kind in {'answer', 'plan'}) for n in nodes)}
 
     def request_decision(self, node_id, request):
         state, node = self._ready_node(node_id, "decision")
@@ -492,12 +554,153 @@ class EngineeringWorkflow:
             return {"status": "resolved", **state["records"][node_id]}
         if request.get("kind") == "permission":
             raise ValueError("authority requests must use request_permission, not engineering questions")
-        from .decision_support import create_user_decision
-        result = create_user_decision(self.process, {**request, "state_topic": node["state_topic"]})
-        state.setdefault("requests", {})[node_id] = result["decision_id"]
-        self._save(state)
+        result = self._publish_question(state, {**request, "state_topic": node["state_topic"]}, [node_id])
         self.notice("WORKFLOW_AWAITING_USER", f"步骤 {node_id} 正在等待你的选择。", node_id=node_id)
         return result
+
+    def _publish_question(self, state, request, node_ids):
+        from .decision_support import create_user_decision
+        result = create_user_decision(self.process, request)
+        state.setdefault("requests", {}).update({name: result["decision_id"] for name in node_ids})
+        try:
+            self._save(state)
+        except Exception:
+            self.process.pending_decision = None
+            self.process.session.host_ledger.append({"event": "user_decision_cancelled", "decision_id": result["decision_id"], "reason": "alignment publication failed"})
+            if self.process.task_budget:
+                self.process.task_budget.resume_from_user()
+            raise
+        return result
+
+    def ask_frontier(self):
+        """Publish one ready facet; adopt its answer before selecting the next.
+
+        The graph can contain several independent candidates. They are not a
+        questionnaire: a reply may resolve other facets or delegate them, so
+        publishing the whole frontier would force obsolete questions on users.
+        """
+        state = self._refresh(self._load()) if self._load() else {}
+        if not state:
+            raise ValueError("configure an alignment tree before asking its frontier")
+        frontier = self.status()["question_frontier"][:1]
+        if not frontier:
+            return {"status": "no_ready_questions", **self.status()}
+        questions = []
+        for node in state["plan"]["nodes"]:
+            if node["id"] not in frontier:
+                continue
+            request = copy.deepcopy(state.get('request_overrides', {}).get(node['id']) or node.get("request") or {})
+            request.setdefault("kind", "clarification")
+            request.setdefault("options", [])
+            questions.append({**request, "node_id": node["id"], "state_topic": node["state_topic"]})
+        result = self._publish_question(state, {
+            "kind": "clarification", "question": questions[0]["question"], "why_user_must_decide": questions[0]["why_user_must_decide"],
+            "questions": questions, "options": [], "allow_free_form": True,
+        }, frontier)
+        self.notice("ALIGNMENT_ROUND_AWAITING_USER", "等待当前问题的回答；采用回答后再决定是否需要下一题。", node_ids=frontier)
+        return result
+
+    def revise_decision(self, node_id, request):
+        state, node = self._ready_node(node_id, "decision")
+        if request.get("kind") == "permission":
+            raise ValueError("authority requests must use request_permission")
+        if self.process.pending_decision:
+            raise ValueError("answer the pending question before revising another decision")
+        previous = state["records"].get(node_id, {}).get("decision_id", "")
+        if request.get("supersedes_decision_id") and request["supersedes_decision_id"] != previous:
+            raise ValueError("superseded decision is not the current confirmed answer")
+        # Publish the new question before invalidating evidence, so validation
+        # errors leave the prior confirmed tree intact.
+        state["records"].pop(node_id, None)
+        result = self._publish_question(state, {**request, "state_topic": node["state_topic"],
+                                               "supersedes_decision_id": previous}, [node_id])
+        self._refresh(state)
+        self.notice("ALIGNMENT_DECISION_REOPENED", f"问题 {node_id} 已重新打开；旧答案与依赖证据仍可审计。", node_id=node_id)
+        return result
+
+    def ask_semantic(self, request):
+        """Default questions use the same DAG, without a separate skill API."""
+        kind = request.get("kind", "choice")
+        if kind not in {"clarification", "preference", "direction", "verification", "choice"}:
+            from .decision_support import create_user_decision
+            return create_user_decision(self.process, request)
+        topic = str(request.get("state_topic") or "").strip()
+        if not topic:
+            if kind != "clarification":
+                from .decision_support import create_user_decision
+                return create_user_decision(self.process, request)
+            topic = "clarification:" + hashlib.sha256(str(request.get("question") or "").encode()).hexdigest()[:16]
+        state = self._load()
+        existing = next((n for n in state.get("plan", {}).get("nodes", []) if n.get("state_topic") == topic and n["kind"] == "decision"), None)
+        if existing:
+            if request.get("supersedes_decision_id"):
+                return self.revise_decision(existing["id"], request)
+            return self.request_decision(existing["id"], request)
+        name = "q_" + hashlib.sha256(topic.encode()).hexdigest()[:16]
+        plan = copy.deepcopy(state.get("plan") or {"profiles": ["alignment"], "nodes": []})
+        plan["profiles"] = list(dict.fromkeys([*plan["profiles"], "alignment"]))
+        plan["nodes"].append({"id": name, "kind": "decision", "state_topic": topic, "before_mutation": True})
+        # Validate the question before extending requirements. No pending card
+        # should survive a failed graph publication.
+        compiled = compile_plan(plan, workspace(self.process))
+        prepared = self.configured_state(compiled)
+        if kind == 'clarification':
+            # A model-elicited clarification is distinct from an explicitly
+            # configured workflow requirement. Preserve its conservative tier
+            # and origin so a source-bound user request for exploratory output
+            # can change the read-only deliverable without resolving this node.
+            prepared['elicitation_tiers'] = {**prepared.get('elicitation_tiers', {}), name: 'foundational'}
+        result = self._publish_question(prepared, {**request, "state_topic": topic}, [name])
+        return result
+
+    def resolve_answer(self, node_id, decision_id, content):
+        state = self._load()
+        node = next((n for n in state.get('plan', {}).get('nodes', []) if n['id'] == node_id and n['kind'] == 'decision'), None)
+        if node is None or (state.get('requests', {}).get(node_id) not in {None, decision_id}):
+            raise ValueError('interpretation must bind the current question of this task')
+        answer = next((a for a in reversed(self._answers(node)) if a.get('decision_id') == decision_id), None)
+        if answer is None and not state.get('requests', {}).get(node_id):
+            from .alignment_evidence import source_answer, answer_digest
+            answer = source_answer(self.process.session.host_ledger, task_id(self.process), decision_id, content.get('source_node_id', ''))
+            if answer is None and not content.get('source_node_id') and content.get('quote'):
+                receipt = next((e for e in reversed(self.process.session.host_ledger)
+                    if e.get('event') == 'user_decision_received' and e.get('task_id') == task_id(self.process)
+                    and e.get('decision_id') == decision_id), {})
+                sources = [(key, item) for key, item in (receipt.get('answers') or {}).items()
+                           if content['quote'] in str(item.get('answer', ''))]
+                # Derive omitted plumbing from immutable evidence, not invented
+                # facts. Identical copies of one reply in a round are equivalent;
+                # genuinely different sources still require explicit selection.
+                if sources and len({answer_digest(item['answer']) for _, item in sources}) == 1:
+                    key, item = sources[0]
+                    content = {**content, 'source_node_id': key}
+                    answer = {**receipt, **item}
+        if not answer or not answer.get('answer'):
+            raise ValueError('no actual user receipt for this question')
+        if answer.get('answers') and node_id in answer['answers'] and not content.get('source_node_id'):
+            content = {**content, 'source_node_id': node_id}
+        from .alignment_evidence import interpret_answer, resolved_answer
+        event = interpret_answer(self.process, node, answer, content, publish=False)
+        previous = resolved_answer(self.process.session.host_ledger, answer, node['state_topic'])
+        if previous and content.get('disposition') == previous.get('disposition'):
+            # Delivery review must not churn a source-bound value just because
+            # the same model paraphrases it differently on the next call.
+            return previous
+        conditional = any(node_id in (n.get('when') or {}) for n in state['plan']['nodes'])
+        if conditional and event['disposition'] in {'confirmed', 'delegated'} and not event.get('choice_key'):
+            # A semantic paraphrase is not a branch key. Rich free-form answers
+            # require explicit classification; exact user values remain literal.
+            literal = answer.get('selected_label') or str(answer['answer']).strip()
+            labels = {v for n in state['plan']['nodes'] for v in (n.get('when') or {}).get(node_id, [])}
+            labels.update(o['label'] for o in (node.get('request') or {}).get('options', []) if o.get('label'))
+            if not answer.get('selected_label') and literal not in labels:
+                raise ValueError('conditional decision requires choice_key separate from its semantic value')
+            event['choice_key'] = literal
+        state.setdefault('requests', {})[node_id] = decision_id
+        self.process.session.host_ledger.append(event)
+        self._save(state)
+        self._refresh(state)
+        return event
 
     def _ready_node(self, node_id, kind=None):
         state = self._load()
@@ -620,8 +823,13 @@ class EngineeringWorkflow:
 
     def completion_reasons(self):
         status = self.status()
+        from .alignment_evidence import exploratory_scope
+        exploration = exploratory_scope(self.process)
+        elicited = self._load().get('elicitation_tiers', {})
         reasons = [f"engineering workflow {n['id']} ({n['kind']}) requires current evidence"
-                   for n in status.get("nodes", []) if n["required"] and n["status"] != "complete"]
+                   for n in status.get("nodes", []) if n["required"] and n["status"] != "complete"
+                   and not (n['status'] == 'assumed' and self.process.task_kind in {'answer', 'plan'})
+                   and not (exploration and n['kind'] == 'decision' and n['id'] in elicited)]
         if status.get("amendment"):
             reasons.append("engineering workflow scope amendment (decision) requires an explicit user choice")
         return reasons
@@ -636,6 +844,14 @@ class EngineeringWorkflow:
                     return self.record(args.get("node_id"), args.get("content"))
                 if operation == "ask":
                     return self.request_decision(args.get("node_id"), args.get("request") or {})
+                if operation == "ask_frontier":
+                    return self.ask_frontier()
+                if operation == "ask_semantic":
+                    return self.ask_semantic(args.get("request") or {})
+                if operation == "revise_decision":
+                    return self.revise_decision(args.get("node_id"), args.get("request") or {})
+                if operation == "resolve_answer":
+                    return self.resolve_answer(args.get("node_id"), args.get("decision_id"), args.get("content"))
                 if operation == "propose_amendment":
                     return self.propose_amendment(args.get("plan"), args.get("reason"))
                 if operation == "retrospective":

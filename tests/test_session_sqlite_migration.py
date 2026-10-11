@@ -201,10 +201,8 @@ def test_terminal_checkpoint_is_committed_before_completion_barrier():
     )
     _save_session_checkpoint({"session_store": Store()}, process)
 
-    assert calls == [
-        ("checkpoint", "process-order"),
-        ("agent_complete", "process-order"),
-    ]
+    assert calls == [("checkpoint", "process-order")]
+    assert process.lifecycle_finalized is True
 
 
 def test_checkpoint_transaction_rolls_back_all_authoritative_rows(

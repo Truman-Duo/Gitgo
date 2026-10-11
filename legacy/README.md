@@ -10,18 +10,12 @@ their historical build script, debug launcher, and original icons.  The code
 is retained for reference only.  It is not imported by the current launcher,
 tested as a supported product, or included in the terminal installer.
 
-## Local-only archive
+## Publication boundary
 
-The following paths are intentionally ignored by Git:
-
-- `artifacts/`: historical executables, PyInstaller work directories, spec
-  files, and local configuration copied from old distributions.
-- `docs/`: superseded plans and private engineering history.
-
-These files may contain machine-local paths, configuration, or obsolete
-implementation details.  They must pass the release privacy scan before any
-part is moved back into the published tree.  Runtime databases, project
-content, provider credentials, and user workspaces never belong in this
-archive or in a release commit.
+Private engineering records, historical executables and local configuration
+are excluded from the published tree. Runtime databases, project content,
+provider credentials and user workspaces do not belong in a source commit.
+Check candidate contents and references before publication; passing a scan
+alone does not establish that all material is public.
 
 The supported Windows build starts at `packaging/build_windows.ps1`.

@@ -274,13 +274,16 @@ export async function relaunchInConfiguredTerminal(
         // ready. A terminal process may exit normally after forwarding to its
         // existing server, so exit(0) alone is not readiness evidence.
         timer = setInterval(() => {
+          if (Date.now() >= deadline) {
+            finish(false, "Terminal did not become ready; continuing here. Change it in /config → General.");
+            return;
+          }
           try {
             const ticket = JSON.parse(readFileSync(path, "utf8"));
             if (ticket.token === token && ticket.status === "ready") {
               finish(true, "Selected terminal is ready."); return;
             }
           } catch { /* Retry only until the fixed launch deadline. */ }
-          if (Date.now() >= deadline) finish(false, "Terminal did not become ready; continuing here. Change it in /config → General.");
         }, 100);
         proc.unref();
       });

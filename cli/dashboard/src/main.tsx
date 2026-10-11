@@ -24,6 +24,12 @@ import {
 } from "./backend/terminalLauncher.js";
 import { detectTerminals } from "./backend/tools.js";
 import { registerLaunchSession } from "./backend/launchSession.js";
+import packageInfo from "../package.json";
+
+if (process.argv.includes("--version")) {
+  process.stdout.write(`Gitgo ${packageInfo.version}\n`);
+  process.exit(0);
+}
 
 const acknowledgeHandoff = acceptTerminalHandoff();
 process.env.GITGO_FRONTEND_ORIGIN = currentFrontendOrigin();

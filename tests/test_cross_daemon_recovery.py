@@ -83,6 +83,29 @@ def test_safe_checkpoint_restores_only_as_explicit_candidate(tmp_path_factory: P
     reopened.close()
 
 
+def test_clean_recovery_requires_fresh_host_continuation_and_preserves_uncertainty(tmp_path_factory):
+    from backend.core.loop.recovery import resolve_clean_recovery
+    from backend.core.loop.verification_policy import verification_plan
+    _, process = _running_supervisor(_workspace(tmp_path_factory))
+    process.recovery = {"state": "awaiting_user", "checkpoint_at": "2026-10-10T12:00:00", "reasons": []}
+    source = {"event": "user_decision_received", "task_id": process.active_task_id,
+              "process_id": process.process_id, "decision_id": "actual-leaf-card", "created_at": "2026-10-10T11:59:00"}
+    process.session.host_ledger.append(source)
+    assert not resolve_clean_recovery(process)
+    source["created_at"] = "2026-10-10T12:01:00"
+    process.runtime_preferences["pending_definition_recovery"] = {"definitions": {}}
+    assert not resolve_clean_recovery(process)
+    process.runtime_preferences.pop("pending_definition_recovery")
+    process.recovery["reasons"] = [{"code": "UNRESOLVED_EFFECT"}]
+    assert not resolve_clean_recovery(process)
+    assert "unresolved_recovery_state" in verification_plan(process).reasons
+    process.recovery["reasons"] = []
+    assert resolve_clean_recovery(process)
+    assert not resolve_clean_recovery(process)
+    assert "unresolved_recovery_state" not in verification_plan(process).reasons
+    assert process.session.host_ledger[-1]["event"] == "recovery_resolved"
+
+
 def test_event_only_orphan_is_visible_but_cannot_be_resumed(tmp_path_factory: Path):
     workspace = _workspace(tmp_path_factory)
     state_home = tmp_path_factory / "state"
@@ -313,7 +336,7 @@ def test_recovery_rehydrates_governance_signal_wire_records(tmp_path_factory: Pa
     reopened.close()
 
 
-def test_terminal_checkpoint_repairs_only_missing_completion_barrier(tmp_path_factory: Path):
+def test_legacy_terminal_checkpoint_repairs_only_missing_completion_barrier(tmp_path_factory: Path):
     workspace = _workspace(tmp_path_factory)
     state_home = tmp_path_factory / "state"
     _, original = _running_supervisor(workspace)
@@ -321,6 +344,13 @@ def test_terminal_checkpoint_repairs_only_missing_completion_barrier(tmp_path_fa
     store = SessionStore(str(workspace), state_home=state_home)
     store.save_process_checkpoint(original)
     process_id = original.process_id
+    # Simulate the pre-finality schema, rather than a current provisional
+    # provider result. Only legacy terminal snapshots may repair this barrier.
+    runtime = dict(store.load_process_state(process_id)["runtime_state"])
+    runtime.pop("lifecycle_finalized")
+    ref = store._storage.put_blob(json.dumps(runtime).encode(), media_type="application/json")
+    with store._storage._state_lock:
+        store._storage._state.execute("UPDATE session_processes SET runtime_state_ref=? WHERE process_id=?", (ref, process_id))
     assert process_id in store.list_incomplete()
     store.close()
 
@@ -331,6 +361,24 @@ def test_terminal_checkpoint_repairs_only_missing_completion_barrier(tmp_path_fa
     assert candidates == []
     assert process_id not in reopened.list_incomplete()
     reopened.close()
+
+
+def test_unfinalized_provider_success_never_becomes_a_completed_barrier(tmp_path_factory: Path):
+    workspace = _workspace(tmp_path_factory)
+    store = SessionStore(str(workspace), state_home=tmp_path_factory / "state")
+    try:
+        _, original = _running_supervisor(workspace)
+        original.status = ProcessStatus.COMPLETED
+        store.save_process_checkpoint(original)
+        manager = AgentProcessManager()
+        candidates = restore_incomplete_processes(store, manager, workspace)
+        restored = manager.get(original.process_id)
+        assert candidates and restored.status == ProcessStatus.RECOVERY_REVIEW_REQUIRED
+        assert restored.recovery["resume_forbidden"]
+        assert any(r["code"] == "HOST_FINALIZATION_INCOMPLETE" for r in restored.recovery["reasons"])
+        assert original.process_id in store.list_incomplete()
+    finally:
+        store.close()
 
 
 def test_restore_rebuilds_connected_supervisor_worker_tree(tmp_path_factory: Path):
@@ -511,6 +559,7 @@ def test_explicit_safe_resume_continues_same_process_and_writes_terminal_barrier
         emitted.append,
     )
 
+    assert "result" in emitted[-1], emitted
     assert emitted[-1]["result"]["process_id"] == process_id
     assert restored.status is ProcessStatus.COMPLETED
     assert restored.result["response"] == "continued safely"
