@@ -19,8 +19,11 @@ class RequestMemo:
         self.claims = OrderedDict()
 
     def claim(self, key, operation, arguments):
-        digest = hashlib.sha256(json.dumps([operation, arguments], ensure_ascii=False,
-                                sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        # Fingerprint the complete JSON value losslessly, including malformed
+        # text. Domain validation must report that text at its own boundary;
+        # transport replay admission must not fail first while encoding it.
+        digest = hashlib.sha256(json.dumps([operation, arguments], ensure_ascii=True,
+                                sort_keys=True, separators=(",", ":")).encode('ascii')).hexdigest()
         with self.lock:
             existing = self.claims.get(key)
             if existing is not None:
