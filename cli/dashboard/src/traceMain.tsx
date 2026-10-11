@@ -5,13 +5,14 @@ import {
 } from "@anthropic/ink";
 import { NativeHostClient } from "./backend/client.js";
 import { resolvePythonRuntime } from "./backend/pythonRuntime.js";
+import { resolveProjectRoot } from "./runtime/paths.js";
 import { colors, truncate, wrap } from "./theme/index.js";
 import {
   eventSummary, mergeTraceEvents, shortPid, verboseEventLines,
   type TraceRecord,
 } from "./traceView.js";
 
-const GITGO_DIR = resolve(import.meta.dir, "../../..");
+const GITGO_DIR = resolveProjectRoot(import.meta.url);
 const PYTHON = resolvePythonRuntime();
 const PROJECT = (() => {
   const index = process.argv.indexOf("--project");

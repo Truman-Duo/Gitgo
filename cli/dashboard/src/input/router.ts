@@ -85,7 +85,7 @@ export class InputBindingRegistry {
   }
   normalize(event: InputEvent): InputEvent {
     // Bracketed paste is literal input, never a shortcut/intent to execute.
-    if (event.input.length > 1 && !event.key.ctrl && !event.key.meta) return event;
+    if (event.key.paste || (event.input.length > 1 && !event.key.ctrl && !event.key.meta)) return event;
     for (const [action, physical] of Object.entries(this.bindings)) {
       if (!matches(event, physical)) continue;
       const canonical = INPUT_ACTIONS[action]!;

@@ -6,8 +6,11 @@
   "private": true,
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "dev": "bun run src/main.tsx",
-    "dev:trace": "bun run src/traceMain.tsx --project gitgo",
+    "dev": "bun scripts/launch.mjs",
+    "dev:node": "node scripts/launch.mjs --runtime node",
+    "dev:trace": "bun scripts/launch.mjs --entry trace --project gitgo",
+    "diagnostics": "node scripts/launch.mjs --runtime-diagnostics",
+    "test:input": "bun scripts/test-input.mjs",
     "dev:live": "bun run src/liveTestServer.ts"
   },
   "devDependencies": {

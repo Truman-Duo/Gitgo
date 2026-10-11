@@ -1,0 +1,33 @@
+name: Dashboard runtime compatibility
+on:
+  pull_request:
+    paths: ['cli/dashboard/**', 'scripts/test_dashboard_pty.py', '.github/workflows/dashboard-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  input:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+        node: ['22', '24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: bun install --frozen-lockfile
+        working-directory: cli/dashboard
+      - run: bun run build
+        working-directory: cli/dashboard
+      - run: bun run test:input
+        working-directory: cli/dashboard
+      - run: node --test scripts/runtime.test.mjs
+        working-directory: cli/dashboard
+      - if: runner.os != 'Windows'
+        run: python3 scripts/test_dashboard_pty.py

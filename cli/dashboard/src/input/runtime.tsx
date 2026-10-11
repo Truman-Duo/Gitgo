@@ -18,9 +18,12 @@ export function InputProvider({ children, settings }: { children: React.ReactNod
       return true; // Never let a clipboard shortcut reach task cancellation.
     } }), [router, selection]);
   useInput((input, key, event: any) => {
+    // Kitty-enabled terminals can report Cmd separately from Alt. Translate
+    // clipboard shortcuts only; Cmd must never turn arbitrary text into Ctrl.
+    const clipboardCommand = key.super && !key.meta && !key.shift && (input === "c" || input === "v");
     router.dispatch({
       input,
-      key: {...key, paste: Boolean(event?.keypress?.isPasted || (key as InputKey).paste)},
+      key: {...key, ctrl: key.ctrl || clipboardCommand, paste: Boolean(event?.keypress?.isPasted || (key as InputKey).paste)},
     });
   });
   return <RouterContext.Provider value={router}>{children}</RouterContext.Provider>;

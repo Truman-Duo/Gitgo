@@ -9,6 +9,9 @@ import { InputProvider } from "./input/runtime.js";
 import { dirname, resolve } from "node:path";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { resolvePythonRuntime } from "./backend/pythonRuntime.js";
+import { resolveProjectRoot } from "./runtime/paths.js";
+import { spawn } from "node:child_process";
+import { probeRuntime } from "../scripts/runtime.mjs";
 import {
   loadTerminalLauncherConfig,
   ensureWindowsUtf8Console,
@@ -30,7 +33,7 @@ const COMPILED = Boolean(
 );
 const GITGO_DIR = process.env.GITGO_INSTALL_ROOT
   ? resolve(process.env.GITGO_INSTALL_ROOT)
-  : COMPILED ? EXECUTABLE_DIR : resolve(import.meta.dir, "../../..");
+  : COMPILED ? EXECUTABLE_DIR : resolveProjectRoot(import.meta.url);
 const PYTHON = resolvePythonRuntime();
 const INTERNAL_HOST = (() => {
   const explicit = process.env.GITGO_HOST_EXECUTABLE || "";
@@ -116,6 +119,28 @@ function startupSmokeTask(): {
 }
 
 async function main() {
+  const requestedRuntime = argumentValue("--runtime") || process.env.GITGO_DASHBOARD_RUNTIME || "auto";
+  if (!["auto", "bun", "node"].includes(requestedRuntime)) throw new Error("Runtime must be auto, bun, or node");
+  // Native releases keep the embedded Bun fast path. Their companion bundle
+  // uses the same UI and Native Host when Node is explicitly requested.
+  if (COMPILED && process.versions.bun && requestedRuntime === "node") {
+    const launcher = resolve(GITGO_DIR, "dashboard/scripts/launch.mjs");
+    if (!existsSync(launcher)) throw new Error("Node companion bundle missing; rebuild the native release");
+    const child = spawn(process.env.GITGO_NODE || "node", [launcher, "--runtime", "node", ...process.argv.slice(2)], {
+      stdio: "inherit", env: {...process.env, GITGO_INSTALL_ROOT: GITGO_DIR},
+    });
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => child.kill(signal));
+    child.once("error", error => { console.error(error.message); process.exit(1); });
+    child.once("exit", (code, signal) => process.exit(code ?? (signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 129)));
+    return;
+  }
+  if (process.argv.includes("--runtime-diagnostics")) {
+    console.log(JSON.stringify({runtime: process.versions.bun ? "bun" : "node",
+      version: process.versions.bun || process.versions.node, compiled: COMPILED,
+      stdinTTY: !!process.stdin.isTTY, stdoutTTY: !!process.stdout.isTTY,
+      node: probeRuntime("node", process.env.GITGO_NODE || "node")}, null, 2));
+    return;
+  }
   ensureWindowsUtf8Console();
   const launcherConfig = loadTerminalLauncherConfig();
   if (shouldRelaunchInConfiguredTerminal({
@@ -141,19 +166,24 @@ async function main() {
   setBackendClient(client);
 
   let shutdownPromise: Promise<void> | null = null;
+  let renderer: ReturnType<typeof renderSync> | undefined;
   const shutdown = (exitCode: number): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
+    renderer?.unmount();
+    renderer?.cleanup();
     shutdownPromise = Promise.resolve(client.close())
       .catch(() => undefined)
       .then(() => { process.exit(exitCode); });
     return shutdownPromise;
   };
-  process.once("SIGINT", () => { void shutdown(130); });
-  process.once("SIGTERM", () => { void shutdown(143); });
-  process.once("SIGHUP", () => { void shutdown(129); });
+  // Keep the handlers installed until asynchronous Host shutdown completes.
+  // Removing a once-handler during delivery can let signal-exit re-raise it.
+  process.on("SIGINT", () => { void shutdown(130); });
+  process.on("SIGTERM", () => { void shutdown(143); });
+  process.on("SIGHUP", () => { void shutdown(129); });
   process.stdin.once("end", () => { void shutdown(0); });
 
-  const { waitUntilExit } = renderSync(
+  renderer = renderSync(
     <ScreenWrapper>
       <InputProvider><App
         client={client}
@@ -164,8 +194,12 @@ async function main() {
     { exitOnCtrlC: false }
   );
 
-  await waitUntilExit();
-  if (!shutdownPromise) await client.close();
+  await renderer.waitUntilExit();
+  if (shutdownPromise) {
+    await shutdownPromise;
+    return;
+  }
+  await client.close();
   // Ink and terminal observers may retain timers after the renderer exits.
   // The backend is already closed, so make the CLI lifecycle deterministic.
   process.exit(0);
