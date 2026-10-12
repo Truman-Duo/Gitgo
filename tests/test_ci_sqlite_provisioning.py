@@ -12,8 +12,13 @@ def test_universal2_duplicate_dependency_has_one_identity():
     assert macos_sqlite_dependency(listing) == library
 
 
-@pytest.mark.parametrize('listing', ['', '\t/a/libsqlite3.dylib (compatibility version 1.0.0)\n'
-                                      '\t/b/libsqlite3.dylib (compatibility version 1.0.0)\n'])
-def test_missing_or_ambiguous_dependency_remains_rejected(listing):
+def test_static_sqlite_layout_requires_module_rebuild():
+    assert macos_sqlite_dependency('/tmp/_sqlite3.so:\n'
+        '\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n') is None
+
+
+def test_ambiguous_dependency_remains_rejected():
+    listing = '\t/a/libsqlite3.dylib (compatibility version 1.0.0)\n' + \
+              '\t/b/libsqlite3.dylib (compatibility version 1.0.0)\n'
     with pytest.raises(RuntimeError, match='dependency layout'):
         macos_sqlite_dependency(listing)

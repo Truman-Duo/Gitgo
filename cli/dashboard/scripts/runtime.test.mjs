@@ -19,8 +19,10 @@ test('Bun is preferred; failed probes fall back to Node; explicit overrides fail
   assert.throws(() => selectRuntime('other'), /Invalid runtime/);
 });
 test('real executable probes verify identity, raw mode and split UTF-8', {timeout: 20000}, () => {
-  assert.equal(probeRuntime('node', process.env.GITGO_NODE || 'node').available, true);
-  assert.equal(probeRuntime('bun', process.env.GITGO_BUN || 'bun').available, true);
+  const node = probeRuntime('node', process.env.GITGO_NODE || 'node');
+  const bun = probeRuntime('bun', process.env.GITGO_BUN || 'bun');
+  assert.equal(node.available, true, JSON.stringify(node));
+  assert.equal(bun.available, true, JSON.stringify(bun));
   assert.equal(probeRuntime('bun', process.env.GITGO_NODE || 'node').available, false);
   assert.equal(probeRuntime('node', '/nonexistent/gitgo-runtime').available, false);
 });
