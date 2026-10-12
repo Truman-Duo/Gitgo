@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import platform
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,10 @@ ARCHIVES = {
         '71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5'),
     'linux': ('x86_64-unknown-linux-musl.tar.gz',
         '33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c'),
+    'darwin-arm64': ('aarch64-apple-darwin.tar.gz',
+        '3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4'),
+    'darwin-x86_64': ('x86_64-apple-darwin.tar.gz',
+        'af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1'),
 }
 
 NOTICE_FILES = ('COPYING', 'LICENSE-MIT', 'UNLICENSE')
@@ -37,7 +42,8 @@ def archive_notices(entries):
 def main():
     if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
         raise SystemExit('Only disposable GitHub-hosted CI is supported')
-    suffix, expected = ARCHIVES[sys.platform]
+    key = f'darwin-{platform.machine()}' if sys.platform == 'darwin' else sys.platform
+    suffix, expected = ARCHIVES[key]
     name = f'ripgrep-{VERSION}-{suffix}'
     url = f'https://github.com/BurntSushi/ripgrep/releases/download/{VERSION}/{name}'
     with urllib.request.urlopen(url, timeout=60) as response:

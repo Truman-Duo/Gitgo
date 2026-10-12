@@ -88,6 +88,9 @@ if __name__ == "__main__":
         os.environ['GITGO_HOST_EXECUTABLE'] = str(Path(args.native_host).resolve())
         with tempfile.TemporaryDirectory(prefix='gitgo-runtime-config-') as config:
             os.environ['GITGO_CONFIG_PATH'] = str(Path(config) / 'config.json')
+            os.environ['GITGO_STATE_HOME'] = str(Path(config) / 'state')
+            os.environ['GITGO_LLM_CONFIG_PATH'] = str(Path(config) / 'llm.json')
+            os.environ['GITGO_LLM_SECRET_PATH'] = str(Path(config) / 'secrets.json')
             for runtime in ('bun', 'node'):
                 command = ([args.native_command, '--runtime', runtime] if args.native_command else
                            ['node', 'scripts/launch.mjs', '--runtime', runtime])

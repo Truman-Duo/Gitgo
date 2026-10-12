@@ -129,7 +129,8 @@ def test_frozen_host_scope_role_preserves_command_semantics(monkeypatch, cancel)
     if cancel:
         terminate_tree(proc)
         assert proc.poll() is not None
-        assert proc._gitgo_cleanup["mode"] == "owned-session-only"
+        expected_mode = "linux-subreaper-pidfd" if sys.platform.startswith("linux") else "owned-session-only"
+        assert proc._gitgo_cleanup["mode"] == expected_mode
         return
     out, err, _ = collect(proc, timeout=10)
     assert proc.returncode == 7

@@ -126,6 +126,7 @@ done < <("$PYTHON_BIN" -B -c 'import json,sys; print("\n".join(json.load(open(sy
 "$PYTHON_BIN" -B "$ROOT/scripts/smoke_packaged_runtime.py" --host "$STAGE/internal/gitgo-host/gitgo-host"
 
 if [ "$SKIP_ARCHIVE" -eq 0 ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/unix_release_manifest.py" --stage "$STAGE" --bun "$BUN_BIN"
   ARCHIVE_DIR="$(dirname "$ARCHIVE")"
   mkdir -p "$ARCHIVE_DIR"
   if [ -e "$ARCHIVE" ] || [ -e "$ARCHIVE.sha256" ]; then

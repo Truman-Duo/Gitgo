@@ -18,7 +18,7 @@ test('Bun is preferred; failed probes fall back to Node; explicit overrides fail
   assert.throws(() => selectRuntime('bun', {}, probe), /probe failed/);
   assert.throws(() => selectRuntime('other'), /Invalid runtime/);
 });
-test('real executable probes verify identity, raw mode and split UTF-8', () => {
+test('real executable probes verify identity, raw mode and split UTF-8', {timeout: 20000}, () => {
   assert.equal(probeRuntime('node', process.env.GITGO_NODE || 'node').available, true);
   assert.equal(probeRuntime('bun', process.env.GITGO_BUN || 'bun').available, true);
   assert.equal(probeRuntime('bun', process.env.GITGO_NODE || 'node').available, false);

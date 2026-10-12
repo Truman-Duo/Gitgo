@@ -66,7 +66,7 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
             ConfigManager.save(Config(projects=[project]), config_path, allow_empty=True)
             llm_path = root / "llm_config.json"
             llm_path.write_text(json.dumps({"providers": [{
-                "id": "continuity", "name": "Local acceptance", "api_key": "local-test-only",
+                "id": "continuity", "name": "Local acceptance", "auth_mode": "none",
                 "base_url": f"http://127.0.0.1:{server.server_port}/v1",
                 "model_id": "continuity", "protocol": "openai_chat",
             }], "active_provider": "continuity"}), encoding="utf-8")
@@ -79,7 +79,7 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
             def start(terminal):
                 current = dict(env)
                 current["GITGO_FRONTEND_ORIGIN"] = json.dumps({"version": 1, "terminal": terminal,
-                    "platform": "win32", "source": "packaged_protocol_acceptance"})
+                    "platform": sys.platform, "source": "packaged_protocol_acceptance"})
                 return ProtocolClient(host, current, arguments=["-u", "-m", "backend.core.native_host"] if source else None)
 
             def call(client, operation, args=None):

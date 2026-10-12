@@ -56,14 +56,17 @@ def main():
         # This process has never imported sqlite3, so it holds no DLL lock.
         with download("windows") as archive:
             target.write_bytes(archive.read("sqlite3.dll"))
-    elif sys.platform == "linux":
+    elif sys.platform in ("linux", "darwin"):
         with download("linux") as archive:
             source = scratch / "sqlite3.c"
             source.write_bytes(archive.read("sqlite-amalgamation-3530400/sqlite3.c"))
-        library = scratch / "libsqlite3.so.0"
-        subprocess.run(["gcc", "-shared", "-fPIC", "-O2", "-DSQLITE_THREADSAFE=1",
+        darwin = sys.platform == "darwin"
+        library = scratch / ("libsqlite3.dylib" if darwin else "libsqlite3.so.0")
+        link_options = (["-dynamiclib", "-Wl,-install_name," + str(library)] if darwin else
+                        ["-shared", "-Wl,-soname,libsqlite3.so.0"])
+        subprocess.run(["cc", *link_options, "-fPIC", "-O2", "-DSQLITE_THREADSAFE=1",
             "-DSQLITE_ENABLE_COLUMN_METADATA", "-DSQLITE_ENABLE_FTS5", "-DSQLITE_ENABLE_RTREE",
-            "-DSQLITE_ENABLE_MATH_FUNCTIONS", "-Wl,-soname,libsqlite3.so.0",
+            "-DSQLITE_ENABLE_MATH_FUNCTIONS",
             str(source), "-o", str(library), "-lpthread", "-ldl", "-lm"], check=True)
         spec = importlib.util.find_spec("_sqlite3")
         if spec is None or spec.origin is None:
@@ -72,11 +75,20 @@ def main():
         shutil.copy2(target, scratch / target.name)
         # Pin the extension's dependency instead of passing an injectable
         # LD_LIBRARY_PATH through the sandbox environment allowlist.
-        previous = subprocess.check_output(["patchelf", "--print-rpath", str(target)], text=True).strip()
-        rpath = str(scratch) + (":" + previous if previous else "")
-        subprocess.run(["patchelf", "--set-rpath", rpath, str(target)], check=True)
+        if darwin:
+            dependencies = subprocess.check_output(["otool", "-L", str(target)], text=True)
+            matches = [line.strip().split()[0] for line in dependencies.splitlines()[1:]
+                       if "libsqlite3" in line]
+            if len(matches) != 1:
+                raise RuntimeError("Unexpected macOS SQLite dependency layout")
+            subprocess.run(["install_name_tool", "-change", matches[0], str(library), str(target)], check=True)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(target)], check=True)
+        else:
+            previous = subprocess.check_output(["patchelf", "--print-rpath", str(target)], text=True).strip()
+            rpath = str(scratch) + (":" + previous if previous else "")
+            subprocess.run(["patchelf", "--set-rpath", rpath, str(target)], check=True)
     else:
-        raise SystemExit("This helper provisions the Windows/Linux acceptance jobs only")
+        raise SystemExit("Unsupported hosted acceptance platform")
     probe = ("import sqlite3;from backend.core.storage.runtime import validate_sqlite_runtime;"
              f"assert sqlite3.sqlite_version == {VERSION!r};"
              "validate_sqlite_runtime();print('Validated SQLite',sqlite3.sqlite_version)")

@@ -6,7 +6,8 @@
 
 - PR 标题遵守目标基线的 commit-config.json；贡献者无需申请全局编号。正文中的候选 head、验证 base 和源/目标身份必须与本次 PR 一致，包含问题、设计、验证、兼容/回滚、上下游和风险说明。允许同义标题，不机械要求复制模板；这只能检查说明存在，不能证明说明真实或设计合理。
 - 功能分支必须包含本次观察到的上游。目标主线继续推进时，由 strict required-status 规则阻止过时组合合入；作者同步并更新正文后重新验证。CI 保存实际测试的 merge commit/tree、head/base 和 run/attempt，旧绿灯不是新候选证据。
-- tracked-file 隐私边界、Windows 完整 Python suite、锁定 Bun 依赖的 dashboard suite 和 production build。当前正式存储凭据后端只有 Windows，因此基础源码验收不冒充跨平台覆盖。
+- tracked-file 隐私边界、Windows 完整 Python suite、锁定 Bun 依赖的 dashboard suite 和 production build。基础源码验收不冒充跨平台覆盖；另有 macOS/Linux 包和原生凭据测试。
+- Bun/Node 三平台 runtime matrix、Windows 最终 ZIP 与 frozen 连续性、macOS ARM64/Linux x86_64 原生 build 和独立 worker 的最终包验收均进入 CI gate；完整来源、依赖固定和人工验收边界见 [原生包自动化](native-package-automation.md)。
 - 候选或目标上游包含原生 sandbox 后，必须保留真实验收入口，启用 Windows/Linux 的源码与实际 frozen Host 验收，Windows 先跑精确 ACL 恢复检查。未引入 sandbox 的主线跳过此项，gate 明确判断这是预期跳过，不将其宣称为沙箱通过。原生实现进入主线后，不能删掉 backend/验收入口让检查消失。
 
 scripts/provision_ci_sqlite.py 与 provision_ci_ripgrep.py 单独复用 PR #25 的固定下载/校验辅助脚本（参考候选 1a2da14fc6e9879a7ead6fd471f53b409659ddcc，贡献者 jgeted），仅在可丢弃的 hosted CI 中准备依赖，不表示接受该 PR 的生产隔离实现。SQLite 3.53.4 官方归档使用固定 SHA3-256；ripgrep 15.2.0 官方发行归档使用固定 SHA-256；原有 SQLite 安全校验保留，不设环境绕过。依赖升级应单独审查并更新版本和证据。
@@ -17,7 +18,7 @@ scripts/provision_ci_sqlite.py 与 provision_ci_ripgrep.py 单独复用 PR #25 �
 
 Windows 测试使用 runner 自有临时目录的规范绝对路径，并启用 Python UTF-8 模式，避免 hosted 环境的 RUNNER~1 别名和 cp1252 默认编码影响测试身份。删除与终端清理仍拒绝重定向路径；这不表示产品已经支持所有 Windows 短路径别名。首次全量运行也暴露了 LocalFileAdapter.is_symlink 先 resolve 后检查的真实缺陷，本 PR 仅修复目录项判断，并用现有测试验证正常文件和悬空链接；不接入 PR #25 的其余生产实现。
 
-只运行 GitHub-hosted 临时 runner，顶层 token 为 contents:read；checkout 不保存凭据，不注入项目 provider/API key，不缓存 PR 执行后可污染的依赖产物，不上传整个 .gitgo、trace 或原生安装包。第三方 Actions 固定完整 commit SHA，并注明版本；下载工具是验证用，不冒充正式 release staging。
+只运行 GitHub-hosted 临时 runner，顶层 token 为 contents:read；checkout 不保存凭据，不注入项目 provider/API key，不缓存 PR 执行后可污染的依赖产物，不上传整个 .gitgo 或 trace。新增原生打包 job 仅上传安装归档和脱敏验收记录，不自动发布正式 Release。第三方 Actions 固定完整 commit SHA，并注明版本；原有 sandbox 下载工具仍是验证用，不冒充正式 release staging。
 
 使用 pull_request 执行候选组合，不使用带高权限的 pull_request_target 执行 fork 代码。不可信标题/正文从 JSON 读取，不直接插入 shell。fork 首次/外部贡献运行所需的 GitHub 人工批准保留；批准 CI 执行不等于批准 PR 或沙箱越权。
 
