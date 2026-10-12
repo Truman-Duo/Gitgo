@@ -42,25 +42,40 @@ python scripts/provision_sandbox.py --workspace PROJECT --runtime DEDICATED_RUNT
 python scripts/provision_sandbox.py --workspace PROJECT --runtime DEDICATED_RUNTIME --runtime GITGO_SOURCE --record PRIVATE_HOST_DIR/project-acl.json --apply
 ```
 
-应用先打开全部目录/文件，确认读取安全描述符、写 DACL/MIC 的权限；记录原始
-DACL、MIC 及原生 volume/file ID，并 flush/fsync 到新文件后才创建 profile 和改 ACL。
-使用 OS 返回的系统 icacls 路径，不从 cwd/PATH 查找。原生句柄锁住父目录和对象，
-防止配置期间改名/删除；拒绝任何 reparse point 和多链接文件，以免改到范围外的对象。
-树最多 100000 个对象，记录最多 64 MiB；需要更大/带链接的安装树应另行审查，不放宽检查。
-恢复数据含私有路径和 SID，保留在 Host 私有目录，不提交、发布或作为工具输入。
+应用使用独立的、已授权的操作员权限；要求当前令牌已有 SeSecurityPrivilege、
+SeBackupPrivilege 和 SeRestorePrivilege。只在私有线程令牌上临时启用，退出恢复原线程身份，
+不改变 Host 进程令牌，不请求 UAC。身份恢复失败立即停止，不能继续回滚或其他权限操作。
 
-修改失败立即通过同一批对象句柄回滚原始 DACL 授权、DACL 保护标志和 MIC，
-然后重新读取核验；回滚失败必须报告不完整并保留记录，不能当成配置成功。
-Windows API 会重新计算 AI 继承记账标志；核验保持每个 ACE、ACE 继承位、
-DACL protected 标志和实际 MIC，不声称描述符二进制逐字节相同。
-恢复逐对象调用用户态 NtSetSecurityObject，将已验证的描述符写到原生句柄；
-仅传 DACL/LABEL 信息位，保护状态使用已记录描述符的 control，不请求强制重新继承。
-不使用会重新传播整树继承的 SetSecurityInfo 恢复，避免给旧显式子 ACL 加入父目录 ACE。
-参见 [Microsoft 原生安全对象 API 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwsetsecurityobject)。
-显式 OWNER_RIGHTS ACL、protected/unprotected 双向变化、可继承父目录与显式子 ACL
-及 Medium/默认 MIC 都有真实对象回归，不接受额外 ACE 作为恢复成功。
-空/不存在的标签使用系统默认 MIC，绝不把允许所有访问的 null DACL 与拒绝
-所有访问的 empty DACL 等同。操作不修改 owner/group，LABEL 更新不恢复或替换审计 ACE。
+先打开全部目录/文件并绑定原生 volume/file ID；通过 NtQuerySecurityObject 保存完整二进制
+owner/group、DACL、审计与 MIC、继承/保护状态。GetSecurityInfo 的文件接口可能返回重建的
+继承视图，不能将它作为底层原始描述符用于回写。独立 GetKernelObjectSecurity 读取用于原生测试对照。
+
+版本 3 恢复记录包含原始值、逐对象计划值及外层父目录的身份/权限边界；flush/fsync 完成后
+才创建 profile 和写权限。每个现存对象单独增加工作区 M 或运行时 RX，工作区设为 Low MIC；
+不再调用递归 icacls。保留原 ACE 的顺序、拒绝规则、控制位及无关审计条目；遇到含冲突的
+AppContainer 权限或无法无损处理的描述符，写入前拒绝。配置本身不覆盖既有拒绝策略。
+
+恢复使用持有的原生句柄和固定 SECURITY_DATA 流调用 BackupWrite，不接受任意内容、链接
+或备用数据流。完整校验全部记录、对象身份、当前权限及父目录边界后才开始写入，每次写入
+前后继续检查目标权限。正常恢复只接受已记录的应用状态；中断恢复/回滚仅接受原始或计划
+状态，其他状态作为外部权限冲突停止。失败保留明确的 applying、rollback_failed 或
+restore_failed 等状态；不伪称已回滚。版本 1/2 缺少完整原始值和期望值，拒绝自动恢复，
+需操作员保留记录并单独核验，不能用当前权限补造历史快照。
+
+比较保留每个 ACE 的内容、顺序及继承位，保留全部控制位、owner/group、MIC 和审计。
+只忽略组件布局/未使用分配空间及不含任何 ACE 的 SACL 的 absent/NULL/empty 表示差异；
+绝不等同 null DACL 和 empty DACL，也不删除 AI/AR/ID 或 protected 差异。
+原生回归对照未改动树，覆盖恢复后创建子对象及父目录授权、撤权、继承重置后的行为。
+
+管理互斥锁串行化合作的配置进程，原生句柄防止对象改名/删除；它们不能冻结其他程序的
+WRITE_DAC/WRITE_OWNER。前后检查不是操作系统的原子权限比较交换。跨 Host 的运行租约、
+引用计数和升级卸载协调仍未完成，配置/恢复必须由操作员停止所有相关使用者后执行；
+不能把本次恢复原语改进当作 B5 全部完成。拒绝 reparse point 和多链接文件，树最多
+100000 个对象，恢复记录最多 64 MiB。恢复数据含私有路径和 SID，只保存在 Host 私有目录。
+
+参见 [Microsoft NtQuerySecurityObject](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerysecurityobject)、
+[GetKernelObjectSecurity](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getkernelobjectsecurity) 与
+[BackupWrite 权限及安全流要求](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-backupwrite)。
 
 若树中对象和身份未变化，可以先预览、再显式恢复：
 
@@ -74,7 +89,7 @@ python scripts/provision_sandbox.py --restore PRIVATE_HOST_DIR/project-acl.json 
 这支持配置失败回滚及未变化树的恢复，不是已使用工作区的通用卸载器：内容编辑
 保留，但产生新对象后还需独立的生命周期迁移方案。profile 保留，因为可能已有
 其他配置共享该 profile；撤销全部相关 ACE、停止所有使用者后再由操作员审查删除。
-不继承 ACL 的已有文件仍需操作员审查配置，工具保持失败关闭。
+现存受保护对象也按清单单独配置；原有拒绝规则不会被移除，访问仍被拒绝时应由操作员核验。
 Agent 工具不会自动执行配置或恢复，也不会为启动工具修改 Host ACL。
 
 ### Shell 迁移

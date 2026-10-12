@@ -145,10 +145,14 @@ Host 崩溃后 running/启动间隙进入待核验状态，由 OS 生命周期�
 普通句柄阻止 rename 不等于阻止其他句柄 WRITE_DAC/WRITE_OWNER，不能假称已独占 ACL。
 检测合法外部权限变更时恢复冲突并停下，不能覆盖旧快照；改到一半保留逐对象结果。
 
-当前未提交的 legacy inheritance_model 方案仅为研究候选：允许 ID 0→1
-不能由当前访问等价推导未来父 ACL 修改行为等价。不得作为满足维护者 B5 的正式实现。
-需覆盖父 ACL 后续变更的继承行为及现代/legacy、protected/unprotected、OWNER_RIGHTS、
-默认/Medium MIC；无法保持审阅要求时在任何修改前拒绝该配置，或采用不修改用户树的隔离卷设计。
+允许 ID 0→1 的 legacy inheritance_model 方案已排除，当前访问等价不能推出未来继承等价。
+恢复快照改由 NtQuerySecurityObject 读取完整底层描述符，以独立 GetKernelObjectSecurity
+核对；不把 GetSecurityInfo 重建的文件继承视图用于原样回写。逐对象固定安全流恢复保留
+原始 ACE 和控制位；仅无 ACE 的 SACL 表示差异可等同。配置前持久化原始/计划状态及外层
+父目录身份/权限，未知当前状态作为冲突拒绝。单独的管理互斥锁串行化配置操作；它不冻结
+外部 WRITE_DAC，不等于运行时 lease/refcount，不能据此宣布 B5 全部关闭。
+原生回归覆盖 modern/legacy、protected/unprotected、OWNER_RIGHTS、默认/Medium MIC、
+父 DACL 与审计规则增删、继承重置及新后代；无法无损规划的配置在任何权限写入前拒绝。
 不得删除 ID 比较、跳过 hosted 失败或扩大 ACL。原生 token 验证 WRITE_DAC/WRITE_OWNER、
 父 DELETE_CHILD、显式 deny、身份及后代权限，不能只测文件内容不可写。
 
@@ -229,8 +233,8 @@ ToolResultReady、executor/Trace 结果路径；保留 exit_code、耗时、time
 不宣称线程、输出或整树清理完成。该诊断不是可信 effect/lineage/cleanup envelope。
 
 B6 的 stderr 传输缺口修复；监督/清理 outcome、正式终端、错误阶段及是否启动事实仍待
-统一 Host envelope。ACL 继承恢复、未来父权限变化和并发事务仍是需要专项设计的障碍，
-不能通过放宽权限、跳过验证或接受“看似等价”的 DACL 消除。
+统一 Host envelope。ACL 原始快照、恢复及未来继承已增加独立原生对照；运行时租约、
+升级/卸载事务和恢复记录目录的原生权限验证仍待完成，不能用专项恢复测试代替完整 B5 验收。
 
 每次候选记录 head、target、观察时间/upstream、merge-base、组合树、策略/协议版本、
 接口对齐、源码/frozen/OS/helper 版本、正向/拒绝/故障/跳过、run/artifact 和剩余风险。
@@ -260,6 +264,6 @@ python -B scripts/audit_sandbox_candidate.py --observed-upstream FULL_SHA --obse
 保留作者/共同作者，不为了编号 force-push 公开分支。正式编号不能现在假定为 75。
 
 PR 正文使用模板所有章节，写“需要修改/设计候选”，不引用 bbc169f 旧 CI 作为最新通过证据。
-当前 public head 的 Windows 生产修复和完整验收没有成功证明；本地未提交改动也不能充当候选证据。
-设计/审计提交的测试仅覆盖设计交付工具，不提升 OS 安全结论。
-当前已有的未提交 ACL 实验保留供研究，避免混入本设计责任提交。
+生产候选必须分别记录 Windows 专项、全量源码与实际 frozen 验证；本地跳过不能代替 hosted 原生成功。
+设计/审计工具不提升 OS 安全结论。研究分支实验仅用于定位；只有同源生产实现和完整回归可作为修复证据。
+旧版模型诊断脚本已退出正式 workflow，正式门禁直接运行生产权限恢复及未来继承测试。

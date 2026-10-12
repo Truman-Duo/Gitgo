@@ -10,13 +10,15 @@ from ctypes import wintypes as W
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.core.sandbox import SandboxPolicy, trusted_runtime_roots, validate_runtime_separation
-from backend.core.executable_identity import windows_system_executable
+from backend.core.windows_acl import SecurityTree, management_lock
+from backend.core.windows_security_privileges import ThreadTokenRestoreError
+
+RECORD_VERSION = 3
 
 MAX_RECORD_BYTES = 64 * 1024 * 1024
 
@@ -71,9 +73,13 @@ def sid_string(api, sid):
         free(C.cast(value, C.c_void_p))
 
 
-def provision(workspace, runtimes, *, record=None, apply=False, run=None):
+def provision(workspace, runtimes, *, record=None, apply=False):
+    with management_lock():
+        return _provision(workspace, runtimes, record=record, apply=apply)
+
+
+def _provision(workspace, runtimes, *, record=None, apply=False):
     from backend.core.sandbox_windows import WindowsApi
-    from backend.core.windows_acl import SecurityTree
     policy = SandboxPolicy(workspace)
     runtimes = concrete_roots(runtimes)
     validate_runtime_separation(policy.workspace, runtimes)
@@ -87,38 +93,43 @@ def provision(workspace, runtimes, *, record=None, apply=False, run=None):
         principal = sid_string(api, sid)
     finally:
         api.free_sid(sid)
-    # Never allow cwd/PATH to select the ACL editor in an operator terminal.
-    editor = str(windows_system_executable('System32/icacls.exe'))
-    commands = [[editor, str(root), '/grant', f'*{principal}:(OI)(CI)RX'] for root in runtimes]
-    commands += [[editor, str(policy.workspace), '/grant', f'*{principal}:(OI)(CI)M'],
-                 [editor, str(policy.workspace), '/setintegritylevel', '(OI)(CI)L']]
     print('Profile:', policy.profile_name)
-    for command in commands:
-        print(subprocess.list2cmdline(command))
+    print('Workspace: modify and Low integrity; dedicated runtimes: read/execute.')
     if not apply:
         print('Read-only preview: no profile, ACL or recovery record created.')
         return
-    execute = run or subprocess.run
-    # All objects are opened with restoration rights and held against deletion
-    # BEFORE a profile or ACL is changed. The original record is durable first.
+    # Full descriptors and both permitted transaction states are durable before
+    # any write. No recursive ACL editor with an unknown partial result is used.
     with SecurityTree(roots) as tree:
-        payload = {'version': 1, 'phase': 'prepared', 'workspace': str(policy.workspace),
+        original = tree.snapshot()
+        planned = tree.plan(original, policy.workspace, principal)
+        payload = {'version': RECORD_VERSION, 'phase': 'prepared',
+                   'workspace': str(policy.workspace),
                    'runtimes': [str(p) for p in runtimes], 'profile': policy.profile_name,
-                   'records': tree.snapshot()}
+                   'records': original, 'planned': planned, 'boundaries': tree.boundaries()}
         save_record(destination, payload, create=True)
         try:
             sid = api.profile_sid(policy.profile_name)
             api.free_sid(sid)
-            for command in commands:
-                execute(command, check=True, capture_output=True)
-            tree.verify_inventory()
+            payload['phase'] = 'applying'
+            save_record(destination, payload)
+            tree.restore(planned, expected=original, boundaries=payload['boundaries'])
             payload['phase'] = 'applied'
             save_record(destination, payload)
+        except ThreadTokenRestoreError:
+            # The applying journal is already durable. Do not start rollback
+            # under an identity that could not be restored. Stop this operator.
+            raise
         except BaseException:
             try:
-                tree.restore(payload['records'])
+                payload['phase'] = 'rolling_back'
+                save_record(destination, payload)
+                tree.restore(original, expected=planned, allow_original=True,
+                             boundaries=payload['boundaries'])
                 payload['phase'] = 'rolled_back'
                 save_record(destination, payload)
+            except ThreadTokenRestoreError:
+                raise
             except BaseException as recovery_error:
                 payload['phase'] = 'rollback_failed'
                 try:
@@ -132,14 +143,19 @@ def provision(workspace, runtimes, *, record=None, apply=False, run=None):
 
 
 def restore_record(path, *, apply=False):
-    from backend.core.windows_acl import SecurityTree
+    with management_lock():
+        return _restore_record(path, apply=apply)
+
+
+def _restore_record(path, *, apply=False):
     path = Path(path).resolve(strict=True)
     with path.open('rb') as handle:
         raw = handle.read(MAX_RECORD_BYTES + 1)
     if len(raw) > MAX_RECORD_BYTES:
         raise ValueError('Recovery record exceeds 64 MiB')
     payload = json.loads(raw)
-    if payload.get('version') != 1 or payload.get('phase') not in {'prepared', 'applied', 'rollback_failed'}:
+    if payload.get('version') != RECORD_VERSION or payload.get('phase') not in {
+            'prepared', 'applying', 'applied', 'rolling_back', 'rollback_failed', 'restoring', 'restore_failed'}:
         raise ValueError('Record is invalid, already recovered or not a supported recovery phase')
     policy = SandboxPolicy(Path(payload['workspace']))
     runtimes = concrete_roots(payload['runtimes'])
@@ -150,16 +166,37 @@ def restore_record(path, *, apply=False):
         raise ValueError('Recovery profile does not match the canonical workspace')
     with SecurityTree(roots, writable=apply) as tree:
         current = tree.snapshot()
-        identity = lambda records: [(r['path'], r['device'], r['inode']) for r in records]
-        if identity(current) != identity(payload['records']):
+        if tree.identity(current) != tree.identity(payload['records']) or tree.identity(current) != tree.identity(payload['planned']):
             raise ValueError('Configuration tree changed; inspect it before recovery')
+        tree.verify_boundaries(payload['boundaries'])
+        allow_original = payload['phase'] != 'applied'
+        for now, before, after in zip(current, payload['records'], payload['planned']):
+            states = {tree.record_descriptor(after).comparison_key()}
+            original_key = tree.record_descriptor(before).comparison_key()
+            if allow_original:
+                states.add(original_key)
+            if tree.record_descriptor(now).comparison_key() not in states:
+                raise ValueError('Security descriptor conflict; refusing to overwrite external changes')
         if not apply:
             print('Read-only restore preview:', len(current), 'matching objects; no ACL changes.')
             return
-        tree.restore(payload['records'])
-        payload['phase'] = 'restored'
+        payload['phase'] = 'restoring'
         save_record(path, payload)
-    print('Original DACL authorization and MIC restored; profile retained:', policy.profile_name)
+        try:
+            tree.restore(payload['records'], expected=payload['planned'],
+                         allow_original=allow_original, boundaries=payload['boundaries'])
+            payload['phase'] = 'restored'
+            save_record(path, payload)
+        except ThreadTokenRestoreError:
+            raise
+        except BaseException:
+            payload['phase'] = 'restore_failed'
+            try:
+                save_record(path, payload)
+            except (OSError, ValueError):
+                pass
+            raise
+    print('Original owner/group, DACL, audit and MIC restored; profile retained:', policy.profile_name)
 
 
 def main():

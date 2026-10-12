@@ -1335,7 +1335,24 @@ def test_packaged_host_document_extraction_is_native(cross_platform_box, suffix)
     assert 'path escapes approved resource scope' not in json.dumps(results[1]), results
 
 
-def test_windows_operator_apply_restore_controls_real_native_access(isolated_python, tmp_path_factory):
+@pytest.fixture
+def windows_operator_privileges():
+    if sys.platform != 'win32':
+        pytest.skip('Windows operator ACL integration')
+    from backend.core.windows_security_privileges import security_privileges
+    context = security_privileges()
+    try:
+        context.__enter__()
+    except PermissionError as error:
+        if os.environ.get('GITHUB_ACTIONS', '').lower() == 'true':
+            pytest.fail('Hosted operator acceptance requires native privileges: ' + str(error))
+        pytest.skip('Operator integration requires an authorized elevated token: ' + str(error))
+    else:
+        context.__exit__(None, None, None)
+
+
+def test_windows_operator_apply_restore_controls_real_native_access(
+        windows_operator_privileges, isolated_python, tmp_path_factory):
     from ctypes import wintypes as W
     from scripts.provision_sandbox import provision, restore_record
     from backend.core.sandbox_windows import WindowsApi
