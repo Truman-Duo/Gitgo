@@ -49,6 +49,29 @@ owned symlink. The installer adds one marked PATH block to the active zsh or
 bash profile, or a dedicated fish `conf.d` file. Re-running it performs an
 atomic upgrade with rollback.
 
+The Unix installers share a transaction helper included in each package.
+An upgrade requires the `.gitgo-install-owner` record, matching product/platform,
+current user and canonical install/command directories. Unknown targets (even
+empty ones), redirected path components, overlapping source/target directories,
+unrelated commands and conflicting PATH blocks are rejected before replacement.
+Earlier preview installations without ownership records are not automatically
+adopted: keep the old directory and use a new empty destination, or uninstall it
+explicitly after preserving needed data. Do not fabricate an ownership marker.
+
+Payload, new command links and the single selected shell profile form one
+transaction. Copy/link/profile failures and INT/TERM restore the previous
+installation and profile; exclusively created temporary directories avoid
+PID-based pre-deletion. Rollback failures retain the recovery transaction and
+report its location. A pre-existing install lock is never deleted automatically.
+Inspect a stale lock and recovery files before retrying; SIGKILL/power loss cannot
+run shell rollback. This is installer safety, not an OS sandbox against hostile
+same-user filesystem races. User runtime databases and projects are not touched.
+
+Windows ZIP validation renders the same Windows x86_64 manifest used by the
+build, checks bundled Dashboard/Host and Node companion files, and retains the
+source commit/tree, per-file hashes and archive checksum. Synthetic archive
+regressions do not replace Windows frozen-package acceptance.
+
 Run the installed `uninstall.sh` to remove the application. It removes only
 Gitgo-owned command links, marked PATH entries, global configuration, and
 provider credentials (including native Keychain items). Runtime databases and

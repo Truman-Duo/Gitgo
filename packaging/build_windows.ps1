@@ -158,7 +158,7 @@ if ($useExternalPyInstaller) {
 if ($LASTEXITCODE -ne 0) { throw "Native Host compilation failed" }
 
 & $Python -B (Join-Path $root "scripts\render_product_manifest.py") `
-    --source $productPath --platform windows `
+    --source $productPath --platform windows --architecture x86_64 `
     --output (Join-Path $stage "product.json")
 if ($LASTEXITCODE -ne 0) { throw "Product manifest rendering failed" }
 

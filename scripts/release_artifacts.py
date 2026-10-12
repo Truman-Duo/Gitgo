@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import subprocess
 import sys
@@ -13,6 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from backend.version import __version__
+from scripts.render_product_manifest import render_manifest
 
 
 def validate_versions(root: Path) -> dict:
@@ -39,11 +40,21 @@ def source_identity(root: Path) -> dict:
 def package(root: Path, stage: Path, output: Path) -> dict:
     product = validate_versions(root)
     stage = stage.resolve(strict=True)
+    output = output.resolve()
+    if output.is_relative_to(stage):
+        raise ValueError('Archive output must be outside the staged payload')
+    if (stage / 'product.json').is_symlink():
+        raise ValueError('Redirected product manifest')
     staged = json.loads((stage / 'product.json').read_text(encoding='utf-8'))
-    if staged != product:
+    expected = render_manifest(root / 'packaging/product.json', 'windows', 'x86_64')
+    if staged != expected:
         raise ValueError('Staged product metadata differs from the current source')
-    required = (product['layout']['dashboard'], product['layout']['native_host'])
+    required = (expected['layout']['dashboard'], expected['layout']['native_host'],
+                'dashboard/dist/cli.js', 'dashboard/dist/trace.js',
+                'dashboard/scripts/launch.mjs', 'dashboard/scripts/runtime.mjs')
     for name in required:
+        if Path(name).is_absolute() or PureWindowsPath(name).drive or '..' in Path(name).parts or '\\' in name:
+            raise ValueError('Unsafe product component path')
         target = (stage / name).resolve(strict=True)
         if not target.is_relative_to(stage) or not target.is_file():
             raise ValueError('Missing or redirected product component')
@@ -55,6 +66,7 @@ def package(root: Path, stage: Path, output: Path) -> dict:
             files.append({'path': path.relative_to(stage).as_posix(), 'bytes': path.stat().st_size,
                           'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
     manifest = {'schema_version': 1, 'version': product['version'], 'platform': 'win-x64',
+                'architecture': expected['architecture'],
                 'source': source_identity(root), 'files': files,
                 'validation': {'packaged_smoke_required': True, 'formal_terminal_verified': False}}
     # This records build identity. Human/API acceptance is recorded separately.
