@@ -11,6 +11,7 @@ OUTPUT=""
 ARCHIVE=""
 CODESIGN_IDENTITY="-"
 SKIP_ARCHIVE=0
+UPDATE_EVIDENCE=0
 
 cleanup_bun_artifacts() {
   find "$ROOT" -maxdepth 1 -type f -name '.*.bun-build' -delete
@@ -29,6 +30,7 @@ Usage: packaging/build_macos.sh [options]
   --codesign-identity ID    codesign identity (default: ad-hoc '-')
   --skip-codesign           Do not sign local binaries
   --skip-archive            Stage files without creating a tarball
+  --update-evidence         Add opt-in, frozen-runtime-verified data evidence
 EOF
 }
 
@@ -43,6 +45,7 @@ while [ "$#" -gt 0 ]; do
     --codesign-identity) CODESIGN_IDENTITY="$2"; shift 2 ;;
     --skip-codesign) CODESIGN_IDENTITY=""; shift ;;
     --skip-archive) SKIP_ARCHIVE=1; shift ;;
+    --update-evidence) UPDATE_EVIDENCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -144,6 +147,10 @@ fi
 
 "$PYTHON_BIN" -B "$ROOT/scripts/smoke_packaged_runtime.py" \
   --host "$STAGE/internal/gitgo-host/gitgo-host"
+
+if [ "$UPDATE_EVIDENCE" -eq 1 ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/stage_update_contract.py" --stage "$STAGE"
+fi
 
 if [ "$SKIP_ARCHIVE" -eq 0 ]; then
   "$PYTHON_BIN" -B "$ROOT/scripts/unix_release_manifest.py" --stage "$STAGE" --bun "$BUN_BIN"

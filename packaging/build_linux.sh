@@ -10,6 +10,7 @@ RIPGREP_NOTICES="${GITGO_RIPGREP_NOTICES:-}"
 OUTPUT=""
 ARCHIVE=""
 SKIP_ARCHIVE=0
+UPDATE_EVIDENCE=0
 
 cleanup_bun_artifacts() {
   find "$ROOT" -maxdepth 1 -type f -name '.*.bun-build' -delete
@@ -26,6 +27,7 @@ Usage: packaging/build_linux.sh [options]
   --output DIR     Staged release directory
   --archive FILE   Output .tar.gz path
   --skip-archive   Stage files without creating a tarball
+  --update-evidence  Add opt-in, frozen-runtime-verified data evidence
 EOF
 }
 
@@ -38,6 +40,7 @@ while [ "$#" -gt 0 ]; do
     --output) OUTPUT="$2"; shift 2 ;;
     --archive) ARCHIVE="$2"; shift 2 ;;
     --skip-archive) SKIP_ARCHIVE=1; shift ;;
+    --update-evidence) UPDATE_EVIDENCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -124,6 +127,10 @@ while IFS= read -r alias; do
 done < <("$PYTHON_BIN" -B -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1], encoding="utf-8"))["command_aliases"]))' "$STAGE/product.json")
 
 "$PYTHON_BIN" -B "$ROOT/scripts/smoke_packaged_runtime.py" --host "$STAGE/internal/gitgo-host/gitgo-host"
+
+if [ "$UPDATE_EVIDENCE" -eq 1 ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/stage_update_contract.py" --stage "$STAGE"
+fi
 
 if [ "$SKIP_ARCHIVE" -eq 0 ]; then
   "$PYTHON_BIN" -B "$ROOT/scripts/unix_release_manifest.py" --stage "$STAGE" --bun "$BUN_BIN"

@@ -97,6 +97,15 @@ def main(argv: list[str] | None = None) -> int:
         from backend.core.native_host import main as native_host_main
         return int(native_host_main() or 0)
     name, role_argv = role
+    if name == "update-data-probe":
+        # Before NativeHost, ConfigManager or any user's data store is opened.
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--nonce", required=True)
+        args = parser.parse_args(role_argv)
+        from backend.core.update.runtime_contract import data_probe
+        from backend.core.protocol_io import dump_protocol_json
+        print(dump_protocol_json(data_probe(args.nonce)), flush=True)
+        return 0
     if name == DAEMON_ROLE:
         return _run_daemon_role(role_argv)
     if name == TOOL_RUNNER_ROLE:

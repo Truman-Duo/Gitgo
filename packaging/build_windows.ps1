@@ -6,7 +6,8 @@ param(
     [string]$RipgrepNotices = "",
     [string]$Output = "",
     [string]$InnoSetupCompiler = "",
-    [switch]$BuildInstaller
+    [switch]$BuildInstaller,
+    [switch]$UpdateEvidence
 )
 
 $ErrorActionPreference = "Stop"
@@ -174,6 +175,10 @@ foreach ($executable in @((Join-Path $stage "$($product.primary_command).exe"), 
 & $Python -B (Join-Path $root "scripts\stage_search_engine.py") `
     --binary $Ripgrep --notices $RipgrepNotices --destination (Split-Path -Parent $packagedHost)
 if ($LASTEXITCODE -ne 0) { throw "Bundled search engine staging failed" }
+if ($UpdateEvidence) {
+    & $Python -B (Join-Path $root "scripts\stage_update_contract.py") --stage $stage
+    if ($LASTEXITCODE -ne 0) { throw "Frozen runtime data evidence failed" }
+}
 & $Python -B (Join-Path $root "scripts\smoke_packaged_runtime.py") --host $packagedHost
 if ($LASTEXITCODE -ne 0) {
     throw "Packaged Host/Daemon/tool-runner smoke test failed"
