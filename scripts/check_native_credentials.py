@@ -9,7 +9,8 @@ import tempfile
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if not getattr(sys, 'frozen', False):
+    sys.path.insert(0, str(ROOT))
 from backend.core.secret_store import EncryptedSecretStore, SecretStoreError
 
 def check(host):
@@ -21,9 +22,11 @@ def check(host):
         # Only newly allocated, opaque UUID references from this fixture are used.
         value = 'ci-fixture-' + uuid.uuid4().hex
         try:
+            print('CHECK native credential creation/read', flush=True)
             store.upsert({'fixture': value})
             assert store.read_all() == {'fixture': value}
             old = store._read_ciphertexts()['fixture']
+            print('CHECK native credential replacement/deletion', flush=True)
             store.upsert({'fixture': value + '-replacement'})
             assert store.read_all() == {'fixture': value + '-replacement'}
             try:
@@ -35,6 +38,7 @@ def check(host):
             active = store._read_ciphertexts()['fixture']
             env = dict(os.environ, GITGO_LLM_CONFIG_PATH=str(root / 'llm.json'),
                        GITGO_LLM_SECRET_PATH=str(store.path))
+            print('CHECK frozen credential cleanup', flush=True)
             subprocess.run([str(host), '--gitgo-internal-role', 'credential-cleanup'],
                            env=env, check=True, timeout=60, capture_output=True)
             assert store.read_all() == {} and store.pending_count(store.path) == 0

@@ -59,7 +59,11 @@ def accept(archive, commit):
         # frozen Host and this deliberately build-free environment.
         run(sys.executable, '-B', str(ROOT / 'scripts/smoke_packaged_runtime.py'), '--host', str(host))
         run(sys.executable, '-B', str(ROOT / 'scripts/check_terminal_continuity.py'), '--host', str(host))
-        run(sys.executable, '-B', str(ROOT / 'scripts/check_native_credentials.py'), '--host', str(host))
+        from backend.core.child_process import INTERNAL_ROLE_FLAG, PYTHON_ROLE
+        # Create/read/delete with the installed app's own native credential
+        # implementation and executable identity, including Keychain ACLs.
+        run(str(host), INTERNAL_ROLE_FLAG, PYTHON_ROLE,
+            str(ROOT / 'scripts/check_native_credentials.py'), '--host', str(host))
         scope_env = dict(env, GITGO_SCOPE_TEST_HOST=str(host))
         subprocess.run([sys.executable, '-B', '-m', 'pytest', str(ROOT / 'tests/test_unix_process_scope.py'),
                         '-q', '-k', 'frozen'], cwd=ROOT, env=scope_env, check=True, timeout=180)

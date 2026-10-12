@@ -106,6 +106,15 @@ jobs:
               python -B scripts/accept_unix_archive.py --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --report acceptance.json
             '
           else
+            # Disposable native fixture; never unlock or modify login credentials.
+            keychain_dir="$(mktemp -d "$RUNNER_TEMP/gitgo-ci-keychain.XXXXXXXX")"
+            keychain="$keychain_dir/fixture.keychain-db"
+            security create-keychain -p disposable-ci-fixture "$keychain"
+            trap 'security delete-keychain "$keychain"' EXIT
+            security set-keychain-settings -lut 3600 "$keychain"
+            security unlock-keychain -p disposable-ci-fixture "$keychain"
+            security list-keychains -d user -s "$keychain"
+            security default-keychain -d user -s "$keychain"
             python -B scripts/accept_unix_archive.py --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --report acceptance.json
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
