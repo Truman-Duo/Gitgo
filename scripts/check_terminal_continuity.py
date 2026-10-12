@@ -151,8 +151,20 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
                 finally:
                     connection.close()
             assert sorted(origins) == ["git_bash", "windows_console", "windows_console"], origins
-            from backend.core.usability.collector import read_summary
-            summary = read_summary(stores[0])
+            if source:
+                from backend.core.usability.collector import read_summary
+                summary = read_summary(stores[0])
+            else:
+                # Read with the package's validated SQLite, not the independent
+                # worker's potentially unsafe system library. No build-library
+                # paths or replacements are injected into the installed Host.
+                from backend.core.child_process import INTERNAL_ROLE_FLAG, PYTHON_ROLE
+                code = ('import json,sys;from pathlib import Path;'
+                        'from backend.core.usability.collector import read_summary;'
+                        'print(json.dumps(read_summary(Path(sys.argv[1]))))')
+                summary = json.loads(subprocess.check_output(
+                    [str(host), INTERNAL_ROLE_FLAG, PYTHON_ROLE, '-c', code, str(stores[0])],
+                    env=env, text=True, encoding='utf-8', timeout=30))
             statistics = {event: sum(row["total"] for row in summary["daily"] if row["metric"] == "events" and row["event"] == event)
                           for event in ("task_admitted", "provider_request_started", "provider_usage", "agent_complete")}
             assert all(count == 3 for count in statistics.values()), statistics
