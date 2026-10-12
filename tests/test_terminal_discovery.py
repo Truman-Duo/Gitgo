@@ -149,6 +149,8 @@ def test_shell_explicit_fake_override_is_rejected_without_running_script(tmp_pat
     images(root)
     monkeypatch.setenv("GITGO_BASH_PATH", str(root / "bin/bash.exe"))
     monkeypatch.setattr(workspace_tools.sys, "platform", "win32")
+    # This Windows identity test runs on Unix too; never query a real registry.
+    monkeypatch.setattr("backend.core.terminal_launcher.git_install_roots", lambda: [])
     monkeypatch.setattr(executable_identity, "verify_git_bash", lambda _: {
         "verified": False, "message": "invalid publisher"})
     result = workspace_tools.shell_script({"_workspace": str(tmp_path_factory), "script": "never-run", "purpose": "negative identity test"})

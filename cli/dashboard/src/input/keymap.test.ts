@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
+import {isDeepStrictEqual} from "node:util";
 import type { InputContext } from "./keymap.js";
 import { resolveCommandInput, resolveSceneKey } from "./keymap.js";
 
@@ -40,23 +42,23 @@ describe("host-driven decision interaction", () => {
   test("free-form replies use the decision channel while a root stream is still busy", () => {
     const ctx = context({decisionAllowFreeForm: true, chatBusy: true,
       textValue: "For my team", textCursor: 11, chatInputFocused: true});
-    expect(resolveSceneKey(ctx, "", {return: true})).toContainEqual({kind: "effect",
-      effect: {type: "send_chat", text: "For my team", decisionSubmission: true}});
-    expect(resolveSceneKey({...ctx, decisionSubmitting: true}, "", {return: true}))
-      .toEqual([{kind: "effect", effect: {type: "report_notice", code: 2004}}]);
-    expect(resolveSceneKey({...ctx, decisionAllowFreeForm: false}, "", {return: true}))
-      .toEqual([{kind: "effect", effect: {type: "report_notice", code: 2004}}]);
+    assert.ok(resolveSceneKey(ctx, "", {return: true}).some(item => isDeepStrictEqual(item,
+      {kind: "effect", effect: {type: "send_chat", text: "For my team", decisionSubmission: true}})));
+    assert.deepStrictEqual(resolveSceneKey({...ctx, decisionSubmitting: true}, "", {return: true}),
+      [{kind: "effect", effect: {type: "report_notice", code: 2004}}]);
+    assert.deepStrictEqual(resolveSceneKey({...ctx, decisionAllowFreeForm: false}, "", {return: true}),
+      [{kind: "effect", effect: {type: "report_notice", code: 2004}}]);
   });
   test("Tab reaches running B even during a pending decision, without submitting it", () => {
     const ctx = context({decisionOptionLabels: ["Continue", "Stop"], runningBIds: ["b"], chatBusy: true});
-    expect(resolveSceneKey(ctx, "", {tab: true})).toEqual([
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", {tab: true}), [
       {kind: "state", action: {type: "set_status_bar_focused", focused: true}},
     ]);
-    expect(resolveSceneKey({...ctx, statusBarFocused: true}, "", {return: true})).toEqual([
+    assert.deepStrictEqual(resolveSceneKey({...ctx, statusBarFocused: true}, "", {return: true}), [
       {kind: "state", action: {type: "navigate", scene: "agent_detail", patch: {activeAgentId: "b"}}},
     ]);
-    expect(resolveSceneKey({...ctx, mode: "COMMAND", cmdValue: "b"}, "", {tab: true}))
-      .not.toContainEqual({kind: "state", action: {type: "set_status_bar_focused", focused: true}});
+    assert.ok(!resolveSceneKey({...ctx, mode: "COMMAND", cmdValue: "b"}, "", {tab: true})
+      .some(item => isDeepStrictEqual(item, {kind: "state", action: {type: "set_status_bar_focused", focused: true}})));
   });
   test("selects and submits an option without model-side UI parsing", () => {
     const ctx = context({
@@ -65,10 +67,10 @@ describe("host-driven decision interaction", () => {
       decisionSelection: 0,
     });
 
-    expect(resolveSceneKey(ctx, "", { downArrow: true })).toEqual([
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", { downArrow: true }), [
       { kind: "state", action: { type: "set_decision_selection", index: 1 } },
     ]);
-    expect(resolveSceneKey({ ...ctx, decisionSelection: 1 }, "", { return: true })).toEqual([
+    assert.deepStrictEqual(resolveSceneKey({ ...ctx, decisionSelection: 1 }, "", { return: true }), [
       { kind: "state", action: { type: "set_decision_submitting", submitting: true } },
       {
         kind: "effect",
@@ -87,15 +89,15 @@ describe("host-driven decision interaction", () => {
       decisionOptionLabels: ["Minimal", "Detailed"],
       decisionSelection: 1,
     });
-    expect(resolveSceneKey(ctx, "", {return: true})).toContainEqual({
+    assert.ok((resolveSceneKey(ctx, "", {return: true})).some(item => isDeepStrictEqual(item, {
       kind: "effect",
       effect: {type: "send_chat", text: "Choose option 2: Detailed", decisionSubmission: true},
-    });
+    })));
   });
 
   test("Ctrl+G opens the external prompt editor in both A and B chat scenes", () => {
     for (const scene of ["workspace", "agent_detail"] as const) {
-      expect(resolveSceneKey(context({scene}), "g", {ctrl: true})).toEqual([
+      assert.deepStrictEqual(resolveSceneKey(context({scene}), "g", {ctrl: true}), [
         {kind: "effect", effect: {type: "edit_prompt_external"}},
       ]);
     }
@@ -103,10 +105,10 @@ describe("host-driven decision interaction", () => {
 
   test("up and down move within a focused wrapped prompt instead of scrolling chat", () => {
     const ctx = context({chatInputFocused: true, textValue: "a".repeat(160), textCursor: 90});
-    expect(resolveSceneKey(ctx, "", {upArrow: true})).toEqual([
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", {upArrow: true}), [
       {kind: "text", buffer: "text", op: {op: "move_visual_line", delta: -1, width: 76}},
     ]);
-    expect(resolveSceneKey(ctx, "", {downArrow: true})).toEqual([
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", {downArrow: true}), [
       {kind: "text", buffer: "text", op: {op: "move_visual_line", delta: 1, width: 76}},
     ]);
   });
@@ -117,26 +119,26 @@ describe("host-driven decision interaction", () => {
       decisionAllowFreeForm: true,
     });
     const amend = resolveSceneKey(ctx, "a", {});
-    expect(amend).toContainEqual({
+    assert.ok((amend).some(item => isDeepStrictEqual(item, {
       kind: "state",
       action: { type: "set_decision_composing", composing: true },
-    });
-    expect(amend).toContainEqual({
+    })));
+    assert.ok((amend).some(item => isDeepStrictEqual(item, {
       kind: "text",
       buffer: "text",
       op: { op: "set_value", text: "Choose option 1: Keep API; conditions: " },
-    });
+    })));
 
     const strict = resolveSceneKey({ ...ctx, decisionAllowFreeForm: false }, "d", {});
-    expect(strict).toEqual([]);
+    assert.deepStrictEqual(strict, []);
   });
 });
 
 describe("list-first scenes", () => {
   test("ignore stray text and open the command editor only with slash", () => {
     const ctx = context({ scene: "projects", mode: "COMMAND", activeProject: null });
-    expect(resolveSceneKey(ctx, "q", {})).toEqual([]);
-    expect(resolveSceneKey(ctx, "/", {})).toEqual([
+    assert.deepStrictEqual(resolveSceneKey(ctx, "q", {}), []);
+    assert.deepStrictEqual(resolveSceneKey(ctx, "/", {}), [
       { kind: "text", buffer: "cmd", op: { op: "insert", text: "/" } },
     ]);
   });
@@ -145,7 +147,7 @@ describe("list-first scenes", () => {
 describe("single in-flight chat", () => {
   test("keeps the draft and reports busy instead of launching a competing stream", () => {
     const ctx = context({ textValue: "next message", textCursor: 12, chatBusy: true });
-    expect(resolveSceneKey(ctx, "", { return: true })).toEqual([
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", { return: true }), [
       { kind: "effect", effect: { type: "report_notice", code: 2004 } },
     ]);
   });
@@ -156,7 +158,7 @@ describe("single in-flight chat", () => {
       decisionOptionLabels: ["Allow once", "Deny"],
       decisionSelection: 0,
     });
-    expect(resolveSceneKey(ctx, "", { return: true })).toEqual([
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", { return: true }), [
       { kind: "state", action: { type: "set_decision_submitting", submitting: true } },
       {
         kind: "effect",
@@ -175,8 +177,8 @@ describe("single in-flight chat", () => {
       chatInputFocused: true,
       interruptTarget: { running: true, pid: "root-live" },
     });
-    expect(resolveSceneKey(ctx, "", { escape: true })).toEqual([
-      { kind: "state", action: { type: "push_overlay", overlay: "interruptConfirm", props: { processId: "root-live", project: "gitgo", subtree: true } } },
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", { escape: true }), [
+      { kind: "state", action: { type: "push_overlay", overlay: "interruptConfirm", props: { processId: "root-live", requestId: undefined, project: "gitgo", subtree: true } } },
     ]);
   });
 
@@ -186,7 +188,7 @@ describe("single in-flight chat", () => {
       chatInputFocused: true,
       interruptTarget: { running: true, requestId: "dashboard-request-1" },
     });
-    expect(resolveSceneKey(ctx, "", { escape: true })).toEqual([
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", { escape: true }), [
       { kind: "state", action: { type: "push_overlay", overlay: "interruptConfirm", props: {
         processId: undefined, requestId: "dashboard-request-1", project: "gitgo", subtree: true,
       } } },
@@ -199,10 +201,10 @@ describe("single in-flight chat", () => {
       chatInputFocused: true,
       interruptTarget: { running: true, pid: "child-live" },
     });
-    expect(resolveSceneKey(ctx, "", { escape: true })).toEqual([
-      { kind: "state", action: { type: "push_overlay", overlay: "interruptConfirm", props: { processId: "child-live", project: "gitgo", subtree: false } } },
+    assert.deepStrictEqual(resolveSceneKey(ctx, "", { escape: true }), [
+      { kind: "state", action: { type: "push_overlay", overlay: "interruptConfirm", props: { processId: "child-live", requestId: undefined, project: "gitgo", subtree: false } } },
     ]);
-    expect(resolveSceneKey({ ...ctx, chatInputFocused: false }, "", { leftArrow: true })).toEqual([
+    assert.deepStrictEqual(resolveSceneKey({ ...ctx, chatInputFocused: false }, "", { leftArrow: true }), [
       { kind: "text", buffer: "text", op: { op: "set_value", text: "" } },
       { kind: "text", buffer: "cmd", op: { op: "set_value", text: "" } },
       { kind: "state", action: { type: "navigate", scene: "workspace", patch: { activeAgentId: null } } },
@@ -220,7 +222,7 @@ describe("parameterised command completion", () => {
         label: "/btw", description: "Isolated Side Question", inputMode: "fill",
       }],
     });
-    expect(resolveCommandInput(ctx, "", { return: true })).toEqual([
+    assert.deepStrictEqual(resolveCommandInput(ctx, "", { return: true }), [
       { kind: "text", buffer: "cmd", op: { op: "set_value", text: "btw " } },
     ]);
   });
@@ -234,9 +236,9 @@ describe("parameterised command completion", () => {
         label: "/btw", description: "Isolated Side Question", inputMode: "fill",
       }],
     });
-    expect(resolveCommandInput(ctx, "", { tab: true })).toContainEqual({
+    assert.ok((resolveCommandInput(ctx, "", { tab: true })).some(item => isDeepStrictEqual(item, {
       kind: "text", buffer: "cmd", op: { op: "set_value", text: "btw " },
-    });
+    })));
   });
 
   test("Tab completes every chat command without duplicating the rendered slash", () => {
@@ -246,9 +248,9 @@ describe("parameterised command completion", () => {
       cmdCursor: 2,
       suggestions: [{ label: "/compact", description: "Compact context" }],
     });
-    expect(resolveCommandInput(ctx, "", { tab: true })).toContainEqual({
+    assert.ok((resolveCommandInput(ctx, "", { tab: true })).some(item => isDeepStrictEqual(item, {
       kind: "text", buffer: "cmd", op: { op: "set_value", text: "compact" },
-    });
+    })));
   });
 
   test("Tab preserves the slash when the command bar itself owns it", () => {
@@ -259,8 +261,8 @@ describe("parameterised command completion", () => {
       cmdCursor: 3,
       suggestions: [{ label: "/stats", description: "Usage overview" }],
     });
-    expect(resolveCommandInput(ctx, "", { tab: true })).toContainEqual({
+    assert.ok((resolveCommandInput(ctx, "", { tab: true })).some(item => isDeepStrictEqual(item, {
       kind: "text", buffer: "cmd", op: { op: "set_value", text: "/stats" },
-    });
+    })));
   });
 });

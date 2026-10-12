@@ -5,6 +5,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import type { StreamEvent } from "./streamEvents.js";
+import { resolveProjectRoot } from "../runtime/paths.js";
 
 export class DaemonClient {
   private proc: ChildProcess | null = null;
@@ -36,7 +37,7 @@ export class DaemonClient {
   // ── lifecycle ──────────────────────────────────────────────
 
   async start(): Promise<void> {
-    const gitgoDir = resolve(import.meta.dir, "../../../..");
+    const gitgoDir = resolveProjectRoot(import.meta.url);
 
     process.stderr.write(`[daemon] Starting daemon for '${this.projectName}'...\n`);
 

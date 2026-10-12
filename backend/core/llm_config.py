@@ -88,6 +88,13 @@ class LLMConfigManager:
     _lock = threading.RLock()
 
     @staticmethod
+    def credential_cleanup_status() -> dict:
+        from backend.core.secret_store import EncryptedSecretStore
+        count = EncryptedSecretStore.pending_count(LLMConfigManager._secret_path())
+        return {"pending": count, "complete": count == 0,
+                "message": "Saved configuration; obsolete credential cleanup pending" if count else ""}
+
+    @staticmethod
     def _config_path() -> Path:
         override = os.environ.get("GITGO_LLM_CONFIG_PATH", "").strip()
         if override:
@@ -193,6 +200,10 @@ class LLMConfigManager:
             if provider.get("auth_mode") == "none":
                 provider.pop("secret_ref", None)
                 continue
+            if raw_key:
+                # Never overwrite the credential referenced by still-durable
+                # old metadata. Keep both until the new metadata is committed.
+                secret_ref = f"provider:{provider_id}:{uuid.uuid4().hex}:api_key"
             provider["secret_ref"] = secret_ref
             secret_refs.add(secret_ref)
             if raw_key:

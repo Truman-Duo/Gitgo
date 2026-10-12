@@ -66,8 +66,8 @@ def test_project_identity_is_stable_and_hot_state_is_external(tmp_path_factory: 
 
     assert first.project_id == second.project_id
     assert (workspace / ".gitgo" / "project-id").read_text(encoding="ascii").strip()
-    assert first.project_root.is_relative_to(state_home)
-    assert not first.state_db.is_relative_to(workspace)
+    assert first.project_root.is_relative_to(state_home.resolve())
+    assert not first.state_db.is_relative_to(workspace.resolve())
 
 
 def test_existing_identity_never_relaunches_git_on_hot_read(
