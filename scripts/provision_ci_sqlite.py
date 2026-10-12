@@ -69,7 +69,10 @@ def rebuild_macos_sqlite(target: Path, scratch: Path) -> None:
         '-I' + str(source / 'Include/internal'), '-I' + str(scratch),
         *[str(path) for path in sorted((source / 'Modules/_sqlite').glob('*.c'))],
         str(scratch / 'sqlite3.c'), '-o', str(compiled), '-lpthread', '-ldl', '-lm'], check=True)
-    shutil.copy2(compiled, target)
+    subprocess.run(['codesign', '--force', '--sign', '-', str(compiled)], check=True)
+    # setup-python's framework file is writable but owned by the installer;
+    # preserve its metadata instead of attempting owner-only timestamp changes.
+    shutil.copyfile(compiled, target)
     print(f'Rebuilt native SQLite module from CPython {CPYTHON_VERSION} SHA-256 {CPYTHON_SHA256}', flush=True)
 
 
@@ -123,7 +126,8 @@ def main():
                 rebuild_macos_sqlite(target, scratch)
             else:
                 subprocess.run(["install_name_tool", "-change", dependency, str(library), str(target)], check=True)
-            subprocess.run(["codesign", "--force", "--sign", "-", str(target)], check=True)
+                subprocess.run(["codesign", "--force", "--sign", "-", str(target)], check=True)
+            subprocess.run(["codesign", "--verify", "--strict", str(target)], check=True)
         else:
             previous = subprocess.check_output(["patchelf", "--print-rpath", str(target)], text=True).strip()
             rpath = str(scratch) + (":" + previous if previous else "")
