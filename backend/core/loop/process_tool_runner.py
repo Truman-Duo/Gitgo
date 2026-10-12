@@ -116,6 +116,7 @@ class ProcessToolRunner:
                         exit_code=proc.returncode,
                         duration_ms=duration_ms,
                         stderr=stderr_str,
+                        cleanup=getattr(proc, "_gitgo_cleanup", None),
                     )
 
                 result = json.loads(stdout_str)
@@ -161,6 +162,7 @@ class ProcessToolRunner:
                 error=f"subprocess spawn failed: {exc}",
                 exit_code=-1,
                 duration_ms=duration_ms,
+                cleanup=getattr(spawned, "_gitgo_cleanup", None),
             )
 
     @staticmethod

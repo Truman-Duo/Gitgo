@@ -68,21 +68,8 @@ remove_owned_link() {
 remove_owned_link "$GITGO_PRODUCT_COMMAND"
 for alias in $GITGO_PRODUCT_ALIASES; do remove_owned_link "$alias"; done
 
-remove_managed_block() {
-  profile="$1"
-  [ -f "$profile" ] || return 0
-  temporary="${profile}.gitgo-uninstall-$$"
-  awk -v start="$START_MARKER" -v end="$END_MARKER" '
-    $0 == start { skip = 1; next }
-    $0 == end { skip = 0; next }
-    !skip { print }
-  ' "$profile" > "$temporary"
-  mv "$temporary" "$profile"
-}
 if [ "$UPDATE_PATH" -eq 1 ]; then
-  remove_managed_block "$HOME/.zprofile"
-  remove_managed_block "$HOME/.profile"
-  remove_managed_block "$HOME/.config/fish/conf.d/gitgo.fish"
+  remove_owned_path_blocks
 fi
 
 CONFIG_ROOT="$HOME/.gitgo"

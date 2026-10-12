@@ -38,8 +38,18 @@ def test_modified_payload_or_source_is_rejected(tmp_path_factory, change):
     with pytest.raises(ValueError): verify(tmp_path_factory, 'a' * 40)
 
 def test_external_symlink_cannot_be_release_asset(tmp_path_factory):
-    (tmp_path_factory / 'outside').symlink_to('/bin/sh')
-    with pytest.raises(ValueError): inventory(tmp_path_factory)
+    stage = tmp_path_factory / 'stage'
+    stage.mkdir()
+    external = tmp_path_factory / 'external.txt'
+    external.write_text('outside the payload')
+    try:
+        (stage / 'outside').symlink_to(external)
+    except OSError as exc:
+        if getattr(exc, 'winerror', None) == 1314:
+            pytest.skip('Windows account cannot create symbolic links')
+        raise
+    with pytest.raises(ValueError, match='escapes payload'):
+        inventory(stage)
 
 def test_required_native_and_runtime_jobs_are_in_gate():
     ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())

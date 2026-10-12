@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import pytest
 
 from tests.test_unix_install_transaction import setup_install, invoke
 
@@ -49,3 +50,28 @@ def test_uninstall_can_be_retried_after_service_recovers(setup_install):
     assert subprocess.run(command, env=s["env"], capture_output=True).returncode == 0
     assert not index.exists()
     assert not (s["bin"] / "gitgo").is_symlink()
+
+
+@pytest.mark.parametrize('kind', ['unmanaged-symlink', 'no-block', 'damaged-block'])
+def test_uninstall_preserves_unowned_or_changed_profiles(setup_install, kind):
+    s = setup_install
+    platform = s['release'].joinpath('product.env').read_text().split('GITGO_PRODUCT_PLATFORM=',1)[1].splitlines()[0]
+    from tests.test_unix_install_transaction import ROOT
+    shutil.copy2(ROOT / f'packaging/{platform}/uninstall.sh', s['release'] / 'uninstall.sh')
+    assert invoke(s).returncode == 0
+    profile = s['profile']
+    if kind == 'unmanaged-symlink':
+        profile = s['home'] / '.profile'
+        external = s['home'] / 'personal-dotfile'
+        external.write_text('# personal settings\n')
+        profile.symlink_to(external)
+    elif kind == 'no-block':
+        profile.write_text('# replacement personal settings\n')
+    else:
+        profile.write_text(profile.read_text().replace('# <<< Gitgo managed PATH <<<','') + 'export PERSONAL_VALUE=keep\n')
+    before = profile.read_bytes(), profile.stat().st_ino, profile.is_symlink()
+    completed = subprocess.run(['/bin/bash', str(s['target'] / 'uninstall.sh'),
+        '--bin-dir', str(s['bin']), '--keep-config'], env=s['env'], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+    assert (profile.read_bytes(), profile.stat().st_ino, profile.is_symlink()) == before
+    assert not s['target'].exists()

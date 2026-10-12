@@ -376,11 +376,31 @@ class EncryptedSecretStore:
         self.protector = protector or default_secret_protector()
         self._lock = threading.RLock()
 
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        if os.name == "nt":
+            return  # Windows uses the existing file/replace persistence contract.
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _ensure_parent(self) -> None:
+        missing = []
+        directory = self.path.parent
+        while not directory.exists():
+            missing.append(directory)
+            directory = directory.parent
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in missing:
+            self._sync_directory(directory.parent)
+
     @contextmanager
     def _exclusive(self):
         """Serialize native effects and their retry index across Host processes."""
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._ensure_parent()
             lock_path = self.path.with_name(f".{self.path.name}.lock")
             with open(lock_path, "a+b") as handle:
                 if os.name == "nt":
@@ -429,6 +449,12 @@ class EncryptedSecretStore:
 
     def _retry_cleanup(self) -> bool:
         encrypted, pending = self._read_payload(self.path)
+        if pending:
+            try:
+                # Reconfirm the durable journal before deleting native effects.
+                self._write_ciphertexts(encrypted, pending)
+            except OSError:
+                return False
         delete = getattr(self.protector, "delete", None)
         remaining = []
         for reference in pending:
@@ -492,7 +518,6 @@ class EncryptedSecretStore:
             except Exception:
                 # Durable creation intents remain available even if cleanup or
                 # the native write failed. Never erase an unconfirmed deletion.
-                self._retry_cleanup()
                 raise
             self._retry_cleanup()
 
@@ -525,7 +550,7 @@ class EncryptedSecretStore:
     def _write_ciphertexts(self, values: dict[str, str], pending: list[str] | None = None) -> None:
         if pending is None:
             pending = self._read_payload(self.path)[1]
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_parent()
         temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
         try:
             with open(temporary, "w", encoding="utf-8") as handle:
@@ -535,6 +560,7 @@ class EncryptedSecretStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+            self._sync_directory(self.path.parent)
             try:
                 self.path.chmod(0o600)
             except OSError:

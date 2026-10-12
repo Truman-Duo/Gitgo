@@ -20,7 +20,7 @@ PR CI 构建的是 GitHub 测试合并 commit，不应把它混同贡献分支 h
 不能只改文件名，也不能用跨编译结果替代原生执行。runner 标签固定但系统镜像会由
 GitHub 更新；这不是逐字节可复现或离线构建声明。
 
-Python 3.12.15、PyInstaller 6.22.3、Bun 1.4.2 固定；Python 全部依赖使用
+Python 3.14.7、PyInstaller 6.22.3、Bun 1.4.2 固定；Python 全部依赖使用
 `packaging/requirements-build.lock` 的精确版本与 PyPI 官方资产 SHA-256。
 Bun frozen lockfile、Actions 完整 SHA、SQLite 3.53.4 官方 SHA3-256 和
 ripgrep 15.2.0 官方 SHA-256/完整通知固定。Python/Bun 安装资产由固定 setup

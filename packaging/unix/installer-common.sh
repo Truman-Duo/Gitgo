@@ -67,7 +67,7 @@ install_transaction() {
     owned_install || fail "Refusing unknown install directory (ownership marker required): $INSTALL_ROOT"
   fi
 
-  local name profile_kind="" existing_block="" quoted_bin
+  local name profile_kind="" existing_block="" quoted_bin profile_tag=""
   COMMANDS=("$COMMAND")
   for name in ${ALIASES[@]+"${ALIASES[@]}"}; do COMMANDS+=("$name"); done
   for name in "${COMMANDS[@]}"; do
@@ -82,9 +82,9 @@ install_transaction() {
   PROFILE=""
   if [ "$UPDATE_PATH" -eq 1 ]; then
     case "$(basename "${SHELL:-}")" in
-      zsh) PROFILE="$HOME/.zprofile"; profile_kind=posix ;;
-      bash) PROFILE="$HOME/$BASH_PROFILE"; profile_kind=posix ;;
-      fish) PROFILE="$HOME/.config/fish/conf.d/gitgo.fish"; profile_kind=fish ;;
+      zsh) PROFILE="$HOME/.zprofile"; profile_kind=posix; profile_tag=zsh ;;
+      bash) PROFILE="$HOME/$BASH_PROFILE"; profile_kind=posix; profile_tag=bash ;;
+      fish) PROFILE="$HOME/.config/fish/conf.d/gitgo.fish"; profile_kind=fish; profile_tag=fish ;;
       *) echo "Add to PATH manually: $BIN_DIR" >&2 ;;
     esac
   fi
@@ -167,7 +167,14 @@ install_transaction() {
   mkdir "$TXN/payload"
   cp -pR "$SCRIPT_DIR/." "$TXN/payload/"
   owner_record > "$TXN/payload/.gitgo-install-owner"
+  # Preserve ownership of PATH blocks written by earlier owned upgrades.
+  for name in bash zsh fish; do
+    if [ -f "$INSTALL_ROOT/.gitgo-path-$name" ] && [ ! -L "$INSTALL_ROOT/.gitgo-path-$name" ]; then
+      cp -p "$INSTALL_ROOT/.gitgo-path-$name" "$TXN/payload/.gitgo-path-$name"
+    fi
+  done
   if [ -n "$PROFILE" ]; then
+    printf 'gitgo-managed-path-v1\n%s\n%s\n' "$PROFILE" "$EXPECTED_BLOCK" > "$TXN/payload/.gitgo-path-$profile_tag"
     ensure_dir "$(dirname "$PROFILE")"
     PROFILE_TEMP="$(mktemp "$(dirname "$PROFILE")/.gitgo-profile.XXXXXXXX")"
     if [ -f "$PROFILE" ]; then
@@ -206,4 +213,61 @@ install_transaction() {
   COMMITTED=1
   echo "Gitgo installed at: $INSTALL_ROOT"
   echo "Command: $BIN_DIR/$COMMAND"
+}
+
+remove_owned_path_blocks() {
+  local tag record header profile expected observed starts ends snapshot temporary lock
+  for tag in bash zsh fish; do
+    record="$INSTALL_ROOT/.gitgo-path-$tag"
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    if [ ! -f "$record" ] || [ -L "$record" ] || [ ! -O "$record" ]; then
+      echo "PATH ownership record changed; preserving user profile ($tag)" >&2
+      continue
+    fi
+    header="$(sed -n '1p' "$record")"
+    profile="$(sed -n '2p' "$record")"
+    expected="$(sed '1,2d' "$record")"
+    case "$tag:$profile" in
+      "bash:$HOME/.profile"|"bash:$HOME/.bash_profile"|"zsh:$HOME/.zprofile"|"fish:$HOME/.config/fish/conf.d/gitgo.fish") ;;
+      *) echo "Unknown managed profile; preserving it ($tag)" >&2; continue ;;
+    esac
+    if [ "$header" != gitgo-managed-path-v1 ] || [ -L "$profile" ]; then
+      echo "Profile ownership changed; preserving it: $profile" >&2
+      continue
+    fi
+    [ -f "$profile" ] || continue
+    # No managed marker means no write, chmod, rename or symlink replacement.
+    starts="$(grep -Fxc "$START_MARKER" "$profile" || true)"
+    ends="$(grep -Fxc "$END_MARKER" "$profile" || true)"
+    [ "$starts:$ends" != 0:0 ] || continue
+    observed="$(awk -v start="$START_MARKER" -v end="$END_MARKER" '$0 == start {block=1} block {print} $0 == end {block=0}' "$profile")"
+    if [ "$starts:$ends" != 1:1 ] || [ "$observed" != "$expected" ]; then
+      echo "Managed PATH block changed; preserving profile: $profile" >&2
+      continue
+    fi
+    # Parent redirects are refused before allocating files beside the profile.
+    [ "$(safe_path "$profile")" = "$profile" ] || fail "Profile redirected"
+    lock="$profile.gitgo-path.lock"
+    if ! mkdir "$lock"; then
+      echo "Profile is locked; preserving it: $profile" >&2
+      continue
+    fi
+    snapshot="$(mktemp "$(dirname "$profile")/.gitgo-path-original.XXXXXXXX")"
+    temporary="$(mktemp "$(dirname "$profile")/.gitgo-path-updated.XXXXXXXX")"
+    if ! cp -p "$profile" "$snapshot" || ! cp -p "$profile" "$temporary" ||
+       ! awk -v start="$START_MARKER" -v end="$END_MARKER" '$0 == start {skip=1;next} $0 == end {skip=0;next} !skip {print}' "$snapshot" > "$temporary"; then
+      rm -f "$snapshot" "$temporary"; rmdir "$lock"
+      fail "Cannot safely update managed PATH profile"
+    fi
+    if [ -L "$profile" ] || ! cmp -s "$profile" "$snapshot"; then
+      echo "Profile changed concurrently; preserving it: $profile" >&2
+      rm -f "$snapshot" "$temporary"; rmdir "$lock"
+      continue
+    fi
+    if ! mv "$temporary" "$profile"; then
+      rm -f "$snapshot" "$temporary"; rmdir "$lock"
+      fail "Cannot commit managed PATH removal"
+    fi
+    rm -f "$snapshot"; rmdir "$lock"
+  done
 }

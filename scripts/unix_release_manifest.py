@@ -20,7 +20,7 @@ def inventory(stage):
     files = []
     for path in sorted(stage.rglob('*')):
         name = path.relative_to(stage).as_posix()
-        if name in ('build-manifest.json', '.gitgo-install-owner'):
+        if name in ('build-manifest.json', '.gitgo-install-owner', '.gitgo-path-bash', '.gitgo-path-zsh', '.gitgo-path-fish'):
             continue
         if path.is_symlink():
             # Installer aliases and PyInstaller framework links must stay inside payload.

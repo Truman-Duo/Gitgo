@@ -103,6 +103,31 @@ def test_failed_intent_write_never_creates_native_item(tmp_path_factory, monkeyp
     assert not protector.values
 
 
+def test_failed_directory_checkpoint_prevents_native_creation(tmp_path_factory, monkeypatch):
+    path = tmp_path_factory / 'index.json'
+    protector = FailingProtector()
+    store = EncryptedSecretStore(path, protector)
+    monkeypatch.setattr(store, '_sync_directory', lambda _: (_ for _ in ()).throw(OSError('directory sync failed')))
+    with pytest.raises(OSError):
+        store.upsert({'a':'fixture'})
+    assert not protector.values
+
+
+def test_failed_directory_checkpoint_preserves_native_cleanup_for_retry(tmp_path_factory, monkeypatch):
+    path = tmp_path_factory / 'index.json'
+    protector = FailingProtector()
+    store = EncryptedSecretStore(path, protector)
+    store.upsert({'a':'fixture'})
+    with monkeypatch.context() as patch:
+        patch.setattr(store, '_sync_directory', lambda _: (_ for _ in ()).throw(OSError('directory sync failed')))
+        with pytest.raises(OSError):
+            store.retain_only(set())
+        assert protector.values
+        assert not store.retry_cleanup()
+    assert store.retry_cleanup()
+    assert not protector.values
+
+
 def test_failed_cleanup_checkpoint_keeps_last_durable_retry_index(tmp_path_factory, monkeypatch):
     path = tmp_path_factory / "index.json"
     protector = FailingProtector()

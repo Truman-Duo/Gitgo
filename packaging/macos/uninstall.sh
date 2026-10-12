@@ -67,21 +67,8 @@ while alias="$(/usr/bin/plutil -extract "command_aliases.$index" raw -o - "$INST
   index=$((index + 1))
 done
 
-remove_managed_block() {
-  profile="$1"
-  [ -f "$profile" ] || return 0
-  temporary="${profile}.gitgo-uninstall-$$"
-  /usr/bin/awk -v start="$START_MARKER" -v end="$END_MARKER" '
-    $0 == start { skip = 1; next }
-    $0 == end { skip = 0; next }
-    !skip { print }
-  ' "$profile" > "$temporary"
-  mv "$temporary" "$profile"
-}
 if [ "$UPDATE_PATH" -eq 1 ]; then
-  remove_managed_block "$HOME/.zprofile"
-  remove_managed_block "$HOME/.bash_profile"
-  remove_managed_block "$HOME/.config/fish/conf.d/gitgo.fish"
+  remove_owned_path_blocks
 fi
 
 CONFIG_ROOT="$HOME/.gitgo"
