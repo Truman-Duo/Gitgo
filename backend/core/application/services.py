@@ -119,6 +119,8 @@ class ApplicationServices:
             "deletion.list": lambda: self.deletion.catalog.list_deletion_plans(),
             "deletion.run": self.deletion.run,
             "config.get": self.config_get,
+            "product.version": self.product_version,
+            "update.status": self.update_status,
             "config.set": self.config_set,
             "config.terminals": self.config_terminals,
             "config.web_search.test": self.config_web_search_test,
@@ -422,6 +424,16 @@ class ApplicationServices:
                         ConfigManager.save(cfg)
                     return {"ok": had_pending, "name": name}
         raise OperationError("PROJECT_NOT_FOUND", f"Project '{name}' was not found")
+
+    def product_version(self) -> dict:
+        # The executing Host is authoritative, not editable user configuration
+        # or a potentially different Dashboard package.
+        from backend.version import __version__
+        return {"product_id": "gitgo-terminal", "version": __version__}
+
+    def update_status(self) -> dict:
+        from backend.core.update.status import update_status
+        return update_status()
 
     def config_get(self, key: str = "") -> dict:
         cfg = ConfigManager.load()

@@ -53,6 +53,7 @@ tar.gz 使用有界的临时未压缩 tar 文件，再展开 payload；峰值磁
 
 ## 尚未完成的边界
 
+- Dashboard 已提供仅项目列表可用的 `/update` 状态入口与 General 中的真实 Host 只读版本号。入口仍保持首版禁用，不开放启用、下载、应用或回滚；本地状态刷新不做发行网络请求。UI 输入/渲染测试不是 Windows/Linux/macOS 正式终端视觉验收。
 - 已有 HTTPS 流式传输器，但测试使用 HTTPX MockTransport 和本地生成的 ZIP/tar.gz；尚未进行真实 HTTPS 服务、企业代理、正式 CDN 和发行包下载验收。
 - 独立检查/准备接口的记录仍是调用方输入与返回建议。模拟事务原型另有安装级持久高水位，回滚不降低；正式安装尚未接入这一权威，不能将普通检查结果视为生产持久防重放。
 - 打包器新增明确选择的更新数据证据生成：Unix 的 `--update-evidence`、Windows 的 `-UpdateEvidence`。默认构建和 CI 尚未启用；旧包缺少描述时不会自动猜测或放行。

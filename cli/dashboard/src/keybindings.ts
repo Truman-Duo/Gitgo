@@ -21,6 +21,7 @@ export type CommandDef = {
 const ZH_TITLES: Record<string, string> = {
   "app.help": "帮助", "app.quit": "退出", "projects.bin": "归档项目",
   "projects.create": "创建项目", "projects.archive": "归档项目",
+  "projects.update": "软件更新",
   "projects.stats_overview": "全局用量概览", "workspace.stats": "项目统计与任务时间轴", "projects.export": "导出知识",
   "projects.config": "设置", "config.general": "通用设置",
   "config.llm": "模型服务商", "config.publish": "发布设置",
@@ -82,6 +83,14 @@ export const REGISTRY: CommandDef[] = [
     category: "action",
     keys: [],
     slashName: "create",
+    scene: ["projects"],
+  },
+  {
+    name: "projects.update",
+    title: "Software Update",
+    category: "system",
+    keys: [],
+    slashName: "update",
     scene: ["projects"],
   },
   {

@@ -19,6 +19,7 @@ import { PublishPanel } from "./PublishPanel.js";
 import { CreateProjectPanel } from "./CreateProjectPanel.js";
 import { StatsPanel } from "./StatsPanel.js";
 import { StatsOverview } from "./StatsOverview.js";
+import { UpdatePanel } from "./UpdatePanel.js";
 import { BtwPanel } from "./BtwPanel.js";
 import { CompactPanel } from "./CompactPanel.js";
 import { InterruptPanel } from "./InterruptPanel.js";
@@ -213,6 +214,9 @@ export function renderOverlay(
     }
     case "statsOverview":
       return <StatsOverview client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} />;
+    case "updatePanel":
+      return ctx.scene === "projects"
+        ? <UpdatePanel client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} /> : null;
     case "btwPanel":
       return <BtwPanel client={ctx.client}
         project={String(overlay.props?.project || ctx.activeProject || "")}
