@@ -33,6 +33,15 @@ def download(platform):
     return zipfile.ZipFile(io.BytesIO(data))
 
 
+def macos_sqlite_dependency(dependencies: str) -> str:
+    # Universal2 otool output repeats a dependency for each architecture slice.
+    matches = {line.strip().split()[0] for line in dependencies.splitlines()
+               if "libsqlite3" in line and "compatibility version" in line}
+    if len(matches) != 1:
+        raise RuntimeError("Unexpected macOS SQLite dependency layout: " + dependencies)
+    return matches.pop()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--download-only", action="store_true")
@@ -77,11 +86,8 @@ def main():
         # LD_LIBRARY_PATH through the sandbox environment allowlist.
         if darwin:
             dependencies = subprocess.check_output(["otool", "-L", str(target)], text=True)
-            matches = [line.strip().split()[0] for line in dependencies.splitlines()[1:]
-                       if "libsqlite3" in line]
-            if len(matches) != 1:
-                raise RuntimeError("Unexpected macOS SQLite dependency layout")
-            subprocess.run(["install_name_tool", "-change", matches[0], str(library), str(target)], check=True)
+            dependency = macos_sqlite_dependency(dependencies)
+            subprocess.run(["install_name_tool", "-change", dependency, str(library), str(target)], check=True)
             subprocess.run(["codesign", "--force", "--sign", "-", str(target)], check=True)
         else:
             previous = subprocess.check_output(["patchelf", "--print-rpath", str(target)], text=True).strip()

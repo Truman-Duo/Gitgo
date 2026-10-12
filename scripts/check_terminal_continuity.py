@@ -66,7 +66,7 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
             ConfigManager.save(Config(projects=[project]), config_path, allow_empty=True)
             llm_path = root / "llm_config.json"
             llm_path.write_text(json.dumps({"providers": [{
-                "id": "continuity", "name": "Local acceptance", "auth_mode": "none",
+                "id": "continuity", "name": "Local acceptance", "kind": "local", "auth_mode": "none",
                 "base_url": f"http://127.0.0.1:{server.server_port}/v1",
                 "model_id": "continuity", "protocol": "openai_chat",
             }], "active_provider": "continuity"}), encoding="utf-8")
