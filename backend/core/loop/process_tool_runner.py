@@ -35,6 +35,7 @@ class SubprocessResult:
     duration_ms: float = 0.0
     timed_out: bool = False
     stderr: str = ""
+    cleanup: dict | None = None
 
 
 class ProcessToolRunner:
@@ -64,7 +65,7 @@ class ProcessToolRunner:
         start = time.time()
 
         try:
-            from backend.core.process_control import attach_kill_job, close_job, creation_flags
+            from backend.core.process_control import attach_kill_job, close_job, creation_flags, spawn_managed
             # Inherit parent env so GITGO_TOOL_REGISTRY_MODULE etc. propagate
             from backend.core.tools.execution_profile import safe_environment
             child_env = safe_environment()
@@ -73,7 +74,7 @@ class ProcessToolRunner:
                 "PYTHONUTF8": "1",
             })
             source_root = Path(__file__).resolve().parents[3]
-            proc = subprocess.Popen(
+            proc = spawn_managed(
                 tool_runner_command(),
                 # DaemonClient starts ``python -m gitgo`` from the package's
                 # parent directory.  Relying on inherited cwd therefore makes
@@ -100,8 +101,10 @@ class ProcessToolRunner:
                         input=payload, limit=4 * 1024 * 1024, reject_overflow=True,
                         cancel_event=cancellation_event, terminate=lambda: self._kill_tree(proc))
                 except ProcessCancelled:
-                    return SubprocessResult(success=False, error=f"tool '{tool_name}' cancelled",
-                        exit_code=-1, duration_ms=(time.time() - start) * 1000)
+                    cleanup = getattr(proc, "_gitgo_cleanup", {})
+                    warning = " (detached descendant cleanup not confirmed)" if not cleanup.get("complete", True) else ""
+                    return SubprocessResult(success=False, error=f"tool '{tool_name}' cancelled{warning}",
+                        exit_code=-1, duration_ms=(time.time() - start) * 1000, cleanup=cleanup)
                 duration_ms = (time.time() - start) * 1000
                 close_job(getattr(proc, "_gitgo_job_handle", None))
                 proc._gitgo_job_handle = None
@@ -123,6 +126,7 @@ class ProcessToolRunner:
                     exit_code=0,
                     duration_ms=duration_ms,
                     stderr=stderr_str,
+                    cleanup=getattr(proc, "_gitgo_cleanup", None),
                 )
 
             except subprocess.TimeoutExpired:
@@ -130,11 +134,13 @@ class ProcessToolRunner:
                 self._kill_tree(proc)
                 return SubprocessResult(
                     success=False,
-                    error=f"tool '{tool_name}' timed out after {effective_timeout}s",
+                    error=f"tool '{tool_name}' timed out after {effective_timeout}s" +
+                          ("; detached descendant cleanup not confirmed" if not getattr(proc, "_gitgo_cleanup", {}).get("complete", True) else ""),
                     exit_code=-1,
                     duration_ms=duration_ms,
                     timed_out=True,
                     stderr="",
+                    cleanup=getattr(proc, "_gitgo_cleanup", None),
                 )
 
         except FileNotFoundError:

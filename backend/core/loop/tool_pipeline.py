@@ -822,7 +822,7 @@ class ToolPipeline:
                 raise ToolExecutionCancelled(result.error)
             if result.timed_out:
                 raise TimeoutError(
-                    f"Tool '{tool_name}' timed out after {timeout}s"
+                    result.error or f"Tool '{tool_name}' timed out after {timeout}s"
                 )
             raise RuntimeError(result.error or f"Tool '{tool_name}' failed")
         return result.data or {}

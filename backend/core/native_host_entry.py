@@ -107,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         return _run_python_role(role_argv)
     if name == CREDENTIAL_CLEANUP_ROLE:
         return _run_credential_cleanup_role(role_argv)
+    if name == "unix-scope":
+        if len(role_argv) != 1 or not role_argv[0].isdigit():
+            raise SystemExit("unix-scope requires one owned control descriptor")
+        from backend.core.unix_process_scope import main as scope_main
+        return scope_main(role_argv)
     raise SystemExit(f"unknown Gitgo internal role: {name}")
 
 
