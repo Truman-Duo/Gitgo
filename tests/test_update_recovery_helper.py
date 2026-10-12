@@ -133,7 +133,7 @@ def test_coordinator_keeps_cleanup_separate_and_drops_inherited_keys(coordinator
     assert captured["env"]["GITGO_CONFIG_PATH"] == str(profile / "config.json")
 
 
-@pytest.mark.parametrize("fault", ["nonce", "id", "status", "version", "schema", "cleanup", "lie", "overflow", "exit"])
+@pytest.mark.parametrize("fault", ["nonce", "id", "status", "version", "schema", "cleanup", "lie", "overflow", "timeout", "oversized_stdout", "changed_helper", "exit"])
 def test_coordinator_rejects_untrusted_or_incomplete_reports(coordinator, monkeypatch, fault):
     from backend.core import process_output
     host, sha, request, profile, _, proc = coordinator
@@ -148,6 +148,9 @@ def test_coordinator_rejects_untrusted_or_incomplete_reports(coordinator, monkey
         if fault == "schema": result["schema_version"] = True
         if fault == "lie": result["status"] = "committed"  # Same version but wrong ledger state.
         if fault == "overflow": raise ValueError("sensitive-proxy-detail")
+        if fault == "timeout": raise subprocess.TimeoutExpired("private-helper-command", 30)
+        if fault == "oversized_stdout": return " " * (64 * 1024 + 1), "", False
+        if fault == "changed_helper": host.write_bytes(b"changed after launch")
         return json.dumps(result), "", False
     monkeypatch.setattr(process_output, "collect_output", output)
     with pytest.raises(UpdateError, match="UPDATE_HELPER_FAILED") as exc:
