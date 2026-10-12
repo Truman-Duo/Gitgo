@@ -1225,8 +1225,11 @@ def test_replace_existing_daemon_uses_windows_process_tree_termination(
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='Non-Windows credential boundary')
-def test_unsupported_credential_backend_refuses_without_plaintext_fallback(tmp_path_factory):
-    from backend.core.secret_store import EncryptedSecretStore, SecretStoreError
+def test_unavailable_dpapi_backend_refuses_without_plaintext_fallback(tmp_path_factory, monkeypatch):
+    from backend.core.secret_store import EncryptedSecretStore, SecretStoreError, WindowsDPAPIProtector
+    # Other platforms now have their own native stores. Explicitly select the
+    # unavailable backend to verify refusal, bypassing only the test protector.
+    monkeypatch.setattr("backend.core.secret_store.default_secret_protector", WindowsDPAPIProtector)
     path = tmp_path_factory / 'unavailable-secrets.json'
     with pytest.raises(SecretStoreError, match='DPAPI is unavailable'):
         EncryptedSecretStore(path)

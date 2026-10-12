@@ -135,5 +135,6 @@ def runner_transport_only(monkeypatch):
     test_native_sandbox.py. This fixture is opt-in, never applied globally.
     """
     def launch(argv, policy, **kwargs):
-        return subprocess.Popen(argv, **kwargs)
+        from backend.core.process_control import spawn_managed
+        return spawn_managed(argv, **kwargs)
     monkeypatch.setattr("backend.core.sandbox.sandbox_popen", launch)

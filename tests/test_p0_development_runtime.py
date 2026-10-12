@@ -927,8 +927,8 @@ def test_process_runner_cancels_transport_process_tree(tmp_path_factory, runner_
     event = threading.Event()
     runner = ProcessToolRunner(timeout=20)
     # This fixture intentionally disables the native boundary. Exercise its
-    # own process group with an inheriting descendant; real exec handlers may
-    # start a new session and require the native Job/cgroup tests instead.
+    # owned transport scope with an inheriting descendant; native containment
+    # is tested separately using real Job/cgroup boundaries.
     ready = tmp_path_factory / "transport-descendant-ready"
     child = (f"import pathlib,time;pathlib.Path({str(ready)!r}).write_text('ran');time.sleep(2);"
              f"pathlib.Path({str(marker)!r}).write_text('survived')")

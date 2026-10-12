@@ -63,7 +63,8 @@ class BoundedCommunication:
                 denial.effect_state = "ambiguous"
                 raise denial
             if self.proc.poll() is not None:
-                from backend.core.process_control import close_job
+                from backend.core.process_control import close_job, finish_scope
+                finish_scope(self.proc)
                 close_job(getattr(self.proc, "_gitgo_job_handle", None))
                 self.proc._gitgo_job_handle = None
                 if all(not thread.is_alive() for thread in self.threads):
