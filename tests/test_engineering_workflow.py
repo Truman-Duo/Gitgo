@@ -175,6 +175,8 @@ def test_decision_frontier_requires_real_user_answer_and_blocks_downstream(tmp_p
     p.session.host_ledger.append({"event": "user_decision_received", "task_id": p.active_task_id,
                                   "state_topic": "scope", "decision_id": result["decision_id"], "answer": "Small"})
     p.pending_decision = None
+    assert workflow.status()['ready'] == ['scope']
+    workflow.resolve_answer('scope', result['decision_id'], {'disposition': 'confirmed', 'value': 'Small', 'quote': 'Small'})
     assert workflow.status()["ready"] == ["mode"]
 
 

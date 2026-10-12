@@ -239,7 +239,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
     for process_id in list(incomplete):
         state = states.get(process_id)
         status = str((state or {}).get("process", {}).get("status") or "")
-        if status in _TERMINAL:
+        if status in _TERMINAL and (state.get("runtime_state") or {}).get("lifecycle_finalized") is not False:
             session_store.append_event(process_id, "agent_complete", {
                 "status": status,
                 "steps_used": int((state or {}).get("process", {}).get("steps_used", 0) or 0),
@@ -263,6 +263,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             session_state = {}
         process = AgentProcess(
             process_id=process_id,
+            durable_revision=session_store.process_revision(process_id),
             role="recovery-diagnostic",
             ring_level=RingLevel.RING_3,
             tool_registry=ToolRegistry([]),
@@ -352,6 +353,10 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
         ) if process_id in incomplete else []
         if process_id in incomplete:
             findings.extend(inspect_worktree_recovery(durable_worktree))
+        provisional_terminal = (persisted_status in _TERMINAL and runtime.get("lifecycle_finalized") is False)
+        if provisional_terminal:
+            findings.append({"code": "HOST_FINALIZATION_INCOMPLETE", "effect_state": "ambiguous",
+                             "detail": "Provider result was not finalized by Host; inspect retained effects in a new task."})
 
         if process_id not in incomplete:
             try:
@@ -384,6 +389,8 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
         process = AgentProcess(
             process_id=process_id,
             role=str(raw_process.get("role") or actor_kind),
+            lifecycle_finalized=bool(runtime.get("lifecycle_finalized", persisted_status in _TERMINAL)),
+            durable_revision=int(raw_process.get("state_revision", 0)),
             ring_level=ring,
             tool_registry=tool_registry,
             max_steps=max(1, int(raw_process.get("max_steps", 50) or 50)),
@@ -437,6 +444,10 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             ),
             approval_grants=list(runtime.get("approval_grants") or []),
         )
+        if process.pending_tool_batch and runtime.get("dynamic_tool_specs"):
+            process.runtime_preferences["pending_definition_recovery"] = {
+                "definitions": dict(runtime["dynamic_tool_specs"]),
+                "lease": runtime.get("capability_lease_source")}
         process._child_sequence = max(
             int(runtime.get("child_sequence", 0) or 0), len(process.child_ids)
         )
@@ -462,7 +473,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
                     dict(runtime.get("dynamic_tool_specs") or {}).keys()
                 ),
                 "requires_manual_verification": bool(findings or profile_error),
-                "resume_forbidden": bool(profile_error or worktree_forbidden or evidence_unavailable),
+                "resume_forbidden": bool(profile_error or worktree_forbidden or evidence_unavailable or provisional_terminal),
             }
         manager.register_restored(process)
 
@@ -503,6 +514,33 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             **dict(process.recovery or {}),
         })
     return candidates
+
+
+def resolve_clean_recovery(process: AgentProcess) -> bool:
+    """Close a clean recovery from Host evidence, never from model attestation.
+
+    Effect uncertainty and missing definitions remain blocking. A genuine user
+    continuation plus validated durable state needs no semantic reviewer.
+    """
+    recovery = process.recovery or {}
+    if (not recovery or recovery.get("state") in {"resolved", "completed"}
+            or recovery.get("reasons") or recovery.get("resume_forbidden")
+            or recovery.get("requires_manual_verification")
+            or process.runtime_preferences.get("pending_definition_recovery")):
+        return False
+    task_id = process.active_task_id or process.process_id
+    source = next((e for e in reversed(process.session.host_ledger)
+        if e.get("event") in {"user_decision_received", "recovery_resume_claimed"}
+        and e.get("task_id") == task_id and e.get("process_id") == process.process_id
+        and _timestamp(str(e.get("created_at") or "")) > _timestamp(str(recovery.get("checkpoint_at") or ""))), None)
+    if source is None:
+        return False
+    process.recovery = {**recovery, "state": "resolved", "resolution": "host_validated_continuation",
+                        "decision_id": source.get("decision_id")}
+    process.session.host_ledger.append({"event": "recovery_resolved", "task_id": task_id,
+        "process_id": process.process_id, "decision_id": source.get("decision_id"),
+        "evidence": "clean_checkpoint_and_validated_continuation"})
+    return True
 
 
 def recovery_instruction(process: AgentProcess, user_note: str, *, verified: bool) -> str:

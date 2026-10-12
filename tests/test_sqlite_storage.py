@@ -677,13 +677,32 @@ def test_backend_cannot_open_sqlite_outside_storage_facade():
     backend = Path(__file__).parents[1] / "backend" / "core"
     offenders: list[str] = []
     allowed = (backend / "storage" / "runtime.py").resolve()
+    storage = (backend / "storage").resolve()
     for path in backend.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        sqlite_modules = set()
+        sqlite_connectors = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "sqlite3":
+                        sqlite_modules.add(alias.asname or alias.name)
+            if isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
+                sqlite_modules.add("sqlite3")
+                sqlite_connectors.update(alias.asname or alias.name for alias in node.names if alias.name == "connect")
+        # Domain repositories may use SQLite types/errors, but the facade alone
+        # creates connections. All repositories share its lock and transaction.
+        if not path.resolve().is_relative_to(storage) and sqlite_modules:
+            offenders.append(str(path))
         if path.resolve() == allowed:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(alias.name == "sqlite3" for alias in node.names):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if (isinstance(fn, ast.Attribute) and fn.attr == "connect"
+                    and isinstance(fn.value, ast.Name) and fn.value.id in sqlite_modules):
                 offenders.append(str(path))
-            if isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
+            elif isinstance(fn, ast.Name) and fn.id in sqlite_connectors:
                 offenders.append(str(path))
     assert offenders == []

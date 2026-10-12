@@ -78,6 +78,33 @@ def test_dynamic_envelope_is_tail_only_and_never_persisted():
     assert session.messages == before
 
 
+def test_provider_projection_seals_parallel_tool_outputs_before_host_deltas():
+    session = AgentSession()
+    calls = [{'id': key, 'function': {'name': 'read_file', 'arguments': '{}'}} for key in ('one', 'two')]
+    session.append_assistant_provider('', tool_calls=calls)
+    session.append_host_steering('Working default', steering_type='alignment_assumptions')
+    session.append_tool_result('First result', tool_name='read_file', tool_call_id='one')
+    session.append_user('Actual user update')
+    session.append_tool_result('Second result', tool_name='read_file', tool_call_id='two')
+    before = list(session.messages)
+    for projected in (session.to_provider_messages(), session.to_openai_messages()):
+        assert [m['role'] for m in projected] == ['assistant', 'tool', 'tool', 'user', 'user']
+        assert [m['content'] for m in projected[3:]] == ['Working default', 'Actual user update']
+    wire = OpenAIResponsesAdapter().build_body(_request(session.to_provider_messages()), 'test-model')['input']
+    assert [m.get('type') for m in wire[:4]] == ['function_call', 'function_call', 'function_call_output', 'function_call_output']
+    assert session.messages == before
+
+
+def test_tool_projection_never_invents_missing_outputs_or_crosses_assistant_turns():
+    session = AgentSession()
+    session.append_assistant_provider('', tool_calls=[{'id': 'missing', 'function': {'name': 'read_file', 'arguments': '{}'}}])
+    session.append_host_steering('Update', steering_type='alignment_assumptions')
+    session.append_assistant('Next assistant turn')
+    session.append_tool_result('Late output', tool_name='read_file', tool_call_id='missing')
+    projected = session.to_provider_messages()
+    assert [m['role'] for m in projected] == ['assistant', 'user', 'assistant', 'tool']
+
+
 def test_provider_switch_keeps_public_dialogue_but_quarantines_native_state():
     session = AgentSession()
     route_a = "route-a"
@@ -790,6 +817,29 @@ def test_sync_overflow_returns_to_host_without_hidden_output_token_retries(monke
     assert len(calls) == 1
 
 
+def test_paid_sync_fallback_truncation_is_recorded_without_executing_partial_calls():
+    from backend.core.loop.provider_protocol import ProviderResponseIncomplete
+    process = AgentRuntimeFactory.create(RuntimeSpec(
+        role='supervisor', actor_kind='supervisor', capability_profile_id='supervisor.control',
+        ring_level=RingLevel.RING_0, tool_registry=ToolRegistry([]), max_steps=5,
+        task_kind='answer', task_id='paid-fallback'))
+    class InterruptedProvider:
+        protocol = SimpleNamespace(value='openai_responses')
+        def stream_events(self, *_args, **_kwargs):
+            yield ProviderEvent(ProviderEventType.REASONING_DELTA, reasoning='partial')
+            raise StreamInterruptedError()
+        def chat(self, *_args, **_kwargs):
+            raise ProviderResponseIncomplete('max_output_tokens', {
+                'input_tokens': 20, 'output_tokens': 8192, 'reasoning_tokens': 8192})
+    events = []
+    outcome = TaskOutcome.from_dict(agent_step(process, InterruptedProvider(),
+        instruction='reply', on_stream_event=events.append))
+    assert outcome.status == OutcomeStatus.FAILED
+    assert process.session.provider_usage[-1]['output_tokens'] == 8192
+    assert sum(e.get('event') == 'provider_usage' and e.get('phase') == 'sync_fallback' for e in events) == 1
+    assert not process.tool_receipts
+
+
 def test_outcome_duration_covers_the_whole_round_and_uses_shared_tree_trace(monkeypatch):
     from backend.core.loop.executor import _make_result
     from backend.core.loop.budget import TaskTreeBudget
@@ -964,6 +1014,7 @@ def test_executor_continues_typed_provider_truncation_without_repeating_work():
     ))
     assert outcome.status == OutcomeStatus.COMPLETED
     assert provider.calls == 2
+    assert outcome.response == "partial answerfinal answer"
     assert any(
         message.get("message_type") == "host_provider_continuation"
         for message in process.session.messages
@@ -1182,7 +1233,8 @@ def test_interrupted_responses_call_is_not_replayed_without_output():
     assert provider.calls == 2
 
 
-def test_stream_recovery_sync_fallback_does_not_crash_on_unbound_invalid_calls():
+@pytest.mark.parametrize('with_public_fragments', [False, True])
+def test_stream_recovery_sync_fallback_does_not_crash_on_unbound_invalid_calls(with_public_fragments):
     process = AgentRuntimeFactory.create(RuntimeSpec(
         role="worker", actor_kind="worker", capability_profile_id="text.only",
         ring_level=RingLevel.RING_3, tool_registry=ToolRegistry([]), max_steps=3,
@@ -1199,12 +1251,15 @@ def test_stream_recovery_sync_fallback_does_not_crash_on_unbound_invalid_calls()
 
         def stream_events(self, *_args, **_kwargs):
             self.stream_calls += 1
-            if False:
-                yield None
+            if with_public_fragments:
+                yield ProviderEvent(ProviderEventType.TEXT_DELTA,
+                                    text=f'Part {self.stream_calls}. ')
             raise StreamInterruptedError()
 
-        def chat(self, *_args, **_kwargs):
+        def chat(self, messages, **_kwargs):
             self.chat_calls += 1
+            if with_public_fragments:
+                assert [m['content'] for m in messages if m['role'] == 'assistant'] == ['Part 1. ', 'Part 2. ']
             return {"content": "recovered\nTASK_COMPLETE", "tool_calls": []}
 
     provider = FallbackProvider()
@@ -1214,6 +1269,11 @@ def test_stream_recovery_sync_fallback_does_not_crash_on_unbound_invalid_calls()
     assert outcome.status == OutcomeStatus.COMPLETED
     assert provider.stream_calls == 2
     assert provider.chat_calls == 1
+    assert outcome.response == ('Part 1. Part 2. ' if with_public_fragments else '') + 'recovered'
+    recoveries = [m for m in process.session.messages if m.get('message_type') == 'host_provider_continuation']
+    assert len(recoveries) == 2
+    from backend.core.storage.runtime import StorageRuntime
+    assert not any(StorageRuntime._is_public_user_message(m) for m in recoveries)
 
 
 def test_live_turn_seals_legacy_dangling_responses_call_before_request():

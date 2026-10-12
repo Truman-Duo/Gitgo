@@ -1,45 +1,27 @@
 # 配置
 
-Gitgo 的用户级配置位于 `~/.gitgo/config.json`。在 Dashboard 中保存的设置与直接修改该 JSON 使用同一配置模型；外部修改由运行时重新读取或在下一次启动生效，具体取决于设置类别。
+Gitgo 的用户级配置使用 `~/.gitgo/config.json`。Dashboard 保存设置与运行入口使用同一配置模型；项目身份和历史数据不因终端选择改变。
 
-## Launcher
+## General
 
-```json
-{
-  "launcher": {
-    "terminal": "auto",
-    "command": "",
-    "args": []
-  }
-}
-```
+首次启动在 Terminal 行选择检测到的可用终端：左右切换、Enter 保存、R 重新检测。初次保存可以转到所选终端；日后在 `/config → General` 修改时保留当前窗口，下次启动采用新选择。
 
-`terminal` 支持：
+发现或验证失败会提示原因。不要通过手填未经验证的 Bash 路径绕过检查。旧配置兼容保留 `auto/current/windows_terminal/custom`；可选项取决于当前系统发现结果。
 
-- `auto`：资源管理器启动时优先 Windows Terminal；已有终端则复用当前控制台；
-- `current`：始终使用当前控制台；
-- `windows_terminal`：使用 Windows Terminal；
-- `custom`：使用 `command` 与 `args` 指定的终端。
+Verbose 控制思考、工具等内容的默认展开程度，不改变任务或历史事实。
 
-## Provider
+## Providers
 
-Provider 配置由元数据和凭据两部分组成：
+在 `/config → Providers` 配置名称、协议、Base URL、模型及真实容量。凭据单独保存；Windows 使用当前用户 DPAPI 加密，不写入项目文件。
 
-- 元数据：名称、协议、Base URL、模型、上下文窗口、能力探针结果等；
-- 凭据：API key 等敏感字段。
+支持 OpenAI Responses、OpenAI Chat Completions 与 Anthropic Messages 风格协议。模型原生搜索、独立 Provider 搜索和外部检索是不同能力，取决于配置和实际服务支持。
 
-Windows 上凭据使用当前用户 DPAPI 加密，单独写入用户级 secret store；明文不会写入项目配置、SQLite、Trace 或 Git。删除 Provider 时应同步清理不再引用的凭据。
+主 Provider 与备用设置分别保存。开启自动 failover 并设置备用顺序后，失败请求才允许转到所选节点。自动路由不改写配置主模型。详见 [备用切换](provider-routing.md)。
 
-支持的协议适配边界包括：
+本地端点有部分接口和兼容服务测试，但实际本地模型验收延期，不能按正式支持承诺。
 
-- OpenAI Responses；
-- OpenAI Chat Completions；
-- Anthropic Messages。
+## 项目与数据
 
-模型原生搜索、Provider 托管搜索和外部 SearXNG 是不同能力。Gitgo 应优先使用已探测到的 Provider 原生能力；SearXNG 是可选后备，不是使用网络搜索的前置条件。
+项目配置包含工作区、提交格式及发布偏好，不应保存凭据。不同终端使用相同项目身份和状态根目录时共享历史。显式指定 `GITGO_STATE_HOME` 会产生独立数据环境，测试隔离环境不能冒充正常安装历史。
 
-## 项目设置
-
-项目配置保存工作区位置、可选发布/试验仓、提交格式、发布隐私策略和运行时偏好。项目路径可以关联已有目录，不要求位于 Gitgo 源码目录中。
-
-不要在项目配置中保存 API key。不要把项目 SQLite、WAL、Trace、`.env` 或本地 Agent 指令文件提交到远端。
+修改运行中的 Provider 配置可能被拒绝，应等待任务结束或明确取消。终端选择仅影响下次启动，不应为切换终端同时启动另一个写入同一数据环境的窗口。

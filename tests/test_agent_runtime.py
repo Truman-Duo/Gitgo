@@ -478,6 +478,11 @@ class PromptAndReasoningStateTests(unittest.TestCase):
         self.assertEqual(
             status["web_access"]["search_state"], "provider_plan_unavailable",
         )
+        self.assertNotIn('tool_access', status)
+        discovery = tools['capability_status'].execute({'capability': 'all'})['tool_access']
+        self.assertIn('declare_task_contract', discovery['active_tools'])
+        self.assertTrue(any('author_tool' in p['inactive_installed_tools'] for p in discovery['requestable_profiles']))
+        self.assertIsNone(process.capability_lease)
         self.assertEqual(tools["configure_capability"].approval.value, "ask")
         self.assertTrue(tools["configure_capability"].approval_per_invocation)
 

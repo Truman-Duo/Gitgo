@@ -32,6 +32,12 @@ class CompletionClaim:
     declared_at: str = ""
     source: str = "complete_task"
 
+    @staticmethod
+    def is_explicit_response(response: str) -> bool:
+        """An actual completion claim differs from a provider stopping output."""
+        return bool(re.search(r"(?m)^\s*TASK_COMPLETE\s*$", response)
+                    or re.search(r"(?m)^\s*FINAL_ANSWER\s*:", response))
+
     @classmethod
     def from_args(cls, args: dict, *, step: int) -> "CompletionClaim":
         result = str(args.get("result", "")).strip()
@@ -106,6 +112,7 @@ class CompletionClaim:
 class HostEvaluation:
     allowed: bool
     reasons: tuple[str, ...] = field(default_factory=tuple)
+    gates: tuple[dict, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -189,7 +196,7 @@ class HostCompletionEvaluator:
     """Non-agent hard gates. Neither A nor B can override these checks."""
 
     @classmethod
-    def outstanding_gates(cls, process, signals: list | None = None) -> dict:
+    def outstanding_gates(cls, process, signals: list | None = None, harness_result=None, candidate=None) -> dict:
         """Project the authoritative evaluator into an actionable checklist.
 
         This is a read model over :meth:`evaluate`, not another completion
@@ -203,72 +210,53 @@ class HostCompletionEvaluator:
             or str((review_claim or {}).get("summary", ""))
             or "Host completion readiness probe"
         )
-        evaluation = cls.evaluate(process, probe, signals)
+        evaluation = cls.evaluate(process, probe if candidate is None else candidate, signals)
+        if harness_result is None and signals:
+            from .harness.completion import CompletionGuard
+            harness_result = CompletionGuard().on_signals(signals, process)
 
-        def classify(reason: str) -> tuple[str, list[str], bool]:
-            lowered = reason.casefold()
-            if lowered.startswith("engineering workflow"):
-                return "engineering_evidence", [
-                    "inspect engineering_workflow status and satisfy the ready evidence nodes",
-                    "if unavailable, preserve the missing facts and request a scope decision",
-                ], "(decision)" not in lowered
-            if "test" in lowered:
-                return "test_evidence", [
-                    "run the required test through the registered test system",
-                    "fix the failing check and rerun it",
-                ], True
-            if "review" in lowered or "approval" in lowered:
-                return "verification", [
-                    "satisfy the verification plan with deterministic checks or an independent review",
-                    "if unavailable, present a completion-exception decision to the user",
-                ], True
-            if "delegated" in lowered or "child" in lowered:
-                return "subprocess", [
-                    "wait for, recover, replace, or cancel the required subprocess",
-                    "review its terminal outcome and record the decision",
-                ], True
-            if "artifact" in lowered or "workspace" in lowered:
-                return "deliverable", [
-                    "create and verify the required workspace artifact",
-                    "ask the user to reduce or accept incomplete scope if it is impossible",
-                ], True
-            if "receipt" in lowered or "effectful" in lowered:
-                return "effect_evidence", [
-                    "perform the intended operation through a registered tool",
-                    "cite the Host receipt in the completion claim",
-                ], False
-            if "governance" in lowered or "signal" in lowered:
-                return "governance", [
-                    "inspect and resolve the identified governance signal",
-                    "ask the user only when a material semantic choice remains",
-                ], False
-            return "completion", [
-                "inspect decision_evidence and satisfy the stated Host fact",
-                "if the fact is impossible in this environment, ask the user how to proceed",
-            ], True
-
-        gates = []
-        for reason in evaluation.reasons:
-            kind, resolutions, degradable = classify(reason)
-            digest = hashlib.sha256(reason.encode("utf-8")).hexdigest()[:12]
-            gates.append({
-                "gate_id": f"gate_{digest}",
-                "kind": kind,
-                "message": reason,
-                "source": "HostCompletionEvaluator",
-                "blocking": True,
-                "degradable_by_explicit_user_decision": degradable,
-                "resolution_options": resolutions,
-            })
-        return {
-            "ready": evaluation.allowed,
-            "gate_count": len(gates),
-            "gates": gates,
-        }
+        gates = list(evaluation.gates)
+        if harness_result is not None:
+            from .completion_gates import CompletionReasons
+            extra = CompletionReasons()
+            with extra.scope("required_tool_evidence", degradable=True):
+                for name in harness_result.missing_tools:
+                    extra.append("required tool has no successful receipt: " + name)
+            extra.extend("unresolved governance instruction: " + warning for warning in harness_result.warnings)
+            if harness_result.blocked and not extra:
+                extra.append("completion policy plugin blocked delivery")
+            gates.extend(extra.gates)
+        return {"ready": not gates, "gate_count": len(gates), "gates": gates}
 
     @classmethod
     def evaluate(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
-        reasons: list[str] = []
+        from .completion_gates import CompletionReasons
+        reasons = CompletionReasons()
+        context, _ = process.read_context_snapshot() if getattr(process, 'read_context_snapshot', None) else ({}, 0)
+        alignment = context.get('alignment_runtime') or {}
+        review_required = True
+        from .alignment_routing import uses_on_demand_review
+        if (uses_on_demand_review(alignment)
+                and alignment.get('task_id') == (process.active_task_id or process.process_id)
+                and alignment.get('process_id') == process.process_id):
+            from .alignment_routing import review_reason
+            from .alignment_runtime import AlignmentRuntime
+            review_required = bool(review_reason(process, AlignmentRuntime(process).payload(candidate=response)))
+        if (alignment.get('enforced') and alignment.get('task_id') == (process.active_task_id or process.process_id)
+                and alignment.get('process_id', process.process_id if not process.parent_id else '') == process.process_id):
+            from .alignment_evidence import alignment_input_digest, answer_digest
+            delivery = alignment.get('delivery') or {}
+            candidate = process.completion_claim.result if response.strip() == 'TASK_COMPLETE' and process.completion_claim else response
+            candidate = CompletionClaim.from_response(candidate, step=process.steps_used).result
+            if (delivery.get('candidate_digest') != answer_digest(candidate)
+                    or delivery.get('input_digest') != alignment_input_digest(process)
+                    or (review_required and delivery.get('source') == 'host_on_demand')):
+                reasons.append('alignment delivery requires a current semantic check of this candidate and user evidence')
+            if delivery.get('artifact_manifest'):
+                from .delivery_artifacts import verify_manifest
+                claim = process.completion_claim
+                if not claim or not verify_manifest(process, delivery['artifact_manifest'], claim.files):
+                    reasons.append('published artifact evidence changed or is no longer in the completion claim')
         from backend.core.loop.engineering_workflow import EngineeringWorkflow
         try:
             if getattr(process, "read_context_snapshot", None):
@@ -280,7 +268,17 @@ class HostCompletionEvaluator:
             task_kind = TaskKind(getattr(process, "task_kind", TaskKind.ANSWER.value))
         except ValueError:
             reasons.append(f"unknown task_kind: {getattr(process, 'task_kind', '')}")
-            return HostEvaluation(False, tuple(reasons))
+            return HostEvaluation(False, tuple(reasons), tuple(reasons.gates))
+
+        # Explicit verification belongs to the task contract, regardless of
+        # whether its deliverable is an answer, plan, review or mutation. A
+        # failed test must not turn into ordinary completion after reclassification.
+        if task_kind != TaskKind.ACTION and getattr(process, "required_test_ids", []):
+            evidence = HostCompletionEvidence.collect(process)
+            with reasons.scope("test_evidence", degradable=True):
+                if evidence.test_failures:
+                    reasons.append("required tests are not all passing")
+                reasons.extend(f"required test failed: {failure}" for failure in evidence.test_failures)
 
         if task_kind == TaskKind.SUPERVISOR:
             cls._evaluate_supervisor(process, response, reasons)
@@ -291,21 +289,21 @@ class HostCompletionEvaluator:
             else:
                 cls._verify_receipt_references(process, claim, reasons)
             evidence = HostCompletionEvidence.collect(process)
-            reasons.extend(evidence.reasons)
-            reasons.extend(
-                f"required test failed: {failure}"
-                for failure in evidence.test_failures
-            )
+            if not evidence.action_receipt_ids:
+                reasons.append("no successful committed effectful receipt")
+            with reasons.scope("test_evidence", degradable=True):
+                if evidence.test_failures:
+                    reasons.append("required tests are not all passing")
+                reasons.extend(f"required test failed: {failure}" for failure in evidence.test_failures)
             cls._verify_required_tool_calls(process, reasons)
             from backend.core.loop.verification_policy import verification_plan
             plan = verification_plan(process)
             if plan.requires_independent_review and not getattr(
                 process, "review_approvals", []
             ):
-                reasons.append(
-                    "independent reviewer approval is required "
-                    f"(verification level {plan.level}: {', '.join(plan.reasons)})"
-                )
+                with reasons.scope("verification", degradable=True):
+                    reasons.append("independent reviewer approval is required "
+                        f"(verification level {plan.level}: {', '.join(plan.reasons)})")
         elif task_kind == TaskKind.REVIEW:
             review_claim = getattr(process, "review_claim", None)
             if not isinstance(review_claim, dict):
@@ -346,7 +344,7 @@ class HostCompletionEvaluator:
                     "delegated agents are still unresolved: " + ", ".join(unresolved)
                 )
 
-        return HostEvaluation(not reasons, tuple(reasons))
+        return HostEvaluation(not reasons, tuple(reasons), tuple(reasons.gates))
 
     @classmethod
     def _evaluate_supervisor(cls, process, response: str,

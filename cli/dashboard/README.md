@@ -1,8 +1,10 @@
 # Gitgo Dashboard
 
-Gitgo 的正式终端界面，使用 React、Ink 和 Bun。它通过版本化原生协议连接 bundled Native Host；MCP、browser smoke 和 mock renderer 不是正式数据面。
+正式终端界面使用 React、Ink 和 Bun，通过原生协议连接 Native Host。浏览器诊断页、简化 renderer 和 MCP 不替代产品界面。
 
-## 开发
+## 开发入口
+
+在本目录执行：
 
 ```text
 bun install
@@ -10,27 +12,15 @@ bun test
 bun run build
 ```
 
-从仓库根目录启动完整产品：
+在仓库根目录运行 `run_dashboard_native.bat` 启动完整产品。`dev:trace` 和 `dev:live` 仅用于诊断。
 
-```text
-run_dashboard_native.bat
-```
+## 贡献要求
 
-直接运行开发入口：
+- 使用既有输入路由，保持 NormalBar、CommandBar 和场景底栏一致。
+- 延续现有颜色、聚焦、间距和状态图标；正文与思考清晰区分。
+- 展示真实问题与答案状态，发送回执不能冒充已回答。
+- 已回答卡片可收起/展开；流式消息、工具及权限事件不能相互覆盖。
+- 调整尺寸、滚动、鼠标复制、输入法、单行与多行粘贴都要检查。
+- 界面消费后端状态，不由前端制造完成或权限事实。
 
-```text
-bun run dev
-```
-
-`dev:trace` 和 `dev:live` 仅用于诊断。它们不能证明正式 Dashboard 的颜色、场景输入、NormalBar/CommandBar、状态栏、流式事件或后端同步正确。
-
-## 修改要求
-
-- 输入统一经过中央 input router，不在组件中堆叠全局按键监听；
-- Main Process 与 Subprocess 共用时间线、Markdown、Diff 和决策组件；
-- 已提交历史与当前 active cell 分离，最终回答不得覆盖过程轨迹；
-- resize 应保持用户滚动锚点；虚拟化不能破坏复制选择；
-- 颜色、聚焦、间距和状态图标沿用现有视觉语言；
-- UI 只消费 Native Host read model，不自行推导治理真相。
-
-完整贡献要求见 [CONTRIBUTING.md](../../CONTRIBUTING.md)。
+可见验收必须在真实彩色终端进行，不能用隐藏 PTY 或传输测试代替。环境中的 `NO_COLOR` 和 `TERM` 会影响颜色。当前结果见 [测试说明](../../docs/VALIDATION.md)，通用贡献规范见 [CONTRIBUTING](../../CONTRIBUTING.md)。

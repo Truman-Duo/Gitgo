@@ -92,7 +92,7 @@ class ToolDispatcher:
 
             steps_remaining = process.max_steps - process.steps_used
             if steps_remaining <= 0:
-                process.status = ProcessStatus.KILLED
+                transition(process, ProcessStatus.KILLED)
 
             return DispatchResult(
                 allowed=True, data=result_data,

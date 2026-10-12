@@ -37,6 +37,16 @@ function context(patch: Partial<InputContext> = {}): InputContext {
 }
 
 describe("host-driven decision interaction", () => {
+  test("free-form replies use the decision channel while a root stream is still busy", () => {
+    const ctx = context({decisionAllowFreeForm: true, chatBusy: true,
+      textValue: "For my team", textCursor: 11, chatInputFocused: true});
+    expect(resolveSceneKey(ctx, "", {return: true})).toContainEqual({kind: "effect",
+      effect: {type: "send_chat", text: "For my team", decisionSubmission: true}});
+    expect(resolveSceneKey({...ctx, decisionSubmitting: true}, "", {return: true}))
+      .toEqual([{kind: "effect", effect: {type: "report_notice", code: 2004}}]);
+    expect(resolveSceneKey({...ctx, decisionAllowFreeForm: false}, "", {return: true}))
+      .toEqual([{kind: "effect", effect: {type: "report_notice", code: 2004}}]);
+  });
   test("Tab reaches running B even during a pending decision, without submitting it", () => {
     const ctx = context({decisionOptionLabels: ["Continue", "Stop"], runningBIds: ["b"], chatBusy: true});
     expect(resolveSceneKey(ctx, "", {tab: true})).toEqual([

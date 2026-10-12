@@ -139,6 +139,9 @@ class AgentTool:
     composite_spec: dict | None = None
     # None is intentionally unregistered authority, never a legacy Host default.
     execution_contract: ExecutionContract | None = None
+    # Host-only preview of a control operation's prospective requirement state.
+    # Dynamic definitions cannot supply this hook; it grants no permission.
+    alignment_contract: Callable | None = None
 
     def __post_init__(self) -> None:
         self._bound_executor = self.execute
@@ -178,7 +181,7 @@ class AgentTool:
             if contract.kind != ExecutionType.NATIVE_PROCESS:
                 raise ValueError("Authored code requires native process authority")
         elif self.composite_spec is not None:
-            if mode != "host_pipeline" or contract != ExecutionContract(ExecutionType.DATA_BROKER, "host.composite"):
+            if mode not in {"host_pipeline", "authored_host_python"} or contract != ExecutionContract(ExecutionType.DATA_BROKER, "host.composite"):
                 raise ValueError("Composite execution requires Host pipeline authority")
         if self.isolated and contract.kind != ExecutionType.NATIVE_PROCESS:
             raise ValueError("A process cannot run with Host/broker authority")

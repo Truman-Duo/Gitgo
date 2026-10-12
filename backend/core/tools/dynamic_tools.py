@@ -28,7 +28,7 @@ _SAFE_CALLS = {
 }
 
 
-def validate_authored_definition(raw: dict, workspace: str) -> dict:
+def validate_authored_definition(raw: dict, workspace: str, *, host_calls: bool = False) -> dict:
     """Compile one pure, task-scoped Python shortcut without adding authority."""
     name = str(raw.get("name", "")).strip()
     if not _NAME_RE.fullmatch(name):
@@ -70,7 +70,7 @@ def validate_authored_definition(raw: dict, workspace: str) -> dict:
         if isinstance(node, ast.Name) and str(node.id).startswith("__"):
             raise ValueError("dunder names are forbidden in authored tools")
         if isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name) or node.func.id not in (_SAFE_CALLS | functions):
+            if not isinstance(node.func, ast.Name) or node.func.id not in (_SAFE_CALLS | functions | ({"call_tool"} if host_calls else set())):
                 raise ValueError("authored tools may call only safe builtins or local functions")
     tests = list(raw.get("tests") or [])
     if not 1 <= len(tests) <= 20:
@@ -92,6 +92,19 @@ def validate_authored_definition(raw: dict, workspace: str) -> dict:
     # Runtime-only registration payload. Persistent catalogs store this body
     # separately in CAS; process checkpoints retain only the immutable ref.
     spec["_source"] = source
+    return spec
+
+
+def validate_host_authored_definition(raw, workspace, available_tools):
+    spec = validate_authored_definition(raw, workspace, host_calls=True)
+    names = list(dict.fromkeys(raw.get("host_tools") or []))
+    if not names or len(names) > 20 or any(name not in available_tools or not available_tools[name].composable for name in names):
+        raise ValueError("host_tools must name between 1 and 20 currently composable tools")
+    spec.update(execution_mode="authored_host_python", host_tools=names,
+        effect=_strongest_effect([available_tools[name].effect.value for name in names]),
+        resources=sorted({r for name in names for r in available_tools[name].resources or []}))
+    body = {k: v for k, v in spec.items() if k not in {"digest", "_source"}}
+    spec["digest"] = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     return spec
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
+from backend.core.messaging import MessageIdentity, DeliveryClass
 import logging
 
 LOG = logging.getLogger(__name__)
@@ -29,6 +30,12 @@ class ToolEvent:
     call_index: int = 0
     data: dict = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    signal: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.signal:
+            self.signal = MessageIdentity(self.event_type, DeliveryClass.OBSERVATION,
+                "ToolPipeline", correlation_id=self.execution_id).to_dict()
 
 
 @dataclass
@@ -39,6 +46,12 @@ class ExecutionEvent:
     reason: str = ""
     results: list = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    signal: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.signal:
+            self.signal = MessageIdentity(self.event_type, DeliveryClass.OBSERVATION,
+                "ToolExecution", correlation_id=self.execution_id).to_dict()
 
 
 # ── EventBus ────────────────────────────────────────────────

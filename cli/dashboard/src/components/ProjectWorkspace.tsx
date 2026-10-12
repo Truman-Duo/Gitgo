@@ -26,6 +26,7 @@ type Props = {
   decisionSelection: number;
   decisionComposing: boolean;
   decisionSubmitting: boolean;
+  decisionView?: PendingDecision | null;
   onDecisionChange: (decision: PendingDecision | null) => void;
   onSendSettled: () => void;
   onBusyChange: (busy: boolean) => void;
@@ -38,6 +39,7 @@ type Props = {
 export const ProjectWorkspace = memo(function ProjectWorkspace({
   project, projectId, workspace, client, loopData, cols, sendChatRef, sendChatReadyRef, manualCreateRef, scrollChatRef,
   decisionSelection, decisionComposing, decisionSubmitting,
+  decisionView,
   onDecisionChange, onSendSettled, onBusyChange, onActiveProcessChange, onActiveRequestChange,
   verbose = false,
   visible = true,
@@ -79,8 +81,12 @@ export const ProjectWorkspace = memo(function ProjectWorkspace({
   useEffect(() => {
     if (!visible) return;
     onDecisionChange(pendingDecision);
-    return () => onDecisionChange(null);
   }, [pendingDecision, onDecisionChange, visible]);
+
+  useEffect(() => {
+    if (!visible) onDecisionChange(null);
+    return () => onDecisionChange(null);
+  }, [visible, onDecisionChange]);
 
   useEffect(() => {
     onBusyChange(Boolean(streaming));
@@ -109,7 +115,7 @@ export const ProjectWorkspace = memo(function ProjectWorkspace({
         client={client}
         messages={messages}
         streaming={streaming}
-        pendingDecision={pendingDecision}
+        pendingDecision={decisionView?.decision_id === pendingDecision?.decision_id ? decisionView : pendingDecision}
         decisionSelection={decisionSelection}
         decisionComposing={decisionComposing}
         decisionSubmitting={decisionSubmitting}

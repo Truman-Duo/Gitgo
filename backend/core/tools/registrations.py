@@ -81,6 +81,8 @@ def register_all(register) -> None:
     register("dynamic_composite", execute_composite, NATIVE_PROCESS)
     register("authored_python", execute_authored_python, NATIVE_PROCESS)
     register("authored_privileged_python", execute_authored_privileged_python, NATIVE_PROCESS)
+    from backend.core.tools.authored_bridge import execute_authored_host_python
+    register("authored_host_python", execute_authored_host_python, NATIVE_PROCESS)
 
 
 # ── File Tools ─────────────────────────────────────────────
@@ -141,7 +143,8 @@ def file_write(args: dict) -> dict:
     p = _resolve_path(path)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding=encoding)
+        with p.open(mode, encoding=encoding) as stream:
+            stream.write(content)
         return {
             "path": str(p),
             "size": p.stat().st_size,

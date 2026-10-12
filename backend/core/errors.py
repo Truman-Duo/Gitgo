@@ -255,6 +255,11 @@ _DEFINITIONS = (
         True, "request_exact_user_permission",
     ),
     ErrorDefinition(
+        "GITGO-E3310", "CUSTOM_TOOL_CAPABILITY_REQUIRED",
+        "The saved tool requires leaf capabilities outside the current task surface.",
+        True, "request_bounded_capability_then_mount",
+    ),
+    ErrorDefinition(
         "GITGO-E3401", "DOCUMENT_FORMAT_UNSUPPORTED",
         "The document format is unsupported or its adapter is unavailable.",
         True, "convert_document_or_install_adapter",

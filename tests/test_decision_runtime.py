@@ -88,6 +88,31 @@ def test_calculator_is_deterministic_and_rejects_code_execution():
         safe_calculate("2 ** 101")
 
 
+def test_decision_checkpoint_failure_keeps_the_exact_card_and_cannot_resume(tmp_path_factory):
+    import queue
+    from backend.core.daemon.dispatch import _cmd_task
+    manager, process = _supervisor(tmp_path_factory)
+    pending = create_user_decision(process, _decision_args("Choose the scope"))
+    pending = dict(process.pending_decision)
+    process.status = ProcessStatus.AWAITING_USER
+    ledger = list(process.session.host_ledger)
+    class Store:
+        def save_process_checkpoint(self, p):
+            assert p.pending_decision is None
+            assert p.session.host_ledger[-1]["event"] == "user_decision_received"
+            raise OSError("storage full")
+    emitted = []
+    _cmd_task({"action": "decision", "process_id": process.process_id,
+        "decision_id": pending["decision_id"], "instruction": "Choose option 1: A"},
+        SimpleNamespace(workspace_path=tmp_path_factory), SimpleNamespace(name="project"),
+        {"apm": manager, "session_store": Store(), "evq": queue.Queue()}, emitted.append)
+    assert "DECISION_CHECKPOINT_FAILED" in emitted[-1]["error"]
+    assert process.status is ProcessStatus.AWAITING_USER
+    assert process.pending_decision == pending
+    assert process.session.host_ledger == ledger
+    assert not manager._threads
+
+
 def test_repeated_degradable_gates_can_finish_only_as_explicit_degraded_outcome(
     tmp_path_factory,
 ):
@@ -117,7 +142,11 @@ def test_repeated_degradable_gates_can_finish_only_as_explicit_degraded_outcome(
     decision = create_completion_exception_decision(process, gates)
     assert decision["options"][1]["action"] == "accept_partial"
 
+    process.session.host_ledger.append({"event": "user_decision_received",
+        "decision_id": decision["decision_id"], "task_id": process.active_task_id,
+        "process_id": process.process_id, "selected_action": "accept_partial"})
     process.runtime_preferences["completion_exception"] = {
+        "contract_digest": decision["contract_digest"],
         "decision_id": decision["decision_id"],
         "gate_ids": decision["completion_gate_ids"],
     }

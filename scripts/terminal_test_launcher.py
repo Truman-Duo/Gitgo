@@ -20,6 +20,7 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 BASE = ROOT / ".gitgo" / "terminal-tests"
 RUN_NAME = re.compile(r"run-[0-9a-f]{32}\Z")
 
@@ -225,9 +226,19 @@ def keep(root: Path, token: str, *, base: Path = BASE) -> int:
                 break
             time.sleep(0.2)
         selected = json.loads((root / "config.json").read_text(encoding="utf-8")).get("launcher", {}).get("terminal")
+        evidence_export = None
+        if session.get('preserve_runtime_evidence'):
+            try:
+                from scripts.terminal_test_evidence import archive_state
+                owned_session(root, token, base=base)
+                evidence_export = archive_state(root, base.parent / 'terminal-evidence' / root.name)
+            except Exception as error:
+                evidence_export = {'ok': False, 'error_type': type(error).__name__}
+                warnings.append('Runtime evidence export failed; see last-result.json')
         cleanup(root, token, base=base)
         write_json(base / "last-result.json", {"run": root.name, "cleaned": True, "selected_terminal": selected,
                    "participants": len(seen), "visible_ui_verified": False,
+                   'evidence_export': evidence_export, 'warnings': warnings,
                    "note": "Lifecycle result only; terminal appearance is verified by the human."})
         return 0
     except Exception as error:
@@ -239,15 +250,22 @@ def keep(root: Path, token: str, *, base: Path = BASE) -> int:
             handle.close()
 
 
-def launch() -> int:
+def launch(*, profile_initializer=None) -> int:
     if os.name != "nt":
         raise RuntimeError("The terminal BAT test requires Windows")
     if BASE.exists():
         for report in BASE.glob("run-*.cleanup-error.json"):
             print(f"[gitgo-test] Previous cleanup failed; details: {report}", flush=True)
+        last = BASE / 'last-result.json'
+        if last.exists():
+            prior = json.loads(last.read_text(encoding='utf-8'))
+            if (prior.get('evidence_export') or {}).get('ok') is False:
+                print(f'[gitgo-test] Previous evidence export failed; details: {last}', flush=True)
     root, session = prepare()
     keeper = None
     try:
+        if profile_initializer is not None:
+            profile_initializer(root, session)
         keeper = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--keep", str(root), session["token"]],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP, cwd=ROOT)

@@ -28,14 +28,33 @@ class ProviderTransportCancelled(RuntimeError):
     pass
 
 
+class LocalProviderTransport:
+    """Loopback transport bypasses ambient proxies and never follows redirects."""
+
+    def __init__(self):
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+    def post_json(self, *args, **kwargs):
+        return HttpProviderTransport(self._opener.open).post_json(*args, **kwargs)
+
+    def stream_sse(self, *args, **kwargs):
+        yield from HttpProviderTransport(self._opener.open).stream_sse(*args, **kwargs)
+
+
 class HttpProviderTransport:
+    def __init__(self, open_url=None):
+        self._open_url = open_url
+
     def post_json(
         self, url: str, body: dict, headers: dict, *, timeout: int,
         cancel_event: threading.Event | None = None,
     ) -> dict:
         request = self._request(url, body, headers)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with (self._open_url or urllib.request.urlopen)(request, timeout=timeout) as response:
                 done = self._close_on_cancel(response, cancel_event)
                 try:
                     payload = response.read().decode("utf-8")
@@ -60,7 +79,7 @@ class HttpProviderTransport:
     ) -> Generator[tuple[str, dict], None, None]:
         request = self._request(url, body, headers)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with (self._open_url or urllib.request.urlopen)(request, timeout=timeout) as response:
                 done = self._close_on_cancel(response, cancel_event)
                 event_name = "message"
                 data_lines: list[str] = []
@@ -124,6 +143,8 @@ class HttpProviderTransport:
 
     @staticmethod
     def _request(url: str, body: dict, headers: dict) -> urllib.request.Request:
+        headers = {key: value for key, value in headers.items()
+                   if str(value).strip() and not (key.casefold() == "authorization" and str(value).strip() == "Bearer")}
         return urllib.request.Request(
             url,
             data=json.dumps(

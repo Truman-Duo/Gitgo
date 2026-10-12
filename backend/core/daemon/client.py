@@ -243,6 +243,8 @@ class DaemonClient:
         Returns the 'result' dict from the response, or raises RuntimeError on error.
         Automatically retries with reconnection for idempotent commands.
         """
+        cmd = dict(cmd)
+        cmd.setdefault("command_id", str(uuid.uuid4()))
         cmd_name = cmd.get("cmd", "")
         idempotent = cmd_name in self.IDEMPOTENT_COMMANDS
         max_attempts = self.MAX_RECONNECT_ATTEMPTS if idempotent else 1

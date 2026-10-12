@@ -11,7 +11,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-if (-not $Output) { $Output = Join-Path $root "dist-terminal" }
+if (-not $Output) { $Output = Join-Path $root ("dist-terminal\build-" + (Get-Date -Format "yyyyMMdd-HHmmss")) }
 $stage = [System.IO.Path]::GetFullPath($Output)
 $internal = Join-Path $stage "internal"
 $productPath = Join-Path $PSScriptRoot "product.json"
@@ -35,6 +35,11 @@ if (-not $Python -or -not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $Bun -PathType Leaf)) {
     throw "Bun runtime not found: $Bun"
+}
+& $Python -B (Join-Path $root "scripts\release_artifacts.py") --check
+if ($LASTEXITCODE -ne 0) { throw "Product versions do not agree" }
+if ((Test-Path -LiteralPath $stage) -and (Get-ChildItem -LiteralPath $stage -Force | Select-Object -First 1)) {
+    throw "Build output must be empty; select a new -Output directory to avoid stale release assets"
 }
 if (-not $Ripgrep -and $env:GITGO_RIPGREP_PATH) { $Ripgrep = $env:GITGO_RIPGREP_PATH }
 if (-not $Ripgrep) {
@@ -105,7 +110,10 @@ try {
 
 try {
     & $Bun build (Join-Path $root "cli\dashboard\src\main.tsx") `
-        --compile --outfile (Join-Path $stage "$($product.primary_command).exe")
+        --compile --windows-title "$($product.display_name)" `
+        --windows-version "$($product.windows_version)" `
+        --windows-description "$($product.display_name) $($product.version)" `
+        --outfile (Join-Path $stage "$($product.primary_command).exe")
     if ($LASTEXITCODE -ne 0) { throw "Dashboard compilation failed" }
 } finally {
     # Bun can leave its full-size atomic output beside the repository when an
@@ -119,12 +127,16 @@ $terminalReferences = Join-Path $root "backend\resources\terminal_provenance"
 if (-not (Get-ChildItem -LiteralPath $terminalReferences -Filter "git-for-windows-*.json" -File -ErrorAction SilentlyContinue)) {
     throw "Official terminal provenance references are missing; stage references before packaging"
 }
+$versionFile = Join-Path $root "build\terminal-host\version-info.txt"
+& $Python -B (Join-Path $root "scripts\write_windows_version.py") --output $versionFile
+if ($LASTEXITCODE -ne 0) { throw "Windows Host version metadata generation failed" }
 $pyInstallerArguments = @(
     "--noconfirm", "--clean", "--onedir",
     "--name", "gitgo-host",
     "--distpath", $internal,
     "--workpath", (Join-Path $root "build\terminal-host"),
     "--specpath", (Join-Path $root "build\terminal-host"),
+    "--version-file", $versionFile,
     "--add-data", "$terminalReferences;backend/resources/terminal_provenance",
     (Join-Path $root "backend\core\native_host_entry.py")
 )
@@ -139,6 +151,14 @@ Copy-Item -LiteralPath $productPath `
     -Destination (Join-Path $stage "product.json") -Force
 
 $packagedHost = Join-Path $internal "gitgo-host\gitgo-host.exe"
+$reportedVersion = & (Join-Path $stage "$($product.primary_command).exe") --version
+if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne "Gitgo $($product.version)") {
+    throw "Packaged Dashboard reports an unexpected product version"
+}
+foreach ($executable in @((Join-Path $stage "$($product.primary_command).exe"), $packagedHost)) {
+    $fileVersion = (Get-Item -LiteralPath $executable).VersionInfo.FileVersion
+    if ($fileVersion -ne $product.windows_version) { throw "Windows executable version mismatch" }
+}
 & $Python -B (Join-Path $root "scripts\stage_search_engine.py") `
     --binary $Ripgrep --notices $RipgrepNotices --destination (Split-Path -Parent $packagedHost)
 if ($LASTEXITCODE -ne 0) { throw "Bundled search engine staging failed" }
@@ -178,7 +198,11 @@ if ($BuildInstaller) {
         "/DProductName=$($product.display_name)" `
         "/DProductId=$($product.product_id)" `
         "/DPrimaryCommand=$($product.primary_command)" `
+        "/DProductVersion=$($product.version)" `
+        "/DWindowsVersion=$($product.windows_version)" `
         (Join-Path $PSScriptRoot "windows\installer.iss")
     if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
     Write-Host "Windows installer written to $installerOutput"
 }
+& $Python -B (Join-Path $root "scripts\release_artifacts.py") --stage $stage --output (Join-Path $root "dist-installer")
+if ($LASTEXITCODE -ne 0) { throw "Release artifact packaging failed" }

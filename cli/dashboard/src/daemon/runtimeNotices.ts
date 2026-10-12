@@ -47,6 +47,10 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
   if (!("event" in event)) return null;
   const ev = event as TraceLifecycleEvent;
   switch (ev.event) {
+    case "architecture_warning":
+      return makeNotice(ev, "Maintenance warning", short(ev.message), "warning");
+    case "runtime_projection_failed":
+      return makeNotice(ev, "State refresh delayed", short(ev.message), "warning");
     case "stream_recovery":
       return makeNotice(
         ev, "Stream recovery",
@@ -59,6 +63,13 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
       return makeNotice(ev, "Feedback applied", short(ev.summary || ev.kind || "safe boundary"), "success");
     case "deadline_extended": return null;
     case "provider_request_started": return null;
+    case "provider_route_selected": return null;
+    case "provider_route_activated":
+      return ev.route_changed === true
+        ? makeNotice(ev, "Provider switched", short(ev.message || ev.model || ev.provider_id), "warning") : null;
+    case "provider_route_failed":
+      return makeNotice(ev, "Provider failed", short(ev.message || ev.reason), "warning");
+    case "provider_route_skipped": return null;
     case "provider_response_completed": return null;
     case "provider_response_incomplete":
       return makeNotice(ev, "Provider response incomplete", short(ev.reason || "unknown"), "warning");
@@ -66,7 +77,7 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
       return makeNotice(
         ev,
         "Provider capability fallback",
-        `${short(ev.capability || "hosted_web_search")} · ${short(ev.from || "provider")} → ${short(ev.to || "fallback")} · HTTP ${ev.status_code ?? "?"}`,
+        `${short(ev.capability || "hosted_web_search")} · ${short(ev.from || "provider")} → ${short(ev.to || "fallback")} · ${ev.status_code != null ? `HTTP ${ev.status_code}` : short(ev.reason || "unavailable")}`,
         "warning",
       );
     // Usage belongs to the first Thinking row. Cache is represented by the

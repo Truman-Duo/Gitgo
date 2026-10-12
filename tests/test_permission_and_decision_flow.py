@@ -100,6 +100,30 @@ def test_external_resource_requires_structured_permission(tmp_path_factory: Path
     assert info["next_actions"][0]["action"] == "request_permission"
 
 
+def test_product_delegation_does_not_authorize_external_resources(tmp_path_factory: Path):
+    from backend.core.loop.engineering_workflow import EngineeringWorkflow
+    root, external = tmp_path_factory / 'project', tmp_path_factory / 'external'
+    root.mkdir(); external.mkdir()
+    target = external / 'note.txt'
+    target.write_text('private external data', encoding='utf-8')
+    process = _process(root)
+    text = 'Do not ask product questions. Choose all remaining design details yourself.'
+    process.session.append_user(text, message_type='conversation')
+    workflow = EngineeringWorkflow(process)
+    request = workflow.ask_semantic({'kind': 'clarification', 'state_topic': 'audience',
+        'question': 'Who is the product for?', 'why_user_must_decide': 'Product scope', 'options': []})
+    process.session.host_ledger.append({'event': 'user_decision_received', 'task_id': process.active_task_id,
+        'decision_id': request['decision_id'], 'state_topic': 'audience', 'answer': text})
+    process.pending_decision = None
+    node = workflow.status()['nodes'][0]['id']
+    workflow.resolve_answer(node, request['decision_id'], {'disposition': 'delegated',
+        'value': 'Assistant chooses intended users; this is delegation, not resource permission.', 'quote': text})
+    assert workflow.status()['complete']
+    result = _execute(process, _read_tool(root), root, str(target))
+    assert result.is_error
+    assert result.diagnostics['code'] == 'RESOURCE_SCOPE_APPROVAL_REQUIRED'
+
+
 def test_permission_decision_grants_one_exact_external_read(tmp_path_factory: Path):
     root = tmp_path_factory / "project"
     external = tmp_path_factory / "external"
@@ -384,7 +408,7 @@ def test_questions_can_be_incremental_and_latest_confirmed_topic_wins(tmp_path_f
     })
     state = confirmed_user_state(process.session.host_ledger)
     assert state == [{
-        "topic": "ui.visual_style", "kind": "verification", "value": "Revise",
+        "topic": "ui.visual_style", "kind": "verification", "value": "Revise", "disposition": "confirmed",
         "conditions": "Choose option 2: Revise", "decision_id": second["decision_id"],
         "confirmed_at": "2026-01-02T00:00:00Z",
         "supersedes_decision_id": first["decision_id"],

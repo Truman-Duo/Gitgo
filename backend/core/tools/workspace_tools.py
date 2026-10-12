@@ -402,7 +402,7 @@ def exec_command(args: dict) -> dict:
     if argv[0].casefold() in {"python", "python3", "py"}:
         argv = _managed_python_argv(argv, cwd)
     timeout = max(1, min(int(args.get("timeout", 120) or 120), 1800))
-    env = os.environ.copy()
+    env = _safe_shell_environment()
     env["GITGO_AGENT_TOOL"] = "1"
     try:
         started = subprocess.Popen(
@@ -414,7 +414,9 @@ def exec_command(args: dict) -> dict:
         return {"error": "COMMAND_ERROR", "detail": str(exc), "argv": argv}
     job_handle = attach_kill_job(started)
     try:
-        stdout, stderr = started.communicate(timeout=timeout)
+        from backend.core.process_output import collect_output
+        stdout, stderr, truncated = collect_output(started, timeout=timeout, limit=_MAX_OUTPUT,
+            terminate=lambda: _kill_tree(started, job_handle))
     except subprocess.TimeoutExpired:
         _kill_tree(started, job_handle)
         return {"error": "COMMAND_TIMEOUT", "timeout": timeout, "argv": argv}
@@ -431,7 +433,7 @@ def exec_command(args: dict) -> dict:
         "stderr": stderr,
         "exit_code": started.returncode,
         "success": started.returncode == 0,
-        "truncated": len(stdout) >= _MAX_OUTPUT or len(stderr) >= _MAX_OUTPUT,
+        "truncated": truncated,
     }
 
 
@@ -527,6 +529,13 @@ def shell_script(args: dict) -> dict:
         return {"error": "PURPOSE_REQUIRED"}
     if "\x00" in script or len(script.encode("utf-8")) > 100_000:
         return {"error": "SCRIPT_INVALID", "detail": "script exceeds the 100KB boundary or contains NUL"}
+    shell = str(args.get("shell") or "auto").lower()
+    if shell == "auto":
+        shell = "powershell" if sys.platform == "win32" else "bash"
+    if shell not in {"bash", "powershell"}:
+        return {"error": "SHELL_PROFILE_INVALID", "detail": "Choose bash, powershell or auto; scripts are never translated"}
+    if (sys.platform == "win32" and shell != "powershell") or (sys.platform != "win32" and shell != "bash"):
+        return {"error": "SANDBOX_CAPABILITY_UNSUPPORTED", "detail": "This native sandbox supports PowerShell on Windows and Bash on Linux; select that shell explicitly and use its syntax."}
     resolution = {}
     if sys.platform == "win32":
         # MSYS Bash requires a shared global object namespace, incompatible
@@ -579,7 +588,9 @@ def shell_script(args: dict) -> dict:
             creationflags=creation_flags(), start_new_session=sys.platform != "win32",
         )
         job_handle = attach_kill_job(started)
-        stdout, stderr = started.communicate(timeout=timeout)
+        from backend.core.process_output import collect_output
+        stdout, stderr, truncated = collect_output(started, timeout=timeout, limit=_MAX_OUTPUT,
+            terminate=lambda: _kill_tree(started, job_handle))
     except subprocess.TimeoutExpired:
         if started is not None:
             _kill_tree(started, job_handle)
@@ -597,11 +608,12 @@ def shell_script(args: dict) -> dict:
     return {
         "cwd": _rel(workspace, cwd),
         "purpose": purpose,
+        "shell": shell,
         "stdout": stdout[-_MAX_OUTPUT:],
         "stderr": stderr[-_MAX_OUTPUT:],
         "exit_code": started.returncode,
         "success": started.returncode == 0,
-        "truncated": stdout_truncated or stderr_truncated,
+        "truncated": truncated or stdout_truncated or stderr_truncated,
     }
 
 
@@ -639,27 +651,21 @@ def _resolve_bash() -> dict:
             return {"path": str(root / "bin/bash.exe"), "identity": identity}
         return {"error": "BASH_IDENTITY_UNVERIFIED" if failures or configured else "BASH_UNAVAILABLE",
                 "detail": "; ".join(failures) or "No verified Git for Windows Bash found; no implicit WSL or project executable fallback"}
+    from backend.core.tools.execution_profile import verify_posix_bash
     if configured:
-        candidate = Path(configured).expanduser()
-        if not candidate.is_absolute() or not candidate.is_file():
-            return {"error": "BASH_UNAVAILABLE", "detail": "Configured Bash must be an existing absolute executable; no implicit fallback"}
-        return {"path": str(candidate.resolve())}
-    resolved = shutil.which("bash")
-    return {"path": str(Path(resolved).resolve())} if resolved else {"error": "BASH_UNAVAILABLE"}
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            return {"error": "BASH_IDENTITY_UNVERIFIED", "detail": "Configured Bash must be absolute; no implicit fallback"}
+        return verify_posix_bash(candidate)
+    for candidate in (Path("/bin/bash"), Path("/usr/bin/bash")):
+        if candidate.is_file():
+            return verify_posix_bash(candidate)
+    return {"error": "BASH_UNAVAILABLE", "detail": "No verified system Bash was found"}
 
 
 def _safe_shell_environment() -> dict[str, str]:
-    sensitive_fragments = (
-        "API_KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD",
-        "CREDENTIAL", "AUTHORIZATION", "PRIVATE_KEY", "ACCESS_KEY",
-        "BEARER", "COOKIE",
-    )
-    return {
-        key: value for key, value in os.environ.items()
-        if not any(fragment in key.upper() for fragment in sensitive_fragments)
-        and key.upper() not in {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "LD_PRELOAD", "LD_LIBRARY_PATH"}
-        and not key.upper().startswith("BASH_FUNC_")
-    }
+    from backend.core.tools.execution_profile import safe_environment
+    return safe_environment()
 
 
 def dependency_feedback(args: dict) -> dict:

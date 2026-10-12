@@ -361,17 +361,19 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "shell_script": AgentTool(
             name="shell_script",
             description=(
-                "Run one native shell script (PowerShell on Windows, Bash on Linux) inside "
-                "the workspace when argv-based exec_command "
+                "Run one script inside the workspace. Choose shell=bash or powershell; "
+                "auto uses PowerShell on Windows and Bash elsewhere. Match that shell's syntax; "
+                "the Host never translates scripts. Use when argv-based exec_command "
                 "cannot express the required pipes, redirections or shell control flow. "
-                "This is a sensitive capability: explain the user-visible purpose with "
-                "request_permission and obtain approval for these exact arguments before "
-                "every invocation. Never use it merely for command convenience."
+                "This is a sensitive capability: include the user-visible purpose; Host "
+                "automatically pauses for approval of these exact arguments before every "
+                "invocation. Never use it merely for command convenience."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "script": {"type": "string"},
+                    "shell": {"type": "string", "enum": ["bash", "powershell", "auto"], "default": "bash"},
                     "purpose": {"type": "string"},
                     "cwd": {"type": "string"},
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 1800},

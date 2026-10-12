@@ -31,6 +31,15 @@ COMPLETION_PROTOCOL_TOOLS = frozenset({
 })
 
 
+def semantic_contract(contract):
+    """Stable request/dependency fields; lease/timing/revision are Host mechanics."""
+    return {key: contract[key] for key in (
+        'goal', 'execution_mode', 'deliverables', 'acceptance_criteria', 'uncertainties',
+        'requires_user_decision', 'estimated_complexity', 'independent_workstreams',
+        'delegation_required', 'user_requested_delegation', 'engineering_workflow',
+        'required_tool_calls') if key in contract}
+
+
 def _relative_workspace_path(workspace: Path, raw: str) -> str:
     value = str(raw or "").strip().replace("\\", "/")
     while value.startswith("./"):
@@ -345,36 +354,37 @@ def _update_contract(process, update) -> dict:
         return dict(contract)
 
 
-def publish_contract(process, proposal: dict) -> dict:
-    def apply(previous: dict) -> dict:
-        preserved_attempts = list(previous.get("delegation_attempts") or [])
-        revision = int(previous.get("revision", 0) or 0) + 1
-        merged = {
-            key: previous[key]
-            for key in (
-                "task_description", "task_kind", "capability_profile_id",
-                "required_test_ids", "host_requirements",
-            )
-            if key in previous
-        }
-        # Host facts come from explicit UI actions, never natural-language inference.
-        requirements = dict(previous.get("host_requirements") or {})
-        workflow_started = bool(
-            previous.get("workflow_started")
-            or getattr(process, "successful_actions", 0)
+def _compile_contract(process, previous: dict, proposal: dict) -> dict:
+    preserved_attempts = list(previous.get("delegation_attempts") or [])
+    revision = int(previous.get("revision", 0) or 0) + 1
+    merged = {
+        key: previous[key]
+        for key in (
+            "task_description", "task_kind", "capability_profile_id",
+            "required_test_ids", "host_requirements",
         )
-        normalized, compilation = compile_routing_proposal(
-            previous, proposal, workflow_started=workflow_started,
-        )
-        merged.update(normalized)
-        if requirements:
-            merged["host_requirements"] = requirements
-        merged["routing_compilation"] = compilation
-        merged["revision"] = revision
-        merged["delegation_attempts"] = preserved_attempts
-        return merged
+        if key in previous
+    }
+    # Host facts come from explicit UI actions, never natural-language inference.
+    requirements = dict(previous.get("host_requirements") or {})
+    workflow_started = bool(previous.get("workflow_started") or getattr(process, "successful_actions", 0))
+    normalized, compilation = compile_routing_proposal(previous, proposal, workflow_started=workflow_started)
+    merged.update(normalized)
+    if requirements:
+        merged["host_requirements"] = requirements
+    merged["routing_compilation"] = compilation
+    merged["revision"] = revision
+    merged["delegation_attempts"] = preserved_attempts
+    return merged
 
-    return _update_contract(process, apply)
+
+def preview_contract(process, proposal: dict) -> dict:
+    """Use the exact publication compiler without changing state or authority."""
+    return _compile_contract(process, get_task_contract(process), proposal)
+
+
+def publish_contract(process, proposal: dict) -> dict:
+    return _update_contract(process, lambda previous: _compile_contract(process, previous, proposal))
 
 
 def get_task_contract(process) -> dict:

@@ -28,6 +28,8 @@ from backend.core.loop.provider_protocol import (
     ProviderEventType,
     ProviderProtocol,
     ProviderRequest,
+    ProviderResponseIncomplete,
+    ProviderRequestPreparationFailed,
     deterministic_hash,
 )
 from backend.core.loop.provider_transport import (
@@ -65,6 +67,7 @@ class StreamCancelledError(RuntimeError):
 
 
 class LLMProvider:
+    supports_generation_purpose = True
     """Compatibility facade over canonical provider events.
 
     不绑定特定模型——model_id + base_url + api_key 全部由 config 注入。
@@ -112,6 +115,10 @@ class LLMProvider:
 
     # ── Public API ──────────────────────────────────────────
 
+    def assess_alignment(self, payload, **kwargs):
+        from .alignment_runtime import assess_with_provider
+        return assess_with_provider(self, payload, **kwargs)
+
     def chat(self, messages: list[dict], max_tokens: int = 4096,
              timeout: int = 120,
              tools: list[dict] | None = None,
@@ -119,7 +126,8 @@ class LLMProvider:
              cancel_event: threading.Event | None = None,
              max_retries: int = 5,
              base_delay: float = 1.0,
-             max_backoff: float = 10.0) -> str | dict:
+             max_backoff: float = 10.0, *, purpose: str = "",
+             on_notice=None, before_generation_fallback=None) -> str | dict:
         """同步 chat completion（带分类重试）。
 
         Retry strategy:
@@ -144,9 +152,17 @@ class LLMProvider:
                     messages, current_max_tokens, timeout, tools,
                     preserve_provider_state=preserve_provider_state,
                     cancel_event=cancel_event,
+                    purpose=purpose, on_notice=on_notice,
+                    before_generation_fallback=before_generation_fallback,
                 )
             except StreamCancelledError:
                 raise
+            except ProviderResponseIncomplete:
+                # The caller owns bounded output recovery and its usage charge.
+                # Network retry would conceal another paid attempt here.
+                raise
+            except ProviderRequestPreparationFailed as exc:
+                raise exc.cause
             except RuntimeError as e:
                 classified = self._classify_chat_error(e)
 
@@ -161,6 +177,8 @@ class LLMProvider:
 
                 # Rate limited: follow server instruction
                 if classified.code == "RATE_LIMITED":
+                    if attempt >= max_retries:
+                        raise
                     retry_after = self._parse_retry_after(e)
                     wait = min(retry_after or 5, 30)
                     if cancel_event is not None and cancel_event.wait(wait):
@@ -247,6 +265,8 @@ class LLMProvider:
         cancel_event: threading.Event | None = None,
         cache_intent: CacheIntent | None = None,
         metadata: dict | None = None,
+        max_attempts: int = 2,
+        before_request=None,
     ) -> Generator[ProviderEvent, None, None]:
         """Yield protocol-neutral events; never replay after the first event."""
         request = ProviderRequest(
@@ -261,13 +281,22 @@ class LLMProvider:
         body = self.adapter.build_body(request, self._model)
         emitted = False
         hosted_fallback_used = False
-        for attempt in range(2):
+        attempt = 0
+        attempt_limit = max(1, min(int(max_attempts), 2))
+        while attempt < attempt_limit:
             if cancel_event is not None and cancel_event.is_set():
                 raise StreamCancelledError()
+            request_timeout = before_request() if before_request else timeout
+            if before_request:
+                yield ProviderEvent(ProviderEventType.ROUTING_NOTICE, artifact={
+                    "event": "provider_request_started", "protocol": self.protocol.value,
+                    "model": self._model, "route_key": self.route_key,
+                    "idle_timeout_seconds": request_timeout,
+                })
             try:
                 wire_events = self.transport.stream_sse(
                     self.adapter.endpoint(self._base), body,
-                    self.adapter.headers(self._key), timeout=timeout,
+                    self.adapter.headers(self._key), timeout=request_timeout,
                     cancel_event=cancel_event,
                 )
                 for event in self.adapter.iter_stream(wire_events):
@@ -282,7 +311,8 @@ class LLMProvider:
                     and not hosted_fallback_used
                     and request.metadata.get("hosted_web_search")
                     and request.metadata.get("web_search_mode") == "auto"
-                    and 400 <= exc.status_code < 500
+                    and exc.status_code in {400, 404, 422}
+                    and not ("context" in exc.body.casefold() and any(word in exc.body.casefold() for word in ("limit", "length", "overflow", "token")))
                 ):
                     # A compatible Responses/Messages endpoint may support
                     # function tools but not the vendor-hosted web tool. Auto
@@ -309,7 +339,8 @@ class LLMProvider:
                     body = self.adapter.build_body(request, self._model)
                     continue
                 retryable = exc.status_code == 429 or exc.status_code >= 500
-                if not emitted and retryable and attempt == 0:
+                if not emitted and retryable and attempt + 1 < attempt_limit:
+                    attempt += 1
                     continue
                 raise StreamInterruptedError(
                     retryable=retryable, status_code=exc.status_code,
@@ -318,7 +349,8 @@ class LLMProvider:
             except StreamCancelledError:
                 raise
             except Exception as exc:
-                if not emitted and attempt == 0:
+                if not emitted and attempt + 1 < attempt_limit:
+                    attempt += 1
                     continue
                 raise StreamInterruptedError() from exc
 
@@ -327,27 +359,46 @@ class LLMProvider:
     def _chat_once(self, messages: list[dict], max_tokens: int,
                    timeout: int, tools: list[dict] | None,
                    *, preserve_provider_state: bool = False,
-                   cancel_event: threading.Event | None = None) -> str | dict:
+                   cancel_event: threading.Event | None = None, purpose="",
+                   on_notice=None, before_generation_fallback=None) -> str | dict:
         """Single chat call, no retry logic."""
+        from .provider_generation import reasoning_effort, rejects_reasoning_preference
+        effort = reasoning_effort(self.protocol, purpose, getattr(self, '_alignment_effort_unsupported', False))
         request = ProviderRequest(
             messages=tuple(messages), tools=tuple(tools or []),
             max_output_tokens=min(max_tokens, self.max_output_tokens),
             stream=False,
             cache_intent=CacheIntent(mode=self.capabilities.prompt_cache),
+            reasoning_effort=effort,
         )
         body = self.adapter.build_body(request, self._model)
-        try:
-            data = self.transport.post_json(
-                self.adapter.endpoint(self._base), body,
-                self.adapter.headers(self._key), timeout=timeout,
-                cancel_event=cancel_event,
-            )
-        except ProviderTransportCancelled as exc:
-            raise StreamCancelledError() from exc
-        except ProviderHttpError as exc:
-            wrapped = RuntimeError(str(exc))
-            wrapped.__cause__ = exc
-            raise wrapped
+        for preference_attempt in range(2):
+            try:
+                data = self.transport.post_json(
+                    self.adapter.endpoint(self._base), body,
+                    self.adapter.headers(self._key), timeout=timeout,
+                    cancel_event=cancel_event,
+                )
+                break
+            except ProviderTransportCancelled as exc:
+                raise StreamCancelledError() from exc
+            except ProviderHttpError as exc:
+                if preference_attempt == 0 and effort and rejects_reasoning_preference(exc):
+                    self._alignment_effort_unsupported = True
+                    if on_notice:
+                        on_notice({'event': 'generation_profile_fallback', 'purpose': purpose,
+                                   'requested_effort': effort, 'reason': 'unsupported_parameter',
+                                   'route_key': self.route_key})
+                    if before_generation_fallback:
+                        try:
+                            timeout = before_generation_fallback()
+                        except Exception as preparation_error:
+                            raise ProviderRequestPreparationFailed(preparation_error) from preparation_error
+                    body = self.adapter.build_body(replace(request, reasoning_effort=None), self._model)
+                    continue
+                wrapped = RuntimeError(str(exc))
+                wrapped.__cause__ = exc
+                raise wrapped
 
         response = self._accumulate_events(self.adapter.parse_response(data))
         if tools or preserve_provider_state:

@@ -365,6 +365,7 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
         assert result.data['engine'] == 'python' and result.data['complete'], result
         assert result.data['count'] == 1, result
     _assert_legacy_file_aliases_are_native(runner, workspace)
+    _assert_authored_bridge_is_native(runner, workspace)
     shell = runner.run("shell_script", {
         "_workspace": str(workspace),
         "script": "Set-Content -LiteralPath shell.txt -Value native-file;Write-Output native-shell",
@@ -1486,3 +1487,48 @@ def test_native_runner_crash_diagnostics_reach_pipeline(cross_platform_box, monk
     assert "native-crash-marker" in result.formatted
     assert result.diagnostics["runner"]["exit_code"] == 23
     assert result.receipt["effect_state"] == "ambiguous"
+
+
+def _authored_bridge_invocation(workspace):
+    import hashlib
+    source = "def run(args):\n    return call_tool('fixture_leaf', {'value': args['value']})\n"
+    return {'_workspace': str(workspace), 'value': 7, '_dynamic_spec': {
+        '_source': source, 'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
+        'host_tools': ['fixture_leaf']}}
+
+
+def _assert_authored_bridge_is_native(runner, workspace):
+    from backend.core.loop.permission_broker import arguments_digest
+    args = _authored_bridge_invocation(workspace)
+    first = runner.run('authored_host_python', args)
+    assert first.success and first.data == {'bridge_version': 1, 'state': 'needs_host_call',
+        'call_index': 0, 'tool_name': 'fixture_leaf', 'arguments': {'value': 7}}, first
+    second = runner.run('authored_host_python', {**args, '_host_results': [
+        {'tool_name': 'fixture_leaf', 'arguments_digest': arguments_digest({'value': 7}), 'result': {'verified': 7}}]})
+    assert second.success and second.data == {'bridge_version': 1, 'state': 'completed', 'output': {'verified': 7}}, second
+
+
+def test_linux_authored_host_bridge_uses_native_runner(linux_box):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, _ = linux_box
+    _assert_authored_bridge_is_native(ProcessToolRunner(timeout=30), workspace)
+
+
+def test_packaged_authored_host_bridge_uses_native_runner(cross_platform_box):
+    workspace, _, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Source job; packaged bridge requires an actual built Host')
+    host = Path(configured).resolve(strict=True)
+    args = _authored_bridge_invocation(workspace)
+    source = (
+        "import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;"
+        f"r=ProcessToolRunner(timeout=30).run('authored_host_python',{args!r});"
+        "print(json.dumps({'success':r.success,'data':r.data,'error':r.error,'stderr':r.stderr}))"
+    )
+    result = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-c', source],
+        capture_output=True, text=True, encoding='utf-8', timeout=60)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload['success'] and payload['data'] == {'bridge_version': 1, 'state': 'needs_host_call',
+        'call_index': 0, 'tool_name': 'fixture_leaf', 'arguments': {'value': 7}}, payload

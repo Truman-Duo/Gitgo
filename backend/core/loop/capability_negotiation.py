@@ -22,6 +22,28 @@ def _capability_dict(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def apply_provider_runtime(process, *, provider_id, route_key, model_id, protocol,
+                           capabilities, hosted_search_transport="unavailable") -> bool:
+    """Apply one Host-owned route projection to identity and tool authority.
+
+    The configured provider remains admission/ownership state; the effective
+    provider is per-process runtime state and must follow automatic routing.
+    """
+    prefs = process.runtime_preferences
+    previous = (process.model_id, prefs.get("provider_protocol"),
+                prefs.get("effective_provider_id"), prefs.get("provider_route"),
+                prefs.get("provider_capabilities"), prefs.get("hosted_search_transport"))
+    process.model_id = str(model_id or "unknown")
+    prefs.update({"effective_provider_id": str(provider_id or ""),
+                  "provider_route": str(route_key or ""),
+                  "provider_protocol": str(getattr(protocol, "value", protocol) or "unknown"),
+                  "provider_capabilities": _capability_dict(capabilities),
+                  "hosted_search_transport": str(hosted_search_transport or "unavailable")})
+    current = (process.model_id, prefs["provider_protocol"], prefs["effective_provider_id"],
+               prefs["provider_route"], prefs["provider_capabilities"], prefs["hosted_search_transport"])
+    return previous != current
+
+
 def build_capability_snapshot(
     *,
     model_id: str,
@@ -36,7 +58,7 @@ def build_capability_snapshot(
     tools = set(available_tools or ())
     mode = str(prefs.get("web_search_mode") or "auto").strip().lower()
     endpoint_configured = bool(str(prefs.get("web_search_endpoint") or "").strip())
-    hosted_search = bool(caps.get("hosted_web_search", False))
+    hosted_search = bool(caps.get("hosted_web_search", False)) or prefs.get("hosted_search_transport", "unavailable") != "unavailable"
     search_tool_visible = "web_search" in tools
     fetch_tool_visible = "web_fetch" in tools
 
@@ -64,8 +86,9 @@ def build_capability_snapshot(
         options.append({
             "action": "use_configured_fallback",
             "available": True,
-            "requires_user_approval": True,
-            "effect": "Switch to auto mode and use the already configured SearXNG fallback.",
+            "requires_user_approval": mode != "auto",
+            "effect": ("Use the already authorized SearXNG fallback when provider search is unavailable."
+                       if mode == "auto" else "Switch to auto mode and use the already configured SearXNG fallback."),
         })
     if not endpoint_configured:
         options.append({
@@ -93,6 +116,7 @@ def build_capability_snapshot(
             "model_id": str(model_id or "unknown"),
             "protocol": str(protocol or "unknown"),
             "harness": "Gitgo",
+            "provider_id": str(prefs.get("effective_provider_id") or ""),
         },
         "provider_capabilities": {
             key: caps.get(key)
@@ -109,6 +133,7 @@ def build_capability_snapshot(
             "search_tool_visible": search_tool_visible,
             "fetch_tool_visible": fetch_tool_visible,
             "provider_hosted_search": hosted_search,
+            "provider_search_transport": str(prefs.get("hosted_search_transport") or "unavailable"),
             "searxng_configured": endpoint_configured,
             "engine": str(prefs.get("web_search_engine") or "duckduckgo"),
             "options": options,

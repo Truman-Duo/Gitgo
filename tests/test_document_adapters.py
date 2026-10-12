@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from backend.core.tools.document_tools import document_create, document_open
@@ -93,7 +94,7 @@ def test_document_create_requires_hash_bound_overwrite(tmp_path_factory: Path):
 
 def test_doc_converter_rejects_workspace_and_relative_path_candidates(tmp_path_factory, monkeypatch):
     import os
-    from backend.core.tools.document_tools import _document_converter
+    from backend.core.tools.document_limits import verified_antiword
     workspace = tmp_path_factory / 'workspace'
     workspace.mkdir()
     name = 'antiword.exe' if os.name == 'nt' else 'antiword'
@@ -102,7 +103,10 @@ def test_doc_converter_rejects_workspace_and_relative_path_candidates(tmp_path_f
     fake.chmod(0o755)
     monkeypatch.chdir(workspace)
     monkeypatch.setenv('PATH', str(workspace) + os.pathsep + '.')
-    assert _document_converter(workspace) is None
+    import hashlib
+    monkeypatch.setenv("GITGO_ANTIWORD_SHA256", hashlib.sha256(fake.read_bytes()).hexdigest())
+    with pytest.raises(ValueError, match="CONVERTER_IDENTITY_UNVERIFIED"):
+        verified_antiword(workspace)
     (workspace / 'legacy.doc').write_bytes(b'legacy document')
     result = document_open({'_workspace': str(workspace), 'path': 'legacy.doc'})
     assert result['error'] == 'DOCUMENT_FORMAT_UNSUPPORTED'
@@ -110,25 +114,37 @@ def test_doc_converter_rejects_workspace_and_relative_path_candidates(tmp_path_f
 
 def test_doc_converter_selects_absolute_host_installation(tmp_path_factory, monkeypatch):
     import os
-    from backend.core.tools.document_tools import _document_converter
+    from backend.core.tools.document_limits import verified_antiword
     workspace = tmp_path_factory / 'workspace'
     runtime = tmp_path_factory / 'runtime'
     workspace.mkdir(); runtime.mkdir()
     converter = runtime / ('antiword.exe' if os.name == 'nt' else 'antiword')
     converter.write_bytes(b'installed executable identity'); converter.chmod(0o755)
     monkeypatch.setenv('PATH', str(runtime))
-    assert _document_converter(workspace) == str(converter.resolve())
+    import hashlib
+    digest = hashlib.sha256(converter.read_bytes()).hexdigest()
+    monkeypatch.setenv("GITGO_ANTIWORD_SHA256", digest)
+    assert verified_antiword(workspace) == (converter.resolve(), digest)
 
 
 def test_doc_converter_receives_private_eof(tmp_path_factory, monkeypatch):
     import subprocess
-    from backend.core.tools import document_tools
-    path = tmp_path_factory / 'legacy.doc'
+    from types import SimpleNamespace
+    from backend.core.tools import document_tools, document_limits
+    workspace = tmp_path_factory / 'workspace'
+    workspace.mkdir()
+    path = workspace / 'legacy.doc'
     path.write_bytes(b'legacy document')
-    monkeypatch.setattr(document_tools, '_document_converter', lambda _: '/installed/antiword')
+    converter = tmp_path_factory / 'antiword'
+    converter.write_bytes(b'fixture converter')
+    monkeypatch.setattr(document_limits, 'verified_antiword', lambda _: (converter, 'fixture'))
+    monkeypatch.setattr(document_limits, 'check_converter', lambda *args: None)
     def convert(argv, **kwargs):
-        assert kwargs['input'] == b''
-        assert argv[1] == str(path)
-        return subprocess.CompletedProcess(argv, 0, b'converted document', b'')
-    monkeypatch.setattr(document_tools.subprocess, 'run', convert)
-    assert document_open({'_workspace': str(tmp_path_factory), 'path': path.name})['content'] == 'converted document'
+        assert kwargs['stdin'] == subprocess.DEVNULL
+        assert argv == [str(converter), str(path)]
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(document_tools.subprocess, 'Popen', convert)
+    monkeypatch.setattr('backend.core.process_control.attach_kill_job', lambda _: None)
+    monkeypatch.setattr('backend.core.process_output.collect_output',
+        lambda *args, **kwargs: ('converted document', '', False))
+    assert document_open({'_workspace': str(workspace), 'path': path.name})['content'] == 'converted document'
