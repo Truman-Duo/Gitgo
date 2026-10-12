@@ -505,24 +505,30 @@ def test_existing_windows_packager_zip_layout_not_an_invented_test_format(signin
     import json
     from backend.version import __version__
     from scripts import release_artifacts
+    from scripts.render_product_manifest import render_manifest
     root = locations[0].parent / "build-source"
     (root / "packaging").mkdir(parents=True)
     (root / "cli/dashboard").mkdir(parents=True)
-    product = {"version": __version__, "windows_version": "1.0.0.2",
-               "layout": {"dashboard": "gitgo.exe", "native_host": "internal/gitgo-host/gitgo-host.exe"}}
-    (root / "packaging/product.json").write_text(json.dumps(product))
+    source = Path(__file__).resolve().parents[1] / "packaging/product.json"
+    (root / "packaging/product.json").write_bytes(source.read_bytes())
+    product = render_manifest(source, "windows", "x86_64")
     (root / "cli/dashboard/package.json").write_text(json.dumps({"version": __version__}))
     stage = root / "payload"
     (stage / "internal/gitgo-host").mkdir(parents=True)
     (stage / "product.json").write_text(json.dumps(product))
     (stage / "gitgo.exe").write_bytes(b"placeholder")
     (stage / "internal/gitgo-host/gitgo-host.exe").write_bytes(b"host-placeholder")
+    for name in ("uninstall.exe", "dashboard/dist/cli.js", "dashboard/dist/trace.js",
+                 "dashboard/scripts/launch.mjs", "dashboard/scripts/runtime.mjs"):
+        path = stage / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"placeholder-not-a-runnable-product")
     monkeypatch.setattr(release_artifacts, "source_identity", lambda _: {"commit": "b" * 40,
                                                                         "tree": "c" * 40, "dirty": False})
     packaged = release_artifacts.package(root, stage, root / "output")
     result, _ = pipeline(signing, locations, Path(packaged["archive"]).read_bytes(),
-                         wire_changes={"platform": "windows", "architecture": "x86_64", "archive_format": "zip"},
-                         current=replace(CURRENT, platform="windows", architecture="x86_64"))
+                         wire_changes={"version": __version__, "platform": "windows", "architecture": "x86_64", "archive_format": "zip"},
+                         current=replace(CURRENT, version="1.0.0-alpha.1", platform="windows", architecture="x86_64"))
     assert (result.bundle_directory / "build-manifest.json").is_file()
     assert (result.bundle_directory / "gitgo.exe").read_bytes() == b"placeholder"
     # The existing packager is used, but placeholders are NOT runnable Windows
