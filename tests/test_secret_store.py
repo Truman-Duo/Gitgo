@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 
@@ -41,9 +42,15 @@ class _ReferenceProtector:
         self.deleted: list[str] = []
 
     def protect(self, plaintext: str) -> str:
-        reference = f"ref-{len(self.values) + 1}"
-        self.values[reference] = plaintext
+        reference = self.allocate_reference()
+        self.protect_into(reference, plaintext)
         return reference
+
+    def allocate_reference(self) -> str:
+        return f"ref-{uuid.uuid4().hex}"
+
+    def protect_into(self, reference, plaintext):
+        self.values[reference] = plaintext
 
     def unprotect(self, reference: str) -> str:
         return self.values[reference]

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from contextlib import contextmanager
 
 
 class SecretStoreError(RuntimeError):
@@ -229,9 +230,15 @@ class MacOSKeychainProtector:
         return account
 
     def protect(self, plaintext: str) -> str:
-        account = uuid.uuid4().hex
-        self._keychain.add(self.SERVICE, account, plaintext)
-        return f"{self.REFERENCE_PREFIX}{account}"
+        reference = self.allocate_reference()
+        self.protect_into(reference, plaintext)
+        return reference
+
+    def allocate_reference(self) -> str:
+        return self.REFERENCE_PREFIX + uuid.uuid4().hex
+
+    def protect_into(self, reference: str, plaintext: str) -> None:
+        self._keychain.add(self.SERVICE, self._account(reference), plaintext)
 
     def unprotect(self, reference: str) -> str:
         return self._keychain.read(self.SERVICE, self._account(reference))
@@ -269,12 +276,13 @@ class _LinuxSecretToolBackend:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SecretStoreError(f"Linux Secret Service {action} failed: {exc}") from exc
+            # TimeoutExpired may contain captured credential output. Never
+            # surface subprocess stdout/stderr or input in public diagnostics.
+            raise SecretStoreError(f"Linux Secret Service {action} unavailable or timed out") from exc
 
     @staticmethod
     def _failure(action: str, result: subprocess.CompletedProcess[str]) -> SecretStoreError:
-        detail = (result.stderr or result.stdout or "native keyring unavailable").strip()
-        return SecretStoreError(f"Linux Secret Service {action} failed: {detail}")
+        return SecretStoreError(f"Linux Secret Service {action} failed (exit {result.returncode})")
 
     def add(self, service: str, account: str, plaintext: str) -> None:
         result = self._run("store", service, account, plaintext=plaintext)
@@ -289,8 +297,15 @@ class _LinuxSecretToolBackend:
 
     def delete(self, service: str, account: str) -> None:
         result = self._run("clear", service, account)
-        if result.returncode not in (0, 1):
-            raise self._failure("delete", result)
+        if result.returncode == 0 and not result.stderr:
+            return
+        # clear's exit 1 can mean a service failure, not just no matching item.
+        # Confirm absence through a successful search, without --unlock.
+        if result.returncode == 1 and not result.stderr:
+            absent = self._run("search", service, account)
+            if absent.returncode == 0 and not absent.stdout and not absent.stderr:
+                return
+        raise self._failure("delete", result)
 
 
 class LinuxSecretServiceProtector:
@@ -317,9 +332,15 @@ class LinuxSecretServiceProtector:
         return account
 
     def protect(self, plaintext: str) -> str:
-        account = uuid.uuid4().hex
-        self._backend.add(self.SERVICE, account, plaintext)
-        return f"{self.REFERENCE_PREFIX}{account}"
+        reference = self.allocate_reference()
+        self.protect_into(reference, plaintext)
+        return reference
+
+    def allocate_reference(self) -> str:
+        return self.REFERENCE_PREFIX + uuid.uuid4().hex
+
+    def protect_into(self, reference: str, plaintext: str) -> None:
+        self._backend.add(self.SERVICE, self._account(reference), plaintext)
 
     def unprotect(self, reference: str) -> str:
         return self._backend.read(self.SERVICE, self._account(reference))
@@ -348,40 +369,92 @@ class EncryptedSecretStore:
     weakening the production backend.
     """
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, path: Path, protector=None) -> None:
         self.path = Path(path)
         self.protector = protector or default_secret_protector()
         self._lock = threading.RLock()
 
-    def _delete_protected(self, value: str) -> None:
-        delete = getattr(self.protector, "delete", None)
-        if callable(delete):
-            try:
-                delete(value)
-            except SecretStoreError:
-                # The durable store no longer references this value. Failure
-                # to remove an orphan must not make a successful save appear
-                # to have failed or risk rolling metadata back to stale data.
-                pass
+    @contextmanager
+    def _exclusive(self):
+        """Serialize native effects and their retry index across Host processes."""
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.path.with_name(f".{self.path.name}.lock")
+            with open(lock_path, "a+b") as handle:
+                if os.name == "nt":
+                    import msvcrt
+                    if handle.tell() == 0:
+                        handle.write(b"0"); handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if os.name == "nt":
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def _read_ciphertexts(self) -> dict[str, str]:
-        if not self.path.exists():
-            return {}
+    @classmethod
+    def pending_count(cls, path: Path) -> int:
+        """Read retry status without opening an OS keyring or returning refs."""
+        return len(cls._read_payload(Path(path))[1])
+
+    @classmethod
+    def _read_payload(cls, path: Path) -> tuple[dict[str, str], list[str]]:
+        if not path.exists():
+            return {}, []
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise SecretStoreError(f"Cannot read encrypted credential store: {exc}") from exc
-        if int(payload.get("version", 0) or 0) != self.VERSION:
+            raise SecretStoreError("Cannot read encrypted credential index") from exc
+        if not isinstance(payload, dict) or payload.get("version") not in (1, cls.VERSION):
             raise SecretStoreError("Unsupported credential store version")
         values = payload.get("secrets", {})
-        if not isinstance(values, dict):
-            raise SecretStoreError("Credential store has an invalid secrets map")
-        return {str(key): str(value) for key, value in values.items()}
+        pending = payload.get("pending_cleanup", [])
+        if (not isinstance(values, dict) or
+                any(not isinstance(k, str) or not isinstance(v, str) for k, v in values.items()) or
+                not isinstance(pending, list) or any(not isinstance(v, str) for v in pending)):
+            raise SecretStoreError("Invalid encrypted credential index")
+        return dict(values), list(dict.fromkeys(pending))
+
+    def _read_ciphertexts(self) -> dict[str, str]:
+        return self._read_payload(self.path)[0]
+
+    def _retry_cleanup(self) -> bool:
+        encrypted, pending = self._read_payload(self.path)
+        delete = getattr(self.protector, "delete", None)
+        remaining = []
+        for reference in pending:
+            # A journaled creation can have become the active credential.
+            if reference in encrypted.values():
+                continue
+            try:
+                if not callable(delete):
+                    raise SecretStoreError("Native deletion backend unavailable")
+                delete(reference)
+            except (SecretStoreError, OSError):
+                remaining.append(reference)
+        if remaining != pending:
+            try:
+                self._write_ciphertexts(encrypted, remaining)
+            except OSError:
+                # Deletion was attempted, but the durable retry record remains.
+                return False
+        return not remaining
+
+    def retry_cleanup(self) -> bool:
+        with self._exclusive():
+            return self._retry_cleanup()
 
     def read_all(self) -> dict[str, str]:
-        with self._lock:
+        with self._exclusive():
             return {
                 key: self.protector.unprotect(value)
                 for key, value in self._read_ciphertexts().items()
@@ -390,58 +463,74 @@ class EncryptedSecretStore:
     def upsert(self, values: dict[str, str]) -> None:
         if not values:
             return
-        with self._lock:
-            encrypted = self._read_ciphertexts()
+        with self._exclusive():
+            encrypted, pending = self._read_payload(self.path)
             replacements: dict[str, tuple[str | None, str]] = {}
             try:
                 for key, value in values.items():
                     normalized_key = str(key)
-                    protected = self.protector.protect(str(value))
+                    if callable(getattr(self.protector, "delete", None)):
+                        allocate = getattr(self.protector, "allocate_reference", None)
+                        write = getattr(self.protector, "protect_into", None)
+                        if not callable(allocate) or not callable(write):
+                            raise SecretStoreError("Native protector must support journaled creation")
+                        protected = allocate()
+                        pending.append(protected)
+                        # Persist intent BEFORE creating any native credential.
+                        self._write_ciphertexts(self._read_ciphertexts(), pending)
+                        write(protected, str(value))
+                    else:
+                        protected = self.protector.protect(str(value))
                     replacements[normalized_key] = (
                         encrypted.get(normalized_key), protected,
                     )
                     encrypted[normalized_key] = protected
-                self._write_ciphertexts(encrypted)
+                pending.extend(old for old, new in replacements.values() if old and old != new
+                               and callable(getattr(self.protector, "delete", None)))
+                pending = [ref for ref in dict.fromkeys(pending) if ref not in encrypted.values()]
+                self._write_ciphertexts(encrypted, pending)
             except Exception:
-                for _old, protected in replacements.values():
-                    self._delete_protected(protected)
+                # Durable creation intents remain available even if cleanup or
+                # the native write failed. Never erase an unconfirmed deletion.
+                self._retry_cleanup()
                 raise
-            for old, protected in replacements.values():
-                if old and old != protected:
-                    self._delete_protected(old)
+            self._retry_cleanup()
 
     def retain_only(self, keys: set[str]) -> None:
-        with self._lock:
-            encrypted = self._read_ciphertexts()
+        with self._exclusive():
+            encrypted, pending = self._read_payload(self.path)
             retained = {key: value for key, value in encrypted.items() if key in keys}
             if retained != encrypted:
-                self._write_ciphertexts(retained)
-                for key, value in encrypted.items():
-                    if key not in retained:
-                        self._delete_protected(value)
+                if callable(getattr(self.protector, "delete", None)):
+                    pending.extend(value for key, value in encrypted.items() if key not in retained)
+                self._write_ciphertexts(retained, list(dict.fromkeys(pending)))
+            self._retry_cleanup()
 
     def clear(self) -> None:
         """Remove every native credential, then durably empty the reference file.
 
-        Unlike ordinary orphan cleanup, uninstall must fail closed: if the OS
+        Like retryable orphan cleanup, uninstall must fail closed: if the OS
         credential backend refuses a deletion, keep the reference index so the
         operation can be retried instead of silently stranding a secret.
         """
-        with self._lock:
-            encrypted = self._read_ciphertexts()
-            delete = getattr(self.protector, "delete", None)
-            if callable(delete):
-                for value in encrypted.values():
-                    delete(value)
-            if encrypted or self.path.exists():
-                self._write_ciphertexts({})
+        with self._exclusive():
+            encrypted, pending = self._read_payload(self.path)
+            if callable(getattr(self.protector, "delete", None)):
+                pending.extend(encrypted.values())
+            if encrypted or pending or self.path.exists():
+                self._write_ciphertexts({}, list(dict.fromkeys(pending)))
+                if not self._retry_cleanup():
+                    raise SecretStoreError("Credential deletion incomplete; retry index preserved")
 
-    def _write_ciphertexts(self, values: dict[str, str]) -> None:
+    def _write_ciphertexts(self, values: dict[str, str], pending: list[str] | None = None) -> None:
+        if pending is None:
+            pending = self._read_payload(self.path)[1]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
         try:
             with open(temporary, "w", encoding="utf-8") as handle:
-                json.dump({"version": self.VERSION, "secrets": values}, handle,
+                json.dump({"version": self.VERSION, "secrets": values,
+                           "pending_cleanup": pending}, handle,
                           ensure_ascii=False, indent=2)
                 handle.flush()
                 os.fsync(handle.fileno())

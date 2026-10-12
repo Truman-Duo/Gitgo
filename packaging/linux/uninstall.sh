@@ -39,6 +39,25 @@ if [ "${GITGO_PRODUCT_PLATFORM:-}" != "linux" ]; then
 fi
 : "${GITGO_PRODUCT_COMMAND:?missing product command}"
 GITGO_PRODUCT_ALIASES="${GITGO_PRODUCT_ALIASES:-}"
+PRODUCT_ID="${GITGO_PRODUCT_ID:?}"
+PLATFORM=linux
+source "$INSTALL_ROOT/installer-common.sh"
+INSTALL_ROOT="$(safe_path "$INSTALL_ROOT")"
+BIN_DIR="$(safe_path "$BIN_DIR")"
+owned_install || fail "Installed directory ownership cannot be confirmed"
+
+# Preserve app, links, PATH and the last retry record on deletion failure.
+CONFIG_ROOT="$HOME/.gitgo"
+SECRET_INDEX="$CONFIG_ROOT/provider_secrets.json"
+if [ "$KEEP_CONFIG" -eq 0 ]; then
+  if [ -f "$SECRET_INDEX" ]; then
+    HOST="$INSTALL_ROOT/internal/gitgo-host/gitgo-host"
+    [ -x "$HOST" ] || fail "Native Host missing; credential cleanup cannot proceed"
+    GITGO_LLM_CONFIG_PATH="$CONFIG_ROOT/llm_config.json" \
+      GITGO_LLM_SECRET_PATH="$SECRET_INDEX" \
+      "$HOST" --gitgo-internal-role credential-cleanup
+  fi
+fi
 
 remove_owned_link() {
   name="$1"
@@ -69,16 +88,6 @@ fi
 CONFIG_ROOT="$HOME/.gitgo"
 SECRET_INDEX="$CONFIG_ROOT/provider_secrets.json"
 if [ "$KEEP_CONFIG" -eq 0 ]; then
-  if [ -f "$SECRET_INDEX" ]; then
-    HOST="$INSTALL_ROOT/internal/gitgo-host/gitgo-host"
-    if [ ! -x "$HOST" ]; then
-      echo "Cannot safely remove Secret Service credentials: Native Host is missing" >&2
-      exit 1
-    fi
-    GITGO_LLM_CONFIG_PATH="$CONFIG_ROOT/llm_config.json" \
-      GITGO_LLM_SECRET_PATH="$SECRET_INDEX" \
-      "$HOST" --gitgo-internal-role credential-cleanup
-  fi
   rm -f "$CONFIG_ROOT/config.json" "$CONFIG_ROOT/commit-config.json" \
     "$CONFIG_ROOT/llm_config.json" "$SECRET_INDEX"
   rmdir "$CONFIG_ROOT" 2>/dev/null || true
