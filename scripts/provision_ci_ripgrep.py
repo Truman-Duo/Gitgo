@@ -11,6 +11,9 @@ import tarfile
 import urllib.request
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.ci_downloads import fetch_verified
+
 VERSION = '15.2.0'
 ARCHIVES = {
     'win32': ('x86_64-pc-windows-msvc.zip',
@@ -46,10 +49,7 @@ def main():
     suffix, expected = ARCHIVES[key]
     name = f'ripgrep-{VERSION}-{suffix}'
     url = f'https://github.com/BurntSushi/ripgrep/releases/download/{VERSION}/{name}'
-    with urllib.request.urlopen(url, timeout=60) as response:
-        raw = response.read(64 * 1024 * 1024 + 1)
-    if len(raw) > 64 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != expected:
-        raise SystemExit('Official ripgrep archive hash mismatch')
+    raw = fetch_verified(url, expected, limit=64 * 1024 * 1024)
     binary_name = 'rg.exe' if sys.platform == 'win32' else 'rg'
     if sys.platform == 'win32':
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:

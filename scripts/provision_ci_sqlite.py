@@ -15,6 +15,9 @@ import tarfile
 import urllib.request
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.ci_downloads import fetch_verified
+
 # Official release archives and SHA3-256 from https://www.sqlite.org/download.html
 VERSION = "3.53.4"
 CPYTHON_VERSION = "3.14.7"
@@ -29,10 +32,8 @@ ARCHIVES = {
 
 def download(platform):
     name, expected = ARCHIVES[platform]
-    with urllib.request.urlopen("https://www.sqlite.org/2026/" + name, timeout=60) as response:
-        data = response.read(20_000_001)
-    if len(data) > 20_000_000 or hashlib.sha3_256(data).hexdigest() != expected:
-        raise RuntimeError("SQLite archive failed its pinned release digest")
+    data = fetch_verified("https://www.sqlite.org/2026/" + name, expected,
+                          algorithm='sha3_256', limit=20_000_000)
     print(f"Verified {name}: SHA3-256 {expected}", flush=True)
     return zipfile.ZipFile(io.BytesIO(data))
 
@@ -51,10 +52,7 @@ def rebuild_macos_sqlite(target: Path, scratch: Path) -> None:
     if sys.version_info[:3] != tuple(map(int, CPYTHON_VERSION.split('.'))):
         raise RuntimeError("Static SQLite rebuild requires the pinned CPython version")
     url = f"https://www.python.org/ftp/python/{CPYTHON_VERSION}/Python-{CPYTHON_VERSION}.tar.xz"
-    with urllib.request.urlopen(url, timeout=60) as response:
-        data = response.read(40_000_001)
-    if len(data) > 40_000_000 or hashlib.sha256(data).hexdigest() != CPYTHON_SHA256:
-        raise RuntimeError("CPython source failed its pinned official archive digest")
+    data = fetch_verified(url, CPYTHON_SHA256, limit=40_000_000)
     prefix = f"Python-{CPYTHON_VERSION}"
     with tarfile.open(fileobj=io.BytesIO(data), mode='r:xz') as archive:
         members = [member for member in archive.getmembers()
