@@ -1,12 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
 import { resolveInlineContextKey } from "./inlineContext.js";
 
 describe("runtime inline paging", () => {
   test("routes page keys through the central overlay binding resolver", () => {
-    expect(resolveInlineContextKey("", { pageUp: true })).toEqual([
+    assert.deepStrictEqual(resolveInlineContextKey("", { pageUp: true }), [
       { type: "page", delta: -1 },
     ]);
-    expect(resolveInlineContextKey("", { pageDown: true })).toEqual([
+    assert.deepStrictEqual(resolveInlineContextKey("", { pageDown: true }), [
       { type: "page", delta: 1 },
     ]);
   });

@@ -8,8 +8,11 @@ import { setBackendClient } from "./clients.js";
 import { App } from "./components/App.js";
 import { InputProvider, type VerificationInput } from "./input/runtime.js";
 import { dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { resolvePythonRuntime } from "./backend/pythonRuntime.js";
+import { resolveProjectRoot } from "./runtime/paths.js";
+import { spawn } from "node:child_process";
+import { probeRuntime } from "../scripts/runtime.mjs";
 import {
   acceptTerminalHandoff,
   currentFrontendOrigin,
@@ -37,7 +40,12 @@ const temporaryLaunch = registerLaunchSession();
 if (acknowledgeHandoff) assertInteractiveTerminal(process.stdin, process.stdout);
 if (acknowledgeHandoff) process.stdout.write("\x1b]0;Gitgo - selected terminal\x07");
 
-const EXECUTABLE_DIR = dirname(process.execPath);
+// Per-user Unix installers expose the public command through a symlink. Resolve
+// it before locating product.json and the private Native Host beside the binary.
+const EXECUTABLE_PATH = (() => {
+  try { return realpathSync(process.execPath); } catch { return process.execPath; }
+})();
+const EXECUTABLE_DIR = dirname(EXECUTABLE_PATH);
 const COMPILED = Boolean(
   process.env.GITGO_INSTALL_ROOT
   || existsSync(resolve(EXECUTABLE_DIR, "product.json"))
@@ -45,17 +53,19 @@ const COMPILED = Boolean(
 );
 const GITGO_DIR = process.env.GITGO_INSTALL_ROOT
   ? resolve(process.env.GITGO_INSTALL_ROOT)
-  : COMPILED ? EXECUTABLE_DIR : resolve(import.meta.dir, "../../..");
+  : COMPILED ? EXECUTABLE_DIR : resolveProjectRoot(import.meta.url);
 const PYTHON = resolvePythonRuntime();
 const INTERNAL_HOST = (() => {
   const explicit = process.env.GITGO_HOST_EXECUTABLE || "";
   if (explicit) return explicit;
   const name = process.platform === "win32" ? "gitgo-host.exe" : "gitgo-host";
   const candidates = [
-    resolve(GITGO_DIR, "internal", name),
     resolve(GITGO_DIR, "internal", "gitgo-host", name),
+    resolve(GITGO_DIR, "internal", name),
   ];
-  return candidates.find(existsSync) || "";
+  return candidates.find((candidate) => {
+    try { return statSync(candidate).isFile(); } catch { return false; }
+  }) || "";
 })();
 
 // ── Alt-Screen vs Main-Screen ──────────────────────────────────────────
@@ -143,6 +153,28 @@ function verificationInput(): VerificationInput[] | undefined {
 }
 
 async function main() {
+  const requestedRuntime = argumentValue("--runtime") || process.env.GITGO_DASHBOARD_RUNTIME || "auto";
+  if (!["auto", "bun", "node"].includes(requestedRuntime)) throw new Error("Runtime must be auto, bun, or node");
+  // Native releases keep the embedded Bun fast path. Their companion bundle
+  // uses the same UI and Native Host when Node is explicitly requested.
+  if (COMPILED && process.versions.bun && requestedRuntime === "node") {
+    const launcher = resolve(GITGO_DIR, "dashboard/scripts/launch.mjs");
+    if (!existsSync(launcher)) throw new Error("Node companion bundle missing; rebuild the native release");
+    const child = spawn(process.env.GITGO_NODE || "node", [launcher, "--runtime", "node", ...process.argv.slice(2)], {
+      stdio: "inherit", env: {...process.env, GITGO_INSTALL_ROOT: GITGO_DIR},
+    });
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => child.kill(signal));
+    child.once("error", error => { console.error(error.message); process.exit(1); });
+    child.once("exit", (code, signal) => process.exit(code ?? (signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 129)));
+    return;
+  }
+  if (process.argv.includes("--runtime-diagnostics")) {
+    console.log(JSON.stringify({runtime: process.versions.bun ? "bun" : "node",
+      version: process.versions.bun || process.versions.node, compiled: COMPILED,
+      stdinTTY: !!process.stdin.isTTY, stdoutTTY: !!process.stdout.isTTY,
+      node: probeRuntime("node", process.env.GITGO_NODE || "node")}, null, 2));
+    return;
+  }
   ensureWindowsUtf8Console();
   const useMock = process.argv.includes("--mock");
   const client: BackendClient = useMock
@@ -178,19 +210,23 @@ async function main() {
   if (temporaryLaunch) startupNotice = ["Temporary terminal test · isolated chat history; settings and conversations are removed when this test closes.", startupNotice].filter(Boolean).join(" ");
 
   let shutdownPromise: Promise<void> | null = null;
+  let renderer: ReturnType<typeof renderSync> | undefined;
   const shutdown = (exitCode: number): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
+    renderer?.unmount();
+    renderer?.cleanup();
     shutdownPromise = Promise.resolve(client.close())
       .catch(() => undefined)
       .then(() => { process.exit(exitCode); });
     return shutdownPromise;
   };
-  process.once("SIGINT", () => { void shutdown(130); });
-  process.once("SIGTERM", () => { void shutdown(143); });
-  process.once("SIGHUP", () => { void shutdown(129); });
+  // Keep the handlers installed until asynchronous Host shutdown completes.
+  // Removing a once-handler during delivery can let signal-exit re-raise it.
+  process.on("SIGINT", () => { void shutdown(130); });
+  process.on("SIGTERM", () => { void shutdown(143); });
+  process.on("SIGHUP", () => { void shutdown(129); });
   process.stdin.once("end", () => { void shutdown(0); });
 
-  let root: ReturnType<typeof renderSync>;
   const completeTerminalSetup = async () => {
     const selected = await detectTerminals(client) as TerminalInventory;
     const config = launcherFromInventory(selected);
@@ -199,12 +235,11 @@ async function main() {
       ? await transferTerminalOwner(client, () => relaunchInConfiguredTerminal(config))
       : await relaunchInConfiguredTerminal(config);
     if (handoff.launched) {
-      root.unmount(); root.cleanup();
       await shutdown(0);
     }
     return {completed: handoff.launched, message: handoff.message};
   };
-  root = renderSync(
+  renderer = renderSync(
     <ScreenWrapper>
       <InputProvider verificationInput={verificationInput()}><App
         client={client}
@@ -221,8 +256,12 @@ async function main() {
   // renderer have started, never by a hidden smoke renderer or process spawn.
   acknowledgeHandoff?.();
 
-  await root.waitUntilExit();
-  if (!shutdownPromise) await client.close();
+  await renderer.waitUntilExit();
+  if (shutdownPromise) {
+    await shutdownPromise;
+    return;
+  }
+  await client.close();
   // Ink and terminal observers may retain timers after the renderer exits.
   // The backend is already closed, so make the CLI lifecycle deterministic.
   process.exit(0);

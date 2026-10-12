@@ -63,6 +63,8 @@ def collect_output(proc, *, timeout, limit, terminate, input=None,
             raise OutputLimit(f"PROCESS_OUTPUT_LIMIT: pipe exceeded {limit} characters")
         if failure:
             raise failure[0]
+        from backend.core.process_control import finish_scope
+        finish_scope(proc)
         return buffers[0], buffers[1], any(truncated)
     except BaseException:
         terminate()

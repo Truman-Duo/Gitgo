@@ -1,4 +1,3 @@
-import { feature } from 'bun:bundle';
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import useStdin from '../hooks/use-stdin.js';
 import { getSystemThemeName, type SystemTheme } from './systemTheme.js';
@@ -73,10 +72,9 @@ export function ThemeProvider({ children, initialState, onThemeSave = defaultSav
   const { internal_querier } = useStdin();
 
   // Watch for live terminal theme changes while 'auto' is active.
-  // Positive feature() pattern so the watcher import is dead-code-eliminated
-  // in external builds.
+  // One runtime-independent opt-in for both bundles and native builds.
   useEffect(() => {
-    if (feature('AUTO_THEME')) {
+    if (process.env.GITGO_AUTO_THEME === '1') {
       if (activeSetting !== 'auto' || !internal_querier) return;
       let cleanup: (() => void) | undefined;
       let cancelled = false;

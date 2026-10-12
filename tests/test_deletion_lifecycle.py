@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.core.application import ApplicationServices, OperationError
+from backend.core.application.deletion import checked_directory
 from backend.core.config import Config, ConfigManager, ProjectConfig
 from backend.models import FileAccess, RepoNode
 from backend.core.storage import get_storage, StorageRuntime
@@ -24,6 +25,33 @@ def setup_project(tmp_path_factory, monkeypatch):
         file_access=FileAccess(path=str(ws))))], safety={"delete_delay_minutes": 0, "process_delete_delay_minutes": 0})
     ConfigManager.save(cfg)
     return ws, ApplicationServices()
+
+
+def test_deletion_target_rejects_user_symlink(tmp_path_factory):
+    target = tmp_path_factory / "real-workspace"
+    target.mkdir()
+    alias = tmp_path_factory / "linked-workspace"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("No symlink permission on this system")
+
+    with pytest.raises(OperationError, match="redirected"):
+        checked_directory(str(alias), protected=[])
+
+
+def test_deletion_target_rejects_symlinked_parent(tmp_path_factory):
+    real_parent = tmp_path_factory / "real-parent"
+    target = real_parent / "workspace"
+    target.mkdir(parents=True)
+    alias_parent = tmp_path_factory / "linked-parent"
+    try:
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("No symlink permission on this system")
+
+    with pytest.raises(OperationError, match="redirected"):
+        checked_directory(str(alias_parent / "workspace"), protected=[])
 
 
 def test_legacy_due_delete_is_read_only_and_old_write_requires_confirmation(tmp_path_factory, monkeypatch):

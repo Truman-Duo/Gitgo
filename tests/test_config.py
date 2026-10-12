@@ -140,7 +140,7 @@ class TestConfigManagerLegacy:
         loaded = ConfigManager.load()
 
         assert loaded.verbose is True
-        assert ConfigManager.default_path() == user_home / ".gitgo" / "config.json"
+        assert ConfigManager.default_path() == (user_home / ".gitgo" / "config.json").resolve()
         assert ConfigManager.default_path().exists()
         assert not legacy.exists()
         assert list((user_home / ".gitgo" / "migrations").glob(

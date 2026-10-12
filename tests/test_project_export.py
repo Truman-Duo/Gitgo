@@ -37,7 +37,7 @@ def test_project_export_writes_selected_format_atomically(
     )
 
     target = tmp_path_factory / "exports" / f"state{suffix}"
-    assert result["path"] == str(target)
+    assert result["path"] == str(target.resolve())
     assert result["format"] == format_name
     assert target.is_file()
     assert result["size"] == target.stat().st_size

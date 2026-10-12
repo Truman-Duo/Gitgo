@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
 import tempfile
@@ -13,6 +14,22 @@ import pytest
 from backend.adapters.local_file_adapter import LocalFileAdapter
 from backend.adapters.local_git_runner import LocalGitRunner
 from backend.core.storage import close_owned_storage
+
+
+class _TestSecretProtector:
+    """Deterministic, disk-safe protector that never touches an OS keychain."""
+
+    _PREFIX = b"gitgo-test-secret\0"
+
+    def protect(self, plaintext: str) -> str:
+        payload = self._PREFIX + plaintext.encode("utf-8")
+        return base64.b64encode(payload).decode("ascii")
+
+    def unprotect(self, ciphertext: str) -> str:
+        payload = base64.b64decode(ciphertext.encode("ascii"), validate=True)
+        if not payload.startswith(self._PREFIX):
+            raise ValueError("invalid test credential")
+        return payload[len(self._PREFIX):].decode("utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +49,18 @@ def isolate_default_gitgo_state(
     )
     monkeypatch.setenv(
         "GITGO_CONFIG_PATH", str(tmp_path_factory / "config" / "config.json"),
+    )
+    monkeypatch.setenv(
+        "GITGO_LLM_CONFIG_PATH", str(tmp_path_factory / "config" / "llm_config.json"),
+    )
+    # Let the secret store follow the isolated provider config, including tests
+    # that override _config_path themselves; never inherit a live secret path.
+    monkeypatch.delenv("GITGO_LLM_SECRET_PATH", raising=False)
+    # Unit tests must never add records to a developer or CI worker's real
+    # DPAPI/Keychain store. Production still selects the native OS backend.
+    monkeypatch.setattr(
+        "backend.core.secret_store.default_secret_protector",
+        lambda: _TestSecretProtector(),
     )
     try:
         yield
@@ -106,4 +135,3 @@ def factory():
     """固定种子 factory（CI 确定性测试）。"""
     from tests.factory import TestDataFactory
     return TestDataFactory(seed=42)
-
