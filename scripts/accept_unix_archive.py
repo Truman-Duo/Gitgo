@@ -47,8 +47,8 @@ def accept(archive, commit):
         installed = root / 'app'
         commands = root / 'bin'
         arguments = ['--install-root', str(installed), '--bin-dir', str(commands)]
-        def run(*args, **kwargs):
-            subprocess.run(args, env=env, cwd=root, check=True, timeout=180, **kwargs)
+        def run(*args, environment=env, **kwargs):
+            subprocess.run(args, env=environment, cwd=root, check=True, timeout=180, **kwargs)
         run(str(release / 'install.sh'), *arguments)
         # Upgrade the same owned payload twice; unknown/older unmarked directories
         # intentionally cannot be adopted. Failure injection is tested separately.
@@ -62,8 +62,14 @@ def accept(archive, commit):
         from backend.core.child_process import INTERNAL_ROLE_FLAG, PYTHON_ROLE
         # Create/read/delete with the installed app's own native credential
         # implementation and executable identity, including Keychain ACLs.
+        credential_env = dict(env)
+        if sys.platform == 'darwin':
+            # Keychain preferences resolve through HOME. The workflow configured
+            # its disposable Keychain there; Gitgo files remain explicitly isolated.
+            credential_env['HOME'] = os.environ['HOME']
         run(str(host), INTERNAL_ROLE_FLAG, PYTHON_ROLE,
-            str(ROOT / 'scripts/check_native_credentials.py'), '--host', str(host))
+            str(ROOT / 'scripts/check_native_credentials.py'), '--host', str(host),
+            environment=credential_env)
         scope_env = dict(env, GITGO_SCOPE_TEST_HOST=str(host))
         subprocess.run([sys.executable, '-B', '-m', 'pytest', str(ROOT / 'tests/test_unix_process_scope.py'),
                         '-q', '-k', 'frozen'], cwd=ROOT, env=scope_env, check=True, timeout=180)

@@ -1,6 +1,7 @@
 """Real disposable CI keyring round-trip plus frozen cleanup (never user keys)."""
 from __future__ import annotations
 import argparse
+import ctypes
 import os
 from pathlib import Path
 import subprocess
@@ -16,6 +17,14 @@ from backend.core.secret_store import EncryptedSecretStore, SecretStoreError
 def check(host):
     if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
         raise RuntimeError('Real keyring acceptance requires a disposable hosted runner')
+    if sys.platform == 'darwin':
+        # A headless fixture must report unavailable/unauthorized, never wait
+        # for a create/unlock dialog. This changes only this disposable probe.
+        security = ctypes.CDLL('/System/Library/Frameworks/Security.framework/Security')
+        security.SecKeychainSetUserInteractionAllowed.argtypes = [ctypes.c_bool]
+        security.SecKeychainSetUserInteractionAllowed.restype = ctypes.c_int32
+        if security.SecKeychainSetUserInteractionAllowed(False) != 0:
+            raise RuntimeError('Cannot configure noninteractive CI Keychain probe')
     with tempfile.TemporaryDirectory(prefix='gitgo-keyring-') as raw:
         root = Path(raw)
         store = EncryptedSecretStore(root / 'secrets.json')
@@ -24,6 +33,7 @@ def check(host):
         try:
             print('CHECK native credential creation/read', flush=True)
             store.upsert({'fixture': value})
+            print('CHECK native credential read after creation', flush=True)
             assert store.read_all() == {'fixture': value}
             old = store._read_ciphertexts()['fixture']
             print('CHECK native credential replacement/deletion', flush=True)
