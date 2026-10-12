@@ -32,7 +32,8 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeo
         response = pipeline._execute_isolated("authored_host_python",
             {**inputs, "_workspace": str(ctx.workspace_path), "_dynamic_spec": spec, "_host_results": journal},
             remaining, cancellation_event=ctx.cancellation, diagnostics=diagnostics, runtime_metadata=runtime_metadata)
-        if runtime_metadata.get("cleanup", {}).get("complete") is False:
+        cleanup = runtime_metadata.get("cleanup")
+        if isinstance(cleanup, dict) and (cleanup.get("complete") is not True or cleanup.get("issues")):
             return failed("PROCESS_CLEANUP_INCOMPLETE", "Bridge cleanup is unconfirmed; no further Host calls may start")
         if not isinstance(response, dict) or type(response.get("bridge_version")) is not int or response["bridge_version"] != 1:
             return failed("AUTHORED_HOST_PROTOCOL_FAILED", str(response.get("error") or "invalid bridge frame")

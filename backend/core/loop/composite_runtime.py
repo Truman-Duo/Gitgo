@@ -27,7 +27,10 @@ def state_for(process, key, tool, inputs, catalog):
     state = process.runtime_preferences.get("composite_continuations", {}).get(key)
     if state is None:
         return None
-    expiry = float(state.get("expires_at", 0))
+    try:
+        expiry = float(state.get("expires_at", 0))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("COMPOSITE_CONTINUATION_STALE: invalid expiry; existing effects retained") from exc
     if (not math.isfinite(expiry) or state.get("outer_authorized") is not True
             or state.get("task_id") != (process.active_task_id or process.process_id)
             or state.get("process_id") != process.process_id

@@ -551,8 +551,9 @@ class ToolPipeline:
         if isinstance(result_data, dict) and result_data.get("_suspended"):
             self._write_invocation_state(ctx, tool, tool_name, execution_id, call_index,
                 state="awaiting_user", effect_state="partial", path=invocation_path)
-            return self._attach_runtime_cleanup(ToolResult(tool_name=tool_name, execution_id=execution_id,
-                call_index=call_index, suspended=True, data={"execution_state": "awaiting_user"}), runtime_metadata, ctx)
+            result = ToolResult(tool_name=tool_name, execution_id=execution_id,
+                call_index=call_index, suspended=True, data={"execution_state": "awaiting_user"})
+            return self._attach_runtime_cleanup(self._attach_runner_diagnostics(result, runner_diagnostics), runtime_metadata, ctx)
 
         business_error = ""
         if isinstance(result_data, dict):
