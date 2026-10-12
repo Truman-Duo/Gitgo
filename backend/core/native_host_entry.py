@@ -97,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
         from backend.core.native_host import main as native_host_main
         return int(native_host_main() or 0)
     name, role_argv = role
+    if name == "update-recover-simulation":
+        # No NativeHost, providers, project daemon or user config is initialized.
+        # The helper reopens only explicitly registered simulation authority.
+        from backend.core.update.recovery_helper import helper_main
+        return helper_main(role_argv)
     if name == "update-data-probe":
         # Before NativeHost, ConfigManager or any user's data store is opened.
         parser = argparse.ArgumentParser(add_help=False)

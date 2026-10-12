@@ -20,6 +20,31 @@ PROBE_ROLE = "update-data-probe"
 MAX_REPORT_BYTES = 64 * 1024
 
 
+def isolated_environment(profile: Path) -> dict[str, str]:
+    """Shared bounded child environment; never inherit user credentials."""
+    env = {"PATH": "/usr/bin:/bin" if os.name == "posix" else os.environ.get("PATH", ""),
+           "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
+           "TMPDIR": str(profile), "TEMP": str(profile), "TMP": str(profile),
+           "GITGO_CONFIG_PATH": str(profile / "config.json"),
+           "GITGO_STATE_HOME": str(profile / "state"),
+           "GITGO_LLM_CONFIG_PATH": str(profile / "providers.json"),
+           "GITGO_LLM_SECRET_PATH": str(profile / "secrets.json")}
+    if os.name == "nt" and "SystemRoot" in os.environ:
+        env["SystemRoot"] = os.environ["SystemRoot"]
+    return env
+
+
+def cleanup_report(proc, job) -> dict:
+    """Report parent-owned process containment, never candidate assertions."""
+    cleanup = getattr(proc, "_gitgo_cleanup", None)
+    if os.name == "nt":
+        cleanup = {"complete": bool(job), "mode": "windows-job" if job else "unmanaged-root-only",
+                   "issues": [] if job else ["job_attachment_missing"]}
+    if not isinstance(cleanup, dict) or type(cleanup.get("complete")) is not bool:
+        reject("UPDATE_HEALTH_FAILED", "Host probe cleanup report is missing")
+    return cleanup
+
+
 def probe_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
     number(timeout, minimum=1, maximum=120)
     if (not host.is_file() or host.is_symlink() or not host.is_absolute()
@@ -31,16 +56,8 @@ def probe_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
         reject("UPDATE_HEALTH_FAILED", "Probe profile must be private")
     nonce = uuid.uuid4().hex
     # Whitelist, rather than subtracting guessed names from the parent env.
-    env = {"PATH": "/usr/bin:/bin" if os.name == "posix" else os.environ.get("PATH", ""),
-           "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
-           "TMPDIR": str(profile), "TEMP": str(profile), "TMP": str(profile),
-           "GITGO_CONFIG_PATH": str(profile / "config.json"),
-           "GITGO_STATE_HOME": str(profile / "state"),
-           "GITGO_LLM_CONFIG_PATH": str(profile / "providers.json"),
-           "GITGO_LLM_SECRET_PATH": str(profile / "secrets.json")}
+    env = isolated_environment(profile)
     # Required Windows loader environment, never an application/user secret.
-    if os.name == "nt" and "SystemRoot" in os.environ:
-        env["SystemRoot"] = os.environ["SystemRoot"]
     from backend.core.process_control import spawn_managed, terminate_tree, attach_kill_job, close_job
     from backend.core.process_output import collect_output
     proc, job = None, None
@@ -56,12 +73,7 @@ def probe_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
         # Keep runtime-owned cleanup separate from the candidate's JSON. macOS
         # owned-session-only may return complete=False; fingerprint collection
         # is still useful, but this result CANNOT authorize update commitment.
-        cleanup = getattr(proc, "_gitgo_cleanup", None)
-        if os.name == "nt":
-            cleanup = {"complete": bool(job), "mode": "windows-job" if job else "unmanaged-root-only",
-                       "issues": [] if job else ["job_attachment_missing"]}
-        if not isinstance(cleanup, dict) or type(cleanup.get("complete")) is not bool:
-            reject("UPDATE_HEALTH_FAILED", "Host probe cleanup report is missing")
+        cleanup = cleanup_report(proc, job)
         report = json_object(output.encode("utf-8"), MAX_REPORT_BYTES)
         fields(report, {"schema_version", "nonce", "product_id", "version", "platform", "architecture",
                         "data_compatibility", "memory_sqlite_check"})

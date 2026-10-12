@@ -36,3 +36,12 @@ def test_disabled_preparation_and_apply_need_no_os_adapter():
                           clock=forbidden, cancelled=forbidden).status == "disabled"
     store = object.__new__(SimulationStore)
     assert store.apply(UpdatePolicy(), None, None, None, None, health_check=None, clock=forbidden).status == "disabled"
+
+
+def test_non_posix_helper_rejects_before_request_or_host_inspection(monkeypatch):
+    from backend.core.update import recovery_helper
+    monkeypatch.setattr(recovery_helper, "os", SimpleNamespace(name="nt"))
+    with pytest.raises(UpdateError, match="UPDATE_TRANSACTION_PLATFORM"):
+        recovery_helper.recover_request(None)
+    with pytest.raises(UpdateError, match="UPDATE_TRANSACTION_PLATFORM"):
+        recovery_helper.recover_in_helper(None, None, None, None)
