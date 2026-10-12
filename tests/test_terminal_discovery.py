@@ -149,6 +149,8 @@ def test_explicit_fake_bash_override_is_rejected_by_identity_resolver(tmp_path_f
     images(root)
     monkeypatch.setenv("GITGO_BASH_PATH", str(root / "bin/bash.exe"))
     monkeypatch.setattr(workspace_tools.sys, "platform", "win32")
+    # This Windows identity test runs on Unix too; never query a real registry.
+    monkeypatch.setattr("backend.core.terminal_launcher.git_install_roots", lambda: [])
     monkeypatch.setattr(executable_identity, "verify_git_bash", lambda _: {
         "verified": False, "message": "invalid publisher"})
     # Simulate Windows inventory without importing winreg on a Linux runner.

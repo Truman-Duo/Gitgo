@@ -6,7 +6,7 @@ from .permission_broker import matching_grant, arguments_digest
 from .operation_policy import decide_tool_operation
 
 
-def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeout, diagnostics):
+def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeout, diagnostics, runtime_metadata):
     catalog = ctx.artifacts.get("tool_catalog") or {}
     from .tool_surface import component_blocker
     blocker = component_blocker(ctx.process, spec, catalog)
@@ -31,7 +31,9 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeo
             return failed("AUTHORED_HOST_TIMEOUT", "The Host bridge exhausted its invocation time allowance")
         response = pipeline._execute_isolated("authored_host_python",
             {**inputs, "_workspace": str(ctx.workspace_path), "_dynamic_spec": spec, "_host_results": journal},
-            remaining, cancellation_event=ctx.cancellation, diagnostics=diagnostics)
+            remaining, cancellation_event=ctx.cancellation, diagnostics=diagnostics, runtime_metadata=runtime_metadata)
+        if runtime_metadata.get("cleanup", {}).get("complete") is False:
+            return failed("PROCESS_CLEANUP_INCOMPLETE", "Bridge cleanup is unconfirmed; no further Host calls may start")
         if not isinstance(response, dict) or type(response.get("bridge_version")) is not int or response["bridge_version"] != 1:
             return failed("AUTHORED_HOST_PROTOCOL_FAILED", str(response.get("error") or "invalid bridge frame")
                 if isinstance(response, dict) else "invalid bridge frame")

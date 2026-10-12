@@ -89,6 +89,7 @@ class ToolPipeline:
         } if isinstance(supplied_args, dict) else supplied_args
 
         start = time.time()
+        runtime_metadata: dict = {}
         from .composite_runtime import call_key, state_for
         continuation_key = call_key(tool_call, execution_id, call_index)
         resume_state = None
@@ -465,7 +466,7 @@ class ToolPipeline:
                         if dynamic_spec.get("execution_mode") == "authored_host_python":
                             from .authored_runtime import run
                             result_data = run(self, tool, args, ctx, execution_id, call_index, continuation_key, dynamic_spec,
-                                timeout=effective_timeout, diagnostics=runner_diagnostics)
+                                timeout=effective_timeout, diagnostics=runner_diagnostics, runtime_metadata=runtime_metadata)
                         else:
                             result_data = self._execute_isolated(
                                 (
@@ -477,6 +478,7 @@ class ToolPipeline:
                                 effective_timeout,
                                 cancellation_event=ctx.cancellation,
                                 diagnostics=runner_diagnostics,
+                                runtime_metadata=runtime_metadata,
                             )
                 else:
                     result_data = self._execute_composite_plan(
@@ -489,6 +491,7 @@ class ToolPipeline:
                     {**args, "_workspace": str(ctx.workspace_path)}, effective_timeout,
                     cancellation_event=ctx.cancellation,
                     diagnostics=runner_diagnostics,
+                    runtime_metadata=runtime_metadata,
                 )
             else:
                 result_data = tool.execute(args)
@@ -516,7 +519,7 @@ class ToolPipeline:
                 "effect_state": effect_state,
                 "invocation_path": invocation_path,
             })
-            return self._attach_runner_diagnostics(result, runner_diagnostics)
+            return self._attach_runtime_cleanup(self._attach_runner_diagnostics(result, runner_diagnostics), runtime_metadata, ctx)
         except Exception as exc:
             self._write_invocation_state(
                 ctx, tool, tool_name, execution_id, call_index,
@@ -542,14 +545,14 @@ class ToolPipeline:
                 "effect_state": "ambiguous",
                 "invocation_path": invocation_path,
             })
-            return self._attach_runner_diagnostics(result, runner_diagnostics)
+            return self._attach_runtime_cleanup(self._attach_runner_diagnostics(result, runner_diagnostics), runtime_metadata, ctx)
 
         self._publish_tool_notices(ctx, tool_name, execution_id, call_index, result_data)
         if isinstance(result_data, dict) and result_data.get("_suspended"):
             self._write_invocation_state(ctx, tool, tool_name, execution_id, call_index,
                 state="awaiting_user", effect_state="partial", path=invocation_path)
-            return ToolResult(tool_name=tool_name, execution_id=execution_id,
-                call_index=call_index, suspended=True, data={"execution_state": "awaiting_user"})
+            return self._attach_runtime_cleanup(ToolResult(tool_name=tool_name, execution_id=execution_id,
+                call_index=call_index, suspended=True, data={"execution_state": "awaiting_user"}), runtime_metadata, ctx)
 
         business_error = ""
         if isinstance(result_data, dict):
@@ -661,7 +664,7 @@ class ToolPipeline:
             self._attach_child_lineage(result.receipt, result_data)
             if not getattr(tool, "composite_spec", None):
                 self._record_dependency_observation(ctx, tool_name, args, result_data)
-            return self._attach_runner_diagnostics(result, runner_diagnostics)
+            return self._attach_runtime_cleanup(self._attach_runner_diagnostics(result, runner_diagnostics), runtime_metadata, ctx)
 
         # Step 5: after_hooks + format_result
         duration = (time.time() - start) * 1000
@@ -710,6 +713,7 @@ class ToolPipeline:
             artifacts={"tool_result": spill} if spill else {},
             receipt=receipt,
         )
+        result = self._attach_runtime_cleanup(result, runtime_metadata, ctx)
 
         result = self._attach_runner_diagnostics(result, runner_diagnostics)
         ctx.event_bus.emit(
@@ -725,6 +729,27 @@ class ToolPipeline:
             )
         )
 
+        return result
+
+    @classmethod
+    def _attach_runtime_cleanup(cls, result, runtime_metadata, ctx):
+        """Keep supervisor facts separate from handler data and effect success."""
+        cleanup = runtime_metadata.get("cleanup")
+        if not isinstance(cleanup, dict):
+            return result
+        issues = cleanup.get("issues", [])
+        if not isinstance(issues, list):
+            issues = ["cleanup_report_invalid"]
+        report = {"complete": cleanup.get("complete") is True and not issues,
+                  "mode": str(cleanup.get("mode") or "unknown")[:80],
+                  "issues": [str(issue)[:120] for issue in issues[:16]]}
+        result.receipt["runtime_cleanup"] = report
+        result.diagnostics["runtime_cleanup"] = report
+        if not report["complete"]:
+            cls._publish_tool_notices(ctx, result.tool_name, result.execution_id, result.call_index,
+                {"warnings": [{"code": "PROCESS_CLEANUP_INCOMPLETE",
+                               "message": "Process cleanup was not fully confirmed (" + report["mode"] +
+                                   "). Completed effects are retained; inspect remaining processes before repeating the operation."}]})
         return result
 
     @staticmethod
@@ -854,7 +879,7 @@ class ToolPipeline:
 
     def _execute_isolated(self, tool_name: str, args: dict,
                           timeout: float = 60.0,
-                          cancellation_event=None, diagnostics=None) -> dict:
+                          cancellation_event=None, diagnostics=None, runtime_metadata=None) -> dict:
         """通过 ProcessToolRunner 在子进程中执行工具。
 
         子进程崩溃→异常传播到 Step 4 的 catch 块→被 classify_tool_error 捕获。
@@ -869,13 +894,15 @@ class ToolPipeline:
         if diagnostics is not None:
             diagnostics.update(capture_runner_diagnostics(result))
         error = safe_runner_text(getattr(result, "error", "") or "")
+        if runtime_metadata is not None and isinstance(getattr(result, "cleanup", None), dict):
+            runtime_metadata["cleanup"] = dict(result.cleanup)
         if not result.success:
             if "cancelled" in error.lower():
                 raise ToolExecutionCancelled(error,
                     effect_state=getattr(result, "effect_state", ""))
             if result.timed_out:
                 raise TimeoutError(
-                    f"Tool '{tool_name}' timed out after {timeout}s"
+                    result.error or f"Tool '{tool_name}' timed out after {timeout}s"
                 )
             raise RuntimeError(error or f"Tool '{tool_name}' failed")
         return result.data or {}

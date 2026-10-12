@@ -366,7 +366,7 @@ def apply_patch(args: dict) -> dict:
 
 
 def exec_command(args: dict) -> dict:
-    from backend.core.process_control import attach_kill_job, close_job, creation_flags
+    from backend.core.process_control import attach_kill_job, close_job, creation_flags, spawn_managed
     workspace = _workspace(args)
     cwd = _confined_path(workspace, args.get("cwd", "."), must_exist=True,
                          allowed_roots=_allowed_roots(args))
@@ -405,7 +405,7 @@ def exec_command(args: dict) -> dict:
     env = _safe_shell_environment()
     env["GITGO_AGENT_TOOL"] = "1"
     try:
-        started = subprocess.Popen(
+        started = spawn_managed(
             argv, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env, creationflags=creation_flags(),
             start_new_session=sys.platform != "win32",
@@ -419,7 +419,8 @@ def exec_command(args: dict) -> dict:
             terminate=lambda: _kill_tree(started, job_handle))
     except subprocess.TimeoutExpired:
         _kill_tree(started, job_handle)
-        return {"error": "COMMAND_TIMEOUT", "timeout": timeout, "argv": argv}
+        return {"error": "COMMAND_TIMEOUT", "timeout": timeout, "argv": argv,
+                "cleanup": getattr(started, "_gitgo_cleanup", {})}
     except (OSError, ValueError) as exc:
         _kill_tree(started, job_handle)
         return {"error": "COMMAND_ERROR", "detail": str(exc), "argv": argv}
@@ -432,6 +433,7 @@ def exec_command(args: dict) -> dict:
         "stdout": stdout,
         "stderr": stderr,
         "exit_code": started.returncode,
+        "cleanup": getattr(started, "_gitgo_cleanup", {}),
         "success": started.returncode == 0,
         "truncated": truncated,
     }
@@ -512,7 +514,7 @@ def shell_script(args: dict) -> dict:
     ProcessToolRunner applies native OS isolation before loading this handler;
     the exact script remains the unit the user reviewed and approved.
     """
-    from backend.core.process_control import attach_kill_job, close_job, creation_flags
+    from backend.core.process_control import attach_kill_job, close_job, creation_flags, spawn_managed
 
     workspace = _workspace(args)
     cwd = _confined_path(
@@ -581,7 +583,7 @@ def shell_script(args: dict) -> dict:
                 assert_identity_unchanged(resolution["identity"])
             except (OSError, ValueError) as exc:
                 return {"error": "BASH_IDENTITY_UNVERIFIED", "detail": str(exc)}
-        started = subprocess.Popen(
+        started = spawn_managed(
             shell_argv,
             cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", env=env,
@@ -595,7 +597,8 @@ def shell_script(args: dict) -> dict:
         if started is not None:
             _kill_tree(started, job_handle)
             job_handle = None
-        return {"error": "SHELL_TIMEOUT", "timeout": timeout}
+        return {"error": "SHELL_TIMEOUT", "timeout": timeout,
+                "cleanup": getattr(started, "_gitgo_cleanup", {})}
     except (OSError, ValueError) as exc:
         if started is not None:
             _kill_tree(started, job_handle)
@@ -609,6 +612,7 @@ def shell_script(args: dict) -> dict:
         "cwd": _rel(workspace, cwd),
         "purpose": purpose,
         "shell": shell,
+        "cleanup": getattr(started, "_gitgo_cleanup", {}),
         "stdout": stdout[-_MAX_OUTPUT:],
         "stderr": stderr[-_MAX_OUTPUT:],
         "exit_code": started.returncode,

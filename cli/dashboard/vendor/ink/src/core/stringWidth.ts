@@ -6,7 +6,7 @@ import { getGraphemeSegmenter } from './utils/grapheme.js'
 const EMOJI_REGEX = emojiRegex()
 
 /**
- * Fallback JavaScript implementation of stringWidth when Bun.stringWidth is not available.
+ * Shared JavaScript implementation for Bun and Node terminal layout.
  *
  * Get the display width of a string as it would appear in a terminal.
  *
@@ -75,13 +75,11 @@ function stringWidthJavaScript(str: string): number {
     }
 
     // Calculate width for non-emoji graphemes
-    // For grapheme clusters (like Devanagari conjuncts with virama+ZWJ), only count
-    // the first non-zero-width character's width since the cluster renders as one glyph
+    // Non-emoji conjuncts still occupy the cells of each printable base.
     for (const char of grapheme) {
       const codePoint = char.codePointAt(0)!
       if (!isZeroWidth(codePoint)) {
         width += eastAsianWidth(codePoint, { ambiguousAsWide: false })
-        break
       }
     }
   }
@@ -202,21 +200,5 @@ function isZeroWidth(codePoint: number): boolean {
   return false
 }
 
-// Note: complex-script graphemes like Devanagari क्ष (ka+virama+ZWJ+ssa) render
-// as a single ligature glyph but occupy 2 terminal cells (wcwidth sums the base
-// consonants). Bun.stringWidth=2 matches terminal cell allocation, which is what
-// we need for cursor positioning — the JS fallback's grapheme-cluster width of 1
-// would desync Ink's layout from the terminal.
-//
-// Bun.stringWidth is resolved once at module scope rather than checked on every
-// call — typeof guards deopt property access and this is a hot path (~100k calls/frame).
-const bunStringWidth =
-  typeof Bun !== 'undefined' && typeof Bun.stringWidth === 'function'
-    ? Bun.stringWidth
-    : null
-
-const BUN_STRING_WIDTH_OPTS = { ambiguousIsNarrow: true } as const
-
-export const stringWidth: (str: string) => number = bunStringWidth
-  ? str => bunStringWidth(str, BUN_STRING_WIDTH_OPTS)
-  : stringWidthJavaScript
+// Runtime-specific width calculations can move the caret on identical input.
+export const stringWidth: (str: string) => number = stringWidthJavaScript

@@ -21,9 +21,13 @@ class LocalFileAdapter(FileAdapter):
 
     # ── 路径解析 ───────────────────────────────────────────────
 
+    def _lexical(self, path: str) -> Path:
+        """Return the addressed path without following its final symlink."""
+        return self._root / path if path else self._root
+
     def _resolve(self, path: str) -> Path:
         """将相对路径解析为绝对路径。"""
-        return (self._root / path).resolve() if path else self._root
+        return self._lexical(path).resolve()
 
     # ── 文件查询 ───────────────────────────────────────────────
 
@@ -37,8 +41,9 @@ class LocalFileAdapter(FileAdapter):
         return self._resolve(path).is_dir()
 
     def is_symlink(self, path: str) -> bool:
-        # Inspect the directory entry, before resolve follows the link.
-        return (self._root / path).is_symlink()
+        # ``resolve`` follows the link and would make every valid symlink look
+        # like its regular-file/directory target.
+        return self._lexical(path).is_symlink()
 
     def stat(self, path: str) -> os.stat_result:
         return self._resolve(path).stat()

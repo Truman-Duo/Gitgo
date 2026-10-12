@@ -15,6 +15,7 @@ INTERNAL_ROLE_FLAG = "--gitgo-internal-role"
 DAEMON_ROLE = "daemon"
 TOOL_RUNNER_ROLE = "tool-runner"
 PYTHON_ROLE = "python"
+CREDENTIAL_CLEANUP_ROLE = "credential-cleanup"
 
 
 def is_frozen_runtime() -> bool:

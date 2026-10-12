@@ -7,6 +7,7 @@ import runpy
 import sys
 
 from backend.core.child_process import (
+    CREDENTIAL_CLEANUP_ROLE,
     DAEMON_ROLE,
     INTERNAL_ROLE_FLAG,
     PYTHON_ROLE,
@@ -79,6 +80,16 @@ def _run_python_role(argv: list[str]) -> int:
     raise SystemExit(f"unsupported packaged Python arguments: {values!r}")
 
 
+def _run_credential_cleanup_role(argv: list[str]) -> int:
+    """Remove OS-backed provider credentials during a safe uninstall."""
+    if argv:
+        raise SystemExit(f"{CREDENTIAL_CLEANUP_ROLE} does not accept arguments")
+    from backend.core.llm_config import LLMConfigManager
+
+    LLMConfigManager._secret_store().clear()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     role = _role_arguments(values)
@@ -94,6 +105,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if name == PYTHON_ROLE:
         return _run_python_role(role_argv)
+    if name == CREDENTIAL_CLEANUP_ROLE:
+        return _run_credential_cleanup_role(role_argv)
+    if name == "unix-scope":
+        if len(role_argv) != 1 or not role_argv[0].isdigit():
+            raise SystemExit("unix-scope requires one owned control descriptor")
+        from backend.core.unix_process_scope import main as scope_main
+        return scope_main(role_argv)
     raise SystemExit(f"unknown Gitgo internal role: {name}")
 
 

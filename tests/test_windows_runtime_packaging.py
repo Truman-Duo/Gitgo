@@ -47,7 +47,8 @@ def test_terminal_product_manifest_has_one_public_command_and_safe_uninstall():
     manifest = json.loads((root / "packaging" / "product.json").read_text(encoding="utf-8"))
     assert manifest["primary_command"] == "gitgo"
     assert isinstance(manifest["command_aliases"], list)
-    assert manifest["layout"]["native_host"].startswith("internal/")
+    assert manifest["layouts"]["windows"]["native_host"].startswith("internal/")
+    assert manifest["layouts"]["macos"]["native_host"].startswith("internal/")
     assert manifest["uninstall"]["remove_runtime_state"] is False
     assert manifest["uninstall"]["remove_project_directories"] is False
     assert manifest["uninstall"]["remove_project_gitgo_metadata"] is False

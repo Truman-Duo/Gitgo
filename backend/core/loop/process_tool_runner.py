@@ -35,6 +35,7 @@ class SubprocessResult:
     stderr: str = ""
     stderr_partial: bool = False
     effect_state: str = ""
+    cleanup: dict | None = None
 
 
 class ProcessToolRunner:
@@ -161,6 +162,7 @@ class ProcessToolRunner:
                     exit_code=0,
                     duration_ms=duration_ms,
                     stderr=stderr_str,
+                    cleanup=getattr(proc, "_gitgo_cleanup", None),
                 )
 
             except subprocess.TimeoutExpired:
@@ -168,12 +170,14 @@ class ProcessToolRunner:
                 self._kill_tree(proc)
                 return SubprocessResult(
                     success=False,
-                    error=f"tool '{tool_name}' timed out after {effective_timeout}s",
+                    error=f"tool '{tool_name}' timed out after {effective_timeout}s" +
+                          ("; detached descendant cleanup not confirmed" if not getattr(proc, "_gitgo_cleanup", {}).get("complete", True) else ""),
                     exit_code=-1,
                     duration_ms=duration_ms,
                     timed_out=True,
                     effect_state="ambiguous",
                     stderr=communication.stderr_snapshot(), stderr_partial=True,
+                    cleanup=getattr(proc, "_gitgo_cleanup", None),
                 )
 
         except SandboxDenied as exc:
@@ -206,6 +210,7 @@ class ProcessToolRunner:
                 stderr_partial=True,
                 exit_code=-1,
                 duration_ms=duration_ms,
+                cleanup=getattr(spawned, "_gitgo_cleanup", None),
             )
 
         finally:

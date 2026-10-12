@@ -87,3 +87,30 @@ def test_old_leaf_grant_does_not_suppress_new_permission(tmp_path_factory):
     assert result.suspended and calls == ['prefix']
     assert ctx.artifacts['nested_permission']['tool'] is replacement
     assert process.approval_grants[-1]['remaining_uses'] == 1
+
+
+@pytest.mark.parametrize('expiry', [float('nan'), float('inf'), 0])
+def test_invalid_continuation_expiry_never_replays_prefix(tmp_path_factory, expiry):
+    process, ctx, outer, leaf, calls = setup(tmp_path_factory)
+    call = {'id': 'call', 'name': outer.name, 'args': {}}
+    pipeline = ToolPipeline()
+    assert pipeline.execute(call, outer, ctx, 'execution').suspended
+    next(iter(process.runtime_preferences['composite_continuations'].values()))['expires_at'] = expiry
+    assert pipeline.execute(call, outer, ctx, 'execution').is_error
+    assert calls == ['prefix']
+
+
+def test_bridge_unconfirmed_cleanup_blocks_host_call(tmp_path_factory, monkeypatch):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner, SubprocessResult
+    process, ctx, _, _, calls = setup(tmp_path_factory)
+    spec, _ = definition(tmp_path_factory, ctx.artifacts['tool_catalog'])
+    tool = mounted_tool(spec)
+    process.tool_registry.add_scoped(tool.name)
+    cleanup = {'complete': False, 'mode': 'fixture', 'issues': ['supervisor_report_missing']}
+    monkeypatch.setattr(ProcessToolRunner, 'run', lambda *a, **kw: SubprocessResult(success=True,
+        data={'bridge_version': 1, 'state': 'needs_host_call', 'call_index': 0,
+              'tool_name': 'read_prefix', 'arguments': {}}, cleanup=cleanup))
+    result = ToolPipeline().execute({'name': tool.name, 'args': {}}, tool, ctx, 'execution')
+    assert result.is_error and not calls
+    assert result.data['error'] == 'PROCESS_CLEANUP_INCOMPLETE'
+    assert result.receipt['runtime_cleanup'] == cleanup

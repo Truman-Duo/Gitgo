@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
 import tempfile
@@ -13,6 +14,22 @@ import pytest
 from backend.adapters.local_file_adapter import LocalFileAdapter
 from backend.adapters.local_git_runner import LocalGitRunner
 from backend.core.storage import close_owned_storage
+
+
+class _TestSecretProtector:
+    """Deterministic, disk-safe protector that never touches an OS keychain."""
+
+    _PREFIX = b"gitgo-test-secret\0"
+
+    def protect(self, plaintext: str) -> str:
+        payload = self._PREFIX + plaintext.encode("utf-8")
+        return base64.b64encode(payload).decode("ascii")
+
+    def unprotect(self, ciphertext: str) -> str:
+        payload = base64.b64decode(ciphertext.encode("ascii"), validate=True)
+        if not payload.startswith(self._PREFIX):
+            raise ValueError("invalid test credential")
+        return payload[len(self._PREFIX):].decode("utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +49,9 @@ def isolate_default_gitgo_state(
         root = Path(state_dir)
         monkeypatch.setenv("GITGO_STATE_HOME", str(root / "state"))
         monkeypatch.setenv("GITGO_CONFIG_PATH", str(root / "config" / "config.json"))
+        monkeypatch.setenv("GITGO_LLM_CONFIG_PATH", str(root / "config" / "llm_config.json"))
+        monkeypatch.delenv("GITGO_LLM_SECRET_PATH", raising=False)
+        monkeypatch.setattr("backend.core.secret_store.default_secret_protector", lambda: _TestSecretProtector())
         try:
             yield
         finally:
@@ -41,7 +61,7 @@ def isolate_default_gitgo_state(
 @pytest.fixture
 def tmp_path_factory() -> Iterator[Path]:
     """创建临时目录，测试后自动清理。"""
-    with tempfile.TemporaryDirectory(prefix="gitgo_test_") as d:
+    with tempfile.TemporaryDirectory(prefix="gt_") as d:
         yield Path(d).resolve()
 
 

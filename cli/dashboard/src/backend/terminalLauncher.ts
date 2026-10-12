@@ -2,7 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdtempSync, unlinkSync, rmdirSync } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve, isAbsolute } from "node:path";
+import { basename, dirname, join, resolve, isAbsolute, posix, win32 } from "node:path";
 
 export type TerminalMode = "auto" | "current" | "windows_terminal" | "custom" |
   "wezterm" | "alacritty" | "conemu" | "mintty" | "git_bash" | "git_bash_console" | "gnome_terminal" | "konsole" | "xterm";
@@ -56,9 +56,11 @@ const DEFAULT_CONFIG: TerminalLauncherConfig = {
 export function globalConfigPath(
   environment: NodeJS.ProcessEnv = process.env,
   userHome = homedir(),
+  platform: NodeJS.Platform = process.platform,
 ): string {
+  const paths = platform === "win32" ? win32 : posix;
   const explicit = String(environment.GITGO_CONFIG_PATH || "").trim();
-  return explicit ? resolve(explicit) : join(userHome, ".gitgo", "config.json");
+  return explicit ? paths.resolve(explicit) : paths.join(userHome, ".gitgo", "config.json");
 }
 
 export function loadTerminalLauncherConfig(path = globalConfigPath()): TerminalLauncherConfig {
