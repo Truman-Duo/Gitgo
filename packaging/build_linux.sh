@@ -111,6 +111,7 @@ HOST_BUILD="$ROOT/build/terminal-host-linux-$ARCH"
   --output "$STAGE/product.json" \
   --shell-output "$STAGE/product.env"
 cp "$SCRIPT_DIR/linux/install.sh" "$STAGE/install.sh"
+cp "$SCRIPT_DIR/unix/installer-common.sh" "$STAGE/installer-common.sh"
 cp "$SCRIPT_DIR/linux/uninstall.sh" "$STAGE/uninstall.sh"
 cp "$ROOT/LICENSE.md" "$STAGE/LICENSE.md"
 chmod 755 "$STAGE/gitgo" "$STAGE/internal/gitgo-host/gitgo-host" "$STAGE/install.sh" "$STAGE/uninstall.sh"

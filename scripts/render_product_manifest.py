@@ -28,6 +28,7 @@ def render_shell_contract(manifest: dict) -> str:
     """Render installer fields as a shell-safe, sourceable contract."""
     aliases = manifest.get("command_aliases") or []
     values = {
+        "GITGO_PRODUCT_ID": str(manifest.get("product_id") or ""),
         "GITGO_PRODUCT_PLATFORM": str(manifest.get("platform") or ""),
         "GITGO_PRODUCT_ARCHITECTURE": str(manifest.get("architecture") or ""),
         "GITGO_PRODUCT_COMMAND": str(manifest.get("primary_command") or ""),

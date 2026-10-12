@@ -122,6 +122,7 @@ HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
   --architecture "$ARCH" \
   --output "$STAGE/product.json"
 cp "$SCRIPT_DIR/macos/install.sh" "$STAGE/install.sh"
+cp "$SCRIPT_DIR/unix/installer-common.sh" "$STAGE/installer-common.sh"
 cp "$SCRIPT_DIR/macos/uninstall.sh" "$STAGE/uninstall.sh"
 cp "$ROOT/LICENSE.md" "$STAGE/LICENSE.md"
 chmod 755 "$STAGE/gitgo" "$STAGE/internal/gitgo-host/gitgo-host" \

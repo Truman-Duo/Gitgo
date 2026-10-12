@@ -80,6 +80,7 @@ def test_linux_install_upgrade_and_safe_uninstall(tmp_path_factory):
     for name in ("install.sh", "uninstall.sh"):
         shutil.copy2(ROOT / "packaging" / "linux" / name, release / name)
         (release / name).chmod(0o755)
+    shutil.copy2(ROOT / "packaging/unix/installer-common.sh", release / "installer-common.sh")
 
     environment = {
         **{
