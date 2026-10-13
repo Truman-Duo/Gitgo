@@ -157,12 +157,13 @@ def profile_paths() -> tuple[Path, ...]:
 
 
 def protected_install_paths() -> tuple[Path, ...]:
-    """Read only bounded registered workspace paths; never migrate user config."""
+    """Read bounded local repository paths in both formats; never migrate config."""
     import json
     from backend.core.config import ConfigManager
     paths = list(profile_paths())
-    config = ConfigManager.default_path()
-    if config.exists() or config.is_symlink():
+    config = ConfigManager.find_config()
+    if config is not None:
+        paths.append(config.parent.resolve())
         import stat
         fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as handle:
@@ -171,15 +172,46 @@ def protected_install_paths() -> tuple[Path, ...]:
                     or info.st_uid != os.getuid() or info.st_mode & 0o022):
                 reject("UPDATE_PROTECTED_PATHS", "Existing profile cannot be safely inspected")
             value = json.loads(handle.read(256 * 1024 + 1).decode("utf-8"))
-        if type(value) is not dict or type(value.get("projects", [])) is not list or len(value.get("projects", [])) > 128:
+        if type(value) is not dict:
             reject("UPDATE_PROTECTED_PATHS", "Existing workspace protection list is unavailable")
-        for project in value.get("projects", []):
-            if type(project) is not dict or type(project.get("workspace_path")) is not str:
-                reject("UPDATE_PROTECTED_PATHS", "Registered workspace path is invalid")
-            path = Path(project["workspace_path"]).expanduser()
-            if not path.is_absolute(): reject("UPDATE_PROTECTED_PATHS", "Workspace protection requires absolute paths")
-            paths.append(path.resolve())
-    return tuple(dict.fromkeys(paths))
+        # Mirror the existing schema's read semantics without invoking its
+        # load/save/migration or any provider/remote access implementation.
+        projects = value.get("projects", [value] if "workspace_path" in value or "backup_path" in value else [])
+        if type(projects) is not list or len(projects) > 128:
+            reject("UPDATE_PROTECTED_PATHS", "Existing workspace protection list is unavailable")
+        for project in projects:
+            paths.extend(_local_repository_paths(project))
+    result = tuple(dict.fromkeys(paths))
+    if len(result) > 256: reject("UPDATE_PROTECTED_PATHS", "Protected repository list exceeds its limit")
+    return result
+
+
+def _local_repository_paths(project):
+    if type(project) is not dict: reject("UPDATE_PROTECTED_PATHS", "Registered project is invalid")
+    values = []
+    if "workspace_path" in project or "backup_path" in project:
+        values.extend((project.get("workspace_path", project.get("workspace", "")), project.get("backup_path", "")))
+    else:
+        for role in ("workspace", "release", "trial"):
+            node = project.get(role)
+            if node is None: continue
+            if type(node) is not dict: reject("UPDATE_PROTECTED_PATHS", "Registered repository node is invalid")
+            access = node.get("file_access") or {}
+            if type(access) is not dict: reject("UPDATE_PROTECTED_PATHS", "Registered repository access is invalid")
+            kind = access.get("kind", "local")
+            # The current model treats unrecognized kinds as local. Do not let
+            # such a declaration omit a filesystem path from protection.
+            if kind not in ("ssh", "smb"): values.append(access.get("path", ""))
+            if kind == "ssh": values.append(access.get("key_path", ""))
+    paths = []
+    for raw in values:
+        if type(raw) is not str or len(raw) > 4096 or any(ord(c) < 32 for c in raw):
+            reject("UPDATE_PROTECTED_PATHS", "Registered local repository path is invalid")
+        if not raw: continue
+        path = Path(raw).expanduser()
+        if not path.is_absolute(): reject("UPDATE_PROTECTED_PATHS", "Repository protection requires absolute paths")
+        paths.append(path.resolve())
+    return paths
 
 
 def _new_path(raw: str) -> Path:

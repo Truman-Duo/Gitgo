@@ -258,6 +258,41 @@ def test_frontend_keeper_holds_real_lease_until_input_eof(managed, monkeypatch, 
     with pytest.raises(UpdateError): installation.frontend_lease("not-a-nonce")
 
 
+@pytest.mark.parametrize("format", ["modern", "legacy", "single-legacy"])
+def test_protection_reads_all_local_repository_roles_without_migrating_config(tmp_path_factory, monkeypatch, format):
+    from backend.core.config import ConfigManager, Config, ProjectConfig
+    from backend.models import RepoNode, FileAccess
+    base = tmp_path_factory.resolve()
+    workspace, release, trial = (base / name for name in ("workspace", "release", "trial"))
+    config = ConfigManager.default_path()
+    if format == "modern":
+        ConfigManager.save(Config(projects=[ProjectConfig(name="test",
+            workspace=RepoNode(file_access=FileAccess(path=str(workspace))),
+            release=RepoNode(file_access=FileAccess(path=str(release))),
+            trial=RepoNode(file_access=FileAccess(path=str(trial))))]))
+    else:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        value = {"workspace_path": str(workspace), "backup_path": str(release)}
+        config.write_text(json.dumps({"projects": [value]} if format == "legacy" else value))
+    before = config.read_bytes()
+    monkeypatch.setattr(ConfigManager, "load", lambda *_args, **_kwargs: pytest.fail("protection must not migrate/load config"))
+    paths = installation.protected_install_paths()
+    assert workspace in paths and release in paths
+    if format == "modern": assert trial in paths
+    assert config.read_bytes() == before
+    assert not (config.parent / "migrations").exists()
+
+
+def test_protection_does_not_treat_remote_paths_as_local_but_retains_local_ssh_key(tmp_path_factory):
+    base = tmp_path_factory.resolve()
+    key = base / "key"
+    paths = installation._local_repository_paths({"workspace": {"file_access": {"kind": "local", "path": str(base / "work")}},
+        "release": {"file_access": {"kind": "ssh", "path": "/", "key_path": str(key)}},
+        "trial": {"file_access": {"kind": "smb", "path": "relative-remote-path"}}})
+    assert paths == [base / "work", key]
+    with pytest.raises(UpdateError): installation._local_repository_paths({"workspace": {"file_access": {"kind": "unknown", "path": "relative-local"}}})
+
+
 @pytest.mark.skipif(not os.environ.get("GITGO_MANAGED_TEST_STAGE"), reason="Requires an explicitly built new managed-capable Unix package")
 def test_actual_frozen_managed_install_can_boot_without_source_or_python(tmp_path_factory):
     base = tmp_path_factory.resolve()
@@ -280,6 +315,8 @@ def test_actual_frozen_managed_install_can_boot_without_source_or_python(tmp_pat
     assert result.returncode == 0, result.stderr
     assert "Gitgo " + store._ledger()["current"]["version"] in result.stdout
     assert store.recover().status == "idle"
+
+
     assert (protected / "sentinel").read_bytes() == b"keep"
     assert not list(profile.iterdir())
 
@@ -324,3 +361,78 @@ def test_actual_frozen_managed_install_can_boot_without_source_or_python(tmp_pat
             assert not list(profile.iterdir())
     finally: atomic_control(root / "control/registration.json", registration)
     assert store.recover().status == "idle"
+
+    # Actual ordinary Host initialization also retains the installation lease.
+    # Only local, read-only product/status operations; never a model request.
+    host = subprocess.Popen([str(root / "active/internal/gitgo-host/gitgo-host")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    buffered = bytearray()
+    def event():
+        deadline = time.monotonic() + 60
+        with selectors.DefaultSelector() as selector:
+            selector.register(host.stdout, selectors.EVENT_READ)
+            while b"\n" not in buffered:
+                assert len(buffered) <= 65536, "Host protocol report exceeded its limit"
+                assert selector.select(max(0, deadline - time.monotonic())), "actual Host handshake timed out"
+                chunk = os.read(host.stdout.fileno(), 4096)
+                assert chunk, "actual Host exited before its protocol report"
+                buffered.extend(chunk)
+        line, _, remainder = buffered.partition(b"\n")
+        buffered[:] = remainder
+        return json.loads(line)
+    try:
+        assert event()["type"] == "host_started"
+        assert store.recover().status == "busy"
+        for operation in ("product.version", "update.status"):
+            host.stdin.write((json.dumps({"protocol_version": 1, "type": "request", "request_id": operation,
+                "operation": operation, "arguments": {}}) + "\n").encode()); host.stdin.flush()
+            response = event()
+            assert response["request_id"] == operation and "error" not in response
+            assert response["result"]["version"] == store._ledger()["current"]["version"]
+            if operation == "update.status":
+                assert response["result"]["can_apply"] is False
+                assert "MANAGED_INSTALLATION_REQUIRED" not in response["result"]["blockers"]
+        host.stdin.close(); host.wait(timeout=30)
+        assert host.returncode == 0
+    finally:
+        if host.poll() is None: host.kill(); host.wait(timeout=10)
+        host.stdout.close(); host.stderr.close()
+    assert store.recover().status == "idle"
+    assert not (profile / "providers.json").exists() and not (profile / "secrets.json").exists()
+    assert (protected / "sentinel").read_bytes() == b"keep"
+
+
+@pytest.mark.skipif(not os.environ.get("GITGO_MANAGED_TEST_STAGE"), reason="Requires an explicitly built new managed-capable Unix package")
+def test_actual_frozen_installer_preserves_modern_registered_projects_and_profile(tmp_path_factory):
+    base = tmp_path_factory.resolve()
+    profile = base / "profile"; profile.mkdir(mode=0o700)
+    work, release, trial = (base / name for name in ("work", "release", "trial"))
+    for path in (work, release, trial):
+        path.mkdir(mode=0o700); (path / "sentinel").write_bytes(b"existing project data")
+    config = profile / "config.json"
+    config.write_text(json.dumps({"projects": [{"name": "existing", **{
+        name: {"file_access": {"kind": "local", "path": str(path)}}
+        for name, path in (("workspace", work), ("release", release), ("trial", trial))}}]}))
+    config.chmod(0o600)
+    before = config.read_bytes()
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(profile), "TMPDIR": str(base),
+        "GITGO_CONFIG_PATH": str(config), "GITGO_STATE_HOME": str(profile / "state"),
+        "GITGO_LLM_CONFIG_PATH": str(profile / "providers.json"), "GITGO_LLM_SECRET_PATH": str(profile / "secrets.json")}
+    stage = Path(os.environ["GITGO_MANAGED_TEST_STAGE"]).resolve(strict=True)
+    bins = base / "commands"
+    rejected_root = release / "unsafe-install"
+    result = subprocess.run(["/bin/bash", str(stage / "install.sh"), "--managed", "--no-path-update",
+        "--install-root", str(rejected_root), "--bin-dir", str(bins)], capture_output=True, text=True, timeout=60, env=env)
+    assert result.returncode != 0
+    assert not rejected_root.exists() and not bins.exists()
+    root = base / "managed"
+    result = subprocess.run(["/bin/bash", str(stage / "install.sh"), "--managed", "--no-path-update",
+        "--install-root", str(root), "--bin-dir", str(bins)], capture_output=True, text=True, timeout=120, env=env)
+    assert result.returncode == 0, result.stderr + result.stdout
+    store = open_managed(root)
+    assert all(str(path) in store.registration["protected_paths"] for path in (work, release, trial))
+    result = subprocess.run([str(root / "active/gitgo"), "--runtime-diagnostics"], capture_output=True, text=True, timeout=60, env=env)
+    assert result.returncode == 0, result.stderr
+    assert config.read_bytes() == before
+    assert sorted(path.name for path in profile.iterdir()) == ["config.json"]
+    assert all((path / "sentinel").read_bytes() == b"existing project data" for path in (work, release, trial))
