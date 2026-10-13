@@ -4,9 +4,9 @@
 
 ## 范围
 
-默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 2。构建时需要选择 `--update-evidence`。旧包（含此前 API 1）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
+默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 3。构建时需要选择 `--update-evidence`。旧包（含此前 API 1/2）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
 
-该模式不支持应用更新或回滚。`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。正式发行配置与应用交接/健康/平台验收仍需完成；不能把管理安装或下载成功当作更新验收通过。详见[手动更新准备](update-preparation.md)。
+`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 3 增加绑定启动会话的确认/退出/事务交接，仅在受支持的平台和清理证明完整时允许。macOS 不满足清理条件，Windows 无管理适配；Linux 尚待实机验收。主动回滚尚未开放，不能把管理安装或下载成功当作更新验收通过。详见[手动更新准备与交接](update-preparation.md)。
 
 ## 布局与唯一权威
 
@@ -19,7 +19,7 @@ installation/
   control/operation.lock
   control/runtime.lock
   control/preparation.lock        # 固定 inode 的检查/下载锁
-  control/preparation/            # 私有签名缓存、已校验包；从不执行
+  control/preparation/            # 私有签名缓存、已校验包与会话请求；不从此执行
   active/                         # 实际 Dashboard、Host、脚本和组件
   transactions/                   # 已记录候选/旧版/失败版本
 ```
@@ -64,4 +64,4 @@ installation/
 
 可显式提供 `GITGO_MANAGED_TEST_STAGE` 指向新构建的 managed-capable staging，运行实际冻结安装与启动测试。未提供工件时明确跳过。测试只使用新建的私有目录、保护哨兵和隔离资料，不安装到日常目录，不调用付费模型。
 
-尚需完成应用更新的确认/退出交接与稳定 helper 替换、正式签名发行配置、两个真实版本切换/失败恢复、Windows ACL/运行锁适配、Linux 原生验收，以及正式终端、断电和清理完整性验收。应用更新保持不可用直到这些条件满足；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。
+确认/退出交接已接入固定 bootstrap，准备锁忙时普通启动仍可继续，只是不提供本次会话的更新交接。尚需正式签名发行配置、两个真实版本切换/失败恢复、Windows ACL/运行锁适配、Linux 原生验收，以及正式终端、断电和清理完整性验收。不能据此启用正式发行更新；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。

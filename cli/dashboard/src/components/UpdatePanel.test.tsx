@@ -11,14 +11,14 @@ const sample = {schema_version: 1, product_id: "gitgo-terminal", version: "1.0.0
   blockers: ["MANAGED_INSTALLATION_REQUIRED"]};
 const wait = () => new Promise(resolve => setTimeout(resolve, 45));
 
-function mount(client: BackendClient, onDismiss: () => void) {
+function mount(client: BackendClient, onDismiss: () => void, onUpdateExit?: () => Promise<void>) {
   const stdin: any = new PassThrough();
   stdin.isTTY = true; stdin.setRawMode = () => stdin; stdin.ref = () => stdin; stdin.unref = () => stdin;
   const stdout: any = new PassThrough(); stdout.isTTY = false; stdout.columns = 80; stdout.rows = 24;
   const stderr: any = new PassThrough();
   let text = "";
   stdout.on("data", (chunk: Buffer) => {text += chunk.toString();}); stderr.on("data", () => {});
-  const root = renderSync(<InputProvider><UpdatePanel client={client} cols={80} onDismiss={onDismiss}/></InputProvider>,
+  const root = renderSync(<InputProvider><UpdatePanel client={client} cols={80} onDismiss={onDismiss} onUpdateExit={onUpdateExit}/></InputProvider>,
     {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
   return {stdin, text: () => text, close() {
     root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();
@@ -78,6 +78,51 @@ const idle = {schema_version: 2, product_id: "gitgo-terminal", version: "1.0.0-a
 const candidate = {candidate_id: "a".repeat(64), version: "1.0.0-alpha.3", release_id: "release-3", bytes: 4096, channel: "stable"};
 const available = {...idle, status: "available", can_download: true, latest_version: candidate.version, candidate};
 const prepared = {...available, status: "downloaded", can_download: false};
+
+describe("confirmed updater handoff", () => {
+  test("separate confirmation and exact response are required before shutdown", async () => {
+    const calls: string[] = []; let exits = 0;
+    const fixture = mount({ready: true, close() {}, async callTool(operation) {
+      calls.push(operation);
+      return operation === "update.request_apply"
+        ? {schema_version: 1, status: "exit_required", channel: "stable", candidate_id: candidate.candidate_id, exit_code: 75}
+        : {...prepared, schema_version: 3, can_request_apply: true};
+    }}, () => {}, async () => {exits++;});
+    try {
+      await wait(); fixture.stdin.write("\r"); await wait(); expect(calls).toHaveLength(1);
+      fixture.stdin.write("a"); await wait(); expect(calls).toHaveLength(1);
+      expect(fixture.text()).toContain("Close this Gitgo session");
+      fixture.stdin.write("n"); await wait(); expect(exits).toBe(0);
+      fixture.stdin.write("a"); await wait(); fixture.stdin.write("\r"); await wait();
+      fixture.stdin.write("\r"); await wait();
+      expect(calls.filter(call => call === "update.request_apply")).toHaveLength(1);
+      expect(exits).toBe(1);
+    } finally {fixture.close();}
+  });
+  test("cancelled late acknowledgement never triggers shutdown", async () => {
+    let acknowledge!: (value: any) => void; let exits = 0;
+    const fixture = mount({ready: true, close() {}, callTool(operation) {
+      if (operation === "update.request_apply") return new Promise(resolve => {acknowledge = resolve;});
+      return Promise.resolve(operation === "update.cancel" ? {cancelled: true} : {...prepared, schema_version: 3, can_request_apply: true});
+    }}, () => {}, async () => {exits++;});
+    try {
+      await wait(); fixture.stdin.write("a"); await wait(); fixture.stdin.write("\r"); await wait();
+      fixture.stdin.write("x"); await wait();
+      acknowledge({schema_version: 1, status: "exit_required", channel: "stable", candidate_id: candidate.candidate_id, exit_code: 75});
+      await wait(); expect(exits).toBe(0);
+    } finally {fixture.close();}
+  });
+  test("an unsupported launcher cannot request application", async () => {
+    const calls: string[] = [];
+    const fixture = mount({ready: true, close() {}, async callTool(operation) {
+      calls.push(operation); return {...prepared, schema_version: 3, can_request_apply: true};
+    }}, () => {});
+    try {
+      await wait(); fixture.stdin.write("a\r"); await wait(); expect(calls).toHaveLength(1);
+      expect(fixture.text()).toContain("Restart/update is unavailable");
+    } finally {fixture.close();}
+  });
+});
 
 describe("manual update preparation UI", () => {
   test("opens offline, explicitly checks, and requires separate download confirmation", async () => {

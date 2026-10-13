@@ -181,12 +181,15 @@ class UpdatePreparationService:
             return legacy_status()
         _, current, _ = self._local(store, channel)
         configuration = installed_release_policy(store)
-        result = {"schema_version": 2, "product_id": "gitgo-terminal", "version": current.version,
+        from .handoff import request_available, platform_ready
+        result = {"schema_version": 3, "product_id": "gitgo-terminal", "version": current.version,
             "status": "unconfigured", "enabled": False, "automatic_check": False, "channel": channel,
             "can_check": configuration is not None and channel in configuration.channels,
-            "can_download": False, "can_apply": False,
-            "blockers": ["UPDATE_HANDOFF_REQUIRED", "PLATFORM_ACCEPTANCE_REQUIRED"],
+            "can_download": False, "can_apply": False, "can_request_apply": False,
+            "blockers": ["PLATFORM_ACCEPTANCE_REQUIRED"],
             "candidate": None, "latest_version": None}
+        if not request_available(store): result["blockers"].append("UPDATE_HANDOFF_REQUIRED")
+        if not platform_ready(store): result["blockers"].append("UPDATE_SCOPE_UNAVAILABLE")
         if not result["can_check"]:
             result["blockers"].insert(0, "RELEASE_TRUST_REQUIRED")
             return result
@@ -206,9 +209,18 @@ class UpdatePreparationService:
                 if prepared is not None and prepared.get("candidate_id") == manifest.manifest_sha256:
                     self._prepared(store, manifest, prepared)
                     result["status"] = "downloaded"; result["can_download"] = False
+                    result["can_request_apply"] = request_available(store)
         except (UpdateError, OSError, ValueError):
             result.update(status="stale", candidate=None, latest_version=None, can_download=False)
         return result
+
+    def request_apply(self, channel, candidate_id, operation_id):
+        text(candidate_id, r"[0-9a-f]{64}", 64)
+        with self._job(operation_id) as cancelled:
+            store, configuration = self._required(channel)
+            with self._preparation(store):
+                from .handoff import queue_request
+                return queue_request(self, store, configuration, channel, candidate_id, cancelled)
 
     def _required(self, channel):
         channel = _channel(channel)

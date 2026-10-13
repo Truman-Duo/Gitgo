@@ -211,7 +211,8 @@ def test_transaction_health_requires_runtime_match_and_owned_cleanup(tmp_path_fa
     result["cleanup"]["complete"] = changed != "cleanup"
     if changed == "runtime": result["runtime"]["version"] = "9.0.0"
     if changed == "compatibility": result["runtime"]["data_compatibility"]["config_schema_version"] += 1
-    monkeypatch.setattr(health, "probe_host", lambda *_: result)
+    monkeypatch.setattr(health, "probe_startup_host", lambda *_: result)
+    monkeypatch.setattr(health, "probe_dashboard_version", lambda *_: None)  # Unit fixture is not executable.
     if changed != "none":
         with pytest.raises(UpdateError, match="UPDATE_HEALTH_FAILED"):
             health.frozen_health_check(root, root)

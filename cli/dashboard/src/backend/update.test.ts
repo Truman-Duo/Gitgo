@@ -1,11 +1,26 @@
 import {describe, expect, test} from "bun:test";
-import {productVersion, updateStatus, parseUpdateStatus, checkUpdate, downloadUpdate, cancelUpdate} from "./update.js";
+import {productVersion, updateStatus, parseUpdateStatus, checkUpdate, downloadUpdate, cancelUpdate, requestApplyUpdate} from "./update.js";
 import type {BackendClient} from "./client.js";
 
 const sample = {schema_version: 1, product_id: "gitgo-terminal", version: "1.0.0-alpha.2",
   status: "disabled", enabled: false, automatic_check: false, channel: "stable", can_apply: false,
   blockers: ["MANAGED_INSTALLATION_REQUIRED"]};
 const client = (data: unknown): BackendClient => ({ready: true, close() {}, async callTool() {return data;}});
+
+describe("confirmed handoff protocol", () => {
+  const ack = {schema_version: 1, status: "exit_required", exit_code: 75,
+    channel: "preview", candidate_id: "a".repeat(64)};
+  test("requires an acknowledgement for the exact confirmed selection", async () => {
+    await requestApplyUpdate(client(ack), "preview", ack.candidate_id, "b".repeat(32));
+  });
+  for (const patch of [{schema_version: 2}, {status: "installed"}, {exit_code: 0},
+    {exit_code: "75"}, {channel: "stable"}, {candidate_id: "c".repeat(64)}]) {
+    test(`rejects mismatched shutdown acknowledgement ${JSON.stringify(patch)}`, async () => {
+      await expect(requestApplyUpdate(client({...ack, ...patch}), "preview", ack.candidate_id,
+        "b".repeat(32))).rejects.toThrow("Update handoff mismatch");
+    });
+  }
+});
 
 describe("update status protocol", () => {
   test("uses local application operations without project arguments", async () => {

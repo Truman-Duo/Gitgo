@@ -226,8 +226,8 @@ async function main() {
     if (shutdownPromise) return shutdownPromise;
     renderer?.unmount();
     renderer?.cleanup();
-    shutdownPromise = Promise.resolve(client.close())
-      .catch(() => undefined)
+    shutdownPromise = Promise.resolve(client instanceof NativeHostClient ? client.close(exitCode === 75) : client.close())
+      .catch(() => { if (exitCode === 75) process.exit(1); })
       .then(() => { process.exit(exitCode); });
     return shutdownPromise;
   };
@@ -259,6 +259,7 @@ async function main() {
         startupTerminalSetup={!useMock && (!terminals || !terminals.configured)}
         startupNotice={startupNotice}
         onTerminalSetupComplete={completeTerminalSetup}
+        onUpdateExit={managed && !useMock ? () => shutdown(75) : undefined}
       /></InputProvider>
     </ScreenWrapper>,
     { exitOnCtrlC: false }

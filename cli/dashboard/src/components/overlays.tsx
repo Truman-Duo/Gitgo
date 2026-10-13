@@ -64,6 +64,7 @@ export interface OverlayCtx {
   sendChat: (text: string) => void;
   verbose: boolean;
   onSettingSaved?: (key: string) => Promise<string | void>;
+  onUpdateExit?: () => Promise<void>;
 }
 
 function enterCommandMode(
@@ -216,7 +217,7 @@ export function renderOverlay(
       return <StatsOverview client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} />;
     case "updatePanel":
       return ctx.scene === "projects"
-        ? <UpdatePanel client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} /> : null;
+        ? <UpdatePanel client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} onUpdateExit={ctx.onUpdateExit} /> : null;
     case "btwPanel":
       return <BtwPanel client={ctx.client}
         project={String(overlay.props?.project || ctx.activeProject || "")}

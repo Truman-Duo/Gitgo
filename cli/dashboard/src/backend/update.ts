@@ -7,9 +7,10 @@ type LegacyUpdateStatus = ProductVersion & {
   blockers: string[];
 };
 export type PreparationStatus = ProductVersion & {
-  schema_version: 2; status: "unconfigured" | "idle" | "available" | "up_to_date" | "downloaded" | "stale";
+  schema_version: 2 | 3; status: "unconfigured" | "idle" | "available" | "up_to_date" | "downloaded" | "stale";
   enabled: false; automatic_check: false; channel: "stable" | "preview"; can_apply: false;
   can_check: boolean; can_download: boolean; blockers: string[]; latest_version: string | null;
+  can_request_apply: boolean;
   candidate: null | {candidate_id: string; version: string; release_id: string; bytes: number; channel: "stable" | "preview"};
 };
 export type UpdateStatus = LegacyUpdateStatus | PreparationStatus;
@@ -46,9 +47,11 @@ export function parseUpdateStatus(value: any): UpdateStatus {
     return {...product, schema_version: 1, status: "disabled", enabled: false,
       automatic_check: false, channel: "stable", can_apply: false, blockers: [...value.blockers]};
   }
-  if (value.schema_version !== 2 || !["stable", "preview"].includes(value.channel)
+  if (![2, 3].includes(value.schema_version) || !["stable", "preview"].includes(value.channel)
       || !["unconfigured", "idle", "available", "up_to_date", "downloaded", "stale"].includes(value.status)
       || typeof value.can_check !== "boolean" || typeof value.can_download !== "boolean") throw new Error("Update status unavailable");
+  if (value.schema_version === 3 && (typeof value.can_request_apply !== "boolean"
+      || (value.can_request_apply && value.status !== "downloaded"))) throw new Error("Update handoff unavailable");
   let candidate: PreparationStatus["candidate"] = null;
   if (value.candidate !== null) {
     const item = value.candidate;
@@ -68,26 +71,27 @@ export function parseUpdateStatus(value: any): UpdateStatus {
       || value.can_check !== (value.status !== "unconfigured")
       || (!selected && value.status !== "up_to_date" && value.latest_version !== null)
       || (value.status === "up_to_date" && value.latest_version === null)) throw new Error("Update capability mismatch");
-  return {...product, schema_version: 2, status: value.status, enabled: false, automatic_check: false,
+  return {...product, schema_version: value.schema_version, status: value.status, enabled: false, automatic_check: false,
     channel: value.channel, can_apply: false, can_check: value.can_check, can_download: value.can_download,
+    can_request_apply: value.schema_version === 3 && value.can_request_apply,
     blockers: [...value.blockers], latest_version: value.latest_version, candidate};
 }
 
 export async function updateStatus(client: BackendClient, channel: "stable" | "preview" = "stable"): Promise<UpdateStatus> {
   const result = parseUpdateStatus(await (channel === "stable" ? client.callTool("update.status") : client.callTool("update.status", {channel})));
-  if (result.schema_version === 2 && result.channel !== channel) throw new Error("Update channel mismatch");
+  if (result.schema_version !== 1 && result.channel !== channel) throw new Error("Update channel mismatch");
   return result;
 }
 
 export async function checkUpdate(client: BackendClient, channel: "stable" | "preview", operationId: string): Promise<UpdateStatus> {
   const result = parseUpdateStatus(await client.callTool("update.check", {channel, operation_id: operationId}, 180));
-  if (result.schema_version !== 2 || result.channel !== channel) throw new Error("Update channel mismatch");
+  if (result.schema_version === 1 || result.channel !== channel) throw new Error("Update channel mismatch");
   return result;
 }
 
 export async function downloadUpdate(client: BackendClient, channel: "stable" | "preview", candidateId: string, operationId: string): Promise<UpdateStatus> {
   const result = parseUpdateStatus(await client.callTool("update.download", {channel, candidate_id: candidateId, operation_id: operationId}, 1200));
-  if (result.schema_version !== 2 || result.channel !== channel || result.status !== "downloaded"
+  if (result.schema_version === 1 || result.channel !== channel || result.status !== "downloaded"
       || result.candidate?.candidate_id !== candidateId) throw new Error("Prepared release mismatch");
   return result;
 }
@@ -95,4 +99,10 @@ export async function downloadUpdate(client: BackendClient, channel: "stable" | 
 export async function cancelUpdate(client: BackendClient, operationId: string): Promise<void> {
   const result = await client.callTool("update.cancel", {operation_id: operationId}, 10);
   if (result?.cancelled !== true) throw new Error("Update cancellation unavailable");
+}
+
+export async function requestApplyUpdate(client: BackendClient, channel: "stable" | "preview", candidateId: string, operationId: string): Promise<void> {
+  const result = await client.callTool("update.request_apply", {channel, candidate_id: candidateId, operation_id: operationId}, 180);
+  if (result?.schema_version !== 1 || result.status !== "exit_required" || result.exit_code !== 75
+      || result.channel !== channel || result.candidate_id !== candidateId) throw new Error("Update handoff mismatch");
 }

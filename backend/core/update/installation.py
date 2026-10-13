@@ -336,7 +336,7 @@ def installed_runtime(role: str | None):
         yield; return
     # Probe candidate code only while an inherited, locally pinned exclusive
     # descriptor protects the CHECK_NEW state; environment alone is not enough.
-    if role in {"update-data-probe", "managed-capabilities"}:
+    if role in {"update-data-probe", "managed-capabilities", "update-startup-probe"}:
         ledger = store._ledger()
         if ledger["transaction"] is not None and ledger["transaction"]["state"] == "CHECK_NEW":
             with _inherited_probe_lease(store): yield
@@ -391,17 +391,34 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             print(dump_protocol_json({"status": result.status, "version": result.version}), flush=True)
             return 0
     from backend.core.process_control import spawn_managed, finish_scope, terminate_tree
-    with store.runtime_lease() as (active, descriptor), retain_descriptor(descriptor):
-        env = {**os.environ, "GITGO_INSTALL_ROOT": str(active),
-               "GITGO_HOST_EXECUTABLE": str(active / "internal/gitgo-host/gitgo-host")}
-        proc = spawn_managed([str(active / "gitgo"), *arguments], cwd=str(active), env=env)
-        try:
-            proc.wait()
-            finish_scope(proc)
-            return int(proc.returncode)
-        except BaseException:
-            terminate_tree(proc)
-            raise
+    from .handoff import launch_session, consume_request, SESSION_ENV, HANDOFF_EXIT
+    for _ in range(8):  # Bound this launcher lifecycle, never automatic retry.
+        with launch_session(store) as nonce:
+            with store.runtime_lease() as (active, descriptor), retain_descriptor(descriptor):
+                env = {**os.environ, "GITGO_INSTALL_ROOT": str(active), SESSION_ENV: nonce or "",
+                       "GITGO_HOST_EXECUTABLE": str(active / "internal/gitgo-host/gitgo-host")}
+                proc = spawn_managed([str(active / "gitgo"), *arguments], cwd=str(active), env=env)
+                try:
+                    proc.wait()
+                    finish_scope(proc)
+                except BaseException:
+                    terminate_tree(proc)
+                    raise
+            # All launcher leases close before the updater obtains exclusivity.
+            if proc.returncode != HANDOFF_EXIT: return int(proc.returncode)
+            if nonce is None:
+                reject("UPDATE_HANDOFF_STALE", "This launch has no update handoff session")
+            result = consume_request(store, nonce, proc.returncode, getattr(proc, "_gitgo_cleanup", None))
+            if result is None: return 2
+            from backend.core.protocol_io import dump_protocol_json
+            print(dump_protocol_json({"update_status": result.status, "version": result.version,
+                                      "error_code": result.error_code}), flush=True)
+            recovered = store.recover()
+            if recovered.status not in {"idle", "committed", "rolled_back"}:
+                reject("UPDATE_RECOVERY_REQUIRED", "Update must recover before restarting")
+        # Same terminal, new session; never replay task/approval/smoke arguments.
+        arguments = []
+    reject("UPDATE_RETAIN_LIMIT", "Too many confirmed restarts in one launcher lifecycle")
 
 
 def frontend_lease(nonce: str) -> int:

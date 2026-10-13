@@ -1,6 +1,6 @@
-# 手动更新检查与下载（第一阶段）
+# 手动更新准备与确认交接
 
-关联 [Issue 21](https://github.com/Truman-Duo/Gitgo/issues/21)。这是功能分支的准备阶段，不是已公开发行的完整自动更新。它不执行候选程序、安装/卸载脚本，不替换当前版本，也不支持主动回滚。
+关联 [Issue 21](https://github.com/Truman-Duo/Gitgo/issues/21)。这是功能分支的准备及确认交接实现，不是已公开发行的完整自动更新。检查和下载不执行候选、不替换当前版本。只有另行确认且通过平台、稳定启动器及运行锁门禁后，才可交接到事务引擎；不执行包内安装/卸载脚本，不支持主动回滚。
 
 ## 使用与状态
 
@@ -9,7 +9,8 @@
 - `C`：明确选择 stable / preview，只刷新本地该渠道状态，不自动切换或下载。
 - `K`：手动请求签名清单和独立签名，显示最新兼容版本；检查不会下载整包。
 - `D`：在已有已验证候选时进入下载确认，显示 release ID 和整包大小。只有确认后才下载该清单对应的精确包，不在下载时偷偷改选刚发布的另一个版本。
-- `Enter`：只在下载确认中生效，不直接检查、下载、安装。
+- `A`：仅受支持的管理启动器、平台及已验证下载可进入应用确认。
+- `Enter`：只在下载或应用确认中生效；应用确认绑定显示的精确候选，不选择其他版本。
 - `X`：检查/下载过程中请求取消；`Esc` 取消并关闭页面，确认框内的 `Esc` 只取消确认。
 
 粘贴和修饰键不触发上述单键操作。取消是协作式的，阻塞读取仍受网络超时限制；取消确认与下载完成可能交错，但均不会安装任何软件。
@@ -18,7 +19,7 @@
 
 ## 本地权威与并发
 
-应用请求仅支持 `update.status(channel)`、`update.check(channel, operation_id)`、`update.download(channel, candidate_id, operation_id)`、`update.cancel(operation_id)`。不接受调用方给定的安装根、暂存目录、URL、公钥、启用标记或健康回调。没有 `update.apply`/`update.enable` 操作。
+应用请求支持 `update.status(channel)`、`update.check(channel, operation_id)`、`update.download(channel, candidate_id, operation_id)`、`update.cancel(operation_id)`，以及 `update.request_apply(channel, candidate_id, operation_id)`。最后一项只登记当前启动会话的确认请求，不在 Host 内替换程序。不接受调用方给定的安装根、暂存目录、URL、公钥、启用标记或健康回调。没有 `update.apply`/`update.enable` 操作。
 
 真实安装由正在执行的冻结 Host 的物理位置与 schema 3 登记核对，不能通过环境变量冒充。普通安装/源码入口仍显示兼容的 schema 1 禁用状态；schema 2 是此前未公开的管理实验登记，不自动迁移或接管。Windows 还没有管理所有权/ACL 适配，不能使用真实下载暂存入口。
 
@@ -52,4 +53,12 @@
 
 可选真实冻结测试使用 `GITGO_MANAGED_TEST_STAGE` 与 `GITGO_UPDATE_TEST_ARCHIVE` 指定新构建的完整包。测试在副本中固定一次性公钥，使用注入的 HTTPX 流运行真实冻结 Host 协议，并要求签名清单宣称的版本与实际整包不符时拒绝。它不执行候选，不是两个真实版本升级成功，也不是正式 CDN/HTTPS/代理验收。
 
-下一阶段才处理确认应用更新、安全退出、稳定 helper 切换与重启；真实双版本失败恢复、主动回滚、完整进程清理、正式发布及跨平台验收仍需单独完成。
+## 第二阶段交接边界
+
+管理状态协议 schema 3 通过 `can_request_apply` 单独表达可请求交接；`can_apply` 仍为 false，因为运行中的 Host 不直接替换自身。旧 schema 2 状态仍可展示检查/下载，但不提供应用确认。
+
+稳定 bootstrap 在 active 之外创建有界会话票据。收到与精确候选匹配的确认回复后，前端停止界面并要求 Host 正常以 0 退出，才返回专用退出码 75。取消后的迟到回复、普通退出、崩溃和强制关闭 Host 不触发应用。bootstrap 必须确认自己拥有的进程范围清理完整，并释放自身全部共享租约，才重新验签、核对下载并取得独占运行锁；其他实例仍运行则拒绝切换，不杀它们。
+
+切换使用既有单一 ledger。候选在独立临时资料目录中执行真实 Host 初始化/协议检查及 Dashboard `--version` 加载检查；不调用模型、不读取用户秘密、不迁移用户数据库。失败按既有事务恢复旧版，启动前再次恢复检查；重启不重放旧命令行任务。此检查不等于完整可见终端或真实业务验收。
+
+当前仅 Linux 可进入交接，尚无 Linux 实机验收。macOS owned-session-only 无法证明完整清理，因此明确拒绝应用，不能通过测试替身或用户确认绕过。Windows 管理适配仍缺失。默认包没有正式发行信任。真实双版本升级/故障恢复、主动回滚、正式发行与跨平台验收仍待完成。`tests/test_update_handoff.py` 的模拟平台和健康驱动只验证交接状态机，不作为这些验收证据。

@@ -148,6 +148,14 @@ def _main(values: list[str]) -> int:
         # The helper reopens only explicitly registered simulation authority.
         from backend.core.update.recovery_helper import helper_main
         return helper_main(role_argv)
+    if name == "update-startup-probe":
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--nonce", required=True)
+        args = parser.parse_args(role_argv)
+        from backend.core.update.startup_probe import startup_probe
+        from backend.core.protocol_io import dump_protocol_json
+        print(dump_protocol_json(startup_probe(args.nonce)), flush=True)
+        return 0
     if name == "update-data-probe":
         # Before NativeHost, ConfigManager or any user's data store is opened.
         parser = argparse.ArgumentParser(add_help=False)

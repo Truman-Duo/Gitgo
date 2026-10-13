@@ -18,7 +18,7 @@ from .version import Version
 
 PROBE_ROLE = "update-data-probe"
 MAX_REPORT_BYTES = 64 * 1024
-MANAGED_API_VERSION = 2  # schema 3 includes pinned preparation ownership.
+MANAGED_API_VERSION = 3  # Stable launcher supports confirmed session handoff.
 
 
 def isolated_environment(profile: Path) -> dict[str, str]:
@@ -54,7 +54,11 @@ def probe_managed_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
     return _probe_host(host, profile, timeout=timeout, managed=True)
 
 
-def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool) -> dict:
+def probe_startup_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
+    return _probe_host(host, profile, timeout=timeout, managed=False, startup=True)
+
+
+def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool, startup: bool = False) -> dict:
     number(timeout, minimum=1, maximum=120)
     if (not host.is_file() or host.is_symlink() or not host.is_absolute()
             or host != host.resolve(strict=True)
@@ -71,7 +75,7 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool) -> di
     from backend.core.process_output import collect_output
     proc, job = None, None
     try:
-        role = "managed-capabilities" if managed else PROBE_ROLE
+        role = "managed-capabilities" if managed else "update-startup-probe" if startup else PROBE_ROLE
         proc = spawn_managed([str(host), "--gitgo-internal-role", role, "--nonce", nonce],
             cwd=str(profile), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="strict", env=env)
@@ -92,7 +96,9 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool) -> di
                 reject("UPDATE_HEALTH_FAILED", "Managed bootstrap capability is unavailable")
             report = report["runtime"]
         fields(report, {"schema_version", "nonce", "product_id", "version", "platform", "architecture",
-                        "data_compatibility", "memory_sqlite_check"})
+                        "data_compatibility", "memory_sqlite_check"} | ({"native_host_check"} if startup else set()))
+        if startup and report["native_host_check"] is not True:
+            reject("UPDATE_HEALTH_FAILED", "Candidate Native Host startup failed")
         if (type(report["schema_version"]) is not int or report["schema_version"] != 1
                 or report["nonce"] != nonce or report["memory_sqlite_check"] is not True):
             reject("UPDATE_HEALTH_FAILED", "Host probe identity or memory health evidence is invalid")
@@ -121,7 +127,7 @@ def frozen_health_check(bundle: Path, profile: Path):
     contract = json_object((bundle / "update-data-contract.json").read_bytes(), MAX_REPORT_BYTES)
     expected = DataCompatibility.parse(contract["data_compatibility"])
     name = "gitgo-host.exe" if product["platform"] == "windows" else "gitgo-host"
-    result = probe_host(bundle / "internal/gitgo-host" / name, profile)
+    result = probe_startup_host(bundle / "internal/gitgo-host" / name, profile)
     runtime = result["runtime"]
     if result["cleanup"].get("complete") is not True:
         reject("UPDATE_HEALTH_FAILED", "Candidate execution cleanup is incomplete; cannot commit")
@@ -130,5 +136,37 @@ def frozen_health_check(bundle: Path, profile: Path):
             reject("UPDATE_HEALTH_FAILED", "Candidate runtime differs from package identity")
     if DataCompatibility.parse(runtime["data_compatibility"]) != expected:
         reject("UPDATE_HEALTH_FAILED", "Candidate runtime differs from signed migration evidence")
+    dashboard_profile = profile / "dashboard"
+    dashboard_profile.mkdir(mode=0o700)
+    probe_dashboard_version(bundle, dashboard_profile, product["version"])
     return HealthReport(product["product_id"], runtime["version"], runtime["platform"],
                         runtime["architecture"], build["source"]["commit"], build["source"]["tree"], True)
+
+
+def probe_dashboard_version(bundle: Path, profile: Path, version: str):
+    """Exercise the actual frontend loader/imports without user profile or UI.
+
+    This bounded early entry is not a visible terminal rendering acceptance.
+    As with Host health, cleanup is judged by the parent-owned supervisor.
+    """
+    from backend.core.process_control import spawn_managed, terminate_tree, attach_kill_job, close_job
+    from backend.core.process_output import collect_output
+    Version.parse(version)
+    program = bundle / ("gitgo.exe" if os.name == "nt" else "gitgo")
+    proc, job = None, None
+    try:
+        proc = spawn_managed([str(program), "--version"], cwd=str(profile),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="strict", env=isolated_environment(profile))
+        job = attach_kill_job(proc)
+        output, _, _ = collect_output(proc, timeout=30, limit=4096, reject_overflow=True,
+                                     terminate=lambda: terminate_tree(proc, job))
+        if (proc.returncode != 0 or output != f"Gitgo {version}\n"
+                or cleanup_report(proc, job).get("complete") is not True):
+            reject("UPDATE_HEALTH_FAILED", "Candidate frontend startup or cleanup failed")
+    except Exception:
+        if proc is not None and (proc.poll() is None or getattr(proc, "_gitgo_scope_socket", None) is not None):
+            terminate_tree(proc, job)
+        reject("UPDATE_HEALTH_FAILED", "Candidate frontend startup failed")
+    finally:
+        close_job(job)
