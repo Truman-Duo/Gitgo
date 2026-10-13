@@ -175,3 +175,69 @@ def test_actual_frozen_bootstrap_recovers_an_interrupted_switch(actual_lab, monk
     assert json.loads(result.stdout)["status"] == "rolled_back"
     boot(old_version)
     assert tree_digest(store.root / "active") == before
+
+
+def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_back(actual_lab):
+    """Actual compiled UI -> actual Host -> physical stable bootstrap.
+
+    Automated hidden PTY is process/input evidence, NOT formal visible terminal
+    acceptance. Preparation uses the fixture's signed injected HTTP stream.
+    """
+    import pty
+    import select
+    import time
+    store, prepare, _, before, old_version, new_version, env = actual_lab
+    prepare()
+    profile = Path(env["GITGO_CONFIG_PATH"]).parent
+    # Isolated test preference, no terminal selection dialog or external UI.
+    Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [],
+        "launcher": {"terminal": "current", "configured": True}}))
+    master, slave = pty.openpty()
+    proc = subprocess.Popen([str(store.root / "gitgo")], stdin=slave, stdout=slave, stderr=slave,
+        env={**env, "TERM": "xterm-256color"}, start_new_session=True)
+    os.close(slave)
+    output = bytearray()
+    def wait_for(text, *, after=0, timeout=120):
+        deadline = time.monotonic() + timeout
+        while text.encode() not in output[after:]:
+            assert time.monotonic() < deadline, f"actual UI did not reach {text!r}"
+            assert proc.poll() is None, "actual managed UI stopped unexpectedly"
+            if select.select([master], [], [], .1)[0]:
+                output.extend(os.read(master, 65536))
+                assert len(output) < 4 * 1024**2, "bounded test terminal output exceeded limit"
+    def send(text): os.write(master, text.encode()); time.sleep(.15)
+    def update_panel():
+        start = len(output)
+        send("/"); send("update"); send("\r")
+        wait_for("Gitgo Software Update", after=start)
+        time.sleep(.5)
+    try:
+        wait_for("Projects")
+        update_panel()
+        send("c")  # Select the configured preview channel, local refresh only.
+        wait_for("Downloaded and verified")
+        send("a"); wait_for("Close this Gitgo session")
+        start = len(output); send("\r")
+        wait_for('"update_status":"committed"', after=start)
+        wait_for("Projects", after=start)
+        assert store._ledger()["current"]["version"] == new_version
+        update_panel()
+        wait_for("Retained version")
+        send("b"); wait_for("restore Gitgo " + old_version)
+        start = len(output); send("\r")
+        wait_for('"update_status":"rolled_back"', after=start)
+        wait_for("Projects", after=start)
+        assert store._ledger()["current"]["version"] == old_version
+        assert tree_digest(store.root / "active") == before
+    finally:
+        # Directly owned disposable launcher only; EOF tells its owning Linux
+        # supervisor to clean the child tree. Never signal a sampled PID/group.
+        if proc.poll() is None:
+            proc.terminate()
+            try: proc.wait(timeout=10)
+            except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=5)
+        os.close(master)
+        deadline = time.monotonic() + 10
+        while open_managed(store.root).recover().status == "busy" and time.monotonic() < deadline:
+            time.sleep(.1)
+        assert open_managed(store.root).recover().status != "busy"

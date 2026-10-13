@@ -142,6 +142,32 @@ def reopen(store):
     return SimulationStore(store.root, protected_paths=store.protected_paths)
 
 
+@pytest.mark.parametrize("after_write", [False, True])
+def test_failed_second_update_intent_does_not_report_previous_commit_as_new_success(lab, monkeypatch, after_write):
+    assert apply(lab).status == "committed"
+    store, source, _, signing, _ = lab
+    before = tree_digest(store.root / "active")
+    product = json.loads((source / "product.json").read_bytes()); product["version"] = "1.0.0-alpha.4"
+    (source / "product.json").write_text(json.dumps(product))
+    refresh_build(source, version=product["version"])
+    raw, signature, archive = archive_fixture(source, source.parent / "download", signing,
+        version=product["version"], sequence=3)
+    save = store._save
+    once = False
+    def fail(ledger, state=None, **kwargs):
+        nonlocal once
+        if not once and state is None and ledger["transaction"]["new"]["version"] == product["version"]:
+            once = True
+            if after_write: save(ledger, state, **kwargs)
+            raise OSError("test durable intent failure")
+        return save(ledger, state, **kwargs)
+    monkeypatch.setattr(store, "_save", fail)
+    result = store.apply(POLICY, signing[1], raw, signature, archive, health_check=inspect_health, clock=lambda: NOW)
+    assert result.status == ("rolled_back" if after_write else "failed")
+    assert result.version == "1.0.0-alpha.3"
+    assert tree_digest(store.root / "active") == before
+
+
 class Crash(BaseException):
     pass
 

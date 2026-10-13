@@ -570,7 +570,7 @@ class InstallationStore:
                 # effect even if the call raised. Never trust the in-memory step.
                 failure = "UPDATE_HEALTH_FAILED" if isinstance(error, UpdateError) and error.code == "UPDATE_HEALTH_FAILED" else "UPDATE_OPERATION_FAILED"
                 recovered = self._recover_locked(checkpoint=checkpoint, failure_code=failure)
-                if recovered.status == "idle":
+                if recovered.status == "idle" or (recovered.status == "committed" and recovered.version != manifest.version):
                     return TransactionResult("failed", current.version, failure)
                 return recovered
 

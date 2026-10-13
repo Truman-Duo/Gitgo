@@ -78,7 +78,7 @@ def test_automatic_check_requires_both_switches(signing):
 @pytest.mark.parametrize("current,verifier,code", [
     (replace(CURRENT, managed=False), ManifestVerifier(), "UPDATE_INSTALL_UNMANAGED"),
     (replace(CURRENT, data_compatibility=None), ManifestVerifier(), "UPDATE_COMPATIBILITY_MISSING"),
-    (replace(CURRENT, platform="linux", architecture="aarch64"), ManifestVerifier(), "UPDATE_TARGET_INVALID"),
+    (replace(CURRENT, platform="linux", architecture="riscv64"), ManifestVerifier(), "UPDATE_TARGET_INVALID"),
     (CURRENT, ManifestVerifier(), "UPDATE_TRUST_MISSING"),
 ])
 def test_missing_local_authority_fails_before_fetch(current, verifier, code):
