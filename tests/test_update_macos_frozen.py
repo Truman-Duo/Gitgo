@@ -82,3 +82,89 @@ def test_actual_bootstrap_does_not_apply_pending_request_in_current_boot(actual_
     assert store._ledger()["current"]["version"] == old
     assert deferred.pending_status(store)["version"] == new
     assert tree_digest(store.root / "active") == before
+
+
+def confirm_with_actual_ui(store, env, *, rollback=False):
+    """Hidden PTY process/input evidence, not formal visible terminal QA."""
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+    import time
+    from pathlib import Path
+    from backend.core.update.installation import open_managed
+    from tests.terminal_screen import TerminalScreen
+    Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [],
+        "launcher": {"terminal": "current", "configured": True}}))
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+    proc = subprocess.Popen([str(store.root / "gitgo")], stdin=slave, stdout=slave, stderr=slave,
+        env={**env, "TERM": "xterm-256color"}, start_new_session=True)
+    os.close(slave)
+    output = bytearray()
+    screen = TerminalScreen()
+    def wait_for(text, *, after=0):
+        end = time.monotonic() + 90
+        while text not in screen.transcript() or len(output) <= after:
+            assert time.monotonic() < end, f"Actual Mac UI did not reach {text!r}"
+            if select.select([master], [], [], .1)[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                    output.extend(chunk); screen.feed(chunk)
+                except OSError: raise AssertionError("Actual Mac UI closed before confirmation")
+                assert len(output) < 4 * 1024**2
+            else:
+                assert proc.poll() is None, "Actual Mac UI exited before confirmation"
+    def send(value): os.write(master, value.encode()); time.sleep(.15)
+    try:
+        wait_for("Providers")
+        start = len(output); send("\x1b"); wait_for("Projects", after=start)
+        # The initial menu shows only eight commands; /update is below that
+        # visible window. Wait for the opened editor, not an offscreen item.
+        start = len(output); send("/"); wait_for("/archive", after=start)
+        prefix = "/"
+        for letter in "update":
+            start = len(output); send(letter); prefix += letter
+            wait_for(prefix, after=start)
+        assert not termios.tcgetattr(master)[0] & termios.ICRNL, "Mac PTY still translates Enter to newline"
+        start = len(output); send("\r"); wait_for("Gitgo Software Update", after=start)
+        wait_for("After a manual macOS restart")
+        if not rollback:
+            send("c"); wait_for("Downloaded and verified"); send("a")
+        else:
+            wait_for("Retained version"); send("b")
+        wait_for("manually restart macOS")
+        start = len(output); send("\r")
+        wait_for('"update_status": "restart_required"', after=start)
+        proc.wait(timeout=30)
+        assert proc.returncode == 0
+        pending = deferred.pending_status(store)
+        assert pending is not None and pending["action"] == ("rollback" if rollback else "apply")
+        return pending
+    finally:
+        if os.environ.get("GITGO_UPDATE_LAB_LOG"):
+            try:
+                fd = os.open(os.environ["GITGO_UPDATE_LAB_LOG"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as handle: handle.write(output)
+            except OSError: pass
+        # Only a directly owned disposable launcher. No PID/PGID snapshots.
+        if proc.poll() is None:
+            try: os.write(master, b"\x03"); proc.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                proc.terminate()
+                try: proc.wait(timeout=10)
+                except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=5)
+        os.close(master)
+        end = time.monotonic() + 10
+        while open_managed(store.root).recover().status == "busy" and time.monotonic() < end:
+            time.sleep(.1)
+        assert open_managed(store.root).recover().status != "busy"
+
+
+def test_actual_mac_ui_confirmation_saves_intent_but_does_not_replace(actual_lab):
+    store, prepare, boot, before, old, new, env = actual_lab
+    prepare()
+    assert confirm_with_actual_ui(store, env)["version"] == new
+    boot(old)
+    assert tree_digest(store.root / "active") == before

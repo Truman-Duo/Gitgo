@@ -70,7 +70,7 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
     before = tree_digest(root / "active")
     # Each test publishes its own signed candidate copy, including a deliberate
     # startup fault when requested. Keys never leave this isolated test process.
-    def prepare(broken=False):
+    def prepare(broken=False, *, lifetime_days=1):
         if broken:
             (candidate / "gitgo").chmod(0o700)
             (candidate / "gitgo").write_bytes(b"not-an-executable-test-fault")
@@ -83,7 +83,7 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
         with archive.open("rb") as handle: archive_sha = hashlib.file_digest(handle, "sha256").hexdigest()
         raw, signature = signed({"schema_version": 1, "product_id": "gitgo-terminal", "release_id": "lab-two-version",
             "channel": "preview", "sequence": 1, "published_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expires_at": (now + timedelta(days=lifetime_days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "version": product["version"], "platform": product["platform"], "architecture": product["architecture"],
             "archive_format": "tar.gz", "url": "https://releases.example.test/package.tar.gz",
             "bytes": archive.stat().st_size, "sha256": archive_sha,

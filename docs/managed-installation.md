@@ -6,7 +6,7 @@
 
 默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 5。构建时需要选择 `--update-evidence`。旧包（含此前实验 API 1/2/3/4）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
 
-`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 5 区分 Linux 的完整清理后即时交接与 macOS 的手动重启后交接。macOS 不通过修改清理报告获得即时更新；Windows 无管理适配。此前 Linux API 4 ARM64 已有双版本虚拟机演练；新 API 5 和 macOS 跨启动流程仍需对应工件验收，不能继承旧版本的通过结果。详见[手动更新准备与交接](update-preparation.md)。
+`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 5 区分 Linux 的完整清理后即时交接与 macOS 的手动重启后交接。macOS 不通过修改清理报告获得即时更新；Windows 无管理适配。Linux API 5 已重新完成双版本工件交接验收，macOS API 5 已完成静置安装工件事务及同一次启动内的安全门禁验收，真实手动重启流程仍待验证。详见[手动更新准备与交接](update-preparation.md)。
 
 ## 布局与唯一权威
 
@@ -34,7 +34,7 @@ installation/
 
 安装使用锁以已验证的真实文件描述符传给拥有的 Unix supervisor 和它的 worker；启动进程关闭自己的描述符后，仍在使用程序的子进程继续持有内核锁。Native Host、daemon、工具运行器和 Python 子角色在普通应用初始化前，也从实际可执行文件的物理位置核对管理安装、重新取得共享锁。调用方的环境根目录或数字不能替代登记和真实描述符。
 
-现有 daemon、工具运行、搜索与文档转换子进程保留安装租约；进程范围仍采用原有 owned Unix supervisor。macOS owned-session-only 的清理不完整事实保持不变，不能因此提交生产更新。
+现有 daemon、工具运行、搜索与文档转换子进程保留安装租约；进程范围仍采用原有 owned Unix supervisor。macOS owned-session-only 的清理不完整事实保持不变，不能因此进行即时程序替换；API 5 的替换必须等待真实内核启动标识改变。
 
 直接打开 `active/gitgo` 或其 Node companion 时，Dashboard 也在 launch-session/profile 初始化前请求固定 bootstrap 的租约。bootstrap 持有真实共享锁，以有界 nonce/版本报告确认，直到前端 stdin 管道关闭；租约异常退出时前端停止。`--version` 是不初始化用户资料的只读例外。该早期入口不接受环境变量作为管理安装凭据。
 
@@ -64,4 +64,4 @@ installation/
 
 可显式提供 `GITGO_MANAGED_TEST_STAGE` 指向新构建的 managed-capable staging，运行实际冻结安装与启动测试。未提供工件时明确跳过。测试只使用新建的私有目录、保护哨兵和隔离资料，不安装到日常目录，不调用付费模型。
 
-确认/退出交接已接入固定 bootstrap，准备锁忙时普通启动仍可继续，只是不提供本次会话的更新交接。Linux ARM64 双版本、真实编译 UI 交接与一次虚拟机突然断电恢复证据见上述准备文档。尚需正式签名发行配置、Windows ACL/运行锁适配、macOS 清理完整性，以及其他目标、正式终端和物理掉电验收。不能据此启用正式发行更新；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。
+确认/退出交接已接入固定 bootstrap，准备锁忙时普通启动仍可继续，只是不提供本次会话的更新交接。Linux ARM64 双版本、真实编译 UI 交接及历史 API 4 的一次虚拟机突然断电恢复证据见上述准备文档。尚需真实 macOS 跨启动验收、正式签名发行配置，以及其他目标和正式终端验收。Windows ACL/运行锁适配、macOS 即时清理和物理掉电证明没有由本轮实现。不能据此启用正式发行更新；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。
