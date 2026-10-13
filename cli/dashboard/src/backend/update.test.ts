@@ -1,5 +1,5 @@
 import {describe, expect, test} from "bun:test";
-import {productVersion, updateStatus, parseUpdateStatus, checkUpdate, downloadUpdate, cancelUpdate, requestApplyUpdate} from "./update.js";
+import {productVersion, updateStatus, parseUpdateStatus, checkUpdate, downloadUpdate, cancelUpdate, requestApplyUpdate, requestRollbackUpdate} from "./update.js";
 import type {BackendClient} from "./client.js";
 
 const sample = {schema_version: 1, product_id: "gitgo-terminal", version: "1.0.0-alpha.2",
@@ -78,5 +78,32 @@ describe("manual check/download protocol", () => {
       ["update.download", {channel: "preview", candidate_id: "a".repeat(64), operation_id: "c".repeat(32)}, 1200],
       ["update.cancel", {operation_id: "c".repeat(32)}, 10],
     ]);
+  });
+});
+
+describe("retained rollback protocol", () => {
+  const rollback = {rollback_id: "d".repeat(64), version: "1.0.0-alpha.1"};
+  const status = {...available, schema_version: 4, can_request_apply: false, can_request_rollback: true, rollback};
+  test("rollback remains available offline without publisher trust", () => {
+    const parsed = parseUpdateStatus({...status, status: "unconfigured", can_check: false, can_download: false,
+      latest_version: null, candidate: null});
+    expect(parsed.schema_version).toBe(4);
+    expect(parsed.schema_version !== 1 && parsed.can_request_rollback).toBe(true);
+  });
+  for (const patch of [{rollback: null}, {can_request_rollback: "true"},
+    {rollback: {...rollback, rollback_id: "../wrong"}}, {rollback: {...rollback, version: "bad\x1b"}}]) {
+    test(`rejects invalid rollback selection ${JSON.stringify(patch)}`, () => {
+      expect(() => parseUpdateStatus({...status, ...patch})).toThrow();
+    });
+  }
+  test("only sends exact reviewed ID, and rejects an unrelated acknowledgement", async () => {
+    const calls: any[] = [];
+    const ack = {schema_version: 1, status: "exit_required", action: "rollback", exit_code: 75, rollback_id: rollback.rollback_id};
+    await requestRollbackUpdate({ready: true, close() {}, async callTool(...args) {calls.push(args); return ack;}},
+      rollback.rollback_id, "e".repeat(32));
+    expect(calls).toEqual([["update.request_rollback", {rollback_id: rollback.rollback_id, operation_id: "e".repeat(32)}, 180]]);
+    for (const patch of [{action: "apply"}, {exit_code: 0}, {rollback_id: "f".repeat(64)}]) {
+      await expect(requestRollbackUpdate(client({...ack, ...patch}), rollback.rollback_id, "e".repeat(32))).rejects.toThrow();
+    }
   });
 });

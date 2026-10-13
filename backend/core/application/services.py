@@ -136,6 +136,7 @@ class ApplicationServices:
             "update.download": self.update_download,
             "update.cancel": self.update_cancel,
             "update.request_apply": self.update_request_apply,
+            "update.request_rollback": self.update_request_rollback,
             "config.set": self.config_set,
             "config.terminals": self.config_terminals,
             "config.web_search.test": self.config_web_search_test,
@@ -467,6 +468,9 @@ class ApplicationServices:
 
     def update_request_apply(self, channel: str, candidate_id: str, operation_id: str) -> dict:
         return self._update_call(self.updates.request_apply, channel, candidate_id, operation_id)
+
+    def update_request_rollback(self, rollback_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.request_rollback, rollback_id, operation_id)
 
     def config_get(self, key: str = "") -> dict:
         cfg = ConfigManager.load()

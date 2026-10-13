@@ -182,12 +182,14 @@ class UpdatePreparationService:
         _, current, _ = self._local(store, channel)
         configuration = installed_release_policy(store)
         from .handoff import request_available, platform_ready
-        result = {"schema_version": 3, "product_id": "gitgo-terminal", "version": current.version,
+        result = {"schema_version": 4, "product_id": "gitgo-terminal", "version": current.version,
             "status": "unconfigured", "enabled": False, "automatic_check": False, "channel": channel,
             "can_check": configuration is not None and channel in configuration.channels,
             "can_download": False, "can_apply": False, "can_request_apply": False,
             "blockers": ["PLATFORM_ACCEPTANCE_REQUIRED"],
-            "candidate": None, "latest_version": None}
+            "candidate": None, "latest_version": None,
+            "rollback": store.rollback_selection(), "can_request_rollback": False}
+        result["can_request_rollback"] = result["rollback"] is not None and request_available(store)
         if not request_available(store): result["blockers"].append("UPDATE_HANDOFF_REQUIRED")
         if not platform_ready(store): result["blockers"].append("UPDATE_SCOPE_UNAVAILABLE")
         if not result["can_check"]:
@@ -230,6 +232,15 @@ class UpdatePreparationService:
         if configuration is None: reject("UPDATE_TRUST_MISSING", "Publisher release addresses and public keys are not configured")
         configuration.channel(channel)
         return store, configuration
+
+    def request_rollback(self, rollback_id, operation_id):
+        text(rollback_id, r"[0-9a-f]{64}", 64)
+        with self._job(operation_id) as cancelled:
+            store = self._store_loader()
+            if store is None: reject("UPDATE_INSTALL_UNMANAGED", "Rollback requires a managed installation")
+            with self._preparation(store):
+                from .handoff import queue_rollback
+                return queue_rollback(store, rollback_id, cancelled)
 
     def check(self, channel, operation_id):
         with self._job(operation_id) as cancelled:

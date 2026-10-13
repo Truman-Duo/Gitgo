@@ -131,6 +131,26 @@ def consume_request(store, nonce, exit_code, cleanup):
     return _consume_request(store, nonce, exit_code, cleanup)
 
 
+def queue_rollback(store, rollback_id, cancelled):
+    """Offline explicit predecessor request, under preparation/shared locks."""
+    if not platform_ready(store):
+        reject("UPDATE_SCOPE_UNAVAILABLE", "Platform process cleanup cannot authorize rollback")
+    nonce = os.environ.get(SESSION_ENV, "")
+    session = _session(store, nonce)
+    selected = store.rollback_selection()
+    if selected is None or selected["rollback_id"] != rollback_id:
+        reject("UPDATE_SELECTION_STALE", "Review the retained predecessor again")
+    if cancelled(): reject("UPDATE_CANCELLED", "Rollback handoff was cancelled")
+    value = {"schema_version": 1, "installation_id": session["installation_id"], "nonce": nonce,
+             "current": session["current"], "action": "rollback", "rollback_id": rollback_id}
+    path = _path(store, nonce, "request")
+    if path.exists() or path.is_symlink():
+        if read_control(path) != value: reject("UPDATE_HANDOFF_STALE", "A different action was already confirmed")
+    else: atomic_control(path, value)
+    return {"schema_version": 1, "status": "exit_required", "action": "rollback",
+            "rollback_id": rollback_id, "exit_code": HANDOFF_EXIT}
+
+
 def _consume_request(store, nonce, exit_code, cleanup):
     from backend.core.installation_lease import runtime_descriptors
     from .transaction import InstallationStore, TransactionResult
@@ -149,10 +169,19 @@ def _consume_request(store, nonce, exit_code, cleanup):
             store._guard()
             session = _session(store, nonce)
             path = _path(store, nonce, "request")
-            request = fields(read_control(path), {"schema_version", "installation_id", "nonce", "current", "channel", "candidate_id"})
+            request = read_control(path)
+            rollback = request.get("action") == "rollback"
+            fields(request, {"schema_version", "installation_id", "nonce", "current"} |
+                   ({"action", "rollback_id"} if rollback else {"channel", "candidate_id"}))
             if (type(request["schema_version"]) is not int or request["schema_version"] != 1
                     or any(request[k] != session[k] for k in ("installation_id", "nonce", "current"))):
                 reject("UPDATE_HANDOFF_STALE", "Confirmed handoff does not match this launch")
+            if rollback:
+                text(request["rollback_id"], r"[0-9a-f]{64}", 64)
+                result = store._rollback(request["rollback_id"], health_check=frozen_health_check)
+                if read_control(path) == request:
+                    path.unlink(); sync_directory(path.parent)
+                return result
             channel = _channel(request["channel"])
             text(request["candidate_id"], r"[0-9a-f]{64}", 64)
             configuration = installed_release_policy(store)

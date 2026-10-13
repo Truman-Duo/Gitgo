@@ -333,7 +333,7 @@ def test_native_host_request_cancel_reaches_the_preparation_job(prep):
         release.set(); worker.join(timeout=10); host.close()
 
 
-@pytest.mark.parametrize("api", [1, True, 2, 3])
+@pytest.mark.parametrize("api", [1, True, 2, 3, 4])
 def test_managed_probe_rejects_old_bootstrap_api_before_schema_three_provisioning(tmp_path_factory, api):
     from backend.core.update.health import probe_managed_host
     from backend.core.update.runtime_contract import data_probe
@@ -344,7 +344,7 @@ def test_managed_probe_rejects_old_bootstrap_api_before_schema_three_provisionin
     fmt = json.dumps(report).replace('"' + "a" * 32 + '"', '"%s"') + "\n"
     host = base / "report-only"
     host.write_text("#!/bin/sh\nprintf " + shlex.quote(fmt) + ' "$4"\n'); host.chmod(0o700)
-    if api is True or api in (1, 2):
+    if api is True or api in (1, 2, 3):
         with pytest.raises(UpdateError, match="UPDATE_HEALTH_FAILED"): probe_managed_host(host, profile)
     else:
         result = probe_managed_host(host, profile)

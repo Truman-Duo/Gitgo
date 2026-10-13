@@ -24,7 +24,7 @@ from .manifest import DataCompatibility, ManifestVerifier
 from .persistence import atomic_control, filesystem_identity, lock_file, read_control, sync_directory
 from .staging import _staging_parent, _verify_file
 from .tree import sync_tree, tree_digest
-from .validation import UpdateError, digest, fields, number, reject, text, timestamp
+from .validation import UpdateError, digest, fields, json_object, number, reject, text, timestamp
 from .version import Version
 
 
@@ -284,6 +284,78 @@ class InstallationStore:
         _staging_parent(directory, self.protected_paths)
         return self.root / "active", directory / "old", directory / "new", directory / "failed"
 
+    def rollback_selection(self):
+        """Only the retained predecessor of the last committed transaction.
+
+        Caller holds preparation/runtime or operation locks. The original
+        locally recorded tree is the authority, not a newly supplied manifest.
+        No database/config rollback, directory scanning or arbitrary downgrade.
+        """
+        from types import SimpleNamespace
+        import hashlib
+        from .tree import encode
+        self._guard()
+        ledger = self._ledger()
+        txn = ledger["transaction"]
+        if txn is None or txn["state"] != "COMMITTED": return None
+        active, old, new, failed = self._slots(txn)
+        if (not self._matches(active, txn["new"]) or not self._matches(old, txn["old"])
+                or new.exists() or new.is_symlink() or failed.exists() or failed.is_symlink()):
+            reject("UPDATE_RECOVERY_REQUIRED", "Retained rollback layout changed")
+        product = json_object((old / "product.json").read_bytes(), 64 * 1024)
+        build = json_object((old / "build-manifest.json").read_bytes(), 2 * 1024**2)
+        expected = SimpleNamespace(product_id=self.registration["product_id"], version=txn["old"]["version"],
+            platform=self.registration["platform"], architecture=self.registration["architecture"],
+            source_commit=build["source"]["commit"], source_tree=build["source"]["tree"],
+            data_compatibility=DataCompatibility.parse(self.registration["data_compatibility"]))
+        if product.get("version") != expected.version:
+            reject("UPDATE_PACKAGE_CONTRACT", "Retained version differs from recorded predecessor")
+        verify_bundle_contract(old, expected)
+        identity = {"installation_id": ledger["installation_id"], "transaction_id": txn["id"],
+                    "current": ledger["current"], "previous": txn["old"]}
+        return {"rollback_id": hashlib.sha256(encode(identity)).hexdigest(), "version": expected.version}
+
+    def _rollback(self, rollback_id, *, health_check, checkpoint=lambda _: None):
+        """Fixed-bootstrap driver. Preflight predecessor before durable intent."""
+        digest(rollback_id)
+        with self._operation():
+            selection = self.rollback_selection()
+            if selection is None or selection["rollback_id"] != rollback_id:
+                reject("UPDATE_SELECTION_STALE", "Retained rollback selection changed")
+            ledger = self._ledger()
+            txn = ledger["transaction"]
+            active, old, _, _ = self._slots(txn)
+            # New unique private profile; never reuse the candidate's prior I/O.
+            with os.scandir(old.parent) as entries:
+                if sum(1 for entry in entries if entry.name.startswith("rollback-probe-")) >= 8:
+                    reject("UPDATE_RETAIN_LIMIT", "Rollback diagnostic retention requires separate maintenance")
+            profile = old.parent / ("rollback-probe-" + uuid.uuid4().hex)
+            profile.mkdir(mode=0o700); sync_directory(profile.parent)
+            try:
+                report = health_check(old, profile)
+                product = json_object((old / "product.json").read_bytes(), 64 * 1024)
+                build = json_object((old / "build-manifest.json").read_bytes(), 2 * 1024**2)
+                expected = {"product_id": product["product_id"], "version": selection["version"],
+                    "platform": product["platform"], "architecture": product["architecture"],
+                    "source_commit": build["source"]["commit"], "source_tree": build["source"]["tree"], "passed": True}
+                if type(report) is not HealthReport or asdict(report) != expected:
+                    reject("UPDATE_HEALTH_FAILED", "Retained predecessor startup failed")
+                if self.rollback_selection() != selection:
+                    reject("UPDATE_RECOVERY_REQUIRED", "Payload changed during rollback preflight")
+            except Exception:
+                return TransactionResult("failed", ledger["current"]["version"], "UPDATE_HEALTH_FAILED")
+            checkpoint("user_rollback_health_passed")
+            # Reuse the original transaction's known old/new slots and sole
+            # ledger. Its high water is preserved. Crash recovery now completes
+            # the explicit rollback; no second journal or guessed old payload.
+            ledger["current"] = dict(txn["old"])
+            try:
+                self._save(ledger, "ROLLBACK", failure="UPDATE_USER_ROLLBACK")
+                checkpoint("user_rollback_intent")
+                return self._recover_locked(checkpoint=checkpoint)
+            except Exception:
+                return self._recover_locked(checkpoint=checkpoint)
+
     def _recover_locked(self, *, checkpoint=lambda _: None, failure_code="UPDATE_INTERRUPTED"):
         try:
             ledger = self._ledger()
@@ -315,7 +387,8 @@ class InstallationStore:
             if transaction["state"] == "ROLLED_BACK":
                 if a != oh:
                     reject("UPDATE_RECOVERY_REQUIRED", "Rollback record does not match current payload")
-                return TransactionResult("rolled_back", old_id["version"], transaction["failure_code"])
+                return TransactionResult("rolled_back", old_id["version"],
+                    None if transaction["failure_code"] == "UPDATE_USER_ROLLBACK" else transaction["failure_code"])
             self._save(ledger, "ROLLBACK", failure=transaction["failure_code"] or failure_code)
             checkpoint("rollback_intent")
             if a == nh:
@@ -329,7 +402,8 @@ class InstallationStore:
                 reject("UPDATE_RECOVERY_REQUIRED", "Restored payload differs from previous identity")
             self._save(ledger, "ROLLED_BACK")
             checkpoint("rollback_written")
-            return TransactionResult("rolled_back", old_id["version"], transaction["failure_code"])
+            return TransactionResult("rolled_back", old_id["version"],
+                None if transaction["failure_code"] == "UPDATE_USER_ROLLBACK" else transaction["failure_code"])
         except Exception:
             # Do not turn corruption into a new baseline or delete diagnostics.
             return TransactionResult("recovery_required", error_code="UPDATE_RECOVERY_REQUIRED")

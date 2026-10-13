@@ -7,10 +7,11 @@ type LegacyUpdateStatus = ProductVersion & {
   blockers: string[];
 };
 export type PreparationStatus = ProductVersion & {
-  schema_version: 2 | 3; status: "unconfigured" | "idle" | "available" | "up_to_date" | "downloaded" | "stale";
+  schema_version: 2 | 3 | 4; status: "unconfigured" | "idle" | "available" | "up_to_date" | "downloaded" | "stale";
   enabled: false; automatic_check: false; channel: "stable" | "preview"; can_apply: false;
   can_check: boolean; can_download: boolean; blockers: string[]; latest_version: string | null;
   can_request_apply: boolean;
+  can_request_rollback: boolean; rollback: null | {rollback_id: string; version: string};
   candidate: null | {candidate_id: string; version: string; release_id: string; bytes: number; channel: "stable" | "preview"};
 };
 export type UpdateStatus = LegacyUpdateStatus | PreparationStatus;
@@ -47,11 +48,22 @@ export function parseUpdateStatus(value: any): UpdateStatus {
     return {...product, schema_version: 1, status: "disabled", enabled: false,
       automatic_check: false, channel: "stable", can_apply: false, blockers: [...value.blockers]};
   }
-  if (![2, 3].includes(value.schema_version) || !["stable", "preview"].includes(value.channel)
+  if (![2, 3, 4].includes(value.schema_version) || !["stable", "preview"].includes(value.channel)
       || !["unconfigured", "idle", "available", "up_to_date", "downloaded", "stale"].includes(value.status)
       || typeof value.can_check !== "boolean" || typeof value.can_download !== "boolean") throw new Error("Update status unavailable");
-  if (value.schema_version === 3 && (typeof value.can_request_apply !== "boolean"
+  if (value.schema_version >= 3 && (typeof value.can_request_apply !== "boolean"
       || (value.can_request_apply && value.status !== "downloaded"))) throw new Error("Update handoff unavailable");
+  let rollback: PreparationStatus["rollback"] = null;
+  if (value.schema_version === 4) {
+    if (typeof value.can_request_rollback !== "boolean") throw new Error("Rollback unavailable");
+    if (value.rollback !== null) {
+      identity({product_id: product.product_id, version: value.rollback?.version});
+      if (typeof value.rollback?.rollback_id !== "string" || !/^[0-9a-f]{64}$/.test(value.rollback.rollback_id)
+          || value.rollback.rollback_id.length !== 64) throw new Error("Rollback selection unavailable");
+      rollback = {rollback_id: value.rollback.rollback_id, version: value.rollback.version};
+    }
+    if (value.can_request_rollback && !rollback) throw new Error("Rollback capability mismatch");
+  }
   let candidate: PreparationStatus["candidate"] = null;
   if (value.candidate !== null) {
     const item = value.candidate;
@@ -73,7 +85,8 @@ export function parseUpdateStatus(value: any): UpdateStatus {
       || (value.status === "up_to_date" && value.latest_version === null)) throw new Error("Update capability mismatch");
   return {...product, schema_version: value.schema_version, status: value.status, enabled: false, automatic_check: false,
     channel: value.channel, can_apply: false, can_check: value.can_check, can_download: value.can_download,
-    can_request_apply: value.schema_version === 3 && value.can_request_apply,
+    can_request_apply: value.schema_version >= 3 && value.can_request_apply,
+    rollback, can_request_rollback: value.schema_version === 4 && value.can_request_rollback,
     blockers: [...value.blockers], latest_version: value.latest_version, candidate};
 }
 
@@ -105,4 +118,10 @@ export async function requestApplyUpdate(client: BackendClient, channel: "stable
   const result = await client.callTool("update.request_apply", {channel, candidate_id: candidateId, operation_id: operationId}, 180);
   if (result?.schema_version !== 1 || result.status !== "exit_required" || result.exit_code !== 75
       || result.channel !== channel || result.candidate_id !== candidateId) throw new Error("Update handoff mismatch");
+}
+
+export async function requestRollbackUpdate(client: BackendClient, rollbackId: string, operationId: string): Promise<void> {
+  const result = await client.callTool("update.request_rollback", {rollback_id: rollbackId, operation_id: operationId}, 180);
+  if (result?.schema_version !== 1 || result.status !== "exit_required" || result.exit_code !== 75
+      || result.action !== "rollback" || result.rollback_id !== rollbackId) throw new Error("Rollback handoff mismatch");
 }

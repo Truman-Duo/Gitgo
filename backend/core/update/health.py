@@ -18,7 +18,7 @@ from .version import Version
 
 PROBE_ROLE = "update-data-probe"
 MAX_REPORT_BYTES = 64 * 1024
-MANAGED_API_VERSION = 3  # Stable launcher supports confirmed session handoff.
+MANAGED_API_VERSION = 4  # Stable launcher supports update and retained rollback.
 
 
 def isolated_environment(profile: Path) -> dict[str, str]:

@@ -4,9 +4,9 @@
 
 ## 范围
 
-默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 3。构建时需要选择 `--update-evidence`。旧包（含此前 API 1/2）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
+默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 4。构建时需要选择 `--update-evidence`。旧包（含此前 API 1/2/3）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
 
-`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 3 增加绑定启动会话的确认/退出/事务交接，仅在受支持的平台和清理证明完整时允许。macOS 不满足清理条件，Windows 无管理适配；Linux 尚待实机验收。主动回滚尚未开放，不能把管理安装或下载成功当作更新验收通过。详见[手动更新准备与交接](update-preparation.md)。
+`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 4 支持绑定启动会话的更新及保留版本回滚，仅在受支持的平台和清理证明完整时允许。macOS 不满足清理条件，Windows 无管理适配；Linux 尚待实机验收。不能把管理安装或下载成功当作更新验收通过。详见[手动更新准备与交接](update-preparation.md)。
 
 ## 布局与唯一权威
 

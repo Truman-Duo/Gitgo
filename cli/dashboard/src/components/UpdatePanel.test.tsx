@@ -79,6 +79,42 @@ const candidate = {candidate_id: "a".repeat(64), version: "1.0.0-alpha.3", relea
 const available = {...idle, status: "available", can_download: true, latest_version: candidate.version, candidate};
 const prepared = {...available, status: "downloaded", can_download: false};
 
+describe("explicit retained rollback", () => {
+  const rollback = {rollback_id: "d".repeat(64), version: "1.0.0-alpha.1"};
+  const status = {...idle, schema_version: 4, can_request_apply: false, can_request_rollback: true, rollback};
+  test("requires its own confirmation before clean shutdown, even offline", async () => {
+    const calls: any[] = []; let exits = 0;
+    const fixture = mount({ready: true, close() {}, async callTool(...args) {
+      calls.push(args); return args[0] === "update.request_rollback"
+        ? {schema_version: 1, status: "exit_required", action: "rollback", rollback_id: rollback.rollback_id, exit_code: 75}
+        : {...status, status: "unconfigured", can_check: false};
+    }}, () => {}, async () => {exits++;});
+    try {
+      await wait(); fixture.stdin.write("\r"); await wait(); expect(calls).toHaveLength(1);
+      fixture.stdin.write("b"); await wait(); expect(calls).toHaveLength(1);
+      expect(fixture.text()).toContain("restore Gitgo 1.0.0-alpha.1");
+      fixture.stdin.write("n"); await wait(); expect(exits).toBe(0);
+      fixture.stdin.write("b"); await wait(); fixture.stdin.write("\r"); await wait();
+      expect(calls[1][0]).toBe("update.request_rollback");
+      expect(calls[1][1].rollback_id).toBe(rollback.rollback_id);
+      expect(exits).toBe(1);
+    } finally {fixture.close();}
+  });
+  test("cancelled rollback acknowledgement cannot close the session", async () => {
+    let finish!: (value: any) => void; let exits = 0;
+    const fixture = mount({ready: true, close() {}, callTool(operation) {
+      return operation === "update.request_rollback" ? new Promise(resolve => {finish = resolve;})
+        : Promise.resolve(operation === "update.cancel" ? {cancelled: true} : status);
+    }}, () => {}, async () => {exits++;});
+    try {
+      await wait(); fixture.stdin.write("b"); await wait(); fixture.stdin.write("\r"); await wait();
+      fixture.stdin.write("x"); await wait();
+      finish({schema_version: 1, status: "exit_required", action: "rollback", rollback_id: rollback.rollback_id, exit_code: 75});
+      await wait(); expect(exits).toBe(0);
+    } finally {fixture.close();}
+  });
+});
+
 describe("confirmed updater handoff", () => {
   test("separate confirmation and exact response are required before shutdown", async () => {
     const calls: string[] = []; let exits = 0;
