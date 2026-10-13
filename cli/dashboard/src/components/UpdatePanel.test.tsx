@@ -15,7 +15,7 @@ function mount(client: BackendClient, onDismiss: () => void) {
   const stdin: any = new PassThrough();
   stdin.isTTY = true; stdin.setRawMode = () => stdin; stdin.ref = () => stdin; stdin.unref = () => stdin;
   const stdout: any = new PassThrough(); stdout.isTTY = false; stdout.columns = 80; stdout.rows = 24;
-  const stderr = new PassThrough();
+  const stderr: any = new PassThrough();
   let text = "";
   stdout.on("data", (chunk: Buffer) => {text += chunk.toString();}); stderr.on("data", () => {});
   const root = renderSync(<InputProvider><UpdatePanel client={client} cols={80} onDismiss={onDismiss}/></InputProvider>,
@@ -69,5 +69,98 @@ describe("software update panel", () => {
       expect(dismissed).toBe(1);
     } finally {fixture.close();}
     resolve(sample); await wait();
+  });
+});
+
+const idle = {schema_version: 2, product_id: "gitgo-terminal", version: "1.0.0-alpha.2", status: "idle",
+  enabled: false, automatic_check: false, channel: "stable", can_apply: false, can_check: true,
+  can_download: false, blockers: ["UPDATE_HANDOFF_REQUIRED"], latest_version: null, candidate: null};
+const candidate = {candidate_id: "a".repeat(64), version: "1.0.0-alpha.3", release_id: "release-3", bytes: 4096, channel: "stable"};
+const available = {...idle, status: "available", can_download: true, latest_version: candidate.version, candidate};
+const prepared = {...available, status: "downloaded", can_download: false};
+
+describe("manual update preparation UI", () => {
+  test("opens offline, explicitly checks, and requires separate download confirmation", async () => {
+    const calls: any[] = [];
+    let result = idle;
+    const fixture = mount({ready: true, close() {}, async callTool(...args) {
+      calls.push(args);
+      if (args[0] === "update.check") result = available as any;
+      if (args[0] === "update.download") result = prepared as any;
+      return result;
+    }}, () => {});
+    try {
+      await wait(); expect(calls.map(call => call[0])).toEqual(["update.status"]);
+      fixture.stdin.write("\r"); await wait(); expect(calls).toHaveLength(1);
+      fixture.stdin.write("k"); await wait();
+      expect(calls[1][0]).toBe("update.check");
+      expect(fixture.text()).toContain("1.0.0-alpha.3");
+      fixture.stdin.write("d"); await wait(); expect(calls).toHaveLength(2);
+      expect(fixture.text()).toContain("Download this exact signed package?");
+      fixture.stdin.write("n"); await wait(); expect(calls).toHaveLength(2);
+      fixture.stdin.write("d"); await wait(); fixture.stdin.write("\r"); await wait();
+      expect(calls[2][0]).toBe("update.download");
+      expect(calls[2][1].candidate_id).toBe(candidate.candidate_id);
+      expect(fixture.text()).toContain("Downloaded and verified");
+      expect(calls.some(call => call[0] === "update.apply")).toBe(false);
+    } finally {fixture.close();}
+  });
+  test("changing channels is only a local refresh; paste and Enter do not check", async () => {
+    const calls: any[] = [];
+    const fixture = mount({ready: true, close() {}, async callTool(...args) {
+      calls.push(args); return {...idle, channel: args[1]?.channel || "stable"};
+    }}, () => {});
+    try {
+      await wait(); fixture.stdin.write("c"); await wait();
+      expect(calls).toEqual([["update.status"], ["update.status", {channel: "preview"}]]);
+      fixture.stdin.write("\x1b[200~k\x1b[201~"); await wait();
+      fixture.stdin.write("\r"); await wait();
+      expect(calls).toHaveLength(2);
+    } finally {fixture.close();}
+  });
+  test("missing publisher configuration never sends check/download requests", async () => {
+    const calls: any[] = [];
+    const fixture = mount({ready: true, close() {}, async callTool(...args) {
+      calls.push(args); return {...idle, status: "unconfigured", can_check: false};
+    }}, () => {});
+    try {
+      await wait(); fixture.stdin.write("kd\r"); await wait();
+      expect(calls).toHaveLength(1);
+      expect(fixture.text()).toContain("not configured");
+    } finally {fixture.close();}
+  });
+  test("in-flight cancellation uses the same job ID, with no duplicate download", async () => {
+    const calls: any[] = []; let reject!: (error: Error) => void;
+    const fixture = mount({ready: true, close() {}, callTool(...args) {
+      calls.push(args);
+      if (args[0] === "update.download") return new Promise((_yes, no) => {reject = no;});
+      if (args[0] === "update.cancel") {reject(new Error("private-proxy-password")); return Promise.resolve({cancelled: true});}
+      return Promise.resolve(available);
+    }}, () => {});
+    try {
+      await wait(); fixture.stdin.write("d"); await wait(); fixture.stdin.write("\r"); await wait();
+      fixture.stdin.write("d\r"); await wait();
+      expect(calls.filter(call => call[0] === "update.download")).toHaveLength(1);
+      fixture.stdin.write("x"); await wait();
+      expect(calls[2][0]).toBe("update.cancel");
+      expect(calls[2][1].operation_id).toBe(calls[1][1].operation_id);
+      expect(fixture.text()).toContain("No software was installed");
+      expect(fixture.text()).not.toContain("private-proxy-password");
+    } finally {fixture.close();}
+  });
+  test("closing a pending check cancels it and ignores late completion", async () => {
+    const calls: any[] = []; let complete!: (data: unknown) => void; let dismissed = 0;
+    const fixture = mount({ready: true, close() {}, callTool(...args) {
+      calls.push(args);
+      if (args[0] === "update.check") return new Promise(yes => {complete = yes;});
+      return Promise.resolve(args[0] === "update.cancel" ? {cancelled: true} : idle);
+    }}, () => {dismissed++;});
+    try {
+      await wait(); fixture.stdin.write("k"); await wait(); fixture.stdin.write("\x1b");
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(dismissed).toBe(1);
+      expect(calls.find(call => call[0] === "update.cancel")?.[1].operation_id).toBe(calls[1][1].operation_id);
+    } finally {fixture.close();}
+    complete(available); await wait();
   });
 });

@@ -1,5 +1,5 @@
 import {describe, expect, test} from "bun:test";
-import {productVersion, updateStatus} from "./update.js";
+import {productVersion, updateStatus, parseUpdateStatus, checkUpdate, downloadUpdate, cancelUpdate} from "./update.js";
 import type {BackendClient} from "./client.js";
 
 const sample = {schema_version: 1, product_id: "gitgo-terminal", version: "1.0.0-alpha.2",
@@ -26,5 +26,42 @@ describe("update status protocol", () => {
   });
   test("missing old-host operation never guesses a current version", async () => {
     await expect(productVersion(client({}))).rejects.toThrow("Product version unavailable");
+  });
+});
+
+const available = {schema_version: 2, product_id: "gitgo-terminal", version: "1.0.0-alpha.2",
+  status: "available", enabled: false, automatic_check: false, channel: "preview", can_apply: false,
+  can_check: true, can_download: true, blockers: ["UPDATE_HANDOFF_REQUIRED"], latest_version: "1.0.0-alpha.3",
+  candidate: {candidate_id: "a".repeat(64), version: "1.0.0-alpha.3", release_id: "release-3", bytes: 4096, channel: "preview"}};
+
+describe("manual check/download protocol", () => {
+  test("allows separate manual capabilities but never enables apply", () => {
+    expect(parseUpdateStatus(available).can_apply).toBe(false);
+    expect(parseUpdateStatus({...available, status: "downloaded", can_download: false}).status).toBe("downloaded");
+  });
+  for (const patch of [
+    {can_apply: true}, {enabled: true}, {automatic_check: true}, {status: "installed"},
+    {can_download: false}, {can_check: false}, {candidate: null}, {latest_version: null},
+    {candidate: {...available.candidate, candidate_id: "a".repeat(64) + "\n"}},
+    {candidate: {...available.candidate, release_id: "unsafe\x1b[31m"}},
+    {candidate: {...available.candidate, bytes: 2 * 1024 ** 3 + 1}},
+    {candidate: {...available.candidate, channel: "stable"}},
+  ]) test(`rejects capability/payload mismatch ${JSON.stringify(patch)}`, () => {
+    expect(() => parseUpdateStatus({...available, ...patch})).toThrow();
+  });
+  test("uses only channel/selection/job IDs, never UI supplied trust or local paths", async () => {
+    const calls: any[] = [];
+    const c: BackendClient = {ready: true, close() {}, async callTool(...args) {
+      calls.push(args); return args[0] === "update.cancel" ? {cancelled: true} : args[0] === "update.download"
+        ? {...available, status: "downloaded", can_download: false} : available;
+    }};
+    await checkUpdate(c, "preview", "b".repeat(32));
+    await downloadUpdate(c, "preview", "a".repeat(64), "c".repeat(32));
+    await cancelUpdate(c, "c".repeat(32));
+    expect(calls).toEqual([
+      ["update.check", {channel: "preview", operation_id: "b".repeat(32)}, 180],
+      ["update.download", {channel: "preview", candidate_id: "a".repeat(64), operation_id: "c".repeat(32)}, 1200],
+      ["update.cancel", {operation_id: "c".repeat(32)}, 10],
+    ]);
   });
 });

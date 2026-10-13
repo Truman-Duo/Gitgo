@@ -4,9 +4,9 @@
 
 ## 范围
 
-默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 1。构建时需要选择 `--update-evidence`。旧包、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
+默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 2。构建时需要选择 `--update-evidence`。旧包（含此前 API 1）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
 
-该模式的更新总开关仍关闭。`/update` 可识别已经登记的管理布局，但仍不提供下载/应用/回滚操作。正式发行信任、应用更新交接与完整健康/平台验收尚未开放；不能把管理安装成功当作更新验收通过。
+该模式不支持应用更新或回滚。`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。正式发行配置与应用交接/健康/平台验收仍需完成；不能把管理安装或下载成功当作更新验收通过。详见[手动更新准备](update-preparation.md)。
 
 ## 布局与唯一权威
 
@@ -14,15 +14,17 @@
 installation/
   gitgo                           # 本地生成、固定位置的启动脚本
   bootstrap/gitgo-host/           # 独立冻结启动/恢复程序及组件
-  control/registration.json       # schema 2，simulation=false
+  control/registration.json       # schema 3，simulation=false
   control/ledger.json             # 复用原事务引擎的唯一持久记录
   control/operation.lock
   control/runtime.lock
+  control/preparation.lock        # 固定 inode 的检查/下载锁
+  control/preparation/            # 私有签名缓存、已校验包；从不执行
   active/                         # 实际 Dashboard、Host、脚本和组件
   transactions/                   # 已记录候选/旧版/失败版本
 ```
 
-模拟模式 schema 1 与管理模式 schema 2 不能互相接管；不是修改一个布尔值就转换安装。两种模式复用同一事务状态机、文件检查、锁、持久化和恢复，不再建立一套平行 ledger。
+模拟模式 schema 1 与管理模式 schema 3 不能互相接管；不是修改一个布尔值就转换安装。此前未公开的 schema 2 实验安装也不自动迁移或接管，应使用全新隔离目录演练。两种模式复用同一事务状态机、文件检查、锁、持久化和恢复，不再建立一套平行 ledger。
 
 管理登记固定安装 ID、根与控制目录设备/inode、两把锁身份、保护路径，以及 bootstrap 完整文件树和本地生成启动脚本摘要。更换锁 inode、修改稳定程序/脚本或手工开启未支持的开关会被拒绝。初始安装只复制进入新的私有目录；完整包与实际 frozen runtime 的版本、目标、数据证据及 API 都要匹配。
 
@@ -62,4 +64,4 @@ installation/
 
 可显式提供 `GITGO_MANAGED_TEST_STAGE` 指向新构建的 managed-capable staging，运行实际冻结安装与启动测试。未提供工件时明确跳过。测试只使用新建的私有目录、保护哨兵和隔离资料，不安装到日常目录，不调用付费模型。
 
-尚需完成正式更新请求/确认/退出交接与稳定 helper 应用、签名发行配置、两个真实版本切换/失败恢复、Windows ACL/运行锁适配、Linux 原生验收，以及正式终端、断电和清理完整性验收。默认关闭保持到这些条件满足；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。
+尚需完成应用更新的确认/退出交接与稳定 helper 替换、正式签名发行配置、两个真实版本切换/失败恢复、Windows ACL/运行锁适配、Linux 原生验收，以及正式终端、断电和清理完整性验收。应用更新保持不可用直到这些条件满足；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。
