@@ -117,6 +117,7 @@ export function useVirtualScroll({
   const callbacksRef = useRef(new Map<string, (element: DOMElement | null) => void>())
   const lastLayoutKeyRef = useRef<string | number>(layoutKey)
   const pendingLayoutAnchorRef = useRef<LayoutAnchor | null>(null)
+  const previousSizesRef = useRef(new Map<string, number>())
 
   const estimate = useCallback((key: string, index: number): number => {
     const raw = typeof estimateSize === 'function' ? estimateSize(key, index) : estimateSize
@@ -150,7 +151,8 @@ export function useVirtualScroll({
       const previousLayoutKey = lastLayoutKeyRef.current
       const previousSizes = itemKeys.map((key, index) => {
         const cached = sizesRef.current.get(key)
-        return cached?.layoutKey === previousLayoutKey ? cached.rows : estimate(key, index)
+        return cached?.layoutKey === previousLayoutKey ? cached.rows
+          : previousSizesRef.current.get(key) ?? estimate(key, index)
       })
       let before = 0
       let anchorIndex = 0
@@ -241,6 +243,14 @@ export function useVirtualScroll({
     for (const key of callbacksRef.current.keys()) {
       if (!live.has(key)) callbacksRef.current.delete(key)
     }
+
+    // Retain estimates too: most of a virtualized history has never mounted.
+    // Using the next width's estimates to locate the old viewport shifts the
+    // semantic anchor even when all measured rows are cached correctly.
+    previousSizesRef.current = new Map(itemKeys.map((key, index) => {
+      const cached = sizesRef.current.get(key)
+      return [key, cached?.layoutKey === layoutKey ? cached.rows : sizes[index]!]
+    }))
 
     const handle = scrollRef.current
     if (virtualized && handle) {
