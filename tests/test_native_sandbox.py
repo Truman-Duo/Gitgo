@@ -570,13 +570,22 @@ def test_pipeline_rechecks_consumption_before_execution(tmp_path_factory, monkey
     calls = []
     tool = AgentTool("sensitive", "test", {}, lambda args: calls.append(args),
                      execution_contract=data_broker("test.fixture"), approval=ApprovalMode.ASK, approval_per_invocation=True)
-    def match(*args, **kwargs):
-        return None if kwargs.get("consume") else {"grant_id": "already-consumed"}
-    monkeypatch.setattr("backend.core.loop.permission_broker.matching_grant", match)
+    from backend.core.loop.permission_broker import (
+        create_permission_request, grant_from_decision, matching_grant,
+    )
+    create_permission_request(process, {"tool_name": tool.name, "arguments": {},
+        "purpose": "Approve this exact fixture call"}, {tool.name: tool}, str(tmp_path_factory))
+    grant = grant_from_decision(process, process.pending_decision, "allow_once")
+    assert grant and grant["remaining_uses"] == 1
+    bus = EventBus()
+    # Another admission wins after this call's preview, before its own admission.
+    bus.subscribe("ToolBeforeHooksStarted", lambda _: matching_grant(
+        process, tool.name, {}, per_invocation=True, tool=tool, consume=True))
     result = ToolPipeline().execute({"name": tool.name, "args": {}}, tool,
         ExecutionContext(process=process, session=process.session,
-                         workspace_path=str(tmp_path_factory), event_bus=EventBus(),
+                         workspace_path=str(tmp_path_factory), event_bus=bus,
                          cancellation=process.cancellation_event), "race", 0)
+    assert grant["remaining_uses"] == 0
     assert result.is_error
     assert result.diagnostics["code"] == "APPROVAL_GRANT_INVALID"
     assert calls == []

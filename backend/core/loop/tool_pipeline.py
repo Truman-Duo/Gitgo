@@ -323,17 +323,6 @@ class ToolPipeline:
             )
             result.receipt["effect_state"] = "not_committed"
             return result
-        if explicit_user_grant is not None:
-            consumed = matching_grant(
-                ctx.process, tool_name, public_raw,
-                per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool, consume=True,
-            )
-            if consumed is None:
-                return self._error_result(
-                    tool_name, execution_id, call_index, start, "approval is no longer available",
-                    diagnostics={"nature": "governance", "code": "APPROVAL_GRANT_INVALID"},
-                )
-
         # One canonical governance path.  Composite wrappers are transparent:
         # their compiled component calls are authorized below, so the same
         # semantic operation is not checked once as a wrapper and again as a
@@ -391,6 +380,37 @@ class ToolPipeline:
             )
             result.receipt["effect_state"] = "not_committed"
             return result
+
+        # Preflight only previews authority. Spend the complete grant selection
+        # once, after argument/prerequisite/governance/ring checks have passed.
+        if ctx.is_cancelled() or getattr(ctx.process, "cancel_requested", False):
+            return self._error_result(
+                tool_name, execution_id, call_index, start, "tool execution cancelled before admission",
+                diagnostics={"nature": "system", "code": "TOOL_CANCELLED"},
+            )
+        from backend.core.loop.permission_broker import admit_invocation_grants
+        try:
+            admitted_roots, admission_error = admit_invocation_grants(
+                ctx.process, tool, dict(raw_args or {}), dict(args or {}),
+                out_of_scope_resources(args, str(ctx.workspace_path)),
+                require_explicit=operation_policy.requires_user and resume_state is None,
+            )
+        except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
+            result = self._error_result(
+                tool_name, execution_id, call_index, start, f"grant admission failed: {exc}",
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+            )
+            result.receipt["effect_state"] = "not_committed"
+            return result
+        if admission_error is not None:
+            result = self._error_result(
+                tool_name, execution_id, call_index, start, admission_error["message"],
+                diagnostics={"nature": "governance", "code": admission_error["name"],
+                             "source": "host", "error_info": admission_error},
+            )
+            result.receipt["effect_state"] = "not_committed"
+            return result
+        args["_allowed_roots"] = admitted_roots
 
         # Step 4: execute
         ctx.event_bus.emit(

@@ -110,6 +110,13 @@ def grant_is_current(grant: dict, process, tool=None) -> bool:
     return True
 
 
+def _has_remaining_uses(grant: dict) -> bool:
+    if "remaining_uses" not in grant:
+        return False
+    uses = grant.get("remaining_uses")
+    return (uses is None and grant.get("scope") == "task") or (type(uses) is int and uses > 0)
+
+
 @_locked_grants
 def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: bool,
                    consume: bool = False, tool=None) -> dict | None:
@@ -130,7 +137,7 @@ def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: 
             if per_invocation
             else (item.get("scope") == "task" or item.get("arguments_digest") == digest)
         )
-        and (item.get("remaining_uses") is None or int(item.get("remaining_uses") or 0) > 0)
+        and _has_remaining_uses(item)
     )), None)
     if consume and grant is not None and grant.get("remaining_uses") is not None:
         grant["remaining_uses"] = max(0, int(grant["remaining_uses"]) - 1)
@@ -372,7 +379,7 @@ def consume_exact_grant(process, tool_name: str, arguments: dict) -> dict | None
         and item.get("task_id") == task_id
         and item.get("tool_name") == tool_name
         and item.get("arguments_digest") == digest
-        and (item.get("remaining_uses") is None or int(item.get("remaining_uses") or 0) > 0)
+        and _has_remaining_uses(item)
     )), None)
     if grant is None:
         return None
@@ -391,11 +398,10 @@ def _arguments_preview(arguments: dict, *, limit: int = 1200) -> str:
     return rendered if len(rendered) <= limit else rendered[:limit] + "\n…"
 
 
-@_locked_grants
-def authorize_external_resources(process, tool_name: str, effect: str, arguments: dict,
-                                 resources: list[str], *, tool=None) -> tuple[list[str], dict | None]:
+def _select_external_resources(process, tool_name: str, effect: str, arguments: dict,
+                                 resources: list[str], *, tool=None) -> tuple[list[str], list[dict], dict | None]:
     if not resources:
-        return [], None
+        return [], [], None
     digest = arguments_digest(arguments)
     allowed: list[str] = []
     matched: list[dict] = []
@@ -408,7 +414,7 @@ def authorize_external_resources(process, tool_name: str, effect: str, arguments
             and item.get("effect") == effect
             and _is_within(target, Path(str(item.get("resource") or "")).resolve(strict=False))
             and (item.get("scope") == "task" or item.get("arguments_digest") == digest)
-            and (item.get("remaining_uses") is None or int(item.get("remaining_uses") or 0) > 0)
+            and _has_remaining_uses(item)
         )), None)
         if grant is None:
             info = error_payload(
@@ -423,10 +429,49 @@ def authorize_external_resources(process, tool_name: str, effect: str, arguments
                     "resource": str(target),
                 }],
             )
-            return [], info["error_info"]
+            return [], [], info["error_info"]
         matched.append(grant)
         allowed.append(str(Path(str(grant["resource"])).resolve(strict=False)))
-    for grant in matched:
-        if grant.get("remaining_uses") is not None:
-            grant["remaining_uses"] = max(0, int(grant["remaining_uses"]) - 1)
-    return list(dict.fromkeys(allowed)), None
+    return list(dict.fromkeys(allowed)), matched, None
+
+
+@_locked_grants
+def authorize_external_resources(process, tool_name: str, effect: str, arguments: dict,
+                                 resources: list[str], *, tool=None) -> tuple[list[str], dict | None]:
+    """Preview scope without spending approval; admission must recheck it.
+
+    This result is only for preflight. It does not authorize a later execution.
+    """
+    roots, _, error = _select_external_resources(process, tool_name, effect, arguments, resources, tool=tool)
+    return roots, error
+
+
+@_locked_grants
+def admit_invocation_grants(process, tool, raw_arguments: dict, prepared_arguments: dict,
+                            resources: list[str], *, require_explicit: bool) -> tuple[list[str], dict | None]:
+    """Recheck and spend the complete invocation selection under the grant lock.
+
+    One grant may cover both explicit approval and several resource paths. All
+    required grants must still be current before any is spent; each selected
+    grant is spent once. This is in-process atomicity only, not durable launch
+    admission or proof that an OS backend can enforce the resulting scope.
+    """
+    tool.validate_execution_contract()
+    selected = []
+    if require_explicit:
+        grant = matching_grant(process, tool.name, raw_arguments,
+            per_invocation=bool(tool.approval_per_invocation), tool=tool)
+        if grant is None:
+            return [], {"name": "APPROVAL_GRANT_INVALID", "message": "approval is no longer available"}
+        selected.append(grant)
+    effect = getattr(tool.effect, "value", str(tool.effect))
+    roots, resource_grants, error = _select_external_resources(
+        process, tool.name, effect, prepared_arguments, resources, tool=tool)
+    if error is not None:
+        return [], error
+    selected.extend(resource_grants)
+    # Deduplicate the Host-owned record, not tool JSON or a supplied grant ID.
+    for grant in {id(item): item for item in selected}.values():
+        if grant["remaining_uses"] is not None:
+            grant["remaining_uses"] -= 1
+    return roots, None
