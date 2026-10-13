@@ -1,7 +1,8 @@
-"""Simulation-only POSIX transaction authority, NOT a shipping installer/helper.
+"""Shared POSIX transaction engine with distinct, validated installation modes.
 
-Only an explicitly provisioned, initially empty private simulation root can be
-opened. No production registration, launcher, process-killing or runtime hooks.
+Concrete modes provision only initially empty private roots and validate their
+own registration schema. SimulationStore remains lab-only; the opt-in managed
+installation adapter adds its bootstrap and admission, with activation closed.
 The sole ledger commits current identity and replay evidence in one record.
 """
 
@@ -77,6 +78,10 @@ def _identity(value):
 def initialize_simulation(root: Path, seed: Path, current: CurrentInstallation, *,
                           protected_paths: tuple[Path, ...]) -> "SimulationStore":
     """Explicit test/lab provisioning only; refuse every nonempty directory."""
+    return _initialize_store(root, seed, current, protected_paths=protected_paths, store_type=SimulationStore)
+
+
+def _initialize_store(root, seed, current, *, protected_paths, store_type):
     _staging_parent(root, protected_paths)
     _staging_parent(seed, protected_paths)
     if any(root.iterdir()) or root == seed or root.is_relative_to(seed) or seed.is_relative_to(root):
@@ -94,27 +99,40 @@ def initialize_simulation(root: Path, seed: Path, current: CurrentInstallation, 
     if tree_digest(root / "active") != seed_hash:
         reject("UPDATE_SIMULATION_INVALID", "Seed changed during simulation provisioning")
     sync_tree(root / "active")
+    extra = store_type._provision_extra(root, seed)
     installation_id = uuid.uuid4().hex
     atomic_control(root / "control/ledger.json", {"schema_version": 1, "installation_id": installation_id,
                    "revision": 1, "current": {"version": current.version, "tree_sha256": seed_hash},
                    "watermarks": [], "transaction": None})
     # Registration is written LAST. Interrupted provisioning cannot be adopted
     # from orphan folders; it is not an installation with valid authority.
-    registration = {"schema_version": 1, "simulation": True, "installation_id": installation_id,
+    registration = {"schema_version": store_type.SCHEMA, "simulation": store_type.SIMULATION, "installation_id": installation_id,
                     "root": str(root), "device": root.stat().st_dev, "inode": root.stat().st_ino,
                     "product_id": current.product_id, "platform": current.platform,
                     "architecture": current.architecture, "updater_version": current.updater_version,
                     "data_compatibility": _compat_wire(current.data_compatibility),
                     "directory_identities": {name: filesystem_identity(root / name) for name in ("control", "transactions")},
                     "lock_identities": {name: filesystem_identity(root / "control" / name) for name in ("operation.lock", "runtime.lock")},
-                    "protected_paths": [str(p.resolve()) for p in protected_paths]}
+                    "protected_paths": [str(p.resolve()) for p in protected_paths], **extra}
     atomic_control(root / "control/registration.json", registration)
     sync_directory(root / "transactions")
     sync_directory(root)
-    return SimulationStore(root, protected_paths=protected_paths)
+    return store_type(root, protected_paths=protected_paths)
 
 
-class SimulationStore:
+class InstallationStore:
+    """One ledger/lock authority. Concrete modes validate their own registration."""
+    SCHEMA = 1
+    SIMULATION = True
+    EXTRA_FIELDS = frozenset()
+
+    @classmethod
+    def _provision_extra(cls, root, seed):
+        return {}
+
+    def _validate_extra(self, value):
+        pass
+
     def __init__(self, root: Path, *, protected_paths: tuple[Path, ...]):
         self.root, self.protected_paths = root, protected_paths
         try:
@@ -131,9 +149,9 @@ class SimulationStore:
         value = read_control(self.root / "control/registration.json")
         fields(value, {"schema_version", "simulation", "installation_id", "root", "device", "inode",
                        "product_id", "platform", "architecture", "updater_version", "data_compatibility", "protected_paths",
-                       "directory_identities", "lock_identities"})
-        if (type(value["schema_version"]) is not int or value["schema_version"] != 1
-                or value["simulation"] is not True or value["root"] != str(self.root)
+                       "directory_identities", "lock_identities"} | self.EXTRA_FIELDS)
+        if (type(value["schema_version"]) is not int or value["schema_version"] != self.SCHEMA
+                or value["simulation"] is not self.SIMULATION or value["root"] != str(self.root)
                 or type(value["device"]) is not int or value["device"] != self.root.stat().st_dev
                 or type(value["inode"]) is not int or value["inode"] != self.root.stat().st_ino
                 or value["protected_paths"] != [str(p.resolve()) for p in self.protected_paths]):
@@ -148,6 +166,7 @@ class SimulationStore:
                 number(identity["inode"], maximum=2**64 - 1)
                 if identity != filesystem_identity(parent / name) or identity["device"] != value["device"]:
                     reject("UPDATE_CONTROL_INVALID", "Registered directory or lock identity changed")
+        self._validate_extra(value)
         CurrentInstallation(value["product_id"], "0.0.0", value["platform"], value["architecture"],
                             value["updater_version"], DataCompatibility.parse(value["data_compatibility"]), True)
         return value
@@ -165,9 +184,14 @@ class SimulationStore:
     def _operation(self):
         self._guard()
         with lock_file(self.root / "control/operation.lock", expected_identity=self.registration["lock_identities"]["operation.lock"]):
-            with lock_file(self.root / "control/runtime.lock", expected_identity=self.registration["lock_identities"]["runtime.lock"]):
+            with lock_file(self.root / "control/runtime.lock", expected_identity=self.registration["lock_identities"]["runtime.lock"]) as descriptor:
                 self._guard()
-                yield
+                if self.SIMULATION:
+                    yield
+                else:
+                    from backend.core.installation_lease import retain_descriptor
+                    with retain_descriptor(descriptor):
+                        yield
 
     def _ledger(self):
         value = read_control(self.root / "control/ledger.json")
@@ -321,11 +345,11 @@ class SimulationStore:
             return TransactionResult("recovery_required", error_code="UPDATE_RECOVERY_REQUIRED")
 
     @contextmanager
-    def runtime_session(self):
-        """Simulation launcher gate: never yield an uncommitted payload path."""
+    def runtime_lease(self):
+        """Admit a verified payload and retain its kernel lease through child use."""
         self._guard()
         with lock_file(self.root / "control/runtime.lock", shared=True,
-                       expected_identity=self.registration["lock_identities"]["runtime.lock"]):
+                       expected_identity=self.registration["lock_identities"]["runtime.lock"]) as descriptor:
             with lock_file(self.root / "control/operation.lock", expected_identity=self.registration["lock_identities"]["operation.lock"]):
                 ledger = self._ledger()
                 transaction = ledger["transaction"]
@@ -338,6 +362,11 @@ class SimulationStore:
                     reject("UPDATE_RECOVERY_REQUIRED", "Current payload differs from installation evidence")
                 self._guard()
             # Keep the shared runtime inode locked for the whole admitted use.
+            yield active, descriptor
+
+    @contextmanager
+    def runtime_session(self):
+        with self.runtime_lease() as (active, _descriptor):
             yield active
 
     def apply(self, policy: UpdatePolicy, verifier: ManifestVerifier, raw: bytes, detached: bytes,
@@ -466,3 +495,7 @@ class SimulationStore:
                 if recovered.status == "idle":
                     return TransactionResult("failed", current.version, failure)
                 return recovered
+
+
+class SimulationStore(InstallationStore):
+    """Test/lab mode never accepts a managed or production registration."""

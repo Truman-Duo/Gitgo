@@ -28,10 +28,20 @@ import {
 import { detectTerminals } from "./backend/tools.js";
 import { registerLaunchSession } from "./backend/launchSession.js";
 import packageInfo from "../package.json";
+import {managedRoot, acquireManagedAdmission} from "./backend/managedAdmission.js";
 
 if (process.argv.includes("--version")) {
   process.stdout.write(`Gitgo ${packageInfo.version}\n`);
   process.exit(0);
+}
+
+// Before launch-session/profile/terminal reads or writes. This also covers a
+// direct active binary and the Node companion, not only the public wrapper.
+const managed = managedRoot(process.execPath, import.meta.url);
+let releaseManagedAdmission: (() => void) | undefined;
+if (managed) {
+  try { releaseManagedAdmission = await acquireManagedAdmission(managed, packageInfo.version); }
+  catch { process.stderr.write("Managed installation could not safely start. Use the installed public command or recover the installation.\n"); process.exit(1); }
 }
 
 const acknowledgeHandoff = acceptTerminalHandoff();
@@ -173,6 +183,7 @@ async function main() {
       version: process.versions.bun || process.versions.node, compiled: COMPILED,
       stdinTTY: !!process.stdin.isTTY, stdoutTTY: !!process.stdout.isTTY,
       node: probeRuntime("node", process.env.GITGO_NODE || "node")}, null, 2));
+    releaseManagedAdmission?.();
     return;
   }
   ensureWindowsUtf8Console();

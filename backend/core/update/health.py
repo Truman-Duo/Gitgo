@@ -46,6 +46,14 @@ def cleanup_report(proc, job) -> dict:
 
 
 def probe_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
+    return _probe_host(host, profile, timeout=timeout, managed=False)
+
+
+def probe_managed_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
+    return _probe_host(host, profile, timeout=timeout, managed=True)
+
+
+def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool) -> dict:
     number(timeout, minimum=1, maximum=120)
     if (not host.is_file() or host.is_symlink() or not host.is_absolute()
             or host != host.resolve(strict=True)
@@ -62,7 +70,8 @@ def probe_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
     from backend.core.process_output import collect_output
     proc, job = None, None
     try:
-        proc = spawn_managed([str(host), "--gitgo-internal-role", PROBE_ROLE, "--nonce", nonce],
+        role = "managed-capabilities" if managed else PROBE_ROLE
+        proc = spawn_managed([str(host), "--gitgo-internal-role", role, "--nonce", nonce],
             cwd=str(profile), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="strict", env=env)
         job = attach_kill_job(proc)
@@ -75,6 +84,12 @@ def probe_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
         # is still useful, but this result CANNOT authorize update commitment.
         cleanup = cleanup_report(proc, job)
         report = json_object(output.encode("utf-8"), MAX_REPORT_BYTES)
+        if managed:
+            fields(report, {"schema_version", "managed_api", "runtime"})
+            if (type(report["schema_version"]) is not int or report["schema_version"] != 1
+                    or type(report["managed_api"]) is not int or report["managed_api"] != 1):
+                reject("UPDATE_HEALTH_FAILED", "Managed bootstrap capability is unavailable")
+            report = report["runtime"]
         fields(report, {"schema_version", "nonce", "product_id", "version", "platform", "architecture",
                         "data_compatibility", "memory_sqlite_check"})
         if (type(report["schema_version"]) is not int or report["schema_version"] != 1

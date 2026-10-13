@@ -34,7 +34,10 @@ export function UpdatePanel({client, cols, onDismiss}: {
       <Text>Software updates  Disabled</Text>
       <Text>Automatic checks  OFF</Text>
       <Text color={colors.warning}>This build cannot install or roll back software updates.</Text>
-      <Text>Signed releases, a managed installation and platform validation are required.</Text>
+      {data.blockers.includes("MANAGED_INSTALLATION_REQUIRED")
+        ? <Text>A managed installation is required; existing installs are not adopted.</Text>
+        : <Text>Managed installation registered; software updates remain disabled.</Text>}
+      <Text>Signed releases, update handoff and platform validation are required before enabling updates.</Text>
       <Text dimColor>This is Gitgo software status, not a project or model update. Refresh makes no release-network request.</Text>
     </> : null}
   </Box>;

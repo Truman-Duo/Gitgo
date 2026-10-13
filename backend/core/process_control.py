@@ -109,18 +109,29 @@ def spawn_managed(argv, **kwargs):
     """Establish owned lifetime BEFORE the command runs, not at cancellation."""
     if sys.platform == "win32":
         return subprocess.Popen(argv, **kwargs)
+    from backend.core.installation_lease import runtime_descriptors
+    retained = tuple(sorted(set(kwargs.pop("pass_fds", ())) | set(runtime_descriptors())))
+    if len(retained) > 16 or any(type(fd) is not int or fd < 3 for fd in retained):
+        raise ValueError("Invalid owned child descriptors")
+    for fd in retained:
+        os.fstat(fd)
     parent, child = socket.socketpair()
     # Frozen first launch may include platform loader/signature checks. Keep a
     # separate, bounded startup limit rather than misclassifying a cold Host.
     parent.settimeout(20 if getattr(sys, "frozen", False) else 5)
     if getattr(sys, "frozen", False):
-        launch = [sys.executable, "--gitgo-internal-role", "unix-scope", str(child.fileno())]
+        launch = [sys.executable, "--gitgo-internal-role", "unix-scope", str(child.fileno()), *(str(fd) for fd in retained)]
     else:
-        launch = [sys.executable, str(Path(__file__).with_name("unix_process_scope.py")), str(child.fileno())]
+        launch = [sys.executable, str(Path(__file__).with_name("unix_process_scope.py")), str(child.fileno()), *(str(fd) for fd in retained)]
     proc = None
     try:
         kwargs["start_new_session"] = True
-        kwargs["pass_fds"] = (child.fileno(),)
+        kwargs["pass_fds"] = (child.fileno(), *retained)
+        if retained:
+            kwargs["env"] = {**(kwargs.get("env") or os.environ),
+                             "GITGO_INSTALL_LEASE_FDS": ",".join(str(fd) for fd in retained)}
+        elif "env" in kwargs:
+            kwargs["env"] = {k: v for k, v in kwargs["env"].items() if k != "GITGO_INSTALL_LEASE_FDS"}
         proc = subprocess.Popen(launch, **kwargs)
         child.close()
         proc._gitgo_scope_socket = parent

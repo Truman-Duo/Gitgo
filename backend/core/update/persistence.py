@@ -79,6 +79,6 @@ def lock_file(path: Path, *, shared: bool = False, expected_identity: dict | Non
         except BlockingIOError:
             reject("UPDATE_BUSY", "Installation has an active operation or runtime")
         # Do not unlink/recreate a flock file: two lock inodes would split authority.
-        yield
+        yield fd
     finally:
         os.close(fd)

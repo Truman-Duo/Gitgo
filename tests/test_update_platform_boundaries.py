@@ -45,3 +45,11 @@ def test_non_posix_helper_rejects_before_request_or_host_inspection(monkeypatch)
         recovery_helper.recover_request(None)
     with pytest.raises(UpdateError, match="UPDATE_TRANSACTION_PLATFORM"):
         recovery_helper.recover_in_helper(None, None, None, None)
+
+
+def test_non_posix_managed_provisioning_refuses_before_path_access(monkeypatch):
+    from backend.core.update import installation
+    monkeypatch.setattr(installation, "os", SimpleNamespace(name="nt"))
+    with pytest.raises(UpdateError, match="UPDATE_TRANSACTION_PLATFORM"):
+        installation.initialize_managed(None, None, protected_paths=None)
+    with pytest.raises(UpdateError): installation.open_managed(None)

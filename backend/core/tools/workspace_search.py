@@ -37,9 +37,10 @@ class StreamOutcome:
 
 def stream_process(argv, cwd, separator, consume, deadline):
     """Drain both pipes concurrently, with bounded queues and record sizes."""
+    from backend.core.installation_lease import child_options
     proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            creationflags=creation_flags(), start_new_session=os.name != "nt")
+                            creationflags=creation_flags(), start_new_session=os.name != "nt", **child_options())
     job = attach_kill_job(proc)
     chunks = queue.Queue(maxsize=4)
     stop = threading.Event()

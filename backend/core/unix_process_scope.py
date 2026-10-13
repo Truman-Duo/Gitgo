@@ -52,6 +52,11 @@ def signal_adopted(pid):
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     fd = int(args[0])
+    retained = tuple(int(item) for item in args[1:])
+    if len(retained) > 16 or len(set(retained)) != len(retained) or any(item < 3 or item == fd for item in retained):
+        raise RuntimeError("Invalid retained descriptors")
+    for item in retained:
+        os.fstat(item)
     control = socket.socket(fileno=fd)
     if os.getpgrp() != os.getpid() or os.getsid(0) != os.getpid():
         raise RuntimeError("Supervisor must own a new session")
@@ -75,7 +80,7 @@ def main(argv=None):
     worker = None
     exit_code = 127
     try:
-        worker = subprocess.Popen(command, close_fds=True)
+        worker = subprocess.Popen(command, close_fds=True, pass_fds=retained)
         ready = {"spawned": worker.pid}
     except (OSError, ValueError) as exc:
         ready = {"spawn_error": getattr(exc, "errno", 22) or 22}

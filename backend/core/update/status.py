@@ -11,7 +11,7 @@ from .checker import UpdatePolicy
 def update_status() -> dict:
     from backend.version import __version__
     policy = UpdatePolicy()
-    return {
+    result = {
         "schema_version": 1,
         "product_id": "gitgo-terminal",
         "version": __version__,
@@ -26,3 +26,13 @@ def update_status() -> dict:
             "PLATFORM_ACCEPTANCE_REQUIRED",
         ],
     }
+    import os
+    import sys
+    if getattr(sys, "frozen", False) and os.name == "posix":
+        from pathlib import Path
+        from .installation import physical_installation, open_managed
+        physical = physical_installation(Path(sys.executable))
+        if physical is not None:
+            open_managed(physical[0])
+            result["blockers"] = ["RELEASE_TRUST_REQUIRED", "UPDATE_HANDOFF_REQUIRED", "PLATFORM_ACCEPTANCE_REQUIRED"]
+    return result

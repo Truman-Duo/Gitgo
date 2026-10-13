@@ -67,8 +67,17 @@ def _project(project_name: str):
     cfg = ConfigManager.load()
     for project in cfg.projects:
         if project.name == project_name:
+            _external_workspace(getattr(project, "workspace_path", ""))
             return cfg, project
     raise OperationError("PROJECT_NOT_FOUND", f"Project '{project_name}' was not found")
+
+
+def _external_workspace(path):
+    from backend.core.update.installation import assert_external_resource
+    from backend.core.update.validation import UpdateError
+    try: assert_external_resource(Path(path or ""))
+    except UpdateError:
+        raise OperationError("UNSAFE_WORKSPACE_PATH", "Project workspace must stay outside the managed software installation") from None
 
 
 def _public_provider(provider: dict) -> dict:
@@ -308,6 +317,7 @@ class ApplicationServices:
                 "workspace_mode must be attach_existing or create_new",
             )
         workspace = Path(raw_workspace).expanduser().resolve(strict=False)
+        _external_workspace(workspace)
         if workspace == Path(workspace.anchor):
             raise OperationError(
                 "UNSAFE_WORKSPACE_PATH", "A filesystem root cannot be used as a project workspace",
