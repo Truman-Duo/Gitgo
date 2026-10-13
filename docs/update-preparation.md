@@ -64,4 +64,16 @@
 
 主动回滚仅恢复最近一次成功事务中保留的上一版，不扫描任意历史目录或下载旧清单。绑定安装/current/事务/旧树的选择在退出后重新核对；先在隔离资料目录中验证旧版启动，失败保持新版和原 ledger。通过后先持久化意图，再复用原事务槽位恢复旧版，中断由同一 ledger 完成恢复。渠道 high water 不降低，不还原配置或数据库快照，不删除保留包或项目。每次事务最多保留八份回滚检查诊断，超限拒绝并要求独立维护。
 
-当前仅 Linux 可进入交接，尚无 Linux 实机验收。macOS owned-session-only 无法证明完整清理，因此明确拒绝更新及回滚，不能通过测试替身或用户确认绕过。Windows 管理适配仍缺失。默认包没有正式发行信任。真实双版本升级/故障恢复、正式发行与跨平台验收仍待完成。`tests/test_update_handoff.py` 与 `tests/test_update_manual_rollback.py` 的模拟平台和健康驱动只验证状态机，不作为这些验收证据。
+当前仅 Linux 可进入交接，已有下述 ARM64 虚拟机验收。macOS owned-session-only 无法证明完整清理，因此明确拒绝更新及回滚，不能通过测试替身或用户确认绕过。Windows 管理适配仍缺失。默认包没有正式发行信任。正式发行、其他平台及真实终端人工验收仍待完成。`tests/test_update_handoff.py` 与 `tests/test_update_manual_rollback.py` 的模拟平台和健康驱动只验证状态机，不作为平台验收证据。
+
+## Linux 双版本验收记录
+
+2026-10-13，在无主机目录挂载的 Ubuntu 24.04 ARM64 虚拟机（真实 Linux 6.8 内核、glibc 2.39）上，分别以干净提交构建 `1.0.0-alpha.2.lab.1` 与 `1.0.0-alpha.3.lab.1`。这些版本只用于实验，未发布；正式版本字段未改变。Python 3.12.15、SQLite 3.53.1、Bun 1.4.2、PyInstaller 6.22.3；源码与冻结运行时的数据证据匹配。已统一 Linux `aarch64` 与 macOS `arm64` 的平台专用架构名，保留未支持目标的拒绝。
+
+`tests/test_update_two_frozen_versions.py` 可通过 `GITGO_UPDATE_PREVIOUS_STAGE` 与 `GITGO_UPDATE_CANDIDATE_STAGE` 指定两份真实 Linux 包。签名使用一次性内存密钥、传输使用注入 HTTP 流，实际候选启动和父进程清理不替换为模拟健康结果。覆盖真实版本升级、主动回退、损坏 Dashboard 启动后恢复旧版及冻结 bootstrap 的中断恢复。另一个案例实际运行编译 Dashboard、Native Host 和物理安装中的固定 bootstrap，完成 `/update` 确认、退出、升级重启与回滚重启；其自动化隐藏 PTY 是进程/输入证据，不代替正式可见终端人工验收。
+
+组合工件验收 85 项通过、2 项 macOS 边界跳过。Linux 全源码回归 2060 项通过、80 项平台/可选工件跳过；macOS 全源码回归 2109 项通过、31 项跳过，Dashboard 247 项通过、4 项 Windows 平台跳过，类型检查与构建通过。
+
+还在持久化 `CHECK_NEW` 后挂起独立实验控制器，强制终止虚拟机驱动模拟突然断电。重启后实际冻结 bootstrap 恢复旧版，原程序完整树摘要、保护数据哨兵及渠道 high water 保持，旧版可再次启动。该结果覆盖一次真实虚拟机骤停，不证明物理硬件掉电、全部文件系统、正式 CDN/HTTPS/代理或实际模型业务任务。
+
+macOS 的旧 fork tracking 参数已被 [Apple XNU](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/sys/event.h) 标为不再支持；现有适配仍未提供完整清理证明，不采用采样 PID/PGID 扩大终止权限。完整 macOS 即时更新需要另行确定进程隔离方案。
