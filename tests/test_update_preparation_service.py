@@ -357,7 +357,7 @@ def test_managed_probe_rejects_old_bootstrap_api_before_schema_three_provisionin
 def test_actual_frozen_host_uses_pinned_public_trust_and_rejects_wrong_version_real_archive(tmp_path_factory, signing):
     """Actual frozen protocol, injected HTTP stream, no candidate execution.
 
-    The signed manifest deliberately calls a real alpha.2 archive alpha.3.
+    The signed manifest deliberately claims a higher version than the archive.
     Correct refusal proves static contract validation, NOT a two-version update.
     """
     from backend.core.update.tree import inventory
@@ -365,9 +365,13 @@ def test_actual_frozen_host_uses_pinned_public_trust_and_rejects_wrong_version_r
     stage = Path(os.environ["GITGO_MANAGED_TEST_STAGE"]).resolve(strict=True)
     archive = Path(os.environ["GITGO_UPDATE_TEST_ARCHIVE"]).resolve(strict=True)
     seed = base / "seed"; shutil.copytree(stage, seed, symlinks=True); seed.chmod(0o700)
+    product = json.loads((seed / "product.json").read_bytes())
+    from backend.core.update.version import Version
+    claimed_version = str(Version.parse(product["version"]).core[0] + 1) + ".0.0"
     public = signing[0].public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     if (seed / POLICY_FILE).exists(): (seed / POLICY_FILE).chmod(0o600)
-    (seed / POLICY_FILE).write_text(json.dumps(policy_wire(public))); (seed / POLICY_FILE).chmod(0o400)
+    policy = {**policy_wire(public), "platform": product["platform"], "architecture": product["architecture"]}
+    (seed / POLICY_FILE).write_text(json.dumps(policy)); (seed / POLICY_FILE).chmod(0o400)
     build = json.loads((seed / "build-manifest.json").read_bytes())
     build["files"] = [{"path": item["path"], **({"link": item["link"]} if item["kind"] == "symlink" else
         {"bytes": item["bytes"], "sha256": item["sha256"]})} for item in inventory(seed)
@@ -382,7 +386,8 @@ def test_actual_frozen_host_uses_pinned_public_trust_and_rejects_wrong_version_r
     with archive.open("rb") as handle: archive_sha = hashlib.file_digest(handle, "sha256").hexdigest()
     contract = json.loads((seed / "update-data-contract.json").read_bytes())
     wire = manifest_wire(bytes=archive.stat().st_size, sha256=archive_sha, source={key: build["source"][key] for key in ("commit", "tree")},
-        data_compatibility=contract["data_compatibility"])
+        data_compatibility=contract["data_compatibility"], version=claimed_version,
+        platform=product["platform"], architecture=product["architecture"])
     raw = json.dumps(wire).encode(); signature = sign_raw(raw, signing[0])
     # Debug role is test-only privileged instrumentation, not a request-facing
     # transport/key override. NativeHost subsequently serves its real protocol.
@@ -435,7 +440,7 @@ raise SystemExit(host.serve_forever())
         initial = request("update.status", {"channel": "preview"})["result"]
         assert initial["can_check"] is True and initial["status"] == "idle"
         checked = request("update.check", {"channel": "preview", "operation_id": "a" * 32})["result"]
-        assert checked["status"] == "available" and checked["latest_version"] == "1.0.0-alpha.3"
+        assert checked["status"] == "available" and checked["latest_version"] == claimed_version
         response = request("update.download", {"channel": "preview", "operation_id": "b" * 32,
             "candidate_id": checked["candidate"]["candidate_id"]})
         assert response["error"]["code"] == "UPDATE_PACKAGE_CONTRACT"
