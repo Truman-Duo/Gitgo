@@ -79,6 +79,14 @@ def test_wrong_private_key_and_unknown_key_cannot_verify(signing):
         signing[1].verify(raw, sign_raw(raw, signing[0], key_id="network-chosen-key"))
 
 
+def test_signed_linux_arm64_uses_aarch64_not_the_macos_spelling(signing):
+    raw, signature = signed(manifest_wire(platform="linux", architecture="aarch64"), signing)
+    assert signing[1].verify(raw, signature).scope == ("gitgo-terminal", "preview", "linux", "aarch64")
+    raw, signature = signed(manifest_wire(platform="linux", architecture="arm64"), signing)
+    with pytest.raises(UpdateError, match="UPDATE_TARGET_INVALID"):
+        signing[1].verify(raw, signature)
+
+
 def test_unverified_manifest_is_not_parsed(signing):
     raw = b"not JSON; do not interpret this as a release"
     with pytest.raises(UpdateError, match="UPDATE_SIGNATURE_INVALID"):

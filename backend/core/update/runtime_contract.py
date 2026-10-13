@@ -110,8 +110,10 @@ def data_probe(nonce: str) -> dict:
     compatibility, _ = runtime_evidence()
     from backend.version import __version__
     target = {"darwin": "macos", "linux": "linux", "win32": "windows"}.get(sys.platform)
-    architecture = {"aarch64": "arm64", "amd64": "x86_64"}.get(platform.machine().lower(),
-                                                               platform.machine().lower())
+    machine = platform.machine().lower()
+    architecture = {"amd64": "x86_64"}.get(machine, machine)
+    if machine in {"aarch64", "arm64"}:
+        architecture = "aarch64" if target == "linux" else "arm64"
     if target is None:
         reject("UPDATE_TARGET_INVALID", "Runtime platform is unsupported")
     return {"schema_version": 1, "nonce": nonce, "product_id": "gitgo-terminal",

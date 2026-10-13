@@ -15,6 +15,18 @@ from backend.core.update.health import probe_host
 from scripts import stage_update_contract
 
 
+@pytest.mark.parametrize("target,machine,expected", [("linux", "aarch64", "aarch64"),
+    ("linux", "arm64", "aarch64"), ("linux", "x86_64", "x86_64"),
+    ("darwin", "arm64", "arm64"), ("darwin", "aarch64", "arm64"), ("win32", "AMD64", "x86_64")])
+def test_runtime_target_uses_the_package_architecture_vocabulary(monkeypatch, target, machine, expected):
+    import platform
+    from backend.core.update import runtime_contract
+    monkeypatch.setattr(runtime_contract.sys, "platform", target)
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+    report = data_probe("a" * 32)
+    assert report["architecture"] == expected
+
+
 def test_actual_sql_fingerprints_and_writer_evidence_are_bound():
     from backend.core.storage.migrations import STATE_MIGRATIONS, OBSERVABILITY_MIGRATIONS
     compatibility, evidence = runtime_evidence()

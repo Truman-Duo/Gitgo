@@ -19,7 +19,8 @@ from .version import Version
 MAX_MANIFEST_BYTES = 128 * 1024
 MAX_SIGNATURE_BYTES = 1024
 MAX_MANIFEST_LIFETIME = timedelta(days=7)
-TARGETS = frozenset({("windows", "x86_64"), ("macos", "arm64"), ("linux", "x86_64")})
+TARGETS = frozenset({("windows", "x86_64"), ("macos", "arm64"),
+                     ("linux", "x86_64"), ("linux", "aarch64")})
 
 
 @dataclass(frozen=True)
