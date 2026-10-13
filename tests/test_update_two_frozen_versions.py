@@ -186,6 +186,9 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
     import pty
     import select
     import time
+    import fcntl
+    import struct
+    import termios
     store, prepare, _, before, old_version, new_version, env = actual_lab
     prepare()
     profile = Path(env["GITGO_CONFIG_PATH"]).parent
@@ -193,6 +196,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
     Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [],
         "launcher": {"terminal": "current", "configured": True}}))
     master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     proc = subprocess.Popen([str(store.root / "gitgo")], stdin=slave, stdout=slave, stderr=slave,
         env={**env, "TERM": "xterm-256color"}, start_new_session=True)
     os.close(slave)
@@ -230,6 +234,11 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         assert store._ledger()["current"]["version"] == old_version
         assert tree_digest(store.root / "active") == before
     finally:
+        # Optional local diagnostics contain only this disposable test profile.
+        # Do not publish raw terminal transcripts as release evidence.
+        if os.environ.get("GITGO_UPDATE_LAB_LOG"):
+            fd = os.open(os.environ["GITGO_UPDATE_LAB_LOG"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as handle: handle.write(output)
         # Directly owned disposable launcher only; EOF tells its owning Linux
         # supervisor to clean the child tree. Never signal a sampled PID/group.
         if proc.poll() is None:
