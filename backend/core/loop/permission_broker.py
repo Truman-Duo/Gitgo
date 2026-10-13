@@ -48,8 +48,10 @@ def arguments_digest(arguments: dict) -> str:
 def _runtime_implementation_digest() -> str:
     """Invalidate built-in approvals when source or frozen handler code changes."""
     digest = hashlib.sha256()
-    for name in ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner"):
-        module_name = f"backend.core.tools.{name}"
+    modules = [f"backend.core.tools.{name}" for name in
+               ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner")]
+    modules += ["backend.core.sandbox_read", "backend.core.sandbox_read_windows"]
+    for module_name in modules:
         spec = importlib.util.find_spec(module_name)
         if spec is None or spec.loader is None:
             raise RuntimeError(f"Cannot identify tool implementation: {module_name}")

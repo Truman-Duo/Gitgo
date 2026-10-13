@@ -364,6 +364,7 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
         assert result.success and 'error' not in result.data, result
         assert result.data['engine'] == 'python' and result.data['complete'], result
         assert result.data['count'] == 1, result
+    _assert_descriptor_read_protocol(runner, workspace)
     _assert_legacy_file_aliases_are_native(runner, workspace)
     _assert_authored_bridge_is_native(runner, workspace)
     shell = runner.run("shell_script", {
@@ -1541,3 +1542,78 @@ def test_packaged_authored_host_bridge_uses_native_runner(cross_platform_box):
     payload = json.loads(result.stdout)
     assert payload['success'] and payload['data'] == {'bridge_version': 1, 'state': 'needs_host_call',
         'call_index': 0, 'tool_name': 'fixture_leaf', 'arguments': {'value': 7}}, payload
+
+
+def _assert_descriptor_read_protocol(runner, workspace):
+    import hashlib
+    (workspace / 'read-dir').mkdir()
+    content = b'bound-read\nsecond\n'
+    (workspace / 'read-dir' / 'note.txt').write_bytes(content)
+    for handler in ('read_file', 'file_read'):
+        result = runner.run(handler, {'_workspace': str(workspace), 'path': 'read-dir/note.txt'})
+        assert result.success and (result.data or {}).get('content', '').startswith('bound-read'), result
+        assert result.data['size'] == len(content), result
+        if handler == 'read_file':
+            assert result.data['sha256'] == hashlib.sha256(content).hexdigest(), result
+    os.link(workspace / 'read-dir' / 'note.txt', workspace / 'read-hardlink.txt')
+    outside = workspace.parent / 'read-host-only.txt'
+    outside.write_text('stable-read-host-private', encoding='utf8')
+    assert outside.read_text() == 'stable-read-host-private'
+    if sys.platform == 'win32':
+        import _winapi
+        _winapi.CreateJunction(str(workspace / 'read-dir'), str(workspace / 'read-linked'))
+    else:
+        (workspace / 'read-linked').symlink_to(workspace / 'read-dir', target_is_directory=True)
+    for handler in ('read_file', 'file_read'):
+        for path in ('read-hardlink.txt', 'read-linked/note.txt', str(outside)):
+            result = runner.run(handler, {'_workspace': str(workspace), 'path': path,
+                '_allowed_roots': [str(outside)]})
+            assert not result.success or (result.data or {}).get('error'), result
+            assert 'content' not in (result.data or {}), result
+
+
+def test_linux_real_runner_descriptor_read_protocol(linux_box):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, _ = linux_box
+    _assert_descriptor_read_protocol(ProcessToolRunner(timeout=30), workspace)
+
+
+@pytest.mark.parametrize('handler', ['read_file', 'file_read'])
+def test_packaged_host_descriptor_read_protocol(cross_platform_box, handler):
+    import hashlib
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Requires an actual built Host')
+    host = Path(configured).resolve(strict=True)
+    target = workspace / 'read.txt'
+    target.write_bytes(b'bound-read\nsecond\n')
+    secret = workspace.parent / 'read-host-only.txt'
+    secret.write_text('stable-read-host-private', encoding='utf8')
+    assert secret.read_text() == 'stable-read-host-private'
+    os.link(target, workspace / 'alias.txt')
+    # Separate positive control remains singly linked.
+    positive = workspace / 'positive.txt'
+    positive.write_bytes(b'bound-read\nsecond\n')
+    commands = [{'path': 'positive.txt'}, {'path': 'alias.txt'},
+        {'path': str(secret), '_allowed_roots': [str(secret)]}]
+    source = (
+        'import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;'
+        f'commands={commands!r};'
+        f'results=[ProcessToolRunner(timeout=30).run({handler!r},'
+        f"dict(a,_workspace={str(policy.workspace)!r})) for a in commands];"
+        "print(json.dumps([{'success':r.success,'data':r.data,'error':r.error,'stderr':r.stderr} "
+        "for r in results]))"
+    )
+    result = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-c', source],
+                            capture_output=True, text=True, encoding='utf8', timeout=100)
+    assert result.returncode == 0, result.stderr
+    results = json.loads(result.stdout)
+    assert results[0]['success'] and results[0]['data']['content'].startswith('bound-read'), results
+    assert results[0]['data']['size'] == 18, results
+    if handler == 'read_file':
+        assert results[0]['data']['sha256'] == hashlib.sha256(positive.read_bytes()).hexdigest()
+    for blocked in results[1:]:
+        assert not blocked['success'] or (blocked['data'] or {}).get('error'), results
+        assert 'content' not in (blocked['data'] or {}), results
+        assert 'stable-read-host-private' not in json.dumps(blocked), results

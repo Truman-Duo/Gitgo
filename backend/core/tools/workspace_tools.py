@@ -49,24 +49,25 @@ def _text_diff(path: str, before: str, after: str) -> str:
 
 
 def read_file(args: dict) -> dict:
-    workspace = _workspace(args)
-    path = _confined_path(workspace, args.get("path", ""), must_exist=True,
-                          allowed_roots=_allowed_roots(args))
-    if path.is_dir():
-        return {"error": "IS_DIRECTORY", "path": _rel(workspace, path)}
+    from backend.core.sandbox_read import ReadRoot
+    workspace, path, root, relative = _read_target(args)
+    label = str(path.relative_to(workspace)).replace("\\", "/") if path.is_relative_to(workspace) else str(path)
     offset = max(0, int(args.get("offset", 0) or 0))
     limit = max(1, min(int(args.get("limit", 2000) or 2000), 5000))
     try:
-        raw = path.read_bytes()
+        with ReadRoot(root) as acquired, acquired.open(relative) as opened:
+            raw = opened.read_bytes()
+    except IsADirectoryError:
+        return {"error": "IS_DIRECTORY", "path": label}
     except OSError as exc:
-        return {"error": "READ_ERROR", "detail": str(exc), "path": _rel(workspace, path)}
+        return {"error": "READ_ERROR", "detail": str(exc), "path": label}
     if b"\x00" in raw[:8192]:
-        return {"error": "BINARY_FILE", "path": _rel(workspace, path)}
+        return {"error": "BINARY_FILE", "path": label}
     text = raw.decode("utf-8-sig", errors="replace")
     lines = text.splitlines()
     selected = lines[offset:offset + limit]
     return {
-        "path": _rel(workspace, path),
+        "path": label,
         "content": "\n".join(selected),
         "offset": offset,
         "returned_lines": len(selected),
@@ -705,6 +706,33 @@ def _workspace(args: dict) -> Path:
     if not workspace.exists() or not workspace.is_dir():
         raise ValueError(f"invalid workspace: {workspace}")
     return workspace
+
+
+def _read_target(args: dict) -> tuple[Path, Path, Path, str]:
+    """Select names only; ReadRoot enforces lookup using the opened objects.
+
+    Do not resolve symlinks here and erase the evidence needed by the kernel.
+    _workspace/_allowed_roots are Host inputs, never model authority. Existing
+    file grants select that one name under its parent, not sibling operations.
+    """
+    from backend.core.sandbox_read import ReadBoundaryError, relative_parts
+    workspace = Path(str(args.get("_workspace") or Path.cwd()))
+    raw = args.get("path", "")
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise ReadBoundaryError("A file path is required")
+    requested = Path(raw)
+    if ".." in requested.parts or (requested.anchor and not requested.is_absolute()):
+        raise ReadBoundaryError("File path escapes the read boundary")
+    path = requested if requested.is_absolute() else workspace / requested
+    roots = [workspace, *(Path(str(item)) for item in args.get("_allowed_roots", []))]
+    for root in roots:
+        if path.is_relative_to(root):
+            if path == root:
+                return workspace, path, root.parent, root.name
+            relative = str(path.relative_to(root))
+            relative_parts(relative)
+            return workspace, path, root, relative
+    raise ReadBoundaryError("File path escapes the approved resource scope")
 
 
 def _allowed_roots(args: dict) -> list[Path]:

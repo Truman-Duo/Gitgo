@@ -97,14 +97,16 @@ def file_read(args: dict) -> dict:
     encoding = args.get("encoding", "utf-8")
     max_lines = args.get("lines")
 
-    p = _resolve_path(path)
-    if not p.exists():
-        return {"error": "FILE_NOT_FOUND", "path": path}
-    if p.is_dir():
-        return {"error": "IS_DIRECTORY", "path": path}
-
+    from backend.core.sandbox_read import ReadRoot, ReadBoundaryError
+    from backend.core.tools.workspace_tools import _read_target
     try:
-        content = p.read_text(encoding=encoding)
+        _workspace, p, root, relative = _read_target(args)
+    except ReadBoundaryError as exc:
+        return {"error": "READ_ERROR", "path": path, "detail": str(exc)}
+    try:
+        with ReadRoot(root) as acquired, acquired.open(relative) as opened:
+            raw = opened.read_bytes()
+        content = raw.decode(encoding)
         total_lines = content.count("\n") + 1
         if max_lines and max_lines > 0:
             lines = content.splitlines()
@@ -114,10 +116,14 @@ def file_read(args: dict) -> dict:
         return {
             "content": content,
             "path": str(p),
-            "size": p.stat().st_size,
+            "size": len(raw),
             "lines": total_lines,
             "truncated": max_lines is not None and total_lines > max_lines,
         }
+    except FileNotFoundError:
+        return {"error": "FILE_NOT_FOUND", "path": path}
+    except IsADirectoryError:
+        return {"error": "IS_DIRECTORY", "path": path}
     except UnicodeDecodeError:
         return {"error": "BINARY_FILE", "path": path}
     except OSError as e:
