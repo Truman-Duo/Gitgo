@@ -189,6 +189,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
     import fcntl
     import struct
     import termios
+    import re
     store, prepare, _, before, old_version, new_version, env = actual_lab
     prepare()
     profile = Path(env["GITGO_CONFIG_PATH"]).parent
@@ -203,7 +204,12 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
     output = bytearray()
     def wait_for(text, *, after=0, timeout=120):
         deadline = time.monotonic() + timeout
-        while text.encode() not in output[after:]:
+        def displayed():
+            value = output[after:].decode("utf-8", "replace")
+            # Ink optimizes spaces into cursor-forward commands in a real TTY.
+            value = re.sub(r"\x1b\[(\d+)C", lambda match: " " * min(int(match[1]), 200), value)
+            return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value).replace("\r", "")
+        while text not in displayed():
             assert time.monotonic() < deadline, f"actual UI did not reach {text!r}"
             assert proc.poll() is None, "actual managed UI stopped unexpectedly"
             if select.select([master], [], [], .1)[0]:
@@ -216,6 +222,8 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         wait_for("Gitgo Software Update", after=start)
         time.sleep(.5)
     try:
+        wait_for("Providers")  # Expected first launch without API credentials.
+        send("\x1b")
         wait_for("Projects")
         update_panel()
         send("c")  # Select the configured preview channel, local refresh only.
@@ -223,6 +231,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         send("a"); wait_for("Close this Gitgo session")
         start = len(output); send("\r")
         wait_for('"update_status": "committed"', after=start)
+        wait_for("Providers", after=start); send("\x1b")
         wait_for("Projects", after=start)
         assert store._ledger()["current"]["version"] == new_version
         update_panel()
@@ -230,6 +239,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         send("b"); wait_for("restore Gitgo " + old_version)
         start = len(output); send("\r")
         wait_for('"update_status": "rolled_back"', after=start)
+        wait_for("Providers", after=start); send("\x1b")
         wait_for("Projects", after=start)
         assert store._ledger()["current"]["version"] == old_version
         assert tree_digest(store.root / "active") == before
@@ -237,8 +247,10 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         # Optional local diagnostics contain only this disposable test profile.
         # Do not publish raw terminal transcripts as release evidence.
         if os.environ.get("GITGO_UPDATE_LAB_LOG"):
-            fd = os.open(os.environ["GITGO_UPDATE_LAB_LOG"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "wb") as handle: handle.write(output)
+            try:
+                fd = os.open(os.environ["GITGO_UPDATE_LAB_LOG"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as handle: handle.write(output)
+            except OSError: pass  # Diagnostic failure must never skip cleanup.
         # Directly owned disposable launcher only; EOF tells its owning Linux
         # supervisor to clean the child tree. Never signal a sampled PID/group.
         if proc.poll() is None:
