@@ -218,14 +218,14 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         wait_for("Downloaded and verified")
         send("a"); wait_for("Close this Gitgo session")
         start = len(output); send("\r")
-        wait_for('"update_status":"committed"', after=start)
+        wait_for('"update_status": "committed"', after=start)
         wait_for("Projects", after=start)
         assert store._ledger()["current"]["version"] == new_version
         update_panel()
         wait_for("Retained version")
         send("b"); wait_for("restore Gitgo " + old_version)
         start = len(output); send("\r")
-        wait_for('"update_status":"rolled_back"', after=start)
+        wait_for('"update_status": "rolled_back"', after=start)
         wait_for("Projects", after=start)
         assert store._ledger()["current"]["version"] == old_version
         assert tree_digest(store.root / "active") == before
