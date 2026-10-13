@@ -46,6 +46,7 @@ def startup_probe(nonce):
                 or capabilities["result"].get("protocol_version") != 1
                 or "update.request_apply" not in capabilities["result"].get("operations", [])
                 or "update.request_rollback" not in capabilities["result"].get("operations", [])
+                or "update.cancel_pending" not in capabilities["result"].get("operations", [])
                 or version.get("request_id") != nonce + "product.version"
                 or version["result"] != {"product_id": report["product_id"], "version": report["version"]}):
             reject("UPDATE_HEALTH_FAILED", "Native Host capability/identity startup failed")

@@ -27,8 +27,8 @@ from tests.test_update_manifest import signing, signed
 from tests.test_update_transaction import Crash
 from tests.test_update_preparation_service import Stream, httpx_transport
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux" or not os.environ.get("GITGO_UPDATE_PREVIOUS_STAGE")
-    or not os.environ.get("GITGO_UPDATE_CANDIDATE_STAGE"), reason="Requires two fresh actual Linux frozen bundles")
+pytestmark = pytest.mark.skipif(os.name != "posix" or not os.environ.get("GITGO_UPDATE_PREVIOUS_STAGE")
+    or not os.environ.get("GITGO_UPDATE_CANDIDATE_STAGE"), reason="Requires two fresh actual Unix frozen bundles")
 
 
 def refresh_inventory(root):
@@ -56,10 +56,10 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
     candidate.chmod(0o700)
     old_product = json.loads((seed / "product.json").read_bytes())
     product = json.loads((candidate / "product.json").read_bytes())
-    assert product["platform"] == old_product["platform"] == "linux"
+    assert product["platform"] == old_product["platform"] == ("macos" if sys.platform == "darwin" else "linux")
     assert Version.parse(product["version"]) > Version.parse(old_product["version"])
     key = signing[0].public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    policy = {"schema_version": 1, "product_id": "gitgo-terminal", "platform": "linux", "architecture": product["architecture"],
+    policy = {"schema_version": 1, "product_id": "gitgo-terminal", "platform": product["platform"], "architecture": product["architecture"],
         "allowed_hosts": ["releases.example.test"], "public_keys": [{"key_id": "ephemeral-test", "ed25519_base64": __import__("base64").b64encode(key).decode()}],
         "channels": {"preview": {"manifest_url": "https://releases.example.test/manifest.json", "signature_url": "https://releases.example.test/manifest.sig"}}}
     policy_path = seed / "release-trust.json"
@@ -84,7 +84,7 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
         raw, signature = signed({"schema_version": 1, "product_id": "gitgo-terminal", "release_id": "lab-two-version",
             "channel": "preview", "sequence": 1, "published_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "version": product["version"], "platform": "linux", "architecture": product["architecture"],
+            "version": product["version"], "platform": product["platform"], "architecture": product["architecture"],
             "archive_format": "tar.gz", "url": "https://releases.example.test/package.tar.gz",
             "bytes": archive.stat().st_size, "sha256": archive_sha,
             "source": {key: build["source"][key] for key in ("commit", "tree")},
@@ -123,6 +123,7 @@ def finish_disposable_handoff():
     return proc._gitgo_cleanup
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Actual immediate Linux handoff")
 def test_actual_upgrade_and_explicit_rollback_keep_real_program_bootable(actual_lab, monkeypatch):
     store, prepare, boot, before, old_version, new_version, _ = actual_lab
     service, selected = prepare()
@@ -144,6 +145,7 @@ def test_actual_upgrade_and_explicit_rollback_keep_real_program_bootable(actual_
     assert store._ledger()["watermarks"] == watermarks
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Actual immediate Linux handoff")
 def test_actual_bad_frontend_restores_the_actual_predecessor(actual_lab, monkeypatch):
     store, prepare, boot, before, old_version, _, _ = actual_lab
     service, selected = prepare(broken=True)
@@ -156,6 +158,7 @@ def test_actual_bad_frontend_restores_the_actual_predecessor(actual_lab, monkeyp
     assert tree_digest(store.root / "active") == before
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Actual immediate Linux handoff")
 def test_actual_frozen_bootstrap_recovers_an_interrupted_switch(actual_lab, monkeypatch):
     store, prepare, boot, before, old_version, _, env = actual_lab
     service, selected = prepare()
@@ -177,6 +180,7 @@ def test_actual_frozen_bootstrap_recovers_an_interrupted_switch(actual_lab, monk
     assert tree_digest(store.root / "active") == before
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Actual immediate Linux handoff")
 def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_back(actual_lab):
     """Actual compiled UI -> actual Host -> physical stable bootstrap.
 

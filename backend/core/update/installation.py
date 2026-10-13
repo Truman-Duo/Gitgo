@@ -401,7 +401,7 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
         if deferred is not None:
             from backend.core.protocol_io import dump_protocol_json
             print(dump_protocol_json({"update_status": deferred.status, "version": deferred.version,
-                                      "error_code": deferred.error_code}), flush=True)
+                                      "error_code": deferred.error_code}), file=sys.stderr, flush=True)
             if deferred.status == "restart_required":
                 print("A confirmed Gitgo replacement is waiting. Restart macOS manually, then launch Gitgo again. No program has been replaced in this boot.", file=sys.stderr, flush=True)
             pending = store._ledger()["transaction"]
