@@ -29,9 +29,10 @@ from .validation import UpdateError, digest, fields, json_object, number, reject
 
 
 class ManagedStore(InstallationStore):
-    SCHEMA = 2
+    SCHEMA = 3
     SIMULATION = False
-    EXTRA_FIELDS = frozenset({"bootstrap", "updates_enabled"})
+    EXTRA_FIELDS = frozenset({"bootstrap", "updates_enabled", "preparation_directory_identity"})
+    LOCK_NAMES = (*InstallationStore.LOCK_NAMES, "preparation.lock")
 
     @classmethod
     def _provision_extra(cls, root, seed):
@@ -39,7 +40,14 @@ class ManagedStore(InstallationStore):
         bootstrap.mkdir(mode=0o700)
         shutil.copytree(seed / "internal/gitgo-host", bootstrap / "gitgo-host", symlinks=True)
         (bootstrap / "gitgo-host").chmod(0o700)
+        from .release_policy import POLICY_FILE
+        if (seed / POLICY_FILE).exists():
+            shutil.copyfile(seed / POLICY_FILE, bootstrap / POLICY_FILE)
+            (bootstrap / POLICY_FILE).chmod(0o400)
         sync_tree(bootstrap)
+        preparation = root / "control/preparation"
+        preparation.mkdir(mode=0o700)
+        sync_directory(preparation)
         # Stable wrapper is installed once, not supplied by a remote candidate.
         wrapper = root / "gitgo"
         content = "#!/bin/sh\nexec " + shlex.quote(str(bootstrap / "gitgo-host/gitgo-host")) + ' --gitgo-internal-role managed-launch "$@"\n'
@@ -51,11 +59,18 @@ class ManagedStore(InstallationStore):
         finally: os.close(descriptor)
         return {"bootstrap": {"directory_identity": filesystem_identity(bootstrap),
                               "tree_sha256": tree_digest(bootstrap),
-                              "launcher_sha256": _file_digest(wrapper)}, "updates_enabled": False}
+                              "launcher_sha256": _file_digest(wrapper)}, "updates_enabled": False,
+                "preparation_directory_identity": filesystem_identity(preparation)}
 
     def _validate_extra(self, value):
         if type(value["updates_enabled"]) is not bool or value["updates_enabled"] is not False:
             reject("UPDATE_CONTROL_INVALID", "This managed installation does not support activation yet")
+        preparation = self.root / "control/preparation"
+        _staging_parent(preparation, self.protected_paths)
+        preparation_identity = fields(value["preparation_directory_identity"], {"device", "inode"})
+        if (preparation_identity != filesystem_identity(preparation)
+                or preparation_identity["device"] != value["device"]):
+            reject("UPDATE_CONTROL_INVALID", "Preparation directory identity changed")
         bootstrap = fields(value["bootstrap"], {"directory_identity", "tree_sha256", "launcher_sha256"})
         identity = fields(bootstrap["directory_identity"], {"device", "inode"})
         number(identity["device"], minimum=0, maximum=2**64 - 1)
@@ -109,6 +124,9 @@ def initialize_managed(root: Path, seed: Path, *, protected_paths: tuple[Path, .
         identity = SimpleNamespace(**{key: product[key] for key in ("product_id", "version", "platform", "architecture")},
             source_commit=build["source"]["commit"], source_tree=build["source"]["tree"], data_compatibility=compatibility)
         verify_bundle_contract(seed, identity)
+        from .release_policy import POLICY_FILE, read_policy_file, parse_release_policy
+        if POLICY_FILE in records:
+            parse_release_policy(read_policy_file(seed / POLICY_FILE), product["platform"], product["architecture"])
         with tempfile.TemporaryDirectory(prefix="gitgo-managed-incoming-", dir=root.parent) as temporary:
             temporary = Path(temporary).resolve()
             private_seed = temporary / "package"

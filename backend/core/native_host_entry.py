@@ -139,8 +139,9 @@ def _main(values: list[str]) -> int:
         parser.add_argument("--nonce", required=True)
         args = parser.parse_args(role_argv)
         from backend.core.update.runtime_contract import data_probe
+        from backend.core.update.health import MANAGED_API_VERSION
         from backend.core.protocol_io import dump_protocol_json
-        print(dump_protocol_json({"schema_version": 1, "managed_api": 1, "runtime": data_probe(args.nonce)}), flush=True)
+        print(dump_protocol_json({"schema_version": 1, "managed_api": MANAGED_API_VERSION, "runtime": data_probe(args.nonce)}), flush=True)
         return 0
     if name == "update-recover-simulation":
         # No NativeHost, providers, project daemon or user config is initialized.

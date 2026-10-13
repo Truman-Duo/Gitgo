@@ -91,7 +91,7 @@ def _initialize_store(root, seed, current, *, protected_paths, store_type):
     seed_hash = tree_digest(seed)
     for name in ("control", "transactions"):
         (root / name).mkdir(mode=0o700)
-    for name in ("operation.lock", "runtime.lock"):
+    for name in store_type.LOCK_NAMES:
         fd = os.open(root / "control" / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.fsync(fd)
         os.close(fd)
@@ -112,7 +112,7 @@ def _initialize_store(root, seed, current, *, protected_paths, store_type):
                     "architecture": current.architecture, "updater_version": current.updater_version,
                     "data_compatibility": _compat_wire(current.data_compatibility),
                     "directory_identities": {name: filesystem_identity(root / name) for name in ("control", "transactions")},
-                    "lock_identities": {name: filesystem_identity(root / "control" / name) for name in ("operation.lock", "runtime.lock")},
+                    "lock_identities": {name: filesystem_identity(root / "control" / name) for name in store_type.LOCK_NAMES},
                     "protected_paths": [str(p.resolve()) for p in protected_paths], **extra}
     atomic_control(root / "control/registration.json", registration)
     sync_directory(root / "transactions")
@@ -125,6 +125,7 @@ class InstallationStore:
     SCHEMA = 1
     SIMULATION = True
     EXTRA_FIELDS = frozenset()
+    LOCK_NAMES = ("operation.lock", "runtime.lock")
 
     @classmethod
     def _provision_extra(cls, root, seed):
@@ -158,7 +159,7 @@ class InstallationStore:
             reject("UPDATE_CONTROL_INVALID", "Simulation registration differs from local ownership")
         text(value["installation_id"], r"[0-9a-f]{32}", 32)
         for key, parent, names in (("directory_identities", self.root, {"control", "transactions"}),
-                                  ("lock_identities", self.root / "control", {"operation.lock", "runtime.lock"})):
+                                  ("lock_identities", self.root / "control", set(self.LOCK_NAMES))):
             identities = fields(value[key], names)
             for name in names:
                 identity = fields(identities[name], {"device", "inode"})

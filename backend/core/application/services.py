@@ -109,6 +109,8 @@ class ApplicationServices:
     def __init__(self, *, daemon_online: Callable[[str], bool] | None = None, prepare_deletion=None):
         self._daemon_online = daemon_online or (lambda _name: False)
         self._write_lock = threading.RLock()
+        from backend.core.update.preparation_service import UpdatePreparationService
+        self.updates = UpdatePreparationService()
         from .deletion import DeletionService
         self.deletion = DeletionService(prepare_runtime=prepare_deletion)
         self._operations: dict[str, Callable[..., Any]] = {
@@ -130,6 +132,9 @@ class ApplicationServices:
             "config.get": self.config_get,
             "product.version": self.product_version,
             "update.status": self.update_status,
+            "update.check": self.update_check,
+            "update.download": self.update_download,
+            "update.cancel": self.update_cancel,
             "config.set": self.config_set,
             "config.terminals": self.config_terminals,
             "config.web_search.test": self.config_web_search_test,
@@ -441,9 +446,23 @@ class ApplicationServices:
         from backend.version import __version__
         return {"product_id": "gitgo-terminal", "version": __version__}
 
-    def update_status(self) -> dict:
-        from backend.core.update.status import update_status
-        return update_status()
+    def _update_call(self, method, *arguments):
+        from backend.core.update.validation import UpdateError
+        try: return method(*arguments)
+        except UpdateError as error: raise OperationError(error.code, str(error)) from None
+        except Exception: raise OperationError("UPDATE_PREPARATION_FAILED", "Update preparation failed; current program unchanged") from None
+
+    def update_status(self, channel: str = "stable") -> dict:
+        return self._update_call(self.updates.status, channel)
+
+    def update_check(self, channel: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.check, channel, operation_id)
+
+    def update_download(self, channel: str, candidate_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.download, channel, candidate_id, operation_id)
+
+    def update_cancel(self, operation_id: str) -> dict:
+        return self._update_call(self.updates.cancel, operation_id)
 
     def config_get(self, key: str = "") -> dict:
         cfg = ConfigManager.load()

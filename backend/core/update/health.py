@@ -18,6 +18,7 @@ from .version import Version
 
 PROBE_ROLE = "update-data-probe"
 MAX_REPORT_BYTES = 64 * 1024
+MANAGED_API_VERSION = 2  # schema 3 includes pinned preparation ownership.
 
 
 def isolated_environment(profile: Path) -> dict[str, str]:
@@ -87,7 +88,7 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool) -> di
         if managed:
             fields(report, {"schema_version", "managed_api", "runtime"})
             if (type(report["schema_version"]) is not int or report["schema_version"] != 1
-                    or type(report["managed_api"]) is not int or report["managed_api"] != 1):
+                    or type(report["managed_api"]) is not int or report["managed_api"] != MANAGED_API_VERSION):
                 reject("UPDATE_HEALTH_FAILED", "Managed bootstrap capability is unavailable")
             report = report["runtime"]
         fields(report, {"schema_version", "nonce", "product_id", "version", "platform", "architecture",

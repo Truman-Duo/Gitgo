@@ -12,6 +12,7 @@ ARCHIVE=""
 CODESIGN_IDENTITY="-"
 SKIP_ARCHIVE=0
 UPDATE_EVIDENCE=0
+UPDATE_RELEASE_POLICY=""
 
 cleanup_bun_artifacts() {
   find "$ROOT" -maxdepth 1 -type f -name '.*.bun-build' -delete
@@ -31,6 +32,7 @@ Usage: packaging/build_macos.sh [options]
   --skip-codesign           Do not sign local binaries
   --skip-archive            Stage files without creating a tarball
   --update-evidence         Add opt-in, frozen-runtime-verified data evidence
+  --update-release-policy FILE  Pin publisher public keys and channel URLs (requires --update-evidence)
 EOF
 }
 
@@ -46,10 +48,14 @@ while [ "$#" -gt 0 ]; do
     --skip-codesign) CODESIGN_IDENTITY=""; shift ;;
     --skip-archive) SKIP_ARCHIVE=1; shift ;;
     --update-evidence) UPDATE_EVIDENCE=1; shift ;;
+    --update-release-policy) UPDATE_RELEASE_POLICY="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+if [ -n "$UPDATE_RELEASE_POLICY" ] && [ "$UPDATE_EVIDENCE" -ne 1 ]; then
+  echo 'Release policy requires --update-evidence' >&2; exit 2
+fi
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "macOS packages must be built on macOS" >&2
@@ -150,6 +156,9 @@ fi
 
 if [ "$UPDATE_EVIDENCE" -eq 1 ]; then
   "$PYTHON_BIN" -B "$ROOT/scripts/stage_update_contract.py" --stage "$STAGE"
+fi
+if [ -n "$UPDATE_RELEASE_POLICY" ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/stage_release_policy.py" --stage "$STAGE" --policy "$UPDATE_RELEASE_POLICY"
 fi
 
 if [ "$SKIP_ARCHIVE" -eq 0 ]; then
