@@ -1554,7 +1554,7 @@ class NativeHost:
                     },
                 })
             return result
-        if operation in {"update.check", "update.download", "update.request_apply", "update.request_rollback"}:
+        if operation in {"update.check", "update.download", "update.request_apply", "update.request_rollback", "update.cancel_pending"}:
             update_id = arguments.get("operation_id")
             if request_id and type(update_id) is str:
                 with self._daemon_lock: self._update_requests[request_id] = update_id

@@ -107,11 +107,14 @@ class UpdatePreparationService:
             for event in self._jobs.values(): event.set()
 
     @contextmanager
-    def _preparation(self, store):
+    def _preparation(self, store, *, allow_pending=False):
         store._guard()
         with lock_file(store.root / "control/preparation.lock",
                        expected_identity=store.registration["lock_identities"]["preparation.lock"]):
             with store.runtime_lease():
+                from .deferred import pending_status
+                if not allow_pending and pending_status(store) is not None:
+                    reject("UPDATE_DEFERRED_EXISTS", "Cancel the pending restart request first")
                 yield
 
     def _local(self, store, channel):
@@ -181,14 +184,16 @@ class UpdatePreparationService:
             return legacy_status()
         _, current, _ = self._local(store, channel)
         configuration = installed_release_policy(store)
-        from .handoff import request_available, platform_ready
-        result = {"schema_version": 4, "product_id": "gitgo-terminal", "version": current.version,
+        from .handoff import request_available, platform_ready, strategy
+        from .deferred import pending_status
+        result = {"schema_version": 5, "product_id": "gitgo-terminal", "version": current.version,
             "status": "unconfigured", "enabled": False, "automatic_check": False, "channel": channel,
             "can_check": configuration is not None and channel in configuration.channels,
             "can_download": False, "can_apply": False, "can_request_apply": False,
             "blockers": ["PLATFORM_ACCEPTANCE_REQUIRED"],
             "candidate": None, "latest_version": None,
-            "rollback": store.rollback_selection(), "can_request_rollback": False}
+            "rollback": store.rollback_selection(), "can_request_rollback": False,
+            "apply_strategy": strategy(store), "pending_restart": pending_status(store)}
         result["can_request_rollback"] = result["rollback"] is not None and request_available(store)
         if not request_available(store): result["blockers"].append("UPDATE_HANDOFF_REQUIRED")
         if not platform_ready(store): result["blockers"].append("UPDATE_SCOPE_UNAVAILABLE")
@@ -228,6 +233,8 @@ class UpdatePreparationService:
         channel = _channel(channel)
         store = self._store_loader()
         if store is None: reject("UPDATE_INSTALL_UNMANAGED", "Manual updates require a new managed installation")
+        from .deferred import pending_status
+        if pending_status(store) is not None: reject("UPDATE_DEFERRED_EXISTS", "Cancel the pending restart request first")
         configuration = installed_release_policy(store)
         if configuration is None: reject("UPDATE_TRUST_MISSING", "Publisher release addresses and public keys are not configured")
         configuration.channel(channel)
@@ -241,6 +248,14 @@ class UpdatePreparationService:
             with self._preparation(store):
                 from .handoff import queue_rollback
                 return queue_rollback(store, rollback_id, cancelled)
+
+    def cancel_pending(self, request_id, operation_id):
+        with self._job(operation_id) as cancelled:
+            store = self._store_loader()
+            if store is None: reject("UPDATE_INSTALL_UNMANAGED", "Pending replacement requires a managed installation")
+            with self._preparation(store, allow_pending=True):
+                from .deferred import cancel_pending
+                return cancel_pending(store, request_id, cancelled)
 
     def check(self, channel, operation_id):
         with self._job(operation_id) as cancelled:

@@ -3,14 +3,14 @@ import {randomUUID} from "node:crypto";
 import {Box, Text} from "@anthropic/ink";
 import {useManagedInput as useInput} from "../input/runtime.js";
 import type {BackendClient} from "../backend/client.js";
-import {updateStatus, checkUpdate, downloadUpdate, requestApplyUpdate, requestRollbackUpdate, cancelUpdate, type UpdateStatus} from "../backend/update.js";
+import {updateStatus, checkUpdate, downloadUpdate, requestApplyUpdate, requestRollbackUpdate, cancelUpdate, cancelPendingUpdate, type UpdateStatus} from "../backend/update.js";
 import {colors} from "../theme/index.js";
 
 export function UpdatePanel({client, cols, onDismiss, onUpdateExit}: {
   client: BackendClient; cols: number; onDismiss: () => void; onUpdateExit?: () => Promise<void>;
 }) {
   const [data, setData] = useState<UpdateStatus | null>(null);
-  const [state, setState] = useState<"loading" | "ready" | "error" | "checking" | "downloading" | "requesting" | "cancelling" | "confirm" | "confirmApply" | "confirmRollback">("loading");
+  const [state, setState] = useState<"loading" | "ready" | "error" | "checking" | "downloading" | "requesting" | "cancelling" | "confirm" | "confirmApply" | "confirmRollback" | "confirmCancelPending">("loading");
   const [channel, setChannel] = useState<"stable" | "preview">("stable");
   const [retry, setRetry] = useState(0);
   const alive = useRef(true);
@@ -22,18 +22,23 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit}: {
     setState("cancelling");
     void cancelUpdate(client, job.current.id).catch(() => {});
   };
-  const run = (kind: "check" | "download" | "apply" | "rollback") => {
+  const run = (kind: "check" | "download" | "apply" | "rollback" | "cancelPending") => {
     if (job.current || !data || data.schema_version === 1) return;
+    if (data.pending_restart && kind !== "cancelPending") return;
+    if (kind === "cancelPending" && !data.pending_restart) return;
     if (kind === "check" && !data.can_check) return;
     if (kind === "download" && (!data.can_download || !data.candidate)) return;
     if (kind === "apply" && (!data.can_request_apply || !data.candidate || !onUpdateExit)) return;
     if (kind === "rollback" && (!data.can_request_rollback || !data.rollback || !onUpdateExit)) return;
     const current = {id: randomUUID().replaceAll("-", ""), cancelled: false};
     job.current = current;
-    setState(kind === "check" ? "checking" : kind === "apply" || kind === "rollback" ? "requesting" : "downloading");
-    const promise = kind === "apply" || kind === "rollback" ? (kind === "apply"
-      ? requestApplyUpdate(client, channel, data.candidate!.candidate_id, current.id)
-      : requestRollbackUpdate(client, data.rollback!.rollback_id, current.id)).then(async () => {
+    setState(kind === "check" ? "checking" : kind === "download" ? "downloading" : "requesting");
+    const expectedStrategy = data.schema_version === 5 ? data.apply_strategy : undefined;
+    const promise = kind === "cancelPending"
+      ? cancelPendingUpdate(client, data.pending_restart!.request_id, current.id).then(() => updateStatus(client, channel))
+      : kind === "apply" || kind === "rollback" ? (kind === "apply"
+      ? requestApplyUpdate(client, channel, data.candidate!.candidate_id, current.id, expectedStrategy)
+      : requestRollbackUpdate(client, data.rollback!.rollback_id, current.id, expectedStrategy)).then(async () => {
       // Confirmation does not install in this running process. Shutdown only
       // after the exact response; cancellation/closed UI must never exit 75.
       if (alive.current && job.current === current && !current.cancelled) await onUpdateExit!();
@@ -48,25 +53,26 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit}: {
   };
   useInput((input, key) => {
     if (key.escape) {
-      if (state === "confirm" || state === "confirmApply" || state === "confirmRollback") {setState("ready"); return;}
+      if (state === "confirm" || state === "confirmApply" || state === "confirmRollback" || state === "confirmCancelPending") {setState("ready"); return;}
       if (busy) cancel();
       onDismiss(); return;
     }
     if (key.paste || key.ctrl || key.meta) return;
     if (busy) {if (input.toLowerCase() === "x") cancel(); return;}
-    if (state === "confirm" || state === "confirmApply" || state === "confirmRollback") {
-      if (key.return) run(state === "confirm" ? "download" : state === "confirmApply" ? "apply" : "rollback");
+    if (state === "confirm" || state === "confirmApply" || state === "confirmRollback" || state === "confirmCancelPending") {
+      if (key.return) run(state === "confirm" ? "download" : state === "confirmApply" ? "apply" : state === "confirmRollback" ? "rollback" : "cancelPending");
       else if (input.toLowerCase() === "n") setState("ready");
       return;
     }
     if (state === "loading") return;
     const letter = input.toLowerCase();
+    if (data && data.schema_version !== 1 && data.pending_restart && letter === "x") {setState("confirmCancelPending"); return;}
     if (letter === "r") setRetry(value => value + 1);
     else if (letter === "c" && data && data.schema_version !== 1) setChannel(value => value === "stable" ? "preview" : "stable");
     else if (letter === "k") run("check");
     else if (letter === "d" && data && data.schema_version !== 1 && data.can_download) setState("confirm");
     else if (letter === "a" && data && data.schema_version !== 1 && data.can_request_apply && onUpdateExit) setState("confirmApply");
-    else if (letter === "b" && data && data.schema_version === 4 && data.can_request_rollback && onUpdateExit) setState("confirmRollback");
+    else if (letter === "b" && data && data.schema_version !== 1 && data.can_request_rollback && onUpdateExit) setState("confirmRollback");
   }, {clipboard: false});
   useEffect(() => {
     alive.current = true;
@@ -86,7 +92,7 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit}: {
   }, [client, channel, retry]);
   return <Box flexDirection="column" paddingX={1} width={cols}>
     <Text bold>Gitgo Software Update</Text>
-    <Text dimColor>{busy ? "X cancel · Esc cancel and close" : state === "confirmRollback" ? "Enter confirm rollback · Esc/N cancel" : state === "confirmApply" ? "Enter confirm restart/update · Esc/N cancel" : state === "confirm" ? "Enter confirm download · Esc/N cancel" : "Esc close · R refresh · C channel · K check · D download · A apply · B rollback"}</Text>
+    <Text dimColor>{busy ? "X cancel · Esc cancel and close" : state === "confirmCancelPending" ? "Enter cancel pending replacement · Esc/N keep it" : state === "confirmRollback" ? "Enter confirm rollback · Esc/N cancel" : state === "confirmApply" ? "Enter confirm restart/update · Esc/N cancel" : state === "confirm" ? "Enter confirm download · Esc/N cancel" : "Esc close · R refresh · C channel · K check · D download · A apply · B rollback · X cancel pending restart"}</Text>
     {state === "loading" ? <Text>Reading local update status…</Text> : null}
     {state === "checking" ? <Text>Checking publisher-signed release metadata…</Text> : null}
     {state === "downloading" ? <Text>Downloading and verifying the selected full package…</Text> : null}
@@ -102,6 +108,9 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit}: {
         <Text>A new managed installation and publisher public release trust are required.</Text>
       </> : <>
         <Text>Latest version    {data.latest_version || "Not checked"}</Text>
+        {data.apply_strategy === "after_reboot" ? <Text>Replacement mode  After a manual macOS restart, not immediately</Text> : null}
+        {data.pending_restart ? <Text color={colors.warning}>Confirmed {data.pending_restart.action} to Gitgo {data.pending_restart.version} is waiting. Restart macOS manually, then launch the installed command. X review cancellation before reboot.</Text> : null}
+        {state === "confirmCancelPending" ? <Text color={colors.warning}>Cancel this pending replacement? The current program and prepared package remain unchanged.</Text> : null}
         {data.status === "unconfigured" ? <Text color={colors.warning}>Publisher release source/public keys are not configured for this channel. No network request.</Text> : null}
         {data.status === "idle" ? <Text>K manually check for updates; opening this page never contacts the release server.</Text> : null}
         {data.status === "stale" ? <Text color={colors.warning}>Cached release or download is stale/changed. K check again.</Text> : null}
@@ -112,10 +121,10 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit}: {
         {data.status === "downloaded" ? <Text color={colors.success}>Downloaded and verified. Current program is unchanged.</Text> : null}
         {data.status === "downloaded" && (!data.can_request_apply || !onUpdateExit) ? <Text color={colors.warning}>Restart/update is unavailable here: use a supported managed launcher with complete process cleanup.</Text> : null}
         {data.can_request_apply && onUpdateExit && state !== "confirmApply" ? <Text>A review restart/update confirmation.</Text> : null}
-        {state === "confirmApply" ? <Text color={colors.warning}>Close this Gitgo session and attempt the selected update? The stable launcher will reverify, switch and check health; failures restore the previous program. Other running instances block replacement.</Text> : null}
+        {state === "confirmApply" ? <Text color={colors.warning}>{data.apply_strategy === "after_reboot" ? "Close this Gitgo session and save this exact update for after you manually restart macOS? No program is replaced now. On next boot, the fixed launcher reverifies signature/package and startup health; failures preserve or restore the old program." : "Close this Gitgo session and attempt the selected update? The stable launcher will reverify, switch and check health; failures restore the previous program. Other running instances block replacement."}</Text> : null}
         {data.rollback ? <Text>Retained version  {data.rollback.version}</Text> : null}
         {data.can_request_rollback && onUpdateExit && state !== "confirmRollback" ? <Text>B review rollback to the retained version.</Text> : null}
-        {state === "confirmRollback" ? <Text color={colors.warning}>Close this session and restore Gitgo {data.rollback?.version}? The retained program must pass startup checks. Projects, configuration and databases remain unchanged; other running instances block replacement.</Text> : null}
+        {state === "confirmRollback" ? <Text color={colors.warning}>Close this session and {data.apply_strategy === "after_reboot" ? "save a rollback after you manually restart macOS to" : "restore"} Gitgo {data.rollback?.version}? The retained program must pass startup checks. Projects, configuration and databases remain unchanged; other running instances block replacement.</Text> : null}
       </>}
       <Text dimColor>Gitgo software only, not projects or models. No automatic checks. Rollback requires explicit confirmation.</Text>
     </> : null}

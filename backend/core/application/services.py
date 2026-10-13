@@ -137,6 +137,7 @@ class ApplicationServices:
             "update.cancel": self.update_cancel,
             "update.request_apply": self.update_request_apply,
             "update.request_rollback": self.update_request_rollback,
+            "update.cancel_pending": self.update_cancel_pending,
             "config.set": self.config_set,
             "config.terminals": self.config_terminals,
             "config.web_search.test": self.config_web_search_test,
@@ -471,6 +472,9 @@ class ApplicationServices:
 
     def update_request_rollback(self, rollback_id: str, operation_id: str) -> dict:
         return self._update_call(self.updates.request_rollback, rollback_id, operation_id)
+
+    def update_cancel_pending(self, request_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.cancel_pending, request_id, operation_id)
 
     def config_get(self, key: str = "") -> dict:
         cfg = ConfigManager.load()

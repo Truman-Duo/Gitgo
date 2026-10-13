@@ -1,5 +1,5 @@
 import {describe, expect, test} from "bun:test";
-import {productVersion, updateStatus, parseUpdateStatus, checkUpdate, downloadUpdate, cancelUpdate, requestApplyUpdate, requestRollbackUpdate} from "./update.js";
+import {productVersion, updateStatus, parseUpdateStatus, checkUpdate, downloadUpdate, cancelUpdate, requestApplyUpdate, requestRollbackUpdate, cancelPendingUpdate} from "./update.js";
 import type {BackendClient} from "./client.js";
 
 const sample = {schema_version: 1, product_id: "gitgo-terminal", version: "1.0.0-alpha.2",
@@ -105,5 +105,39 @@ describe("retained rollback protocol", () => {
     for (const patch of [{action: "apply"}, {exit_code: 0}, {rollback_id: "f".repeat(64)}]) {
       await expect(requestRollbackUpdate(client({...ack, ...patch}), rollback.rollback_id, "e".repeat(32))).rejects.toThrow();
     }
+  });
+});
+
+describe("reboot-bound update protocol", () => {
+  const pending = {request_id: "e".repeat(64), action: "apply" as const, version: "1.0.0-alpha.3"};
+  const status = {...available, schema_version: 5, status: "downloaded", can_download: false,
+    can_request_apply: false, can_request_rollback: false, rollback: null,
+    apply_strategy: "after_reboot", pending_restart: pending};
+  test("explicitly describes a pending replacement without enabling apply", () => {
+    const parsed = parseUpdateStatus(status);
+    expect(parsed.schema_version !== 1 && parsed.pending_restart).toEqual(pending);
+    expect(parsed.schema_version !== 1 && parsed.apply_strategy).toBe("after_reboot");
+  });
+  for (const patch of [{apply_strategy: "immediate"}, {apply_strategy: "unknown"},
+    {can_request_apply: true}, {can_request_rollback: true}, {pending_restart: undefined},
+    {pending_restart: {...pending, request_id: "../wrong"}}, {pending_restart: {...pending, action: "reboot"}},
+    {pending_restart: {...pending, version: "bad\n"}}]) {
+    test(`rejects unsafe restart capabilities ${JSON.stringify(patch)}`, () => {
+      expect(() => parseUpdateStatus({...status, ...patch})).toThrow();
+    });
+  }
+  test("only an exact acknowledgement of the reviewed strategy allows shutdown", async () => {
+    const ack = {schema_version: 2, status: "exit_required", exit_code: 75, channel: "preview",
+      candidate_id: "a".repeat(64), apply_strategy: "after_reboot"};
+    await requestApplyUpdate(client(ack), "preview", ack.candidate_id, "b".repeat(32), "after_reboot");
+    for (const patch of [{schema_version: 1}, {apply_strategy: "immediate"}, {apply_strategy: undefined}]) {
+      await expect(requestApplyUpdate(client({...ack, ...patch}), "preview", ack.candidate_id,
+        "b".repeat(32), "after_reboot")).rejects.toThrow();
+    }
+  });
+  test("pending cancellation is bound to the exact request", async () => {
+    await cancelPendingUpdate(client({schema_version: 1, status: "cancelled", request_id: pending.request_id}), pending.request_id, "b".repeat(32));
+    await expect(cancelPendingUpdate(client({schema_version: 1, status: "cancelled", request_id: "f".repeat(64)}),
+      pending.request_id, "b".repeat(32))).rejects.toThrow();
   });
 });

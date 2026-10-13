@@ -27,16 +27,18 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="Managed handoff requ
 
 
 @pytest.fixture
-def lab(tmp_path_factory, monkeypatch, signing):
+def lab(tmp_path_factory, monkeypatch, signing, request):
+    platform = getattr(request, "param", "linux")
+    architecture = "arm64" if platform == "macos" else "x86_64"
     base = tmp_path_factory.resolve()
     protected = base / "protected"; protected.mkdir(mode=0o700)
     sentinels = {name: ("preserve-" + name).encode() for name in ("project", "config", "db", "db-wal", "db-shm", "secrets")}
     for name, data in sentinels.items(): (protected / name).write_bytes(data)
-    seed = base / "seed"; build_fixture(seed, version="1.0.0-alpha.2", platform="linux", architecture="x86_64")
+    seed = base / "seed"; build_fixture(seed, version="1.0.0-alpha.2", platform=platform, architecture=architecture)
     public = signing[0].public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    policy = {**policy_wire(public), "platform": "linux", "architecture": "x86_64"}
+    policy = {**policy_wire(public), "platform": platform, "architecture": architecture}
     (seed / "release-trust.json").write_text(json.dumps(policy))
-    refresh_build(seed, version="1.0.0-alpha.2", platform="linux", architecture="x86_64")
+    refresh_build(seed, version="1.0.0-alpha.2", platform=platform, architecture=architecture)
     def probe(host, profile):
         product = json.loads((host.parents[2] / "product.json").read_bytes())
         contract = json.loads((host.parents[2] / "update-data-contract.json").read_bytes())
@@ -45,9 +47,9 @@ def lab(tmp_path_factory, monkeypatch, signing):
     monkeypatch.setattr(installation, "probe_managed_host", probe)
     root = base / "managed"; root.mkdir(mode=0o700)
     store = initialize_managed(root, seed, protected_paths=(protected,))
-    candidate = base / "candidate"; build_fixture(candidate, platform="linux", architecture="x86_64")
+    candidate = base / "candidate"; build_fixture(candidate, platform=platform, architecture=architecture)
     inputs = base / "inputs"; inputs.mkdir(mode=0o700)
-    raw, signature, archive = archive_fixture(candidate, inputs, signing, platform="linux", architecture="x86_64")
+    raw, signature, archive = archive_fixture(candidate, inputs, signing, platform=platform, architecture=architecture)
     calls = []
     def serve(request):
         calls.append(str(request.url))
@@ -58,6 +60,7 @@ def lab(tmp_path_factory, monkeypatch, signing):
     selected = service.check("preview", "a" * 32)["candidate"]["candidate_id"]
     service.download("preview", selected, "b" * 32)
     monkeypatch.setattr(handoff, "platform_ready", lambda _: True)  # unit wiring only
+    monkeypatch.setattr(handoff, "strategy", lambda _: "immediate")  # Linux-style handoff wiring
     monkeypatch.setattr(handoff, "datetime", SimpleNamespace(now=lambda _: NOW))
     monkeypatch.setattr(health, "frozen_health_check", inspect_health)  # static fixtures only
     before = tree_digest(root / "active")
@@ -75,8 +78,8 @@ def test_queue_is_confirmed_exact_selection_not_apply_or_network(lab, monkeypatc
         monkeypatch.setenv(handoff.SESSION_ENV, nonce)
         assert lab.service.status("preview")["can_request_apply"] is True
         before = lab.store._ledger(); calls = list(lab.calls)
-        assert queue(lab) == {"schema_version": 1, "status": "exit_required", "candidate_id": lab.selected,
-                              "channel": "preview", "exit_code": 75}
+        assert queue(lab) == {"schema_version": 2, "status": "exit_required", "candidate_id": lab.selected,
+                              "channel": "preview", "exit_code": 75, "apply_strategy": "immediate"}
         assert queue(lab)["status"] == "exit_required"
         assert lab.calls == calls and lab.store._ledger() == before
         assert tree_digest(lab.store.root / "active") == lab.before

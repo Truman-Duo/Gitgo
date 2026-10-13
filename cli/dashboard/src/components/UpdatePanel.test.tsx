@@ -79,6 +79,46 @@ const candidate = {candidate_id: "a".repeat(64), version: "1.0.0-alpha.3", relea
 const available = {...idle, status: "available", can_download: true, latest_version: candidate.version, candidate};
 const prepared = {...available, status: "downloaded", can_download: false};
 
+describe("macOS reboot confirmation", () => {
+  const status = {...prepared, schema_version: 5, can_request_apply: true, can_request_rollback: false,
+    rollback: null, apply_strategy: "after_reboot", pending_restart: null};
+  test("discloses manual computer restart and refuses an immediate-mode acknowledgement", async () => {
+    let exits = 0;
+    const fixture = mount({ready: true, close() {}, async callTool(operation) {
+      return operation === "update.request_apply" ? {schema_version: 2, status: "exit_required", channel: "stable",
+        candidate_id: candidate.candidate_id, exit_code: 75, apply_strategy: "immediate"} : status;
+    }}, () => {}, async () => {exits++;});
+    try {
+      await wait(); fixture.stdin.write("a"); await wait();
+      expect(fixture.text().replace(/\s+/g, " ")).toContain("manually restart macOS");
+      fixture.stdin.write("\r"); await wait();
+      expect(exits).toBe(0);
+      expect(fixture.text()).toContain("Update status unavailable");
+    } finally {fixture.close();}
+  });
+  test("pending cancellation needs its own confirmation and never shuts down", async () => {
+    const pending = {request_id: "e".repeat(64), action: "apply", version: candidate.version};
+    let cancelled = false, exits = 0; const calls: string[] = [];
+    const fixture = mount({ready: true, close() {}, async callTool(operation, args) {
+      calls.push(operation);
+      if (operation === "update.cancel_pending") {
+        expect(args?.request_id).toBe(pending.request_id); cancelled = true;
+        return {schema_version: 1, status: "cancelled", request_id: pending.request_id};
+      }
+      return {...status, can_request_apply: cancelled, pending_restart: cancelled ? null : pending};
+    }}, () => {}, async () => {exits++;});
+    try {
+      await wait(); fixture.stdin.write("\r"); fixture.stdin.write("k"); await wait();
+      expect(calls).toEqual(["update.status"]);
+      fixture.stdin.write("x"); await wait(); fixture.stdin.write("n"); await wait();
+      expect(calls).toEqual(["update.status"]);
+      fixture.stdin.write("x"); await wait(); fixture.stdin.write("\r"); await wait();
+      expect(calls).toEqual(["update.status", "update.cancel_pending", "update.status"]);
+      expect(exits).toBe(0);
+    } finally {fixture.close();}
+  });
+});
+
 describe("explicit retained rollback", () => {
   const rollback = {rollback_id: "d".repeat(64), version: "1.0.0-alpha.1"};
   const status = {...idle, schema_version: 4, can_request_apply: false, can_request_rollback: true, rollback};

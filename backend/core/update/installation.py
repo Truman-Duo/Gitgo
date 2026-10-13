@@ -29,9 +29,9 @@ from .validation import UpdateError, digest, fields, json_object, number, reject
 
 
 class ManagedStore(InstallationStore):
-    SCHEMA = 3
+    SCHEMA = 4
     SIMULATION = False
-    EXTRA_FIELDS = frozenset({"bootstrap", "updates_enabled", "preparation_directory_identity"})
+    EXTRA_FIELDS = frozenset({"bootstrap", "bootstrap_api", "updates_enabled", "preparation_directory_identity"})
     LOCK_NAMES = (*InstallationStore.LOCK_NAMES, "preparation.lock")
 
     @classmethod
@@ -59,10 +59,12 @@ class ManagedStore(InstallationStore):
         finally: os.close(descriptor)
         return {"bootstrap": {"directory_identity": filesystem_identity(bootstrap),
                               "tree_sha256": tree_digest(bootstrap),
-                              "launcher_sha256": _file_digest(wrapper)}, "updates_enabled": False,
+                              "launcher_sha256": _file_digest(wrapper)}, "bootstrap_api": 5, "updates_enabled": False,
                 "preparation_directory_identity": filesystem_identity(preparation)}
 
     def _validate_extra(self, value):
+        if type(value["bootstrap_api"]) is not int or value["bootstrap_api"] != 5:
+            reject("UPDATE_CONTROL_INVALID", "Managed bootstrap API is unavailable")
         if type(value["updates_enabled"]) is not bool or value["updates_enabled"] is not False:
             reject("UPDATE_CONTROL_INVALID", "This managed installation does not support activation yet")
         preparation = self.root / "control/preparation"
@@ -392,6 +394,19 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             return 0
     from backend.core.process_control import spawn_managed, finish_scope, terminate_tree
     from .handoff import launch_session, consume_request, SESSION_ENV, HANDOFF_EXIT
+    from .handoff import strategy
+    if strategy(store) == "after_reboot":
+        from .deferred import consume_after_reboot
+        deferred = consume_after_reboot(store)
+        if deferred is not None:
+            from backend.core.protocol_io import dump_protocol_json
+            print(dump_protocol_json({"update_status": deferred.status, "version": deferred.version,
+                                      "error_code": deferred.error_code}), flush=True)
+            if deferred.status == "restart_required":
+                print("A confirmed Gitgo replacement is waiting. Restart macOS manually, then launch Gitgo again. No program has been replaced in this boot.", file=sys.stderr, flush=True)
+            pending = store._ledger()["transaction"]
+            if pending is not None and pending["state"] not in TERMINAL:
+                reject("UPDATE_RECOVERY_REQUIRED", "Deferred attempt requires ledger recovery before launch")
     for _ in range(8):  # Bound this launcher lifecycle, never automatic retry.
         with launch_session(store) as nonce:
             with store.runtime_lease() as (active, descriptor), retain_descriptor(descriptor):
@@ -413,6 +428,9 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             from backend.core.protocol_io import dump_protocol_json
             print(dump_protocol_json({"update_status": result.status, "version": result.version,
                                       "error_code": result.error_code}), flush=True)
+            if result.status == "restart_required":
+                print("Confirmation saved. Restart macOS manually, then use the installed Gitgo command. Signature, package and exclusive runtime locks will be checked again before replacement.", file=sys.stderr, flush=True)
+                return 0
             recovered = store.recover()
             if recovered.status not in {"idle", "committed", "rolled_back"}:
                 reject("UPDATE_RECOVERY_REQUIRED", "Update must recover before restarting")
