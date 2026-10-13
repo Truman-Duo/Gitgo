@@ -107,6 +107,9 @@ def close_job(job_handle) -> None:
 
 def spawn_managed(argv, **kwargs):
     """Establish owned lifetime BEFORE the command runs, not at cancellation."""
+    macos_forkless = kwargs.pop("macos_forkless", False)
+    if type(macos_forkless) is not bool or (macos_forkless and sys.platform != "darwin"):
+        raise ValueError("Forkless probes require macOS")
     if sys.platform == "win32":
         return subprocess.Popen(argv, **kwargs)
     from backend.core.installation_lease import runtime_descriptors
@@ -123,6 +126,8 @@ def spawn_managed(argv, **kwargs):
         launch = [sys.executable, "--gitgo-internal-role", "unix-scope", str(child.fileno()), *(str(fd) for fd in retained)]
     else:
         launch = [sys.executable, str(Path(__file__).with_name("unix_process_scope.py")), str(child.fileno()), *(str(fd) for fd in retained)]
+    if macos_forkless:
+        launch.append("--macos-forkless")
     proc = None
     try:
         kwargs["start_new_session"] = True

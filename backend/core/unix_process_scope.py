@@ -4,6 +4,8 @@ Never upgrade sampled PIDs/PGIDs into group termination authority. The session
 leader stays alive until cleanup and can signal only its own pinned group.
 Linux subreaper + pidfds add bounded cleanup of adopted detached descendants.
 macOS explicitly reports owned-session-only coverage, not full tree isolation.
+An explicit forkless macOS probe uses the system sandbox before executing its
+single payload. It is NOT applied to ordinary tool execution or the Dashboard.
 """
 from __future__ import annotations
 
@@ -17,6 +19,19 @@ import socket
 import subprocess
 import sys
 import time
+
+
+# process-fork also denies vfork. Deny the Darwin posix_spawn syscall separately
+# (including SETEXEC/SETSID/SETPGROUP attributes), not just the setsid syscall.
+# These fixed Darwin syscall numbers are present in Apple's SDK sys/syscall.h.
+# No interpolated command/path is part of the profile. sandbox-exec is a system
+# private/deprecated interface; unavailable/rejected profiles fail closed.
+MACOS_FORKLESS_PROFILE = """(version 1)
+(allow default)
+(deny process-fork)
+(deny syscall-unix (syscall-number 2) (syscall-number 66)
+                   (syscall-number 82) (syscall-number 147) (syscall-number 244))
+"""
 
 
 def enable_subreaper():
@@ -51,6 +66,11 @@ def signal_adopted(pid):
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
+    forkless = bool(args and args[-1] == "--macos-forkless")
+    if forkless:
+        if sys.platform != "darwin":
+            raise RuntimeError("Forkless scope requires macOS")
+        args = args[:-1]
     fd = int(args[0])
     retained = tuple(int(item) for item in args[1:])
     if len(retained) > 16 or len(set(retained)) != len(retained) or any(item < 3 or item == fd for item in retained):
@@ -80,7 +100,9 @@ def main(argv=None):
     worker = None
     exit_code = 127
     try:
-        worker = subprocess.Popen(command, close_fds=True, pass_fds=retained)
+        payload = (["/usr/bin/sandbox-exec", "-p", MACOS_FORKLESS_PROFILE, *command]
+                   if forkless else command)
+        worker = subprocess.Popen(payload, close_fds=True, pass_fds=retained)
         ready = {"spawned": worker.pid}
     except (OSError, ValueError) as exc:
         ready = {"spawn_error": getattr(exc, "errno", 22) or 22}
@@ -109,7 +131,21 @@ def main(argv=None):
     try: os.killpg(group, signal.SIGTERM)
     except OSError: issues.append("owned_group_signal_failed")
     complete = False
-    if subreaper:
+    if forkless:
+        # There can be no descendants and no group/session detachment. Reap the
+        # direct child before reporting completion; merely signalling it is not
+        # an exit proof. No sampled PID or process-group census is used.
+        if worker is not None:
+            try:
+                if worker.poll() is None:
+                    worker.kill()
+                worker.wait(timeout=2)
+                complete = not issues
+            except (OSError, subprocess.TimeoutExpired):
+                issues.append("forkless_child_exit_not_confirmed")
+        else:
+            issues.append("forkless_child_not_started")
+    elif subreaper:
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             try:
@@ -133,7 +169,7 @@ def main(argv=None):
         issues.append("detached_descendants_not_covered")
         time.sleep(.1)
     report = {"command_exit": None if cancelled else exit_code,
-              "cleanup": {"mode": "linux-subreaper-pidfd" if subreaper else "owned-session-only",
+              "cleanup": {"mode": "macos-forkless-sandbox" if forkless else "linux-subreaper-pidfd" if subreaper else "owned-session-only",
                           "complete": complete, "issues": sorted(set(issues))}}
     try:
         control.settimeout(1)

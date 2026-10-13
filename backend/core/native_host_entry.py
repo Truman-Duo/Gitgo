@@ -176,7 +176,8 @@ def _main(values: list[str]) -> int:
     if name == CREDENTIAL_CLEANUP_ROLE:
         return _run_credential_cleanup_role(role_argv)
     if name == "unix-scope":
-        if not 1 <= len(role_argv) <= 17 or any(not value.isdigit() for value in role_argv):
+        descriptors = role_argv[:-1] if role_argv and role_argv[-1] == "--macos-forkless" else role_argv
+        if not 1 <= len(descriptors) <= 17 or any(not value.isdigit() for value in descriptors):
             raise SystemExit("unix-scope requires one owned control descriptor")
         from backend.core.unix_process_scope import main as scope_main
         return scope_main(role_argv)

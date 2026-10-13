@@ -118,14 +118,14 @@ def test_invalid_or_cancelled_real_package_never_changes_protected_data(artifact
     assert not list(artifact[8].iterdir())
 
 
-def test_mac_runtime_scope_limit_is_preserved_after_real_package_validation(artifact):
+def test_mac_forkless_health_does_not_enable_unconfined_application_handoff(artifact):
     if artifact[2]["platform"] != "macos": pytest.skip("macOS incomplete-scope boundary")
     result, _ = prepare(artifact)
     verify_bundle_contract(result.bundle_directory, result.candidate)
     profile = artifact[8].parent / "health"; profile.mkdir(mode=0o700)
-    with pytest.raises(UpdateError, match="UPDATE_HEALTH_FAILED") as exc:
-        frozen_health_check(result.bundle_directory, profile)
-    # A missing library, timeout or malformed Host response must not count as
-    # proof of the intended scope boundary. The probe must actually complete.
-    assert "cleanup is incomplete" in str(exc.value)
-    assert not list(profile.iterdir())
+    assert frozen_health_check(result.bundle_directory, profile).passed is True
+    from backend.core.update.handoff import platform_ready
+    from types import SimpleNamespace
+    # Forkless health is not proof that the ordinary application and all its
+    # unrestricted tools have stopped. Preserve the handoff boundary.
+    assert platform_ready(SimpleNamespace(registration={"platform": "macos"})) is False

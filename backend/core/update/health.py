@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
 import uuid
 
 from .manifest import DataCompatibility, TARGETS
@@ -78,7 +79,8 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool, start
         role = "managed-capabilities" if managed else "update-startup-probe" if startup else PROBE_ROLE
         proc = spawn_managed([str(host), "--gitgo-internal-role", role, "--nonce", nonce],
             cwd=str(profile), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="strict", env=env)
+            text=True, encoding="utf-8", errors="strict", env=env,
+            macos_forkless=sys.platform == "darwin")
         job = attach_kill_job(proc)
         output, _, _ = collect_output(proc, timeout=timeout, limit=MAX_REPORT_BYTES,
                                      reject_overflow=True, terminate=lambda: terminate_tree(proc, job))
@@ -119,7 +121,8 @@ def frozen_health_check(bundle: Path, profile: Path):
     """Explicit transaction driver; invoke ONLY after full candidate validation.
 
     It is still not a production installer/launcher. An incomplete execution
-    scope (including macOS owned-session-only) cannot commit a transaction.
+    scope cannot commit a transaction. macOS uses a forkless probe only; this
+    does not confer cleanup authority over an ordinary application session.
     """
     from .transaction import HealthReport
     product = json_object((bundle / "product.json").read_bytes(), MAX_REPORT_BYTES)
@@ -157,7 +160,8 @@ def probe_dashboard_version(bundle: Path, profile: Path, version: str):
     try:
         proc = spawn_managed([str(program), "--version"], cwd=str(profile),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="strict", env=isolated_environment(profile))
+            text=True, encoding="utf-8", errors="strict", env=isolated_environment(profile),
+            macos_forkless=sys.platform == "darwin")
         job = attach_kill_job(proc)
         output, _, _ = collect_output(proc, timeout=30, limit=4096, reject_overflow=True,
                                      terminate=lambda: terminate_tree(proc, job))

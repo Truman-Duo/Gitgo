@@ -66,6 +66,12 @@
 
 当前仅 Linux 可进入交接，已有下述 ARM64 虚拟机验收。macOS owned-session-only 无法证明完整清理，因此明确拒绝更新及回滚，不能通过测试替身或用户确认绕过。Windows 管理适配仍缺失。默认包没有正式发行信任。正式发行、其他平台及真实终端人工验收仍待完成。`tests/test_update_handoff.py` 与 `tests/test_update_manual_rollback.py` 的模拟平台和健康驱动只验证状态机，不作为平台验收证据。
 
+## macOS 单进程候选检查
+
+候选 Host 数据/初始化检查和 Dashboard `--version` 使用明确限定的单进程环境：由系统 `/usr/bin/sandbox-exec` 在候选执行前禁止 fork/vfork、posix_spawn（包括 SETEXEC/SETSID/SETPGROUP）及会话/进程组变更。父进程实际等待唯一候选进程退出后才报告检查清理完整。固定策略不插入输入路径或命令；系统接口缺失、拒绝或候选无法启动均失败关闭。
+
+该策略只用于受验证候选的有界健康检查，不应用于正常 Dashboard 或工具执行，不限制其现有能力，也不将普通 macOS 会话报告为已清理。因此它本身不启用 macOS 即时更新。`sandbox-exec` 属于已弃用/私有的系统接口，当前系统上的测试不能替代其他 macOS 版本及未来系统的实际验收。普通进程范围和检查范围的能力保持分开。
+
 ## Linux 双版本验收记录
 
 2026-10-13，在无主机目录挂载的 Ubuntu 24.04 ARM64 虚拟机（真实 Linux 6.8 内核、glibc 2.39）上，分别以干净提交构建 `1.0.0-alpha.2.lab.1` 与 `1.0.0-alpha.3.lab.1`。这些版本只用于实验，未发布；正式版本字段未改变。Python 3.12.15、SQLite 3.53.1、Bun 1.4.2、PyInstaller 6.22.3；源码与冻结运行时的数据证据匹配。已统一 Linux `aarch64` 与 macOS `arm64` 的平台专用架构名，保留未支持目标的拒绝。
