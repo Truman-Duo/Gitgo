@@ -94,7 +94,7 @@ mkdir -p "$STAGE/internal"
 "$BUN_BIN" build "$ROOT/cli/dashboard/src/main.tsx" --compile --outfile "$STAGE/gitgo"
 (
   cd "$ROOT/cli/dashboard"
-  "$BUN_BIN" run build
+  "$BUN_BIN" run scripts/build.ts
 )
 mkdir -p "$STAGE/dashboard/scripts" "$STAGE/dashboard/dist"
 cp "$ROOT/cli/dashboard/scripts/launch.mjs" "$ROOT/cli/dashboard/scripts/runtime.mjs" "$STAGE/dashboard/scripts/"
