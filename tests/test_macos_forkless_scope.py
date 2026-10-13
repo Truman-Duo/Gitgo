@@ -113,3 +113,22 @@ def test_forkless_capability_cannot_be_requested_on_other_platform(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     with pytest.raises(ValueError):
         spawn_managed(["/bin/true"], macos_forkless=True)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_actual_frozen_supervisor_enforces_the_forkless_role(monkeypatch, cancel):
+    host = os.environ.get("GITGO_SCOPE_TEST_HOST")
+    if not host:
+        pytest.skip("Requires a fresh actual frozen Host")
+    python = interpreter()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", host)
+    code = "import time; time.sleep(30)" if cancel else "import os; os.fork()"
+    proc = spawn_managed([python, "-c", code], macos_forkless=True,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if cancel:
+        terminate_tree(proc)
+    else:
+        _, err, _ = collect(proc)
+        assert proc.returncode != 0 and "PermissionError" in err
+    assert proc._gitgo_cleanup == {"mode": "macos-forkless-sandbox", "complete": True, "issues": []}
