@@ -354,7 +354,10 @@ class InstallationStore:
                 checkpoint("user_rollback_intent")
                 return self._recover_locked(checkpoint=checkpoint)
             except Exception:
-                return self._recover_locked(checkpoint=checkpoint)
+                result = self._recover_locked(checkpoint=checkpoint)
+                if result.status == "committed":
+                    return TransactionResult("failed", result.version, "UPDATE_OPERATION_FAILED")
+                return result
 
     def _recover_locked(self, *, checkpoint=lambda _: None, failure_code="UPDATE_INTERRUPTED"):
         try:

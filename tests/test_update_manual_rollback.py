@@ -84,3 +84,34 @@ def test_cancelled_or_busy_rollback_does_not_publish_or_switch(lab, monkeypatch)
         with lab.store.runtime_lease():
             assert consume(lab, nonce).error_code == "UPDATE_BUSY"
         assert lab.store._ledger()["current"]["version"] == "1.0.0-alpha.3"
+
+
+@pytest.mark.parametrize("after_write", [False, True])
+def test_rollback_intent_write_error_uses_durable_fact_not_assumed_success(lab, monkeypatch, after_write):
+    selected = upgraded(lab, monkeypatch)
+    save = lab.store._save
+    once = False
+    def fail(ledger, state=None, **kwargs):
+        nonlocal once
+        if state == "ROLLBACK" and not once:
+            once = True
+            if after_write: save(ledger, state, **kwargs)
+            raise OSError("test fsync failure")
+        return save(ledger, state, **kwargs)
+    monkeypatch.setattr(lab.store, "_save", fail)
+    result = lab.store._rollback(selected["rollback_id"], health_check=inspect_health)
+    assert result.status == ("rolled_back" if after_write else "failed")
+    assert open_managed(lab.store.root).recover().status == ("rolled_back" if after_write else "committed")
+
+
+def test_failed_restore_retains_both_programs_for_fresh_recovery(lab, monkeypatch):
+    selected = upgraded(lab, monkeypatch)
+    move = lab.store._move
+    def fail(source, target, expected=None):
+        if source.name == "old": raise OSError("test disk error")
+        return move(source, target, expected)
+    monkeypatch.setattr(lab.store, "_move", fail)
+    assert lab.store._rollback(selected["rollback_id"], health_check=inspect_health).status == "recovery_required"
+    fresh = open_managed(lab.store.root)
+    assert fresh.recover().status == "rolled_back"
+    assert tree_digest(fresh.root / "active") == lab.before
