@@ -34,7 +34,7 @@ def lab(tmp_path_factory, signing):
     except UpdateError:
         import subprocess
         for path in (base, seed):
-            result = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            result = subprocess.run(["pwsh.exe", "-NoProfile", "-Command",
                 "(Get-Acl -LiteralPath '" + str(path).replace("'", "''") + "').Sddl"], capture_output=True, text=True)
             print("Fixture ACL", path.name, result.stdout, result.stderr)
         raise

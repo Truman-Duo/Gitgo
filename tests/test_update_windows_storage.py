@@ -32,7 +32,7 @@ def test_private_root_and_file_use_same_stable_volume(private):
     try: win.validate_staging(private)
     except UpdateError:
         for index, path in enumerate((private, *private.parents)):
-            result = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            result = subprocess.run(["pwsh.exe", "-NoProfile", "-Command",
                 "(Get-Acl -LiteralPath '" + str(path).replace("'", "''") + "').Sddl"], capture_output=True, text=True)
             print("Ancestor", index, path.name, result.stdout, result.stderr)
         raise

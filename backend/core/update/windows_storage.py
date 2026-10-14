@@ -108,7 +108,10 @@ def validate_acl(handle, *, private=True):
             mask = U32.from_address(ace.value + 4).value
             sid = _sid(ace.value + 8)
             if sid not in allowed and (private or mask & REPLACE_CHILD):
-                reject("UPDATE_ACL_INVALID", "Foreign access permits installation replacement")
+                # Only well-known public group IDs, never account/path names.
+                group = sid if sid in {"S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-3-0", "S-1-3-4"} else "other"
+                reject("UPDATE_ACL_INVALID", "Foreign access permits installation replacement "
+                       f"(private={private}, group={group}, rights={mask:#x})")
     finally:
         api()["LocalFree"](descriptor)
 
