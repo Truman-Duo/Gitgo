@@ -107,14 +107,39 @@ def test_actual_active_windows_host_holds_admission_until_clean_exit(actual_lab)
 
 
 def test_actual_windows_installer_and_unicode_powershell_command(actual_lab):
+    from backend.core.process_control import spawn_managed, terminate_tree
+    from backend.core.process_output import collect_output
     store, _, _, _, old, _, env = actual_lab
     base = store.root.parent
     root, bin_dir = base / "独立 安装", base / "独立 命令"
     seed = base / "seed"
-    result = subprocess.run(["pwsh.exe", "-NoProfile", "-File", str(seed / "install-managed.ps1"),
+    installer = spawn_managed(["pwsh.exe", "-NoProfile", "-File", str(seed / "install-managed.ps1"),
         "-Root", str(root), "-BinDir", str(bin_dir), "-ProtectedPath", str(base / "protected")],
-        env=env, cwd=base, capture_output=True, text=True, timeout=180)
-    assert result.returncode == 0, result.stderr
+        env=env, cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+    output, errors, _ = collect_output(installer, timeout=180, limit=65536,
+        terminate=lambda: terminate_tree(installer))
+    assert installer._gitgo_cleanup["complete"], installer._gitgo_cleanup
+    if installer.returncode != 0:
+        # Inspect only bounded error codes/types from a separate fresh attempt;
+        # never publish an exception message, user configuration or traceback.
+        diagnostic = """import sys,json
+from backend.core.update.installation import install_from_frozen_package
+try:
+ install_from_frozen_package(*json.loads(sys.argv[1]))
+except Exception as error:
+ items=[]
+ for _ in range(8):
+  if error is None: break
+  items.append({'type':type(error).__name__,'code':getattr(error,'code',None),'winerror':getattr(error,'winerror',None)})
+  error=error.__cause__ or error.__context__
+ print(json.dumps(items));sys.exit(2)
+"""
+        arguments = json.dumps([str(base / "diagnostic-root"), str(base / "diagnostic-bin"), []])
+        proc = spawn_managed([str(seed / "internal/gitgo-host/gitgo-host.exe"),
+            "--gitgo-internal-role", "python", "-c", diagnostic, arguments], env=env, cwd=base,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        detail, _, _ = collect_output(proc, timeout=180, limit=65536, terminate=lambda: terminate_tree(proc))
+        pytest.fail("Public installer failed: " + output.strip() + "; bounded diagnostic: " + detail.strip())
     assert open_managed(root).registration["bootstrap_api"] == 7
     command = bin_dir / "gitgo.ps1"
     assert command.read_bytes().startswith(b"\xef\xbb\xbf")
