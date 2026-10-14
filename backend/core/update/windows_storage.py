@@ -241,6 +241,36 @@ def move(source, target, *, replace=False):
     _check(api()["MoveFileExW"](str(source), str(target), 8 | (1 if replace else 0)))
 
 
+def durable_copy(source, target):
+    """New private file only: flush contents, never repair a retained file ACL.
+
+    READONLY/mtime are not portable update authority. Normalize attributes only
+    on our newly created copy, without chmod or permission changes to source.
+    """
+    source, target = Path(source), Path(target)
+    source_fd = open_file(source, share=1)
+    with os.fdopen(source_fd, "rb") as incoming:
+        before = os.fstat(incoming.fileno())
+        import stat
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 2 * 1024**3:
+            reject("UPDATE_TREE_INVALID", "Copy requires a bounded ordinary private file")
+        fd = open_file(target, create=True, write=True)
+        with os.fdopen(fd, "wb") as outgoing:
+            total = 0
+            while chunk := incoming.read(64 * 1024):
+                total += len(chunk)
+                if total > before.st_size: reject("UPDATE_TREE_INVALID", "Source grew during private copy")
+                outgoing.write(chunk)
+            if total != before.st_size: reject("UPDATE_TREE_INVALID", "Source changed during private copy")
+            outgoing.flush(); os.fsync(outgoing.fileno())
+    return str(target)
+
+
+def copy_tree(source, target):
+    import shutil
+    return shutil.copytree(source, target, symlinks=False, copy_function=durable_copy)
+
+
 @contextmanager
 def lock_file(path, *, shared=False, expected_identity=None):
     import msvcrt

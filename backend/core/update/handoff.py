@@ -35,6 +35,12 @@ def _session(store, nonce):
 
 def platform_ready(store):
     if sys.platform == "linux" and store.registration["platform"] == "linux": return True
+    if (sys.platform == "win32" and store.registration["platform"] == "windows"
+            and store.registration.get("bootstrap_api") == 7):
+        from .windows_storage import supported
+        from backend.core.windows_job import _api
+        try: return supported() and _api() is not None
+        except (OSError, AttributeError): return False
     if strategy(store) == "after_reboot":
         from .deferred import boot_session
         try: boot_session(); return True

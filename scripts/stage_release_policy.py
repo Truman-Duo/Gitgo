@@ -1,6 +1,7 @@
 """Stage publisher public trust for an explicit opt-in Unix build, before inventory."""
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -16,8 +17,9 @@ def stage_policy(stage: Path, policy: Path):
     raw = read_policy_file(policy)
     parse_release_policy(raw, product["platform"], product["architecture"])
     path = stage / POLICY_FILE
-    with path.open("xb") as handle: handle.write(raw)
-    path.chmod(0o400)
+    with path.open("xb") as handle:
+        handle.write(raw); handle.flush(); os.fsync(handle.fileno())
+    if os.name == "posix": path.chmod(0o400)
 
 
 def main():

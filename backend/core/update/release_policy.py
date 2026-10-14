@@ -19,11 +19,12 @@ MAX_POLICY_BYTES = 64 * 1024
 
 
 def read_policy_file(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    from .persistence import open_readonly
+    fd = open_readonly(path)
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
-                or info.st_mode & 0o022 or info.st_size > MAX_POLICY_BYTES):
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_POLICY_BYTES
+                or (os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o022))):
             reject("UPDATE_RELEASE_POLICY", "Release policy ownership or size is invalid")
         return handle.read(MAX_POLICY_BYTES + 1)
 

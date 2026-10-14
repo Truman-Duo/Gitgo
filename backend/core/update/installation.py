@@ -21,15 +21,39 @@ from .checker import CurrentInstallation
 from .contracts import verify_bundle_contract, _metadata
 from .health import probe_managed_host
 from .manifest import DataCompatibility
-from .persistence import filesystem_identity, descriptor_identity, validate_device, sync_directory, read_control
+from .persistence import filesystem_identity, descriptor_identity, validate_device, sync_directory, read_control, open_readonly
 from .staging import _staging_parent
 from .transaction import InstallationStore, TransactionResult, _initialize_store, TERMINAL
 from .tree import inventory, tree_digest, sync_tree
 from .validation import UpdateError, digest, fields, json_object, number, reject
 
 
+def _ownership_supported():
+    if os.name == "posix": return True
+    from .windows_storage import supported
+    return supported()
+
+
+def _host_name():
+    return "gitgo-host.exe" if os.name == "nt" else "gitgo-host"
+
+
+def _windows_launcher(host):
+    # Only the installation-root wrapper uses this fixed relative layout.
+    # Expanding %~dp0 preserves Unicode paths without changing console encoding
+    # or interpolating a user path as batch syntax.
+    if host.parts[-3:] != ("bootstrap", "gitgo-host", "gitgo-host.exe"):
+        reject("UPDATE_INSTALL_INVALID", "Unsupported Windows bootstrap layout")
+    return ('@echo off\n@setlocal DisableDelayedExpansion\n'
+            '@"%~dp0bootstrap\\gitgo-host\\gitgo-host.exe" --gitgo-internal-role managed-launch %*\n'
+            '@exit /b %errorlevel%\n')
+
+
 class ManagedStore(InstallationStore):
-    SCHEMA = 5
+    # Windows has a distinct immutable bootstrap contract. Never adopt a
+    # POSIX registration or upgrade an old bootstrap's asserted capabilities.
+    SCHEMA = 6 if os.name == "nt" else 5
+    BOOTSTRAP_API = 7 if os.name == "nt" else 6
     SIMULATION = False
     EXTRA_FIELDS = frozenset({"bootstrap", "bootstrap_api", "updates_enabled", "preparation_directory_identity"})
     LOCK_NAMES = (*InstallationStore.LOCK_NAMES, "preparation.lock")
@@ -38,32 +62,39 @@ class ManagedStore(InstallationStore):
     def _provision_extra(cls, root, seed):
         bootstrap = root / "bootstrap"
         bootstrap.mkdir(mode=0o700)
-        shutil.copytree(seed / "internal/gitgo-host", bootstrap / "gitgo-host", symlinks=True)
+        if os.name == "nt":
+            from .windows_storage import copy_tree, durable_copy
+            copy_tree(seed / "internal/gitgo-host", bootstrap / "gitgo-host")
+        else: shutil.copytree(seed / "internal/gitgo-host", bootstrap / "gitgo-host", symlinks=True)
         (bootstrap / "gitgo-host").chmod(0o700)
         from .release_policy import POLICY_FILE
         if (seed / POLICY_FILE).exists():
-            shutil.copyfile(seed / POLICY_FILE, bootstrap / POLICY_FILE)
-            (bootstrap / POLICY_FILE).chmod(0o400)
+            if os.name == "nt": durable_copy(seed / POLICY_FILE, bootstrap / POLICY_FILE)
+            else:
+                shutil.copyfile(seed / POLICY_FILE, bootstrap / POLICY_FILE)
+                (bootstrap / POLICY_FILE).chmod(0o400)
         sync_tree(bootstrap)
         preparation = root / "control/preparation"
         preparation.mkdir(mode=0o700)
         sync_directory(preparation)
         # Stable wrapper is installed once, not supplied by a remote candidate.
-        wrapper = root / "gitgo"
-        content = "#!/bin/sh\nexec " + shlex.quote(str(bootstrap / "gitgo-host/gitgo-host")) + ' --gitgo-internal-role managed-launch "$@"\n'
+        wrapper = root / ("gitgo.cmd" if os.name == "nt" else "gitgo")
+        content = (_windows_launcher(bootstrap / "gitgo-host/gitgo-host.exe") if os.name == "nt" else
+            "#!/bin/sh\nexec " + shlex.quote(str(bootstrap / "gitgo-host/gitgo-host")) + ' --gitgo-internal-role managed-launch "$@"\n')
         with wrapper.open("x", encoding="utf-8") as handle:
             handle.write(content); handle.flush(); os.fsync(handle.fileno())
         wrapper.chmod(0o700)
-        descriptor = os.open(wrapper, os.O_RDONLY | os.O_NOFOLLOW)
-        try: os.fsync(descriptor)
-        finally: os.close(descriptor)
+        if os.name == "posix":
+            descriptor = open_readonly(wrapper)
+            try: os.fsync(descriptor)
+            finally: os.close(descriptor)
         return {"bootstrap": {"directory_identity": filesystem_identity(bootstrap),
                               "tree_sha256": tree_digest(bootstrap),
-                              "launcher_sha256": _file_digest(wrapper)}, "bootstrap_api": 6, "updates_enabled": False,
+                              "launcher_sha256": _file_digest(wrapper)}, "bootstrap_api": cls.BOOTSTRAP_API, "updates_enabled": False,
                 "preparation_directory_identity": filesystem_identity(preparation)}
 
     def _validate_extra(self, value):
-        if type(value["bootstrap_api"]) is not int or value["bootstrap_api"] != 6:
+        if type(value["bootstrap_api"]) is not int or value["bootstrap_api"] != self.BOOTSTRAP_API:
             reject("UPDATE_CONTROL_INVALID", "Managed bootstrap API is unavailable")
         if type(value["updates_enabled"]) is not bool or value["updates_enabled"] is not False:
             reject("UPDATE_CONTROL_INVALID", "This managed installation does not support activation yet")
@@ -76,12 +107,12 @@ class ManagedStore(InstallationStore):
         bootstrap = fields(value["bootstrap"], {"directory_identity", "tree_sha256", "launcher_sha256"})
         identity = fields(bootstrap["directory_identity"], {"device", "inode"})
         validate_device(identity["device"])
-        number(identity["inode"], maximum=2**64 - 1)
+        number(identity["inode"], maximum=2**128 - 1 if os.name == "nt" else 2**64 - 1)
         digest(bootstrap["tree_sha256"]); digest(bootstrap["launcher_sha256"])
         _staging_parent(self.root / "bootstrap", self.protected_paths)
         if (identity != filesystem_identity(self.root / "bootstrap") or identity["device"] != value["device"]
                 or tree_digest(self.root / "bootstrap") != bootstrap["tree_sha256"]
-                or _file_digest(self.root / "gitgo") != bootstrap["launcher_sha256"]):
+                or _file_digest(self.root / ("gitgo.cmd" if os.name == "nt" else "gitgo")) != bootstrap["launcher_sha256"]):
             reject("UPDATE_CONTROL_INVALID", "Stable bootstrap or launcher changed")
 
     def apply(self, policy, verifier, raw, detached, archive, *, clock=None, checkpoint=None):
@@ -93,18 +124,18 @@ class ManagedStore(InstallationStore):
 def _file_digest(path):
     import hashlib
     import stat
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = open_readonly(path)
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
-                or info.st_mode & 0o022 or info.st_size > 4096):
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096
+                or (os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o022))):
             reject("UPDATE_CONTROL_INVALID", "Stable launcher ownership is invalid")
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def initialize_managed(root: Path, seed: Path, *, protected_paths: tuple[Path, ...]) -> ManagedStore:
     """New local installation only; validate package and actual bootstrap API."""
-    if os.name != "posix":
+    if not _ownership_supported():
         reject("UPDATE_TRANSACTION_PLATFORM", "Managed installation ownership adapter is unavailable")
     try:
         _staging_parent(root, protected_paths)
@@ -120,6 +151,8 @@ def initialize_managed(root: Path, seed: Path, *, protected_paths: tuple[Path, .
         before = inventory(seed)
         records = {record["path"]: record for record in before}
         product = _metadata(seed, "product.json", records)
+        if os.name == "nt" and product.get("installation_mode") != "managed-windows-v1":
+            reject("UPDATE_INSTALL_INVALID", "Windows managed installation requires its explicit package mode")
         build = _metadata(seed, "build-manifest.json", records)
         contract = _metadata(seed, "update-data-contract.json", records)
         compatibility = DataCompatibility.parse(contract["data_compatibility"])
@@ -132,11 +165,15 @@ def initialize_managed(root: Path, seed: Path, *, protected_paths: tuple[Path, .
         with tempfile.TemporaryDirectory(prefix="gitgo-managed-incoming-", dir=root.parent) as temporary:
             temporary = Path(temporary).resolve()
             private_seed = temporary / "package"
-            shutil.copytree(seed, private_seed, symlinks=True); private_seed.chmod(0o700)
+            if os.name == "nt":
+                from .windows_storage import copy_tree
+                copy_tree(seed, private_seed)
+            else: shutil.copytree(seed, private_seed, symlinks=True)
+            private_seed.chmod(0o700)
             if inventory(private_seed) != before or inventory(seed) != before:
                 reject("UPDATE_INSTALL_INVALID", "Package changed during private preparation")
             probe = temporary / "probe"; probe.mkdir(mode=0o700)
-            report = probe_managed_host(private_seed / "internal/gitgo-host/gitgo-host", probe)["runtime"]
+            report = probe_managed_host(private_seed / "internal/gitgo-host" / _host_name(), probe)["runtime"]
             if (any(report[key] != product[key] for key in ("product_id", "version", "platform", "architecture"))
                     or DataCompatibility.parse(report["data_compatibility"]) != compatibility):
                 reject("UPDATE_INSTALL_INVALID", "Initial frozen runtime differs from package evidence")
@@ -153,7 +190,7 @@ def initialize_managed(root: Path, seed: Path, *, protected_paths: tuple[Path, .
 
 def open_managed(root: Path) -> ManagedStore:
     """Read protection only from an owned registration, then validate everything."""
-    if os.name != "posix" or not isinstance(root, Path) or root != root.resolve(strict=True):
+    if not _ownership_supported() or not isinstance(root, Path) or root != root.resolve(strict=True):
         reject("UPDATE_CONTROL_INVALID", "Managed installation ownership is unavailable")
     # Reading is not authority. ManagedStore revalidates canonical paths, mode,
     # captured inode identities, local registration type and stable bootstrap.
@@ -185,11 +222,11 @@ def protected_install_paths() -> tuple[Path, ...]:
     if config is not None:
         paths.append(config.parent.resolve())
         import stat
-        fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = open_readonly(config)
         with os.fdopen(fd, "rb") as handle:
             info = os.fstat(handle.fileno())
             if (not stat.S_ISREG(info.st_mode) or info.st_size > 256 * 1024 or info.st_nlink != 1
-                    or info.st_uid != os.getuid() or info.st_mode & 0o022):
+                    or (os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o022))):
                 reject("UPDATE_PROTECTED_PATHS", "Existing profile cannot be safely inspected")
             value = json.loads(handle.read(256 * 1024 + 1).decode("utf-8"))
         if type(value) is not dict:
@@ -251,14 +288,17 @@ def _create_private_directories(path: Path):
         missing.append(current); current = current.parent
     if not current.is_dir(): reject("UPDATE_INSTALL_INVALID", "Target parent is not a directory")
     for directory in reversed(missing):
-        directory.mkdir(mode=0o700)
+        if os.name == "nt":
+            from .windows_storage import create_private_directory
+            create_private_directory(directory)
+        else: directory.mkdir(mode=0o700)
     return missing
 
 
 def install_from_frozen_package(root_value: str, bin_value: str, protected_values: list[str]):
     """Explicit initial-install role. No overwrite, PATH profile edits or adoption."""
-    if os.name != "posix" or not getattr(sys, "frozen", False):
-        reject("UPDATE_INSTALL_INVALID", "Managed installer requires a packaged POSIX Host")
+    if not _ownership_supported() or not getattr(sys, "frozen", False):
+        reject("UPDATE_INSTALL_INVALID", "Managed installer requires a packaged Host with native ownership support")
     executable = Path(sys.executable)
     if (executable != executable.resolve(strict=True) or executable.parent.name != "gitgo-host"
             or executable.parents[1].name != "internal"):
@@ -274,7 +314,7 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
             reject("UPDATE_PROTECTED_PATHS", "Command directory overlaps package or protected data")
     if root.exists() and (not root.is_dir() or any(root.iterdir())):
         reject("UPDATE_INSTALL_INVALID", "Initial managed target must be new or empty")
-    command = bin_dir / "gitgo"
+    command = bin_dir / ("gitgo.ps1" if os.name == "nt" else "gitgo")
     if command.exists() or command.is_symlink():
         reject("UPDATE_INSTALL_INVALID", "Public command already exists; choose a separate command directory")
     if len(protected_values) > 128: reject("UPDATE_PROTECTED_PATHS", "Too many protected workspace paths")
@@ -283,6 +323,20 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
     # Never publish a public symlink before final registration and validation.
     store = initialize_managed(root, seed, protected_paths=protected)
     _new_path(str(bin_dir))
+    if os.name == "nt":
+        _staging_parent(bin_dir, protected)
+        host = str(root / "bootstrap/gitgo-host/gitgo-host.exe").replace("'", "''")
+        # UTF-8 BOM is supported by Windows PowerShell 5.1 and PowerShell 7.
+        # Do not rewrite the user's global execution policy or PATH profile.
+        content = ("param([Parameter(ValueFromRemainingArguments=$true)][string[]]$GitgoArguments)\n"
+                   "$ErrorActionPreference = 'Stop'\n& '" + host +
+                   "' --gitgo-internal-role managed-launch @GitgoArguments\nexit $LASTEXITCODE\n")
+        from .windows_storage import open_file
+        descriptor = open_file(command, create=True, write=True)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content.encode("utf-8-sig")); handle.flush(); os.fsync(handle.fileno())
+        return {"schema_version": 1, "managed": True, "version": store._ledger()["current"]["version"],
+                "updates_enabled": False}
     descriptor = os.open(bin_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         info = os.fstat(descriptor)
@@ -302,7 +356,7 @@ def physical_installation(executable: Path) -> tuple[Path, str] | None:
     # A command symlink must not bypass admission. Derive the physical target's
     # fixed layout, rather than trusting either an environment root or argv[0].
     executable = executable.resolve(strict=True)
-    if executable.name != "gitgo-host": return None
+    if executable.name != _host_name(): return None
     if executable.parent.name == "gitgo-host" and executable.parent.parent.name == "bootstrap":
         return executable.parents[2], "bootstrap"
     if (executable.parent.name == "gitgo-host" and executable.parents[1].name == "internal"
@@ -313,7 +367,7 @@ def physical_installation(executable: Path) -> tuple[Path, str] | None:
 
 def assert_external_resource(path: Path):
     """Projects must never become payload files that a software update replaces."""
-    if not getattr(sys, "frozen", False) or os.name != "posix": return
+    if not getattr(sys, "frozen", False) or not _ownership_supported(): return
     physical = physical_installation(Path(sys.executable))
     if physical is None: return
     root = physical[0]
@@ -325,7 +379,12 @@ def assert_external_resource(path: Path):
 @contextmanager
 def installed_runtime(role: str | None):
     """Every managed frozen Host/daemon/tool role owns a lease before imports."""
-    if not getattr(sys, "frozen", False) or os.name != "posix":
+    if not getattr(sys, "frozen", False) or not _ownership_supported():
+        yield; return
+    if os.name == "nt" and role in {"windows-scope", "windows-job-lease"}:
+        # Fixed trusted transport/guardian only: no application, configuration
+        # or project imports. Payload roles acquire their own admission below;
+        # the supervisor retains explicitly inherited kernel sharing leases.
         yield; return
     physical = physical_installation(Path(sys.executable))
     if physical is None:
@@ -341,6 +400,10 @@ def installed_runtime(role: str | None):
     if role in {"update-data-probe", "managed-capabilities", "update-startup-probe"}:
         ledger = store._ledger()
         if ledger["transaction"] is not None and ledger["transaction"]["state"] == "CHECK_NEW":
+            if os.name == "nt":
+                # Windows byte-range locks are not inherited authority. Health
+                # executes a verified private snapshot, never the active path.
+                reject("UPDATE_PROBE_LEASE", "Candidate probes must use the private Windows snapshot")
             with _inherited_probe_lease(store): yield
             return
     for path in protected_install_paths():
@@ -411,8 +474,8 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
         with launch_session(store) as nonce:
             with store.runtime_lease() as (active, descriptor), retain_descriptor(descriptor):
                 env = {**os.environ, "GITGO_INSTALL_ROOT": str(active), SESSION_ENV: nonce or "",
-                       "GITGO_HOST_EXECUTABLE": str(active / "internal/gitgo-host/gitgo-host")}
-                proc = spawn_managed([str(active / "gitgo"), *arguments], cwd=str(active), env=env)
+                       "GITGO_HOST_EXECUTABLE": str(active / "internal/gitgo-host" / _host_name())}
+                proc = spawn_managed([str(active / ("gitgo.exe" if os.name == "nt" else "gitgo")), *arguments], cwd=str(active), env=env)
                 try:
                     proc.wait()
                     finish_scope(proc)

@@ -10,7 +10,7 @@ import {acquireManagedAdmission, managedRoot} from "./managedAdmission.js";
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "gitgo-admission-")));
   for (const path of ["bootstrap/gitgo-host", "control", "active/dashboard/dist"]) mkdirSync(join(root, path), {recursive: true});
-  for (const path of ["bootstrap/gitgo-host/gitgo-host", "control/registration.json", "active/gitgo", "active/dashboard/dist/cli.js"]) writeFileSync(join(root, path), "test");
+  for (const path of ["bootstrap/gitgo-host/gitgo-host", "bootstrap/gitgo-host/gitgo-host.exe", "control/registration.json", "active/gitgo", "active/gitgo.exe", "active/dashboard/dist/cli.js"]) writeFileSync(join(root, path), "test");
   return root;
 }
 
@@ -39,6 +39,20 @@ describe("early managed frontend admission", () => {
       expect(managedRoot(process.execPath, pathToFileURL(join(root, "active/dashboard/dist/cli.js")).href, "linux")).toBe(root);
       expect(managedRoot(process.execPath, import.meta.url, "darwin")).toBeUndefined();
       expect(managedRoot(join(root, "active/gitgo"), import.meta.url, "win32")).toBeUndefined();
+      expect(managedRoot(join(root, "active/gitgo.exe"), import.meta.url, "win32")).toBe(root);
+    } finally {rmSync(root, {recursive: true, force: true});}
+  });
+  test("Windows keeper uses the actual exe rather than a Unix host name", async () => {
+    const root = fixture();
+    const {spawn} = fakeSpawn(nonce => JSON.stringify({schema_version: 1, nonce, version: "1.0.0"}) + "\n");
+    try {
+      let path = "";
+      const checkedSpawn = ((host: string, args: string[], options: any) => {
+        path = host; return spawn(host, args, options);
+      }) as any;
+      const release = await acquireManagedAdmission(root, "1.0.0", checkedSpawn, "win32");
+      expect(path).toBe(join(root, "bootstrap/gitgo-host/gitgo-host.exe"));
+      release();
     } finally {rmSync(root, {recursive: true, force: true});}
   });
   test("real keeper protocol stays open until explicitly released", async () => {

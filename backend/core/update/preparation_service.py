@@ -20,7 +20,7 @@ from .checker import CurrentInstallation, check_for_update
 from .contracts import verify_bundle_contract
 from .installation import open_managed, physical_installation
 from .manifest import DataCompatibility, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES
-from .persistence import atomic_control, filesystem_identity, lock_file, read_control
+from .persistence import atomic_control, filesystem_identity, lock_file, read_control, open_readonly
 from .release_policy import installed_release_policy
 from .staging import prepare_update, _verify_file
 from .transaction import TERMINAL, _watermark, _watermark_wire
@@ -30,7 +30,8 @@ from .validation import fields, reject, text, UpdateError
 
 
 def executing_store():
-    if os.name != "posix" or not getattr(sys, "frozen", False): return None
+    from .installation import _ownership_supported
+    if not _ownership_supported() or not getattr(sys, "frozen", False): return None
     physical = physical_installation(Path(sys.executable))
     if physical is None or physical[1] != "active": return None
     return open_managed(physical[0])
@@ -170,7 +171,7 @@ class UpdatePreparationService:
         bundle = work / value["bundle"]
         if bundle != bundle.resolve(strict=True) or not bundle.is_relative_to(work):
             reject("UPDATE_PREPARATION_CHANGED", "Prepared payload is redirected")
-        fd = os.open(work / "archive.verified", os.O_RDONLY | os.O_NOFOLLOW)
+        fd = open_readonly(work / "archive.verified")
         with os.fdopen(fd, "rb") as archive: _verify_file(archive, manifest, lambda: False)
         verify_bundle_contract(bundle, manifest)
         if tree_digest(bundle) != value["tree_sha256"]:

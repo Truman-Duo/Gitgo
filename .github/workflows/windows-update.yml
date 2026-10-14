@@ -33,16 +33,10 @@ jobs:
           if (!(Test-Path -LiteralPath $testTemp -PathType Container)) { throw 'Private temporary parent missing' }
           "TEMP=$testTemp" >> $env:GITHUB_ENV
           "TMP=$testTemp" >> $env:GITHUB_ENV
-          $parent = Get-Item -LiteralPath $testTemp
-          $depth = 0
-          while ($null -ne $parent) {
-            Write-Output "Temporary ancestor $depth ($($parent.Name))"
-            (Get-Acl -LiteralPath $parent.FullName).Access | Select-Object IdentityReference,FileSystemRights,InheritanceFlags,PropagationFlags,AccessControlType | Format-Table
-            $parent = $parent.Parent
-            $depth++
-          }
+      - name: Provision the pinned safe CI SQLite runtime
+        run: python -B scripts/provision_ci_sqlite.py
       - name: Actual NTFS ownership and lock tests
-        run: python -B -m pytest tests/test_update_windows_storage.py tests/test_update_windows_transaction.py tests/test_windows_owned_job.py -q --tb=short --junitxml=windows-update.xml
+        run: python -B -m pytest tests/test_update_windows_storage.py tests/test_update_windows_transaction.py tests/test_update_windows_managed.py tests/test_windows_owned_job.py -q --tb=short --junitxml=windows-update.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

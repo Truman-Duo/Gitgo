@@ -27,7 +27,8 @@ def legacy_status() -> dict:
     }
     import os
     import sys
-    if getattr(sys, "frozen", False) and os.name == "posix":
+    from .installation import _ownership_supported
+    if getattr(sys, "frozen", False) and _ownership_supported():
         from pathlib import Path
         from .installation import physical_installation, open_managed
         physical = physical_installation(Path(sys.executable))

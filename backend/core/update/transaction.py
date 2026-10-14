@@ -95,7 +95,10 @@ def _initialize_store(root, seed, current, *, protected_paths, store_type):
         fd = os.open(root / "control" / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.fsync(fd)
         os.close(fd)
-    shutil.copytree(seed, root / "active", symlinks=True)
+    if os.name == "nt":
+        from .windows_storage import copy_tree
+        copy_tree(seed, root / "active")
+    else: shutil.copytree(seed, root / "active", symlinks=True)
     if tree_digest(root / "active") != seed_hash:
         reject("UPDATE_SIMULATION_INVALID", "Seed changed during simulation provisioning")
     sync_tree(root / "active")
@@ -522,6 +525,12 @@ class InstallationStore:
                 bundle = _extract_archive(copy, manifest.archive_format, directory / "payload", directory,
                                           ExtractionLimits(), lambda: False)
             verify_bundle_contract(bundle, manifest)
+            if not self.SIMULATION and local["platform"] == "windows":
+                from .contracts import _metadata
+                from .tree import inventory
+                product = _metadata(bundle, "product.json", {item["path"]: item for item in inventory(bundle)})
+                if product.get("installation_mode") != "managed-windows-v1":
+                    reject("UPDATE_PACKAGE_CONTRACT", "Windows update requires the managed package lifecycle")
             checkpoint("candidate_validated")
             if not self._matches(self.root / "active", ledger["current"]):
                 reject("UPDATE_RECOVERY_REQUIRED", "Current payload changed before switch")

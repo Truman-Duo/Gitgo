@@ -89,7 +89,8 @@ def test_live_runtime_lease_prevents_switch(lab):
     store, apply, original = lab
     identity = store.registration["lock_identities"]["runtime.lock"]
     with lock_file(store.root / "control/runtime.lock", shared=True, expected_identity=identity):
-        assert apply().status == "busy"
+        with pytest.raises(UpdateError, match="UPDATE_BUSY"): apply()
+        assert store.recover().status == "busy"
     assert tree_digest(store.root / "active") == original
 
 

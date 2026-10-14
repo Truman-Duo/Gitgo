@@ -7,11 +7,10 @@ import {basename, dirname, resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 
 export function managedRoot(executable: string, entryUrl: string, platform = process.platform): string | undefined {
-  if (platform === "win32") return;
   let active: string | undefined;
   try {
     const physical = realpathSync(executable);
-    if (basename(dirname(physical)) === "active" && basename(physical) === "gitgo") active = dirname(physical);
+    if (basename(dirname(physical)) === "active" && basename(physical) === (platform === "win32" ? "gitgo.exe" : "gitgo")) active = dirname(physical);
     if (!active && entryUrl.startsWith("file:")) {
       const entry = realpathSync(fileURLToPath(entryUrl));
       if (basename(entry) === "cli.js" && basename(dirname(entry)) === "dist"
@@ -24,8 +23,8 @@ export function managedRoot(executable: string, entryUrl: string, platform = pro
   return active ? dirname(active) : undefined;
 }
 
-export async function acquireManagedAdmission(root: string, version: string, spawnHost = spawn): Promise<() => void> {
-  const host = resolve(root, "bootstrap/gitgo-host/gitgo-host");
+export async function acquireManagedAdmission(root: string, version: string, spawnHost = spawn, platform = process.platform): Promise<() => void> {
+  const host = resolve(root, "bootstrap/gitgo-host", platform === "win32" ? "gitgo-host.exe" : "gitgo-host");
   if (!existsSync(host) || !existsSync(resolve(root, "control/registration.json"))) {
     throw new Error("Managed installation requires its stable bootstrap; use the installed public command");
   }

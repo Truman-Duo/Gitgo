@@ -59,6 +59,11 @@ def verify_bundle_contract(root: Path, manifest: UpdateManifest) -> None:
                        "uninstaller": "uninstall.exe"} if manifest.platform == "windows" else {
         "dashboard": "gitgo", "native_host": "internal/gitgo-host/gitgo-host",
         "installer": "install.sh", "uninstaller": "uninstall.sh"}
+    if "installation_mode" in product:
+        if manifest.platform != "windows" or product["installation_mode"] != "managed-windows-v1":
+            reject("UPDATE_PACKAGE_CONTRACT", "Unsupported installation mode")
+        expected_layout = {"dashboard": "gitgo.exe", "native_host": "internal/gitgo-host/gitgo-host.exe",
+                           "installer": "install-managed.ps1"}
     if product.get("layout") != expected_layout:
         reject("UPDATE_PACKAGE_CONTRACT", "Package component layout is unsupported")
     for name in expected_layout.values():

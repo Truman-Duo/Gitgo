@@ -138,9 +138,10 @@ def _main(values: list[str]) -> int:
         return frontend_lease(args.nonce)
     if name == "managed-capabilities":
         import os
-        if os.name != "posix":
+        from backend.core.update.installation import _ownership_supported
+        if not _ownership_supported():
             from backend.core.update.validation import reject
-            reject("UPDATE_TRANSACTION_PLATFORM", "Managed installation adapter is POSIX-only")
+            reject("UPDATE_TRANSACTION_PLATFORM", "Managed installation ownership adapter is unavailable")
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("--nonce", required=True)
         args = parser.parse_args(role_argv)

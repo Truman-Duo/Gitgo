@@ -19,9 +19,14 @@ def startup_probe(nonce):
     if not root.is_absolute() or root != root.resolve(strict=True):
         reject("UPDATE_HEALTH_FAILED", "Startup probe requires a private isolated profile")
     info = root.lstat()
-    if root.is_symlink() or not root.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+    if root.is_symlink() or not root.is_dir():
         reject("UPDATE_HEALTH_FAILED", "Startup profile ownership is invalid")
-    for ancestor in root.parents:
+    if os.name == "nt":
+        from .windows_storage import validate_staging
+        validate_staging(root)
+    elif info.st_uid != os.getuid() or info.st_mode & 0o077:
+        reject("UPDATE_HEALTH_FAILED", "Startup profile ownership is invalid")
+    for ancestor in (() if os.name == "nt" else root.parents):
         info = ancestor.lstat()
         if (ancestor.is_symlink() or info.st_uid not in (0, os.getuid())
                 or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):

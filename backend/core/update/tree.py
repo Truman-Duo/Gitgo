@@ -119,9 +119,16 @@ def tree_digest(root: Path) -> str:
 
 def sync_tree(root: Path) -> None:
     if os.name == "nt":
-        # Newly extracted file contents were fsynced before publication.
-        # READONLY is not a Unix mode; do not clear it on retained programs.
-        inventory(root)
+        from .windows_storage import open_file
+        records = inventory(root)
+        for record in records:
+            if record["kind"] == "file":
+                # Never clear READONLY on an existing/retained program. Owned
+                # fresh copies are flushed during creation; an unflushable
+                # foreign/readonly tree must not be published as durable.
+                descriptor = open_file(root / record["path"], write=True)
+                try: os.fsync(descriptor)
+                finally: os.close(descriptor)
         return
     from .persistence import sync_directory
     records = inventory(root)

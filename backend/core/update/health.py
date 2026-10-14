@@ -19,7 +19,7 @@ from .version import Version
 
 PROBE_ROLE = "update-data-probe"
 MAX_REPORT_BYTES = 64 * 1024
-MANAGED_API_VERSION = 6  # Stable Darwin volume identity; older bootstrap cannot adopt it.
+MANAGED_API_VERSION = 7 if os.name == "nt" else 6
 
 
 def isolated_environment(profile: Path) -> dict[str, str]:
@@ -68,6 +68,9 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool, start
         reject("UPDATE_HEALTH_FAILED", "Probe requires an explicit host and empty isolated profile")
     if os.name == "posix" and (profile.stat().st_uid != os.getuid() or profile.stat().st_mode & 0o077):
         reject("UPDATE_HEALTH_FAILED", "Probe profile must be private")
+    if os.name == "nt":
+        from .windows_storage import validate_staging
+        validate_staging(profile)
     nonce = uuid.uuid4().hex
     # Whitelist, rather than subtracting guessed names from the parent env.
     env = isolated_environment(profile)
@@ -124,6 +127,29 @@ def frozen_health_check(bundle: Path, profile: Path):
     scope cannot commit a transaction. macOS uses a forkless probe only; this
     does not confer cleanup authority over an ordinary application session.
     """
+    if os.name == "nt":
+        # Never pretend LockFileEx authority transfers to a child. Probe an
+        # exact, private, disposable snapshot outside the active fixed layout.
+        # The original remains under the updater's exclusive sharing lease;
+        # parent-owned Jobs/guardians retain it through verified cleanup.
+        from .tree import inventory
+        from .windows_storage import validate_staging, copy_tree
+        validate_staging(profile)
+        before = inventory(bundle)
+        snapshot = profile / "program"
+        copy_tree(bundle, snapshot)
+        if inventory(snapshot) != before or inventory(bundle) != before:
+            reject("UPDATE_HEALTH_FAILED", "Windows candidate changed during private probe preparation")
+        runtime_profile = profile / "runtime"
+        runtime_profile.mkdir(mode=0o700)
+        result = _frozen_health_check(snapshot, runtime_profile)
+        if inventory(snapshot) != before or inventory(bundle) != before:
+            reject("UPDATE_HEALTH_FAILED", "Windows health changed the verified program tree")
+        return result
+    return _frozen_health_check(bundle, profile)
+
+
+def _frozen_health_check(bundle: Path, profile: Path):
     from .transaction import HealthReport
     product = json_object((bundle / "product.json").read_bytes(), MAX_REPORT_BYTES)
     build = json_object((bundle / "build-manifest.json").read_bytes(), 2 * 1024**2)
