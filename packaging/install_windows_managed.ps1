@@ -11,5 +11,6 @@ if (!(Test-Path -LiteralPath $hostPath -PathType Leaf)) { throw 'Complete extrac
 $installerArguments = @('--gitgo-internal-role', 'managed-install', '--root', $Root, '--bin-dir', $BinDir)
 foreach ($path in $ProtectedPath) { $installerArguments += @('--protected-path', $path) }
 & $hostPath @installerArguments
-if ($LASTEXITCODE -ne 0) { throw 'Managed installation rejected; existing files and user data retained' }
+$installerExit = $LASTEXITCODE
+if ($installerExit -ne 0) { throw "Managed installation rejected (Host exit $installerExit); existing files and user data retained" }
 Write-Output 'Managed installation registered. Launch the new gitgo.ps1 command from PowerShell. Updates require pinned release trust and explicit confirmation.'

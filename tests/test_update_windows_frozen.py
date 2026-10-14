@@ -140,6 +140,12 @@ except Exception as error:
             "--gitgo-internal-role", "python", "-c", diagnostic, arguments], env=env, cwd=base,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
         detail, diagnostic_errors, _ = collect_output(proc, timeout=180, limit=65536, terminate=lambda: terminate_tree(proc))
+        role_proc = spawn_managed([str(seed / "internal/gitgo-host/gitgo-host.exe"),
+            "--gitgo-internal-role", "managed-install", "--root", str(base / "role 安装"),
+            "--bin-dir", str(base / "role 命令"), "--protected-path", str(base / "protected")],
+            env=env, cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        role_output, _, _ = collect_output(role_proc, timeout=180, limit=65536,
+            terminate=lambda: terminate_tree(role_proc))
         # Error text may contain a path. Report only bounded standard failure
         # categories and numerical exits, not the raw stderr or traceback.
         categories = [name for name in ("PermissionError", "OSError", "UpdateError", "ImportError",
@@ -151,6 +157,7 @@ except Exception as error:
             "installer_output": output.strip(), "diagnostic_exit": proc.returncode,
             "diagnostic_output": detail.strip(), "stderr_categories": categories,
             "installer_error": safe_errors[-4096:], "stderr_bytes": len(diagnostic_errors),
+            "role_exit": role_proc.returncode, "role_output": role_output.strip(),
             "cleanup": proc._gitgo_cleanup}))
     assert open_managed(root).registration["bootstrap_api"] == 7
     command = bin_dir / "gitgo.ps1"
