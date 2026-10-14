@@ -88,7 +88,7 @@ def test_role_is_busy_without_killing_or_overwriting_a_live_runtime(lab):
     (b"not-json-private-path", []), (b"x" * (MAX_REQUEST_BYTES + 1), []),
     (b'{}', []), (b'{"schema_version":1,"schema_version":1}', []),
     (b"{}", ["--root", "private-path-must-not-be-echoed"]),
-])
+], ids=["invalid-json", "oversized-input", "empty-request", "duplicate-schema", "unexpected-argument"])
 def test_role_failures_are_bounded_and_do_not_echo_private_input(raw, args):
     output = io.StringIO()
     assert helper_main(args, stdin=io.BytesIO(raw), stdout=output) == 2
