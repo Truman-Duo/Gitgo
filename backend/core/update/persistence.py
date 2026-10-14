@@ -50,6 +50,11 @@ def _volume_uuid(fd: int) -> str:
 
 
 def validate_device(value) -> None:
+    if os.name == "nt":
+        text(value, r"windows-volume:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", 51)
+        if value == "windows-volume:" + str(uuid.UUID(int=0)):
+            reject("UPDATE_CONTROL_INVALID", "Filesystem GUID must be nonzero")
+        return
     if _darwin():
         text(value, r"darwin-volume:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", 50)
         if value == "darwin-volume:" + str(uuid.UUID(int=0)):
@@ -59,17 +64,30 @@ def validate_device(value) -> None:
 
 
 def descriptor_identity(fd: int) -> dict:
+    if os.name == "nt":
+        from .windows_storage import descriptor_identity as windows_identity
+        return windows_identity(fd)
     info = os.fstat(fd)
     return {"device": _volume_uuid(fd) if _darwin() else info.st_dev, "inode": info.st_ino}
 
 
 def filesystem_identity(path: Path) -> dict:
+    if os.name == "nt":
+        from .windows_storage import filesystem_identity as windows_identity
+        return windows_identity(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
     try: return descriptor_identity(fd)
     finally: os.close(fd)
 
 
 def sync_directory(path: Path) -> None:
+    if os.name == "nt":
+        # No POSIX directory fsync on Windows. NTFS replacements below use
+        # WRITE_THROUGH; verify the directory boundary instead of claiming a
+        # directory FlushFileBuffers succeeded. Physical power loss is separate.
+        from .windows_storage import opened
+        with opened(path): pass
+        return
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
@@ -78,11 +96,11 @@ def sync_directory(path: Path) -> None:
 
 
 def read_control(path: Path) -> dict:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = open_readonly(path)
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600
+                or (os.name != "nt" and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600))
                 or info.st_size > MAX_CONTROL_BYTES):
             reject("UPDATE_CONTROL_INVALID", "Control file ownership, type or size is invalid")
         return json_object(handle.read(MAX_CONTROL_BYTES + 1), MAX_CONTROL_BYTES)
@@ -95,13 +113,20 @@ def atomic_control(path: Path, value: dict) -> None:
     if path.exists() or path.is_symlink():
         read_control(path)
     temporary = path.parent / (".record-" + uuid.uuid4().hex)
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    if os.name == "nt":
+        from .windows_storage import open_file
+        fd = open_file(temporary, write=True, create=True)
+    else:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        if os.name == "nt":
+            from .windows_storage import move
+            move(temporary, path, replace=True)
+        else: os.replace(temporary, path)
         sync_directory(path.parent)
     finally:
         # Only the exact random file created by this call. A hard kill can
@@ -112,6 +137,11 @@ def atomic_control(path: Path, value: dict) -> None:
 
 @contextmanager
 def lock_file(path: Path, *, shared: bool = False, expected_identity: dict | None = None):
+    if os.name == "nt" and hasattr(os, "open"):
+        from .windows_storage import supported, lock_file as windows_lock
+        if supported():
+            with windows_lock(path, shared=shared, expected_identity=expected_identity) as fd: yield fd
+            return
     if os.name != "posix":
         reject("UPDATE_TRANSACTION_PLATFORM", "Transaction ownership adapter is unavailable")
     import fcntl
@@ -131,3 +161,10 @@ def lock_file(path: Path, *, shared: bool = False, expected_identity: dict | Non
         yield fd
     finally:
         os.close(fd)
+
+
+def open_readonly(path):
+    if os.name == "nt":
+        from .windows_storage import open_file
+        return open_file(path)
+    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW)

@@ -20,6 +20,14 @@ def _metadata(root, name, records):
     item = records.get(name)
     if item is None or item["kind"] != "file" or item["bytes"] > 2 * 1024**2:
         reject("UPDATE_PACKAGE_CONTRACT", "Missing or oversized regular package metadata")
+    if os.name == "nt":
+        from .persistence import open_readonly
+        fd = open_readonly(root / name)
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read(2 * 1024**2 + 1)
+        if len(raw) != item["bytes"] or hashlib.sha256(raw).hexdigest() != item["sha256"]:
+            reject("UPDATE_PACKAGE_CONTRACT", "Windows package metadata changed during inspection")
+        return json_object(raw, 2 * 1024**2)
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)

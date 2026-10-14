@@ -1,6 +1,8 @@
 name: Windows update acceptance
 
 on:
+  push:
+    branches: [test/21-windows-update]
   workflow_dispatch:
 
 permissions:
@@ -24,7 +26,7 @@ jobs:
           python -c "import platform; print(platform.platform(), platform.machine())"
           git rev-parse HEAD
       - name: Actual NTFS ownership and lock tests
-        run: python -B -m pytest tests/test_update_windows_storage.py -q --junitxml=windows-update.xml
+        run: python -B -m pytest tests/test_update_windows_storage.py tests/test_update_windows_transaction.py -q --junitxml=windows-update.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

@@ -41,6 +41,9 @@ def api():
         "GetVolumeInformationByHandleW": (kernel, C.c_int, [HANDLE, C.c_wchar_p, U32, PTR, PTR, PTR, C.c_wchar_p, U32]),
         "MoveFileExW": (kernel, C.c_int, [C.c_wchar_p, C.c_wchar_p, U32]),
         "CreateDirectoryW": (kernel, C.c_int, [C.c_wchar_p, PTR]),
+        "FindFirstStreamW": (kernel, HANDLE, [C.c_wchar_p, C.c_int, PTR, U32]),
+        "FindNextStreamW": (kernel, C.c_int, [HANDLE, PTR]),
+        "FindClose": (kernel, C.c_int, [HANDLE]),
         "LockFileEx": (kernel, C.c_int, [HANDLE, U32, U32, U32, U32, PTR]),
         "UnlockFileEx": (kernel, C.c_int, [HANDLE, U32, U32, U32, PTR]),
         "LocalFree": (kernel, HANDLE, [HANDLE]),
@@ -199,6 +202,27 @@ def open_file(path, *, write=False, create=False):
 def validate_staging(path):
     for parent in (path, *path.parents):
         with opened(parent, private=parent == path): pass
+
+
+def reject_alternate_streams(path):
+    class StreamData(C.Structure):
+        _fields_ = [("size", C.c_int64), ("name", C.c_wchar * 296)]
+    data = StreamData()
+    handle = api()["FindFirstStreamW"](str(path), 0, C.byref(data), 0)
+    if handle == C.c_void_p(-1).value:
+        if C.get_last_error() == 38: return
+        reject("UPDATE_TREE_INVALID", "NTFS stream enumeration is unavailable")
+    try:
+        count = 0
+        while True:
+            count += 1
+            if count > 1 or data.name != "::$DATA":
+                reject("UPDATE_TREE_INVALID", "Alternate NTFS streams are unsupported")
+            if not api()["FindNextStreamW"](handle, C.byref(data)):
+                if C.get_last_error() != 38:
+                    reject("UPDATE_TREE_INVALID", "NTFS stream enumeration failed")
+                break
+    finally: api()["FindClose"](handle)
 
 
 def move(source, target, *, replace=False):

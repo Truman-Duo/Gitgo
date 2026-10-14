@@ -19,6 +19,9 @@ def encode(value) -> bytes:
 
 
 def inventory(root: Path) -> list[dict]:
+    if os.name == "nt":
+        from .windows_tree import inventory as windows_inventory
+        return windows_inventory(root)
     if root.is_symlink() or not root.is_dir():
         reject("UPDATE_TREE_INVALID", "Payload root must be a real directory")
     limits = ExtractionLimits()
@@ -110,11 +113,16 @@ def inventory(root: Path) -> list[dict]:
 def tree_digest(root: Path) -> str:
     # Root mode matters too: changing a directory into a more permissive one
     # must not silently keep its installation identity.
-    return hashlib.sha256(encode({"mode": stat.S_IMODE(root.stat().st_mode),
+    return hashlib.sha256(encode({"mode": 0o700 if os.name == "nt" else stat.S_IMODE(root.stat().st_mode),
                                   "entries": inventory(root)})).hexdigest()
 
 
 def sync_tree(root: Path) -> None:
+    if os.name == "nt":
+        # Newly extracted file contents were fsynced before publication.
+        # READONLY is not a Unix mode; do not clear it on retained programs.
+        inventory(root)
+        return
     from .persistence import sync_directory
     records = inventory(root)
     for record in records:

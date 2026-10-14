@@ -33,22 +33,30 @@ class PreparationResult:
 
 
 def _staging_parent(parent: Path, protected_paths: tuple[Path, ...]) -> Path:
-    if os.name != "posix":
+    windows = False
+    if os.name == "nt" and hasattr(os, "open"):
+        from .windows_storage import supported
+        windows = supported()
+    if os.name != "posix" and not windows:
         reject("UPDATE_STAGING_PLATFORM", "Private staging requires a validated platform ownership adapter")
     if (not isinstance(parent, Path) or not parent.is_absolute()
             or parent != parent.resolve(strict=True) or not parent.is_dir()):
         reject("UPDATE_STAGING_INVALID", "Staging requires an existing canonical directory")
     # Reject symlink ancestors even if they happen to resolve within the parent.
-    for component in (parent, *parent.parents):
+    for component in (() if windows else (parent, *parent.parents)):
         if component.is_symlink():
             reject("UPDATE_STAGING_INVALID", "Staging ancestors must not be symlinks")
         info = component.stat()
         if (info.st_uid not in (0, os.getuid())
                 or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
             reject("UPDATE_STAGING_INVALID", "Staging ancestors allow untrusted directory replacement")
-    info = parent.stat()
-    if info.st_uid != os.getuid() or info.st_mode & 0o077:
-        reject("UPDATE_STAGING_INVALID", "Staging parent must be private and owned by the current user")
+    if windows:
+        from .windows_storage import validate_staging
+        validate_staging(parent)
+    else:
+        info = parent.stat()
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            reject("UPDATE_STAGING_INVALID", "Staging parent must be private and owned by the current user")
     if type(protected_paths) is not tuple or not 1 <= len(protected_paths) <= 256:
         reject("UPDATE_PROTECTED_PATHS", "Explicit local protected paths are required")
     for path in protected_paths:

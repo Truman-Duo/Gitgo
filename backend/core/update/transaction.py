@@ -21,7 +21,7 @@ from .archive import ExtractionLimits, _extract_archive
 from .checker import CurrentInstallation, ReplayState, UpdatePolicy, check_for_update
 from .contracts import verify_bundle_contract
 from .manifest import DataCompatibility, ManifestVerifier
-from .persistence import atomic_control, filesystem_identity, lock_file, read_control, sync_directory, validate_device
+from .persistence import atomic_control, filesystem_identity, lock_file, read_control, sync_directory, validate_device, open_readonly
 from .staging import _staging_parent, _verify_file
 from .tree import sync_tree, tree_digest
 from .validation import UpdateError, digest, fields, json_object, number, reject, text, timestamp
@@ -155,7 +155,7 @@ class InstallationStore:
         if (type(value["schema_version"]) is not int or value["schema_version"] != self.SCHEMA
                 or value["simulation"] is not self.SIMULATION or value["root"] != str(self.root)
                 or value["device"] != filesystem_identity(self.root)["device"]
-                or type(value["inode"]) is not int or value["inode"] != self.root.stat().st_ino
+                or type(value["inode"]) is not int or value["inode"] != filesystem_identity(self.root)["inode"]
                 or value["protected_paths"] != [str(p.resolve()) for p in self.protected_paths]):
             reject("UPDATE_CONTROL_INVALID", "Simulation registration differs from local ownership")
         text(value["installation_id"], r"[0-9a-f]{32}", 32)
@@ -165,7 +165,7 @@ class InstallationStore:
             for name in names:
                 identity = fields(identities[name], {"device", "inode"})
                 validate_device(identity["device"])
-                number(identity["inode"], maximum=2**64 - 1)
+                number(identity["inode"], maximum=2**128 - 1 if os.name == "nt" else 2**64 - 1)
                 if identity != filesystem_identity(parent / name) or identity["device"] != value["device"]:
                     reject("UPDATE_CONTROL_INVALID", "Registered directory or lock identity changed")
         self._validate_extra(value)
@@ -275,7 +275,10 @@ class InstallationStore:
             reject("UPDATE_RECOVERY_REQUIRED", "Directory switch must remain on the installation volume")
         if expected is not None and not self._matches(source, expected):
             reject("UPDATE_RECOVERY_REQUIRED", "Directory switch source differs from recorded identity")
-        os.rename(source, target)
+        if os.name == "nt":
+            from .windows_storage import move
+            move(source, target)
+        else: os.rename(source, target)
         sync_directory(source.parent)
         if target.parent != source.parent:
             sync_directory(target.parent)
@@ -503,7 +506,7 @@ class InstallationStore:
             directory.mkdir(mode=0o700)
             sync_directory(directory.parent)
             # Orphans from interrupted preparation are retained, never adopted.
-            fd = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = open_readonly(archive)
             with os.fdopen(fd, "rb") as source, (directory / "archive").open("x+b") as copy:
                 _verify_file(source, manifest, lambda: False)
                 remaining = manifest.bytes
