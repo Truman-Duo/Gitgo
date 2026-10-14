@@ -81,8 +81,10 @@ def test_frozen_windows_bootstrap_recovers_after_switch_interruption(actual_lab,
 
 def test_real_windows_managed_launcher_and_live_lease(actual_lab):
     store, _, _, before, old, _, env = actual_lab
-    command = '"' + str(store.root / 'gitgo.cmd') + '" --version'
-    result = subprocess.run(["cmd.exe", "/d", "/s", "/c", '"' + command + '"'],
+    # CreateProcess takes the cmd command line directly; list2cmdline's C-argv
+    # escaping of nested quotes is not cmd.exe's /s /c quoting grammar.
+    command = 'cmd.exe /d /s /c ""' + str(store.root / 'gitgo.cmd') + '" --version"'
+    result = subprocess.run(command,
         env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "Gitgo " + old

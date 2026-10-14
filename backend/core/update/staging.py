@@ -138,7 +138,10 @@ def prepare_update(policy: UpdatePolicy, current: CurrentInstallation, verifier:
             check_for_update(policy, current, verifier, lambda url, _: metadata[url],
                              now=clock(), previous=previous)
         archive_path.rename(work / "archive.verified")
-        (work / "archive.verified").chmod(0o400)
+        if os.name == "posix": (work / "archive.verified").chmod(0o400)
+        # Windows integrity uses the private DACL, held handles and signed
+        # revalidation. READONLY is not an ownership/lease mechanism and would
+        # prevent flushing this freshly written cache or cleaning failed work.
         complete = True
         return PreparationResult("staged", manifest, result.watermark, work, bundle)
     except UpdateError:

@@ -14,12 +14,13 @@ from backend.core.update.persistence import read_control, atomic_control
 from backend.core.update.validation import UpdateError
 from backend.core.update.health import isolated_environment
 from tests.test_update_transaction import build_fixture, refresh_build
+from tests.test_update_manifest import signing
 
 pytestmark = pytest.mark.skipif(not win.supported(), reason="Actual Windows managed ownership required")
 
 
 @pytest.fixture
-def managed(tmp_path_factory, monkeypatch):
+def managed(tmp_path_factory, monkeypatch, signing):
     base = tmp_path_factory.resolve() / "private"
     win.create_private_directory(base)
     protected = base / "protected"; protected.mkdir(mode=0o700)
@@ -31,6 +32,13 @@ def managed(tmp_path_factory, monkeypatch):
     product.update(installation_mode="managed-windows-v1", layout={"dashboard": "gitgo.exe",
         "native_host": "internal/gitgo-host/gitgo-host.exe", "installer": "install-managed.ps1"})
     (seed / "product.json").write_text(json.dumps(product))
+    import base64
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    public = signing[0].public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    policy = {"schema_version": 1, "product_id": "gitgo-terminal", "platform": "windows", "architecture": "x86_64",
+        "allowed_hosts": ["releases.example.test"], "public_keys": [{"key_id": "ephemeral-test", "ed25519_base64": base64.b64encode(public).decode()}],
+        "channels": {"preview": {"manifest_url": "https://releases.example.test/manifest.json", "signature_url": "https://releases.example.test/manifest.sig"}}}
+    (seed / "release-trust.json").write_text(json.dumps(policy))
     refresh_build(seed, platform="windows", architecture="x86_64", version=product["version"])
     def probe(host, profile):
         assert host.name == "gitgo-host.exe"
@@ -94,6 +102,48 @@ def test_probe_profile_cannot_nest_inside_its_candidate_or_copy_itself(managed):
     with pytest.raises(UpdateError, match="UPDATE_HEALTH_FAILED"):
         frozen_health_check(seed, seed)
     assert not (seed / "program").exists()
+
+
+def test_native_windows_download_cache_can_be_flushed_and_revalidated(managed, signing):
+    import hashlib
+    import httpx
+    import zipfile
+    from backend.core.update.preparation_service import UpdatePreparationService
+    from tests.test_update_manifest import manifest_wire, signed
+    from tests.test_update_discovery import NOW
+    from tests.test_update_transaction import compatibility_wire
+    from tests.test_update_preparation_service import Stream, httpx_transport
+    store, _, _ = managed
+    candidate = store.root.parent / "candidate"
+    build_fixture(candidate, platform="windows", architecture="x86_64")
+    (candidate / "uninstall.exe").unlink()
+    (candidate / "install-managed.ps1").write_bytes(b"test-placeholder-only")
+    product = json.loads((candidate / "product.json").read_bytes())
+    product.update(installation_mode="managed-windows-v1", layout={"dashboard": "gitgo.exe",
+        "native_host": "internal/gitgo-host/gitgo-host.exe", "installer": "install-managed.ps1"})
+    (candidate / "product.json").write_text(json.dumps(product))
+    refresh_build(candidate, platform="windows", architecture="x86_64")
+    archive = store.root.parent / "candidate.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+        for path in candidate.rglob("*"):
+            if path.is_file(): package.write(path, path.relative_to(candidate).as_posix())
+    data = archive.read_bytes()
+    raw, signature = signed(manifest_wire(platform="windows", architecture="x86_64", archive_format="zip",
+        url="https://releases.example.test/candidate.zip", bytes=len(data), sha256=hashlib.sha256(data).hexdigest(),
+        data_compatibility=compatibility_wire()), signing)
+    def serve(request):
+        value = raw if str(request.url).endswith(".json") else signature if str(request.url).endswith(".sig") else data
+        return httpx.Response(200, stream=Stream(value))
+    service = UpdatePreparationService(store_loader=lambda: open_managed(store.root), clock=lambda: NOW,
+        transport_factory=lambda hosts, **options: httpx_transport(hosts, serve, **options))
+    selected = service.check("preview", "a" * 32)["candidate"]["candidate_id"]
+    assert service.download("preview", selected, "b" * 32)["status"] == "downloaded"
+    assert service.status("preview")["status"] == "downloaded"
+    cached = next((store.root / "control/preparation").glob("gitgo-update-*/archive.verified"))
+    descriptor = win.open_file(cached, write=True)
+    try: os.fsync(descriptor)
+    finally: os.close(descriptor)
+    assert store._ledger()["current"]["version"] == "1.0.0-alpha.2"
 
 
 @pytest.mark.parametrize("fault", [None, "existing-profile", "outside-config"])
