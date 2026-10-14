@@ -138,8 +138,16 @@ except Exception as error:
         proc = spawn_managed([str(seed / "internal/gitgo-host/gitgo-host.exe"),
             "--gitgo-internal-role", "python", "-c", diagnostic, arguments], env=env, cwd=base,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
-        detail, _, _ = collect_output(proc, timeout=180, limit=65536, terminate=lambda: terminate_tree(proc))
-        pytest.fail("Public installer failed: " + output.strip() + "; bounded diagnostic: " + detail.strip())
+        detail, diagnostic_errors, _ = collect_output(proc, timeout=180, limit=65536, terminate=lambda: terminate_tree(proc))
+        # Error text may contain a path. Report only bounded standard failure
+        # categories and numerical exits, not the raw stderr or traceback.
+        categories = [name for name in ("PermissionError", "OSError", "UpdateError", "ImportError",
+            "ModuleNotFoundError", "Fatal Python error", "Failed to load", "failed to load",
+            "access violation", "Access is denied") if name in diagnostic_errors]
+        pytest.fail(json.dumps({"installer_exit": installer.returncode,
+            "installer_output": output.strip(), "diagnostic_exit": proc.returncode,
+            "diagnostic_output": detail.strip(), "stderr_categories": categories,
+            "stderr_bytes": len(diagnostic_errors), "cleanup": proc._gitgo_cleanup}))
     assert open_managed(root).registration["bootstrap_api"] == 7
     command = bin_dir / "gitgo.ps1"
     assert command.read_bytes().startswith(b"\xef\xbb\xbf")
