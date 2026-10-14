@@ -21,7 +21,7 @@ from .checker import CurrentInstallation
 from .contracts import verify_bundle_contract, _metadata
 from .health import probe_managed_host
 from .manifest import DataCompatibility
-from .persistence import filesystem_identity, sync_directory, read_control
+from .persistence import filesystem_identity, descriptor_identity, validate_device, sync_directory, read_control
 from .staging import _staging_parent
 from .transaction import InstallationStore, TransactionResult, _initialize_store, TERMINAL
 from .tree import inventory, tree_digest, sync_tree
@@ -29,7 +29,7 @@ from .validation import UpdateError, digest, fields, json_object, number, reject
 
 
 class ManagedStore(InstallationStore):
-    SCHEMA = 4
+    SCHEMA = 5
     SIMULATION = False
     EXTRA_FIELDS = frozenset({"bootstrap", "bootstrap_api", "updates_enabled", "preparation_directory_identity"})
     LOCK_NAMES = (*InstallationStore.LOCK_NAMES, "preparation.lock")
@@ -59,11 +59,11 @@ class ManagedStore(InstallationStore):
         finally: os.close(descriptor)
         return {"bootstrap": {"directory_identity": filesystem_identity(bootstrap),
                               "tree_sha256": tree_digest(bootstrap),
-                              "launcher_sha256": _file_digest(wrapper)}, "bootstrap_api": 5, "updates_enabled": False,
+                              "launcher_sha256": _file_digest(wrapper)}, "bootstrap_api": 6, "updates_enabled": False,
                 "preparation_directory_identity": filesystem_identity(preparation)}
 
     def _validate_extra(self, value):
-        if type(value["bootstrap_api"]) is not int or value["bootstrap_api"] != 5:
+        if type(value["bootstrap_api"]) is not int or value["bootstrap_api"] != 6:
             reject("UPDATE_CONTROL_INVALID", "Managed bootstrap API is unavailable")
         if type(value["updates_enabled"]) is not bool or value["updates_enabled"] is not False:
             reject("UPDATE_CONTROL_INVALID", "This managed installation does not support activation yet")
@@ -75,7 +75,7 @@ class ManagedStore(InstallationStore):
             reject("UPDATE_CONTROL_INVALID", "Preparation directory identity changed")
         bootstrap = fields(value["bootstrap"], {"directory_identity", "tree_sha256", "launcher_sha256"})
         identity = fields(bootstrap["directory_identity"], {"device", "inode"})
-        number(identity["device"], minimum=0, maximum=2**64 - 1)
+        validate_device(identity["device"])
         number(identity["inode"], maximum=2**64 - 1)
         digest(bootstrap["tree_sha256"]); digest(bootstrap["launcher_sha256"])
         _staging_parent(self.root / "bootstrap", self.protected_paths)
@@ -365,7 +365,7 @@ def _inherited_probe_lease(store):
             info = os.fstat(fd)
             valid = (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid()
                      and stat.S_IMODE(info.st_mode) == 0o600
-                     and {"device": info.st_dev, "inode": info.st_ino} == identity)
+                     and descriptor_identity(fd) == identity)
             if not valid: continue
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError: continue

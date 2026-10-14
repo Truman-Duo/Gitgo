@@ -21,7 +21,7 @@ from .archive import ExtractionLimits, _extract_archive
 from .checker import CurrentInstallation, ReplayState, UpdatePolicy, check_for_update
 from .contracts import verify_bundle_contract
 from .manifest import DataCompatibility, ManifestVerifier
-from .persistence import atomic_control, filesystem_identity, lock_file, read_control, sync_directory
+from .persistence import atomic_control, filesystem_identity, lock_file, read_control, sync_directory, validate_device
 from .staging import _staging_parent, _verify_file
 from .tree import sync_tree, tree_digest
 from .validation import UpdateError, digest, fields, json_object, number, reject, text, timestamp
@@ -107,7 +107,7 @@ def _initialize_store(root, seed, current, *, protected_paths, store_type):
     # Registration is written LAST. Interrupted provisioning cannot be adopted
     # from orphan folders; it is not an installation with valid authority.
     registration = {"schema_version": store_type.SCHEMA, "simulation": store_type.SIMULATION, "installation_id": installation_id,
-                    "root": str(root), "device": root.stat().st_dev, "inode": root.stat().st_ino,
+                    "root": str(root), **filesystem_identity(root),
                     "product_id": current.product_id, "platform": current.platform,
                     "architecture": current.architecture, "updater_version": current.updater_version,
                     "data_compatibility": _compat_wire(current.data_compatibility),
@@ -151,9 +151,10 @@ class InstallationStore:
         fields(value, {"schema_version", "simulation", "installation_id", "root", "device", "inode",
                        "product_id", "platform", "architecture", "updater_version", "data_compatibility", "protected_paths",
                        "directory_identities", "lock_identities"} | self.EXTRA_FIELDS)
+        validate_device(value["device"])
         if (type(value["schema_version"]) is not int or value["schema_version"] != self.SCHEMA
                 or value["simulation"] is not self.SIMULATION or value["root"] != str(self.root)
-                or type(value["device"]) is not int or value["device"] != self.root.stat().st_dev
+                or value["device"] != filesystem_identity(self.root)["device"]
                 or type(value["inode"]) is not int or value["inode"] != self.root.stat().st_ino
                 or value["protected_paths"] != [str(p.resolve()) for p in self.protected_paths]):
             reject("UPDATE_CONTROL_INVALID", "Simulation registration differs from local ownership")
@@ -163,7 +164,7 @@ class InstallationStore:
             identities = fields(value[key], names)
             for name in names:
                 identity = fields(identities[name], {"device", "inode"})
-                number(identity["device"], minimum=0, maximum=2**64 - 1)
+                validate_device(identity["device"])
                 number(identity["inode"], maximum=2**64 - 1)
                 if identity != filesystem_identity(parent / name) or identity["device"] != value["device"]:
                     reject("UPDATE_CONTROL_INVALID", "Registered directory or lock identity changed")

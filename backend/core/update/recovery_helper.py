@@ -15,7 +15,7 @@ import subprocess
 import uuid
 
 from .health import MAX_REPORT_BYTES, cleanup_report, isolated_environment
-from .persistence import filesystem_identity
+from .persistence import filesystem_identity, validate_device
 from .staging import _staging_parent
 from .transaction import SimulationStore
 from .tree import encode, tree_digest
@@ -41,7 +41,7 @@ def _path(value: str) -> Path:
 class RecoveryRequest:
     root: Path
     installation_id: str
-    device: int
+    device: int | str
     inode: int
     protected_paths: tuple[Path, ...]
     nonce: str
@@ -58,7 +58,7 @@ class RecoveryRequest:
             reject("UPDATE_HELPER_REQUEST_INVALID", "Unsupported recovery request schema")
         text(value["installation_id"], r"[0-9a-f]{32}", 32)
         text(value["nonce"], r"[0-9a-f]{32}", 32)
-        number(value["device"], minimum=0, maximum=2**64 - 1)
+        validate_device(value["device"])
         number(value["inode"], maximum=2**64 - 1)
         paths = value["protected_paths"]
         if (type(paths) is not list or not 1 <= len(paths) <= 256

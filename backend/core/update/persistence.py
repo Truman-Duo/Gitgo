@@ -9,15 +9,64 @@ import stat
 import uuid
 
 from .tree import encode
-from .validation import json_object, reject
+from .validation import json_object, reject, number, text
 
 
 MAX_CONTROL_BYTES = 256 * 1024
 
 
+def _darwin() -> bool:
+    # Use the real kernel, not product-target declarations or environment.
+    return os.name == "posix" and os.uname().sysname == "Darwin"
+
+
+def _volume_uuid(fd: int) -> str:
+    """Darwin ATTR_VOL_UUID from the SAME opened object used for inode checks.
+
+    st_dev is a mount's temporary device number and may change after reboot.
+    Never infer volume identity from a path, cached device number or mount name.
+    SDK sys/attr.h specifies attrlist, ATTR_VOL_INFO and ATTR_VOL_UUID; the
+    returned buffer is a uint32 length followed by the full 16-byte UUID.
+    """
+    import ctypes
+    import struct
+    class AttrList(ctypes.Structure):
+        _fields_ = [("bitmapcount", ctypes.c_uint16), ("reserved", ctypes.c_uint16),
+                    *[(name, ctypes.c_uint32) for name in ("common", "volume", "directory", "file", "fork")]]
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        query = libc.fgetattrlist
+        query.argtypes = [ctypes.c_int, ctypes.POINTER(AttrList), ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong]
+        query.restype = ctypes.c_int
+        attrs = AttrList(5, 0, 0, 0x80040000, 0, 0, 0)
+        result = ctypes.create_string_buffer(20)
+        if query(fd, ctypes.byref(attrs), result, 20, 0) != 0 or struct.unpack("=I", result.raw[:4])[0] != 20:
+            raise ValueError("Volume identity query failed")
+        value = uuid.UUID(bytes=result.raw[4:20])
+        if value.int == 0: raise ValueError("Volume UUID unavailable")
+        return "darwin-volume:" + str(value)
+    except (AttributeError, OSError, ValueError):
+        reject("UPDATE_VOLUME_ID_UNAVAILABLE", "Stable filesystem identity is unavailable")
+
+
+def validate_device(value) -> None:
+    if _darwin():
+        text(value, r"darwin-volume:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", 50)
+        if value == "darwin-volume:" + str(uuid.UUID(int=0)):
+            reject("UPDATE_CONTROL_INVALID", "Filesystem UUID must be nonzero")
+    else:
+        number(value, minimum=0, maximum=2**64 - 1)
+
+
+def descriptor_identity(fd: int) -> dict:
+    info = os.fstat(fd)
+    return {"device": _volume_uuid(fd) if _darwin() else info.st_dev, "inode": info.st_ino}
+
+
 def filesystem_identity(path: Path) -> dict:
-    info = path.lstat()
-    return {"device": info.st_dev, "inode": info.st_ino}
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    try: return descriptor_identity(fd)
+    finally: os.close(fd)
 
 
 def sync_directory(path: Path) -> None:
@@ -72,7 +121,7 @@ def lock_file(path: Path, *, shared: bool = False, expected_identity: dict | Non
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
             reject("UPDATE_LOCK_INVALID", "Installation lock ownership is invalid")
-        if expected_identity is not None and expected_identity != {"device": info.st_dev, "inode": info.st_ino}:
+        if expected_identity is not None and expected_identity != descriptor_identity(fd):
             reject("UPDATE_LOCK_INVALID", "Installation lock was replaced after registration")
         try:
             fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)

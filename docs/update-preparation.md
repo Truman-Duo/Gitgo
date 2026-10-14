@@ -22,7 +22,7 @@
 
 应用请求支持 `update.status(channel)`、`update.check(channel, operation_id)`、`update.download(channel, candidate_id, operation_id)`、`update.cancel(operation_id)`、`update.request_apply(channel, candidate_id, operation_id)`、`update.request_rollback(rollback_id, operation_id)`。后两项只登记当前启动会话的确认请求，不在 Host 内替换程序。不接受调用方给定的安装根、暂存目录、URL、公钥、启用标记或健康回调。没有 `update.apply`/`update.enable` 操作。
 
-真实安装由正在执行的冻结 Host 的物理位置与 schema 4 / bootstrap API 5 登记核对，不能通过环境变量冒充。普通安装/源码入口仍显示兼容的 schema 1 禁用状态；schema 2/3 是此前未公开的管理实验登记，不自动迁移或接管。Windows 还没有管理所有权/ACL 适配，不能使用真实下载暂存入口。
+真实安装由正在执行的冻结 Host 的物理位置与 schema 5 / bootstrap API 6 登记核对，不能通过环境变量冒充。普通安装/源码入口仍显示兼容的 schema 1 禁用状态；schema 2/3/4 是此前未公开的管理实验登记，不自动迁移或接管。Windows 还没有管理所有权/ACL 适配，不能使用真实下载暂存入口。
 
 每次签名检查成功后，渠道 high water 先持久化到既有安装 ledger，再保存签名缓存。取消、断网、错误包和重启不降低它。缓存中的原始清单/签名每次使用都重新验证，不作为第二套 release 权威。有效期在收到清单后、传输后与解压后重新核对。
 
@@ -95,6 +95,8 @@
 macOS 的旧 fork tracking 参数已被 [Apple XNU](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/sys/event.h) 标为不再支持；现有适配仍未提供完整清理证明，不采用采样 PID/PGID 扩大终止权限。完整 macOS 即时更新需要另行确定进程隔离方案。
 
 ## API 5 工件与回归记录（2026-10-14）
+
+以下为 API 5 的历史结果，不适用于 API 6。随后真实 macOS 重启暴露 `st_dev` 重分配导致登记拒绝的问题；当时实验已升级到新版并保存回滚请求，但回滚未通过。API 6 改用完整卷 UUID 与 inode，要求全新 schema 5 管理安装和重新构建工件，不修改旧登记绕过拒绝。真实跨启动验收需重新进行。
 
 在 Ubuntu 24.04 ARM64 专用虚拟机中重新构建 API 5 的 Alpha 2 与实验 Alpha 3，真实编译 Dashboard、Native Host 和固定启动器完成确认升级、回滚、坏候选恢复及中断恢复。工件组合验收 96 项通过、2 项 macOS 专用跳过；Linux 全源码回归 2085 项通过、100 项平台或可选工件跳过。本轮未重复 API 4 的虚拟机突然断电实验，不将历史证明计作 API 5 断电验收。
 

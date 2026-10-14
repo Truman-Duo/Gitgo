@@ -4,7 +4,7 @@
 
 ## 范围
 
-默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 5。构建时需要选择 `--update-evidence`。旧包（含此前实验 API 1/2/3/4）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
+默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 6。构建时需要选择 `--update-evidence`。旧包（含此前实验 API 1/2/3/4/5）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
 
 `/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 5 区分 Linux 的完整清理后即时交接与 macOS 的手动重启后交接。macOS 不通过修改清理报告获得即时更新；Windows 无管理适配。Linux API 5 已重新完成双版本工件交接验收，macOS API 5 已完成静置安装工件事务及同一次启动内的安全门禁验收，真实手动重启流程仍待验证。详见[手动更新准备与交接](update-preparation.md)。
 
@@ -14,7 +14,7 @@
 installation/
   gitgo                           # 本地生成、固定位置的启动脚本
   bootstrap/gitgo-host/           # 独立冻结启动/恢复程序及组件
-  control/registration.json       # schema 4，simulation=false，bootstrap_api=5
+  control/registration.json       # schema 5，simulation=false，bootstrap_api=6
   control/ledger.json             # 复用原事务引擎的唯一持久记录
   control/operation.lock
   control/runtime.lock
@@ -24,9 +24,11 @@ installation/
   transactions/                   # 已记录候选/旧版/失败版本
 ```
 
-模拟模式 schema 1 与管理模式 schema 4 不能互相接管；不是修改一个布尔值就转换安装。此前未公开的 schema 2/3 实验安装也不自动迁移或接管，应使用全新隔离目录演练。两种模式复用同一事务状态机、文件检查、锁、持久化和恢复，不再建立一套平行 ledger。
+模拟模式与管理模式 schema 5 不能互相接管；不是修改一个布尔值就转换安装。此前未公开的 schema 2/3/4 管理实验安装也不自动迁移或接管，应使用全新隔离目录演练。两种模式复用同一事务状态机、文件检查、锁、持久化和恢复，不再建立一套平行 ledger。
 
 管理登记固定安装 ID、根与控制目录设备/inode、两把锁身份、保护路径，以及 bootstrap 完整文件树和本地生成启动脚本摘要。更换锁 inode、修改稳定程序/脚本或手工开启未支持的开关会被拒绝。初始安装只复制进入新的私有目录；完整包与实际 frozen runtime 的版本、目标、数据证据及 API 都要匹配。
+
+API 6 的 macOS 持久身份使用内核 `fgetattrlist(ATTR_VOL_INFO | ATTR_VOL_UUID)` 从同一个实际打开的文件描述符读取完整、非零磁盘卷 UUID，结合该 FD 的 inode；不使用会随重启重新分配的 `st_dev`。根目录、控制目录、事务目录、所有锁、bootstrap、准备目录及下载 receipt 使用同一身份规则。UUID 不可读时失败关闭，不回退到临时设备号，不从登记或环境猜测 UUID。Linux 保持设备号/inode 规则；同一进程内防止路径/FD 替换和跨文件系统重命名的 `st_dev` 比较保持不变。
 
 ## 启动与子进程
 

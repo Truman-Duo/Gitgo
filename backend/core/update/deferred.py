@@ -87,7 +87,7 @@ def _read_claim(store):
 def publish(store, request):
     """Called only after stable-launcher exit 75 and under preparation lock."""
     store._guard()
-    if sys.platform != "darwin" or store.registration["platform"] != "macos" or store.registration.get("bootstrap_api") != 5:
+    if sys.platform != "darwin" or store.registration["platform"] != "macos" or store.registration.get("bootstrap_api") != 6:
         reject("UPDATE_SCOPE_UNAVAILABLE", "Reboot-bound replacement requires the macOS bootstrap")
     from .handoff import _perform_request
     version = _perform_request(store, request, verify_only=True)
@@ -118,7 +118,7 @@ def consume_after_reboot(store):
     """Only the physical frozen bootstrap may attempt a scheduled replacement."""
     from pathlib import Path
     from .installation import physical_installation
-    if (sys.platform != "darwin" or store.registration["platform"] != "macos" or store.registration.get("bootstrap_api") != 5
+    if (sys.platform != "darwin" or store.registration["platform"] != "macos" or store.registration.get("bootstrap_api") != 6
             or not getattr(sys, "frozen", False) or physical_installation(Path(sys.executable)) != (store.root, "bootstrap")):
         reject("UPDATE_BOOTSTRAP_ROLE", "Deferred application requires the fixed installed bootstrap")
     return _consume_after_reboot(store)

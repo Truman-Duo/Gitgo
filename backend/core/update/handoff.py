@@ -45,7 +45,7 @@ def platform_ready(store):
 def strategy(store):
     # An older immutable bootstrap must not gain a capability it cannot run.
     return ("after_reboot" if sys.platform == "darwin" and store.registration["platform"] == "macos"
-            and store.registration.get("bootstrap_api") == 5 else "immediate")
+            and store.registration.get("bootstrap_api") == 6 else "immediate")
 
 
 def request_available(store):

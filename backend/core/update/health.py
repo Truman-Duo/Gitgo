@@ -19,7 +19,7 @@ from .version import Version
 
 PROBE_ROLE = "update-data-probe"
 MAX_REPORT_BYTES = 64 * 1024
-MANAGED_API_VERSION = 5  # Includes boot-bound macOS intent, never immediate Mac apply.
+MANAGED_API_VERSION = 6  # Stable Darwin volume identity; older bootstrap cannot adopt it.
 
 
 def isolated_environment(profile: Path) -> dict[str, str]:

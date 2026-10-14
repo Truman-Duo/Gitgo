@@ -50,7 +50,8 @@ def test_stale_or_reduced_authority_never_mutates_the_ledger(lab, change):
     request = RecoveryRequest.capture(store)
     if change == "id": request = replace(request, installation_id="f" * 32)
     if change == "inode": request = replace(request, inode=request.inode + 1)
-    if change == "device": request = replace(request, device=request.device + 1)
+    if change == "device": request = replace(request, device=request.device + 1 if type(request.device) is int
+        else "darwin-volume:11111111-2222-3333-4444-555555555555")
     if change == "protection": request = replace(request, protected_paths=request.protected_paths[:1])
     if change == "production":
         path = store.root / "control/registration.json"
