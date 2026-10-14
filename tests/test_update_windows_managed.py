@@ -88,6 +88,14 @@ def test_nonempty_windows_installation_is_not_adopted(managed):
     assert read_control(store.root / "control/ledger.json") == before
 
 
+def test_probe_profile_cannot_nest_inside_its_candidate_or_copy_itself(managed):
+    from backend.core.update.health import frozen_health_check
+    _, seed, _ = managed
+    with pytest.raises(UpdateError, match="UPDATE_HEALTH_FAILED"):
+        frozen_health_check(seed, seed)
+    assert not (seed / "program").exists()
+
+
 @pytest.mark.parametrize("fault", [None, "existing-profile", "outside-config"])
 def test_actual_windows_source_startup_probe_is_isolated(tmp_path_factory, fault):
     base = tmp_path_factory.resolve() / "private"; win.create_private_directory(base)

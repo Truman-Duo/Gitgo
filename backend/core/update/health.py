@@ -134,6 +134,8 @@ def frozen_health_check(bundle: Path, profile: Path):
         # parent-owned Jobs/guardians retain it through verified cleanup.
         from .tree import inventory
         from .windows_storage import validate_staging, copy_tree
+        if bundle == profile or bundle.is_relative_to(profile) or profile.is_relative_to(bundle):
+            reject("UPDATE_HEALTH_FAILED", "Windows probe profile must be separate from the candidate program")
         validate_staging(profile)
         before = inventory(bundle)
         snapshot = profile / "program"

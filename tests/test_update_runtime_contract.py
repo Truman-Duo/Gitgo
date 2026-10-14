@@ -232,7 +232,10 @@ def test_evidence_write_failure_never_publishes_partial_contract(tmp_path_factor
 @pytest.mark.parametrize("changed", ["none", "cleanup", "runtime", "compatibility"])
 def test_transaction_health_requires_runtime_match_and_owned_cleanup(tmp_path_factory, monkeypatch, changed):
     from backend.core.update import health
-    root = tmp_path_factory
+    root = tmp_path_factory / "bundle"
+    root.mkdir(mode=0o700)
+    profile = tmp_path_factory / "probe"
+    profile.mkdir(mode=0o700)
     product = fake_stage(root)
     compatibility = runtime_evidence()[0]
     (root / "build-manifest.json").write_text(json.dumps({"source": {"commit": "a" * 40, "tree": "b" * 40}}))
@@ -245,9 +248,9 @@ def test_transaction_health_requires_runtime_match_and_owned_cleanup(tmp_path_fa
     monkeypatch.setattr(health, "probe_dashboard_version", lambda *_: None)  # Unit fixture is not executable.
     if changed != "none":
         with pytest.raises(UpdateError, match="UPDATE_HEALTH_FAILED"):
-            health.frozen_health_check(root, root)
+            health.frozen_health_check(root, profile)
     else:
-        report = health.frozen_health_check(root, root)
+        report = health.frozen_health_check(root, profile)
         assert report.passed is True and report.source_commit == "a" * 40
 
 
