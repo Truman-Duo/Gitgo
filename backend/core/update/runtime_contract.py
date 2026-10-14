@@ -33,6 +33,10 @@ def _canonical_code(code: CodeType, module: str) -> dict:
             return {"tuple": [constant(value) for value in item]}
         if type(item) is frozenset:
             return {"frozenset": sorted((constant(value) for value in item), key=encode)}
+        if type(item) is slice:
+            # CPython 3.14 folds constant slices into co_consts. Preserve all
+            # typed components; never fall back to repr for unknown objects.
+            return {"slice": [constant(item.start), constant(item.stop), constant(item.step)]}
         if type(item) is bytes:
             return {"bytes": item.hex()}
         if item is Ellipsis:
@@ -41,7 +45,9 @@ def _canonical_code(code: CodeType, module: str) -> dict:
             return {type(item).__name__: item}
         if type(item) in (float, complex):
             return {type(item).__name__: repr(item)}
-        reject("UPDATE_RUNTIME_CONTRACT", "Runtime code has an unsupported constant")
+        kind = type(item).__name__
+        reject("UPDATE_RUNTIME_CONTRACT", "Runtime code has an unsupported constant " +
+               (kind if kind.isidentifier() and len(kind) <= 48 else "unknown"))
     # Marshal preserves string interning/reference flags that change when a
     # code object is frozen/unmarshalled. A typed canonical representation
     # compares actual instructions rather than serializer implementation flags.

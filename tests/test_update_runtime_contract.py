@@ -55,6 +55,24 @@ def test_uninspectable_writer_is_refused(monkeypatch):
         code_evidence(("uninspectable",))
 
 
+def test_compiler_slice_constants_have_typed_boundaries():
+    original = compile("x = 1\n", "synthetic", "exec")
+    def evidence(value):
+        return _canonical_code(original.replace(co_consts=(*original.co_consts, value)), "writer")
+    item = evidence(slice(None, 20, 2))
+    assert item["constants"][-1] == {"slice": [{"NoneType": None}, {"int": 20}, {"int": 2}]}
+    assert encode(item) != encode(evidence(slice(None, 21, 2)))
+    assert encode(evidence(slice(True, 20))) != encode(evidence(slice(1, 20)))
+
+
+def test_unknown_code_constant_is_rejected_without_repr_execution():
+    class Unknown:
+        def __repr__(self): pytest.fail("Unknown constants must not execute repr")
+    code = compile("x = 1\n", "synthetic", "exec")
+    with pytest.raises(UpdateError, match="UPDATE_RUNTIME_CONTRACT"):
+        _canonical_code(code.replace(co_consts=(*code.co_consts, Unknown())), "writer")
+
+
 def test_early_probe_never_loads_user_state_or_native_secrets(monkeypatch, capsys):
     from backend.core.config import ConfigManager
     from backend.core.llm_config import LLMConfigManager
@@ -242,4 +260,5 @@ def test_all_packagers_keep_update_evidence_opt_in_before_archive_inventory():
         assert script.index("stage_update_contract.py") < script.index("unix_release_manifest.py")
     windows = (root / "packaging/build_windows.ps1").read_text()
     assert "[switch]$UpdateEvidence" in windows and "if ($UpdateEvidence)" in windows
-    assert windows.index("stage_update_contract.py") < windows.index("--stage $stage --output")
+    assert windows.index("stage_update_contract.py") < windows.index("$archiveArguments = @('--stage'")
+    assert windows.index("$archiveArguments = @('--stage'") < windows.index("scripts\\release_artifacts.py') @archiveArguments")
