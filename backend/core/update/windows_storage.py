@@ -91,7 +91,8 @@ def validate_acl(handle, *, private=True):
     if result: reject("UPDATE_ACL_INVALID", "Cannot inspect installation access control")
     try:
         allowed = TRUSTED | {current_sid()}
-        if not owner.value or not acl.value or (private and _sid(owner) not in allowed):
+        owner_sid = _sid(owner) if owner.value else None
+        if not owner_sid or not acl.value or (private and owner_sid not in allowed):
             reject("UPDATE_ACL_INVALID", "Missing or foreign installation ownership")
         header = C.string_at(acl, 8)
         _, _, total, count, _ = struct.unpack("<BBHHH", header)
@@ -107,6 +108,10 @@ def validate_acl(handle, *, private=True):
             if kind != 0: reject("UPDATE_ACL_INVALID", "Complex access entries are unsupported")
             mask = U32.from_address(ace.value + 4).value
             sid = _sid(ace.value + 8)
+            # Python 3.13+ mkdir(mode=0700) uses OWNER RIGHTS, not a foreign
+            # group. Resolve that authority ONLY through the actual queried
+            # owner SID. A foreign-owned ancestor must not gain this exception.
+            if sid == "S-1-3-4" and owner_sid in allowed: continue
             if sid not in allowed and (private or mask & REPLACE_CHILD):
                 # Only well-known public group IDs, never account/path names.
                 group = sid if sid in {"S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-3-0", "S-1-3-4"} else "other"

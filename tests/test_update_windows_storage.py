@@ -29,13 +29,13 @@ def test_private_root_and_file_use_same_stable_volume(private):
         assert identity["device"] == win.filesystem_identity(private)["device"]
         assert identity["inode"] > 0
     finally: os.close(fd)
-    try: win.validate_staging(private)
-    except UpdateError:
-        for index, path in enumerate((private, *private.parents)):
-            result = subprocess.run(["pwsh.exe", "-NoProfile", "-Command",
-                "(Get-Acl -LiteralPath '" + str(path).replace("'", "''") + "').Sddl"], capture_output=True, text=True)
-            print("Ancestor", index, path.name, result.stdout, result.stderr)
-        raise
+    win.validate_staging(private)
+
+
+def test_python_private_directory_owner_rights_are_bound_to_trusted_owner(private):
+    path = private / "python-private"
+    path.mkdir(mode=0o700)
+    win.validate_staging(path)
 
 
 def test_multiple_shared_locks_block_exclusive_in_another_process(private):

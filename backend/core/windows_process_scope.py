@@ -59,21 +59,33 @@ def lease_guardian(values):
     api = _api(); job, parent, ack = (int(value) for value in values[:3])
     leases = [msvcrt.open_osfhandle(int(value), os.O_RDONLY | os.O_BINARY) for value in values[3:]]
     fd = msvcrt.open_osfhandle(ack, os.O_WRONLY | os.O_BINARY)
-    os.write(fd, b"1"); os.close(fd)
+    ready = False
+    try: os.write(fd, b"1"); ready = True
+    except OSError: pass
+    finally: os.close(fd)
+    verified_zero = False
     try:
-        stopping, end = False, None
+        stopping = False
         while True:
-            if api.WaitForSingleObject(parent, 0) == 0 and not stopping:
-                _check(api.TerminateJobObject(job, 137)); stopping = True; end = time.monotonic() + 10
-            report = Accounting()
-            _check(api.QueryInformationJobObject(job, 1, C.byref(report), C.sizeof(report), None))
-            if report.active == 0: return 0
-            if end is not None and time.monotonic() >= end: return 2
-            time.sleep(.02)
+            try:
+                if (not ready or api.WaitForSingleObject(parent, 0) == 0) and not stopping:
+                    _check(api.TerminateJobObject(job, 137)); stopping = True
+                report = Accounting()
+                _check(api.QueryInformationJobObject(job, 1, C.byref(report), C.sizeof(report), None))
+                if report.active == 0:
+                    verified_zero = True
+                    return 0 if ready else 2
+                time.sleep(.02)
+            except OSError:
+                # The parent has its own bounded timeout and reports failure.
+                # Unknown membership is NOT permission to release a lease.
+                # Hold it fail-closed, terminate only this Job, retry proof.
+                api.TerminateJobObject(job, 137)
+                time.sleep(.25)
     finally:
-        # Last Job handle close also kills surviving owned processes on errors.
-        api.CloseHandle(job); api.CloseHandle(parent)
-        for fd in leases: os.close(fd)
+        if verified_zero:
+            api.CloseHandle(job); api.CloseHandle(parent)
+            for fd in leases: os.close(fd)
 
 
 if __name__ == "__main__":

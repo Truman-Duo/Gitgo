@@ -29,15 +29,7 @@ def lab(tmp_path_factory, signing):
     win.create_private_directory(base)
     protected = base / "projects"; protected.mkdir(mode=0o700)
     (protected / "sentinel").write_bytes(b"project-and-database-unchanged")
-    seed = base / "seed"
-    try: build_fixture(seed, version="1.0.0-alpha.2", platform="windows", architecture="x86_64")
-    except UpdateError:
-        import subprocess
-        for path in (base, seed):
-            result = subprocess.run(["pwsh.exe", "-NoProfile", "-Command",
-                "(Get-Acl -LiteralPath '" + str(path).replace("'", "''") + "').Sddl"], capture_output=True, text=True)
-            print("Fixture ACL", path.name, result.stdout, result.stderr)
-        raise
+    seed = base / "seed"; build_fixture(seed, version="1.0.0-alpha.2", platform="windows", architecture="x86_64")
     root = base / "managed-simulation"; root.mkdir(mode=0o700)
     current = CurrentInstallation("gitgo-terminal", "1.0.0-alpha.2", "windows", "x86_64", "0.1.0",
         DataCompatibility.parse(compatibility_wire()), True)

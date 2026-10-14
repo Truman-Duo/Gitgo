@@ -107,6 +107,8 @@ def spawn(argv, **options):
     if options.pop("pass_fds", ()) or options.get("creationflags", 0) & 0x01000000:
         raise ValueError("Windows scope may not request breakaway or Unix descriptor inheritance")
     if "startupinfo" in options: raise ValueError("Windows scope owns its handle allowlist")
+    if options.pop("close_fds", True) is not True:
+        raise ValueError("Windows scope requires an explicit closed handle boundary")
     api = _api()
     job = _check(api.CreateJobObjectW(None, None))
     incoming, send = os.pipe(); report, outgoing = os.pipe()
@@ -183,7 +185,8 @@ def _lease_guardian(api, job, leases):
         with _spawn_lock:
             for handle in handles: os.set_handle_inheritable(handle, True)
             try: guardian = subprocess.Popen(command, startupinfo=startup, close_fds=True,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=0x08000000)  # No console Ctrl-C before zero-member proof.
             finally:
                 for handle in handles: os.set_handle_inheritable(handle, False)
         os.close(ack); ack = -1
