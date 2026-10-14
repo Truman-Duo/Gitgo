@@ -89,6 +89,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build two independently committed real Windows packages
         run: python -B scripts/windows_update_ci_build.py --bun (Get-Command bun).Source
+      - name: Actual public Windows installer smoke
+        run: python -B -m pytest tests/test_update_windows_frozen.py -k installer -q --tb=short --junitxml=windows-installer.xml
       - name: Actual frozen Windows update rollback and recovery
         run: python -B -m pytest tests/test_update_windows_frozen.py -q --tb=short --junitxml=windows-frozen.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -97,6 +99,7 @@ jobs:
           name: windows-source-and-frozen-results
           path: |
             windows-source.xml
+            windows-installer.xml
             windows-frozen.xml
           if-no-files-found: warn
           retention-days: 7

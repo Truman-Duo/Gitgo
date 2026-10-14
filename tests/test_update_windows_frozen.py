@@ -125,7 +125,8 @@ def test_actual_windows_installer_and_unicode_powershell_command(actual_lab):
         diagnostic = """import sys,json
 from backend.core.update.installation import install_from_frozen_package
 try:
- install_from_frozen_package(*json.loads(sys.argv[1]))
+ result=install_from_frozen_package(*json.loads(sys.argv[1]))
+ print(json.dumps(result),flush=True)
 except Exception as error:
  items=[]
  for _ in range(8):
@@ -134,7 +135,7 @@ except Exception as error:
   error=error.__cause__ or error.__context__
  print(json.dumps(items));sys.exit(2)
 """
-        arguments = json.dumps([str(base / "diagnostic-root"), str(base / "diagnostic-bin"), []])
+        arguments = json.dumps([str(base / "诊断 安装"), str(base / "诊断 命令"), []])
         proc = spawn_managed([str(seed / "internal/gitgo-host/gitgo-host.exe"),
             "--gitgo-internal-role", "python", "-c", diagnostic, arguments], env=env, cwd=base,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
@@ -144,10 +145,13 @@ except Exception as error:
         categories = [name for name in ("PermissionError", "OSError", "UpdateError", "ImportError",
             "ModuleNotFoundError", "Fatal Python error", "Failed to load", "failed to load",
             "access violation", "Access is denied") if name in diagnostic_errors]
+        import re
+        safe_errors = re.sub(r"[A-Za-z]:[\\/][^\r\n]*", "<isolated-test-path>", errors)
         pytest.fail(json.dumps({"installer_exit": installer.returncode,
             "installer_output": output.strip(), "diagnostic_exit": proc.returncode,
             "diagnostic_output": detail.strip(), "stderr_categories": categories,
-            "stderr_bytes": len(diagnostic_errors), "cleanup": proc._gitgo_cleanup}))
+            "installer_error": safe_errors[-4096:], "stderr_bytes": len(diagnostic_errors),
+            "cleanup": proc._gitgo_cleanup}))
     assert open_managed(root).registration["bootstrap_api"] == 7
     command = bin_dir / "gitgo.ps1"
     assert command.read_bytes().startswith(b"\xef\xbb\xbf")
