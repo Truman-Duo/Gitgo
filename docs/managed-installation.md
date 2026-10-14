@@ -1,12 +1,12 @@
 # 明确选择的管理安装与运行锁
 
-关联 [安全自动更新与回滚 #21](https://github.com/Truman-Duo/Gitgo/issues/21)。此文描述功能分支新增的 **POSIX 安装/启动层**，不是现有公开预览包已经支持自动更新。
+关联 [安全自动更新与回滚 #21](https://github.com/Truman-Duo/Gitgo/issues/21)。此文描述功能分支新增的管理安装/启动层，不表示现有公开预览包已经支持自动更新。Windows 的独立安装格式和验证边界见 [Windows 管理更新](windows-managed-update.md)。
 
 ## 范围
 
-默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 6。构建时需要选择 `--update-evidence`。旧包（含此前实验 API 1/2/3/4/5）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
+默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 6。构建时需要选择 `--update-evidence`。旧包（含此前实验 API 1/2/3/4/5）、缺少契约的包、未知或已有非空安装目录不被接管。Windows 使用另行明确选择的 API 7/schema 6，不复用 Unix 或 legacy Inno 安装登记。
 
-`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 6 区分 Linux 的完整清理后即时交接与 macOS 的手动重启后交接。macOS 不通过修改清理报告获得即时更新；Windows 无管理适配。此前 API 5 的 Linux 验收是历史记录，macOS 实际重启暴露的设备编号变化已在 API 6 修正，新格式仍需独立跨启动验收。详见[手动更新准备与交接](update-preparation.md)。
+`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 6 区分 Linux 的完整清理后即时交接与 macOS 的手动重启后交接。macOS 不通过修改清理报告获得即时更新；Windows API 7 在已拥有的 Job 成员归零且租约释放后使用同一事务引擎。此前 API 5 的验收仍是历史记录，不能继承为新格式通过。详见[手动更新准备与交接](update-preparation.md)及 Windows 验证记录。
 
 ## 布局与唯一权威
 
@@ -66,4 +66,4 @@ API 6 的 macOS 持久身份使用内核 `fgetattrlist(ATTR_VOL_INFO | ATTR_VOL_
 
 可显式提供 `GITGO_MANAGED_TEST_STAGE` 指向新构建的 managed-capable staging，运行实际冻结安装与启动测试。未提供工件时明确跳过。测试只使用新建的私有目录、保护哨兵和隔离资料，不安装到日常目录，不调用付费模型。
 
-确认/退出交接已接入固定 bootstrap，准备锁忙时普通启动仍可继续，只是不提供本次会话的更新交接。Linux ARM64 双版本、真实编译 UI 交接及历史 API 4 的一次虚拟机突然断电恢复证据见上述准备文档。尚需真实 macOS 跨启动验收、正式签名发行配置，以及其他目标和正式终端验收。Windows ACL/运行锁适配、macOS 即时清理和物理掉电证明没有由本轮实现。不能据此启用正式发行更新；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。
+确认/退出交接已接入固定 bootstrap，准备锁忙时普通启动仍可继续，只是不提供本次会话的更新交接。Linux ARM64 双版本、真实编译 UI 交接及历史 API 4 的一次虚拟机突然断电恢复证据见上述准备文档。各目标仍须按确切候选核对实际平台、正式签名发行配置和正式终端验收。Windows ACL/运行锁适配使用独立 API 7；macOS 即时清理和物理掉电证明没有由本轮实现。不能据此启用正式发行更新；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。

@@ -22,7 +22,7 @@
 
 应用请求支持 `update.status(channel)`、`update.check(channel, operation_id)`、`update.download(channel, candidate_id, operation_id)`、`update.cancel(operation_id)`、`update.request_apply(channel, candidate_id, operation_id)`、`update.request_rollback(rollback_id, operation_id)`。后两项只登记当前启动会话的确认请求，不在 Host 内替换程序。不接受调用方给定的安装根、暂存目录、URL、公钥、启用标记或健康回调。没有 `update.apply`/`update.enable` 操作。
 
-真实安装由正在执行的冻结 Host 的物理位置与 schema 5 / bootstrap API 6 登记核对，不能通过环境变量冒充。普通安装/源码入口仍显示兼容的 schema 1 禁用状态；schema 2/3/4 是此前未公开的管理实验登记，不自动迁移或接管。Windows 还没有管理所有权/ACL 适配，不能使用真实下载暂存入口。
+真实安装由正在执行的冻结 Host 的物理位置与 Unix schema 5 / bootstrap API 6 或 Windows schema 6 / API 7 登记核对，不能通过环境变量冒充。普通安装/源码入口仍显示兼容的 schema 1 禁用状态；旧的管理实验登记不自动迁移或接管。Windows 必须使用明确选择的 `managed-windows-v1` 新安装，NTFS ACL、卷/文件身份与共享运行租约的边界见 [Windows 管理更新](windows-managed-update.md)，不能接管 legacy Inno 安装。
 
 每次签名检查成功后，渠道 high water 先持久化到既有安装 ledger，再保存签名缓存。取消、断网、错误包和重启不降低它。缓存中的原始清单/签名每次使用都重新验证，不作为第二套 release 权威。有效期在收到清单后、传输后与解压后重新核对。
 
@@ -64,7 +64,7 @@
 
 主动回滚仅恢复最近一次成功事务中保留的上一版，不扫描任意历史目录或下载旧清单。绑定安装/current/事务/旧树的选择在退出后重新核对；先在隔离资料目录中验证旧版启动，失败保持新版和原 ledger。通过后先持久化意图，再复用原事务槽位恢复旧版，中断由同一 ledger 完成恢复。渠道 high water 不降低，不还原配置或数据库快照，不删除保留包或项目。每次事务最多保留八份回滚检查诊断，超限拒绝并要求独立维护。
 
-当前只有 Linux 支持完整清理后的即时交接，macOS API 6 支持手动重启后交接，但不支持即时更新。普通 macOS owned-session-only 的不完整清理事实没有改变。Windows 管理适配仍缺失。默认包没有正式发行信任。正式发行、其他目标及真实终端人工验收仍待完成。`tests/test_update_handoff.py` 与 `tests/test_update_manual_rollback.py` 的模拟平台和健康驱动只验证状态机，不作为平台验收证据。
+Linux 支持完整清理后的即时交接，macOS API 6 支持手动重启后交接，但不支持即时更新。普通 macOS owned-session-only 的不完整清理事实没有改变。Windows API 7 在已拥有的 Job 成员归零、共享租约释放后走同一交接事务；源码、模拟及真实冻结包的验证范围见 [Windows 验证记录](windows-managed-update.md)。默认包没有正式发行信任。正式发行、其他目标及真实终端人工验收仍待完成。`tests/test_update_handoff.py` 与 `tests/test_update_manual_rollback.py` 的模拟平台和健康驱动只验证状态机，不作为平台验收证据。
 
 ## macOS 手动重启后更新与回滚
 
