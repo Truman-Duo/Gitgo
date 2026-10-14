@@ -17,6 +17,9 @@ def _api():
     dll = C.WinDLL("kernel32", use_last_error=True)
     specs = {"CreateJobObjectW": (HANDLE, [C.c_void_p, C.c_wchar_p]),
         "CloseHandle": (C.c_int, [HANDLE]),
+        "GetCurrentProcess": (HANDLE, []),
+        "DuplicateHandle": (C.c_int, [HANDLE, HANDLE, HANDLE, C.c_void_p, U32, C.c_int, U32]),
+        "WaitForSingleObject": (U32, [HANDLE, U32]),
         "AssignProcessToJobObject": (C.c_int, [HANDLE, HANDLE]),
         "SetInformationJobObject": (C.c_int, [HANDLE, C.c_int, C.c_void_p, U32]),
         "QueryInformationJobObject": (C.c_int, [HANDLE, C.c_int, C.c_void_p, U32, C.c_void_p]),
@@ -53,6 +56,7 @@ class JobScope:
         self.lock = threading.Lock()
         self.finished = False
         self.proc = None
+        self.guardian = None
 
     def finish(self, *, cancel=False):
         with self.lock:
@@ -81,10 +85,15 @@ class JobScope:
                     if report.active == 0: complete = True; break
                     time.sleep(.01)
                 if not complete: issues.append("job_members_remaining")
-            except (OSError, ValueError, TypeError):
+                if self.guardian is not None:
+                    if self.guardian.wait(timeout=8) != 0:
+                        complete = False; issues.append("lease_guardian_failed")
+            except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+                complete = False
                 issues.append("job_cleanup_unverified")
             finally:
                 # Even an unverified/failed scope kills its OWN Job only.
+                self.api.TerminateJobObject(self.job, 137)
                 self.api.CloseHandle(self.job); os.close(self.report)
                 self.proc._gitgo_cleanup = {"complete": complete, "mode": "windows-owned-job", "issues": issues}
                 if cancel: self.proc.returncode = -15
@@ -101,27 +110,34 @@ def spawn(argv, **options):
     api = _api()
     job = _check(api.CreateJobObjectW(None, None))
     incoming, send = os.pipe(); report, outgoing = os.pipe()
+    from backend.core.installation_lease import runtime_descriptors
+    retained = runtime_descriptors()
+    lease_handles = [msvcrt.get_osfhandle(fd) for fd in retained]
     proc = None
     try:
         limits = ExtendedLimits(); limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no breakaway.
         _check(api.SetInformationJobObject(job, 9, C.byref(limits), C.sizeof(limits)))
         handles = [msvcrt.get_osfhandle(fd) for fd in (incoming, outgoing)]
         if getattr(sys, "frozen", False):
-            command = [sys.executable, "--gitgo-internal-role", "windows-scope", *(str(h) for h in handles)]
+            command = [sys.executable, "--gitgo-internal-role", "windows-scope", *(str(h) for h in handles + lease_handles)]
         else:
-            command = [sys.executable, "-B", str(Path(__file__).with_name("windows_process_scope.py")), *(str(h) for h in handles)]
-        startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": handles}
+            command = [sys.executable, "-B", str(Path(__file__).with_name("windows_process_scope.py")), *(str(h) for h in handles + lease_handles)]
+        startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": handles + lease_handles}
         with _spawn_lock:
             for fd in (incoming, outgoing): os.set_inheritable(fd, True)
+            for handle in lease_handles: os.set_handle_inheritable(handle, True)
             try: proc = subprocess.Popen(command, close_fds=True, startupinfo=startup, **options)
             finally:
                 for fd in (incoming, outgoing): os.set_inheritable(fd, False)
+                for handle in lease_handles: os.set_handle_inheritable(handle, False)
         # The trusted trampoline has no command yet. Failure here cannot race
         # an untrusted payload escaping the Job before assignment.
         _check(api.AssignProcessToJobObject(job, HANDLE(int(proc._handle))))
         os.close(incoming); incoming = -1
         os.close(outgoing); outgoing = -1
         scope = JobScope(api, job, report); scope.proc = proc
+        if retained:
+            scope.guardian = _lease_guardian(api, job, lease_handles)
         proc._gitgo_windows_scope = scope
         proc._gitgo_cleanup = {"complete": False, "mode": "windows-owned-job", "issues": ["cleanup_not_observed"]}
         proc.args = argv
@@ -140,3 +156,46 @@ def spawn(argv, **options):
             if fd >= 0:
                 try: os.close(fd)
                 except OSError: pass
+
+
+def _lease_guardian(api, job, leases):
+    """Outside the payload Job: retain sharing leases until membership is zero.
+
+    If this parent dies, the inherited parent HANDLE is signaled. The guardian
+    terminates only the inherited Job and waits for zero members before exit.
+    A nested guardian may belong to an outer Job; that Job's outer guardian
+    retains the enclosing lease through its complete cleanup.
+    """
+    parent = HANDLE()
+    _check(api.DuplicateHandle(api.GetCurrentProcess(), api.GetCurrentProcess(), api.GetCurrentProcess(),
+                               C.byref(parent), 0x100000, False, 0))
+    ready, ack = os.pipe()
+    import msvcrt
+    ack_handle = msvcrt.get_osfhandle(ack)
+    handles = [job, parent.value, ack_handle, *leases]
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "--gitgo-internal-role", "windows-job-lease", *(str(h) for h in handles)]
+    else:
+        command = [sys.executable, "-B", str(Path(__file__).with_name("windows_process_scope.py")), "--lease", *(str(h) for h in handles)]
+    startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": handles}
+    guardian = None
+    try:
+        with _spawn_lock:
+            for handle in handles: os.set_handle_inheritable(handle, True)
+            try: guardian = subprocess.Popen(command, startupinfo=startup, close_fds=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            finally:
+                for handle in handles: os.set_handle_inheritable(handle, False)
+        os.close(ack); ack = -1
+        os.set_blocking(ready, False)
+        end = time.monotonic() + 20
+        while time.monotonic() < end:
+            try: value = os.read(ready, 1)
+            except BlockingIOError: time.sleep(.01); continue
+            if value == b"1": return guardian
+            break
+        raise OSError("Windows lease guardian did not become ready")
+    finally:
+        api.CloseHandle(parent)
+        os.close(ready)
+        if ack >= 0: os.close(ack)

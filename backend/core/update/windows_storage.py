@@ -177,11 +177,11 @@ def create_private_directory(path):
     with opened(path): pass
 
 
-def open_file(path, *, write=False, create=False):
+def open_file(path, *, write=False, create=False, share=3):
     """Return a CRT FD with ownership transfer, no delete sharing or redirects."""
     import msvcrt
     if not create:
-        with opened(path, write=write) as source:
+        with opened(path, write=write, share=share) as source:
             # Duplicate the SAME handle, not an independently resolved path.
             duplicate = HANDLE()
             kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -235,7 +235,15 @@ def lock_file(path, *, shared=False, expected_identity=None):
     class Overlapped(C.Structure):
         _fields_ = [("internal", C.c_size_t), ("internal_high", C.c_size_t),
                     ("offset", U32), ("offset_high", U32), ("event", HANDLE)]
-    fd = open_file(path, write=True)
+    try:
+        # Shared READ handles deny later WRITE opens; exclusive READ/WRITE
+        # handles deny later shared-lease opens. These reservations survive
+        # DuplicateHandle/inheritance, unlike process-owned byte-range locks.
+        fd = open_file(path, write=not shared, share=1)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 32:
+            reject("UPDATE_BUSY", "Installation has an active runtime or operation")
+        raise
     overlap = Overlapped()
     handle = msvcrt.get_osfhandle(fd)
     locked = False

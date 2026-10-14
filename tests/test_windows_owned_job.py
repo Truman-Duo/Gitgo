@@ -53,3 +53,42 @@ def test_output_overflow_cancels_owned_job_and_cannot_authorize_handoff():
 def test_breakaway_request_is_rejected_before_payload_creation():
     with pytest.raises(ValueError, match="breakaway"):
         spawn_managed([sys.executable, "-c", "raise RuntimeError('must not run')"], creationflags=0x01000000)
+
+
+def test_shared_lease_is_retained_until_job_is_empty(tmp_path_factory):
+    from backend.core.update import windows_storage as win
+    from backend.core.installation_lease import retain_descriptor
+    path = tmp_path_factory.resolve() / "private"; win.create_private_directory(path)
+    lock = path / "runtime.lock"; os.close(win.open_file(lock, write=True, create=True))
+    with win.lock_file(lock, shared=True) as fd, retain_descriptor(fd):
+        assert run("print('leased')")[0] == 0
+    with win.lock_file(lock): pass
+
+
+def test_parent_crash_guardian_cleans_before_releasing_inherited_lease(tmp_path_factory):
+    from backend.core.update import windows_storage as win
+    from backend.core.update.validation import UpdateError
+    path = tmp_path_factory.resolve() / "private"; win.create_private_directory(path)
+    lock = path / "runtime.lock"; os.close(win.open_file(lock, write=True, create=True))
+    marker = path / "must-not-write"
+    worker = f"import time; from pathlib import Path; time.sleep(4); Path({str(marker)!r}).write_text('escaped')"
+    parent = "\n".join([
+        "import os,sys", "from pathlib import Path",
+        "from backend.core.update.windows_storage import lock_file",
+        "from backend.core.installation_lease import retain_descriptor",
+        "from backend.core.process_control import spawn_managed",
+        "with lock_file(Path(sys.argv[1]),shared=True) as fd, retain_descriptor(fd):",
+        " p=spawn_managed([sys.executable,'-c'," + repr(worker) + "])",
+        " os._exit(17)"])
+    result = subprocess.run([sys.executable, "-B", "-c", parent, str(lock)], timeout=20)
+    assert result.returncode == 17
+    end = time.monotonic() + 15
+    while True:
+        try:
+            with win.lock_file(lock): pass
+            break
+        except UpdateError as error:
+            assert error.code == "UPDATE_BUSY" and time.monotonic() < end
+            time.sleep(.05)
+    time.sleep(4.2)
+    assert not marker.exists()

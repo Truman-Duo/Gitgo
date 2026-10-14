@@ -14,7 +14,7 @@ _descriptors: dict[int, int] = {}
 
 @contextmanager
 def retain_descriptor(descriptor: int):
-    if os.name != "posix" or type(descriptor) is not int or descriptor < 3:
+    if os.name not in {"posix", "nt"} or type(descriptor) is not int or descriptor < 3:
         raise ValueError("Invalid installation lease descriptor")
     os.fstat(descriptor)
     with _guard:
@@ -35,4 +35,6 @@ def runtime_descriptors() -> tuple[int, ...]:
 
 def child_options() -> dict:
     descriptors = runtime_descriptors()
-    return {"pass_fds": descriptors} if descriptors else {}
+    # Windows managed spawning translates only this process's registered FDs
+    # to an explicit native handle allowlist, never raw environment assertions.
+    return {"pass_fds": descriptors} if descriptors and os.name == "posix" else {}
