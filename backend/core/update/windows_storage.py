@@ -20,6 +20,7 @@ from .validation import reject
 
 U32, HANDLE, PTR = C.c_uint32, C.c_void_p, C.c_void_p
 TRUSTED = {"S-1-5-18", "S-1-5-32-544"}  # OS/admin authority, not ordinary groups.
+TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 MUTATE = 0x40000000 | 0x10000000 | 0x000D0156
 REPLACE_CHILD = 0x40000000 | 0x10000000 | 0x000C0040
 
@@ -90,9 +91,12 @@ def validate_acl(handle, *, private=True):
     result = api()["GetSecurityInfo"](handle, 1, 5, C.byref(owner), None, C.byref(acl), None, C.byref(descriptor))
     if result: reject("UPDATE_ACL_INVALID", "Cannot inspect installation access control")
     try:
-        allowed = TRUSTED | {current_sid()}
+        # TrustedInstaller can own Windows' volume/system ancestors. It is
+        # not accepted as the private application's installation owner.
+        allowed = TRUSTED | {current_sid()} | ({TRUSTED_INSTALLER} if not private else set())
         owner_sid = _sid(owner) if owner.value else None
-        if not owner_sid or not acl.value or (private and owner_sid not in allowed):
+        # An owner may rewrite the DACL even without an explicit write ACE.
+        if not owner_sid or not acl.value or owner_sid not in allowed:
             reject("UPDATE_ACL_INVALID", "Missing or foreign installation ownership")
         header = C.string_at(acl, 8)
         _, _, total, count, _ = struct.unpack("<BBHHH", header)
