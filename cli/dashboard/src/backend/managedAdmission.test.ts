@@ -34,8 +34,10 @@ describe("early managed frontend admission", () => {
   test("physical Bun binary, command symlink and Node companion locate the same installation", () => {
     const root = fixture();
     try {
-      symlinkSync(join(root, "active/gitgo"), join(root, "command"));
-      expect(managedRoot(join(root, "command"), "file:///not-used.tsx", "darwin")).toBe(root);
+      if (process.platform !== "win32") {
+        symlinkSync(join(root, "active/gitgo"), join(root, "command"));
+        expect(managedRoot(join(root, "command"), "file:///not-used.tsx", "darwin")).toBe(root);
+      } // Windows' public command does not require symlink privileges.
       expect(managedRoot(process.execPath, pathToFileURL(join(root, "active/dashboard/dist/cli.js")).href, "linux")).toBe(root);
       expect(managedRoot(process.execPath, import.meta.url, "darwin")).toBeUndefined();
       expect(managedRoot(join(root, "active/gitgo"), import.meta.url, "win32")).toBeUndefined();

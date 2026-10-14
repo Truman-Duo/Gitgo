@@ -38,6 +38,7 @@ def refresh_inventory(root):
         else {"bytes": item["bytes"], "sha256": item["sha256"]})} for item in inventory(root)
         if item["kind"] != "directory" and item["path"] != "build-manifest.json"]
     path.write_text(json.dumps(build)); path.chmod(0o400)
+    if os.name == "nt": path.chmod(0o600)
 
 
 @pytest.fixture
@@ -49,14 +50,18 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
     sentinels = {name: ("keep-" + name).encode() for name in ("project", "worktree", "config", "db", "db-wal", "db-shm", "secrets")}
     for name, data in sentinels.items(): (protected / name).write_bytes(data)
     seed = base / "seed"
-    shutil.copytree(Path(os.environ["GITGO_UPDATE_PREVIOUS_STAGE"]).resolve(strict=True), seed, symlinks=True)
+    if os.name == "nt":
+        from backend.core.update.windows_storage import copy_tree
+        copy_tree(Path(os.environ["GITGO_UPDATE_PREVIOUS_STAGE"]).resolve(strict=True), seed)
+    else: shutil.copytree(Path(os.environ["GITGO_UPDATE_PREVIOUS_STAGE"]).resolve(strict=True), seed, symlinks=True)
     seed.chmod(0o700)
     candidate = base / "candidate"
-    shutil.copytree(Path(os.environ["GITGO_UPDATE_CANDIDATE_STAGE"]).resolve(strict=True), candidate, symlinks=True)
+    if os.name == "nt": copy_tree(Path(os.environ["GITGO_UPDATE_CANDIDATE_STAGE"]).resolve(strict=True), candidate)
+    else: shutil.copytree(Path(os.environ["GITGO_UPDATE_CANDIDATE_STAGE"]).resolve(strict=True), candidate, symlinks=True)
     candidate.chmod(0o700)
     old_product = json.loads((seed / "product.json").read_bytes())
     product = json.loads((candidate / "product.json").read_bytes())
-    assert product["platform"] == old_product["platform"] == ("macos" if sys.platform == "darwin" else "linux")
+    assert product["platform"] == old_product["platform"] == {"darwin": "macos", "win32": "windows", "linux": "linux"}[sys.platform]
     assert Version.parse(product["version"]) > Version.parse(old_product["version"])
     key = signing[0].public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     policy = {"schema_version": 1, "product_id": "gitgo-terminal", "platform": product["platform"], "architecture": product["architecture"],
@@ -64,6 +69,7 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
         "channels": {"preview": {"manifest_url": "https://releases.example.test/manifest.json", "signature_url": "https://releases.example.test/manifest.sig"}}}
     policy_path = seed / "release-trust.json"
     policy_path.write_text(json.dumps(policy)); policy_path.chmod(0o400)
+    if os.name == "nt": policy_path.chmod(0o600)
     refresh_inventory(seed)
     root = base / "managed"; root.mkdir(mode=0o700)
     store = initialize_managed(root, seed, protected_paths=(protected, profile))
@@ -72,11 +78,19 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
     # startup fault when requested. Keys never leave this isolated test process.
     def prepare(broken=False, *, lifetime_days=1):
         if broken:
-            (candidate / "gitgo").chmod(0o700)
-            (candidate / "gitgo").write_bytes(b"not-an-executable-test-fault")
+            program = candidate / ("gitgo.exe" if os.name == "nt" else "gitgo")
+            program.chmod(0o700)
+            program.write_bytes(b"not-an-executable-test-fault")
             refresh_inventory(candidate)
-        archive = base / "candidate.tar.gz"
-        with tarfile.open(archive, "w:gz") as package: package.add(candidate, arcname="release")
+        suffix = "zip" if os.name == "nt" else "tar.gz"
+        archive = base / ("candidate." + suffix)
+        if os.name == "nt":
+            import zipfile
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+                for path in candidate.rglob("*"):
+                    if path.is_file(): package.write(path, path.relative_to(candidate).as_posix())
+        else:
+            with tarfile.open(archive, "w:gz") as package: package.add(candidate, arcname="release")
         contract = json.loads((candidate / "update-data-contract.json").read_bytes())
         build = json.loads((candidate / "build-manifest.json").read_bytes())
         now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -85,7 +99,7 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
             "channel": "preview", "sequence": 1, "published_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "expires_at": (now + timedelta(days=lifetime_days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "version": product["version"], "platform": product["platform"], "architecture": product["architecture"],
-            "archive_format": "tar.gz", "url": "https://releases.example.test/package.tar.gz",
+            "archive_format": suffix, "url": "https://releases.example.test/package." + suffix,
             "bytes": archive.stat().st_size, "sha256": archive_sha,
             "source": {key: build["source"][key] for key in ("commit", "tree")},
             "data_compatibility": contract["data_compatibility"], "minimum_updater_version": "0.1.0"}, signing)
@@ -99,7 +113,9 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
         return service, selected
     env = {**isolated_environment(profile), "HOME": str(profile)}
     def boot_version(expected):
-        result = subprocess.run([str(root / "gitgo"), "--version"], env=env, capture_output=True, text=True, timeout=90)
+        command = ([str(root / "bootstrap/gitgo-host/gitgo-host.exe"), "--gitgo-internal-role", "managed-launch"]
+                   if os.name == "nt" else [str(root / "gitgo")])
+        result = subprocess.run([*command, "--version"], env=env, capture_output=True, text=True, timeout=90)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "Gitgo " + expected
     boot_version(old_product["version"])
