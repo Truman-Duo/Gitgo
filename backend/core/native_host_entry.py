@@ -114,6 +114,9 @@ def _main(values: list[str]) -> int:
     if name == "windows-scope":
         from backend.core.windows_process_scope import main as windows_scope_main
         return windows_scope_main(role_argv)
+    if name == "windows-job-lease":
+        from backend.core.windows_process_scope import lease_guardian
+        return lease_guardian(role_argv)
     if name == "managed-install":
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("--root", required=True)
