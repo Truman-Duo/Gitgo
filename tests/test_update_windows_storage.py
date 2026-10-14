@@ -29,7 +29,13 @@ def test_private_root_and_file_use_same_stable_volume(private):
         assert identity["device"] == win.filesystem_identity(private)["device"]
         assert identity["inode"] > 0
     finally: os.close(fd)
-    win.validate_staging(private)
+    try: win.validate_staging(private)
+    except UpdateError:
+        for index, path in enumerate((private, *private.parents)):
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                "(Get-Acl -LiteralPath $args[0]).Sddl", str(path)], capture_output=True, text=True)
+            print("Ancestor", index, path.name, result.stdout, result.stderr)
+        raise
 
 
 def test_multiple_shared_locks_block_exclusive_in_another_process(private):
