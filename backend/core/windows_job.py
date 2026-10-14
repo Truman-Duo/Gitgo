@@ -102,6 +102,11 @@ class JobScope:
 
 def spawn(argv, **options):
     import msvcrt
+    if options.pop("shell", False) is not False or "executable" in options:
+        # A shell/alternate executable around the trusted trampoline could
+        # create that trampoline before its parent joins the Job. Callers must
+        # request their shell as explicit payload argv, after assignment.
+        raise ValueError("Windows scope requires an unchanged trusted trampoline and explicit payload argv")
     raw = json.dumps(argv, ensure_ascii=True).encode("ascii") + b"\n"
     if len(raw) > 1024 * 1024: raise ValueError("Windows scope request exceeds bounds")
     if options.pop("pass_fds", ()) or options.get("creationflags", 0) & 0x01000000:

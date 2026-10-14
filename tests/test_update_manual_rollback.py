@@ -1,4 +1,5 @@
 """Explicit rollback wiring and durable recovery. Never execute placeholders."""
+import os
 import pytest
 from backend.core.update import handoff, health, UpdateError
 from backend.core.update.installation import open_managed
@@ -6,6 +7,8 @@ from backend.core.update.persistence import read_control, lock_file
 from backend.core.update.tree import tree_digest
 from tests.test_update_handoff import lab, queue, consume, signing
 from tests.test_update_transaction import Crash, inspect_health
+
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="Imports the POSIX-specific handoff fixture; native Windows coverage is separate")
 
 
 def upgraded(lab, monkeypatch):

@@ -55,6 +55,12 @@ def test_breakaway_request_is_rejected_before_payload_creation():
         spawn_managed([sys.executable, "-c", "raise RuntimeError('must not run')"], creationflags=0x01000000)
 
 
+@pytest.mark.parametrize("options", [{"shell": True}, {"executable": "cmd.exe"}, {"close_fds": False}])
+def test_trampoline_cannot_be_wrapped_or_replaced_before_job_assignment(options):
+    with pytest.raises(ValueError):
+        spawn_managed([sys.executable, "-c", "raise RuntimeError('must not run')"], **options)
+
+
 def test_shared_lease_is_retained_until_job_is_empty(tmp_path_factory):
     from backend.core.update import windows_storage as win
     from backend.core.installation_lease import retain_descriptor

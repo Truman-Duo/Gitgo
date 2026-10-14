@@ -73,6 +73,37 @@ def test_failed_health_restores_previous_bytes(lab):
     assert tree_digest(store.root / "active") == original
 
 
+@pytest.mark.parametrize("point", ["user_rollback_health_passed", "user_rollback_intent", "rollback_intent",
+    "failed_renamed", "old_restored", "rollback_written"])
+def test_interrupted_explicit_windows_rollback_uses_same_durable_ledger(lab, point):
+    store, apply, original = lab
+    assert apply().status == "committed"
+    selection = store.rollback_selection()
+    water = store._ledger()["watermarks"]
+    def interrupt(name):
+        if name == point: raise Crash()
+    with pytest.raises(Crash):
+        store._rollback(selection["rollback_id"], health_check=inspect_health, checkpoint=interrupt)
+    fresh = SimulationStore(store.root, protected_paths=store.protected_paths)
+    result = fresh.recover()
+    expected = "committed" if point == "user_rollback_health_passed" else "rolled_back"
+    assert result.status == expected
+    assert fresh.recover().status == expected
+    assert fresh._ledger()["watermarks"] == water
+    if expected == "rolled_back": assert tree_digest(store.root / "active") == original
+
+
+def test_failed_windows_predecessor_health_keeps_the_running_new_version(lab):
+    store, apply, _ = lab
+    assert apply().status == "committed"
+    before = store._ledger()
+    selection = store.rollback_selection()
+    def unhealthy(*_): raise ValueError("Isolated fault injection")
+    result = store._rollback(selection["rollback_id"], health_check=unhealthy)
+    assert result.status == "failed" and store._ledger() == before
+    assert store.recover().status == "committed"
+
+
 @pytest.mark.parametrize("point", ["prepared", "old_renamed", "new_renamed", "check_new_intent"])
 def test_fresh_reader_recovers_interrupted_transaction(lab, point):
     store, apply, original = lab
