@@ -102,6 +102,9 @@ class JobScope:
 
 def spawn(argv, **options):
     import msvcrt
+    if (type(argv) not in (list, tuple) or not 1 <= len(argv) <= 1024
+            or any(type(value) is not str or "\0" in value for value in argv)):
+        raise ValueError("Windows scope requires bounded explicit string argv")
     if options.pop("shell", False) is not False or "executable" in options:
         # A shell/alternate executable around the trusted trampoline could
         # create that trampoline before its parent joins the Job. Callers must
@@ -114,14 +117,16 @@ def spawn(argv, **options):
     if "startupinfo" in options: raise ValueError("Windows scope owns its handle allowlist")
     if options.pop("close_fds", True) is not True:
         raise ValueError("Windows scope requires an explicit closed handle boundary")
-    api = _api()
-    job = _check(api.CreateJobObjectW(None, None))
-    incoming, send = os.pipe(); report, outgoing = os.pipe()
     from backend.core.installation_lease import runtime_descriptors
     retained = runtime_descriptors()
+    if len(retained) > 16: raise ValueError("Too many retained Windows lease descriptors")
     lease_handles = [msvcrt.get_osfhandle(fd) for fd in retained]
+    api = _api()
+    job = _check(api.CreateJobObjectW(None, None))
+    incoming = send = report = outgoing = -1
     proc = None
     try:
+        incoming, send = os.pipe(); report, outgoing = os.pipe()
         limits = ExtendedLimits(); limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no breakaway.
         _check(api.SetInformationJobObject(job, 9, C.byref(limits), C.sizeof(limits)))
         handles = [msvcrt.get_osfhandle(fd) for fd in (incoming, outgoing)]
@@ -148,18 +153,18 @@ def spawn(argv, **options):
         proc._gitgo_windows_scope = scope
         proc._gitgo_cleanup = {"complete": False, "mode": "windows-owned-job", "issues": ["cleanup_not_observed"]}
         proc.args = argv
-        with os.fdopen(send, "wb") as control: control.write(raw); control.flush()
-        send = -1
+        control_fd, send = send, -1  # Transfer once, even if write/close raises.
+        with os.fdopen(control_fd, "wb") as control: control.write(raw); control.flush()
+        report = -1  # Scope owns this descriptor only after successful admission.
         return proc
     except BaseException:
         api.CloseHandle(job)
         if proc is not None:
             if proc.poll() is None: proc.terminate()
             proc.wait(timeout=10)
-        os.close(report)
         raise
     finally:
-        for fd in (incoming, send, outgoing):
+        for fd in (incoming, send, outgoing, report):
             if fd >= 0:
                 try: os.close(fd)
                 except OSError: pass
@@ -176,17 +181,18 @@ def _lease_guardian(api, job, leases):
     parent = HANDLE()
     _check(api.DuplicateHandle(api.GetCurrentProcess(), api.GetCurrentProcess(), api.GetCurrentProcess(),
                                C.byref(parent), 0x100000, False, 0))
-    ready, ack = os.pipe()
+    ready = ack = -1
     import msvcrt
-    ack_handle = msvcrt.get_osfhandle(ack)
-    handles = [job, parent.value, ack_handle, *leases]
-    if getattr(sys, "frozen", False):
-        command = [sys.executable, "--gitgo-internal-role", "windows-job-lease", *(str(h) for h in handles)]
-    else:
-        command = [sys.executable, "-B", str(Path(__file__).with_name("windows_process_scope.py")), "--lease", *(str(h) for h in handles)]
-    startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": handles}
     guardian = None
     try:
+        ready, ack = os.pipe()
+        ack_handle = msvcrt.get_osfhandle(ack)
+        handles = [job, parent.value, ack_handle, *leases]
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--gitgo-internal-role", "windows-job-lease", *(str(h) for h in handles)]
+        else:
+            command = [sys.executable, "-B", str(Path(__file__).with_name("windows_process_scope.py")), "--lease", *(str(h) for h in handles)]
+        startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": handles}
         with _spawn_lock:
             for handle in handles: os.set_handle_inheritable(handle, True)
             try: guardian = subprocess.Popen(command, startupinfo=startup, close_fds=True,
@@ -205,5 +211,5 @@ def _lease_guardian(api, job, leases):
         raise OSError("Windows lease guardian did not become ready")
     finally:
         api.CloseHandle(parent)
-        os.close(ready)
+        if ready >= 0: os.close(ready)
         if ack >= 0: os.close(ack)

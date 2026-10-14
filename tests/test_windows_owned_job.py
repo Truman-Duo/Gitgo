@@ -61,6 +61,32 @@ def test_trampoline_cannot_be_wrapped_or_replaced_before_job_assignment(options)
         spawn_managed([sys.executable, "-c", "raise RuntimeError('must not run')"], **options)
 
 
+@pytest.mark.parametrize("failure_on", [1, 2])
+def test_pipe_allocation_failure_releases_job_and_partial_descriptors(monkeypatch, failure_on):
+    from backend.core import windows_job
+    api = windows_job._api()
+    create, close = api.CreateJobObjectW, api.CloseHandle
+    created, closed, descriptors = [], [], []
+    def track_create(*args):
+        handle = create(*args); created.append(handle); return handle
+    def track_close(handle):
+        closed.append(handle); return close(handle)
+    api.CreateJobObjectW, api.CloseHandle = track_create, track_close
+    monkeypatch.setattr(windows_job, "_api", lambda: api)
+    pipe, calls = os.pipe, 0
+    def interrupted_pipe():
+        nonlocal calls
+        calls += 1
+        if calls == failure_on: raise OSError("Isolated pipe allocation fault")
+        values = pipe(); descriptors.extend(values); return values
+    with monkeypatch.context() as patch:
+        patch.setattr(windows_job.os, "pipe", interrupted_pipe)
+        with pytest.raises(OSError): spawn_managed([sys.executable, "-c", "print('must-not-run')"])
+    assert len(created) == 1 and closed == created
+    for descriptor in descriptors:
+        with pytest.raises(OSError): os.fstat(descriptor)
+
+
 def test_shared_lease_is_retained_until_job_is_empty(tmp_path_factory):
     from backend.core.update import windows_storage as win
     from backend.core.installation_lease import retain_descriptor

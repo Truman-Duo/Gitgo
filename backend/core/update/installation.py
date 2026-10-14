@@ -329,9 +329,10 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
         host = str(root / "bootstrap/gitgo-host/gitgo-host.exe").replace("'", "''")
         # UTF-8 BOM is supported by Windows PowerShell 5.1 and PowerShell 7.
         # Do not rewrite the user's global execution policy or PATH profile.
-        content = ("param([Parameter(ValueFromRemainingArguments=$true)][string[]]$GitgoArguments)\n"
-                   "$ErrorActionPreference = 'Stop'\n& '" + host +
-                   "' --gitgo-internal-role managed-launch @GitgoArguments\nexit $LASTEXITCODE\n")
+        # No PowerShell parameter binding: preserve native switches such as
+        # --version as argv, instead of treating them as script parameters.
+        content = ("$ErrorActionPreference = 'Stop'\n& '" + host +
+                   "' --gitgo-internal-role managed-launch @args\nexit $LASTEXITCODE\n")
         from .windows_storage import open_file
         descriptor = open_file(command, create=True, write=True)
         with os.fdopen(descriptor, "wb") as handle:

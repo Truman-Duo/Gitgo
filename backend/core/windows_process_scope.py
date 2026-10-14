@@ -39,10 +39,10 @@ def main(argv=None):
         proc = subprocess.Popen(command, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
             close_fds=True, startupinfo=startup)
         code = proc.wait()
-        with os.fdopen(outgoing, "wb") as report:
+        report_fd, outgoing = outgoing, -1
+        with os.fdopen(report_fd, "wb") as report:
             report.write(json.dumps({"command_exit": code}).encode("ascii") + b"\n")
             report.flush()
-        outgoing = -1
         return 0
     finally:
         if outgoing >= 0: os.close(outgoing)

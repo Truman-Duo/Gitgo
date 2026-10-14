@@ -91,3 +91,40 @@ def test_real_windows_managed_launcher_and_live_lease(actual_lab):
     with store.runtime_lease():
         assert open_managed(store.root).recover().status == "busy"
     assert tree_digest(store.root / "active") == before
+
+
+def test_actual_active_windows_host_holds_admission_until_clean_exit(actual_lab):
+    from scripts.smoke_packaged_runtime import ProtocolClient
+    store, _, _, before, old, _, env = actual_lab
+    client = ProtocolClient(store.root / "active/internal/gitgo-host/gitgo-host.exe", env)
+    try:
+        assert client.host_version == old
+        assert open_managed(store.root).recover().status == "busy"
+        assert client.call("product.version")["result"]["version"] == old
+    finally: client.close()
+    assert open_managed(store.root).recover().status == "idle"
+    assert tree_digest(store.root / "active") == before
+
+
+def test_actual_windows_installer_and_unicode_powershell_command(actual_lab):
+    store, _, _, _, old, _, env = actual_lab
+    base = store.root.parent
+    root, bin_dir = base / "独立 安装", base / "独立 命令"
+    seed = base / "seed"
+    result = subprocess.run(["pwsh.exe", "-NoProfile", "-File", str(seed / "install-managed.ps1"),
+        "-Root", str(root), "-BinDir", str(bin_dir), "-ProtectedPath", str(base / "protected")],
+        env=env, cwd=base, capture_output=True, text=True, timeout=180)
+    assert result.returncode == 0, result.stderr
+    assert open_managed(root).registration["bootstrap_api"] == 7
+    command = bin_dir / "gitgo.ps1"
+    assert command.read_bytes().startswith(b"\xef\xbb\xbf")
+    launch = subprocess.run(["pwsh.exe", "-NoProfile", "-File", str(command), "--version"], env=env,
+        cwd=base, capture_output=True, text=True, timeout=120)
+    assert launch.returncode == 0, launch.stderr
+    assert launch.stdout.strip() == "Gitgo " + old
+    before = (root / "control/ledger.json").read_bytes()
+    duplicate = subprocess.run(["pwsh.exe", "-NoProfile", "-File", str(seed / "install-managed.ps1"),
+        "-Root", str(root), "-BinDir", str(bin_dir)], env=env,
+        cwd=base, capture_output=True, text=True, timeout=60)
+    assert duplicate.returncode != 0
+    assert (root / "control/ledger.json").read_bytes() == before
