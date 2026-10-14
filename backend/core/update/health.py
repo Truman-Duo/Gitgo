@@ -39,9 +39,9 @@ def isolated_environment(profile: Path) -> dict[str, str]:
 def cleanup_report(proc, job) -> dict:
     """Report parent-owned process containment, never candidate assertions."""
     cleanup = getattr(proc, "_gitgo_cleanup", None)
-    if os.name == "nt":
-        cleanup = {"complete": bool(job), "mode": "windows-job" if job else "unmanaged-root-only",
-                   "issues": [] if job else ["job_attachment_missing"]}
+    if os.name == "nt" and getattr(proc, "_gitgo_windows_scope", None) is None:
+        cleanup = {"complete": False, "mode": "unmanaged-root-only",
+                   "issues": ["preexecution_job_scope_missing"]}
     if not isinstance(cleanup, dict) or type(cleanup.get("complete")) is not bool:
         reject("UPDATE_HEALTH_FAILED", "Host probe cleanup report is missing")
     return cleanup

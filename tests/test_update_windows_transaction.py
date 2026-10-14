@@ -24,8 +24,8 @@ pytestmark = pytest.mark.skipif(not win.supported(), reason="Requires actual Win
 
 
 @pytest.fixture
-def lab(tmp_path, signing):
-    base = tmp_path.resolve() / "private"
+def lab(tmp_path_factory, signing):
+    base = tmp_path_factory.resolve() / "private"
     win.create_private_directory(base)
     protected = base / "projects"; protected.mkdir(mode=0o700)
     (protected / "sentinel").write_bytes(b"project-and-database-unchanged")
@@ -46,9 +46,9 @@ def lab(tmp_path, signing):
         data_compatibility=compatibility_wire()), signing)
     download = base / "download"; download.mkdir(mode=0o700)
     archive_path = download / "candidate.zip"; archive_path.write_bytes(data)
-    policy = UpdatePolicy(enabled=True, channel="preview", platform="windows", architecture="x86_64",
+    policy = UpdatePolicy(enabled=True, channel="preview",
         manifest_url="https://releases.example.test/manifest.json", signature_url="https://releases.example.test/manifest.sig",
-        allowed_hosts=frozenset({"releases.example.test"}))
+        allowed_hosts=("releases.example.test",))
     def apply(**kwargs):
         return store.apply(policy, signing[1], raw, signature, archive_path,
             health_check=kwargs.pop("health_check", inspect_health), clock=lambda: NOW, **kwargs)

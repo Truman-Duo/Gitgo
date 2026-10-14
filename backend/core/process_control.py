@@ -23,6 +23,8 @@ def attach_kill_job(proc: subprocess.Popen):
     """Attach a Windows child to a kill-on-close Job Object."""
     if sys.platform != "win32":
         return None
+    if getattr(proc, "_gitgo_windows_scope", None) is not None:
+        return proc._gitgo_windows_scope
     try:
         import ctypes
         from ctypes import wintypes
@@ -95,6 +97,9 @@ def attach_kill_job(proc: subprocess.Popen):
 def close_job(job_handle) -> None:
     if sys.platform != "win32" or not job_handle:
         return
+    if hasattr(job_handle, "finish"):
+        job_handle.finish(cancel=job_handle.proc.poll() is None)
+        return
     try:
         import ctypes
         from ctypes import wintypes
@@ -111,7 +116,8 @@ def spawn_managed(argv, **kwargs):
     if type(macos_forkless) is not bool or (macos_forkless and sys.platform != "darwin"):
         raise ValueError("Forkless probes require macOS")
     if sys.platform == "win32":
-        return subprocess.Popen(argv, **kwargs)
+        from backend.core.windows_job import spawn
+        return spawn(argv, **kwargs)
     from backend.core.installation_lease import runtime_descriptors
     retained = tuple(sorted(set(kwargs.pop("pass_fds", ())) | set(runtime_descriptors())))
     if len(retained) > 16 or any(type(fd) is not int or fd < 3 for fd in retained):
@@ -165,6 +171,10 @@ def spawn_managed(argv, **kwargs):
 
 
 def finish_scope(proc):
+    scope = getattr(proc, "_gitgo_windows_scope", None)
+    if scope is not None:
+        if proc.poll() is not None: scope.finish()
+        return
     control = getattr(proc, "_gitgo_scope_socket", None)
     if control is None:
         return
@@ -188,6 +198,12 @@ def finish_scope(proc):
 
 def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
     """Terminate descendants and wait until the root process is reaped."""
+    scope = getattr(proc, "_gitgo_windows_scope", None)
+    if scope is not None:
+        scope.finish(cancel=True)
+        proc.wait(timeout=10)
+        proc.returncode = -15
+        return
     if proc.poll() is not None:
         close_job(job_handle)
         finish_scope(proc)

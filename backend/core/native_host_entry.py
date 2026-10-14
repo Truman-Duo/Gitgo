@@ -111,6 +111,9 @@ def _main(values: list[str]) -> int:
         from backend.core.native_host import main as native_host_main
         return int(native_host_main() or 0)
     name, role_argv = role
+    if name == "windows-scope":
+        from backend.core.windows_process_scope import main as windows_scope_main
+        return windows_scope_main(role_argv)
     if name == "managed-install":
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("--root", required=True)

@@ -13,8 +13,8 @@ pytestmark = pytest.mark.skipif(not win.supported(), reason="Requires actual Win
 
 
 @pytest.fixture
-def private(tmp_path):
-    root = tmp_path.resolve() / "private"
+def private(tmp_path_factory):
+    root = tmp_path_factory.resolve() / "private"
     win.create_private_directory(root)
     yield root
 
