@@ -66,6 +66,29 @@ def test_uuid_unavailable_has_no_temporary_device_fallback(managed, monkeypatch)
     with pytest.raises(UpdateError, match="UPDATE_VOLUME_ID_UNAVAILABLE"): open_managed(store.root)
 
 
+@pytest.mark.parametrize("failure", ["syscall", "length", "zero"])
+def test_kernel_uuid_errors_and_malformed_results_fail_closed(monkeypatch, failure):
+    import ctypes
+    import struct
+    from types import SimpleNamespace
+    class Query:
+        def __call__(self, fd, attrs, buffer, size, options):
+            assert size == 20 and attrs._obj.bitmapcount == 5 and attrs._obj.volume == 0x80040000
+            if failure == "syscall": return -1
+            data = struct.pack("=I", 19 if failure == "length" else 20) + b"\0" * 16
+            ctypes.memmove(buffer, data, 20)
+            return 0
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(fgetattrlist=Query()))
+    with pytest.raises(UpdateError, match="UPDATE_VOLUME_ID_UNAVAILABLE"): persistence._volume_uuid(123)
+
+
+def test_non_darwin_identity_retains_device_and_inode(managed, monkeypatch):
+    path = managed[0].root / "control/runtime.lock"
+    monkeypatch.setattr(persistence, "_darwin", lambda: False)
+    actual = path.stat()
+    assert persistence.filesystem_identity(path) == {"device": actual.st_dev, "inode": actual.st_ino}
+
+
 def test_old_registration_is_not_rewritten_or_adopted(managed):
     store = managed[0]
     path = store.root / "control/registration.json"

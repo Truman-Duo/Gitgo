@@ -6,7 +6,7 @@
 
 默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 6。构建时需要选择 `--update-evidence`。旧包（含此前实验 API 1/2/3/4/5）、缺少契约的包、Windows、未知或已有非空安装目录不被接管。
 
-`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 5 区分 Linux 的完整清理后即时交接与 macOS 的手动重启后交接。macOS 不通过修改清理报告获得即时更新；Windows 无管理适配。Linux API 5 已重新完成双版本工件交接验收，macOS API 5 已完成静置安装工件事务及同一次启动内的安全门禁验收，真实手动重启流程仍待验证。详见[手动更新准备与交接](update-preparation.md)。
+`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 6 区分 Linux 的完整清理后即时交接与 macOS 的手动重启后交接。macOS 不通过修改清理报告获得即时更新；Windows 无管理适配。此前 API 5 的 Linux 验收是历史记录，macOS 实际重启暴露的设备编号变化已在 API 6 修正，新格式仍需独立跨启动验收。详见[手动更新准备与交接](update-preparation.md)。
 
 ## 布局与唯一权威
 
