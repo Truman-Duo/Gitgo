@@ -96,7 +96,22 @@ def test_actual_windows_source_startup_probe_is_isolated(tmp_path_factory, fault
     env = {**isolated_environment(profile), "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
     if fault == "existing-profile": (profile / "user-data").write_bytes(b"keep")
     if fault == "outside-config": env["GITGO_CONFIG_PATH"] = str(outside)
-    result = subprocess.run([sys.executable, "-B", "-m", "backend.core.native_host_entry",
+    diagnostic_entry = """import sys
+import backend.core.native_host_entry as entry
+from backend.core.update.validation import UpdateError
+original = entry._main
+def traced(values):
+    try: return original(values)
+    except UpdateError as error:
+        print(error.code + ': ' + str(error), file=sys.stderr)
+        raise
+    except OSError as error:
+        print('OS_ERROR ' + str(getattr(error, 'winerror', error.errno)), file=sys.stderr)
+        raise
+entry._main = traced
+raise SystemExit(entry.main(sys.argv[1:]))
+"""
+    result = subprocess.run([sys.executable, "-B", "-c", diagnostic_entry,
         "--gitgo-internal-role", "update-startup-probe", "--nonce", "e" * 32], cwd=profile,
         env=env, capture_output=True, text=True, timeout=40)
     assert outside.read_bytes() == b"keep-user-data"

@@ -29,6 +29,7 @@ from .validation import UpdateError, digest, fields, json_object, number, reject
 
 
 def _ownership_supported():
+    if not hasattr(os, "open"): return False
     if os.name == "posix": return True
     from .windows_storage import supported
     return supported()
