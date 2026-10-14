@@ -35,7 +35,7 @@ def lab(tmp_path_factory, signing):
         import subprocess
         for path in (base, seed):
             result = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
-                "(Get-Acl -LiteralPath $args[0]).Sddl", str(path)], capture_output=True, text=True)
+                "(Get-Acl -LiteralPath '" + str(path).replace("'", "''") + "').Sddl"], capture_output=True, text=True)
             print("Fixture ACL", path.name, result.stdout, result.stderr)
         raise
     root = base / "managed-simulation"; root.mkdir(mode=0o700)
