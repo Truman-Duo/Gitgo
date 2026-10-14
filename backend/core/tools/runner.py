@@ -115,7 +115,12 @@ def main() -> None:
         return
 
     try:
-        result = binding.function(args)
+        from backend.core.sandbox_read_plan import approved_read_scope
+        expected = request.get("_approved_read")
+        if expected is not None and binding.execution_contract.file_action != "read_existing_file":
+            raise ValueError("Handler does not declare the approved file action")
+        with approved_read_scope(expected, args):
+            result = binding.function(args)
         if not isinstance(result, dict):
             result = {"result": result}
         _emit_success(result)

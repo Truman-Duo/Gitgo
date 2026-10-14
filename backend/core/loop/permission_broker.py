@@ -50,7 +50,9 @@ def _runtime_implementation_digest() -> str:
     digest = hashlib.sha256()
     modules = [f"backend.core.tools.{name}" for name in
                ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner")]
-    modules += ["backend.core.sandbox_read", "backend.core.sandbox_read_windows"]
+    modules += ["backend.core.sandbox_read", "backend.core.sandbox_read_windows",
+                "backend.core.sandbox_read_plan", "backend.core.loop.read_approval",
+                "backend.core.loop.execution_contract", "backend.core.loop.process_tool_runner"]
     for module_name in modules:
         spec = importlib.util.find_spec(module_name)
         if spec is None or spec.loader is None:
@@ -109,6 +111,10 @@ def grant_is_current(grant: dict, process, tool=None) -> bool:
         return False
     if tool is not None and digest != tool_contract_digest(tool):
         return False
+    from .read_approval import current_pin, requires_read_binding
+    if grant.get("read_binding") is not None or (tool is not None and requires_read_binding(tool)):
+        if current_pin(process, grant) is None:
+            return False
     return True
 
 
@@ -136,7 +142,7 @@ def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: 
         and item.get("task_id") == task_id
         and (
             item.get("arguments_digest") == digest
-            if per_invocation
+            if per_invocation or item.get("read_binding") is not None
             else (item.get("scope") == "task" or item.get("arguments_digest") == digest)
         )
         and _has_remaining_uses(item)
@@ -187,7 +193,7 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def remap_project_paths(process, arguments: dict, effective_workspace: str) -> dict:
+def remap_project_paths(process, arguments: dict, effective_workspace: str, *, lexical=False) -> dict:
     """Map logical project-root paths into a B's isolated worktree.
 
     This is deterministic Host work, not a permission escalation.  A model may
@@ -209,7 +215,7 @@ def remap_project_paths(process, arguments: dict, effective_workspace: str) -> d
         candidate = Path(raw)
         if not candidate.is_absolute():
             continue
-        resolved = candidate.resolve(strict=False)
+        resolved = candidate if lexical else candidate.resolve(strict=False)
         if _is_within(resolved, project_root):
             args[key] = str(effective / resolved.relative_to(project_root))
     return args
@@ -270,9 +276,26 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
             if str(item).strip()
         ]
         resource = declared[0] if declared else f"capability://{tool_name}"
-    target = _canonical_resource(resource)
+    from .read_approval import requires_read_binding
+    bind_read = requires_read_binding(tool)
+    if bind_read:
+        tool.validate_execution_contract()
     effective = Path(workspace_path).resolve(strict=False)
-    if isinstance(target, Path) and _is_within(target, effective):
+    if bind_read:
+        # Display and authorize the actual remapped leaf, not a capability URI
+        # or a relative resource accidentally interpreted against the Host cwd.
+        mapped = remap_project_paths(process, invocation_args, workspace_path, lexical=True)
+        raw_path = Path(str(mapped.get("path") or ""))
+        target = raw_path if raw_path.is_absolute() else effective / raw_path
+        if "://" not in resource:
+            scope = Path(str(remap_project_paths(process, {"path": resource},
+                workspace_path, lexical=True)["path"]))
+            scope = scope if scope.is_absolute() else effective / scope
+            if not _is_within(target, scope):
+                raise ValueError("requested resource does not contain the read target")
+    else:
+        target = _canonical_resource(resource)
+    if isinstance(target, Path) and _is_within(target, effective) and not (bind_read and policy.requires_user):
         raise ValueError("resource is already inside the current execution scope")
     effect = getattr(getattr(tool, "effect", "read"), "value", str(getattr(tool, "effect", "read")))
     invocation_only = bool(getattr(tool, "approval_per_invocation", False))
@@ -288,7 +311,7 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
         "approval_scope": "exact_invocation" if invocation_only else "resource_or_task",
     }
     from backend.core.loop.decision_support import create_user_decision
-    return create_user_decision(process, {
+    decision_args = {
         "kind": "permission",
         "state_topic": f"permission:{tool_name}:{target}",
         "question": f"Allow Gitgo to {purpose}?",
@@ -335,14 +358,29 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
             "api_details": f"{tool_name} · {effect} · {target}",
             "arguments_preview": _arguments_preview(invocation_args),
         },
-    })
+    }
+    if not bind_read:
+        return create_user_decision(process, decision_args)
+    if _is_within(target, effective):
+        decision_args["why_user_must_decide"] = "This tool requires approval for the displayed file read."
+    from .read_approval import publish_read_request
+    prepared = remap_project_paths(process, invocation_args, workspace_path, lexical=True)
+    prepared = {**prepared, "_workspace": workspace_path,
+                "_allowed_roots": [str(target)] if isinstance(target, Path) else []}
+    return publish_read_request(process, decision_args, prepared, create_user_decision)
 
 
 @_locked_grants
 def grant_from_decision(process, pending: dict, action: str) -> dict | None:
     request = dict(pending.get("permission_request") or {})
     if not request or action not in {"allow_once", "allow_task"}:
+        from .read_approval import revoke_read_request
+        revoke_read_request(process, request.get("request_id", ""))
         return None
+    if request.get("read_binding") is not None:
+        from .read_approval import current_pin
+        if pending is not process.pending_decision or current_pin(process, request) is None:
+            return None
     if request.get("approval_scope") == "exact_invocation" and action != "allow_once":
         return None
     grant = {
@@ -360,6 +398,13 @@ def grant_from_decision(process, pending: dict, action: str) -> dict | None:
         "expires_at": str(request.get("expires_at") or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if request.get("read_binding") is not None:
+        grant["resource"] = request["resource"]
+        grant["read_binding"] = request["read_binding"]
+        grant["approval_scope"] = request["approval_scope"]
+        from .read_approval import bind_read_grant
+        if not bind_read_grant(process, grant):
+            return None
     if not grant_is_current(grant, process):
         return None
     process.approval_grants.append(grant)
@@ -450,7 +495,7 @@ def authorize_external_resources(process, tool_name: str, effect: str, arguments
 
 @_locked_grants
 def admit_invocation_grants(process, tool, raw_arguments: dict, prepared_arguments: dict,
-                            resources: list[str], *, require_explicit: bool) -> tuple[list[str], dict | None]:
+                            resources: list[str], *, require_explicit: bool, admission=None) -> tuple[list[str], dict | None]:
     """Recheck and spend the complete invocation selection under the grant lock.
 
     One grant may cover both explicit approval and several resource paths. All
@@ -472,6 +517,11 @@ def admit_invocation_grants(process, tool, raw_arguments: dict, prepared_argumen
     if error is not None:
         return [], error
     selected.extend(resource_grants)
+    from .read_approval import admit_read_binding
+    error = admit_read_binding(process, tool, raw_arguments,
+        {**prepared_arguments, "_allowed_roots": roots}, selected, admission)
+    if error is not None:
+        return [], error
     # Deduplicate the Host-owned record, not tool JSON or a supplied grant ID.
     for grant in {id(item): item for item in selected}.values():
         if grant["remaining_uses"] is not None:

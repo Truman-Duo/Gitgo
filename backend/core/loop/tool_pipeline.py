@@ -69,13 +69,19 @@ class ToolPipeline:
     def __init__(self, gate: RingGate | None = None):
         self._gate = gate or RingGate()
 
-    def execute(
+    def execute(self, tool_call, tool, ctx, execution_id, call_index=0):
+        from .read_approval import AdmissionResources
+        with AdmissionResources() as admission:
+            return self._execute(tool_call, tool, ctx, execution_id, call_index, admission=admission)
+
+    def _execute(
         self,
         tool_call: dict,
         tool: "AgentTool",
         ctx: "ExecutionContext",
         execution_id: str,
         call_index: int = 0,
+        *, admission,
     ) -> ToolResult:
         """执行单次工具调用。"""
         tool_name = tool_call.get("name", tool.name)
@@ -226,7 +232,8 @@ class ToolPipeline:
                     out_of_scope_resources,
                     remap_project_paths,
                 )
-                args = remap_project_paths(ctx.process, args, str(ctx.workspace_path))
+                args = remap_project_paths(ctx.process, args, str(ctx.workspace_path),
+                    lexical=bool(execution_contract.file_action))
                 outside = out_of_scope_resources(args, str(ctx.workspace_path))
                 effect_value = getattr(
                     getattr(tool, "effect", "read"), "value", str(getattr(tool, "effect", "read")),
@@ -394,6 +401,7 @@ class ToolPipeline:
                 ctx.process, tool, dict(raw_args or {}), dict(args or {}),
                 out_of_scope_resources(args, str(ctx.workspace_path)),
                 require_explicit=operation_policy.requires_user and resume_state is None,
+                admission=admission,
             )
         except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
             result = self._error_result(
@@ -509,6 +517,7 @@ class ToolPipeline:
                 result_data = self._execute_isolated(
                     getattr(tool, "runner_name", "") or tool_name,
                     {**args, "_workspace": str(ctx.workspace_path)}, effective_timeout,
+                    **({"read_binding": admission.read_binding} if admission.read_binding else {}),
                     cancellation_event=ctx.cancellation,
                     diagnostics=runner_diagnostics,
                     runtime_metadata=runtime_metadata,
@@ -900,7 +909,7 @@ class ToolPipeline:
 
     def _execute_isolated(self, tool_name: str, args: dict,
                           timeout: float = 60.0,
-                          cancellation_event=None, diagnostics=None, runtime_metadata=None) -> dict:
+                          cancellation_event=None, diagnostics=None, runtime_metadata=None, read_binding=None) -> dict:
         """通过 ProcessToolRunner 在子进程中执行工具。
 
         子进程崩溃→异常传播到 Step 4 的 catch 块→被 classify_tool_error 捕获。
@@ -910,6 +919,7 @@ class ToolPipeline:
         runner = ProcessToolRunner(timeout=timeout)
         result = runner.run(
             tool_name, args, cancellation_event=cancellation_event,
+            **({"read_binding": read_binding} if read_binding else {}),
         )
         from backend.core.loop.runner_diagnostics import capture_runner_diagnostics, safe_runner_text
         if diagnostics is not None:

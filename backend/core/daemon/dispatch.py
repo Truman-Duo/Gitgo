@@ -885,6 +885,8 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         target_runtime = dict(target.get("runtime_state") or {})
         for item in apm.list_processes():
             if item.session is not None and item.session.session_id == session_id:
+                from backend.core.loop.read_approval import revoke_read_requests
+                revoke_read_requests(item)
                 item.session = restored
         apm._sessions[session_id] = restored
         anchor = apm.get(process_id)
@@ -1596,9 +1598,8 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             return
         if pending.get("kind") == "permission" and selected_option is not None:
             selected_action = str(selected_option.get("action", ""))
-            if selected_action in {"allow_once", "allow_task"}:
-                from backend.core.loop.permission_broker import grant_from_decision
-                approval_grant = grant_from_decision(process, pending, selected_action)
+            from backend.core.loop.permission_broker import grant_from_decision
+            approval_grant = grant_from_decision(process, pending, selected_action)
             if isinstance(process.pending_tool_batch, dict):
                 process.pending_tool_batch["decision_action"] = selected_action
         if pending.get("kind") == "completion_exception":
@@ -2009,6 +2010,9 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                       )})
                 return
             process.task_description = task_description
+            if process.active_task_id != task_id:
+                from backend.core.loop.read_approval import revoke_read_requests
+                revoke_read_requests(process)
             process.active_task_id = task_id
             process.runtime_preferences.update(
                 dict(cmd.get("runtime_preferences") or {})

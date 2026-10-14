@@ -47,4 +47,7 @@ def transition(process, proposed):
             return proposed
         validate_transition(previous.value, proposed.value)
         process.status = proposed
+        if proposed.value in TERMINAL | RECOVERY | {"cancelling"}:
+            from .read_approval import revoke_read_requests
+            revoke_read_requests(process)
         return proposed

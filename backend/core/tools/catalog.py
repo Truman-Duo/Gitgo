@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.core.loop.execution_contract import NATIVE_PROCESS
+from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ
 
 from backend.core.loop.agent_tool import (
     AgentTool,
@@ -56,7 +56,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             resources=[],
             runner_name="read_file",
             idempotent=True,
-            **common,
+            **{**common, "execution_contract": NATIVE_FILE_READ},
         ),
         "list_files": AgentTool(
             name="list_files",

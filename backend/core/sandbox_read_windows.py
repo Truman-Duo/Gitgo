@@ -67,7 +67,7 @@ class WindowsReadApi:
         relative_parts(str(path.relative_to(path.anchor)))
         return self.open('\\??\\' + str(path), None, directory=True)
 
-    def open(self, name: str, parent, *, directory: bool):
+    def open(self, name: str, parent, *, directory: bool, read_data: bool = True):
         buffer = C.create_unicode_buffer(name)
         length = len(name.encode('utf-16-le'))
         if length > 65532:
@@ -79,7 +79,7 @@ class WindowsReadApi:
         status_block = IoStatus()
         handle = W.HANDLE()
         # SYNCHRONIZE | READ_ATTRIBUTES | (TRAVERSE or READ_DATA).
-        access = 0x100080 | (0x20 if directory else 1)
+        access = 0x100080 | (0x20 if directory else (1 if read_data else 0))
         # FILE_OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | DIRECTORY_FILE
         # for directories. Leaf type is checked on the returned handle.
         options = 0x200000 | 0x20 | (1 if directory else 0)

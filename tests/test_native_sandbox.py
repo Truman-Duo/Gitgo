@@ -31,7 +31,7 @@ def test_sensitive_handlers_have_no_model_selectable_opt_out():
     from backend.core.tools.runner import handler_bindings
     from backend.core.loop.execution_contract import NATIVE_PROCESS
     bindings = handler_bindings()
-    assert all(binding.execution_contract == NATIVE_PROCESS for binding in bindings.values())
+    assert all(binding.execution_contract.kind == NATIVE_PROCESS.kind for binding in bindings.values())
     assert {"shell_script", "exec_command", "run_command", "run_test",
             "authored_python", "authored_privileged_python", "search_text", "list_files", "document_open"} <= bindings.keys()
 
@@ -365,6 +365,8 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
         assert result.data['engine'] == 'python' and result.data['complete'], result
         assert result.data['count'] == 1, result
     _assert_descriptor_read_protocol(runner, workspace)
+    for handler in ('read_file', 'file_read'):
+        exec(_approval_read_acceptance_source(workspace, handler), {'runner': runner})
     _assert_legacy_file_aliases_are_native(runner, workspace)
     _assert_authored_bridge_is_native(runner, workspace)
     shell = runner.run("shell_script", {
@@ -1617,3 +1619,95 @@ def test_packaged_host_descriptor_read_protocol(cross_platform_box, handler):
         assert not blocked['success'] or (blocked['data'] or {}).get('error'), results
         assert 'content' not in (blocked['data'] or {}), results
         assert 'stable-read-host-private' not in json.dumps(blocked), results
+
+
+def _approval_read_acceptance_source(workspace, handler):
+    """The same Host->native protocol exercised by source and frozen Hosts."""
+    import textwrap
+    return textwrap.dedent(f"""
+        from dataclasses import replace
+        from pathlib import Path
+        from backend.core.loop.agent_tool import ApprovalMode
+        from backend.core.loop.models import AgentProcess, RingLevel
+        from backend.core.loop.session import AgentSession
+        from backend.core.loop.permission_broker import create_permission_request, grant_from_decision, admit_invocation_grants
+        from backend.core.loop.read_approval import AdmissionResources, revoke_read_requests
+        from backend.core.tools.catalog import build_workspace_tools
+        workspace = Path({str(workspace)!r})
+        target = workspace / {('approved-' + handler + '.txt')!r}
+        target.write_text('approved original', encoding='utf8')
+        tool = replace(build_workspace_tools(workspace)['read_file'],
+                       runner_name={handler!r}, approval=ApprovalMode.ASK)
+        process = AgentProcess('native-read-approval', 'worker', RingLevel.RING_3,
+                               active_task_id='native-task', session=AgentSession())
+        args = {{'path': target.name}}
+        prepared = {{**args, '_workspace': str(workspace)}}
+        def approve():
+            create_permission_request(process, {{'tool_name': tool.name, 'arguments': args,
+                'resource': 'capability://read_file', 'purpose': 'Verify the native read approval'}},
+                {{tool.name: tool}}, str(workspace))
+            assert grant_from_decision(process, process.pending_decision, 'allow_once')
+            process.pending_decision = None
+        def admit(admission):
+            roots, error = admit_invocation_grants(process, tool, args, prepared, [],
+                                                   require_explicit=True, admission=admission)
+            assert error is None, error
+        try:
+            approve()
+            target.write_text('approved updated', encoding='utf8')
+            with AdmissionResources() as admission:
+                admit(admission)
+                result = runner.run({handler!r}, prepared, read_binding=admission.read_binding)
+                assert result.success and (result.data or {{}}).get('content') == 'approved updated', result
+            assert not process._read_approval_pins
+            approve()
+            with AdmissionResources() as admission:
+                admit(admission)
+                target.rename(target.with_suffix('.held'))
+                target.write_text('replacement secret', encoding='utf8')
+                result = runner.run({handler!r}, prepared, read_binding=admission.read_binding)
+                assert not result.success or (result.data or {{}}).get('error'), result
+                assert 'content' not in (result.data or {{}}), result
+                assert 'replacement secret' not in str(result), result
+            assert not process._read_approval_pins
+            secret = workspace.parent / {('approval-host-secret-' + handler + '.txt')!r}
+            secret.write_text('approval-private-host-content', encoding='utf8')
+            args = {{'path': str(secret)}}
+            prepared = {{**args, '_workspace': str(workspace)}}
+            approve()
+            with AdmissionResources() as admission:
+                roots, error = admit_invocation_grants(process, tool, args, prepared,
+                    [str(secret)], require_explicit=True, admission=admission)
+                assert error is None, error
+                prepared['_allowed_roots'] = roots
+                result = runner.run({handler!r}, prepared, read_binding=admission.read_binding)
+                assert not result.success or (result.data or {{}}).get('error'), result
+                assert 'content' not in (result.data or {{}}), result
+                assert 'approval-private-host-content' not in str(result), result
+        finally:
+            revoke_read_requests(process)
+    """)
+
+
+@pytest.mark.parametrize('handler', ['read_file', 'file_read'])
+def test_linux_real_runner_approval_binding(linux_box, handler):
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, _ = linux_box
+    exec(_approval_read_acceptance_source(workspace, handler), {'runner': ProcessToolRunner(timeout=30)})
+
+
+@pytest.mark.parametrize('handler', ['read_file', 'file_read'])
+def test_packaged_host_approval_binding(cross_platform_box, handler):
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Requires an actual built Host')
+    source = ('from backend.core.loop.process_tool_runner import ProcessToolRunner\n'
+              'runner = ProcessToolRunner(timeout=90)\n'
+              + _approval_read_acceptance_source(policy.workspace, handler)
+              + "\nprint('approval-binding-verified')\n")
+    result = subprocess.run([str(Path(configured).resolve(strict=True)),
+        '--gitgo-internal-role', 'python', '-c', source],
+        capture_output=True, text=True, encoding='utf8', timeout=200)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'approval-binding-verified', result

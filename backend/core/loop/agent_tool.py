@@ -176,6 +176,11 @@ class AgentTool:
             raise ValueError("Tool has no Host-declared execution contract")
         if contract is not self._bound_execution_contract or self.execute is not self._bound_executor:
             raise ValueError("Registered execution authority or callable changed")
+        if contract.kind == ExecutionType.NATIVE_PROCESS and not self.composite_spec:
+            from backend.core.tools.runner import handler_bindings
+            binding = handler_bindings().get(self.runner_name or self.name)
+            if binding is not None and binding.execution_contract.file_action != contract.file_action:
+                raise ValueError("Host and native handler file actions disagree")
         mode = (self.composite_spec or {}).get("execution_mode")
         if mode in {"authored_pure_python", "authored_privileged_python"}:
             if contract.kind != ExecutionType.NATIVE_PROCESS:

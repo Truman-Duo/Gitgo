@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from backend.core.loop.execution_contract import NATIVE_PROCESS
+from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ
 
 
 def register_all(register) -> None:
@@ -23,7 +23,7 @@ def register_all(register) -> None:
     由 runner._auto_import_registrations() 调用。
     register 是一个 Callable(name, fn, execution_contract)，将工具加入 runner 的注册表。
     """
-    register("file_read", file_read, NATIVE_PROCESS)
+    register("file_read", file_read, NATIVE_FILE_READ)
     register("file_write", file_write, NATIVE_PROCESS)
     register("file_edit", file_edit, NATIVE_PROCESS)
     register("file_delete", file_delete, NATIVE_PROCESS)
@@ -39,7 +39,7 @@ def register_all(register) -> None:
     # for compatibility, but new capability profiles use these confined,
     # receipt-friendly implementations.
     from backend.core.tools import workspace_tools
-    register("read_file", workspace_tools.read_file, NATIVE_PROCESS)
+    register("read_file", workspace_tools.read_file, NATIVE_FILE_READ)
     register("list_files", workspace_tools.list_files, NATIVE_PROCESS)
     register("search_text", workspace_tools.search_text, NATIVE_PROCESS)
     register("edit_file", workspace_tools.edit_file, NATIVE_PROCESS)
@@ -97,14 +97,15 @@ def file_read(args: dict) -> dict:
     encoding = args.get("encoding", "utf-8")
     max_lines = args.get("lines")
 
-    from backend.core.sandbox_read import ReadRoot, ReadBoundaryError
+    from backend.core.sandbox_read import ReadBoundaryError
     from backend.core.tools.workspace_tools import _read_target
     try:
         _workspace, p, root, relative = _read_target(args)
     except ReadBoundaryError as exc:
         return {"error": "READ_ERROR", "path": path, "detail": str(exc)}
     try:
-        with ReadRoot(root) as acquired, acquired.open(relative) as opened:
+        from backend.core.sandbox_read_plan import open_planned_read
+        with open_planned_read(root, relative) as opened:
             raw = opened.read_bytes()
         content = raw.decode(encoding)
         total_lines = content.count("\n") + 1

@@ -49,13 +49,13 @@ def _text_diff(path: str, before: str, after: str) -> str:
 
 
 def read_file(args: dict) -> dict:
-    from backend.core.sandbox_read import ReadRoot
     workspace, path, root, relative = _read_target(args)
     label = str(path.relative_to(workspace)).replace("\\", "/") if path.is_relative_to(workspace) else str(path)
     offset = max(0, int(args.get("offset", 0) or 0))
     limit = max(1, min(int(args.get("limit", 2000) or 2000), 5000))
     try:
-        with ReadRoot(root) as acquired, acquired.open(relative) as opened:
+        from backend.core.sandbox_read_plan import open_planned_read
+        with open_planned_read(root, relative) as opened:
             raw = opened.read_bytes()
     except IsADirectoryError:
         return {"error": "IS_DIRECTORY", "path": label}

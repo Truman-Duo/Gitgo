@@ -74,6 +74,21 @@ def _linux_identity(fd: int) -> ObjectIdentity:
     return ObjectIdentity('linux', info.st_dev, info.st_ino)
 
 
+class PinnedObject:
+    """Metadata-only pin. It cannot read bytes and is never serialized."""
+    def __init__(self, identity, owners):
+        self.identity, self._owners = identity, owners
+
+    def close(self):
+        self._owners.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
 class PinnedRead:
     """Own the readable descriptor until close; never reopen the input name."""
     def __init__(self, fd: int, identity: ObjectIdentity, owners: ExitStack):
@@ -148,7 +163,13 @@ class ReadRoot:
             self.close()
             raise
 
+    def pin(self, relative: str) -> PinnedObject:
+        return self._open(relative, metadata_only=True)
+
     def open(self, relative: str) -> PinnedRead:
+        return self._open(relative, metadata_only=False)
+
+    def _open(self, relative: str, *, metadata_only: bool):
         if self._closed:
             raise ValueError('Read root is closed')
         parts = relative_parts(relative)
@@ -167,6 +188,8 @@ class ReadRoot:
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     raise ReadBoundaryError('Read requires a singly linked regular file')
                 identity = _linux_identity(pinned)
+                if metadata_only:
+                    return PinnedObject(identity, owners)
                 # The native sandbox mounts its own procfs. Follow only our
                 # retained descriptor, never the caller's path, after checking
                 # type. This is not a general procfs access capability.
@@ -184,9 +207,12 @@ class ReadRoot:
                     parent = self._windows.open(part, parent, directory=True)
                     owners.callback(self._windows.close, parent)
                     self._windows.identity(parent, directory=True)
-                handle = self._windows.open(parts[-1], parent, directory=False)
+                handle = self._windows.open(parts[-1], parent, directory=False, read_data=not metadata_only)
                 try:
                     identity = self._windows.identity(handle, directory=False)
+                    if metadata_only:
+                        owners.callback(self._windows.close, handle)
+                        return PinnedObject(identity, owners)
                     fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
                 except BaseException:
                     self._windows.close(handle)

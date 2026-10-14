@@ -102,6 +102,8 @@ class AgentProcess:
     # model is never asked to reconstruct or retry the call.
     pending_tool_batch: dict | None = field(default=None, repr=False)
     approval_grants: list[dict] = field(default_factory=list, repr=False)
+    # Ephemeral OS resources supporting existing grants; never checkpointed.
+    _read_approval_pins: dict = field(default_factory=dict, repr=False)
     recovery: dict | None = field(default=None, repr=False)
     lifecycle_finalized: bool = False
         # Set after Host post-processing (for example worktree sealing). A

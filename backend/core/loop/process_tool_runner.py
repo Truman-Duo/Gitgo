@@ -52,7 +52,8 @@ class ProcessToolRunner:
 
     def run(self, tool_name: str, args: dict,
             timeout: float | None = None,
-            cancellation_event: threading.Event | None = None) -> SubprocessResult:
+            cancellation_event: threading.Event | None = None,
+            *, read_binding=None) -> SubprocessResult:
         """在子进程中执行工具。
 
         Args:
@@ -81,6 +82,12 @@ class ProcessToolRunner:
                 raise SandboxDenied("SANDBOX_POLICY_INVALID", "Unknown Host-registered process handler.")
             # Every registered child handler is native; missing names or future
             # registrations can never fall through to ordinary subprocess.Popen.
+            if read_binding is not None:
+                from .read_approval import ActiveRead
+                if type(read_binding) is not ActiveRead or binding.execution_contract.file_action != "read_existing_file":
+                    raise SandboxDenied("SANDBOX_POLICY_INVALID", "Invalid approved read handoff")
+                input_data["_approved_read"] = read_binding.payload(args)
+                effective_timeout = min(effective_timeout, read_binding.remaining())
             child_env = os.environ.copy()
             source_root = Path(__file__).resolve().parents[3]
             from backend.core.sandbox import SandboxPolicy, sandbox_environment, sandbox_popen
@@ -120,6 +127,10 @@ class ProcessToolRunner:
                 stderr_str = ""
                 first = True
                 while True:
+                    if read_binding is not None:
+                        # Revocation during launch/read also terminates the
+                        # native tree before the pipeline releases its pins.
+                        read_binding.remaining()
                     if cancellation_event is not None and cancellation_event.is_set():
                         self._kill_tree(proc)
                         return SubprocessResult(
@@ -142,6 +153,8 @@ class ProcessToolRunner:
                     except subprocess.TimeoutExpired:
                         first = False
                         continue
+                if read_binding is not None:
+                    read_binding.remaining()
                 duration_ms = (time.monotonic() - start) * 1000
                 close_job(getattr(proc, "_gitgo_job_handle", None))
                 proc._gitgo_job_handle = None

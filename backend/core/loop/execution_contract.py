@@ -22,10 +22,15 @@ class ExecutionContract:
     kind: ExecutionType
     broker: str = ""
     version: int = 1
+    file_action: str = ""
 
     def __post_init__(self):
         if not isinstance(self.kind, ExecutionType) or type(self.version) is not int or self.version != 1:
             raise ValueError("Unknown execution contract type/version")
+        if self.file_action not in {"", "read_existing_file"}:
+            raise ValueError("Unknown file action")
+        if self.file_action and self.kind != ExecutionType.NATIVE_PROCESS:
+            raise ValueError("File reads require the native helper")
         if self.kind in {ExecutionType.DATA_BROKER, ExecutionType.EXTERNAL_SERVICE}:
             if not isinstance(self.broker, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{2,95}", self.broker):
                 raise ValueError("A named Host broker is required")
@@ -33,7 +38,7 @@ class ExecutionContract:
             raise ValueError("Internal/native execution cannot name a broker")
 
     def to_dict(self):
-        return {"version": self.version, "kind": self.kind.value, "broker": self.broker}
+        return {"version": self.version, "kind": self.kind.value, "broker": self.broker, "file_action": self.file_action}
 
 
 def data_broker(name: str) -> ExecutionContract:
@@ -42,3 +47,4 @@ def data_broker(name: str) -> ExecutionContract:
 
 HOST_COMPUTE = ExecutionContract(ExecutionType.HOST_COMPUTE)
 NATIVE_PROCESS = ExecutionContract(ExecutionType.NATIVE_PROCESS)
+NATIVE_FILE_READ = ExecutionContract(ExecutionType.NATIVE_PROCESS, file_action="read_existing_file")

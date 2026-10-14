@@ -199,7 +199,9 @@ def test_new_handler_requires_native_launch_without_name_allowlist(tmp_path_fact
 def test_legacy_file_aliases_declare_native_execution():
     bindings = runner.handler_bindings()
     for name in ("file_read", "file_write", "file_edit", "file_delete", "read_file", "write_file"):
-        assert bindings[name].execution_contract == NATIVE_PROCESS
+        assert bindings[name].execution_contract.kind == ExecutionType.NATIVE_PROCESS
+        assert bindings[name].execution_contract.file_action == (
+            "read_existing_file" if name in {"read_file", "file_read"} else "")
 
 
 def test_execution_contract_change_invalidates_bound_grant():
