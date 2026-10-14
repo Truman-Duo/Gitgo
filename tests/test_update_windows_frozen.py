@@ -106,14 +106,15 @@ def test_actual_active_windows_host_holds_admission_until_clean_exit(actual_lab)
     assert tree_digest(store.root / "active") == before
 
 
-def test_actual_windows_installer_and_unicode_powershell_command(actual_lab):
+@pytest.mark.parametrize("shell", ["pwsh.exe", "powershell.exe"], ids=["ps7", "ps51"])
+def test_actual_windows_installer_and_unicode_powershell_command(actual_lab, shell):
     from backend.core.process_control import spawn_managed, terminate_tree
     from backend.core.process_output import collect_output
     store, _, _, _, old, _, env = actual_lab
     base = store.root.parent
     root, bin_dir = base / "独立 安装", base / "独立 命令"
     seed = base / "seed"
-    installer = spawn_managed(["pwsh.exe", "-NoProfile", "-File", str(seed / "install-managed.ps1"),
+    installer = spawn_managed([shell, "-NoProfile", "-File", str(seed / "install-managed.ps1"),
         "-Root", str(root), "-BinDir", str(bin_dir), "-ProtectedPath", str(base / "protected")],
         env=env, cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
     output, errors, _ = collect_output(installer, timeout=180, limit=65536,
@@ -162,12 +163,12 @@ except Exception as error:
     assert open_managed(root).registration["bootstrap_api"] == 7
     command = bin_dir / "gitgo.ps1"
     assert command.read_bytes().startswith(b"\xef\xbb\xbf")
-    launch = subprocess.run(["pwsh.exe", "-NoProfile", "-File", str(command), "--version"], env=env,
+    launch = subprocess.run([shell, "-NoProfile", "-File", str(command), "--version"], env=env,
         cwd=base, capture_output=True, text=True, timeout=120)
     assert launch.returncode == 0, launch.stderr
     assert launch.stdout.strip() == "Gitgo " + old
     before = (root / "control/ledger.json").read_bytes()
-    duplicate = subprocess.run(["pwsh.exe", "-NoProfile", "-File", str(seed / "install-managed.ps1"),
+    duplicate = subprocess.run([shell, "-NoProfile", "-File", str(seed / "install-managed.ps1"),
         "-Root", str(root), "-BinDir", str(bin_dir)], env=env,
         cwd=base, capture_output=True, text=True, timeout=60)
     assert duplicate.returncode != 0

@@ -331,8 +331,16 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
         # Do not rewrite the user's global execution policy or PATH profile.
         # No PowerShell parameter binding: preserve native switches such as
         # --version as argv, instead of treating them as script parameters.
-        content = ("$ErrorActionPreference = 'Stop'\n& '" + host +
-                   "' --gitgo-internal-role managed-launch @args\nexit $LASTEXITCODE\n")
+        quote_function = r'''function ConvertTo-GitgoNativeArgument([string]$Value) {
+    '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+'''
+        content = ("$ErrorActionPreference = 'Stop'\n" + quote_function +
+            "$nativeArguments = (@('--gitgo-internal-role', 'managed-launch') + $args | "
+            "ForEach-Object { ConvertTo-GitgoNativeArgument $_ }) -join ' '\n"
+            "$child = Start-Process -FilePath '" + host + "' -ArgumentList $nativeArguments "
+            "-NoNewWindow -Wait -PassThru\n"
+            "try { $childExit = $child.ExitCode } finally { $child.Dispose() }\nexit $childExit\n")
         from .windows_storage import open_file
         descriptor = open_file(command, create=True, write=True)
         with os.fdopen(descriptor, "wb") as handle:
