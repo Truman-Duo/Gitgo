@@ -53,7 +53,7 @@ def test_external_symlink_cannot_be_release_asset(tmp_path_factory):
 
 def test_required_native_and_runtime_jobs_are_in_gate():
     ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
-    required = {'runtime', 'unix-packages', 'windows-package'}
+    required = {'runtime', 'unix-packages', 'windows-package', 'managed-update-windows', 'managed-update-linux'}
     assert required <= set(ci['jobs']['gate']['needs'])
     check = ci['jobs']['gate']['steps'][0]['run']
     for name in required: assert repr(name) in check
@@ -64,7 +64,7 @@ def test_required_native_and_runtime_jobs_are_in_gate():
     } == {(x['os'], x['target']) for x in native['jobs']['accept']['strategy']['matrix']['include']}
 
 def test_all_external_actions_are_pinned_and_checkout_does_not_persist_credentials():
-    for name in ('ci.yml', 'linux-package.yml', 'dashboard-runtime.yml'):
+    for name in ('ci.yml', 'linux-package.yml', 'dashboard-runtime.yml', 'linux-update.yml', 'windows-update.yml'):
         workflow = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())
         for job in workflow['jobs'].values():
             for step in job.get('steps', []):

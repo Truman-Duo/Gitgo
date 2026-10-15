@@ -1,6 +1,7 @@
 name: Linux update acceptance
 
 on:
+  workflow_call:
   push:
     branches: [test/21-windows-update]
     paths-ignore:

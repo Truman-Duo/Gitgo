@@ -36,7 +36,7 @@ API 6 的 macOS 持久身份使用内核 `fgetattrlist(ATTR_VOL_INFO | ATTR_VOL_
 
 安装使用锁以已验证的真实文件描述符传给拥有的 Unix supervisor 和它的 worker；启动进程关闭自己的描述符后，仍在使用程序的子进程继续持有内核锁。Native Host、daemon、工具运行器和 Python 子角色在普通应用初始化前，也从实际可执行文件的物理位置核对管理安装、重新取得共享锁。调用方的环境根目录或数字不能替代登记和真实描述符。
 
-现有 daemon、工具运行、搜索与文档转换子进程保留安装租约；进程范围仍采用原有 owned Unix supervisor。macOS owned-session-only 的清理不完整事实保持不变，不能因此进行即时程序替换；API 5 的替换必须等待真实内核启动标识改变。
+现有 daemon、工具运行、搜索与文档转换子进程保留安装租约；进程范围仍采用原有 owned Unix supervisor。macOS owned-session-only 的清理不完整事实保持不变，不能因此进行即时程序替换；API 6 的替换必须等待真实内核启动标识改变。
 
 直接打开 `active/gitgo` 或其 Node companion 时，Dashboard 也在 launch-session/profile 初始化前请求固定 bootstrap 的租约。bootstrap 持有真实共享锁，以有界 nonce/版本报告确认，直到前端 stdin 管道关闭；租约异常退出时前端停止。`--version` 是不初始化用户资料的只读例外。该早期入口不接受环境变量作为管理安装凭据。
 
