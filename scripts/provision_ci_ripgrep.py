@@ -20,6 +20,8 @@ ARCHIVES = {
         '71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5'),
     'linux': ('x86_64-unknown-linux-musl.tar.gz',
         '33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c'),
+    'linux-aarch64': ('aarch64-unknown-linux-musl.tar.gz',
+        '800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915'),
     'darwin-arm64': ('aarch64-apple-darwin.tar.gz',
         '3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4'),
     'darwin-x86_64': ('x86_64-apple-darwin.tar.gz',
@@ -45,7 +47,13 @@ def archive_notices(entries):
 def main():
     if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
         raise SystemExit('Only disposable GitHub-hosted CI is supported')
-    key = f'darwin-{platform.machine()}' if sys.platform == 'darwin' else sys.platform
+    machine = platform.machine()
+    key = f'darwin-{machine}' if sys.platform == 'darwin' else sys.platform
+    if sys.platform == 'linux':
+        if machine in ('aarch64', 'arm64'):
+            key = 'linux-aarch64'
+        elif machine not in ('x86_64', 'amd64'):
+            raise SystemExit('Unsupported Linux ripgrep architecture')
     suffix, expected = ARCHIVES[key]
     name = f'ripgrep-{VERSION}-{suffix}'
     url = f'https://github.com/BurntSushi/ripgrep/releases/download/{VERSION}/{name}'

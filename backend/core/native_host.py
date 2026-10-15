@@ -76,6 +76,7 @@ class NativeHost:
         self._active_processes: dict[str, tuple[str, str]] = {}
         self._admission_requests: dict[str, tuple[str, str]] = {}
         self._cancelled_requests: set[str] = set()
+        self._update_requests: dict[str, str] = {}
         from backend.core.application.request_memo import RequestMemo
         self._request_memo = RequestMemo()
         self._btw_requests: dict[str, tuple[str, str]] = {}
@@ -1408,6 +1409,10 @@ class NativeHost:
         }, action="resume")
 
     def _cancel(self, target_request_id: str) -> dict:
+        with self._daemon_lock:
+            update_id = self._update_requests.get(target_request_id)
+        if update_id is not None:
+            return self.services.update_cancel(update_id)
         active = self._active_processes.get(target_request_id)
         if active is not None:
             project, process_id = active
@@ -1549,6 +1554,13 @@ class NativeHost:
                     },
                 })
             return result
+        if operation in {"update.check", "update.download", "update.request_apply", "update.request_rollback", "update.cancel_pending"}:
+            update_id = arguments.get("operation_id")
+            if request_id and type(update_id) is str:
+                with self._daemon_lock: self._update_requests[request_id] = update_id
+            try: return self.services.invoke(operation, arguments)
+            finally:
+                with self._daemon_lock: self._update_requests.pop(request_id, None)
         return self.services.invoke(operation, arguments)
 
     def _handle_request(self, request: dict) -> None:
@@ -1645,6 +1657,8 @@ class NativeHost:
         if self._stopping.is_set():
             return
         self._stopping.set()
+        updates = getattr(self.services, "updates", None)
+        if updates is not None: updates.close()
         if self._maintenance_thread is not None:
             self._maintenance_thread.join(timeout=15)
         # Explicitly request cancellation before daemon shutdown. This shortens
