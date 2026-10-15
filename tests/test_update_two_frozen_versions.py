@@ -210,6 +210,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
     import struct
     import termios
     import re
+    from tests.terminal_screen import TerminalScreen
     store, prepare, _, before, old_version, new_version, env = actual_lab
     prepare()
     profile = Path(env["GITGO_CONFIG_PATH"]).parent
@@ -222,18 +223,29 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         env={**env, "TERM": "xterm-256color"}, start_new_session=True)
     os.close(slave)
     output = bytearray()
+    screen = TerminalScreen(40, 120)
+    last_frame = 0
     def wait_for(text, *, after=0, timeout=120):
+        nonlocal last_frame
         deadline = time.monotonic() + timeout
         def displayed():
-            value = output[after:].decode("utf-8", "replace")
-            # Ink optimizes spaces into cursor-forward commands in a real TTY.
-            value = re.sub(r"\x1b\[(\d+)C", lambda match: " " * min(int(match[1]), 200), value)
-            return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value).replace("\r", "")
+            # Ink can reuse old cells in the middle of words. Stripping ANSI
+            # cannot reconstruct a display; apply actual cursor/erase commands.
+            if '"update_status"' in text:
+                return output[after:].decode("utf-8", "replace")
+            return screen.text() if last_frame > after else ""
         while text not in displayed():
-            assert time.monotonic() < deadline, f"actual UI did not reach {text!r}"
+            known_states = [value for value in ("Reading local update status", "Update status unavailable",
+                "Current version", "Downloaded and verified", "Restart/update is unavailable")
+                if value in screen.text()]
+            codes = sorted(set(re.findall(r"\bUPDATE_[A-Z_]{1,64}\b", screen.text())))
+            assert time.monotonic() < deadline, f"actual UI did not reach {text!r}; states={known_states}; codes={codes}"
             assert proc.poll() is None, "actual managed UI stopped unexpectedly"
             if select.select([master], [], [], .1)[0]:
-                output.extend(os.read(master, 65536))
+                chunk = os.read(master, 65536)
+                output.extend(chunk)
+                screen.feed(chunk)
+                last_frame = len(output)
                 assert len(output) < 4 * 1024**2, "bounded test terminal output exceeded limit"
     def send(text): os.write(master, text.encode()); time.sleep(.15)
     def update_panel():
