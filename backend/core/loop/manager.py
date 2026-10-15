@@ -1027,14 +1027,21 @@ class SessionStore:
         if lock is None:
             lock = threading.RLock()
             process._checkpoint_lock = lock
-        with lock:
-            restored_source = getattr(process.session, "_restored_checkpoint_source", None)
-            if restored_source is not None and restored_source[0] == process.process_id:
-                process.durable_revision = restored_source[1]
-                del process.session._restored_checkpoint_source
-            ref = self._save_process_checkpoint(process)
-            process.durable_revision = ref.revision
-            return ref
+        from backend.core.storage import StorageCommitUnknown
+        try:
+            with lock:
+                restored_source = getattr(process.session, "_restored_checkpoint_source", None)
+                if restored_source is not None and restored_source[0] == process.process_id:
+                    process.durable_revision = restored_source[1]
+                    del process.session._restored_checkpoint_source
+                ref = self._save_process_checkpoint(process)
+                process.durable_revision = ref.revision
+                return ref
+        except StorageCommitUnknown:
+            # Release the checkpoint lock before acquiring the lifecycle lock.
+            from .lifecycle import block_uncertain_checkpoint
+            block_uncertain_checkpoint(process)
+            raise
 
     def _save_process_checkpoint(self, process: AgentProcess) -> str:
         """Persist process, task, messages and receipts in one SQLite commit."""

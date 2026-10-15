@@ -12,6 +12,23 @@ class InvalidTransition(ValueError):
     code = "PROCESS_TRANSITION_REJECTED"
 
 
+def block_uncertain_checkpoint(process):
+    """Stop local continuation without pretending a durable decision rolled back."""
+    from .models import ProcessStatus
+    from .read_approval import revoke_read_requests
+    with process._coordination_lock:
+        if process.status.value not in TERMINAL:
+            process.status = ProcessStatus.RECOVERY_REVIEW_REQUIRED
+        process.pending_decision = None
+        process.pending_tool_batch = None
+        process.approval_grants = []
+        process.recovery = {**(process.recovery or {}),
+            "state": "recovery_review_required", "resume_forbidden": True,
+            "requires_manual_verification": True,
+            "checkpoint_commit": "unknown"}
+        revoke_read_requests(process)
+
+
 def validate_transition(previous: str, proposed: str) -> None:
     if previous == proposed:
         return

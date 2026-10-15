@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from .ports import CheckpointsPort
 from ..support import _utc_now
+from ..transactions import authoritative_transaction
 
 def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
     """Atomically persist one process/session/task boundary.
@@ -12,6 +13,7 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
     it can never expose a partial authoritative checkpoint.
     """
     self._ensure_open()
+    self._state.require_available()
     process_id = str(snapshot.get("process_id", "")).strip()
     session_id = str(snapshot.get("session_id", "")).strip()
     if not process_id or not session_id:
@@ -104,8 +106,7 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
         str(item) for item in (snapshot.get("depends_on") or []) if str(item)
     ))
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             from ..lifecycle import check_revision, check_transition
             previous_revision = check_revision(self._state, process_id, snapshot.get("expected_revision"))
             check_transition(self._state, process_id, snapshot, self._read_json_blob)
@@ -356,9 +357,5 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
                         project_id=self.paths.project_id, session_id=session_id, task_id=task_id, process_id=process_id,
                         stream_id=f"ledger:{process_id}", sequence=sequence, payload_ref=barrier["ref"], occurred_at=now,
                         causation_id=f"checkpoint:{process_id}:{committed_revision}")
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     from ..lifecycle import CheckpointRef
     return CheckpointRef(f"sqlite:session/{process_id}/{checkpoint_sequence}", committed_revision)

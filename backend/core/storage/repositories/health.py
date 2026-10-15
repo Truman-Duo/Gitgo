@@ -81,6 +81,9 @@ def _health_from_measurement(self) -> StorageHealth:
             StorageHealthLevel.BLOCKED
             if database == "state" else StorageHealthLevel.DEGRADED
         )
+    if self._state.quarantined:
+        reasons.append("state_commit_unknown")
+        raise_level(StorageHealthLevel.BLOCKED)
     for reason in sorted(self._cas_reference_reasons.values()):
         reasons.append(reason)
         raise_level(
@@ -103,8 +106,9 @@ def _health_from_measurement(self) -> StorageHealth:
 
 def check_health(self: HealthPort, *, force_publish: bool = False) -> StorageHealth:
     self._ensure_open()
-    self._refresh_integrity_status(force=force_publish)
-    self._refresh_cas_reference_status(force=force_publish)
+    if not self._state.quarantined:
+        self._refresh_integrity_status(force=force_publish)
+        self._refresh_cas_reference_status(force=force_publish)
     with self._health_lock:
         health = self._health_from_measurement()
         previous = self._last_health

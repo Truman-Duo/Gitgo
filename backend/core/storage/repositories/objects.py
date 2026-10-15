@@ -43,6 +43,7 @@ def _write_blob_file(
 ) -> dict:
     """Write one immutable file without opening a SQLite transaction."""
     self._ensure_open()
+    self._state.require_available()
     if len(data) > self.policy.max_cas_object_bytes:
         raise StorageBlocked("cas_object_too_large")
     digest = hashlib.sha256(data).hexdigest()

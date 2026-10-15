@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -423,6 +424,7 @@ class StorageRuntime:
         return max(4096, logical_bytes * self.policy.sqlite_write_amplification_reserve)
 
     def _reserve_authoritative_write(self, logical_bytes: int) -> None:
+        self._state.require_available()
         self._ensure_authoritative_capacity(self._estimated_sqlite_write(logical_bytes))
         if not self._global_sqlite_budget.reserve(
             self._estimated_sqlite_write(logical_bytes)
@@ -769,7 +771,7 @@ class StorageRuntime:
         # records nothing; a long-lived daemon contributes at most one cadence
         # sample and one bounded retention batch before the passive checkpoint.
         try:
-            if not self._integrity_reasons:
+            if not self._integrity_reasons and not self._state.quarantined:
                 self.record_storage_metric()
                 self.maintain_observability()
                 self.maintain_cas()
@@ -781,7 +783,7 @@ class StorageRuntime:
         with self._state_lock, self._observability_lock:
             for name, connection in (("state", self._state), ("observability", self._observability)):
                 try:
-                    if name not in self._integrity_reasons:
+                    if name not in self._integrity_reasons and not connection.quarantined:
                         connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 except BaseException as exc:
                     errors.append(exc)
@@ -813,6 +815,22 @@ class StorageRuntime:
 
     def claim_command(self, key: str, fingerprint: str, *, process_id: str = "") -> dict:
         return _commands_repository.claim_command(self, key, fingerprint, process_id=process_id)
+
+    def lookup_command(self, key: str, fingerprint: str) -> dict:
+        """Read committed identity only; absence never grants execution."""
+        return _commands_repository.lookup_command(self, key, fingerprint)
+
+    @contextmanager
+    def _committed_state_reader(self):
+        """Own a fresh read-only connection; never run migrations or repair CAS."""
+        self._ensure_open()
+        connection = sqlite3.connect(self.paths.state_db.as_uri() + '?mode=ro',
+                                     uri=True, timeout=1, isolation_level=None)
+        try:
+            connection.execute('PRAGMA query_only=ON')
+            yield connection
+        finally:
+            connection.close()
 
     def complete_command(self, key: str, fingerprint: str, result: dict) -> None:
         _commands_repository.complete_command(self, key, fingerprint, result)

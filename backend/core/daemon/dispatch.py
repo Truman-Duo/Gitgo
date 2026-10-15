@@ -19,7 +19,7 @@ from pathlib import Path
 from backend.core.config import ConfigManager, ProjectConfig
 from backend.core.sync_session import SyncSession
 from backend.core.errors import error_payload
-from backend.core.storage import StorageReferenceMissing
+from backend.core.storage import StorageCommitUnknown, StorageReferenceMissing
 from backend.core.daemon.emit import _emit as _emit_global
 from backend.core.daemon.persist import _save_session_checkpoint
 from backend.core.daemon.policy_helpers import (
@@ -1657,6 +1657,13 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         try:
             if store is not None:
                 store.save_process_checkpoint(process)
+        except StorageCommitUnknown:
+            from backend.core.loop.lifecycle import block_uncertain_checkpoint
+            block_uncertain_checkpoint(process)
+            emit({"event": "command_result", "cmd": "task",
+                  "error": "DECISION_COMMIT_UNKNOWN", "details": {
+                      "decision_id": decision_id, "automatic_replay_suppressed": True}})
+            return
         except Exception as exc:
             process.status = ProcessStatus.AWAITING_USER  # Uncommitted prepare rollback.
             process.pending_decision = pending
@@ -2333,6 +2340,11 @@ def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
             key, digest, _ = command_claim
             try:
                 storage.complete_command(key, digest, {k: v for k, v in ev.items() if k != "request_id"})
+            except StorageCommitUnknown:
+                _emit_global({"event": "command_result", "cmd": cmd_name, "request_id": request_id,
+                    "error": "STORAGE_COMMIT_UNKNOWN", "details": {
+                        "command_id": key, "automatic_replay_suppressed": True}})
+                return
             except Exception as exc:
                 _emit_global({"event": "command_result", "cmd": cmd_name, "request_id": request_id,
                     "error": "COMMAND_RECEIPT_WRITE_FAILED", "details": {
@@ -2371,6 +2383,12 @@ def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,
                 return
             command_claim = admitted
         handler(cmd, session, project, daemon_ctx, emit)
+    except StorageCommitUnknown:
+        # Do not route through emit: it could attempt another receipt write.
+        _emit_global({"event": "command_result", "cmd": cmd_name, "request_id": request_id,
+            "error": "STORAGE_COMMIT_UNKNOWN", "details": {
+                "command_id": str(cmd.get("command_id") or "")[:256],
+                "automatic_replay_suppressed": True}})
     except StorageReferenceMissing as exc:
         payload = error_payload(
             "STORAGE_CAS_REFERENCE_MISSING",
