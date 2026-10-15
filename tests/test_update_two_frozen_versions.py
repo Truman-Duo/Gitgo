@@ -240,7 +240,10 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         start = len(output)
         send("/"); send("update"); send("\r")
         wait_for("Gitgo Software Update", after=start)
-        time.sleep(.5)
+        # The title renders before the Host's full status/inventory response.
+        # While loading, the product correctly ignores channel/apply hotkeys.
+        # Wait for actual data instead of assuming a worker finishes in 0.5s.
+        wait_for("Current version", after=start)
     try:
         wait_for("Providers")  # Expected first launch without API credentials.
         send("\x1b")
