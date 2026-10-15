@@ -3,6 +3,10 @@ name: Windows update acceptance
 on:
   push:
     branches: [test/21-windows-update]
+    paths-ignore:
+      - .github/workflows/linux-update.yml
+      - scripts/linux_update_ci_build.py
+      - docs/**
   workflow_dispatch:
 
 permissions:
