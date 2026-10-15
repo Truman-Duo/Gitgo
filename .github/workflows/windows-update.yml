@@ -6,6 +6,7 @@ on:
     paths-ignore:
       - .github/workflows/linux-update.yml
       - scripts/linux_update_ci_build.py
+      - tests/test_update_two_frozen_versions.py
       - docs/**
   workflow_dispatch:
 
