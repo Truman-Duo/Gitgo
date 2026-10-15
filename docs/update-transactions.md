@@ -1,5 +1,7 @@
 # 更新事务：模拟验收范围
 
+后续管理实现的当前实包证据见 [Linux 双架构验收](linux-managed-update.md)与 [Windows 管理更新](windows-managed-update.md)。下文保留早期模拟阶段及历史限制，不应据此否定或扩大上述独立实包证据。
+
 关联：[安全自动更新与回滚 #21](https://github.com/Truman-Duo/Gitgo/issues/21)。前置行为见[更新检查与隔离解压](update-discovery.md)。
 
 ## 当前状态
