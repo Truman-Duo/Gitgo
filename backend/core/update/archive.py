@@ -174,6 +174,24 @@ def _write_entries(entries, opener, destination, limits, checkpoint, *, wrapped)
     return destination / root
 
 
+class _BoundedTarInfo(tarfile.TarInfo):
+    """Reject oversized extension records before stdlib assembles their bodies.
+
+    New Python versions can assemble one body from several smaller reads, so
+    limiting an individual file-object read does not bound one PAX/GNU record.
+    """
+
+    def _proc_pax(self, archive):
+        if self.size > 1024**2:
+            reject("UPDATE_ARCHIVE_LIMIT", "Tar extension exceeds its limit")
+        return super()._proc_pax(archive)
+
+    def _proc_gnulong(self, archive):
+        if self.size > 1024**2:
+            reject("UPDATE_ARCHIVE_LIMIT", "Tar extension exceeds its limit")
+        return super()._proc_gnulong(archive)
+
+
 class _TarReader:
     """Bound tarfile's individual metadata reads before it allocates PAX bodies."""
 
@@ -226,7 +244,7 @@ def _extract_tar(source, destination, work, limits, checkpoint):
             reject("UPDATE_ARCHIVE_INVALID", "Gzip member was truncated")
     with plain.open("rb") as handle:
         reader = _TarReader(handle, limits.metadata_bytes)
-        with tarfile.open(fileobj=reader, mode="r:") as archive:
+        with tarfile.open(fileobj=reader, mode="r:", tarinfo=_BoundedTarInfo) as archive:
             return _read_tar_entries(archive, reader, destination, limits, checkpoint)
 
 

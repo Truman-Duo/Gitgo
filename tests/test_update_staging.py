@@ -368,13 +368,22 @@ prepare_update(POLICY, CURRENT, keys[1], staging_parent=Path(sys.argv[1]),
     # arbitrary leftovers or treats them as active installations.
 
 
-def test_pax_metadata_read_is_bounded_before_allocating_big_body(signing, locations):
+@pytest.mark.parametrize("kind", ["pax", "gnu-name", "gnu-link"])
+def test_pax_metadata_read_is_bounded_before_allocating_big_body(signing, locations, kind):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
         member = tarfile.TarInfo("bundle/file")
         member.size = 1
-        member.pax_headers = {"comment": "x" * (1024**2 + 1)}
-        archive.addfile(member, io.BytesIO(b"a"))
+        if kind == "pax":
+            member.pax_headers = {"comment": "x" * (1024**2 + 1)}
+            archive.addfile(member, io.BytesIO(b"a"))
+        else:
+            extension = tarfile.TarInfo("././@LongLink")
+            extension.type = tarfile.GNUTYPE_LONGNAME if kind == "gnu-name" else tarfile.GNUTYPE_LONGLINK
+            data = b"x" * (1024**2 + 1) + b"\0"
+            extension.size = len(data)
+            archive.addfile(extension, io.BytesIO(data))
+            archive.addfile(member, io.BytesIO(b"a"))
     # Uncompressed gzip avoids the separate ratio limit masking metadata checks.
     body = gzip.compress(output.getvalue(), compresslevel=0)
     with pytest.raises(UpdateError, match="UPDATE_ARCHIVE_LIMIT"):
