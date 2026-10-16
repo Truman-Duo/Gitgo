@@ -7,6 +7,8 @@ This complements SQLite's locks; it does not serialize normal SQL traffic.
 from __future__ import annotations
 
 import os
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import StorageBlocked
@@ -47,17 +49,33 @@ class StorageMaintenanceActive(StorageBlocked):
     code = "STORAGE_MAINTENANCE_BUSY"
 
 
+def _lock_file(handle, *, exclusive: bool):
+    if os.name == "nt":
+        return _windows_lock(handle, exclusive=exclusive)
+    import fcntl
+    fcntl.flock(handle.fileno(),
+                (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    return None
+
+
+def _unlock_file(handle, state) -> None:
+    if os.name == "nt":
+        _windows_lock(handle, exclusive=False, unlock=True, overlapped=state)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class StorageLease:
     def __init__(self, project_root: Path, *, exclusive: bool = False):
-        self.path = project_root / "storage-maintenance.lock"
+        self.path = project_root.resolve() / "storage-maintenance.lock"
+        self._pid = os.getpid()
+        self._mutex = threading.RLock()
+        self._users = 0
         self._handle = self.path.open("a+b")
         try:
-            if os.name == "nt":
-                self._overlapped = _windows_lock(self._handle, exclusive=exclusive)
-            else:
-                import fcntl
-                fcntl.flock(self._handle.fileno(),
-                            (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+            os.set_inheritable(self._handle.fileno(), False)
+            self._overlapped = _lock_file(self._handle, exclusive=exclusive)
         except OSError as exc:
             self._handle.close()
             raise StorageMaintenanceActive(
@@ -65,20 +83,43 @@ class StorageLease:
                 "before recovery, then retry. No database was replaced."
             ) from exc
 
-    def close(self) -> None:
-        if self._handle.closed:
-            return
+    def require_active(self) -> None:
+        # Do this before touching a potentially inherited Python mutex.
+        if os.getpid() != self._pid:
+            raise StorageBlocked("STORAGE_LEASE_PROCESS_CHANGED")
+        with self._mutex:
+            if self._handle.closed:
+                raise StorageBlocked("STORAGE_LEASE_CLOSED")
+
+    @contextmanager
+    def use(self):
+        """Prevent maintenance admission from disappearing during an operation."""
+        self.require_active()
+        with self._mutex:
+            self.require_active()
+            self._users += 1
         try:
-            if os.name == "nt":
-                _windows_lock(self._handle, exclusive=False, unlock=True,
-                              overlapped=self._overlapped)
-            else:
-                import fcntl
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            yield
         finally:
-            self._handle.close()
+            if os.getpid() == self._pid:
+                with self._mutex:
+                    self._users -= 1
+
+    def close(self) -> None:
+        if os.getpid() != self._pid:
+            raise StorageBlocked("STORAGE_LEASE_PROCESS_CHANGED")
+        with self._mutex:
+            if self._handle.closed:
+                return
+            if self._users:
+                raise StorageBlocked("STORAGE_LEASE_IN_USE")
+            try:
+                _unlock_file(self._handle, self._overlapped)
+            finally:
+                self._handle.close()
 
     def __enter__(self):
+        self.require_active()
         return self
 
     def __exit__(self, *_args):

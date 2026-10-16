@@ -187,6 +187,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: python -B scripts/provision_ci_sqlite.py
       - run: python -B scripts/provision_ci_ripgrep.py
+      - name: CAS format admission and process ordering foundations
+        run: >-
+          python -B -m pytest tests/test_cas_lifecycle_ordering.py
+          tests/test_storage_protocol_admission.py tests/test_storage_recovery_boundaries.py
+          tests/test_storage_transaction_outcomes.py tests/test_sqlite_storage.py -q
       - name: Windows ACL preflight
         if: runner.os == 'Windows'
         run: |

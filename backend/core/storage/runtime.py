@@ -34,6 +34,7 @@ from .paths import (
 )
 from .redaction import redact_for_persistence
 from .maintenance import StorageLease
+from .protocol import require_legacy_storage_format
 
 
 from .repositories import objects as _objects_repository
@@ -278,6 +279,7 @@ class StorageRuntime:
         *,
         authoritative: bool,
     ) -> sqlite3.Connection:
+        migrations = tuple(migrations)
         _validate_sqlite_file_shape(path)
         is_new = not path.exists()
         connection = sqlite3.connect(
@@ -289,6 +291,13 @@ class StorageRuntime:
         )
         connection.row_factory = sqlite3.Row
         try:
+            try:
+                require_legacy_storage_format(connection, migrations)
+            except sqlite3.DatabaseError as error:
+                code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+                if code in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+                    raise StorageCorruptionDetected(str(path), str(error)[:500]) from error
+                raise
             if not is_new:
                 integrity_error = _quick_check(connection)
                 if integrity_error:
@@ -349,6 +358,8 @@ class StorageRuntime:
     def _apply_migrations(
         connection: sqlite3.Connection, migrations: Iterable[Migration]
     ) -> None:
+        migrations = tuple(migrations)
+        require_legacy_storage_format(connection, migrations)
         connection.execute(
             """CREATE TABLE IF NOT EXISTS schema_migrations (
                    version INTEGER PRIMARY KEY,
@@ -396,6 +407,20 @@ class StorageRuntime:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("StorageRuntime is closed")
+        self._maintenance_lease.require_active()
+
+    @staticmethod
+    def require_legacy_state_file(path: Path) -> None:
+        """Offline tools must admit the source before copying or resetting it."""
+        validate_sqlite_runtime()
+        connection = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro", uri=True, timeout=.25,
+        )
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            require_legacy_storage_format(connection, STATE_MIGRATIONS)
+        finally:
+            connection.close()
 
     def set_health_listener(self, listener: Callable[[dict], None] | None) -> None:
         """Replace the event sink after the Daemon queue becomes available."""
@@ -766,6 +791,7 @@ class StorageRuntime:
     def close(self) -> None:
         if self._closed:
             return
+        self._maintenance_lease.require_active()
         errors: list[BaseException] = []
         # Shutdown is a natural low-frequency boundary.  A short-lived process
         # records nothing; a long-lived daemon contributes at most one cadence
