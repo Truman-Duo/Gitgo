@@ -32,9 +32,12 @@ supported-version/frozen checks and the complete writer/collector protocol.
 ## Ordering primitive
 
 `CasLifecycleLock` accepts an active StorageLease. Its project-local lock file
-is stable and remains on disk. Both the process-local coordinator and OS lock
-are acquired without waiting; contention reports `STORAGE_CAS_LIFECYCLE_BUSY`.
-Unexpected lock I/O failures propagate. Handles are non-inheritable.
+is stable and remains on disk. Each attempt opens an independent handle and
+acquires the OS lock without waiting; the native lock excludes both threads
+and processes. Contention reports `STORAGE_CAS_LIFECYCLE_BUSY`; unexpected
+lock I/O failures propagate. Handles are non-inheritable. The process-local
+coordinator tracks current token identity, without holding a Python mutex
+across the operation.
 
 The maintenance lease stays active for the entire operation and cannot be
 closed during it. Explicit nesting requires a currently issued parent token
@@ -50,6 +53,37 @@ cannot release this barrier after failed resource cleanup. Diagnostic failure
 after confirmed connection closure still releases the lease. Concurrent or
 callback-reentrant shutdown is refused; shutdown never waits for its own
 operation. This is an idle-only close contract, not Host bounded drain.
+
+Each borrow has an owner-private identity registered under the lease mutex,
+with exception cleanup established before registration. Exiting a failed
+borrow removes only its own registration. A rejected shutdown cannot clear
+another shutdown attempt; an interrupted admitted attempt stops borrowing but
+can be retried without resetting internal state.
+
+CAS registers its file handle before native lock acquisition. Even if the OS
+locks successfully and the wrapper raises before returning its result, the
+registered handle is closed. Only the current token can clear its coordinator
+identity. Explicit unlock failure still attempts handle closure. If closure
+does not confirm `closed`, the ended borrow remains as cleanup debt and stops
+new borrowing. Shutdown retries only these ended operations' exact handles;
+it never infers completion of a live borrower from PID, thread age or timeout.
+Until cleanup succeeds, direct lease close cannot bypass the maintenance
+barrier. These records are host-private bookkeeping, never caller-supplied
+release credentials or proof of durable execution/budget cleanup.
+
+The tested interruption model is one admission/body exception followed by
+normal unwinding, plus observable close failures with explicit retries. It is
+not a guarantee against arbitrary repeated asynchronous exceptions during
+cleanup, process kill or power loss. Host cancellation must eventually use
+controlled observation boundaries and protect cleanup from repeated cancel;
+the storage library does not install global signal handlers.
+
+Native tests must qualify independent-handle, thread and process exclusion on
+Windows, Linux and macOS, including POSIX fork without unlocking the parent.
+Local CI results do not qualify NFS, SMB or unknown mounts. Before writer/GC
+integration, storage placement must have an explicit supported lock contract;
+an unqualified environment must not enable CAS v2. This foundation does not
+add filesystem qualification or enable the macOS sandbox backend.
 
 The primitive currently has no writer/collector call sites. Future integration
 must acquire it before connection and CAS locks, drain operations before Runtime

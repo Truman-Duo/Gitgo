@@ -66,14 +66,22 @@ def _unlock_file(handle, state) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+class _LeaseBorrow:
+    """Owner-private registration, never a caller-supplied release credential."""
+
+    def __init__(self):
+        self.handle = None
+        self.cleanup_pending = False
+
+
 class StorageLease:
     def __init__(self, project_root: Path, *, exclusive: bool = False):
         self.path = project_root.resolve() / "storage-maintenance.lock"
         self._pid = os.getpid()
         self._mutex = threading.RLock()
-        self._users = 0
+        self._users: set[_LeaseBorrow] = set()
         self._closing = False
-        self._shutdown_active = False
+        self._shutdown_active: object | None = None
         self._handle = self.path.open("a+b")
         try:
             os.set_inheritable(self._handle.fileno(), False)
@@ -97,18 +105,25 @@ class StorageLease:
     @contextmanager
     def use(self):
         """Prevent maintenance admission from disappearing during an operation."""
+        attempt = _LeaseBorrow()
         self.require_active()
-        with self._mutex:
-            self.require_active()
-            if self._closing:
-                raise StorageBlocked('STORAGE_LEASE_CLOSING')
-            self._users += 1
         try:
-            yield
+            with self._mutex:
+                self.require_active()
+                if self._closing:
+                    raise StorageBlocked('STORAGE_LEASE_CLOSING')
+                self._users.add(attempt)
+            yield attempt
         finally:
             if os.getpid() == self._pid:
                 with self._mutex:
-                    self._users -= 1
+                    if attempt.handle is None or attempt.handle.closed:
+                        self._users.discard(attempt)
+                    else:
+                        # The operation has ended, but its registered handle
+                        # has not closed. Keep its exact debt and the barrier.
+                        self._closing = True
+                        attempt.cleanup_pending = True
 
     def close(self) -> None:
         if os.getpid() != self._pid:
@@ -138,34 +153,37 @@ class StorageLease:
         stay blocked, including after a failed cleanup. Only a successful body
         releases the physical lease. A failed body may be retried by its owner.
         """
+        attempt = object()
         if os.getpid() != self._pid:
             raise StorageBlocked('STORAGE_LEASE_PROCESS_CHANGED')
-        with self._mutex:
-            admitted = not self._handle.closed
-            if admitted:
-                if self._shutdown_active:
-                    raise StorageBlocked('STORAGE_LEASE_CLOSING')
-                if self._users:
-                    raise StorageBlocked('STORAGE_LEASE_IN_USE')
-                self._closing = True
-                self._shutdown_active = True
-        if not admitted:
-            yield False
-            return
         try:
-            yield True
-        except BaseException:
-            # Resources may be partially closed. Retain the barrier and deny
-            # operations until the owner retries and confirms cleanup.
-            raise
-        else:
-            if os.getpid() == self._pid:
+            with self._mutex:
+                admitted = not self._handle.closed
+                if admitted:
+                    if self._shutdown_active is not None:
+                        raise StorageBlocked('STORAGE_LEASE_CLOSING')
+                    if any(not user.cleanup_pending for user in self._users):
+                        raise StorageBlocked('STORAGE_LEASE_IN_USE')
+                    self._closing = True
+                    self._shutdown_active = attempt
+                    # Only ended operations with exact registered handles
+                    # may be retried. Live borrowers still return IN_USE.
+                    for user in tuple(self._users):
+                        user.handle.close()
+                        if not user.handle.closed:
+                            raise StorageBlocked('STORAGE_RESOURCE_CLOSE_UNKNOWN')
+                        self._users.discard(user)
+            yield admitted
+            if admitted and os.getpid() == self._pid:
                 with self._mutex:
+                    if self._shutdown_active is not attempt:
+                        raise StorageBlocked('STORAGE_SHUTDOWN_OWNER_CHANGED')
                     self._release_handle()
         finally:
             if os.getpid() == self._pid:
                 with self._mutex:
-                    self._shutdown_active = False
+                    if self._shutdown_active is attempt:
+                        self._shutdown_active = None
 
     def __enter__(self):
         self.require_active()

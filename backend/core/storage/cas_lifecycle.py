@@ -21,8 +21,19 @@ class CasLifecycleBusy(StorageBlocked):
 
 class _Coordinator:
     def __init__(self):
-        self.mutex = threading.Lock()
         self.active = None
+
+
+def _acquire_file_lock(handle):
+    # The caller registers the handle before this call. Error translation
+    # owns no resource; success-before-result faults still close that handle.
+    try:
+        return _lock_file(handle, exclusive=True)
+    except OSError as error:
+        if (getattr(error, 'winerror', None) not in {32, 33}
+                and error.errno not in {errno.EAGAIN, errno.EACCES}):
+            raise
+        raise CasLifecycleBusy(CasLifecycleBusy.code) from error
 
 
 _registry_mutex = threading.Lock()
@@ -71,7 +82,7 @@ class CasLifecycleLock:
     @contextmanager
     def operation(self, *, parent: CasOperation | None = None):
         owner_pid = os.getpid()
-        with self._lease.use():
+        with self._lease.use() as borrow:
             if parent is not None:
                 parent.require_active()
                 if (parent._lease is not self._lease
@@ -79,27 +90,25 @@ class CasLifecycleLock:
                     raise StorageBlocked("STORAGE_CAS_OPERATION_MISMATCH")
                 yield parent
                 return
-            if not self._coordinator.mutex.acquire(blocking=False):
-                raise CasLifecycleBusy(CasLifecycleBusy.code)
+            token = CasOperation(self._lease, self._coordinator)
+            # Independent handles let the native nonblocking lock arbitrate
+            # both threads and processes, without a Python acquisition gap.
             try:
-                with self.path.open("a+b") as handle:
-                    os.set_inheritable(handle.fileno(), False)
-                    try:
-                        state = _lock_file(handle, exclusive=True)
-                    except OSError as error:
-                        if (getattr(error, 'winerror', None) not in {32, 33}
-                                and error.errno not in {errno.EAGAIN, errno.EACCES}):
-                            raise
-                        raise CasLifecycleBusy(CasLifecycleBusy.code) from error
-                    token = CasOperation(self._lease, self._coordinator)
-                    self._coordinator.active = token
-                    try:
-                        yield token
-                    finally:
-                        token._active = False
-                        if os.getpid() == owner_pid:
-                            self._coordinator.active = None
-                            _unlock_file(handle, state)
+                borrow.handle = self.path.open("a+b")
+                os.set_inheritable(borrow.handle.fileno(), False)
+                state = _acquire_file_lock(borrow.handle)
+                self._coordinator.active = token
+                yield token
             finally:
-                if os.getpid() == owner_pid:
-                    self._coordinator.mutex.release()
+                try:
+                    token._active = False
+                    if (os.getpid() == owner_pid
+                            and self._coordinator.active is token):
+                        self._coordinator.active = None
+                        _unlock_file(borrow.handle, state)
+                finally:
+                    # Close also releases a lock whose result was never
+                    # returned. A fork child only closes its own copy; it
+                    # must not explicitly unlock the parent's shared lock.
+                    if borrow.handle is not None:
+                        borrow.handle.close()
