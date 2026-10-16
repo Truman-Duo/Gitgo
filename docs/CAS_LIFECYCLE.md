@@ -13,6 +13,13 @@ unknown migration version or unreadable history cannot be treated as a new
 database. Existing checksums remain authoritative. This runtime intentionally
 does not register the future protocol SQL function or expose an upgrade API.
 
+Reserved names are recognized regardless of ASCII letter case. Only an empty
+application schema, or the empty history table left before the first migration
+commits, can initialize without history. Existing application objects with
+missing/empty history are refused. Accepted history is a checksum-verified
+prefix of the known migrations; gaps, duplicates and non-integer versions do
+not authorize repair or re-creation of history.
+
 Offline salvage checks its isolated source before creating a destination.
 Disposable reset and both relocation paths check the source under exclusive
 maintenance before copying or replacing database families. These tools refuse
@@ -34,6 +41,15 @@ closed during it. Explicit nesting requires a currently issued parent token
 from the same lease and thread. Another Runtime, thread, expired token or
 inherited process cannot borrow that operation. Child cleanup after POSIX fork
 must not explicitly unlock the parent's open-file-description lock.
+
+Runtime shutdown atomically stops new borrowing. Active operations cause a
+retryable refusal before shutdown maintenance or connection closure. A failed
+connection close keeps the maintenance barrier, blocks new operations, and can
+be retried without re-closing confirmed closed connections. Direct lease close
+cannot release this barrier after failed resource cleanup. Diagnostic failure
+after confirmed connection closure still releases the lease. Concurrent or
+callback-reentrant shutdown is refused; shutdown never waits for its own
+operation. This is an idle-only close contract, not Host bounded drain.
 
 The primitive currently has no writer/collector call sites. Future integration
 must acquire it before connection and CAS locks, drain operations before Runtime

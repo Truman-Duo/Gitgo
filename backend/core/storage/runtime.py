@@ -194,6 +194,8 @@ class StorageRuntime:
         self._health_lock = threading.RLock()
         self._cas_lock = threading.RLock()
         self._closed = False
+        self._close_started = False
+        self._closed_databases: set[str] = set()
         self._last_health: StorageHealth | None = None
         self._last_stderr_at = 0.0
         self._cas_bytes_hint: int | None = None
@@ -407,6 +409,8 @@ class StorageRuntime:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("StorageRuntime is closed")
+        if self._close_started:
+            raise StorageBlocked('STORAGE_RUNTIME_CLOSING')
         self._maintenance_lease.require_active()
 
     @staticmethod
@@ -789,15 +793,26 @@ class StorageRuntime:
         return _health_repository.diagnostics(self)
 
     def close(self) -> None:
+        # Admission and borrowing share the lease mutex. Reject before any
+        # maintenance or connection teardown if an operation is still active.
+        with self._maintenance_lease.shutdown() as admitted:
+            if not admitted:
+                return
+            errors = self._close_storage_resources()
+        # Diagnostic/checkpoint errors do not retain a lease once both writer
+        # handles have definitely closed. Cleanup failures do (and can retry).
+        if errors:
+            raise errors[0]
+
+    def _close_storage_resources(self) -> list[BaseException]:
         if self._closed:
-            return
-        self._maintenance_lease.require_active()
+            return []
         errors: list[BaseException] = []
         # Shutdown is a natural low-frequency boundary.  A short-lived process
         # records nothing; a long-lived daemon contributes at most one cadence
         # sample and one bounded retention batch before the passive checkpoint.
         try:
-            if not self._integrity_reasons and not self._state.quarantined:
+            if not self._close_started and not self._integrity_reasons and not self._state.quarantined:
                 self.record_storage_metric()
                 self.maintain_observability()
                 self.maintain_cas()
@@ -806,8 +821,12 @@ class StorageRuntime:
                 self._publish_degraded("observability_maintenance_failed")
             except BaseException:
                 pass
+        self._close_started = True
+        close_errors: list[BaseException] = []
         with self._state_lock, self._observability_lock:
             for name, connection in (("state", self._state), ("observability", self._observability)):
+                if name in self._closed_databases:
+                    continue
                 try:
                     if name not in self._integrity_reasons and not connection.quarantined:
                         connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -816,8 +835,14 @@ class StorageRuntime:
                 try:
                     connection.fault_callback = None
                     connection.close()
+                    self._closed_databases.add(name)
                 except BaseException as exc:
-                    errors.append(exc)
+                    close_errors.append(exc)
+        if close_errors:
+            # shutdown() retains the maintenance barrier and blocks borrowing.
+            # Retry only handles whose close has not returned successfully.
+            raise close_errors[0]
+        self._closed = True
         # One final out-of-band snapshot records post-checkpoint file-family
         # sizes.  This is a single shutdown write, not a per-poll metric log.
         try:
@@ -827,14 +852,7 @@ class StorageRuntime:
                 self._write_health_snapshot(health)
         except BaseException as exc:
             errors.append(exc)
-        finally:
-            # Connections have been closed even if the out-of-band diagnostic
-            # snapshot failed.  A second close must never operate on dead
-            # handles or repeat a checkpoint.
-            self._closed = True
-            self._maintenance_lease.close()
-        if errors:
-            raise errors[0]
+        return errors
 
     def __enter__(self) -> "StorageRuntime":
         return self

@@ -30,23 +30,36 @@ def require_legacy_storage_format(
     missing or unreadable history is not evidence that a guarded store is new.
     SQLite errors propagate; callers must not turn them into empty history.
     """
-    objects = dict(connection.execute(
-        """SELECT name, type FROM sqlite_schema WHERE name IN (
-               'schema_migrations', 'schema_migration_records',
-               'storage_protocol', 'schema_migrations_append')""",
-    ).fetchall())
-    if any(name != "schema_migrations" for name in objects):
+    # SQLite object lookup is ASCII case-insensitive; sqlite_schema preserves
+    # the spelling used to create an object. Inspect all application objects
+    # so missing history cannot hide an already populated database either.
+    objects = [(name, kind) for name, kind in connection.execute(
+        'SELECT lower(name), type FROM sqlite_schema',
+    ).fetchall() if not name.startswith('sqlite_')]
+    reserved = {'schema_migration_records', 'storage_protocol', 'schema_migrations_append'}
+    if any(name in reserved for name, _ in objects):
         raise StorageProtocolUnsupported("guarded_format")
-    kind = objects.get("schema_migrations")
-    if kind is None:
+    history = [kind for name, kind in objects if name == 'schema_migrations']
+    other_objects = [name for name, _ in objects if name != 'schema_migrations']
+    if not history:
+        if other_objects:
+            raise StorageProtocolUnsupported('missing_history')
         return
-    if kind != "table":
+    if history != ['table']:
         raise StorageProtocolUnsupported("guarded_history")
+    migrations = tuple(migrations)
     known = {migration.version: migration.checksum for migration in migrations}
-    for version, checksum in connection.execute(
-        "SELECT version, checksum FROM schema_migrations",
-    ).fetchall():
+    rows = connection.execute(
+        'SELECT version, checksum FROM schema_migrations ORDER BY version',
+    ).fetchall()
+    if not rows and other_objects:
+        raise StorageProtocolUnsupported('empty_history')
+    for version, checksum in rows:
+        if type(version) is not int:
+            raise StorageProtocolUnsupported('invalid_history')
         if version not in known:
             raise StorageProtocolUnsupported("unknown_migration")
         if checksum != known[version]:
             raise RuntimeError(f"Migration checksum mismatch at version {version}")
+    if [row[0] for row in rows] != [migration.version for migration in migrations[:len(rows)]]:
+        raise StorageProtocolUnsupported('non_prefix_history')

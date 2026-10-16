@@ -72,6 +72,8 @@ class StorageLease:
         self._pid = os.getpid()
         self._mutex = threading.RLock()
         self._users = 0
+        self._closing = False
+        self._shutdown_active = False
         self._handle = self.path.open("a+b")
         try:
             os.set_inheritable(self._handle.fileno(), False)
@@ -84,6 +86,7 @@ class StorageLease:
             ) from exc
 
     def require_active(self) -> None:
+        """Check physical lease ownership, including during owner shutdown."""
         # Do this before touching a potentially inherited Python mutex.
         if os.getpid() != self._pid:
             raise StorageBlocked("STORAGE_LEASE_PROCESS_CHANGED")
@@ -97,6 +100,8 @@ class StorageLease:
         self.require_active()
         with self._mutex:
             self.require_active()
+            if self._closing:
+                raise StorageBlocked('STORAGE_LEASE_CLOSING')
             self._users += 1
         try:
             yield
@@ -111,12 +116,56 @@ class StorageLease:
         with self._mutex:
             if self._handle.closed:
                 return
+            if self._closing:
+                raise StorageBlocked('STORAGE_LEASE_CLOSING')
             if self._users:
                 raise StorageBlocked("STORAGE_LEASE_IN_USE")
-            try:
-                _unlock_file(self._handle, self._overlapped)
-            finally:
-                self._handle.close()
+            self._release_handle()
+
+    def _release_handle(self) -> None:
+        # Caller owns _mutex. Closing the handle releases the OS lock even
+        # when explicit unlock reports an error.
+        try:
+            _unlock_file(self._handle, self._overlapped)
+        finally:
+            self._handle.close()
+
+    @contextmanager
+    def shutdown(self):
+        """Atomically stop borrowing before closing the owner's resources.
+
+        Busy admission leaves the lease usable. Once admitted, new borrowers
+        stay blocked, including after a failed cleanup. Only a successful body
+        releases the physical lease. A failed body may be retried by its owner.
+        """
+        if os.getpid() != self._pid:
+            raise StorageBlocked('STORAGE_LEASE_PROCESS_CHANGED')
+        with self._mutex:
+            admitted = not self._handle.closed
+            if admitted:
+                if self._shutdown_active:
+                    raise StorageBlocked('STORAGE_LEASE_CLOSING')
+                if self._users:
+                    raise StorageBlocked('STORAGE_LEASE_IN_USE')
+                self._closing = True
+                self._shutdown_active = True
+        if not admitted:
+            yield False
+            return
+        try:
+            yield True
+        except BaseException:
+            # Resources may be partially closed. Retain the barrier and deny
+            # operations until the owner retries and confirms cleanup.
+            raise
+        else:
+            if os.getpid() == self._pid:
+                with self._mutex:
+                    self._release_handle()
+        finally:
+            if os.getpid() == self._pid:
+                with self._mutex:
+                    self._shutdown_active = False
 
     def __enter__(self):
         self.require_active()

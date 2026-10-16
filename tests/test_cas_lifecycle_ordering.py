@@ -11,6 +11,7 @@ import pytest
 from backend.core.storage.cas_lifecycle import CasLifecycleLock, CasLifecycleBusy, CasOperation
 from backend.core.storage.maintenance import StorageLease, StorageMaintenanceActive
 from backend.core.storage.models import StorageBlocked
+from backend.core.storage import StorageRuntime
 
 
 def test_explicit_nesting_and_other_runtime_exclusion(tmp_path_factory):
@@ -115,6 +116,185 @@ def test_closed_lease_cannot_create_or_enter_gate(tmp_path_factory):
     with pytest.raises(StorageBlocked, match='CLOSED'):
         with gate.operation():
             pass
+
+
+def _runtime(root):
+    workspace = root / 'workspace'
+    workspace.mkdir()
+    return StorageRuntime(workspace, state_home=root / 'state')
+
+
+def _assert_maintenance_available(runtime):
+    with StorageLease(runtime.paths.project_root, exclusive=True):
+        pass
+
+
+def test_runtime_busy_close_preserves_connections_and_can_retry(tmp_path_factory):
+    runtime = _runtime(tmp_path_factory)
+    try:
+        with CasLifecycleLock(runtime._maintenance_lease).operation():
+            with pytest.raises(StorageBlocked, match='LEASE_IN_USE'):
+                runtime.close()
+            assert not runtime._closed
+            runtime.put_state_ref('fixture', 'fact', 'still-open')
+            assert runtime.get_state_ref('fixture', 'fact') == 'still-open'
+        runtime.close()
+        runtime.close()
+        _assert_maintenance_available(runtime)
+    finally:
+        runtime.close()
+
+
+def test_other_threads_operation_prevents_runtime_close(tmp_path_factory):
+    runtime = _runtime(tmp_path_factory)
+    ready, release = threading.Event(), threading.Event()
+    errors = []
+    def worker():
+        try:
+            with CasLifecycleLock(runtime._maintenance_lease).operation():
+                ready.set()
+                assert release.wait(10)
+        except BaseException as error:
+            errors.append(error)
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        assert ready.wait(5)
+        with pytest.raises(StorageBlocked, match='LEASE_IN_USE'):
+            runtime.close()
+        assert runtime._state.execute('SELECT 1').fetchone()[0] == 1
+        release.set()
+        thread.join(5)
+        assert not thread.is_alive()
+        assert not errors
+        runtime.close()
+        _assert_maintenance_available(runtime)
+    finally:
+        release.set()
+        thread.join(5)
+        runtime.close()
+
+
+def test_shutdown_excludes_new_operations_and_concurrent_close(tmp_path_factory, monkeypatch):
+    runtime = _runtime(tmp_path_factory)
+    gate = CasLifecycleLock(runtime._maintenance_lease)
+    ready, release = threading.Event(), threading.Event()
+    errors = []
+    original = runtime._state.close
+    def paused_close():
+        ready.set()
+        assert release.wait(10)
+        original()
+    monkeypatch.setattr(runtime._state, 'close', paused_close)
+    def closer():
+        try:
+            runtime.close()
+        except BaseException as error:
+            errors.append(error)
+    thread = threading.Thread(target=closer)
+    thread.start()
+    try:
+        assert ready.wait(5)
+        with pytest.raises(StorageBlocked, match='LEASE_CLOSING'):
+            with gate.operation():
+                pytest.fail('new operation admitted during shutdown')
+        with pytest.raises(StorageBlocked, match='LEASE_CLOSING'):
+            runtime.close()
+        with pytest.raises(StorageMaintenanceActive):
+            StorageLease(runtime.paths.project_root, exclusive=True)
+        release.set()
+        thread.join(5)
+        assert not thread.is_alive()
+        assert not errors
+        runtime.close()
+        _assert_maintenance_available(runtime)
+    finally:
+        release.set()
+        thread.join(5)
+        runtime.close()
+
+
+def test_shutdown_callback_cannot_reenter_close_or_admit_an_operation(tmp_path_factory, monkeypatch):
+    runtime = _runtime(tmp_path_factory)
+    gate = CasLifecycleLock(runtime._maintenance_lease)
+    observed = []
+    def callback():
+        with pytest.raises(StorageBlocked, match='LEASE_CLOSING'):
+            runtime.close()
+        with pytest.raises(StorageBlocked, match='LEASE_CLOSING'):
+            runtime._maintenance_lease.close()
+        with pytest.raises(StorageBlocked, match='LEASE_CLOSING'):
+            with gate.operation():
+                pytest.fail('callback admitted an operation')
+        observed.append('denied')
+    monkeypatch.setattr(runtime, 'record_storage_metric', callback)
+    runtime.close()
+    assert observed == ['denied']
+    _assert_maintenance_available(runtime)
+
+
+@pytest.mark.parametrize('error_type', [OSError, KeyboardInterrupt, SystemExit])
+def test_failed_connection_close_keeps_barrier_until_retry(tmp_path_factory, monkeypatch, error_type):
+    runtime = _runtime(tmp_path_factory)
+    gate = CasLifecycleLock(runtime._maintenance_lease)
+    state_close, observation_close = runtime._state.close, runtime._observability.close
+    attempts = []
+    def fail_once():
+        attempts.append('state')
+        if attempts.count('state') == 1:
+            raise error_type('fixture close failure')
+        state_close()
+    def close_observation():
+        attempts.append('observability')
+        observation_close()
+    monkeypatch.setattr(runtime._state, 'close', fail_once)
+    monkeypatch.setattr(runtime._observability, 'close', close_observation)
+    try:
+        with pytest.raises(error_type, match='fixture close failure'):
+            runtime.close()
+        assert not runtime._closed
+        with pytest.raises(StorageBlocked, match='RUNTIME_CLOSING'):
+            runtime.put_state_ref('fixture', 'fact', 'rejected')
+        with pytest.raises(StorageBlocked, match='LEASE_CLOSING'):
+            runtime._maintenance_lease.close()
+        with pytest.raises(StorageBlocked, match='LEASE_CLOSING'):
+            with gate.operation():
+                pytest.fail('failed shutdown admitted an operation')
+        with pytest.raises(StorageMaintenanceActive):
+            StorageLease(runtime.paths.project_root, exclusive=True)
+        runtime.close()
+        assert attempts == ['state', 'observability', 'state']
+        assert runtime._closed
+        _assert_maintenance_available(runtime)
+    finally:
+        runtime.close()
+
+
+def test_diagnostic_failure_after_connection_close_releases_maintenance(tmp_path_factory, monkeypatch):
+    runtime = _runtime(tmp_path_factory)
+    def fail(_health):
+        raise OSError('fixture diagnostic failure')
+    monkeypatch.setattr(runtime, '_write_health_snapshot', fail)
+    with pytest.raises(OSError, match='fixture diagnostic failure'):
+        runtime.close()
+    assert runtime._closed
+    runtime.close()
+    _assert_maintenance_available(runtime)
+
+
+def test_unlock_failure_still_closes_handle_and_runtime(tmp_path_factory, monkeypatch):
+    from backend.core.storage import maintenance
+    runtime = _runtime(tmp_path_factory)
+    def fail(*args, **kwargs):
+        raise OSError('fixture unlock failure')
+    with monkeypatch.context() as scoped:
+        scoped.setattr(maintenance, '_unlock_file', fail)
+        with pytest.raises(OSError, match='fixture unlock failure'):
+            runtime.close()
+    assert runtime._closed
+    assert runtime._maintenance_lease._handle.closed
+    runtime.close()
+    _assert_maintenance_available(runtime)
 
 
 def _hold_gate(root, ready, release, abrupt):

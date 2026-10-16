@@ -40,19 +40,30 @@ def _store(root):
     return workspace, state_home, paths
 
 
-@pytest.mark.parametrize('shape', ['guard', 'view_only', 'records_only', 'marker_only', 'future'])
+@pytest.mark.parametrize('shape', ['guard', 'mixed_guard', 'view_only', 'records_only', 'marker_only',
+                                 'future', 'missing', 'empty', 'gap'])
 def test_future_format_rejected_before_writer_setup(tmp_path_factory, monkeypatch, shape):
     workspace, state_home, paths = _store(tmp_path_factory)
     with closing(sqlite3.connect(paths.state_db)) as connection:
         if shape == 'guard':
             _guard(connection)
+        elif shape == 'mixed_guard':
+            connection.execute('ALTER TABLE schema_migrations RENAME TO SCHEMA_MIGRATION_RECORDS')
+            connection.execute('''CREATE VIEW SCHEMA_MIGRATIONS AS
+                SELECT * FROM SCHEMA_MIGRATION_RECORDS WHERE gitgo_storage_protocol(2)=1''')
         elif shape == 'view_only':
             connection.execute('DROP TABLE schema_migrations')
             connection.execute('CREATE VIEW schema_migrations AS SELECT unknown_protocol()')
         elif shape == 'records_only':
             connection.execute('ALTER TABLE schema_migrations RENAME TO schema_migration_records')
         elif shape == 'marker_only':
-            connection.execute('CREATE TABLE storage_protocol(required INTEGER)')
+            connection.execute('CREATE TABLE StOrAgE_PrOtOcOl(required INTEGER)')
+        elif shape == 'missing':
+            connection.execute('DROP TABLE schema_migrations')
+        elif shape == 'empty':
+            connection.execute('DELETE FROM schema_migrations')
+        elif shape == 'gap':
+            connection.execute('DELETE FROM schema_migrations WHERE version=1')
         else:
             connection.execute("INSERT INTO schema_migrations VALUES(999,'future','fixture','fixture')")
         connection.commit()
@@ -104,10 +115,24 @@ def test_checksum_still_checked_before_migration(tmp_path_factory):
 
 
 @pytest.mark.parametrize('tool', ['salvage', 'reset', 'relocate_reset', 'relocate_preserving'])
-def test_offline_tools_refuse_to_strip_future_protocol(tmp_path_factory, monkeypatch, tool):
+@pytest.mark.parametrize('shape', ['guard', 'mixed_guard', 'missing', 'empty'])
+def test_offline_tools_refuse_to_strip_future_protocol(tmp_path_factory, monkeypatch, tool, shape):
     workspace, state_home, paths = _store(tmp_path_factory)
     with closing(sqlite3.connect(paths.state_db)) as connection:
-        _guard(connection)
+        if shape == 'guard':
+            _guard(connection)
+        elif shape == 'mixed_guard':
+            connection.execute('ALTER TABLE schema_migrations RENAME TO SCHEMA_MIGRATION_RECORDS')
+            connection.execute('''CREATE VIEW SCHEMA_MIGRATIONS AS
+                SELECT * FROM SCHEMA_MIGRATION_RECORDS WHERE gitgo_storage_protocol(2)=1''')
+            connection.execute('''CREATE TRIGGER SCHEMA_MIGRATIONS_APPEND
+                INSTEAD OF INSERT ON SCHEMA_MIGRATIONS BEGIN
+                INSERT INTO SCHEMA_MIGRATION_RECORDS VALUES(
+                    NEW.version,NEW.name,NEW.checksum,NEW.applied_at); END''')
+        elif shape == 'missing':
+            connection.execute('DROP TABLE schema_migrations')
+        else:
+            connection.execute('DELETE FROM schema_migrations')
         connection.commit()
     before = paths.state_db.read_bytes()
     destination_home = tmp_path_factory / 'destination'
@@ -129,6 +154,56 @@ def test_offline_tools_refuse_to_strip_future_protocol(tmp_path_factory, monkeyp
     assert not (destination_home / 'projects' / paths.project_id).exists()
     assert not (paths.project_root / 'storage-recovery-in-progress.json').exists()
     assert not (state_home / 'recovery').exists()
+
+
+@pytest.mark.parametrize('initial_history', [False, True])
+def test_empty_store_and_uncommitted_first_migration_can_initialize(initial_history):
+    with closing(sqlite3.connect(':memory:')) as connection:
+        connection.row_factory = sqlite3.Row
+        if initial_history:
+            connection.execute('''CREATE TABLE SCHEMA_MIGRATIONS (
+                version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                checksum TEXT NOT NULL, applied_at TEXT NOT NULL)''')
+            # Migration DDL and its history row roll back together.
+            connection.execute('BEGIN IMMEDIATE')
+            connection.execute('CREATE TABLE unfinished(value INTEGER)')
+            connection.rollback()
+        require_legacy_storage_format(connection, STATE_MIGRATIONS)
+        StorageRuntime._apply_migrations(connection, STATE_MIGRATIONS)
+        assert connection.execute('SELECT COUNT(*) FROM schema_migrations').fetchone()[0] == len(STATE_MIGRATIONS)
+
+
+def test_known_prefix_upgrades_without_changing_existing_history():
+    with closing(sqlite3.connect(':memory:')) as connection:
+        connection.row_factory = sqlite3.Row
+        StorageRuntime._apply_migrations(connection, STATE_MIGRATIONS[:2])
+        before = [tuple(row) for row in connection.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        require_legacy_storage_format(connection, STATE_MIGRATIONS)
+        StorageRuntime._apply_migrations(connection, STATE_MIGRATIONS)
+        after = [tuple(row) for row in connection.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        assert after[:2] == before
+        assert len(after) == len(STATE_MIGRATIONS)
+
+
+@pytest.mark.parametrize('shape', ['duplicate', 'text_version', 'gap', 'extra_trigger'])
+def test_noncanonical_history_is_not_evidence_of_supported_format(shape):
+    with closing(sqlite3.connect(':memory:')) as connection:
+        connection.execute('CREATE TABLE schema_migrations(version, checksum)')
+        first = STATE_MIGRATIONS[0]
+        connection.execute('INSERT INTO schema_migrations VALUES(?,?)', (first.version, first.checksum))
+        if shape == 'duplicate':
+            connection.execute('INSERT INTO schema_migrations VALUES(?,?)', (first.version, first.checksum))
+        elif shape == 'text_version':
+            connection.execute("UPDATE schema_migrations SET version='1'")
+        elif shape == 'gap':
+            connection.execute('DELETE FROM schema_migrations')
+            second = STATE_MIGRATIONS[1]
+            connection.execute('INSERT INTO schema_migrations VALUES(?,?)', (second.version, second.checksum))
+        else:
+            connection.execute('''CREATE TRIGGER schema_migrations AFTER INSERT ON schema_migrations
+                BEGIN SELECT 1; END''')
+        with pytest.raises(StorageProtocolUnsupported):
+            require_legacy_storage_format(connection, STATE_MIGRATIONS)
 
 
 def _migration_process(root, committed, ready, release):
