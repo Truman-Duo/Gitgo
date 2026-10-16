@@ -91,6 +91,35 @@ shutdown, keep callbacks outside critical sections, and remove CAS file writes
 from inside checkpoint SQL transactions. It must also protect the interval
 between looking up a reference and reading its file.
 
+## Cached Runtime retirement
+
+The process-owned fallback pool keeps a strong entry until Runtime.close()
+returns successfully. Release, LRU eviction, replacement by an injected facade,
+and close_owned_storage() use the same retirement path. A failed close seals
+that entry against reuse and retains its capacity charge. Replacement and
+eviction cannot create or publish another facade by dropping that debt.
+
+Only one identified closer may act on an entry. The pool mutex protects state
+transitions, not Runtime I/O or callbacks. Concurrent/reentrant attempts report
+busy and cannot clear the original closer. Old retirement references cannot
+remove or close a later entry. A successfully closed Runtime whose response was
+lost remains retained until its normal idempotent close confirms completion.
+
+Bulk close attempts every current entry after an ordinary failure and reports
+the failure; cancellation still propagates. Interpreter exit reports incomplete
+cleanup rather than erasing ownership. Explicit release or bulk close retries
+retained entries. Injected facades remain caller-owned, and a retiring fallback
+cannot escape cleanup by becoming injected. An inherited pool is refused before
+using its parent's mutex or writers; start a fresh process for a new pool.
+
+Capacity is reserved before construction, and a shutdown request while a
+constructor runs prevents its result from becoming available. This does not
+qualify Runtime's internal partial-construction cleanup, a constructor return
+handoff interrupted before the pool receives it, or native VFS close outcomes.
+Those still require the compound owner and qualified database boundary before
+CAS v2 activation. The pool is not a Host-wide byte quota or a drain registry
+for directly constructed/caller-owned Runtimes.
+
 ## Remaining protocol work
 
 Writers need durable, budgeted preparation before creating or reusing files.

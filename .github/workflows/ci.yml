@@ -191,6 +191,7 @@ jobs:
         run: >-
           python -B -m pytest tests/test_cas_lifecycle_ordering.py
           tests/test_storage_ownership_handoff.py
+          tests/test_storage_binding_retirement.py
           tests/test_storage_protocol_admission.py tests/test_storage_recovery_boundaries.py
           tests/test_storage_transaction_outcomes.py tests/test_sqlite_storage.py -q
       - name: Windows ACL preflight
