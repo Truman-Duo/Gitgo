@@ -120,6 +120,54 @@ Those still require the compound owner and qualified database boundary before
 CAS v2 activation. The pool is not a Host-wide byte quota or a drain registry
 for directly constructed/caller-owned Runtimes.
 
+## Inactive storage envelope contract
+
+`StorageEnvelope` is an immutable, bounded value describing all simultaneous
+file copies for one store and for its Host registry. It grants no allocation,
+file creation or execution rights. No Runtime, writer or collector consumes it
+yet, and it supplies no default policy or new configuration authority.
+
+For each file class, charge every retained copy at its individual ceiling
+rounded up to the qualified allocation unit. Registry files use the same rule;
+rounding an aggregate after adding small files would undercount their space.
+The complete descriptor must satisfy:
+
+```text
+file_charge = ceil(max_bytes / allocation_unit) * allocation_unit * max_files
+store_charge = sum(store file_charge)
+registry_charge = sum(registry file_charge)
+registry_charge + slots * store_charge <= host_max_bytes
+```
+
+The descriptor bounds positive integers, class counts and slot counts. Unknown
+versions/fields, duplicate or unsorted class names, booleans as integers,
+arithmetic overflow and underfunded profiles are rejected. Encoding is bounded,
+canonical JSON with duplicate-key rejection. A digest identifies these exact
+bytes; it is neither a reservation ticket nor proof of enforced ceilings.
+
+Each backend must qualify the actual allocation unit, complete role set,
+maximum retained copies and enforcement for its supported filesystem and
+runtime. An arbitrary caller-provided class list cannot qualify a backend.
+This accounting excludes filesystem metadata and is not an OS volume quota,
+a free-space reservation, a hard-process disk limit or a power-loss guarantee.
+WAL, shared memory, rollback journals, publication copies, temporary files and
+control/cleanup records require explicit ceilings before activating a writer.
+
+The future registry must bind that exact profile to a trusted native Host
+identity and pinned storage domain. Choosing another state_home, changing
+environment variables or copying metadata must not create another budget
+authority. Reserve the entire store envelope before creating any store files.
+Incomplete initialization, a lost response and unconfirmed native closure
+remain charged. A persisted reservation alone must not issue a fresh
+initialization ticket. Unknown/torn records block admission rather than being
+trimmed, skipped or replaced. Refund requires a separate fenced retirement
+protocol with confirmed settlement of every dependent debt, never a timeout.
+
+Registry installation, authoritative reservations, backend enforcement,
+compound construction/cleanup and recovery are activation requirements, not
+implemented behavior of this value type. The existing state_home selector is
+unchanged; this contract does not make legacy storage globally quota-bound.
+
 ## Remaining protocol work
 
 Writers need durable, budgeted preparation before creating or reusing files.
