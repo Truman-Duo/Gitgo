@@ -595,3 +595,48 @@ parent-process exit. Both Windows native CI paths additionally exercise public
 canonical-account install, activate, upgrade, cleanup, refund and selection on
 disposable runners. These construction tests do not enable the default storage
 format or establish complete source/frozen product or power-loss acceptance.
+
+
+## Native SQLite file ownership construction
+
+The Windows VFS binds the actual imported SQLite module, not a library basename
+or reported version. Bounded PE import inspection compares every CPython SQLite
+import with the independently selected loaded module. The explicit `win32` VFS,
+its callbacks and each returned file-method table must belong to that image.
+The runtime version must match the explicitly supplied build header. CI obtains
+that header from its already pinned official release archive. A byte-identical
+separately loaded SQLite library is rejected. The default VFS is never replaced.
+
+All file callbacks execute in C with independent fixed native storage. Each
+worker lifetime permits eight VFS registrations and, per registration, sixteen
+parent-file opens and sixteen connection acquisitions. Nominal SQLite close
+does not refund these lifetime limits. The enclosing native worker is still
+responsible for actual physical retirement, including hidden SQLite/OS state.
+Process and thread identity constrain registration, callbacks and retirement.
+
+Each registration confines SQLite to one main/WAL/rollback-journal family and
+its bounded SHM extent. Byte ceilings precede writes, truncation and SHM mapping;
+existing oversized family members refuse admission. Temporary disk files,
+foreign attachments, extension loading, raw file controls and database mmap
+are unavailable through this VFS. Missing extent evidence is distinct from a
+measured empty file. This primitive is not a path-race or ACL defense: actual
+namespace pins, file identities, exclusive admission, runtime selection and
+durable budget intent remain mandatory enclosing contracts.
+
+Python owns the registration before native creation and a connection slot before
+lease acquisition or SQLite initialization. The actual connection object is
+retained before initialization. Lost open, close or lease acknowledgements keep
+the slot charged; they never trigger implicit replay, repeated native release
+or garbage-collection refund. Native close/unmap uncertainty preserves the
+independent file storage. I/O failures seal further work while known cleanup
+remains possible. Documented short reads and bounded refusals retain their
+normal SQLite meaning. A failed unregister is never retried by the Python
+owner. Only the complete enclosing native-process retirement can settle debt
+that the connection protocol cannot conclusively close.
+
+Acceptance includes actual WAL writes and overflow rollback, pinned readers,
+foreign-path refusal, distinct-module binding refusal, per-process quotas and
+native/Python acknowledgement-loss faults. These tests qualify construction
+boundaries only. The actual State/Obs profile, protected namespace integration,
+SQL/CAS publication, recovery/collection and all StorageRuntime callers remain
+necessary before guarded format activation or storage-milestone completion.

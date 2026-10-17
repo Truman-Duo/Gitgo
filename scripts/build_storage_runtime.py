@@ -26,7 +26,7 @@ from backend.core.storage.runtime_manifest import (
 
 DEPENDENCIES = ("httpx", "httpcore", "h11", "anyio", "idna", "certifi", "click", "rich", "pygments",
                 "markdown_it", "mdurl", "typing_extensions.py")
-NATIVE_LIBRARIES = tuple(f"gitgo-storage-{kind}.dll" for kind in ("scope", "process", "journal", "tree"))
+NATIVE_LIBRARIES = tuple(f"gitgo-storage-{kind}.dll" for kind in ("scope", "process", "journal", "tree", "sqlite"))
 
 
 def archive(entries):
@@ -108,7 +108,7 @@ def build(repository: Path, python_root: Path, packages: Path, native_root: Path
     paths = [path.resolve(strict=True) for path in (repository, python_root, packages, native_root, output)]
     repository, python_root, packages, native_root, output = paths
     if any(output == source or output.is_relative_to(source) or source.is_relative_to(output)
-           for source in (repository, python_root, native_root)):
+           for source in (repository, python_root, packages, native_root)):
         raise ValueError("Runtime output must be separate from all build inputs")
     files, content = inputs(repository, python_root, packages, native_root, profile)
     # Explicit build inputs, not production module discovery. No environment
