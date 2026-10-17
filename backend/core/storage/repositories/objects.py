@@ -111,7 +111,7 @@ def put_blob(self: ObjectsPort, data: bytes, *, media_type: str = "application/o
     return str(descriptor["ref"])
 
 
-def read_blob(self: ObjectsPort, ref: str) -> bytes:
+def read_blob(self: ObjectsPort, ref: str, *, repair: bool = True) -> bytes:
     self._ensure_open()
     if not ref.startswith("sha256:"):
         raise ValueError("unsupported object reference")
@@ -120,9 +120,20 @@ def read_blob(self: ObjectsPort, ref: str) -> bytes:
         raise ValueError("invalid SHA-256 object reference")
     path = self.paths.cas_dir / digest[:2] / digest[2:]
     try:
-        return path.read_bytes()
+        if repair:
+            return path.read_bytes()
+        # Checkpoint lifecycle validation cannot create a missing object or
+        # accept corrupt bytes under the old name. Native generation pinning
+        # is a separate future CAS protocol requirement.
+        with path.open("rb") as handle:
+            data = handle.read(self.policy.max_cas_object_bytes + 1)
+        if len(data) > self.policy.max_cas_object_bytes:
+            raise StorageBlocked("cas_object_too_large")
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise StorageBlocked("cas_object_digest_mismatch")
+        return data
     except FileNotFoundError:
-        restored = self._restore_canonical_blob(digest)
+        restored = self._restore_canonical_blob(digest) if repair else None
         if restored is not None:
             return restored
         reason = f"missing:{digest}"

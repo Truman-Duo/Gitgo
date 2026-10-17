@@ -484,8 +484,8 @@ class StorageRuntime:
         'Write an immutable plaintext CAS object once and return its SHA-256 ref.'
         return _objects_repository.put_blob(self, data, media_type=media_type)
 
-    def read_blob(self, ref: str) -> bytes:
-        return _objects_repository.read_blob(self, ref)
+    def read_blob(self, ref: str, *, repair: bool = True) -> bytes:
+        return _objects_repository.read_blob(self, ref, repair=repair)
 
     def _restore_canonical_blob(self, digest: str) -> bytes | None:
         'Restore only tiny canonical JSON values proven by their digest.'
@@ -527,8 +527,8 @@ class StorageRuntime:
         'Move the undo cursor to its parent and return the immutable target.'
         return _lineage_repository.commit_session_undo(self, session_id, checkpoint_id)
 
-    def _read_json_blob(self, ref: str) -> object:
-        return json.loads(self.read_blob(ref).decode("utf-8"))
+    def _read_json_blob(self, ref: str, *, repair: bool = True) -> object:
+        return json.loads(self.read_blob(ref, repair=repair).decode("utf-8"))
 
     def save_agent_checkpoint(self, snapshot: dict) -> str:
         'Atomically persist one process/session/task boundary.'

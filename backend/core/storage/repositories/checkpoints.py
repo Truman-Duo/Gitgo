@@ -1,6 +1,11 @@
 """Checkpoints repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
 import hashlib
+from copy import deepcopy
+from ..checkpoint_plan import (
+    CheckpointObjectBuilder, capture_basis, require_live_basis, recheck_basis,
+)
+from ..lifecycle import CheckpointRef, require_revision, check_transition
 from .ports import CheckpointsPort
 from ..support import _utc_now
 from ..transactions import authoritative_transaction
@@ -8,30 +13,40 @@ from ..transactions import authoritative_transaction
 def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
     """Atomically persist one process/session/task boundary.
 
-    CAS files are immutable and may safely precede the SQLite commit.  A
-    failed transaction can only leave unreferenced objects for later GC;
-    it can never expose a partial authoritative checkpoint.
+    Plan all immutable object bytes before file work; recheck the captured
+    State dependencies before publishing rows, facts and ownership together.
+    Legacy CAS still lacks durable preparation and generation-aware GC. A
+    failed publication may leave files; this ordering does not protect their
+    lifetime or authorize replay after an unknown commit.
     """
     self._ensure_open()
     self._state.require_available()
+    snapshot = deepcopy(snapshot)
     process_id = str(snapshot.get("process_id", "")).strip()
     session_id = str(snapshot.get("session_id", "")).strip()
     if not process_id or not session_id:
         raise ValueError("process_id and session_id are required")
-    if self.is_process_deleted(process_id):
-        raise ValueError("PROCESS_DELETED: a deleted process cannot be checkpointed again")
+    parent_process_id = str(snapshot.get("parent_id") or "")
+    with self._state_lock:
+        if self._state.in_transaction:
+            raise RuntimeError("STATE_TRANSACTION_ALREADY_ACTIVE")
+        basis = capture_basis(self._state, process_id, parent_process_id)
+    require_live_basis(basis)
+    require_revision(basis.revision, snapshot.get("expected_revision"))
+    status = str(snapshot.get("status") or "running")
+    prior_runtime = {}
+    if basis.status == "completed" and status != basis.status and basis.runtime_ref:
+        prior_runtime = self._read_json_blob(basis.runtime_ref, repair=False)
+    check_transition(basis.status, snapshot, prior_runtime)
+    previous_revision = basis.revision
+    committed_revision = previous_revision + 1
+    checkpoint_sequence = basis.event_sequence
+    now = _utc_now()
+    builder = CheckpointObjectBuilder(self._encoded_object, self.policy, now)
+    prepare = builder.prepare
     messages = list(snapshot.get("messages") or [])
     provider_state = dict(snapshot.get("provider_state") or {})
     session_metadata = dict(snapshot.get("session_metadata") or {})
-
-    descriptors: dict[str, dict] = {}
-
-    def prepare(value: object, media_type: str = "application/json") -> dict:
-        descriptor = self._write_blob_file(
-            self._encoded_object(value), media_type=media_type
-        )
-        descriptors[str(descriptor["digest"])] = descriptor
-        return descriptor
 
     provider_objects = {
         str(state_id): prepare(state)
@@ -95,29 +110,47 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
         if task_id and receipt.get("receipt_id"):
             receipt_objects.append((receipt, prepare(receipt)))
 
+    checkpoint_at = str(snapshot.get("checkpoint_at") or now)
+    dependencies = list(dict.fromkeys(
+        str(item) for item in (snapshot.get("depends_on") or []) if str(item)
+    ))
+    if process_id in dependencies:
+        raise ValueError("process cannot depend on itself")
+    task_status = str((snapshot.get("result") or {}).get("status") or status)
+    fact = prepare({"process_status": status,
+        "task_status": task_status,
+        "revision": committed_revision, "task_id": task_id,
+        "checkpoint": f"sqlite:session/{process_id}/{checkpoint_sequence}",
+        "runtime_state_ref": runtime_object["ref"],
+        "session_metadata_ref": metadata_object["ref"],
+        "message_refs": [item[2]["ref"] for item in message_objects],
+        "contract_ref": contract_object["ref"] if contract_object else "",
+        "outcome_ref": outcome_object["ref"] if outcome_object else "",
+        "receipt_refs": [item[1]["ref"] for item in receipt_objects]})
+    from backend.core.loop.lifecycle import TERMINAL
+    barrier = None
+    if (status in TERMINAL
+            and (snapshot.get("runtime_state") or {}).get("lifecycle_finalized") is True
+            and basis.terminal is None):
+        barrier = prepare({"status": status, "task_status": task_status,
+            "task_id": task_id, "state_revision": committed_revision,
+            "steps_used": snapshot.get("steps_used", 0)})
+    objects = builder.seal()
+    descriptors = {member.digest: member.descriptor for member in objects.members}
     logical_estimate = 2048 + 512 * (
         len(message_objects) + len(receipt_objects) + len(descriptors)
     )
     self._reserve_authoritative_write(logical_estimate)
-    now = _utc_now()
-    checkpoint_at = str(snapshot.get("checkpoint_at") or now)
-    status = str(snapshot.get("status") or "running")
-    dependencies = list(dict.fromkeys(
-        str(item) for item in (snapshot.get("depends_on") or []) if str(item)
-    ))
+    objects.materialize_legacy(self._write_blob_file)
     with self._state_lock:
         with authoritative_transaction(self._state):
-            from ..lifecycle import check_revision, check_transition
-            previous_revision = check_revision(self._state, process_id, snapshot.get("expected_revision"))
-            check_transition(self._state, process_id, snapshot, self._read_json_blob)
-            committed_revision = previous_revision + 1
+            recheck_basis(self._state, process_id, parent_process_id, basis)
             for descriptor in descriptors.values():
                 self._register_object(self._state, descriptor)
             # A checkpoint is one ownership unit.  Record the complete CAS
-            # closure in the same transaction as the authoritative rows so
-            # GC can never mistake split metadata/provider objects for
-            # crash orphans.  Replacing the owner set also releases objects
-            # no longer used by a later checkpoint after the grace period.
+            # closure in the same transaction as the authoritative rows.
+            # Historical facts keep their own closure when this one advances.
+            # This reference index does not fence legacy concurrent collection.
             self._state.execute(
                 "DELETE FROM object_refs WHERE owner_type=? AND owner_id=?",
                 ("session_checkpoint", session_id),
@@ -134,11 +167,6 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
                     for digest in sorted(descriptors)
                 ],
             )
-            event_row = self._state.execute(
-                "SELECT COALESCE(MAX(sequence), 0) FROM session_events WHERE process_id=?",
-                (process_id,),
-            ).fetchone()
-            checkpoint_sequence = int(event_row[0] if event_row else 0)
             self._state.execute(
                 """INSERT INTO sessions(
                        session_id, project_id, status, context_epoch,
@@ -164,8 +192,6 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
                 (process_id,),
             )
             for upstream_id in dependencies:
-                if upstream_id == process_id:
-                    raise ValueError("process cannot depend on itself")
                 self._state.execute(
                     """INSERT INTO process_dependencies(
                            process_id, depends_on_process_id, state,
@@ -174,15 +200,7 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
                     (process_id, upstream_id, now, now),
                 )
             if task_id:
-                parent_process_id = str(snapshot.get("parent_id") or "")
-                parent_task_id = None
-                if parent_process_id:
-                    parent_task_row = self._state.execute(
-                        "SELECT task_id FROM session_processes WHERE process_id=?",
-                        (parent_process_id,),
-                    ).fetchone()
-                    if parent_task_row is not None and parent_task_row["task_id"]:
-                        parent_task_id = str(parent_task_row["task_id"])
+                parent_task_id = basis.parent_task_id
                 self._state.execute(
                     """INSERT INTO tasks(
                            task_id, session_id, parent_task_id, role, status,
@@ -319,17 +337,6 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
             if revision_cursor.rowcount != 1:
                 from ..lifecycle import RevisionConflict
                 raise RevisionConflict("STATE_REVISION_CHANGED: checkpoint was not committed")
-            fact = prepare({"process_status": status,
-                "task_status": str((snapshot.get("result") or {}).get("status") or status),
-                "revision": committed_revision, "task_id": task_id,
-                "checkpoint": f"sqlite:session/{process_id}/{checkpoint_sequence}",
-                "runtime_state_ref": runtime_object["ref"],
-                "session_metadata_ref": metadata_object["ref"],
-                "message_refs": [item[2]["ref"] for item in message_objects],
-                "contract_ref": contract_object["ref"] if contract_object else "",
-                "outcome_ref": outcome_object["ref"] if outcome_object else "",
-                "receipt_refs": [item[1]["ref"] for item in receipt_objects]})
-            self._register_object(self._state, fact)
             # A historical fact owns its complete immutable closure, even
             # after current session rows replace those references.
             for digest in descriptors:
@@ -342,20 +349,12 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
                 stream_id=f"process:{process_id}", sequence=committed_revision,
                 payload_ref=fact["ref"], occurred_at=now,
                 causation_id=str(snapshot.get("causation_id") or ""))
-            from backend.core.loop.lifecycle import TERMINAL
-            if status in TERMINAL and (snapshot.get("runtime_state") or {}).get("lifecycle_finalized") is True:
-                existing_barrier = self._state.execute("SELECT 1 FROM session_events WHERE process_id=? AND event_type='agent_complete'",
-                    (process_id,)).fetchone()
-                if existing_barrier is None:
-                    barrier = prepare({"status": status, "task_status": str((snapshot.get("result") or {}).get("status") or status),
-                        "task_id": task_id, "state_revision": committed_revision, "steps_used": snapshot.get("steps_used", 0)})
-                    self._register_object(self._state, barrier)
-                    sequence = self._state.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM session_events WHERE process_id=?", (process_id,)).fetchone()[0]
-                    self._state.execute("INSERT INTO session_events(event_id,process_id,sequence,event_type,payload_ref,occurred_at) VALUES(?,?,?,'agent_complete',?,?)",
-                        (f"terminal:{process_id}", process_id, sequence, barrier["ref"], now))
-                    insert_fact(self._state, event_id=f"ledger:{process_id}:{sequence}", kind="agent_complete",
-                        project_id=self.paths.project_id, session_id=session_id, task_id=task_id, process_id=process_id,
-                        stream_id=f"ledger:{process_id}", sequence=sequence, payload_ref=barrier["ref"], occurred_at=now,
-                        causation_id=f"checkpoint:{process_id}:{committed_revision}")
-    from ..lifecycle import CheckpointRef
+            if barrier is not None:
+                sequence = checkpoint_sequence + 1
+                self._state.execute("INSERT INTO session_events(event_id,process_id,sequence,event_type,payload_ref,occurred_at) VALUES(?,?,?,'agent_complete',?,?)",
+                    (f"terminal:{process_id}", process_id, sequence, barrier["ref"], now))
+                insert_fact(self._state, event_id=f"ledger:{process_id}:{sequence}", kind="agent_complete",
+                    project_id=self.paths.project_id, session_id=session_id, task_id=task_id, process_id=process_id,
+                    stream_id=f"ledger:{process_id}", sequence=sequence, payload_ref=barrier["ref"], occurred_at=now,
+                    causation_id=f"checkpoint:{process_id}:{committed_revision}")
     return CheckpointRef(f"sqlite:session/{process_id}/{checkpoint_sequence}", committed_revision)

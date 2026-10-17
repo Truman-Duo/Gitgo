@@ -205,6 +205,46 @@ that passed a preflight before another thread quarantined its connection.
 Durable preparation, compound ownership, fenced recovery and generation-aware
 collection remain required before CAS v2 or durable approval activation.
 
+## Checkpoint planning before publication
+
+The legacy checkpoint writer copies its input, captures its State dependencies
+with one SELECT under the owning lock, then builds the entire immutable CAS
+closure in memory. The capture distinguishes process absence from revision zero
+and includes process identity/revision/status/runtime reference, the latest
+session-event sequence and count, latest terminal-barrier identity and count, the deletion
+tombstone and the parent task link. An explicit stale revision or invalid
+lifecycle transition refuses before file creation.
+
+Lifecycle validation reads prior bytes outside the publication transaction,
+without canonical-file repair, and checks the per-object ceiling and digest.
+Missing or corrupt bytes fail explicitly. This legacy read does not provide
+native object generation pinning; that remains a CAS v2 activation requirement.
+
+All metadata/provider fragments, runtime, messages, task contract/result,
+receipts, the checkpoint fact and optional terminal barrier are encoded before
+materialization. Deduplicated bytes and descriptors are immutable. Legacy
+per-object and aggregate CAS ceilings and the existing estimated SQL write
+budget are checked before creating files. These checks are not a durable batch
+reservation, free-space guarantee or bound on input/heap/actual SQL growth.
+
+The final State transaction rechecks the captured dependencies before writing
+rows. A changed dependency returns RevisionConflict; a committed tombstone
+refuses resurrection. Event count also detects explicit-sequence backfill
+into a gap below the last sequence. No automatic refresh or retry is performed. Both the
+current checkpoint and historical fact own the complete prepared closure,
+including the optional terminal payload. File creation and prior-object reads
+are outside this transaction; checkpoint/fact/outbox/barrier publication remains
+atomic. Only confirmed COMMIT returns a revision; uncertain COMMIT keeps the
+existing writer quarantine and never authorizes another effect.
+
+Tests exercise public deletion/event interleavings, an independent SQLite
+writer changing captured dependencies, caller mutation, invalid/over-limit
+plans, partial file materialization, corrupt/missing lifecycle bytes, complete
+ownership, final SQL failure and terminal-checkpoint COMMIT response gaps.
+Legacy files left before a failed publication are still not durable prepared
+debts. The collector race, shared object-lifetime ordering and production batch
+handoff are unresolved; CAS v2 and new durable grants stay disabled.
+
 ## Remaining protocol work
 
 Writers need durable, budgeted preparation before creating or reusing files.
