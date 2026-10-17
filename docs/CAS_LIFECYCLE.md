@@ -393,3 +393,36 @@ and record tests. Native binaries and fault executables are build outputs and
 are not committed. These checks do not qualify source/frozen product routing,
 canonical Host installation, migration, Linux storage primitives or macOS
 storage primitives. Those gates remain required before guarded activation.
+
+
+## Native metadata and installed runtime trees
+
+Pinning, fresh installation, metadata bootstrap, absence observation and
+exact-member retirement now share one four-owner native pool. Purpose is
+immutable at reservation; lifecycle phases cannot select another purpose's
+effects. Native failures seal the owner. Unknown closes retain it, while a
+confirmed old retirement cannot touch a reused owner generation.
+
+Bootstrap creates a new protected Host/System/Administrators ACL atomically.
+It checks the actual process account, exact parent identity and parent ACL
+before creation. A parent granting untrusted mutation or DELETE_CHILD is
+refused; harmless read/traverse rights do not become inherited child authority.
+Existing protected parents can be attached, but added members are still fresh
+CREATE_NEW operations. Every metadata file must be flushed and read back before
+completion. Fresh trees are not automatically adopted after a failure.
+
+Installation has a closed 256-node, 64 MiB rounded file-data limit; bootstrap
+has 32 nodes and 256 KiB. These are fixed primitive ceilings, not a Host budget,
+volume free-space guarantee or filesystem metadata quota. The coordinator must
+reserve all simultaneous copies and other resources before effects. Runtime
+pinning checks exact identities, file contents and protection, and retains
+native ancestor handles. Retirement names every allowed member; it never
+walks or deletes an unrecorded tree. An omitted member prevents successful
+root removal. Actual absence and confirmed owner closure remain separate
+requirements before durable capacity refund.
+
+Both Windows CI paths build this source and run real effects and C fault
+injection. These primitives remain inactive construction dependencies until
+the trusted installation, runtime selection, aggregate accounting and every
+StorageRuntime caller have completed the same qualification. Their tests do
+not establish product activation or sudden-power-loss durability.

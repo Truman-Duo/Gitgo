@@ -27,18 +27,20 @@ def build(compiler: Path, output: Path, *, selftest: bool = False) -> dict:
     prefix = [str(compiler), *(["cc"] if compiler.name.lower() == "zig.exe" else [])]
     flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"]
     result = {}
-    for name in ("scope", "process", "journal"):
+    for name in ("scope", "process", "journal", "tree"):
         library = output / f"gitgo-storage-{name}.dll"
         subprocess.run([*prefix, *flags, "-shared", str(root / f"backend/native/storage_{name}_windows.c"),
                         "-ladvapi32", "-luserenv", "-o", str(library)], check=True, timeout=120)
         result[name + "_library"] = str(library)
-        if selftest:
-            executable = output / f"storage-{name}-faults.exe"
-            # The scope/journal fixtures use wmain; the process fixture uses main.
-            unicode_flags = ["-municode"] if name in {"scope", "journal"} and compiler.name.lower() == "zig.exe" else []
-            subprocess.run([*prefix, *flags, *unicode_flags, str(root / f"tests/native/storage_{name}_faults.c"),
+        cases = ("tree_pins", "tree_install", "tree_bootstrap", "tree_retirement") if name == "tree" else (name,)
+        for case in cases if selftest else ():
+            fault_name = case.replace("_", "-")
+            executable = output / f"storage-{fault_name}-faults.exe"
+            # All fixtures except process use wmain.
+            unicode_flags = ["-municode"] if case != "process" and compiler.name.lower() == "zig.exe" else []
+            subprocess.run([*prefix, *flags, *unicode_flags, str(root / f"tests/native/storage_{case}_faults.c"),
                             "-ladvapi32", "-luserenv", "-o", str(executable)], check=True, timeout=120)
-            result[name + "_fault_tests"] = str(executable)
+            result[case + "_fault_tests"] = str(executable)
     return result
 
 

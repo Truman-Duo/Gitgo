@@ -64,7 +64,7 @@ jobs:
           python -B scripts/build_storage_native.py --compiler $compiler --output $output --selftest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:GITGO_STORAGE_NATIVE_TEST_LIBRARY = Join-Path $output 'gitgo-storage-scope.dll'
-          python -B -m pytest tests/test_storage_windows_scope.py tests/test_storage_windows_process.py tests/test_storage_windows_journal.py tests/test_storage_slot_records.py tests/test_storage_runtime_records.py -q -x
+          python -B -m pytest tests/test_storage_windows_scope.py tests/test_storage_windows_process.py tests/test_storage_windows_journal.py tests/test_storage_windows_tree.py tests/test_storage_slot_records.py tests/test_storage_runtime_records.py -q -x
       - name: Windows ACL recovery preflight
         if: runner.os == 'Windows'
         run: python -B -m pytest tests/test_windows_security_descriptor.py tests/test_windows_security_privileges.py tests/test_windows_acl_plan.py tests/test_windows_acl_provisioning.py tests/test_windows_acl_inheritance.py tests/test_windows_acl_sacl_inheritance.py tests/test_windows_acl_management.py -q -x

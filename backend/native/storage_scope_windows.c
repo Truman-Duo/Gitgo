@@ -187,7 +187,8 @@ API DWORD gitgo_scope_account(uint64_t cookie,wchar_t *sid,DWORD sid_count,wchar
     if(!length||length>513||wcslen(s->profile)<3||s->profile[1]!=L':'||s->profile[2]!=L'\\')return done(s,ERROR_NOT_SUPPORTED);
     code=close_slot(process);if(code)return done(s,code);
     /* No token, string allocation or ambiguous close escapes into Python. */
-    wcscpy(sid,s->sid);wcscpy(profile,s->profile);return done(s,0);
+    memcpy(sid,s->sid,((size_t)used+1)*sizeof(wchar_t));
+    memcpy(profile,s->profile,(wcslen(s->profile)+1)*sizeof(wchar_t));return done(s,0);
 }
 static DWORD close_slot(HandleSlot *n){
     if(n->phase==3)return ERROR_INVALID_STATE;
