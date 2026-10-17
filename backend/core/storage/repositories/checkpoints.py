@@ -3,26 +3,26 @@ from __future__ import annotations
 import hashlib
 from copy import deepcopy
 from ..checkpoint_plan import (
-    CheckpointObjectBuilder, capture_basis, require_live_basis, recheck_basis,
+    CheckpointObjectBuilder, capture_basis, require_live_basis,
 )
 from ..checkpoint_sql import CheckpointSqlBuilder
-from ..lifecycle import CheckpointRef, require_revision, check_transition
+from ..checkpoint_work import CheckpointPublication
+from ..checkpoint_limits import CheckpointLimits, capture_footprint
+from ..lifecycle import require_revision, check_transition
 from .ports import CheckpointsPort
 from ..support import _utc_now
 from ..transactions import authoritative_transaction
 
-def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
-    """Atomically persist one process/session/task boundary.
+def plan_agent_checkpoint(self: CheckpointsPort, snapshot: dict, *, limits: CheckpointLimits | None = None) -> CheckpointPublication:
+    """Build the complete immutable publication without new file/SQL writes.
 
-    Plan all immutable object bytes before file work; recheck the captured
-    State dependencies before publishing rows, facts and ownership together.
-    Legacy CAS still lacks durable preparation and generation-aware GC. A
-    failed publication may leave files; this ordering does not protect their
-    lifetime or authorize replay after an unknown commit.
+    Optional limits are supplied by a future qualified backend, never inferred
+    from a workspace or permission grant. Legacy callers retain their existing
+    policy. The returned value is not an admission or materialization ticket.
     """
     self._ensure_open()
     self._state.require_available()
-    snapshot = deepcopy(snapshot)
+    snapshot = deepcopy(snapshot) if limits is None else limits.copy_snapshot(snapshot)
     process_id = str(snapshot.get("process_id", "")).strip()
     session_id = str(snapshot.get("session_id", "")).strip()
     if not process_id or not session_id:
@@ -31,7 +31,17 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
     with self._state_lock:
         if self._state.in_transaction:
             raise RuntimeError("STATE_TRANSACTION_ALREADY_ACTIVE")
-        basis = capture_basis(self._state, process_id, parent_process_id)
+        footprint = None
+        if limits is None:
+            basis = capture_basis(self._state, process_id, parent_process_id)
+        else:
+            # Bound retained history before queries that scan it. Both reads
+            # observe the same snapshot; an independent writer cannot expand
+            # history between the bounded count and dependency capture. This
+            # read-only transaction is part of the qualified attempt schedule.
+            with authoritative_transaction(self._state):
+                footprint = capture_footprint(self._state, limits, process_id, session_id)
+                basis = capture_basis(self._state, process_id, parent_process_id)
     require_live_basis(basis)
     require_revision(basis.revision, snapshot.get("expected_revision"))
     status = str(snapshot.get("status") or "running")
@@ -352,10 +362,24 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
             stream_id=f"ledger:{process_id}", sequence=sequence, payload_ref=barrier["ref"], occurred_at=now,
             causation_id=f"checkpoint:{process_id}:{committed_revision}")
     writes = publication.seal(basis, objects, process_id, parent_process_id)
-    self._reserve_authoritative_write(max(logical_estimate, writes.parameter_bytes))
-    objects.materialize_legacy(self._write_blob_file)
+    if limits is not None:
+        limits.require_publication(writes, objects)
+        limits.require_transition(footprint, len(objects.members), len(message_objects), len(dependencies), barrier is not None)
+    return CheckpointPublication(process_id, session_id, parent_process_id, basis, objects, writes,
+        max(logical_estimate, writes.parameter_bytes), len(message_objects), len(dependencies),
+        barrier is not None, limits, footprint)
+
+
+def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
+    """Publish the legacy path from the same closed repository-owned plan.
+
+    Future batch admission consumes the plan without first creating CAS files.
+    This wrapper still has the documented legacy lifetime/collector limitations.
+    """
+    plan = plan_agent_checkpoint(self, snapshot)
+    self._reserve_authoritative_write(plan.estimated_sql_bytes)
+    plan.objects.materialize_legacy(self._write_blob_file)
     with self._state_lock:
         with authoritative_transaction(self._state):
-            recheck_basis(self._state, process_id, parent_process_id, basis)
-            writes.apply(self._state)
-    return CheckpointRef(f"sqlite:session/{process_id}/{checkpoint_sequence}", committed_revision)
+            plan.apply(self._state)
+    return plan.reference()

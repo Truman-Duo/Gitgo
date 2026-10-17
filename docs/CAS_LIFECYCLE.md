@@ -268,6 +268,37 @@ commit/rollback uncertainty, partial retirement across restart, active roots and
 consumer/fact changes before acquiring the writer transaction. The CAS lifetime
 and activation requirements below remain unchanged.
 
+## Bounded publication profiles
+
+The checkpoint repository now exposes the same immutable publication to its
+planner and legacy writer. Planning creates no new object files or State rows.
+The final owning transaction revalidates its captured dependencies and applies
+the fixed SQL. Only confirmed commit returns the new revision.
+
+An internal, inactive profile contract can additionally bound snapshot depth,
+node count, UTF-8 bytes, SQL parameters/statements, generated CAS objects and
+old replacement/history/reference rows. Input copying rejects cycles, custom
+adapters and non-finite or out-of-range scalars before encoding. Bounded history
+counts and dependency reads share one transaction snapshot; publication rechecks
+the counts and the projected growth from newly retained facts and roots. Oversized
+history is rejected without deleting it. The complete profile, footprint and
+publication workload participate in the publication digest.
+
+The WAL capacity value sums all business, cleanup and housekeeping attempts
+since a confirmed reset, including retained partial tails. Its conditional
+frame bound includes FULL-sync sector padding and derives the shared-memory
+index size from the aggregate frame count. It supplies no reservation, refund,
+checkpoint-reset or execution API. The main/WAL/SHM classes are only part of a
+complete storage envelope.
+
+There are no enabled production profile defaults. The frame derivation requires
+a qualified SQLite build, fixed page/sector limits, disabled dirty-page spilling
+and flushing, a closed transaction schedule, and native enforcement. Bounded
+input work is not a native heap limit. Runtime identity, every concurrent file
+class, durable debt accounting, prepared generation ownership and migration/
+recovery qualification remain activation requirements. Legacy storage limits
+and the CAS v2 refusal gate remain unchanged.
+
 ## Remaining protocol work
 
 Writers need durable, budgeted preparation before creating or reusing files.
