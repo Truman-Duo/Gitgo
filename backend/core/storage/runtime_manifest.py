@@ -194,11 +194,16 @@ def with_runtime_copies(envelope: StorageEnvelope, content: RuntimeContent) -> S
         raise StorageEnvelopeInvalid("qualified runtime envelope inputs required")
     if any(item.name.startswith(("runtime_", "input_")) for item in envelope.registry_files):
         raise StorageEnvelopeInvalid("runtime copies already accounted")
+    classes = runtime_copy_classes(content)
+    return StorageEnvelope(envelope.version, envelope.allocation_unit, envelope.slots, envelope.host_max_bytes,
+                           tuple(sorted((*envelope.registry_files, *classes), key=lambda item: item.name)), envelope.files)
+
+
+def runtime_copy_classes(content: RuntimeContent) -> tuple[FileEnvelope, ...]:
+    require(type(content) is RuntimeContent, "closed runtime content required")
     buckets = {}
     for length in (*[item.length for item in content.files], MAX_MANIFEST_BYTES):
         size = charge(length)
         buckets[size] = buckets.get(size, 0)+1
-    classes = tuple(FileEnvelope(f"{prefix}_{size:09}", size, count*copies)
+    return tuple(FileEnvelope(f"{prefix}_{size:09}", size, count*copies)
                     for prefix, copies in (("input", 1), ("runtime", 2)) for size, count in sorted(buckets.items()))
-    return StorageEnvelope(envelope.version, envelope.allocation_unit, envelope.slots, envelope.host_max_bytes,
-                           tuple(sorted((*envelope.registry_files, *classes), key=lambda item: item.name)), envelope.files)

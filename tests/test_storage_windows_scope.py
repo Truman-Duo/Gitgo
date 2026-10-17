@@ -188,3 +188,38 @@ def test_native_after_effect_faults_never_retry_unknown_closes(native, tmp_path_
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"fault mode {mode} passed" in result.stdout
     assert f"quarantined={1 if mode in {4, 7, 9} else 0}" in result.stdout
+
+
+def test_volume_qualification_uses_actual_owned_object(native,tmp_path_factory):
+    scope=native.open_scope()
+    try:
+        root=scope.root(str(tmp_path_factory))
+        assert scope.volume(root)==(scope.identity(root)[0].volume,4096)
+    finally: scope.close()
+
+
+@pytest.mark.parametrize("mode",range(1,6))
+def test_native_volume_failures_are_not_replaced_by_path_assumptions(native,tmp_path_factory,mode):
+    executable=Path(os.environ["GITGO_STORAGE_NATIVE_TEST_LIBRARY"]).with_name("storage-volume-faults.exe")
+    assert executable.is_file()
+    drive="\\??\\"+tmp_path_factory.anchor
+    result=subprocess.run([str(executable),drive,str(mode)],capture_output=True,text=True,timeout=20)
+    assert result.returncode==0,result.stdout+result.stderr
+    assert "unqualified or unknown volume refused" in result.stdout
+
+
+def test_root_excludes_actual_ancestor_before_any_descendant_open(native,tmp_path_factory):
+    # The forbidden object's actual identity is decisive, independent of names.
+    scopes=native
+    probe=scopes.open_scope()
+    parent=probe.root(str(tmp_path_factory))
+    identity=probe.identity(parent)[0]
+    guarded=scopes.open_scope()
+    try:
+        with pytest.raises(StorageOwnershipError) as caught:
+            guarded.root(str(tmp_path_factory/"must-not-open"),exclude=identity)
+        assert caught.value.operation=="excluded_ancestor"
+        assert not (tmp_path_factory/"must-not-open").exists()
+        with pytest.raises(StorageOwnershipError): guarded.root(str(tmp_path_factory))
+    finally:
+        guarded.close();probe.close()

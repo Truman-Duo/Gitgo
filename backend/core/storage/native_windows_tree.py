@@ -111,6 +111,7 @@ class WindowsTreeLibrary:
             "install_write": [_U64, _U32, C.c_void_p, _U32],
             "install_seal_file": [_U64, _U32], "install_finish": [_U64, _U32, _U64],
             "install_absent": [_U64, C.c_void_p, words, _U32, C.c_wchar_p, C.POINTER(C.c_int)],
+            "bootstrap_check_parent": [_U64, C.c_void_p, words, _U32],
             "bootstrap_begin": [_U64, C.c_void_p, words, _U32, C.c_wchar_p],
             "bootstrap_attach": [_U64, C.c_void_p, words, _U32],
             "bootstrap_add": [_U64, _U32, C.c_wchar_p, C.c_int, _U64, C.POINTER(_U32)],
@@ -292,6 +293,14 @@ class RuntimePins(_TreeOwner):
 
 
 class MetadataBootstrap(_TreeOwner):
+    def check_parent(self, parent, expected):
+        self._require(mutable=True)
+        borrowed, words = _parent(parent, expected)
+        self._sealed = True
+        _check("bootstrap_parent", self._call("bootstrap_check_parent", self._cookie, borrowed, words, 3))
+        self._finished = True
+        self._sealed = False
+
     def begin(self, parent, expected, name):
         self._require(mutable=True)
         name = _name(name)

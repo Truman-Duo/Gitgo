@@ -62,6 +62,19 @@ class StorageProcessIdentity:
 
 
 @dataclass(frozen=True)
+class StorageProcessContext:
+    identity: StorageProcessIdentity
+    image: str
+    system_root: str
+
+    def __post_init__(self):
+        if type(self.identity) is not StorageProcessIdentity:
+            raise ValueError("Actual process identity required")
+        _absolute(self.image)
+        _absolute(self.system_root)
+
+
+@dataclass(frozen=True)
 class StorageWorkerCommand:
     """Closed launch inputs supplied by the independently verified runtime.
 
@@ -132,6 +145,7 @@ class WindowsProcessLibrary:
         self._owners: dict[int, WindowsStorageProcess] = {}
         signatures = {
             "abi": [], "reserve": [ctypes.POINTER(_U64)],
+            "current": [_U64, ctypes.POINTER(_U64), _U32, ctypes.c_wchar_p, _U32, ctypes.c_wchar_p, _U32],
             "start": [_U64, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p],
             "identity": [_U64, ctypes.POINTER(_U64), _U32],
             "resume": [_U64, _U32, _U64],
@@ -181,6 +195,17 @@ class WindowsStorageProcess:
     def _require(self) -> None:
         if self._sealed or self._retired:
             raise StorageProcessError("owner_sealed", 5023)
+
+    def current(self) -> StorageProcessContext:
+        """Observe the actual host/worker process without a second open handle."""
+        self._require()
+        values = (_U64 * 2)()
+        image, system = ctypes.create_unicode_buffer(32768), ctypes.create_unicode_buffer(513)
+        self._sealed = True
+        _check("current", self._call("current", self._cookie, values, 2, image, len(image), system, len(system)))
+        result = StorageProcessContext(StorageProcessIdentity(*values), image.value, system.value)
+        self._sealed = False
+        return result
 
     def create(self, command: StorageWorkerCommand) -> None:
         self._require()

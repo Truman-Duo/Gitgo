@@ -81,6 +81,29 @@ API DWORD gitgo_process_reserve(uint64_t *cookie) {
     o->generation=generation;o->occupied=1;*cookie=(generation<<8)|(uint64_t)(i+1);
     ReleaseSRWLockExclusive(&o->lock);ReleaseSRWLockExclusive(&pool_lock);return 0;
 }
+/* A pseudo-handle observes this process; no Python-created handle debt exists.
+ * This proves neither selected-runtime membership nor installation approval. */
+API DWORD gitgo_process_current(uint64_t cookie,uint64_t *out,DWORD words,
+                               wchar_t *image,DWORD image_cap,wchar_t *system,DWORD system_cap) {
+    Owner *o=get(cookie);FILETIME created,exit,kernel,user;DWORD count,error=0;
+    if(!o)return ERROR_INVALID_HANDLE;
+    if(o->sealed||!out||words!=2||!image||image_cap!=32768||!system||system_cap!=513)
+        return done(o,ERROR_INVALID_PARAMETER);
+    memset(out,0,words*sizeof(*out));image[0]=system[0]=0;
+    if(!GetProcessTimes(GetCurrentProcess(),&created,&exit,&kernel,&user)){error=failed();goto failed_query;}
+    count=GetModuleFileNameW(NULL,image,image_cap);
+    if(!count){error=failed();goto failed_query;}
+    if(count>=image_cap){error=ERROR_INSUFFICIENT_BUFFER;goto failed_query;}
+    count=GetSystemWindowsDirectoryW(system,system_cap);
+    if(!count){error=failed();goto failed_query;}
+    if(count>=system_cap){error=ERROR_INSUFFICIENT_BUFFER;goto failed_query;}
+    out[0]=GetCurrentProcessId();out[1]=((uint64_t)created.dwHighDateTime<<32)|created.dwLowDateTime;
+    if(!out[0]||!out[1]){error=ERROR_INVALID_DATA;goto failed_query;}
+    return done(o,0);
+failed_query:
+    memset(out,0,words*sizeof(*out));image[0]=system[0]=0;o->sealed=1;
+    return done(o,error);
+}
 API DWORD gitgo_process_start(uint64_t cookie,const wchar_t *executable,wchar_t *command,
                     const wchar_t *directory,wchar_t *environment) {
     Owner *o=get(cookie);JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;

@@ -228,3 +228,33 @@ API DWORD gitgo_scope_retire(uint64_t cookie){
 }
 
 API DWORD gitgo_scope_abi(void){return 1;}
+
+/* Query the exact owned object, never a second path or a mapped drive label. */
+API DWORD gitgo_scope_volume(uint64_t cookie,uint64_t token,uint64_t *out,DWORD words){
+    typedef NTSTATUS (NTAPI *VolumeQuery)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,int);
+    struct Device {ULONG type,characteristics;} device;
+    struct Size {LARGE_INTEGER total,available;ULONG sectors,bytes;} size;
+    Scope *s=get(cookie);HandleSlot *n;HMODULE nt;VolumeQuery query;ErrorFn convert;
+    IO_STATUS_BLOCK io;NTSTATUS status;DWORD flags=0,maximum=0,serial=0;wchar_t fs[32]={0};uint64_t unit;DWORD code;
+    if(!s)return ERROR_INVALID_HANDLE;
+    n=slot(s,token);
+    if(s->sealed||!n||!n->directory||!out||words!=2)return done(s,ERROR_INVALID_PARAMETER);
+    s->sealed=1;code=metadata(n);if(code)return done(s,code);
+    nt=GetModuleHandleW(L"ntdll.dll");if(!nt)return done(s,error());
+    query=(VolumeQuery)(void*)GetProcAddress(nt,"NtQueryVolumeInformationFile");
+    convert=(ErrorFn)(void*)GetProcAddress(nt,"RtlNtStatusToDosError");
+    if(!query||!convert)return done(s,ERROR_PROC_NOT_FOUND);
+    memset(&io,0,sizeof(io));memset(&device,0,sizeof(device));
+    status=query(n->handle,&io,&device,sizeof(device),4);
+    if(status<0)return done(s,convert(status));
+    if(io.Information!=sizeof(device)||device.type!=7||(device.characteristics&0x10))return done(s,ERROR_NOT_SUPPORTED);
+    memset(&io,0,sizeof(io));memset(&size,0,sizeof(size));
+    status=query(n->handle,&io,&size,sizeof(size),3);
+    if(status<0)return done(s,convert(status));
+    if(io.Information!=sizeof(size)||!size.sectors||!size.bytes)return done(s,ERROR_INVALID_DATA);
+    unit=(uint64_t)size.sectors*size.bytes;
+    if(unit!=4096)return done(s,ERROR_NOT_SUPPORTED);
+    if(!GetVolumeInformationByHandleW(n->handle,0,0,&serial,&maximum,&flags,fs,32))return done(s,error());
+    if(wcscmp(fs,L"NTFS"))return done(s,ERROR_NOT_SUPPORTED);
+    out[0]=n->id.VolumeSerialNumber;out[1]=unit;s->sealed=0;return done(s,0);
+}

@@ -224,3 +224,34 @@ def test_process_identity_cannot_be_coerced_or_wrapped(pid, created):
 def test_implicit_or_injected_launch_inputs_are_refused(argv, directory, environment):
     with pytest.raises(ValueError):
         StorageWorkerCommand(argv, directory, environment)
+
+
+def test_native_current_context_ignores_environment_and_owns_no_extra_handle(native,tmp_path_factory,monkeypatch):
+    for name in ("SYSTEMROOT","WINDIR","PATH"):
+        monkeypatch.setenv(name,str(tmp_path_factory/"untrusted"))
+    owner=native.reserve()
+    try:
+        context=owner.current()
+        assert context.identity.pid==os.getpid() and context.identity.creation_time>0
+        assert Path(context.image).is_file() and Path(context.system_root).is_dir()
+        assert str(tmp_path_factory/"untrusted") not in {context.image,context.system_root}
+        assert context==owner.current() and owner.status().handles==0
+    finally:
+        close(owner)
+
+
+def test_lost_current_context_seals_work_without_leaking_new_handles(native,monkeypatch):
+    owner=native.reserve()
+    original=native._calls["current"]
+    def lost(*args):
+        assert original(*args)==0
+        raise RuntimeError("lost native current context")
+    try:
+        with monkeypatch.context() as context:
+            context.setitem(native._calls,"current",lost)
+            with pytest.raises(RuntimeError,match="lost native current context"):
+                owner.current()
+        with pytest.raises(StorageProcessError): owner.current()
+        assert owner.status().handles==0
+    finally:
+        close(owner)

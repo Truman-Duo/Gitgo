@@ -1,7 +1,7 @@
 """Complete native pins for an independently approved installed runtime."""
 from pathlib import PurePosixPath
 
-from .native_windows_tree import TreePurpose, WindowsTreeLibrary
+from .native_windows_tree import TreePurpose, WindowsTreeLibrary, RuntimePins
 from .runtime_manifest import MANIFEST_NAME, RuntimeManifest, require
 
 
@@ -13,11 +13,16 @@ class PinnedRuntime:
     """
 
     def __init__(self, library: WindowsTreeLibrary, raw: bytes, approved_digest: str, host_sid: str):
+        self._attempted = self._closed = self._ready = False
+        self._owner = None
+        self._library = library
+        self._indices = {}
         self._manifest = RuntimeManifest.from_bytes(raw, approved_digest)
         self._raw = raw
-        self._owner = library.reserve(TreePurpose.PIN, host_sid)
-        self._attempted = self._closed = self._ready = False
-        self._indices = {}
+        # The parent retains this wrapper before construction. Retain its leaf
+        # before native reserve too, including an exception after that effect.
+        self._owner = object.__new__(RuntimePins)
+        RuntimePins.__init__(self._owner, library, TreePurpose.PIN, host_sid)
 
     @property
     def manifest(self):
@@ -65,5 +70,8 @@ class PinnedRuntime:
     def close(self):
         self._ready = False
         if not self._closed:
-            self._owner.close()
+            owner = self._owner
+            cookie = getattr(owner,"_cookie",None)
+            if owner is not None and (id(owner) in self._library._owners or cookie is not None and cookie.value):
+                owner.close()
             self._closed = True

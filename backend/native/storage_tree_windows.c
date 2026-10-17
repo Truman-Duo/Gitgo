@@ -678,3 +678,21 @@ API DWORD gitgo_tree_inventory(uint64_t cookie,DWORD index,wchar_t *out,DWORD ca
 }
 
 API DWORD gitgo_tree_abi(void){return 1;}
+
+/* Existing authority parents need the same mutation check as fresh creation.
+ * This consumes a read-only bootstrap owner; it never repairs an ACL. */
+API DWORD gitgo_bootstrap_check_parent(uint64_t cookie,HANDLE parent,const uint64_t *identity,DWORD words){
+    Runtime *r=get(cookie);Node *p;DWORD code;
+    if(!r)return ERROR_INVALID_HANDLE;
+    if(r->purpose!=TREE_BOOTSTRAP)return done(r,ERROR_INVALID_STATE);
+    if(r->sealed||r->count||r->ancestor_count||!parent||!identity||words!=3)
+        return done(r,ERROR_INVALID_PARAMETER);
+    r->sealed=1;r->installing=TREE_BOOTSTRAPPED;
+    code=host_account(r);if(code)return done(r,code);
+    p=&r->ancestors[0];p->phase=1;p->directory=1;
+    code=native_create(r,p,parent,L"",1,0,1,0);if(code)return done(r,code);
+    code=metadata(p);if(code)return done(r,code);
+    if(p->id.VolumeSerialNumber!=identity[0]||memcmp(p->id.FileId.Identifier,identity+1,16))return done(r,ERROR_INVALID_DATA);
+    code=parent_security(r,p);if(code)return done(r,code);
+    p->phase=2;r->sealed=0;return done(r,0);
+}

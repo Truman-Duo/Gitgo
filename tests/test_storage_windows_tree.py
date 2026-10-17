@@ -285,3 +285,17 @@ def test_native_after_effect_failures_keep_ownership(native, tmp_path_factory, k
         result = subprocess.run(args, capture_output=True, text=True, timeout=25)
         assert result.returncode == 0, result.stdout + result.stderr
         assert "passed" in result.stdout and "quarantined=" in result.stdout
+
+
+@pytest.mark.parametrize("extra,allowed", [("(A;OICI;GRGX;;;WD)",True),("(A;OICI;DC;;;WD)",False)])
+def test_existing_parent_gets_same_precreation_mutation_check(native,tmp_path_factory,extra,allowed):
+    with fixture(native,tmp_path_factory,extra) as (_,trees,sid,root,parent,identity):
+        owner=trees.reserve(TreePurpose.BOOTSTRAP,sid)
+        if allowed:
+            owner.check_parent(parent,identity)
+            with pytest.raises(StorageTreeError): owner.begin(parent,identity,"late")
+        else:
+            with pytest.raises(StorageTreeError) as caught: owner.check_parent(parent,identity)
+            assert caught.value.native_error==5
+        owner.close()
+        assert not list(root.iterdir())

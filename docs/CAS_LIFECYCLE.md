@@ -451,3 +451,58 @@ manifest allowance per copy. This does not increase the Host limit or consume
 a reservation. An underfunded envelope is rejected. Source-package approval,
 Host installation, active-runtime selection and process-lifetime joins are
 still required before these interfaces can activate a guarded storage path.
+
+
+## Canonical Host bootstrap and prepaid slots
+
+The Windows Host construction dependency obtains its SID and profile from the
+actual native token. Its public entry points locate only
+`<native-profile>/.gitgo/storage-authority-v1`; `state_home`, environment and a
+project path cannot select another Host budget. Before opening or creating this
+authority, it checks the actual parent object for untrusted mutation rights,
+including DELETE_CHILD, and qualifies the exact local NTFS object and 4096-byte
+allocation unit. Existing parents receive the same checks as new installation.
+No ACL repair or adoption of a partially initialized authority is performed.
+
+Bootstrap holds a native gate, flushes the intent before other metadata, creates
+the finite namespace, and writes the authority record last. The record binds
+account, parent/root/member identities, content contract and the same envelope.
+The one charged input copy is fixed by its canonical root, actual root identity,
+complete manifest digest and content contract in both the intent and authority.
+A second copy with identical bytes cannot reuse that input allowance. The input
+and Host trees must be disjoint before bootstrap can create any directory.
+Missing or unpinned input blocks installation; it does not refund its charge.
+Reopening rechecks those identities, protected metadata, complete namespace and
+both journal types while holding the gate. A content/profile mismatch requires
+an explicit migration; it cannot create a different authority location.
+
+Each project capacity ticket follows a confirmed native slot-journal update.
+An unknown update issues no ticket and keeps the reservation charged. Reopening
+does not replay an existing reservation or refund it. Parent owners register
+each child object before its native constructor can have effects. Failed child
+closure prevents release of the outer gate and namespace scope. Owner and
+ticket use are bound to the creating process/thread.
+
+The bootstrap primitive admits at most eleven project slots within its fixed
+node/byte limits; this is not a qualified production capacity profile. Tests
+with two small prepaid projects validate shared slot accounting, not the full
+State/Obs/WAL budget. Registered project references, runtime activation and
+project workers still need their actual binding/lifetime joins. Unqualified
+reference files are refused. The new path remains inactive in StorageRuntime.
+Native Host protocol tests use new owned temporary parents; public canonical
+installation still requires disposable-account source/frozen acceptance.
+
+
+Host input exclusion also compares actual native ancestor identities before
+creating the canonical parent or authority. A path spelling or directory alias
+cannot put that authority inside the charged input copy. Runtime pin wrappers
+retain their native leaf before construction can have effects, preserving the
+same outer-owner close order if the constructor never returns.
+
+Gate handoff ends the old owner's admission before closing its exact lock
+handle. Unknown handoff cannot resume admission or authorize launch. Other
+namespace and code pins remain owned. A busy process retirement returns
+incomplete and preserves all enclosing resources; only confirmed native
+retirement allows their closure. Native current-process context observes the
+real image, system directory and creation identity without another open handle
+or environment-derived identity. This observation is not runtime approval.

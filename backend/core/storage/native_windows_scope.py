@@ -86,6 +86,7 @@ class WindowsScopeLibrary:
         self._module = loaded_module
         self._owners: dict[int, WindowsStorageScope] = {}
         signatures = {
+            "volume": [_U64, _U64, ctypes.POINTER(_U64), _U32],
             "abi": [],
             "reserve": [ctypes.POINTER(_U64)],
             "open": [_U64, _U64, ctypes.c_wchar_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(_U64)],
@@ -171,9 +172,16 @@ class WindowsStorageScope:
         self._sealed = False
         return handle
 
-    def root(self, path: str) -> NativeHandle:
+    def root(self, path: str, *, exclude: ObjectIdentity | None = None) -> NativeHandle:
         if type(path) is not str or "\0" in path:
             raise ValueError("A bounded local Windows path is required")
+        if exclude is not None:
+            _identity_words(exclude)
+        def check(handle):
+            if exclude is not None and self.identity(handle)[0] == exclude:
+                self._sealed = True
+                raise StorageOwnershipError("excluded_ancestor",5)
+            return handle
         root = PureWindowsPath(path)
         if (not root.is_absolute() or len(root.drive) != 2 or root.drive[1] != ":"
                 or len(root.parts) > 65):
@@ -183,8 +191,9 @@ class WindowsStorageScope:
         for part in root.parts[1:]:
             _leaf(part)
         parent = self._open("\\??\\" + root.anchor, None, True, True)
+        check(parent)
         for part in root.parts[1:]:
-            parent = self._open(part, parent, True, True)
+            parent = check(self._open(part, parent, True, True))
         return parent
 
     def open(self, name: str, parent: NativeHandle, *, directory: bool = False,
@@ -249,6 +258,16 @@ class WindowsStorageScope:
         self._sealed = True
         _check("flush_bound", self._call("flush_bound", self._cookie, parent.token, name, words, maximum))
         self._sealed = False
+
+    def volume(self, handle: NativeHandle) -> tuple[int, int]:
+        """Qualify the actual local NTFS object and its 4096-byte allocation unit."""
+        self._require(handle)
+        words = (_U64 * 2)()
+        self._sealed = True
+        _check("volume", self._call("volume", self._cookie, handle.token, words, 2))
+        result = words[0], words[1]
+        self._sealed = False
+        return result
 
     def account(self) -> tuple[str, str]:
         self._require()

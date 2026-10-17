@@ -80,6 +80,18 @@ int main(void) {
     env=GetEnvironmentStringsW();assert(env);
     assert(real_times(GetCurrentProcess(),&creation,&exit,&kernel,&user));
     created=((uint64_t)creation.dwHighDateTime<<32)|creation.dwLowDateTime;
+    /* Current identity uses no second open handle; query errors seal its owner. */
+    assert(!gitgo_process_reserve(&cookie));
+    assert(!gitgo_process_current(cookie,identity,2,exe,32768,cwd,513));
+    assert(identity[0]==GetCurrentProcessId()&&identity[1]==created);
+    assert(!gitgo_process_status(cookie,stats,9)&&stats[5]==0);
+    fail_times=1;
+    assert(gitgo_process_current(cookie,identity,2,exe,32768,cwd,513)==ERROR_ACCESS_DENIED);
+    assert(!identity[0]&&!identity[1]&&!exe[0]&&!cwd[0]);
+    assert(!gitgo_process_status(cookie,stats,9)&&stats[1]&&stats[5]==0);
+    assert(!gitgo_process_retire(cookie,0));
+    n=GetModuleFileNameW(0,exe,32768);assert(n&&n<32768);
+    n=GetCurrentDirectoryW(32768,cwd);assert(n&&n<32768);
     /* Permission/query/snapshot failure is never evidence of native absence. */
     assert(!gitgo_process_reserve(&cookie));
     assert(!gitgo_process_ended(cookie,GetCurrentProcessId(),created,&ended)&&!ended);
