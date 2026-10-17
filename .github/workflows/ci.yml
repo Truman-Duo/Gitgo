@@ -199,6 +199,16 @@ jobs:
         run: |
           "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           python -B -m pytest tests/test_windows_acl_provisioning.py -q -x
+      - name: Build and validate native storage lifetime and journals
+        if: runner.os == 'Windows'
+        run: |
+          $compiler = (Get-Command clang.exe -ErrorAction Stop).Source
+          & $compiler --version
+          $output = Join-Path $env:RUNNER_TEMP 'gitgo-storage-native'
+          python -B scripts/build_storage_native.py --compiler $compiler --output $output --selftest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:GITGO_STORAGE_NATIVE_TEST_LIBRARY = Join-Path $output 'gitgo-storage-scope.dll'
+          python -B -m pytest tests/test_storage_windows_scope.py tests/test_storage_windows_process.py tests/test_storage_windows_journal.py tests/test_storage_slot_records.py tests/test_storage_runtime_records.py -q -x
       - name: Windows real source and frozen acceptance
         if: runner.os == 'Windows'
         run: python -B scripts/run_sandbox_acceptance.py

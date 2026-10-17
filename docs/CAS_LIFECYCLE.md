@@ -347,3 +347,49 @@ evidence, without reconstructing a missing fact or replaying an execution. This
 check is not a lease, commit proof by itself, or a reason to accept missing
 history: retirement, preparation membership and native object generations must
 still be established by the complete lifecycle protocol before CAS v2 activation.
+
+
+## Native storage lifetime and registry records
+
+Windows storage scope, process and journal components have explicit native ABIs
+and real native fault tests. They are construction dependencies for the guarded
+storage path; the default legacy StorageRuntime does not load them or activate
+CAS v2. They do not constitute a qualified storage backend or an installation
+approval. A trusted runtime owner must supply already loaded native modules
+and retain the verified installation and namespace pins for their lifetime.
+No production loader consults the test-library environment variable.
+
+Native records own handles before creation, duplication, locking or process
+launch. Fixed pools retain their slots after an unknown close. A successful
+retirement whose return was lost can be observed again without closing a
+reused numeric handle or touching a newer owner. Python garbage collection
+cannot discard these owners. Scope owners bind to their native process and
+thread. Process owners create the root suspended and atomically assign its
+Job; the admission coordinator must commit the exact identity before resume.
+The worker receives a closed environment, one-process and 256 MiB Job limits,
+a 30-second aggregate user CPU limit and a hard CPU rate cap. A busy or failed
+retirement cannot confirm cleanup or refund capacity. These trusted storage
+workers are separate from the untrusted tool execution backend.
+
+Worker reservations and installed-runtime records share one two-cell framing
+implementation. Each journal is exactly 8192 bytes; an update writes one
+4096-byte cell after comparing the entire prior snapshot, then flushes and
+checks the complete readback. Checksums detect corruption and do not grant
+authority. Torn nonempty peers, unknown versions, broken sequence links and
+forged parsed snapshots are refused. Worker intent always includes the exact
+selected runtime generation, manifest and activation epoch. Slot 63 belongs
+to the runtime lifecycle; it cannot be consumed as a project reservation.
+
+Activation retains the old runtime generation until its worker has retired,
+native absence has been established and the committed record permits slot
+clearance. The codecs check record transitions; the owning coordinator must
+provide the actual gate, identity, admission and cleanup evidence. In
+particular, writing RETIRED or ABSENT is not itself such evidence.
+
+Build-only validation uses `scripts/build_storage_native.py` with an explicit
+Clang or Zig compiler, a fresh output directory and `--selftest`. Both Windows
+native CI paths build the actual sources and run the scope, process, journal
+and record tests. Native binaries and fault executables are build outputs and
+are not committed. These checks do not qualify source/frozen product routing,
+canonical Host installation, migration, Linux storage primitives or macOS
+storage primitives. Those gates remain required before guarded activation.
