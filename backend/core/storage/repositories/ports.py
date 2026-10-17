@@ -174,6 +174,7 @@ class CasMaintenancePort(Protocol):
     _state_lock: Any
     paths: StoragePaths
     policy: StoragePolicy
+    read_blob: Callable
 
 class HealthPort(Protocol):
     _cas_bytes_hint: Any

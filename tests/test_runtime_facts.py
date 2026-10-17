@@ -110,7 +110,7 @@ def test_stream_order_failed_prefix_and_historical_immutable_refs(tmp_path_facto
         assert [f['stream_sequence'] for f in facts] == list(range(1, 13))
         with pytest.raises(ValueError): acknowledge(runtime, 'ui', facts[1])
         assert runtime._read_json_blob(facts[0]['payload']['runtime_state_ref']) == {'old_value': 0}
-        direct, owned, _ = runtime._cas_reference_inventory()
+        owned = runtime._cas_reference_inventory().owned
         assert facts[0]['payload']['runtime_state_ref'].split(':')[-1] in owned
         delivered = []; failures = []
         def handler(event):
@@ -211,7 +211,7 @@ def test_retired_fact_ownership_is_bounded_and_survives_restart(tmp_path_factory
         assert runtime._state.execute("SELECT COUNT(*) FROM runtime_outbox").fetchone()[0] == 0
         assert runtime._state.execute("SELECT COUNT(*) FROM object_refs WHERE owner_type='runtime_fact'").fetchone()[0] == before - 3
         remaining = {r[0] for r in runtime._state.execute("SELECT digest FROM object_refs WHERE owner_type='runtime_fact'")}
-        direct, owned, _ = runtime._cas_reference_inventory()
+        owned = runtime._cas_reference_inventory().owned
         assert remaining <= owned
     finally:
         runtime.close()

@@ -299,6 +299,24 @@ class, durable debt accounting, prepared generation ownership and migration/
 recovery qualification remain activation requirements. Legacy storage limits
 and the CAS v2 refusal gate remain unchanged.
 
+## Complete root discovery before collection
+
+CAS inventory reports known direct, explicit-owner and nested roots separately
+from discovery completeness. Missing, unreadable, over-limit, hash-mismatched or
+malformed legacy checkpoint metadata produces an incomplete result. Duplicate
+JSON fields are rejected instead of discarding one set of potential references.
+These reads are bounded and do not reconstruct missing files.
+
+Collection requires a complete inventory before admitting writes or unlinking
+any candidate. An incomplete scan leaves files, ownership rows and the previous
+maintenance timestamp unchanged. Authoritative metadata discovery failures also
+appear as blocked storage health. Existing facts/reference rows still protect
+their objects; unknown discovery is never converted into an empty root set.
+
+This closes the incomplete-scan deletion path. It does not fence concurrent
+publication, add generation-aware deletion, or activate CAS v2. All participants
+still need the shared preparation/ownership/collection protocol below.
+
 ## Remaining protocol work
 
 Writers need durable, budgeted preparation before creating or reusing files.

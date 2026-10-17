@@ -1,9 +1,12 @@
 """Cas Maintenance repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
+import hashlib
 import json
 import time
 from pathlib import Path
 from ..transactions import authoritative_transaction
+from ..cas_inventory import CasReferenceInventory
+from ..models import StorageBlocked
 from .ports import CasMaintenancePort
 
 def _digest_from_ref(value: object) -> str | None:
@@ -28,8 +31,7 @@ def _referenced_cas_digests(self) -> set[str]:
     before ``object_refs`` was populated.  Reading those metadata objects is
     therefore part of marking, not an optional migration convenience.
     """
-    direct, owned, nested = self._cas_reference_inventory()
-    return direct | owned | nested
+    return set(self._cas_reference_inventory().require_complete())
 
 
 def _nested_cas_digests(value: object) -> set[str]:
@@ -48,8 +50,13 @@ def _nested_cas_digests(value: object) -> set[str]:
     return found
 
 
-def _cas_reference_inventory(self) -> tuple[set[str], set[str], set[str]]:
-    """Return direct-column, explicit-owner and legacy nested references."""
+def _cas_reference_inventory(self) -> CasReferenceInventory:
+    """Discover known roots and report incomplete discovery independently.
+
+    Metadata reads are bounded, hash-checked and never repair files. This result
+    is not a lifetime lease: concurrent publication still needs the CAS v2
+    ordering/generation protocol before collection can be considered fenced.
+    """
     state_columns = (
         ("sessions", "metadata_ref"),
         ("tasks", "contract_ref"), ("tasks", "outcome_ref"),
@@ -82,6 +89,7 @@ def _cas_reference_inventory(self) -> tuple[set[str], set[str], set[str]]:
         ("trace_events", "detail_ref"),
     )
     direct: set[str] = set()
+    incomplete: set[str] = set()
     metadata_digests: set[str] = set()
     with self._state_lock:
         for table, column in state_columns:
@@ -93,13 +101,20 @@ def _cas_reference_inventory(self) -> tuple[set[str], set[str], set[str]]:
                     direct.add(digest)
                     if table == "sessions" and column == "metadata_ref":
                         metadata_digests.add(digest)
-        owned = {
-            str(row[0])
-            for row in self._state.execute(
-                "SELECT DISTINCT digest FROM object_refs"
-            ).fetchall()
-            if self._digest_from_ref(f"sha256:{row[0]}")
-        }
+                elif ((table == "sessions" and column == "metadata_ref")
+                        or str(row[0]).startswith(("sha256:", "trace-object:"))):
+                    # Report a digest of invalid text, not private metadata.
+                    identity = hashlib.sha256(
+                        str(row[0]).encode("utf8", errors="replace")
+                    ).hexdigest()
+                    incomplete.add("cas_direct_reference_invalid:" + identity)
+        owned = set()
+        for row in self._state.execute("SELECT DISTINCT digest FROM object_refs").fetchall():
+            digest = self._digest_from_ref(f"sha256:{row[0]}")
+            if digest:
+                owned.add(digest)
+            else:
+                incomplete.add("cas_owned_reference_invalid")
     with self._observability_lock:
         for table, column in observability_columns:
             for row in self._observability.execute(
@@ -108,17 +123,32 @@ def _cas_reference_inventory(self) -> tuple[set[str], set[str], set[str]]:
                 digest = self._digest_from_ref(row[0])
                 if digest:
                     direct.add(digest)
+                elif str(row[0]).startswith(("sha256:", "trace-object:")):
+                    identity = hashlib.sha256(
+                        str(row[0]).encode("utf8", errors="replace")
+                    ).hexdigest()
+                    incomplete.add("cas_direct_reference_invalid:" + identity)
     nested: set[str] = set()
+    def unique_fields(items):
+        value = {}
+        for key, entry in items:
+            if key in value:
+                raise ValueError("duplicate CAS metadata field")
+            value[key] = entry
+        return value
     for digest in metadata_digests:
-        path = self.paths.cas_dir / digest[:2] / digest[2:]
-        if not path.exists() and self._restore_canonical_blob(digest) is None:
-            continue
         try:
-            metadata = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = self.read_blob("sha256:" + digest, repair=False)
+            metadata = json.loads(
+                data.decode("utf8", errors="strict"), object_pairs_hook=unique_fields
+            )
+        except (OSError, UnicodeError, ValueError, RecursionError, StorageBlocked):
+            incomplete.add("cas_direct_metadata_unreadable:" + digest)
             continue
         nested.update(self._nested_cas_digests(metadata))
-    return direct, owned, nested
+    return CasReferenceInventory(
+        frozenset(direct), frozenset(owned), frozenset(nested), frozenset(incomplete)
+    )
 
 
 def _refresh_cas_reference_status(self: CasMaintenancePort, *, force: bool = False) -> None:
@@ -130,8 +160,9 @@ def _refresh_cas_reference_status(self: CasMaintenancePort, *, force: bool = Fal
         < self.policy.cas_rescan_interval_seconds
     ):
         return
-    direct, owned, nested = self._cas_reference_inventory()
-    reasons: dict[str, str] = {}
+    inventory = self._cas_reference_inventory()
+    direct, owned, nested = inventory.direct, inventory.owned, inventory.nested
+    reasons: dict[str, str] = {reason: reason for reason in inventory.incomplete}
     # Later classes are stronger: a digest referenced by both nested
     # metadata and an authoritative column must remain a direct failure.
     for kind, digests in (("nested", nested), ("owned", owned), ("direct", direct)):
@@ -161,8 +192,8 @@ def maintain_cas(self: CasMaintenancePort, *, force: bool = False) -> dict:
         < self.policy.cas_gc_interval_seconds
     ):
         return {"ran": False, "deleted": 0}
-    self._last_cas_gc_at = now_monotonic
     marked = self._referenced_cas_digests()
+    self._last_cas_gc_at = now_monotonic
     cutoff = time.time() - self.policy.cas_gc_grace_days * 86400
     candidates: list[tuple[str, Path, int]] = []
     for prefix in self.paths.cas_dir.iterdir():

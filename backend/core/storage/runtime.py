@@ -35,6 +35,7 @@ from .paths import (
 from .redaction import redact_for_persistence
 from .maintenance import StorageLease
 from .protocol import require_legacy_storage_format
+from .cas_inventory import CasReferenceInventory
 
 
 from .repositories import objects as _objects_repository
@@ -755,7 +756,7 @@ class StorageRuntime:
     def _nested_cas_digests(value: object) -> set[str]:
         return _cas_maintenance_repository._nested_cas_digests(value)
 
-    def _cas_reference_inventory(self) -> tuple[set[str], set[str], set[str]]:
+    def _cas_reference_inventory(self) -> CasReferenceInventory:
         'Return direct-column, explicit-owner and legacy nested references.'
         return _cas_maintenance_repository._cas_reference_inventory(self)
 
