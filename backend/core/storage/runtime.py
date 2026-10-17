@@ -812,7 +812,10 @@ class StorageRuntime:
         # records nothing; a long-lived daemon contributes at most one cadence
         # sample and one bounded retention batch before the passive checkpoint.
         try:
-            if not self._close_started and not self._integrity_reasons and not self._state.quarantined:
+            if (
+                not self._close_started and not self._integrity_reasons
+                and not self._state.quarantined and not self._observability.quarantined
+            ):
                 self.record_storage_metric()
                 self.maintain_observability()
                 self.maintain_cas()

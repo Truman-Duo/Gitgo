@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
+from ..transactions import authoritative_transaction
 from ..models import StorageBlocked, StorageReferenceMissing
 from ..redaction import redact_for_persistence
 from .ports import ObjectsPort
@@ -192,8 +193,7 @@ def put_tool_result(
     now = _utc_now()
     self._reserve_authoritative_write(1024)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._register_object(self._state, descriptor)
             self._state.execute(
                 """INSERT INTO tool_result_objects(
@@ -214,10 +214,6 @@ def put_tool_result(
                    DO NOTHING""",
                 (locator, process_id, task_id, tool_name, now),
             )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return {
         "locator": locator,
         "digest": descriptor["digest"],

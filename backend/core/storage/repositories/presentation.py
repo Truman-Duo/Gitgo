@@ -1,5 +1,6 @@
 """Presentation repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
+from ..transactions import authoritative_transaction
 from ..models import StorageReferenceMissing
 from .ports import PresentationPort
 from ..support import _utc_now, _estimate_durable_session_tokens, _durable_context_breakdown, _durable_cache_summary
@@ -285,8 +286,7 @@ def update_process_presentation(self: PresentationPort, process_id: str, *,
     value = display_name if display_name is not None else int(bool(archived))
     self._reserve_authoritative_write(512 + len(str(value)))
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             process = self._state.execute(
                 "SELECT actor_kind, parent_process_id FROM session_processes WHERE process_id=?",
                 (process_id,),
@@ -304,10 +304,6 @@ def update_process_presentation(self: PresentationPort, process_id: str, *,
                     WHERE process_presentation.{column} IS NOT excluded.{column}""",
                 (process_id, value, _utc_now()),
             )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return {"process_id": process_id, **self.read_process_presentation(process_id)}
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from ..transactions import authoritative_transaction
 from .ports import CasMaintenancePort
 
 def _digest_from_ref(value: object) -> str | None:
@@ -147,9 +148,10 @@ def _refresh_cas_reference_status(self: CasMaintenancePort, *, force: bool = Fal
 def maintain_cas(self: CasMaintenancePort, *, force: bool = False) -> dict:
     """Bounded mark-and-sweep with a grace period for crash orphans.
 
-    CAS files are written before their referencing transaction.  The grace
-    window guarantees a concurrent or recently crashed writer cannot have
-    its object reclaimed.  No VACUUM and no per-write deletion is used.
+    CAS files are written before their referencing transaction. The grace
+    window delays reclamation but cannot fence a concurrent publisher. Durable
+    preparation and generation-aware deletion remain CAS v2 activation gates.
+    No VACUUM and no per-write deletion is used.
     """
     self._ensure_open()
     now_monotonic = time.monotonic()
@@ -195,8 +197,7 @@ def maintain_cas(self: CasMaintenancePort, *, force: bool = False) -> dict:
             continue
     if deleted:
         with self._state_lock:
-            self._state.execute("BEGIN IMMEDIATE")
-            try:
+            with authoritative_transaction(self._state):
                 self._state.executemany(
                     "DELETE FROM object_refs WHERE digest=?",
                     [(digest,) for digest in deleted],
@@ -205,10 +206,6 @@ def maintain_cas(self: CasMaintenancePort, *, force: bool = False) -> dict:
                     "DELETE FROM objects WHERE digest=?",
                     [(digest,) for digest in deleted],
                 )
-                self._state.execute("COMMIT")
-            except BaseException:
-                self._state.execute("ROLLBACK")
-                raise
         with self._health_lock:
             if self._cas_bytes_hint is not None:
                 self._cas_bytes_hint = max(0, self._cas_bytes_hint - reclaimed)

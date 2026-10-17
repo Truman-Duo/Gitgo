@@ -84,6 +84,9 @@ def _health_from_measurement(self) -> StorageHealth:
     if self._state.quarantined:
         reasons.append("state_commit_unknown")
         raise_level(StorageHealthLevel.BLOCKED)
+    if self._observability.quarantined:
+        reasons.append("observability_commit_unknown")
+        raise_level(StorageHealthLevel.DEGRADED)
     for reason in sorted(self._cas_reference_reasons.values()):
         reasons.append(reason)
         raise_level(
@@ -106,7 +109,7 @@ def _health_from_measurement(self) -> StorageHealth:
 
 def check_health(self: HealthPort, *, force_publish: bool = False) -> StorageHealth:
     self._ensure_open()
-    if not self._state.quarantined:
+    if not self._state.quarantined and not self._observability.quarantined:
         self._refresh_integrity_status(force=force_publish)
         self._refresh_cas_reference_status(force=force_publish)
     with self._health_lock:
@@ -243,11 +246,11 @@ def diagnostics(self) -> dict:
         state_pragmas = {
             name: self._state.execute(f"PRAGMA {name}").fetchone()[0]
             for name in ("journal_mode", "synchronous", "foreign_keys", "max_page_count")
-        }
+        } if not self._state.quarantined else {}
         observability_pragmas = {
             name: self._observability.execute(f"PRAGMA {name}").fetchone()[0]
             for name in ("journal_mode", "synchronous", "foreign_keys", "max_page_count")
-        }
+        } if not self._observability.quarantined else {}
     return {
         "sqlite_version": sqlite3.sqlite_version,
         "paths": {

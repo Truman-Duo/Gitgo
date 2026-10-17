@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import uuid
+from ..transactions import authoritative_transaction
 from ..redaction import redact_for_persistence
 from .ports import KnowledgePort
 from ..support import _utc_now
@@ -25,8 +26,7 @@ def append_history_record(
     logical = int(descriptor["byte_length"]) + 512
     self._reserve_authoritative_write(logical)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._register_object(self._state, descriptor)
             cursor = self._state.execute(
                 """INSERT OR IGNORE INTO history_events(
@@ -63,10 +63,6 @@ def append_history_record(
                             "DELETE FROM history_events WHERE sequence<?",
                             (int(cutoff[0]),),
                         )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return identifier
 
 
@@ -87,8 +83,7 @@ def replace_history_records(self: KnowledgePort, records: list[dict]) -> None:
         prepared.append((identifier, safe, descriptor))
     self._reserve_authoritative_write(logical)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._state.execute("DELETE FROM history_events")
             for identifier, safe, descriptor in prepared:
                 self._register_object(self._state, descriptor)
@@ -110,10 +105,6 @@ def replace_history_records(self: KnowledgePort, records: list[dict]) -> None:
                         _utc_now(),
                     ),
                 )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
 
 
 def load_history_records(self: KnowledgePort, *, limit: int | None = None) -> list[dict]:
@@ -167,35 +158,33 @@ def upsert_lesson_record(
     self._reserve_authoritative_write(int(descriptor["byte_length"]) + 512)
     now = _utc_now()
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
         try:
-            self._register_object(self._state, descriptor)
-            self._state.execute(
-                """INSERT INTO lessons(
-                       lesson_id, scope, project_name, tech_stack, category,
-                       severity, content_hash, record_ref, created_at, updated_at
-                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(lesson_id) DO UPDATE SET
-                       scope=excluded.scope,
-                       project_name=excluded.project_name,
-                       tech_stack=excluded.tech_stack,
-                       category=excluded.category,
-                       severity=excluded.severity,
-                       content_hash=excluded.content_hash,
-                       record_ref=excluded.record_ref,
-                       updated_at=excluded.updated_at""",
-                (
-                    lesson_id, scope, project_name,
-                    str(safe.get("tech_stack") or ""),
-                    str(safe.get("category") or ""),
-                    str(safe.get("severity") or "medium"),
-                    content_hash, str(descriptor["ref"]),
-                    str(safe.get("created_at") or now), now,
-                ),
-            )
-            self._state.execute("COMMIT")
+            with authoritative_transaction(self._state):
+                self._register_object(self._state, descriptor)
+                self._state.execute(
+                    """INSERT INTO lessons(
+                           lesson_id, scope, project_name, tech_stack, category,
+                           severity, content_hash, record_ref, created_at, updated_at
+                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(lesson_id) DO UPDATE SET
+                           scope=excluded.scope,
+                           project_name=excluded.project_name,
+                           tech_stack=excluded.tech_stack,
+                           category=excluded.category,
+                           severity=excluded.severity,
+                           content_hash=excluded.content_hash,
+                           record_ref=excluded.record_ref,
+                           updated_at=excluded.updated_at""",
+                    (
+                        lesson_id, scope, project_name,
+                        str(safe.get("tech_stack") or ""),
+                        str(safe.get("category") or ""),
+                        str(safe.get("severity") or "medium"),
+                        content_hash, str(descriptor["ref"]),
+                        str(safe.get("created_at") or now), now,
+                    ),
+                )
         except sqlite3.IntegrityError:
-            self._state.execute("ROLLBACK")
             if scope == "pending":
                 existing = self._state.execute(
                     """SELECT lesson_id FROM lessons
@@ -205,9 +194,6 @@ def upsert_lesson_record(
                 ).fetchone()
                 if existing is not None:
                     return str(existing["lesson_id"])
-            raise
-        except BaseException:
-            self._state.execute("ROLLBACK")
             raise
     return lesson_id
 
@@ -312,8 +298,7 @@ def save_harvest_signal_records(self: KnowledgePort, records: list[dict]) -> int
     self._reserve_authoritative_write(logical)
     now = _utc_now()
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             for safe, descriptor in prepared:
                 self._register_object(self._state, descriptor)
                 self._state.execute(
@@ -343,10 +328,6 @@ def save_harvest_signal_records(self: KnowledgePort, records: list[dict]) -> int
                         str(safe.get("updated_at") or now),
                     ),
                 )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return len(prepared)
 
 

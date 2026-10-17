@@ -168,6 +168,43 @@ compound construction/cleanup and recovery are activation requirements, not
 implemented behavior of this value type. The existing state_home selector is
 unchanged; this contract does not make legacy storage globally quota-bound.
 
+## Explicit repository transaction outcomes
+
+All 17 remaining explicit repository transactions use the existing
+`authoritative_transaction` boundary under their owning connection lock.
+This includes State publication/removal and optional Observability imports,
+Trace records and retention. Sharing outcome handling does not make
+Observability authoritative and does not couple two database commits.
+
+A COMMIT response failure is unknown whether the database committed or the
+subsequent rollback succeeded. The affected writer is quarantined, the original
+exception remains the cause, and no success value is returned. A body failure
+with confirmed rollback preserves the original exception and permits reuse;
+failed rollback also quarantines the writer. Cancellation keeps its exception
+type while retaining quarantine. No automatic retry is introduced.
+
+The duplicate session-event return still exits through confirmed commit.
+Lesson deduplication after a competing insert is allowed only after confirmed
+rollback; an IntegrityError from COMMIT cannot masquerade as that duplicate.
+Tests inject response gaps both before and after real SQLite commits through
+every affected public repository API and inspect durable rows with a separate
+read-only connection. They also cover rollback failure and cancellation.
+
+State uncertainty remains blocked. Observability uncertainty reports degraded
+health without querying the sealed writer or relabeling it as corruption.
+Diagnostics omit unavailable PRAGMAs, and new optional writes reject before
+spending capacity or creating a detail file when the writer is already sealed.
+Unaffected State writes can continue; shared CAS collection refuses incomplete
+root discovery. Shutdown skips maintenance and still closes both connections.
+
+This increment handles explicit repository SQL outcomes, not every autocommit
+statement or constructor/migration boundary. Quarantine is connection-local,
+not a durable preparation receipt. It cannot protect CAS files published before
+SQL, reverse a collector unlink, settle unknown native close, or fence a writer
+that passed a preflight before another thread quarantined its connection.
+Durable preparation, compound ownership, fenced recovery and generation-aware
+collection remain required before CAS v2 or durable approval activation.
+
 ## Remaining protocol work
 
 Writers need durable, budgeted preparation before creating or reusing files.

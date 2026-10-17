@@ -6,7 +6,10 @@ from .models import StorageCommitUnknown
 
 @contextmanager
 def authoritative_transaction(connection):
-    """Use under the runtime State lock; never perform an external effect here.
+    """Use under the owning database lock; never perform an external effect here.
+
+    State and Observability share outcome handling, not authority. This helper
+    neither couples their commits nor makes optional observations authoritative.
 
     A failed COMMIT response is uncertain even if a later ROLLBACK succeeds.
     Losing the original exception or reusing the writer would erase that fact.
