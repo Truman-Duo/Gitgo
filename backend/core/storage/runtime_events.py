@@ -6,17 +6,19 @@ consumer cursors. State and CAS remain the source for security decisions.
 from __future__ import annotations
 
 from .transactions import authoritative_transaction
+from .fact_record import INSERT_FACT_SQL, RuntimeFactRecord
 
 
 def insert_fact(connection, *, event_id, kind, project_id, session_id, task_id,
                 process_id, stream_id, sequence, payload_ref, occurred_at,
                 causation_id=""):
-    connection.execute("""INSERT INTO runtime_outbox(
-        event_id,schema_version,kind,project_id,session_id,task_id,process_id,stream_id,
-        stream_sequence,producer,correlation_id,causation_id,payload_ref,occurred_at)
-        VALUES(?,1,?,?,?,?,?,?,?,'StateRepository',?,?,?,?)""",
-        (event_id, kind, project_id, session_id, task_id, process_id, stream_id,
-         sequence, task_id or process_id, causation_id, payload_ref, occurred_at))
+    record = RuntimeFactRecord(
+        event_id, kind, project_id, session_id, task_id, process_id, stream_id,
+        sequence, task_id or process_id, causation_id, payload_ref, occurred_at,
+    )
+    connection.execute(INSERT_FACT_SQL, record.parameters)
+    return record
+
 
 
 def read_facts(runtime, consumer_id, *, limit=100):

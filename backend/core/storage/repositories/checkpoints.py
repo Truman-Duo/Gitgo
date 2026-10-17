@@ -347,27 +347,27 @@ def plan_agent_checkpoint(self: CheckpointsPort, snapshot: dict, *, limits: Chec
         publication.execute("INSERT INTO object_refs(owner_type,owner_id,field_name,digest,created_at) VALUES(?,?,?,?,?)",
             ("runtime_fact", f"{process_id}:{committed_revision}", digest, digest, now))
     from ..runtime_events import insert_fact
-    insert_fact(publication, event_id=f"checkpoint:{process_id}:{committed_revision}",
+    facts = [insert_fact(publication, event_id=f"checkpoint:{process_id}:{committed_revision}",
         kind="checkpoint_committed", project_id=self.paths.project_id,
         session_id=session_id, task_id=task_id, process_id=process_id,
         stream_id=f"process:{process_id}", sequence=committed_revision,
         payload_ref=fact["ref"], occurred_at=now,
-        causation_id=str(snapshot.get("causation_id") or ""))
+        causation_id=str(snapshot.get("causation_id") or ""))]
     if barrier is not None:
         sequence = checkpoint_sequence + 1
         publication.execute("INSERT INTO session_events(event_id,process_id,sequence,event_type,payload_ref,occurred_at) VALUES(?,?,?,'agent_complete',?,?)",
             (f"terminal:{process_id}", process_id, sequence, barrier["ref"], now))
-        insert_fact(publication, event_id=f"ledger:{process_id}:{sequence}", kind="agent_complete",
+        facts.append(insert_fact(publication, event_id=f"ledger:{process_id}:{sequence}", kind="agent_complete",
             project_id=self.paths.project_id, session_id=session_id, task_id=task_id, process_id=process_id,
             stream_id=f"ledger:{process_id}", sequence=sequence, payload_ref=barrier["ref"], occurred_at=now,
-            causation_id=f"checkpoint:{process_id}:{committed_revision}")
+            causation_id=f"checkpoint:{process_id}:{committed_revision}"))
     writes = publication.seal(basis, objects, process_id, parent_process_id)
     if limits is not None:
         limits.require_publication(writes, objects)
         limits.require_transition(footprint, len(objects.members), len(message_objects), len(dependencies), barrier is not None)
     return CheckpointPublication(process_id, session_id, parent_process_id, basis, objects, writes,
         max(logical_estimate, writes.parameter_bytes), len(message_objects), len(dependencies),
-        barrier is not None, limits, footprint)
+        barrier is not None, tuple(facts), limits, footprint)
 
 
 def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:

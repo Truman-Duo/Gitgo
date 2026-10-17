@@ -13,6 +13,7 @@ import json
 from .checkpoint_limits import CheckpointFootprint, CheckpointLimits, capture_footprint
 from .checkpoint_plan import CheckpointBasis, CheckpointObjects, recheck_basis
 from .checkpoint_sql import CheckpointSql
+from .fact_record import INSERT_FACT_SQL, RuntimeFactRecord
 from .lifecycle import CheckpointRef, RevisionConflict
 from .models import StorageBlocked
 
@@ -29,10 +30,19 @@ class CheckpointPublication:
     messages: int
     dependencies: int
     terminal: bool
+    facts: tuple[RuntimeFactRecord, ...]
     limits: CheckpointLimits | None = None
     footprint: CheckpointFootprint | None = None
 
     def __post_init__(self):
+        if (type(self.facts) is not tuple or not 1 <= len(self.facts) <= 2
+                or any(type(fact) is not RuntimeFactRecord for fact in self.facts)
+                or len({fact.event_id for fact in self.facts}) != len(self.facts)):
+            raise StorageBlocked('checkpoint_fact_plan_invalid')
+        written = tuple(statement.parameters for statement in self.writes.statements
+                        if statement.sql == INSERT_FACT_SQL)
+        if written != tuple(fact.parameters for fact in self.facts):
+            raise StorageBlocked('checkpoint_fact_sql_mismatch')
         if ((self.limits is None) != (self.footprint is None)
                 or self.limits is not None and (
                     type(self.limits) is not CheckpointLimits
@@ -45,9 +55,10 @@ class CheckpointPublication:
 
     @property
     def digest(self):
-        value = ['checkpoint-publication-v1',self.writes.digest,
+        value = ['checkpoint-publication-v2',self.writes.digest,
                  self.process_id,self.session_id,self.parent_process_id,
                  self.estimated_sql_bytes,self.messages,self.dependencies,self.terminal,
+                 [fact.parameters for fact in self.facts],
                  asdict(self.limits) if self.limits is not None else None,
                  asdict(self.footprint) if self.footprint is not None else None]
         raw = json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf8')
@@ -64,6 +75,11 @@ class CheckpointPublication:
             self.limits.require_transition(current,len(self.objects.members),self.messages,self.dependencies,self.terminal)
         recheck_basis(connection,self.process_id,self.parent_process_id,self.basis)
         self.writes.apply(connection)
+
+    def require_retained_facts(self, connection):
+        """Caller owns a committed snapshot; missing evidence never replays."""
+        for fact in self.facts:
+            fact.require_row(connection)
 
     def reference(self):
         # Construct a return value only after the owner confirms COMMIT.

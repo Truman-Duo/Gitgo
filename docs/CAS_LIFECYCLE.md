@@ -332,3 +332,18 @@ Process-exit tests do not establish power-loss durability of external CAS files.
 No CAS lock is a substitute for keeping sandboxed processes out of trusted
 storage. Native execution identity, quotas, launch fencing and confirmed process
 tree cleanup remain separate requirements.
+
+
+## Retained fact evidence in the publication plan
+
+The shared checkpoint plan contains the exact immutable outbox rows it will
+publish, including stream position, payload, causation, producer and schema.
+The same record supplies SQL parameters; construction rejects any disagreement
+between planned evidence and the closed SQL writes. The internal publication
+digest version is advanced; no database format or applied migration changes.
+
+Recovery can compare retained rows in its owned committed snapshot with this
+evidence, without reconstructing a missing fact or replaying an execution. This
+check is not a lease, commit proof by itself, or a reason to accept missing
+history: retirement, preparation membership and native object generations must
+still be established by the complete lifecycle protocol before CAS v2 activation.
