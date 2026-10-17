@@ -10,14 +10,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import importlib.util
+import marshal
+import threading
+from functools import wraps
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.core.errors import error_payload
 
 
 PATH_ARGUMENTS = ("path", "cwd")
+_GRANT_LOCK = threading.RLock()
+
+
+def _locked_grants(fn):
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        with _GRANT_LOCK:
+            return fn(*args, **kwargs)
+    return guarded
 
 
 def arguments_digest(arguments: dict) -> str:
@@ -31,8 +45,89 @@ def arguments_digest(arguments: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _runtime_implementation_digest() -> str:
+    """Invalidate built-in approvals when source or frozen handler code changes."""
+    digest = hashlib.sha256()
+    modules = [f"backend.core.tools.{name}" for name in
+               ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner")]
+    modules += ["backend.core.sandbox_read", "backend.core.sandbox_read_windows",
+                "backend.core.sandbox_read_plan", "backend.core.loop.read_approval",
+                "backend.core.loop.execution_contract", "backend.core.loop.process_tool_runner"]
+    for module_name in modules:
+        spec = importlib.util.find_spec(module_name)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Cannot identify tool implementation: {module_name}")
+        source = Path(spec.origin or "")
+        if source.is_file() and source.suffix == ".py":
+            body = source.read_bytes()
+        else:
+            code = spec.loader.get_code(module_name)
+            if code is None:
+                raise RuntimeError(f"Cannot identify frozen tool implementation: {module_name}")
+            body = marshal.dumps(code)
+        digest.update(module_name.encode())
+        digest.update(hashlib.sha256(body).digest())
+    return digest.hexdigest()
+
+
+def tool_contract_digest(tool) -> str:
+    """Bind approval to the Host definition, including authored source version."""
+    spec = dict(getattr(tool, "composite_spec", None) or {})
+    contract = {
+        "name": tool.name,
+        "runner_name": getattr(tool, "runner_name", ""),
+        "execution_contract": (
+            tool.execution_contract.to_dict()
+            if getattr(tool, "execution_contract", None) is not None else None
+        ),
+        "runtime_implementation": _runtime_implementation_digest(),
+        "parameters": tool.parameters,
+        "effect": getattr(getattr(tool, "effect", ""), "value", str(getattr(tool, "effect", ""))),
+        "resources": sorted(getattr(tool, "resources", None) or []),
+        "version": spec.get("version"),
+        "source_sha256": spec.get("source_sha256"),
+        "definition_digest": spec.get("digest"),
+    }
+    return hashlib.sha256(json.dumps(contract, sort_keys=True, default=str,
+                                    separators=(",", ":")).encode()).hexdigest()
+
+
+def grant_is_current(grant: dict, process, tool=None) -> bool:
+    # Old checkpoints remain readable, but unbound/undated approvals never
+    # confer execution authority. Require a new user decision instead.
+    if not isinstance(grant, dict) or grant.get("process_id") != process.process_id:
+        return False
+    digest = grant.get("tool_contract_digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return False
+    expires = grant.get("expires_at")
+    if not isinstance(expires, str) or not expires:
+        return False
+    try:
+        deadline = datetime.fromisoformat(expires)
+        if deadline.tzinfo is None or deadline <= datetime.now(timezone.utc):
+            return False
+    except (ValueError, TypeError):
+        return False
+    if tool is not None and digest != tool_contract_digest(tool):
+        return False
+    from .read_approval import current_pin, requires_read_binding
+    if grant.get("read_binding") is not None or (tool is not None and requires_read_binding(tool)):
+        if current_pin(process, grant) is None:
+            return False
+    return True
+
+
+def _has_remaining_uses(grant: dict) -> bool:
+    if "remaining_uses" not in grant:
+        return False
+    uses = grant.get("remaining_uses")
+    return (uses is None and grant.get("scope") == "task") or (type(uses) is int and uses > 0)
+
+
+@_locked_grants
 def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: bool,
-                   consume: bool = False) -> dict | None:
+                   consume: bool = False, tool=None) -> dict | None:
     """Find one task-bound grant using the same rule at preflight and execute.
 
     Keeping this match in one function prevents the Host suspension gate and
@@ -42,14 +137,15 @@ def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: 
     digest = arguments_digest(arguments)
     task_id = process.active_task_id or process.process_id
     grant = next((item for item in list(process.approval_grants or []) if (
-        item.get("tool_name") == tool_name
+        grant_is_current(item, process, tool)
+        and item.get("tool_name") == tool_name
         and item.get("task_id") == task_id
         and (
             item.get("arguments_digest") == digest
-            if per_invocation
+            if per_invocation or item.get("read_binding") is not None
             else (item.get("scope") == "task" or item.get("arguments_digest") == digest)
         )
-        and (item.get("remaining_uses") is None or int(item.get("remaining_uses") or 0) > 0)
+        and _has_remaining_uses(item)
     )), None)
     if consume and grant is not None and grant.get("remaining_uses") is not None:
         grant["remaining_uses"] = max(0, int(grant["remaining_uses"]) - 1)
@@ -97,7 +193,7 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def remap_project_paths(process, arguments: dict, effective_workspace: str) -> dict:
+def remap_project_paths(process, arguments: dict, effective_workspace: str, *, lexical=False) -> dict:
     """Map logical project-root paths into a B's isolated worktree.
 
     This is deterministic Host work, not a permission escalation.  A model may
@@ -119,7 +215,7 @@ def remap_project_paths(process, arguments: dict, effective_workspace: str) -> d
         candidate = Path(raw)
         if not candidate.is_absolute():
             continue
-        resolved = candidate.resolve(strict=False)
+        resolved = candidate if lexical else candidate.resolve(strict=False)
         if _is_within(resolved, project_root):
             args[key] = str(effective / resolved.relative_to(project_root))
     return args
@@ -180,15 +276,34 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
             if str(item).strip()
         ]
         resource = declared[0] if declared else f"capability://{tool_name}"
-    target = _canonical_resource(resource)
+    from .read_approval import requires_read_binding
+    bind_read = requires_read_binding(tool)
+    if bind_read:
+        tool.validate_execution_contract()
     effective = Path(workspace_path).resolve(strict=False)
-    if isinstance(target, Path) and _is_within(target, effective):
+    if bind_read:
+        # Display and authorize the actual remapped leaf, not a capability URI
+        # or a relative resource accidentally interpreted against the Host cwd.
+        mapped = remap_project_paths(process, invocation_args, workspace_path, lexical=True)
+        raw_path = Path(str(mapped.get("path") or ""))
+        target = raw_path if raw_path.is_absolute() else effective / raw_path
+        if "://" not in resource:
+            scope = Path(str(remap_project_paths(process, {"path": resource},
+                workspace_path, lexical=True)["path"]))
+            scope = scope if scope.is_absolute() else effective / scope
+            if not _is_within(target, scope):
+                raise ValueError("requested resource does not contain the read target")
+    else:
+        target = _canonical_resource(resource)
+    if isinstance(target, Path) and _is_within(target, effective) and not (bind_read and policy.requires_user):
         raise ValueError("resource is already inside the current execution scope")
     effect = getattr(getattr(tool, "effect", "read"), "value", str(getattr(tool, "effect", "read")))
     invocation_only = bool(getattr(tool, "approval_per_invocation", False))
     request_id = str(uuid.uuid4())
     technical = {
         "request_id": request_id,
+        "tool_contract_digest": tool_contract_digest(tool),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
         "tool_name": tool_name,
         "effect": effect,
         "resource": str(target),
@@ -196,7 +311,7 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
         "approval_scope": "exact_invocation" if invocation_only else "resource_or_task",
     }
     from backend.core.loop.decision_support import create_user_decision
-    return create_user_decision(process, {
+    decision_args = {
         "kind": "permission",
         "state_topic": f"permission:{tool_name}:{target}",
         "question": f"Allow Gitgo to {purpose}?",
@@ -217,7 +332,7 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
             },
             *([] if invocation_only else [{
                 "label": "Allow for this task",
-                "principle": "Grant the same tool and exact resource until this task ends.",
+                "principle": "Grant the same tool and exact resource until this task ends or 30 minutes elapse.",
                 "immediate_effect": f"Repeated {tool_name} calls may use {target}.",
                 "downstream_effect": "The grant is not inherited by other tasks or processes.",
                 "risks": "Repeated access within the displayed scope is possible.",
@@ -243,13 +358,29 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
             "api_details": f"{tool_name} · {effect} · {target}",
             "arguments_preview": _arguments_preview(invocation_args),
         },
-    })
+    }
+    if not bind_read:
+        return create_user_decision(process, decision_args)
+    if _is_within(target, effective):
+        decision_args["why_user_must_decide"] = "This tool requires approval for the displayed file read."
+    from .read_approval import publish_read_request
+    prepared = remap_project_paths(process, invocation_args, workspace_path, lexical=True)
+    prepared = {**prepared, "_workspace": workspace_path,
+                "_allowed_roots": [str(target)] if isinstance(target, Path) else []}
+    return publish_read_request(process, decision_args, prepared, create_user_decision)
 
 
+@_locked_grants
 def grant_from_decision(process, pending: dict, action: str) -> dict | None:
     request = dict(pending.get("permission_request") or {})
     if not request or action not in {"allow_once", "allow_task"}:
+        from .read_approval import revoke_read_request
+        revoke_read_request(process, request.get("request_id", ""))
         return None
+    if request.get("read_binding") is not None:
+        from .read_approval import current_pin
+        if pending is not process.pending_decision or current_pin(process, request) is None:
+            return None
     if request.get("approval_scope") == "exact_invocation" and action != "allow_once":
         return None
     grant = {
@@ -263,12 +394,24 @@ def grant_from_decision(process, pending: dict, action: str) -> dict | None:
         "arguments_digest": str(request.get("arguments_digest") or ""),
         "scope": "once" if action == "allow_once" else "task",
         "remaining_uses": 1 if action == "allow_once" else None,
+        "tool_contract_digest": str(request.get("tool_contract_digest") or ""),
+        "expires_at": str(request.get("expires_at") or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if request.get("read_binding") is not None:
+        grant["resource"] = request["resource"]
+        grant["read_binding"] = request["read_binding"]
+        grant["approval_scope"] = request["approval_scope"]
+        from .read_approval import bind_read_grant
+        if not bind_read_grant(process, grant):
+            return None
+    if not grant_is_current(grant, process):
+        return None
     process.approval_grants.append(grant)
     return grant
 
 
+@_locked_grants
 def consume_exact_grant(process, tool_name: str, arguments: dict) -> dict | None:
     """Consume one exact, task-bound approval at a non-ToolPipeline admission gate.
 
@@ -279,10 +422,11 @@ def consume_exact_grant(process, tool_name: str, arguments: dict) -> dict | None
     digest = arguments_digest(arguments)
     task_id = process.active_task_id or process.process_id
     grant = next((item for item in list(process.approval_grants or []) if (
-        item.get("task_id") == task_id
+        grant_is_current(item, process)
+        and item.get("task_id") == task_id
         and item.get("tool_name") == tool_name
         and item.get("arguments_digest") == digest
-        and (item.get("remaining_uses") is None or int(item.get("remaining_uses") or 0) > 0)
+        and _has_remaining_uses(item)
     )), None)
     if grant is None:
         return None
@@ -301,22 +445,23 @@ def _arguments_preview(arguments: dict, *, limit: int = 1200) -> str:
     return rendered if len(rendered) <= limit else rendered[:limit] + "\n…"
 
 
-def authorize_external_resources(process, tool_name: str, effect: str, arguments: dict,
-                                 resources: list[str]) -> tuple[list[str], dict | None]:
+def _select_external_resources(process, tool_name: str, effect: str, arguments: dict,
+                                 resources: list[str], *, tool=None) -> tuple[list[str], list[dict], dict | None]:
     if not resources:
-        return [], None
+        return [], [], None
     digest = arguments_digest(arguments)
     allowed: list[str] = []
     matched: list[dict] = []
     for raw_resource in resources:
         target = Path(raw_resource).resolve(strict=False)
         grant = next((item for item in list(process.approval_grants or []) if (
-            item.get("task_id") == (process.active_task_id or process.process_id)
+            grant_is_current(item, process, tool)
+            and item.get("task_id") == (process.active_task_id or process.process_id)
             and item.get("tool_name") == tool_name
             and item.get("effect") == effect
             and _is_within(target, Path(str(item.get("resource") or "")).resolve(strict=False))
             and (item.get("scope") == "task" or item.get("arguments_digest") == digest)
-            and (item.get("remaining_uses") is None or int(item.get("remaining_uses") or 0) > 0)
+            and _has_remaining_uses(item)
         )), None)
         if grant is None:
             info = error_payload(
@@ -331,10 +476,54 @@ def authorize_external_resources(process, tool_name: str, effect: str, arguments
                     "resource": str(target),
                 }],
             )
-            return [], info["error_info"]
+            return [], [], info["error_info"]
         matched.append(grant)
         allowed.append(str(Path(str(grant["resource"])).resolve(strict=False)))
-    for grant in matched:
-        if grant.get("remaining_uses") is not None:
-            grant["remaining_uses"] = max(0, int(grant["remaining_uses"]) - 1)
-    return list(dict.fromkeys(allowed)), None
+    return list(dict.fromkeys(allowed)), matched, None
+
+
+@_locked_grants
+def authorize_external_resources(process, tool_name: str, effect: str, arguments: dict,
+                                 resources: list[str], *, tool=None) -> tuple[list[str], dict | None]:
+    """Preview scope without spending approval; admission must recheck it.
+
+    This result is only for preflight. It does not authorize a later execution.
+    """
+    roots, _, error = _select_external_resources(process, tool_name, effect, arguments, resources, tool=tool)
+    return roots, error
+
+
+@_locked_grants
+def admit_invocation_grants(process, tool, raw_arguments: dict, prepared_arguments: dict,
+                            resources: list[str], *, require_explicit: bool, admission=None) -> tuple[list[str], dict | None]:
+    """Recheck and spend the complete invocation selection under the grant lock.
+
+    One grant may cover both explicit approval and several resource paths. All
+    required grants must still be current before any is spent; each selected
+    grant is spent once. This is in-process atomicity only, not durable launch
+    admission or proof that an OS backend can enforce the resulting scope.
+    """
+    tool.validate_execution_contract()
+    selected = []
+    if require_explicit:
+        grant = matching_grant(process, tool.name, raw_arguments,
+            per_invocation=bool(tool.approval_per_invocation), tool=tool)
+        if grant is None:
+            return [], {"name": "APPROVAL_GRANT_INVALID", "message": "approval is no longer available"}
+        selected.append(grant)
+    effect = getattr(tool.effect, "value", str(tool.effect))
+    roots, resource_grants, error = _select_external_resources(
+        process, tool.name, effect, prepared_arguments, resources, tool=tool)
+    if error is not None:
+        return [], error
+    selected.extend(resource_grants)
+    from .read_approval import admit_read_binding
+    error = admit_read_binding(process, tool, raw_arguments,
+        {**prepared_arguments, "_allowed_roots": roots}, selected, admission)
+    if error is not None:
+        return [], error
+    # Deduplicate the Host-owned record, not tool JSON or a supplied grant ID.
+    for grant in {id(item): item for item in selected}.values():
+        if grant["remaining_uses"] is not None:
+            grant["remaining_uses"] -= 1
+    return roots, None

@@ -19,6 +19,7 @@ _SECRET_KEYS = re.compile(
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _API_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+_GITHUB_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 
 
 def redact_for_persistence(value: Any, *, key: str = "") -> Any:
@@ -45,7 +46,7 @@ def redact_for_persistence(value: Any, *, key: str = "") -> Any:
     if isinstance(value, str):
         return normalize_unicode_text(_API_TOKEN.sub(
             "[REDACTED_API_KEY]",
-            _BEARER.sub("Bearer [REDACTED]", value),
+            _GITHUB_TOKEN.sub("[REDACTED_GITHUB_TOKEN]", _BEARER.sub("Bearer [REDACTED]", value)),
         ))
     if value is None or isinstance(value, (bool, int, float)):
         return value

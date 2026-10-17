@@ -5,6 +5,8 @@ Written with unittest so this critical subset can run without pytest.
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import queue
 import json
 import tempfile
@@ -127,7 +129,7 @@ class LoopStatusProjectionTests(unittest.TestCase):
 
 def _tool(name: str) -> AgentTool:
     return AgentTool(
-        name=name,
+        execution_contract=data_broker("test.fixture"), name=name,
         description=f"test tool {name}",
         parameters={"type": "object", "properties": {}},
         execute=lambda _args: {"ok": True},

@@ -1,5 +1,6 @@
 """task dag protocol tools."""
 from __future__ import annotations
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from pathlib import Path
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
@@ -250,6 +251,7 @@ def install(ctx):
 
 
     tools["delegate_task_dag"] = AgentTool(
+        execution_contract=data_broker("host.runtime.delegate_task_dag"),
         name="delegate_task_dag",
         description=(
             "Admit a complete sibling DAG in one Host-validated operation. Use "

@@ -1,5 +1,6 @@
 """child review protocol tools."""
 from __future__ import annotations
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 import json
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.models import ProcessStatus
@@ -41,6 +42,7 @@ def install(ctx):
 
 
     tools["list_agents"] = AgentTool(
+        execution_contract=data_broker("host.runtime.list_agents"),
         name="list_agents",
         description="List this supervisor's B Agents and their durable execution states.",
         parameters={"type": "object", "properties": {}, "required": []},
@@ -106,6 +108,7 @@ def install(ctx):
 
 
     tools["wait_agents"] = AgentTool(
+        execution_contract=data_broker("host.runtime.wait_agents"),
         name="wait_agents",
         description="Wait for selected B Agents with a bounded, cancellation-aware timeout.",
         parameters={
@@ -250,6 +253,7 @@ def install(ctx):
 
 
     tools["review_child_outcome"] = AgentTool(
+        execution_contract=data_broker("host.runtime.review_child_outcome"),
         name="review_child_outcome",
         description=(
             "Record A's structured review of a terminal owned B outcome. "
@@ -296,6 +300,7 @@ def install(ctx):
 
 
     tools["promote_agent_changes"] = AgentTool(
+        execution_contract=data_broker("host.runtime.promote_agent_changes"),
         name="promote_agent_changes",
         description=(
             "Promote an A-approved, sealed DAG result into the user working "
@@ -339,6 +344,7 @@ def install(ctx):
 
 
     tools["send_feedback"] = AgentTool(
+        execution_contract=data_broker("host.runtime.send_feedback"),
         name="send_feedback",
         description=(
             "Send corrective or additional instructions to a B Agent mailbox. "
@@ -366,6 +372,7 @@ def install(ctx):
 
 
     tools["cancel_agent"] = AgentTool(
+        execution_contract=data_broker("host.runtime.cancel_agent"),
         name="cancel_agent",
         description="Request cancellation of one delegated B Agent without faking a terminal state.",
         parameters={
@@ -439,6 +446,7 @@ def install(ctx):
 
 
     tools["request_review"] = AgentTool(
+        execution_contract=data_broker("host.runtime.request_review"),
         name="request_review",
         description=(
             "Start an independent read-only Reviewer B for a completed B result or "

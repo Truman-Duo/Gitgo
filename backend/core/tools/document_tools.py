@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 
 from backend.core.errors import error_payload
@@ -98,7 +98,7 @@ def document_open(args: dict) -> dict:
         elif suffix == ".doc":
             from .document_limits import verified_antiword, check_converter
             try:
-                antiword, expected = verified_antiword()
+                antiword, expected = verified_antiword(workspace)
                 check_converter(antiword, expected)
             except ValueError as exc:
                 return _document_error(
@@ -112,7 +112,7 @@ def document_open(args: dict) -> dict:
             from backend.core.process_control import creation_flags, attach_kill_job, terminate_tree, close_job
             from backend.core.process_output import collect_output, OutputLimit
             from backend.core.tools.execution_profile import safe_environment
-            completed = subprocess.Popen([str(antiword), str(path)], stdout=subprocess.PIPE,
+            completed = subprocess.Popen([str(antiword), str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
                 env=safe_environment(), creationflags=creation_flags(), start_new_session=os.name != "nt")
             job = attach_kill_job(completed)

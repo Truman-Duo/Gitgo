@@ -11,6 +11,17 @@ class StorageBlocked(RuntimeError):
     """Raised when an authoritative write cannot be performed safely."""
 
 
+class StorageCommitUnknown(StorageBlocked):
+    """No new effect may follow an unconfirmed authoritative transaction."""
+
+    code = "STORAGE_COMMIT_UNKNOWN"
+
+    def __init__(self, stage: str, *, rollback_failed: bool = False):
+        self.stage = stage
+        self.rollback_failed = rollback_failed
+        super().__init__(self.code)
+
+
 class StorageRuntimeUnsupported(StorageBlocked):
     """The loaded SQLite library has a known WAL corruption vulnerability."""
 

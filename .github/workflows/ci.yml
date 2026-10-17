@@ -187,11 +187,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: python -B scripts/provision_ci_sqlite.py
       - run: python -B scripts/provision_ci_ripgrep.py
+      - name: CAS format admission and process ordering foundations
+        run: >-
+          python -B -m pytest tests/test_cas_lifecycle_ordering.py tests/test_cas_inventory.py
+          tests/test_storage_ownership_handoff.py
+          tests/test_storage_binding_retirement.py tests/test_storage_envelope.py tests/test_storage_host_records.py tests/test_storage_runtime_manifest.py tests/test_storage_slot_records.py tests/test_storage_runtime_records.py tests/test_storage_wal_capacity.py tests/test_checkpoint_limits.py tests/test_checkpoint_work.py tests/test_checkpoint_facts.py tests/test_storage_repository_outcomes.py tests/test_checkpoint_planning.py tests/test_runtime_facts.py
+          tests/test_storage_protocol_admission.py tests/test_storage_recovery_boundaries.py
+          tests/test_storage_transaction_outcomes.py tests/test_sqlite_storage.py -q
       - name: Windows ACL preflight
         if: runner.os == 'Windows'
         run: |
           "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           python -B -m pytest tests/test_windows_acl_provisioning.py -q -x
+      - name: Build and validate native storage lifetime and journals
+        if: runner.os == 'Windows'
+        run: |
+          $compiler = (Get-Command clang.exe -ErrorAction Stop).Source
+          & $compiler --version
+          $output = Join-Path $env:RUNNER_TEMP 'gitgo-storage-native'
+          python -B scripts/build_storage_native.py --compiler $compiler --output $output --sqlite-header .gitgo/ci-sqlite/sqlite3.h --selftest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:GITGO_STORAGE_NATIVE_TEST_LIBRARY = Join-Path $output 'gitgo-storage-scope.dll'
+          $env:GITGO_STORAGE_CANONICAL_TEST = "1"
+          python -B -m pytest tests/test_storage_sqlite_ownership.py tests/test_storage_windows_sqlite.py tests/test_storage_windows_scope.py tests/test_storage_windows_process.py tests/test_storage_windows_journal.py tests/test_storage_windows_tree.py tests/test_storage_windows_host.py tests/test_storage_host_records.py tests/test_storage_runtime_manifest.py tests/test_storage_runtime_installation.py tests/test_storage_runtime_control.py tests/test_storage_runtime_worker.py tests/test_storage_runtime_launch.py tests/test_storage_runtime_lifecycle.py tests/test_storage_runtime_recovery.py tests/test_storage_slot_records.py tests/test_storage_runtime_records.py -q -x
       - name: Windows real source and frozen acceptance
         if: runner.os == 'Windows'
         run: python -B scripts/run_sandbox_acceptance.py

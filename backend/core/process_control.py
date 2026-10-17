@@ -95,6 +95,10 @@ def attach_kill_job(proc: subprocess.Popen):
 def close_job(job_handle) -> None:
     if sys.platform != "win32" or not job_handle:
         return
+    owned_close = getattr(job_handle, "close", None)
+    if owned_close is not None:
+        owned_close()
+        return
     try:
         import ctypes
         from ctypes import wintypes
@@ -172,8 +176,13 @@ def finish_scope(proc):
 
 def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
     """Terminate descendants and wait until the root process is reaped."""
+    cgroup = getattr(proc, "_gitgo_cgroup", None)
+    if cgroup is not None:
+        cgroup.kill()
     if proc.poll() is not None:
         close_job(job_handle)
+        if cgroup is not None:
+            cgroup.close()
         finish_scope(proc)
         return
     try:
@@ -192,7 +201,8 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
                 # Direct Popen child: no sampled PID/PGID may widen authority.
                 proc.terminate()
             else:
-                proc._gitgo_cleanup = {"complete": False, "issues": ["unmanaged_root_only"]}
+                if cgroup is None:
+                    proc._gitgo_cleanup = {"complete": False, "issues": ["unmanaged_root_only"]}
                 proc.kill()
         try:
             proc.wait(timeout=5)
@@ -201,4 +211,6 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
             proc.wait(timeout=5)
     finally:
         close_job(job_handle)
+        if cgroup is not None:
+            cgroup.close()
         finish_scope(proc)

@@ -4,13 +4,15 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import math
 
 from .completion_gates import contract_digest
-from .permission_broker import arguments_digest, matching_grant
+from .permission_broker import arguments_digest, matching_grant, tool_contract_digest
 
 
 def tool_fingerprint(tool):
-    body = {"name": tool.name, "parameters": tool.parameters,
+    tool.validate_execution_contract()
+    body = {"execution_contract_digest": tool_contract_digest(tool), "name": tool.name, "parameters": tool.parameters,
         "effect": str(tool.effect), "approval": str(tool.approval),
         "per_invocation": tool.approval_per_invocation, "runner": tool.runner_name,
         "definition": tool.composite_spec or {}, "resources": tool.resources or []}
@@ -25,12 +27,17 @@ def state_for(process, key, tool, inputs, catalog):
     state = process.runtime_preferences.get("composite_continuations", {}).get(key)
     if state is None:
         return None
-    if (state.get("task_id") != (process.active_task_id or process.process_id)
+    try:
+        expiry = float(state.get("expires_at", 0))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("COMPOSITE_CONTINUATION_STALE: invalid expiry; existing effects retained") from exc
+    if (not math.isfinite(expiry) or state.get("outer_authorized") is not True
+            or state.get("task_id") != (process.active_task_id or process.process_id)
             or state.get("process_id") != process.process_id
             or state.get("contract_digest") != contract_digest(process)
             or state.get("tool_fingerprint") != tool_fingerprint(tool)
             or state.get("arguments_digest") != arguments_digest(inputs)
-            or float(state.get("expires_at", 0)) < time.time()):
+            or expiry <= time.time()):
         raise ValueError("COMPOSITE_CONTINUATION_STALE: existing effects retained; inspect before retry")
     for name, fingerprint in state.get("components", {}).items():
         if name not in catalog or tool_fingerprint(catalog[name]) != fingerprint:
@@ -93,7 +100,7 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key):
         child_key = call_key({"id": step_id}, child_execution, index)
         resumed_child = state_for(ctx.process, child_key, base, resolved, catalog) if base.composite_spec else None
         if policy.requires_user and resumed_child is None and matching_grant(ctx.process, name, resolved,
-                per_invocation=base.approval_per_invocation) is None:
+                per_invocation=base.approval_per_invocation, tool=base) is None:
             ctx.artifacts["nested_permission"] = {"tool": base, "arguments": resolved}
             return {"_suspended": True}
         child = pipeline.execute({"name": name, "args": resolved, "id": step_id}, base, ctx, child_execution, index)

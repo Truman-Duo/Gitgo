@@ -7,6 +7,8 @@ This complements SQLite's locks; it does not serialize normal SQL traffic.
 from __future__ import annotations
 
 import os
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import StorageBlocked
@@ -47,17 +49,43 @@ class StorageMaintenanceActive(StorageBlocked):
     code = "STORAGE_MAINTENANCE_BUSY"
 
 
+def _lock_file(handle, *, exclusive: bool):
+    if os.name == "nt":
+        return _windows_lock(handle, exclusive=exclusive)
+    import fcntl
+    fcntl.flock(handle.fileno(),
+                (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    return None
+
+
+def _unlock_file(handle, state) -> None:
+    if os.name == "nt":
+        _windows_lock(handle, exclusive=False, unlock=True, overlapped=state)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+class _LeaseBorrow:
+    """Owner-private registration, never a caller-supplied release credential."""
+
+    def __init__(self):
+        self.handle = None
+        self.cleanup_pending = False
+
+
 class StorageLease:
     def __init__(self, project_root: Path, *, exclusive: bool = False):
-        self.path = project_root / "storage-maintenance.lock"
+        self.path = project_root.resolve() / "storage-maintenance.lock"
+        self._pid = os.getpid()
+        self._mutex = threading.RLock()
+        self._users: set[_LeaseBorrow] = set()
+        self._closing = False
+        self._shutdown_active: object | None = None
         self._handle = self.path.open("a+b")
         try:
-            if os.name == "nt":
-                self._overlapped = _windows_lock(self._handle, exclusive=exclusive)
-            else:
-                import fcntl
-                fcntl.flock(self._handle.fileno(),
-                            (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+            os.set_inheritable(self._handle.fileno(), False)
+            self._overlapped = _lock_file(self._handle, exclusive=exclusive)
         except OSError as exc:
             self._handle.close()
             raise StorageMaintenanceActive(
@@ -65,20 +93,100 @@ class StorageLease:
                 "before recovery, then retry. No database was replaced."
             ) from exc
 
-    def close(self) -> None:
-        if self._handle.closed:
-            return
+    def require_active(self) -> None:
+        """Check physical lease ownership, including during owner shutdown."""
+        # Do this before touching a potentially inherited Python mutex.
+        if os.getpid() != self._pid:
+            raise StorageBlocked("STORAGE_LEASE_PROCESS_CHANGED")
+        with self._mutex:
+            if self._handle.closed:
+                raise StorageBlocked("STORAGE_LEASE_CLOSED")
+
+    @contextmanager
+    def use(self):
+        """Prevent maintenance admission from disappearing during an operation."""
+        attempt = _LeaseBorrow()
+        self.require_active()
         try:
-            if os.name == "nt":
-                _windows_lock(self._handle, exclusive=False, unlock=True,
-                              overlapped=self._overlapped)
-            else:
-                import fcntl
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            with self._mutex:
+                self.require_active()
+                if self._closing:
+                    raise StorageBlocked('STORAGE_LEASE_CLOSING')
+                self._users.add(attempt)
+            yield attempt
+        finally:
+            if os.getpid() == self._pid:
+                with self._mutex:
+                    if attempt.handle is None or attempt.handle.closed:
+                        self._users.discard(attempt)
+                    else:
+                        # The operation has ended, but its registered handle
+                        # has not closed. Keep its exact debt and the barrier.
+                        self._closing = True
+                        attempt.cleanup_pending = True
+
+    def close(self) -> None:
+        if os.getpid() != self._pid:
+            raise StorageBlocked("STORAGE_LEASE_PROCESS_CHANGED")
+        with self._mutex:
+            if self._handle.closed:
+                return
+            if self._closing:
+                raise StorageBlocked('STORAGE_LEASE_CLOSING')
+            if self._users:
+                raise StorageBlocked("STORAGE_LEASE_IN_USE")
+            self._release_handle()
+
+    def _release_handle(self) -> None:
+        # Caller owns _mutex. Closing the handle releases the OS lock even
+        # when explicit unlock reports an error.
+        try:
+            _unlock_file(self._handle, self._overlapped)
         finally:
             self._handle.close()
 
+    @contextmanager
+    def shutdown(self):
+        """Atomically stop borrowing before closing the owner's resources.
+
+        Busy admission leaves the lease usable. Once admitted, new borrowers
+        stay blocked, including after a failed cleanup. Only a successful body
+        releases the physical lease. A failed body may be retried by its owner.
+        """
+        attempt = object()
+        if os.getpid() != self._pid:
+            raise StorageBlocked('STORAGE_LEASE_PROCESS_CHANGED')
+        try:
+            with self._mutex:
+                admitted = not self._handle.closed
+                if admitted:
+                    if self._shutdown_active is not None:
+                        raise StorageBlocked('STORAGE_LEASE_CLOSING')
+                    if any(not user.cleanup_pending for user in self._users):
+                        raise StorageBlocked('STORAGE_LEASE_IN_USE')
+                    self._closing = True
+                    self._shutdown_active = attempt
+                    # Only ended operations with exact registered handles
+                    # may be retried. Live borrowers still return IN_USE.
+                    for user in tuple(self._users):
+                        user.handle.close()
+                        if not user.handle.closed:
+                            raise StorageBlocked('STORAGE_RESOURCE_CLOSE_UNKNOWN')
+                        self._users.discard(user)
+            yield admitted
+            if admitted and os.getpid() == self._pid:
+                with self._mutex:
+                    if self._shutdown_active is not attempt:
+                        raise StorageBlocked('STORAGE_SHUTDOWN_OWNER_CHANGED')
+                    self._release_handle()
+        finally:
+            if os.getpid() == self._pid:
+                with self._mutex:
+                    if self._shutdown_active is attempt:
+                        self._shutdown_active = None
+
     def __enter__(self):
+        self.require_active()
         return self
 
     def __exit__(self, *_args):

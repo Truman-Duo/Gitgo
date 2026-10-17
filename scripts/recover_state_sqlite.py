@@ -27,6 +27,7 @@ from backend.core.storage.migrations import STATE_MIGRATIONS
 from backend.core.storage.runtime import StorageRuntime, validate_sqlite_runtime
 from backend.core.storage.maintenance import StorageLease
 from backend.core.storage.paths import validate_storage_location
+from backend.core.storage.protocol import require_legacy_storage_format
 
 
 COPY_TABLES = (
@@ -262,8 +263,13 @@ def recover(source_path: Path, destination_path: Path, cas_dir: Path) -> dict:
         source = sqlite3.connect(
             shadow.as_uri() + "?mode=rw", uri=True,
         )
-        source.execute("PRAGMA writable_schema=ON")
-        destination = sqlite3.connect(destination_path)
+        try:
+            require_legacy_storage_format(source, STATE_MIGRATIONS)
+            source.execute("PRAGMA writable_schema=ON")
+            destination = sqlite3.connect(destination_path)
+        except BaseException:
+            source.close()
+            raise
         destination.row_factory = sqlite3.Row
         try:
             StorageRuntime._apply_migrations(destination, STATE_MIGRATIONS)

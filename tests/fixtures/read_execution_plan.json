@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "intent": {
+    "versions": {
+      "compiler": "d597e5c873b354b7411b7e243b9e6a9df88fae3ddce4bdccdce4c95a1649dd32",
+      "policy": "54e4aa3180345317daed2fba150a98e25a6c6a434f10cec6e14e89077b7385db",
+      "registry": "b7d99749bf447910ade9f853e99fc9ff87f71aea1b676f632d53e1eaf110b026"
+    },
+    "kind": "native_process",
+    "action": "read_existing_file",
+    "context": {
+      "project_id": "project_id-sample",
+      "session_id": "session_id-sample",
+      "task_id": "task_id-sample",
+      "process_id": "process_id-sample"
+    },
+    "tool": {
+      "name": "read_file",
+      "registration_ref": "7f9676c79c7eb70abee03e14b35299ed3b8ddf8041c871da1af6978e6df8f8a7",
+      "arguments_ref": "56167c84fd8f921df2c4535b7b832a535a5b922f8432cb387119aa62b9e9822d"
+    },
+    "read": {
+      "workspace": {
+        "platform": "win32",
+        "volume": "10720989997753399398",
+        "file_id": "1",
+        "locator": "C:\\fixture\\project"
+      },
+      "root": {
+        "platform": "win32",
+        "volume": "10720989997753399398",
+        "file_id": "1",
+        "locator": "C:\\fixture\\project"
+      },
+      "file": {
+        "platform": "win32",
+        "volume": "10720989997753399398",
+        "file_id": "2",
+        "locator": "C:\\fixture\\project\\note.txt"
+      },
+      "relative_parts": [
+        "note.txt"
+      ],
+      "protection": {
+        "id": "pin-sample",
+        "generation": 1
+      },
+      "content_semantics": "same_object_mutable_content",
+      "offset": "0",
+      "length": 64
+    },
+    "runtime": {
+      "manifest_ref": "aa2007ca0351258405b9b6cb988594c373c5d7a3d62a875bffe07f59ee1d7c74",
+      "installation_ref": "c5cbedfb7762898f0cdf2b2afb37d180ed4ab5da4bab29b91dcec5722b8d216b",
+      "backend_profile_ref": "be08052c413882619ec3ffb7997162d45563c1c7b82d914a7479c68839b1bcac",
+      "launch_gate_profile_ref": "8cfcd8f03757b0aaa6d37399cc22257bd709e5d25befb04b834580b259524f88",
+      "capability_report_ref": "9ced6fe4aa41b1b1f9a2d3a7f3dd427e16b5b51d3cc98c47762711d650991e79",
+      "descendants": "trusted_manifest_only"
+    },
+    "isolation": {
+      "platform": "win32",
+      "native_rules_ref": "9566c2080fa064eae8a6628e9181ea36a07e5d16a417756426f1bcc921746787",
+      "identity_rule": "unique_per_execution",
+      "network": "deny",
+      "filesystem_mutation": "deny",
+      "external_services": "deny",
+      "ipc_device_profile_ref": "a914ce604d5fc8ea3f5da602882bc37e9751c2c625048a955df56294bc79872b",
+      "scratch": {
+        "mode": "private_bounded_arena",
+        "data_bytes": 4096,
+        "object_slots": 1,
+        "host_storage_bytes": 65536,
+        "quota_profile_ref": "7b74394b4485824be26b60eef19aa0de69644c8c54f7fe6507c182ceb67c0920"
+      }
+    },
+    "limits": {
+      "wall_ms": 5000,
+      "cpu_tree_ms": 1000,
+      "memory_tree_bytes": 134217728,
+      "process_tree_count": 4,
+      "host_buffer_bytes": 65536,
+      "host_io_workers": 3,
+      "host_storage_bytes": 131072,
+      "evidence_bytes": 65536,
+      "cleanup_ms": 3000
+    },
+    "transport": {
+      "profile_ref": "483ca527d79fa7b255ab72fd0f5df0bd99025145e3b89f5b17966414bd2f6be7",
+      "request_frame_bytes": 128,
+      "response_frame_bytes": 256,
+      "request_total_bytes": 512,
+      "response_total_bytes": 4096,
+      "messages": 4,
+      "pending": 1,
+      "read_per_message_bytes": 32,
+      "read_total_bytes": 64,
+      "stderr_bytes": 1024,
+      "parser_reserve_bytes": 8192,
+      "codec_memory_factor": 4,
+      "pipes": [
+        {
+          "role": "request",
+          "direction": "host_to_helper",
+          "access": "read_data_sync",
+          "object_policy_ref": "fda34207ddff84a10f3dfd731cc72271c28423ecc3edae1aff60fe10ed6bd2e5",
+          "kernel_buffer_bytes": 8192
+        },
+        {
+          "role": "result",
+          "direction": "helper_to_host",
+          "access": "write_data_sync",
+          "object_policy_ref": "1f98fe53bb9b061d89f9a7f6638b340c2d560acce1b38b7db0aaeda65b36e25b",
+          "kernel_buffer_bytes": 8192
+        },
+        {
+          "role": "diagnostic",
+          "direction": "helper_to_host",
+          "access": "write_data_sync",
+          "object_policy_ref": "12ea57236c84906eed2201eafeb4ed27a0a15842b5f6262fae467ef6077680f0",
+          "kernel_buffer_bytes": 8192
+        }
+      ]
+    },
+    "approval": {
+      "scope": "once",
+      "valid_for_ms": 60000,
+      "max_invocations": 1
+    }
+  },
+  "allocation": {
+    "execution_id": "execution-sample",
+    "parent_execution_id": null,
+    "owner_id": "host-sample",
+    "owner_boot_id": "boot-sample",
+    "owner_epoch": 1,
+    "native_identity_ref": "d47e8a41dbe53226e712d9ab374a7321d8d8394763049db80b07181585e786ba",
+    "object_bindings_ref": "ddafbcce322d1633b270af0ce47a4d07165f58a7e2c244b1544147f992db8de0",
+    "pipe_instances_ref": "6d343ea6460a26e4d443e0abb5715912f6e22a3904b8246939302fb7d2f567df",
+    "scratch_instance_ref": "8006cc1e60eb191e5178e65638919da61a7ba19cf6e73da24c9791c5c95fde76",
+    "host_share_ref": "f93e3ab54f17a09cccbaab03760ec6d44566e3bd1dde49bd63c5bac0f5e97a16",
+    "prepared_at_utc_ms": 1792022400000,
+    "deadline_utc_ms": 1792022405000,
+    "leases": {
+      "object_user": {
+        "id": "object_user-sample",
+        "generation": 1
+      },
+      "runtime": {
+        "id": "runtime-sample",
+        "generation": 1
+      },
+      "native_scope": {
+        "id": "native_scope-sample",
+        "generation": 1
+      },
+      "transport": {
+        "id": "transport-sample",
+        "generation": 1
+      },
+      "scratch": {
+        "id": "scratch-sample",
+        "generation": 1
+      },
+      "execution_budget": {
+        "id": "execution_budget-sample",
+        "generation": 1
+      },
+      "host_share": {
+        "id": "host_share-sample",
+        "generation": 1
+      }
+    }
+  }
+}

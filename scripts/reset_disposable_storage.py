@@ -50,6 +50,7 @@ def reset_disposable(workspace: Path, *, expected_project_id: str, discard_test_
     with StorageLease(paths.project_root, exclusive=True):
         if marker.exists():
             raise RuntimeError("An earlier recovery is incomplete; do not overwrite its evidence")
+        StorageRuntime.require_legacy_state_file(paths.state_db)
         required = sum(p.stat().st_size for p in paths.project_root.rglob("*") if p.is_file())
         if shutil.disk_usage(paths.project_root).free < required + 1024**3:
             raise RuntimeError("Insufficient space for a complete backup plus safety reserve")
@@ -114,6 +115,7 @@ def relocate_disposable(workspace: Path, *, expected_project_id: str,
         raise ValueError("Source must exist and destination must be a new, separate store")
     backup = destination_home / "recovery" / expected_project_id / uuid.uuid4().hex
     with StorageLease(source, exclusive=True):
+        StorageRuntime.require_legacy_state_file(source / "state.sqlite3")
         required = sum(p.stat().st_size for p in source.rglob("*") if p.is_file())
         destination_home.mkdir(parents=True, exist_ok=True)
         if shutil.disk_usage(destination_home).free < required + 1024**3:

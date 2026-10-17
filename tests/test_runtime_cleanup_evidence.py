@@ -1,5 +1,6 @@
 """Supervisor evidence survives the real Pipeline without replaying effects."""
 import pytest
+from backend.core.loop.execution_contract import NATIVE_PROCESS
 from backend.core.loop.agent_tool import AgentTool
 from backend.core.loop.event_bus import EventBus
 from backend.core.loop.execution_context import ExecutionContext
@@ -35,7 +36,7 @@ def test_pipeline_preserves_runtime_cleanup_and_never_reexecutes(tmp_path_factor
         workspace_path=str(tmp_path_factory), event_bus=bus, cancellation=process.cancellation_event)
     tool = AgentTool(name='fixture', description='fixture', parameters={'type':'object'},
         execute=lambda _: pytest.fail('Must execute only through the isolated runner'),
-        read_only=True, isolated=True)
+        read_only=True, isolated=True, execution_contract=NATIVE_PROCESS)
     actual = ToolPipeline().execute({'name':'fixture','args':{}}, tool, ctx, 'cleanup-call', 0)
     assert len(calls) == 1
     assert actual.receipt['runtime_cleanup'] == cleanup

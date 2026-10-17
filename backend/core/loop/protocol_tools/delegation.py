@@ -1,5 +1,6 @@
 """delegation protocol tools."""
 from __future__ import annotations
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from pathlib import Path
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
@@ -244,6 +245,7 @@ def install(ctx):
 
 
     tools["delegate_task"] = AgentTool(
+        execution_contract=data_broker("host.runtime.delegate_task"),
         name="delegate_task",
         description=(
             "Delegate an executor-ready task contract to an independent B Agent. "
