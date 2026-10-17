@@ -245,6 +245,29 @@ Legacy files left before a failed publication are still not durable prepared
 debts. The collector race, shared object-lifetime ordering and production batch
 handoff are unresolved; CAS v2 and new durable grants stay disabled.
 
+## SQL input validation and bounded fact retirement
+
+Checkpoint publication now freezes SQL parameters before creating any object
+file. SQL-only fields participate in the existing estimated write budget.
+Invalid integer ranges, non-finite SQL numbers and unencodable text fail before
+materialization. The final transaction consumes the frozen statements after its
+State dependency check. This does not qualify physical SQL growth, historical
+replacement costs, input heap usage or a durable reservation.
+
+Fact acknowledgment and maintenance use the same uncertain-commit handling as
+other authoritative transactions. Maintenance rechecks retention eligibility
+after acquiring the writer transaction and removes at most the requested limit
+(capped at 500) of facts and, separately, reference rows per pass. References
+remaining after a fact retires continue to protect CAS objects. Further passes,
+including after restart, drain those rows without reconstructing retired facts.
+Failed or uncertain commits do not report successful cleanup. These limits bound
+changed row counts, not lookup cost, SQLite pages or a hard cleanup-space reserve.
+
+Regressions cover invalid SQL-only inputs, immutable publication parameters,
+commit/rollback uncertainty, partial retirement across restart, active roots and
+consumer/fact changes before acquiring the writer transaction. The CAS lifetime
+and activation requirements below remain unchanged.
+
 ## Remaining protocol work
 
 Writers need durable, budgeted preparation before creating or reusing files.

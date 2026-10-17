@@ -122,3 +122,182 @@ def test_stream_order_failed_prefix_and_historical_immutable_refs(tmp_path_facto
         dispatcher.handler = delivered.append
         assert dispatcher.drain() == 11
     finally: runtime.close()
+
+
+
+@pytest.mark.parametrize("operation", ["acknowledge", "maintain"])
+@pytest.mark.parametrize("mode", ["before", "after"])
+def test_fact_control_commit_gap_quarantines_writer(tmp_path_factory, operation, mode):
+    from backend.core.storage import StorageCommitUnknown
+    from backend.core.storage.runtime_events import acknowledge_batch, maintain_facts
+    from tests.test_storage_transaction_outcomes import inject, ResponseLost
+    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    try:
+        runtime.save_agent_checkpoint(checkpoint())
+        event = read_facts(runtime, "observer")[0]
+        if operation == "maintain":
+            runtime._state.execute("INSERT INTO deleted_processes VALUES(?,?,?)", ("root", "plan", "time"))
+        action = (lambda: acknowledge_batch(runtime, "observer", [event])) if operation == "acknowledge" else (
+            lambda: maintain_facts(runtime))
+        with inject(runtime, mode):
+            with pytest.raises(StorageCommitUnknown) as caught:
+                action()
+            assert isinstance(caught.value.__cause__, ResponseLost)
+            assert caught.value.stage == "commit" and runtime._state.quarantined
+            with pytest.raises(StorageCommitUnknown):
+                runtime.save_agent_checkpoint(checkpoint(1))
+        with closing(sqlite3.connect(runtime.paths.state_db)) as reader:
+            if operation == "acknowledge":
+                assert reader.execute("SELECT COUNT(*) FROM runtime_consumers").fetchone()[0] == (mode == "after")
+                assert reader.execute("SELECT COUNT(*) FROM runtime_outbox").fetchone()[0] == 1
+            else:
+                assert reader.execute("SELECT COUNT(*) FROM runtime_outbox").fetchone()[0] == (mode == "before")
+                assert bool(reader.execute("SELECT 1 FROM object_refs WHERE owner_type='runtime_fact'").fetchone()) == (mode == "before")
+    finally:
+        runtime.close()
+
+
+def test_fact_ack_rollback_failure_keeps_original_cause_and_quarantine(tmp_path_factory):
+    from backend.core.storage import StorageCommitUnknown
+    from backend.core.storage.runtime_events import acknowledge_batch
+    from tests.test_storage_transaction_outcomes import inject
+    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    try:
+        runtime.save_agent_checkpoint(checkpoint())
+        event = read_facts(runtime, "observer")[0]
+        with inject(runtime, "rollback"):
+            with pytest.raises(StorageCommitUnknown) as caught:
+                acknowledge_batch(runtime, "observer", [{**event, "stream_sequence": 99}])
+            assert isinstance(caught.value.__cause__, ValueError)
+            assert caught.value.rollback_failed and runtime._state.quarantined
+    finally:
+        runtime.close()
+
+
+def test_fact_control_refuses_nested_transaction_without_rolling_back_owner(tmp_path_factory):
+    from backend.core.storage.runtime_events import acknowledge_batch, maintain_facts
+    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    try:
+        runtime.save_agent_checkpoint(checkpoint())
+        event = read_facts(runtime, "observer")[0]
+        runtime._state.execute("INSERT INTO deleted_processes VALUES(?,?,?)", ("root", "plan", "time"))
+        for action in (lambda: acknowledge_batch(runtime, "observer", [event]),
+                       lambda: maintain_facts(runtime)):
+            runtime._state.execute("BEGIN IMMEDIATE")
+            try:
+                with pytest.raises(RuntimeError, match="STATE_TRANSACTION_ALREADY_ACTIVE"):
+                    action()
+                assert runtime._state.in_transaction
+            finally:
+                runtime._state.execute("ROLLBACK")
+    finally:
+        runtime.close()
+
+
+
+def test_retired_fact_ownership_is_bounded_and_survives_restart(tmp_path_factory):
+    from backend.core.storage.runtime_events import maintain_facts
+    state = tmp_path_factory / "state"
+    runtime = StorageRuntime(tmp_path_factory, state_home=state)
+    try:
+        first = checkpoint()
+        first["messages"] = [{"role": "user", "content": str(i)} for i in range(12)]
+        runtime.save_agent_checkpoint(first)
+        runtime.save_agent_checkpoint(checkpoint(1))
+        runtime._state.execute("INSERT INTO deleted_processes VALUES(?,?,?)", ("root", "plan", "time"))
+        before = runtime._state.execute("SELECT COUNT(*) FROM object_refs WHERE owner_type='runtime_fact'").fetchone()[0]
+        assert before > 3
+        assert maintain_facts(runtime, limit=3) == 2
+        assert runtime._state.execute("SELECT COUNT(*) FROM runtime_outbox").fetchone()[0] == 0
+        assert runtime._state.execute("SELECT COUNT(*) FROM object_refs WHERE owner_type='runtime_fact'").fetchone()[0] == before - 3
+        remaining = {r[0] for r in runtime._state.execute("SELECT digest FROM object_refs WHERE owner_type='runtime_fact'")}
+        direct, owned, _ = runtime._cas_reference_inventory()
+        assert remaining <= owned
+    finally:
+        runtime.close()
+    runtime = StorageRuntime(tmp_path_factory, state_home=state)
+    try:
+        previous = before - 3
+        while previous:
+            assert maintain_facts(runtime, limit=3) == 0
+            current = runtime._state.execute("SELECT COUNT(*) FROM object_refs WHERE owner_type='runtime_fact'").fetchone()[0]
+            assert current == max(0, previous - 3)
+            previous = current
+        assert maintain_facts(runtime, limit=3) == 0
+    finally:
+        runtime.close()
+
+
+def test_live_fact_ownership_is_not_treated_as_retirement_debt(tmp_path_factory):
+    from backend.core.storage.runtime_events import maintain_facts
+    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    try:
+        runtime.save_agent_checkpoint(checkpoint())
+        before = runtime._state.execute("SELECT COUNT(*) FROM object_refs").fetchone()[0]
+        assert maintain_facts(runtime, limit=1) == 0
+        assert runtime._state.execute("SELECT COUNT(*) FROM object_refs").fetchone()[0] == before
+        assert len(read_facts(runtime, "observer")) == 1
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("mode", ["before", "after"])
+def test_partial_retirement_commit_gap_retains_exact_ownership(tmp_path_factory, mode):
+    from backend.core.storage import StorageCommitUnknown
+    from backend.core.storage.runtime_events import maintain_facts
+    from tests.test_storage_transaction_outcomes import inject
+    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    try:
+        runtime.save_agent_checkpoint(checkpoint())
+        before = runtime._state.execute("SELECT COUNT(*) FROM object_refs WHERE owner_type='runtime_fact'").fetchone()[0]
+        runtime._state.execute("INSERT INTO deleted_processes VALUES(?,?,?)", ("root", "plan", "time"))
+        with inject(runtime, mode):
+            with pytest.raises(StorageCommitUnknown):
+                maintain_facts(runtime, limit=1)
+        with closing(sqlite3.connect(runtime.paths.state_db)) as reader:
+            assert reader.execute("SELECT COUNT(*) FROM runtime_outbox").fetchone()[0] == (mode == "before")
+            expected = before - (mode == "after")
+            assert reader.execute("SELECT COUNT(*) FROM object_refs WHERE owner_type='runtime_fact'").fetchone()[0] == expected
+        assert runtime._state.quarantined
+    finally:
+        runtime.close()
+
+
+
+def test_retention_rechecks_consumer_state_after_acquiring_writer(tmp_path_factory):
+    from backend.core.storage.runtime_events import acknowledge_batch, maintain_facts
+    from tests.test_storage_repository_outcomes import inject
+    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    try:
+        for revision in range(35):
+            runtime.save_agent_checkpoint(checkpoint(revision))
+        acknowledge_batch(runtime, "fast", read_facts(runtime, "fast"))
+        before = runtime._state.execute("SELECT COUNT(*) FROM object_refs").fetchone()[0]
+        def add_reader(connection):
+            connection.execute("INSERT INTO runtime_consumers VALUES(?,?,?)", ("slow", "process:root", 0))
+        with inject(runtime, "state", "none", before_begin=add_reader):
+            assert maintain_facts(runtime, retain_per_stream=32) == 0
+        assert len(read_facts(runtime, "slow")) == 35
+        assert runtime._state.execute("SELECT COUNT(*) FROM object_refs").fetchone()[0] == before
+    finally:
+        runtime.close()
+
+
+def test_retirement_rechecks_new_fact_before_removing_old_candidate_root(tmp_path_factory):
+    from backend.core.storage.runtime_events import insert_fact, maintain_facts
+    from tests.test_storage_repository_outcomes import inject
+    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    try:
+        runtime.save_agent_checkpoint(checkpoint())
+        payload = runtime._state.execute("SELECT payload_ref FROM runtime_outbox").fetchone()[0]
+        digest = payload.split(":", 1)[1]
+        runtime._state.execute("INSERT INTO object_refs VALUES(?,?,?,?,?)", ("runtime_fact", "root:99", digest, digest, "time"))
+        def publish(connection):
+            insert_fact(connection, event_id="checkpoint:root:99", kind="checkpoint_committed",
+                project_id=runtime.paths.project_id, session_id="session", task_id="task", process_id="root",
+                stream_id="process:root", sequence=99, payload_ref=payload, occurred_at="time")
+        with inject(runtime, "state", "none", before_begin=publish):
+            assert maintain_facts(runtime, limit=1) == 0
+        assert runtime._state.execute("SELECT COUNT(*) FROM object_refs WHERE owner_id='root:99'").fetchone()[0] == 1
+    finally:
+        runtime.close()

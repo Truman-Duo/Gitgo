@@ -319,3 +319,141 @@ def test_event_backfilled_below_last_sequence_refuses_stale_publication(runtime,
     assert runtime.process_revision("proc") == 1
     assert runtime._state.execute("SELECT checkpoint_event_sequence FROM session_processes").fetchone()[0] == 0
     assert len(rows(runtime, "session_events")) == 2
+
+
+@pytest.mark.parametrize("updates", [
+    {"steps_used": 1 << 63}, {"max_steps": -(1 << 63) - 1},
+    {"steps_used": "not-an-integer"},
+    {"session_metadata": {"context_epoch": 1 << 63}},
+    {"result": {"duration_ms": float("nan")}},
+    {"result": {"duration_ms": float("inf")}},
+    {"result": {"metadata": {"task_tree_budget": {"used": {"provider_calls": 1 << 63}}}}},
+    {"causation_id": "invalid-\ud800"},
+    {"session_created_at": "invalid-\ud800"},
+])
+def test_invalid_sql_scalar_refused_before_any_file(runtime, monkeypatch, updates):
+    def forbidden(*args, **kwargs):
+        pytest.fail("SQL scalar validation must precede any file write")
+    monkeypatch.setattr(runtime, "_write_blob_file", forbidden)
+    with pytest.raises((StorageBlocked, ValueError, UnicodeError)):
+        runtime.save_agent_checkpoint(checkpoint(**updates))
+    assert rows(runtime, "objects") == rows(runtime, "runtime_outbox") == []
+
+
+def capture_sql_plan(monkeypatch):
+    from backend.core.storage.checkpoint_sql import CheckpointSqlBuilder
+    original = CheckpointSqlBuilder.seal
+    plans = []
+    def sealed(self, *args):
+        plan = original(self, *args)
+        plans.append((plan, args[1]))
+        return plan
+    monkeypatch.setattr(CheckpointSqlBuilder, "seal", sealed)
+    return plans
+
+
+@pytest.mark.parametrize("field,value", [
+    ("role", "worker"), ("actor_kind", "worker"),
+    ("capability_profile_id", "profile"), ("causation_id", "cause"),
+    ("created_at", "created"), ("session_created_at", "session-created"),
+    ("checkpoint_at", "checkpoint-time"), ("steps_used", 2), ("max_steps", 9),
+    ("depends_on", ["upstream"]),
+])
+def test_sql_only_fields_are_bound_even_when_object_bytes_match(runtime, monkeypatch, field, value):
+    plans = capture_sql_plan(monkeypatch)
+    monkeypatch.setattr("backend.core.storage.repositories.checkpoints._utc_now", lambda: "fixed-time")
+    def stop(*args, **kwargs):
+        raise InterruptedError("after complete planning, before files")
+    monkeypatch.setattr(runtime, "_write_blob_file", stop)
+    for snapshot in (checkpoint(task_id=""), checkpoint(task_id="", **{field: value})):
+        with pytest.raises(InterruptedError):
+            runtime.save_agent_checkpoint(snapshot)
+    assert len(plans) == 2
+    assert plans[0][1] == plans[1][1]
+    assert plans[0][0].digest != plans[1][0].digest
+    assert rows(runtime, "runtime_outbox") == []
+
+
+def test_sql_plan_is_sealed_before_first_file_and_cannot_be_mutated(runtime, monkeypatch):
+    from dataclasses import FrozenInstanceError
+    plans = capture_sql_plan(monkeypatch)
+    original = runtime._write_blob_file
+    def write(data, **kwargs):
+        assert len(plans) == 1
+        plan = plans[0][0]
+        assert plan.parameter_bytes > 0 and len(plan.digest) == 64
+        with pytest.raises(FrozenInstanceError):
+            plan.statements[0].parameters = ()
+        with pytest.raises(TypeError):
+            plan.statements[0].parameters[0] = "different"
+        return original(data, **kwargs)
+    monkeypatch.setattr(runtime, "_write_blob_file", write)
+    runtime.save_agent_checkpoint(checkpoint())
+    assert any("runtime_outbox" in item.sql for item in plans[0][0].statements)
+    assert sum(item.expected_rows == 1 for item in plans[0][0].statements) == 1
+
+
+def test_publication_does_not_read_live_project_binding_after_files(runtime, monkeypatch):
+    # All SQL parameters, including runtime-owned ones, are captured in the plan.
+    original_paths = runtime.paths
+    interleave_first_file(monkeypatch, runtime,
+        lambda: monkeypatch.setattr(runtime, "paths", replace(original_paths, project_id="changed")))
+    runtime.save_agent_checkpoint(checkpoint())
+    assert runtime._state.execute("SELECT project_id FROM sessions").fetchone()[0] == original_paths.project_id
+    assert runtime._state.execute("SELECT project_id FROM runtime_outbox").fetchone()[0] == original_paths.project_id
+
+
+def test_sql_integer_extremes_remain_exact(runtime):
+    runtime.save_agent_checkpoint(checkpoint(steps_used=(1 << 63) - 1, max_steps=-(1 << 63)))
+    row = runtime._state.execute("SELECT steps_used,max_steps FROM session_processes").fetchone()
+    assert tuple(row) == ((1 << 63) - 1, -(1 << 63))
+
+
+def test_revision_overflow_refused_before_files(runtime, monkeypatch):
+    runtime.save_agent_checkpoint(checkpoint())
+    runtime._state.execute("UPDATE session_processes SET state_revision=?", ((1 << 63) - 1,))
+    def forbidden(*args, **kwargs):
+        pytest.fail("overflow must be rejected before files")
+    monkeypatch.setattr(runtime, "_write_blob_file", forbidden)
+    with pytest.raises(StorageBlocked, match="checkpoint_sql_scalar_invalid"):
+        runtime.save_agent_checkpoint(checkpoint())
+
+
+def test_sql_builder_rejects_adapter_values_and_sealed_reuse(runtime):
+    from backend.core.storage.checkpoint_sql import CheckpointSqlBuilder
+    from backend.core.storage.checkpoint_plan import CheckpointObjectBuilder, capture_basis
+    builder = CheckpointSqlBuilder()
+    with pytest.raises(StorageBlocked, match="checkpoint_sql_scalar_invalid"):
+        builder.execute("INSERT INTO sample VALUES(?)", (["mutable"],))
+    values = ["original"]
+    builder.execute("INSERT INTO sample VALUES(?)", values)
+    values[0] = "changed"
+    objects = CheckpointObjectBuilder(runtime._encoded_object, runtime.policy, "time").seal()
+    basis = capture_basis(runtime._state, "proc", "")
+    plan = builder.seal(basis, objects, "proc", "")
+    assert plan.statements[0].parameters == ("original",)
+    with pytest.raises(RuntimeError, match="sealed"):
+        builder.execute("INSERT INTO sample VALUES(?)", ("more",))
+    with pytest.raises(RuntimeError, match="sealed"):
+        builder.seal(basis, objects, "proc", "")
+
+
+def test_zero_row_revision_guard_rolls_back_other_publication_rows(runtime):
+    runtime._state.execute("""CREATE TRIGGER ignore_revision BEFORE UPDATE OF state_revision
+        ON session_processes BEGIN SELECT RAISE(IGNORE); END""")
+    with pytest.raises(RevisionConflict):
+        runtime.save_agent_checkpoint(checkpoint())
+    assert rows(runtime, "session_processes") == rows(runtime, "objects") == []
+    assert rows(runtime, "runtime_outbox") == rows(runtime, "object_refs") == []
+
+
+
+def test_sql_only_bytes_participate_in_existing_write_budget(runtime, monkeypatch):
+    from backend.core.storage.support import _MinuteBudget
+    # Tiny generated objects do not justify ignoring a large SQL-only field.
+    monkeypatch.setattr(runtime, "_global_sqlite_budget", _MinuteBudget(100, 64 * 1024))
+    def forbidden(*args, **kwargs):
+        pytest.fail("SQL byte budget refusal must precede materialization")
+    monkeypatch.setattr(runtime, "_write_blob_file", forbidden)
+    with pytest.raises(StorageBlocked, match="global_sqlite_write_rate_exceeded"):
+        runtime.save_agent_checkpoint(checkpoint(task_id="", causation_id="x" * (32 * 1024)))

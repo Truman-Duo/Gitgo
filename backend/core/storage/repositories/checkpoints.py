@@ -5,6 +5,7 @@ from copy import deepcopy
 from ..checkpoint_plan import (
     CheckpointObjectBuilder, capture_basis, require_live_basis, recheck_basis,
 )
+from ..checkpoint_sql import CheckpointSqlBuilder
 from ..lifecycle import CheckpointRef, require_revision, check_transition
 from .ports import CheckpointsPort
 from ..support import _utc_now
@@ -140,221 +141,221 @@ def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
     logical_estimate = 2048 + 512 * (
         len(message_objects) + len(receipt_objects) + len(descriptors)
     )
-    self._reserve_authoritative_write(logical_estimate)
+    publication = CheckpointSqlBuilder()
+    for descriptor in descriptors.values():
+        self._register_object(publication, descriptor)
+    # A checkpoint is one ownership unit.  Record the complete CAS
+    # closure in the same transaction as the authoritative rows.
+    # Historical facts keep their own closure when this one advances.
+    # This reference index does not fence legacy concurrent collection.
+    publication.execute(
+        "DELETE FROM object_refs WHERE owner_type=? AND owner_id=?",
+        ("session_checkpoint", session_id),
+    )
+    publication.executemany(
+        """INSERT INTO object_refs(
+               owner_type, owner_id, field_name, digest, created_at
+           ) VALUES(?, ?, ?, ?, ?)""",
+        [
+            (
+                "session_checkpoint", session_id,
+                f"object:{digest}", digest, now,
+            )
+            for digest in sorted(descriptors)
+        ],
+    )
+    publication.execute(
+        """INSERT INTO sessions(
+               session_id, project_id, status, context_epoch,
+               created_at, updated_at, metadata_ref, checkpoint_at,
+               checkpoint_sequence
+           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET
+               status=excluded.status,
+               context_epoch=excluded.context_epoch,
+               updated_at=excluded.updated_at,
+               metadata_ref=excluded.metadata_ref,
+               checkpoint_at=excluded.checkpoint_at,
+               checkpoint_sequence=excluded.checkpoint_sequence""",
+        (
+            session_id, self.paths.project_id, status,
+            int(session_metadata.get("context_epoch", 0) or 0),
+            str(snapshot.get("session_created_at") or now), now,
+            metadata_object["ref"], checkpoint_at, checkpoint_sequence,
+        ),
+    )
+    publication.execute(
+        "DELETE FROM process_dependencies WHERE process_id=?",
+        (process_id,),
+    )
+    for upstream_id in dependencies:
+        publication.execute(
+            """INSERT INTO process_dependencies(
+                   process_id, depends_on_process_id, state,
+                   created_at, updated_at
+               ) VALUES(?, ?, 'declared', ?, ?)""",
+            (process_id, upstream_id, now, now),
+        )
+    if task_id:
+        parent_task_id = basis.parent_task_id
+        publication.execute(
+            """INSERT INTO tasks(
+                   task_id, session_id, parent_task_id, role, status,
+                   contract_ref, outcome_ref, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    session_id=excluded.session_id,
+                    parent_task_id=excluded.parent_task_id,
+                    role=excluded.role,
+                   status=excluded.status,
+                   contract_ref=excluded.contract_ref,
+                   outcome_ref=excluded.outcome_ref,
+                   updated_at=excluded.updated_at""",
+            (
+                task_id, session_id, parent_task_id,
+                str(snapshot.get("role") or ""),
+                str((snapshot.get("result") or {}).get("status") or status), contract_object["ref"] if contract_object else None,
+                outcome_object["ref"] if outcome_object else None,
+                str(snapshot.get("created_at") or now), now,
+            ),
+        )
+        if usage_values is not None:
+            publication.execute(
+                """INSERT INTO task_usage(
+                       task_id, process_id, parent_process_id, task_kind,
+                       status, provider_calls, input_tokens, output_tokens,
+                       cache_read_tokens, cache_write_tokens, duration_ms,
+                       tool_calls, created_at, updated_at
+                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(task_id) DO UPDATE SET
+                       process_id=excluded.process_id,
+                       parent_process_id=excluded.parent_process_id,
+                       task_kind=excluded.task_kind,
+                       status=excluded.status,
+                       provider_calls=excluded.provider_calls,
+                       input_tokens=excluded.input_tokens,
+                       output_tokens=excluded.output_tokens,
+                       cache_read_tokens=excluded.cache_read_tokens,
+                       cache_write_tokens=excluded.cache_write_tokens,
+                       duration_ms=excluded.duration_ms,
+                       tool_calls=excluded.tool_calls,
+                       updated_at=excluded.updated_at""",
+                (
+                    task_id, process_id,
+                    str(snapshot.get("parent_id") or ""),
+                    usage_values["task_kind"], usage_values["status"],
+                    usage_values["provider_calls"], usage_values["input_tokens"],
+                    usage_values["output_tokens"], usage_values["cache_read_tokens"],
+                    usage_values["cache_write_tokens"], usage_values["duration_ms"],
+                    usage_values["tool_calls"],
+                    str(snapshot.get("created_at") or now), now,
+                ),
+            )
+    publication.execute(
+        """INSERT INTO session_processes(
+               process_id, session_id, task_id, parent_process_id,
+               role, actor_kind, capability_profile_id, status,
+               steps_used, max_steps, checkpoint_event_sequence,
+               created_at, updated_at, runtime_state_ref
+           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(process_id) DO UPDATE SET
+               session_id=excluded.session_id,
+               task_id=excluded.task_id,
+               parent_process_id=excluded.parent_process_id,
+               role=excluded.role,
+               actor_kind=excluded.actor_kind,
+               capability_profile_id=excluded.capability_profile_id,
+               status=excluded.status,
+               steps_used=excluded.steps_used,
+               max_steps=excluded.max_steps,
+               checkpoint_event_sequence=excluded.checkpoint_event_sequence,
+               runtime_state_ref=excluded.runtime_state_ref,
+               updated_at=excluded.updated_at""",
+        (
+            process_id, session_id, task_id or None,
+            str(snapshot.get("parent_id") or "") or None,
+            str(snapshot.get("role") or ""),
+            str(snapshot.get("actor_kind") or ""),
+            str(snapshot.get("capability_profile_id") or ""),
+            status, int(snapshot.get("steps_used", 0) or 0),
+            int(snapshot.get("max_steps", 0) or 0), checkpoint_sequence,
+            str(snapshot.get("created_at") or now), now,
+            runtime_object["ref"],
+        ),
+    )
+    for sequence, message, message_object, reasoning_object in message_objects:
+        message_id = hashlib.sha256(
+            f"{session_id}:{sequence}".encode("utf-8")
+        ).hexdigest()
+        publication.execute(
+            """INSERT INTO messages(
+                   message_id, session_id, task_id, sequence, role,
+                   content_ref, reasoning_ref, created_at
+               ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(session_id, sequence) DO UPDATE SET
+                   task_id=CASE
+                       WHEN messages.content_ref=excluded.content_ref
+                       THEN messages.task_id ELSE excluded.task_id END,
+                   role=excluded.role,
+                   content_ref=excluded.content_ref,
+                   reasoning_ref=excluded.reasoning_ref
+               WHERE messages.role IS NOT excluded.role
+                  OR messages.content_ref IS NOT excluded.content_ref
+                  OR messages.reasoning_ref IS NOT excluded.reasoning_ref""",
+            (
+                message_id, session_id, task_id or None, sequence,
+                str(message.get("role") or ""), message_object["ref"],
+                reasoning_object["ref"] if reasoning_object else None, now,
+            ),
+        )
+    publication.execute(
+        "DELETE FROM messages WHERE session_id=? AND sequence>=?",
+        (session_id, len(message_objects)),
+    )
+    for receipt, receipt_object in receipt_objects:
+        publication.execute(
+            """INSERT INTO receipts(
+                   receipt_id, task_id, receipt_type, evidence_ref, created_at
+               ) VALUES(?, ?, ?, ?, ?)
+               ON CONFLICT(receipt_id) DO UPDATE SET
+                   task_id=excluded.task_id,
+                   receipt_type=excluded.receipt_type,
+                   evidence_ref=excluded.evidence_ref""",
+            (
+                str(receipt["receipt_id"]), task_id,
+                str(receipt.get("tool_name") or receipt.get("effect") or "tool"),
+                receipt_object["ref"],
+                str(receipt.get("timestamp") or now),
+            ),
+        )
+    publication.expect_one(
+        "UPDATE session_processes SET state_revision=? WHERE process_id=? AND state_revision=?",
+        (committed_revision, process_id, previous_revision))
+    # A historical fact owns its complete immutable closure, even
+    # after current session rows replace those references.
+    for digest in descriptors:
+        publication.execute("INSERT INTO object_refs(owner_type,owner_id,field_name,digest,created_at) VALUES(?,?,?,?,?)",
+            ("runtime_fact", f"{process_id}:{committed_revision}", digest, digest, now))
+    from ..runtime_events import insert_fact
+    insert_fact(publication, event_id=f"checkpoint:{process_id}:{committed_revision}",
+        kind="checkpoint_committed", project_id=self.paths.project_id,
+        session_id=session_id, task_id=task_id, process_id=process_id,
+        stream_id=f"process:{process_id}", sequence=committed_revision,
+        payload_ref=fact["ref"], occurred_at=now,
+        causation_id=str(snapshot.get("causation_id") or ""))
+    if barrier is not None:
+        sequence = checkpoint_sequence + 1
+        publication.execute("INSERT INTO session_events(event_id,process_id,sequence,event_type,payload_ref,occurred_at) VALUES(?,?,?,'agent_complete',?,?)",
+            (f"terminal:{process_id}", process_id, sequence, barrier["ref"], now))
+        insert_fact(publication, event_id=f"ledger:{process_id}:{sequence}", kind="agent_complete",
+            project_id=self.paths.project_id, session_id=session_id, task_id=task_id, process_id=process_id,
+            stream_id=f"ledger:{process_id}", sequence=sequence, payload_ref=barrier["ref"], occurred_at=now,
+            causation_id=f"checkpoint:{process_id}:{committed_revision}")
+    writes = publication.seal(basis, objects, process_id, parent_process_id)
+    self._reserve_authoritative_write(max(logical_estimate, writes.parameter_bytes))
     objects.materialize_legacy(self._write_blob_file)
     with self._state_lock:
         with authoritative_transaction(self._state):
             recheck_basis(self._state, process_id, parent_process_id, basis)
-            for descriptor in descriptors.values():
-                self._register_object(self._state, descriptor)
-            # A checkpoint is one ownership unit.  Record the complete CAS
-            # closure in the same transaction as the authoritative rows.
-            # Historical facts keep their own closure when this one advances.
-            # This reference index does not fence legacy concurrent collection.
-            self._state.execute(
-                "DELETE FROM object_refs WHERE owner_type=? AND owner_id=?",
-                ("session_checkpoint", session_id),
-            )
-            self._state.executemany(
-                """INSERT INTO object_refs(
-                       owner_type, owner_id, field_name, digest, created_at
-                   ) VALUES(?, ?, ?, ?, ?)""",
-                [
-                    (
-                        "session_checkpoint", session_id,
-                        f"object:{digest}", digest, now,
-                    )
-                    for digest in sorted(descriptors)
-                ],
-            )
-            self._state.execute(
-                """INSERT INTO sessions(
-                       session_id, project_id, status, context_epoch,
-                       created_at, updated_at, metadata_ref, checkpoint_at,
-                       checkpoint_sequence
-                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(session_id) DO UPDATE SET
-                       status=excluded.status,
-                       context_epoch=excluded.context_epoch,
-                       updated_at=excluded.updated_at,
-                       metadata_ref=excluded.metadata_ref,
-                       checkpoint_at=excluded.checkpoint_at,
-                       checkpoint_sequence=excluded.checkpoint_sequence""",
-                (
-                    session_id, self.paths.project_id, status,
-                    int(session_metadata.get("context_epoch", 0) or 0),
-                    str(snapshot.get("session_created_at") or now), now,
-                    metadata_object["ref"], checkpoint_at, checkpoint_sequence,
-                ),
-            )
-            self._state.execute(
-                "DELETE FROM process_dependencies WHERE process_id=?",
-                (process_id,),
-            )
-            for upstream_id in dependencies:
-                self._state.execute(
-                    """INSERT INTO process_dependencies(
-                           process_id, depends_on_process_id, state,
-                           created_at, updated_at
-                       ) VALUES(?, ?, 'declared', ?, ?)""",
-                    (process_id, upstream_id, now, now),
-                )
-            if task_id:
-                parent_task_id = basis.parent_task_id
-                self._state.execute(
-                    """INSERT INTO tasks(
-                           task_id, session_id, parent_task_id, role, status,
-                           contract_ref, outcome_ref, created_at, updated_at
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(task_id) DO UPDATE SET
-                            session_id=excluded.session_id,
-                            parent_task_id=excluded.parent_task_id,
-                            role=excluded.role,
-                           status=excluded.status,
-                           contract_ref=excluded.contract_ref,
-                           outcome_ref=excluded.outcome_ref,
-                           updated_at=excluded.updated_at""",
-                    (
-                        task_id, session_id, parent_task_id,
-                        str(snapshot.get("role") or ""),
-                        str((snapshot.get("result") or {}).get("status") or status), contract_object["ref"] if contract_object else None,
-                        outcome_object["ref"] if outcome_object else None,
-                        str(snapshot.get("created_at") or now), now,
-                    ),
-                )
-                if usage_values is not None:
-                    self._state.execute(
-                        """INSERT INTO task_usage(
-                               task_id, process_id, parent_process_id, task_kind,
-                               status, provider_calls, input_tokens, output_tokens,
-                               cache_read_tokens, cache_write_tokens, duration_ms,
-                               tool_calls, created_at, updated_at
-                           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                           ON CONFLICT(task_id) DO UPDATE SET
-                               process_id=excluded.process_id,
-                               parent_process_id=excluded.parent_process_id,
-                               task_kind=excluded.task_kind,
-                               status=excluded.status,
-                               provider_calls=excluded.provider_calls,
-                               input_tokens=excluded.input_tokens,
-                               output_tokens=excluded.output_tokens,
-                               cache_read_tokens=excluded.cache_read_tokens,
-                               cache_write_tokens=excluded.cache_write_tokens,
-                               duration_ms=excluded.duration_ms,
-                               tool_calls=excluded.tool_calls,
-                               updated_at=excluded.updated_at""",
-                        (
-                            task_id, process_id,
-                            str(snapshot.get("parent_id") or ""),
-                            usage_values["task_kind"], usage_values["status"],
-                            usage_values["provider_calls"], usage_values["input_tokens"],
-                            usage_values["output_tokens"], usage_values["cache_read_tokens"],
-                            usage_values["cache_write_tokens"], usage_values["duration_ms"],
-                            usage_values["tool_calls"],
-                            str(snapshot.get("created_at") or now), now,
-                        ),
-                    )
-            self._state.execute(
-                """INSERT INTO session_processes(
-                       process_id, session_id, task_id, parent_process_id,
-                       role, actor_kind, capability_profile_id, status,
-                       steps_used, max_steps, checkpoint_event_sequence,
-                       created_at, updated_at, runtime_state_ref
-                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(process_id) DO UPDATE SET
-                       session_id=excluded.session_id,
-                       task_id=excluded.task_id,
-                       parent_process_id=excluded.parent_process_id,
-                       role=excluded.role,
-                       actor_kind=excluded.actor_kind,
-                       capability_profile_id=excluded.capability_profile_id,
-                       status=excluded.status,
-                       steps_used=excluded.steps_used,
-                       max_steps=excluded.max_steps,
-                       checkpoint_event_sequence=excluded.checkpoint_event_sequence,
-                       runtime_state_ref=excluded.runtime_state_ref,
-                       updated_at=excluded.updated_at""",
-                (
-                    process_id, session_id, task_id or None,
-                    str(snapshot.get("parent_id") or "") or None,
-                    str(snapshot.get("role") or ""),
-                    str(snapshot.get("actor_kind") or ""),
-                    str(snapshot.get("capability_profile_id") or ""),
-                    status, int(snapshot.get("steps_used", 0) or 0),
-                    int(snapshot.get("max_steps", 0) or 0), checkpoint_sequence,
-                    str(snapshot.get("created_at") or now), now,
-                    runtime_object["ref"],
-                ),
-            )
-            for sequence, message, message_object, reasoning_object in message_objects:
-                message_id = hashlib.sha256(
-                    f"{session_id}:{sequence}".encode("utf-8")
-                ).hexdigest()
-                self._state.execute(
-                    """INSERT INTO messages(
-                           message_id, session_id, task_id, sequence, role,
-                           content_ref, reasoning_ref, created_at
-                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(session_id, sequence) DO UPDATE SET
-                           task_id=CASE
-                               WHEN messages.content_ref=excluded.content_ref
-                               THEN messages.task_id ELSE excluded.task_id END,
-                           role=excluded.role,
-                           content_ref=excluded.content_ref,
-                           reasoning_ref=excluded.reasoning_ref
-                       WHERE messages.role IS NOT excluded.role
-                          OR messages.content_ref IS NOT excluded.content_ref
-                          OR messages.reasoning_ref IS NOT excluded.reasoning_ref""",
-                    (
-                        message_id, session_id, task_id or None, sequence,
-                        str(message.get("role") or ""), message_object["ref"],
-                        reasoning_object["ref"] if reasoning_object else None, now,
-                    ),
-                )
-            self._state.execute(
-                "DELETE FROM messages WHERE session_id=? AND sequence>=?",
-                (session_id, len(message_objects)),
-            )
-            for receipt, receipt_object in receipt_objects:
-                self._state.execute(
-                    """INSERT INTO receipts(
-                           receipt_id, task_id, receipt_type, evidence_ref, created_at
-                       ) VALUES(?, ?, ?, ?, ?)
-                       ON CONFLICT(receipt_id) DO UPDATE SET
-                           task_id=excluded.task_id,
-                           receipt_type=excluded.receipt_type,
-                           evidence_ref=excluded.evidence_ref""",
-                    (
-                        str(receipt["receipt_id"]), task_id,
-                        str(receipt.get("tool_name") or receipt.get("effect") or "tool"),
-                        receipt_object["ref"],
-                        str(receipt.get("timestamp") or now),
-                    ),
-                )
-            revision_cursor = self._state.execute(
-                "UPDATE session_processes SET state_revision=? WHERE process_id=? AND state_revision=?",
-                (committed_revision, process_id, previous_revision))
-            if revision_cursor.rowcount != 1:
-                from ..lifecycle import RevisionConflict
-                raise RevisionConflict("STATE_REVISION_CHANGED: checkpoint was not committed")
-            # A historical fact owns its complete immutable closure, even
-            # after current session rows replace those references.
-            for digest in descriptors:
-                self._state.execute("INSERT INTO object_refs(owner_type,owner_id,field_name,digest,created_at) VALUES(?,?,?,?,?)",
-                    ("runtime_fact", f"{process_id}:{committed_revision}", digest, digest, now))
-            from ..runtime_events import insert_fact
-            insert_fact(self._state, event_id=f"checkpoint:{process_id}:{committed_revision}",
-                kind="checkpoint_committed", project_id=self.paths.project_id,
-                session_id=session_id, task_id=task_id, process_id=process_id,
-                stream_id=f"process:{process_id}", sequence=committed_revision,
-                payload_ref=fact["ref"], occurred_at=now,
-                causation_id=str(snapshot.get("causation_id") or ""))
-            if barrier is not None:
-                sequence = checkpoint_sequence + 1
-                self._state.execute("INSERT INTO session_events(event_id,process_id,sequence,event_type,payload_ref,occurred_at) VALUES(?,?,?,'agent_complete',?,?)",
-                    (f"terminal:{process_id}", process_id, sequence, barrier["ref"], now))
-                insert_fact(self._state, event_id=f"ledger:{process_id}:{sequence}", kind="agent_complete",
-                    project_id=self.paths.project_id, session_id=session_id, task_id=task_id, process_id=process_id,
-                    stream_id=f"ledger:{process_id}", sequence=sequence, payload_ref=barrier["ref"], occurred_at=now,
-                    causation_id=f"checkpoint:{process_id}:{committed_revision}")
+            writes.apply(self._state)
     return CheckpointRef(f"sqlite:session/{process_id}/{checkpoint_sequence}", committed_revision)
