@@ -23,6 +23,7 @@ typedef struct Runtime {
     Node nodes[GRP_NODES],ancestors[64];DWORD ancestor_count;
     IO_STATUS_BLOCK io;unsigned char security[65536],user[SECURITY_MAX_SID_SIZE];
     DWORD user_length;
+    unsigned char inventory[65536];
 } Runtime;
 static Runtime records[GRP_OWNERS];static SRWLOCK pool;
 static DWORD error(void){DWORD e=GetLastError();return e?e:ERROR_GEN_FAILURE;}
@@ -632,6 +633,48 @@ API DWORD gitgo_retirement_finish(uint64_t cookie){
     r->sealed=1;e=metadata(&r->ancestors[0]);if(e)return done(r,e);
     e=gitgo_retirement_probe(r,r->ancestors[0].handle,t->leaf[0],1);if(e)return done(r,e);
     r->installing=TREE_RETIRED;r->sealed=0;return done(r,0);
+}
+
+/* Enumerate through an already owned directory handle. No FindFirstFile or
+ * Python-owned search handle can escape before the native record owns it. */
+API DWORD gitgo_tree_inventory(uint64_t cookie,DWORD index,wchar_t *out,DWORD capacity,DWORD *used,DWORD *count){
+    Runtime *r=get(cookie);Node *node;DWORD code,position,total=0,names=0,records_seen=0,offset;
+    FILE_INFO_BY_HANDLE_CLASS query=FileIdBothDirectoryRestartInfo;
+    FILE_ID_BOTH_DIR_INFO *entry;wchar_t leaf[129];
+    if(!r)return ERROR_INVALID_HANDLE;
+    if(r->purpose!=TREE_PIN)return done(r,ERROR_INVALID_STATE);
+    if(r->sealed||index>=r->count||!r->nodes[index].directory||!out||capacity!=33025||!used||!count)
+        return done(r,ERROR_INVALID_PARAMETER);
+    *used=0;*count=0;out[0]=0;r->sealed=1;node=&r->nodes[index];
+    code=metadata(node);if(code)return done(r,code);
+    code=security(r,node,index==0);if(code)return done(r,code);
+    for(;;){
+        memset(r->inventory,0,sizeof(r->inventory));
+        if(!GetFileInformationByHandleEx(node->handle,query,r->inventory,sizeof(r->inventory))){
+            code=GetLastError();if(code==ERROR_NO_MORE_FILES)break;return done(r,code?code:ERROR_GEN_FAILURE);
+        }
+        query=FileIdBothDirectoryInfo;position=0;
+        for(;;){
+            if(position>sizeof(r->inventory)-offsetof(FILE_ID_BOTH_DIR_INFO,FileName))return done(r,ERROR_INVALID_DATA);
+            entry=(FILE_ID_BOTH_DIR_INFO*)(void*)(r->inventory+position);
+            if(++records_seen>258||!entry->FileNameLength||entry->FileNameLength%sizeof(wchar_t)||
+               entry->FileNameLength>128*sizeof(wchar_t)||
+               entry->FileNameLength>sizeof(r->inventory)-position-offsetof(FILE_ID_BOTH_DIR_INFO,FileName))
+                return done(r,ERROR_INVALID_DATA);
+            memcpy(leaf,entry->FileName,entry->FileNameLength);leaf[entry->FileNameLength/sizeof(wchar_t)]=0;
+            if(wcscmp(leaf,L".")&&wcscmp(leaf,L"..")){
+                DWORD length=entry->FileNameLength/sizeof(wchar_t);
+                if(wcslen(leaf)!=length||!leaf_ok(leaf)||names>=256||total+length+2>capacity)return done(r,ERROR_INVALID_DATA);
+                memcpy(out+total,leaf,(length+1)*sizeof(wchar_t));total+=length+1;names++;
+            }
+            offset=entry->NextEntryOffset;
+            if(!offset)break;
+            if(offset%8||offset<offsetof(FILE_ID_BOTH_DIR_INFO,FileName)+entry->FileNameLength||
+               offset>sizeof(r->inventory)-position)return done(r,ERROR_INVALID_DATA);
+            position+=offset;
+        }
+    }
+    out[total]=0;*used=total;*count=names;r->sealed=0;return done(r,0);
 }
 
 API DWORD gitgo_tree_abi(void){return 1;}

@@ -426,3 +426,28 @@ injection. These primitives remain inactive construction dependencies until
 the trusted installation, runtime selection, aggregate accounting and every
 StorageRuntime caller have completed the same qualification. Their tests do
 not establish product activation or sudden-power-loss durability.
+
+
+## Closed runtime manifests and input-copy accounting
+
+The runtime descriptor fixes every relative file name, exact length and digest,
+the Python ABI and the storage profile. It is canonical and bounded, including
+directories and the manifest itself in the native node limit. Windows device
+names, file/directory conflicts and case aliases are rejected on every platform
+that evaluates the descriptor. The compatibility contract includes all content
+but excludes installation location and native identity; the installation
+manifest separately binds both. Neither digest supplies installation approval.
+
+An explicitly approved manifest can be pinned only after native enumeration
+through each already owned directory confirms the complete expected member set.
+No Python path enumeration opens a second search handle. Every member is then
+opened relative to its pinned parent and its bytes are verified. Extra, missing,
+replaced or changed members prevent readiness. An unknown read invalidates the
+ready state and keeps all pins until confirmed close.
+
+One pinned source and two installed copies are charged in the same existing
+StorageEnvelope, with each file independently rounded and a full 64 KiB
+manifest allowance per copy. This does not increase the Host limit or consume
+a reservation. An underfunded envelope is rejected. Source-package approval,
+Host installation, active-runtime selection and process-lifetime joins are
+still required before these interfaces can activate a guarded storage path.

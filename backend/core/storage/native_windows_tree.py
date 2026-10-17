@@ -98,6 +98,7 @@ class WindowsTreeLibrary:
         self._owners: dict[int, _TreeOwner] = {}
         words = C.POINTER(_U64)
         signatures = {
+            "tree_inventory": [_U64, _U32, C.c_wchar_p, _U32, C.POINTER(_U32), C.POINTER(_U32)],
             "tree_abi": [], "tree_reserve": [words, C.c_void_p, _U32, _U32],
             "tree_root": [_U64, C.c_void_p, words, _U32],
             "tree_path": [_U64, C.c_wchar_p, words, _U32],
@@ -242,6 +243,26 @@ class _TreeOwner:
 
 
 class RuntimePins(_TreeOwner):
+    def inventory(self, index):
+        self._require()
+        self._index(index)
+        if not self._nodes[index].directory:
+            raise ValueError("An owned directory is required")
+        buffer, used, count = C.create_unicode_buffer(33025), _U32(), _U32()
+        self._sealed = True
+        _check("inventory", self._call("tree_inventory", self._cookie, index, buffer, len(buffer),
+                                     C.byref(used), C.byref(count)))
+        if used.value >= len(buffer) or count.value > 256:
+            raise StorageTreeError("inventory_bounds", 13)
+        raw = buffer[:used.value]
+        names = tuple(raw[:-1].split("\0")) if raw else ()
+        if (raw and not raw.endswith("\0")) or len(names) != count.value:
+            raise StorageTreeError("inventory_framing", 13)
+        for name in names:
+            _name(name)
+        self._sealed = False
+        return names
+
     def root(self, parent: NativeHandle, expected: ObjectIdentity):
         self._require(mutable=True)
         borrowed, words = _parent(parent, expected)
