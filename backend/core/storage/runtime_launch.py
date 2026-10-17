@@ -8,10 +8,10 @@ from .host_records import require
 from .models import StorageCommitUnknown
 from .native_windows_host import WindowsHostOwner
 from .native_windows_process import WindowsProcessLibrary, WindowsStorageProcess, StorageWorkerCommand
-from .runtime_control import RuntimeControl
+from .runtime_control import RuntimeControl,RuntimeReservation,RuntimeCleanupReservation,require_whole_tail
 from .runtime_installation import PinnedRuntime
 from .runtime_manifest import RuntimeManifest, canonical
-from .runtime_worker import RuntimeInstallRequest
+from .runtime_worker import RuntimeInstallRequest,RuntimeCleanupRequest
 
 
 @dataclass(frozen=True)
@@ -22,9 +22,13 @@ class RuntimeInstallResult:
 
 
 class RuntimeInstallation:
+    _mode="install"
+    _ticket_type=RuntimeReservation
+    _request_type=RuntimeInstallRequest
     def __init__(self, control, ticket):
         require(type(control) is RuntimeControl,"owned runtime admission required")
         control.require_ticket(ticket)
+        require(type(ticket) is self._ticket_type,"runtime operation ticket changed")
         require(getattr(control,"_launch",None) is None,"one native launch per runtime reservation")
         self._control,self._ticket,self._host=control,ticket,control._host
         self._anchor,self._registry=control._anchor,control._host._registry
@@ -49,17 +53,19 @@ class RuntimeInstallation:
         self._worker=host._new(WindowsStorageProcess,processes)
         context=self._worker.current()
         prior=self._control._read();value=prior.head.state.value();entry=value["entries"][plan.slot]
-        require(entry==plan.initial_entry(),"runtime reservation is no longer fresh")
-        # Reservation already paid one update out of the complete 32-update
-        # tail. No new budget or larger execution default is introduced here.
-        require(prior.head.sequence<=(1<<64)-1-31,"reserved runtime lifecycle tail is unavailable")
+        if self._mode=="install":
+            require(entry==plan.initial_entry(),"runtime reservation is no longer fresh")
+        else:
+            require(canonical(entry)==self._ticket.record,"runtime cleanup reservation changed")
+        require_whole_tail(prior,additional=0,
+                           cleanup_slot=plan.slot if self._mode=="cleanup" else None)
         self._control._idle(value,except_slot=plan.slot)
         self._control._namespace(value)
-        self._event=dict(launch=str(uuid.uuid4()),mode="install",phase="INTENT",pid=0,created=0,
+        self._event=dict(launch=str(uuid.uuid4()),mode=self._mode,phase="INTENT",pid=0,created=0,
                          parent_pid=context.identity.pid,parent_created=context.identity.creation_time)
         entry["worker"]=self._event
         self._control._update(prior,value)
-        request=RuntimeInstallRequest(self._anchor.binding,plan.slot,plan.generation,plan.source_manifest,
+        request=self._request_type(self._anchor.binding,plan.slot,plan.generation,plan.source_manifest,
                                       plan.sha256,self._event["launch"])
         root=PureWindowsPath(self._source.manifest.root)
         command=StorageWorkerCommand((str(root/"python.exe"),"-I","-S","-B","-m",
@@ -119,6 +125,7 @@ class RuntimeInstallation:
         control=RuntimeControl(observer)
         control._used=True
         observer._ready=False
+        control._lease(exclusive=True)
         prior=control._read();value=prior.head.state.value();entry=value["entries"][plan.slot]
         plan.require_entry(entry)
         control._namespace(value)
@@ -135,6 +142,10 @@ class RuntimeInstallation:
                 raise StorageCommitUnknown("runtime_installation_completion_changed")
             # Exact prior bytes after every previous writer has closed allow a
             # fresh evidence commit. The native worker is never launched again.
+        if self._mode=="cleanup" and not self._create_attempted and canonical(entry)==self._ticket.record:
+            # Cancellation before any new intent leaves the old retirement
+            # debt unchanged. It does not invent a cleanup/absence receipt.
+            return RuntimeInstallResult(plan.generation,"RETIRING",None)
         worker=entry["worker"]
         if worker is None:
             require(not self._create_attempted and entry["phase"]=="RESERVED",
@@ -148,7 +159,11 @@ class RuntimeInstallation:
             require(worker["phase"]!="RETIRED","runtime installer was retired by another coordinator")
         self._before=dict(entry)
         target=None
-        if entry["phase"]=="MATERIALIZED":
+        if self._mode=="cleanup":
+            from .runtime_lifecycle import observe_absence
+            require(entry["phase"]=="RETIRING","unexpected runtime cleanup phase")
+            if observe_absence(control,plan.generation):entry["phase"]="ABSENT"
+        elif entry["phase"]=="MATERIALIZED":
             from backend.core.sandbox_read import ObjectIdentity
             target=plan.target_manifest(self._anchor,ObjectIdentity(**entry["root"]))
             require(target.sha256==entry["manifest"],"runtime materialization record changed")
@@ -179,3 +194,9 @@ class RuntimeInstallation:
             return None
         self._result=pending
         return pending
+
+
+class RuntimeCleanup(RuntimeInstallation):
+    _mode="cleanup"
+    _ticket_type=RuntimeCleanupReservation
+    _request_type=RuntimeCleanupRequest

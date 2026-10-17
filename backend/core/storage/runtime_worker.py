@@ -18,7 +18,7 @@ from .native_windows_host import WindowsHostOwner, WindowsHostRegistry
 from .native_windows_scope import WindowsScopeLibrary
 from .native_windows_journal import WindowsJournalLibrary
 from .native_windows_process import WindowsProcessLibrary, WindowsStorageProcess
-from .native_windows_tree import RuntimeInstaller, TreePurpose, WindowsTreeLibrary
+from .native_windows_tree import RuntimeInstaller, RuntimeRetirement, TreePurpose, WindowsTreeLibrary
 from .runtime_control import RuntimeControl, RuntimeInstallPlan
 from .runtime_installation import PinnedRuntime
 from .runtime_manifest import MANIFEST_NAME, RuntimeManifest, canonical, digest
@@ -26,6 +26,7 @@ from .runtime_manifest import MANIFEST_NAME, RuntimeManifest, canonical, digest
 
 @dataclass(frozen=True)
 class RuntimeInstallRequest:
+    _mode="install"
     host: str
     slot: int
     generation: str
@@ -39,16 +40,20 @@ class RuntimeInstallRequest:
         require(type(self.slot) is int and self.slot in (0,1),"one runtime slot required")
 
     def to_bytes(self):
-        return canonical(dict(version=1,mode="install",**asdict(self)))
+        return canonical(dict(version=1,mode=self._mode,**asdict(self)))
 
     @classmethod
     def from_bytes(cls, raw):
         value=decode(raw)
         require(type(value) is dict and set(value)=={"version","mode","host","slot","generation","source","plan","launch"},
                 "closed runtime worker request required")
-        require(type(value["version"]) is int and value["version"]==1 and value["mode"]=="install",
+        require(type(value["version"]) is int and value["version"]==1 and value["mode"]==cls._mode,
                 "unknown runtime worker protocol or mode")
         return cls(**{key:item for key,item in value.items() if key not in {"version","mode"}})
+
+
+class RuntimeCleanupRequest(RuntimeInstallRequest):
+    _mode="cleanup"
 
 
 def require_input_execution(source, context):
@@ -95,7 +100,7 @@ def require_input_execution(source, context):
                 "native module loaded outside its qualified runtime or system role")
 
 
-def materialize(host, source, processes, request):
+def accept(host, source, processes, request):
     """Consume persisted CREATED admission; keep every owner until worker exit.
 
     The production entry supplies a canonically attached Host. A test may use
@@ -103,7 +108,7 @@ def materialize(host, source, processes, request):
     the production protocol.
     """
     require(type(host) is WindowsHostOwner and type(source) is PinnedRuntime
-            and type(processes) is WindowsProcessLibrary and type(request) is RuntimeInstallRequest,
+            and type(processes) is WindowsProcessLibrary and type(request) in {RuntimeInstallRequest,RuntimeCleanupRequest},
             "exact owned runtime worker inputs required")
     host.require_input(source)
     require(any(child is source for _,child in host._resources.values()),"input pins must belong to this Host owner")
@@ -120,14 +125,21 @@ def materialize(host, source, processes, request):
     prior=control._read();value=prior.head.state.value();entry=value["entries"][plan.slot]
     plan.require_entry(entry)
     worker=entry["worker"]
-    require(entry["phase"]=="RESERVED" and worker is not None and worker["phase"]=="CREATED"
-            and worker["mode"]=="install" and worker["launch"]==request.launch
+    phase="RESERVED" if type(request) is RuntimeInstallRequest else "RETIRING"
+    require(entry["phase"]==phase and worker is not None and worker["phase"]=="CREATED"
+            and worker["mode"]==request._mode and worker["launch"]==request.launch
             and (worker["pid"],worker["created"])==(context.identity.pid,context.identity.creation_time),
             "runtime worker lacks its exact persisted native launch")
     control._idle(value,except_slot=plan.slot)
     control._namespace(value)
     entry["worker"]=dict(worker,phase="ACCEPTED")
     control._update(prior,value)
+    return anchor,control,plan
+
+
+def materialize(host, source, processes, request):
+    require(type(request) is RuntimeInstallRequest,"installation request required")
+    anchor,control,plan=accept(host,source,processes,request)
     installer=host._new(RuntimeInstaller,host._registry.trees,TreePurpose.INSTALL,anchor.account.sid)
     installer.begin(host._members["runtimes"],dict(anchor.members)["runtimes"],plan.generation)
     root_identity=installer.identity(0)
@@ -152,6 +164,44 @@ def materialize(host, source, processes, request):
     prior=control._read();value=prior.head.state.value();entry=value["entries"][plan.slot]
     entry.update(phase="MATERIALIZED",manifest=target.sha256);control._update(prior,value)
     return target
+
+
+def cleanup(host, source, processes, request):
+    require(type(request) is RuntimeCleanupRequest,"cleanup request required")
+    anchor,control,plan=accept(host,source,processes,request)
+    entry=control._read().head.state.value()["entries"][plan.slot]
+    from backend.core.sandbox_read import ObjectIdentity
+    identity=None if entry["root"] is None else ObjectIdentity(**entry["root"])
+    retirement=host._new(RuntimeRetirement,host._registry.trees,TreePurpose.RETIRE,anchor.account.sid)
+    # The native primitive refuses a present root without a recorded identity.
+    # A prior absence or accepted intent cannot authorize identity adoption.
+    retirement.begin(host._members["runtimes"],dict(anchor.members)["runtimes"],plan.generation,identity)
+    positions={"":0};members=[]
+    for name in source.manifest.content.directories:
+        path=PurePosixPath(name);parent=str(path.parent)
+        positions[name]=retirement.add(positions["" if parent=="." else parent],path.name,directory=True)
+    for member in source.manifest.content.files:
+        path=PurePosixPath(member.path);parent=str(path.parent)
+        index=retirement.add(positions["" if parent=="." else parent],path.name,ceiling=member.length)
+        members.append(index)
+        absent,length=retirement.info(index)
+        if not absent:
+            for offset in range(0,length,65536):
+                size=min(65536,length-offset)
+                require(retirement.read(index,offset,size)==source.read(member.path,offset,size),
+                        "partial runtime bytes differ from approved input")
+    index=retirement.add(0,MANIFEST_NAME,ceiling=65536);members.append(index)
+    absent,length=retirement.info(index)
+    if not absent:
+        require(identity is not None,"unrecorded runtime manifest cannot be adopted")
+        raw=plan.target_manifest(anchor,identity).to_bytes()
+        require(length<=len(raw),"partial runtime manifest exceeds its exact bound")
+        if length:require(retirement.read(index,0,length)==raw[:length],"partial runtime manifest changed")
+    retirement.prepare()
+    for index in reversed(members):retirement.delete(index)
+    for name in reversed(source.manifest.content.directories):retirement.delete(positions[name])
+    retirement.delete(0)
+    retirement.finish()
 
 
 def attach_input(request):
@@ -202,10 +252,15 @@ def main():
     try:
         require(len(sys.argv)==2 and getattr(getattr(sys.modules["__main__"],"__spec__",None),"name",None)
                 =="backend.core.storage.runtime_worker","closed runtime worker entry required")
-        request=RuntimeInstallRequest.from_bytes(sys.argv[1].encode("ascii"))
+        raw=sys.argv[1].encode("ascii")
+        value=decode(raw)
+        require(type(value) is dict and value.get("mode") in {"install","cleanup"},"closed runtime operation required")
+        kind=RuntimeInstallRequest if value["mode"]=="install" else RuntimeCleanupRequest
+        request=kind.from_bytes(raw)
         host,source,processes=attach_input(request)
-        materialize(host,source,processes,request)
-        os.write(1,b'{"phase":"MATERIALIZED","authority":"diagnostic"}\n')
+        operation=materialize if type(request) is RuntimeInstallRequest else cleanup
+        operation(host,source,processes,request)
+        os.write(1,b'{"phase":"WORKER_FINISHED","authority":"diagnostic"}\n')
         require(sys.stdin.buffer.read(1)==b"R","runtime worker release frame is invalid")
     except BaseException:
         try: os.write(2,b"Runtime installer stopped; retained journal debt requires reconciliation.\n")

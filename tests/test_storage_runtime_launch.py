@@ -102,14 +102,14 @@ from pathlib import Path
 from backend.core.storage.host_records import HostAccount,HostLayout,HOST_LEAF
 from backend.core.storage.envelope import StorageEnvelope
 from backend.core.storage.native_windows_scope import WindowsScopeLibrary
-from backend.core.storage.native_windows_tree import WindowsTreeLibrary,RuntimeInstaller
+from backend.core.storage.native_windows_tree import WindowsTreeLibrary,RuntimeInstaller,RuntimeRetirement
 from backend.core.storage.native_windows_journal import WindowsJournalLibrary
 from backend.core.storage.native_windows_process import WindowsProcessLibrary
 from backend.core.storage.native_windows_host import WindowsHostRegistry
 from backend.core.storage.runtime_manifest import RuntimeManifest
 from backend.core.storage.runtime_installation import PinnedRuntime
 from backend.core.storage.runtime_control import RuntimeControl
-from backend.core.storage.runtime_worker import RuntimeInstallRequest,materialize
+from backend.core.storage.runtime_worker import RuntimeInstallRequest,RuntimeCleanupRequest,materialize,cleanup
 root=Path(sys.executable).parent
 def lib(name,kind):return kind(ctypes.CDLL(str(root/('gitgo-storage-'+name+'.dll')),winmode=0x100|0x800))
 scopes=lib('scope',WindowsScopeLibrary);trees=lib('tree',WindowsTreeLibrary)
@@ -140,9 +140,16 @@ if FAULT_AFTER_UPDATE==4:
     def lost_begin(self,*args):
         begin(self,*args);os._exit(0)
     RuntimeInstaller.begin=lost_begin
+if FAULT_AFTER_UPDATE==5:
+    delete=RuntimeRetirement.delete
+    def lost_delete(self,*args):
+        delete(self,*args);os._exit(0)
+    RuntimeRetirement.delete=lost_delete
 if DIAGNOSTIC_ONLY:
     os.write(1,b'{"phase":"READY","success":true}\\n');os._exit(0)
-result=materialize(host,source,processes,RuntimeInstallRequest.from_bytes(REQUEST_BYTES))
+kind=RuntimeInstallRequest if FIXTURE_MODE=='install' else RuntimeCleanupRequest
+operation=materialize if FIXTURE_MODE=='install' else cleanup
+result=operation(host,source,processes,kind.from_bytes(REQUEST_BYTES))
 os.write(1,b'MATERIALIZED diagnostic only\\n')
 assert sys.stdin.buffer.read(1)==b'R'
 os._exit(0)
@@ -155,13 +162,14 @@ def fixture_entry(monkeypatch, case, *, fault=0, diagnostic=False):
     original = processes._calls["start"]
     observed = []
     def start(cookie, executable, command, directory, environment):
-        request = RuntimeInstallRequest(launch._anchor.binding, launch._ticket.plan.slot,
+        request = launch._request_type(launch._anchor.binding, launch._ticket.plan.slot,
             launch._ticket.plan.generation, manifest.sha256, launch._ticket.plan.sha256, launch._event["launch"])
         assert command.value == subprocess.list2cmdline((executable, "-I", "-S", "-B", "-m",
             "backend.core.storage.runtime_worker", request.to_bytes().decode("ascii")))
         code = FIXTURE_WORKER.replace("FIXTURE_PROFILE", repr(account.profile)).replace("APPROVED_INPUT", repr(manifest.sha256))
         code = code.replace("REQUEST_BYTES", repr(request.to_bytes())).replace("FAULT_AFTER_UPDATE", repr(fault))
         code = code.replace("DIAGNOSTIC_ONLY", repr(diagnostic))
+        code = code.replace("FIXTURE_MODE", repr(launch._mode))
         actual = ctypes.create_unicode_buffer(subprocess.list2cmdline((executable,"-I","-S","-B","-c",code)))
         observed.append(request)
         return original(cookie, executable, actual, directory, environment)
@@ -315,4 +323,33 @@ def test_disposable_ci_public_canonical_runtime_installation(native, tmp_path_fa
         observer = registry.owner()
         observer.attach()
         assert observer._read_slot(63).head.state.value()["entries"][0]["phase"] == "READY"
+        from backend.core.storage.runtime_lifecycle import activate, select, release_capacity
+        from backend.core.storage.runtime_launch import RuntimeCleanup
+        assert activate(RuntimeControl(observer),0).epoch==1
         assert observer.close()
+
+        def work(cleanup=False):
+            owner=registry.owner();owner.attach()
+            pinned=owner._new(PinnedRuntime,registry.trees,packaged_input.to_bytes(),packaged_input.sha256,account.sid)
+            pinned.pin()
+            control=RuntimeControl(owner)
+            operation=(RuntimeCleanup(control,control.reserve_cleanup(pinned,0)) if cleanup
+                       else RuntimeInstallation(control,control.reserve(pinned)))
+            operation.start(pinned,processes)
+            return finish(operation)
+
+        second=work()
+        assert second.phase=="READY" and second.generation!=result.generation
+        observer=registry.owner();observer.attach()
+        assert activate(RuntimeControl(observer),1).epoch==2
+        assert observer.close()
+        assert work(cleanup=True).phase=="ABSENT"
+        assert not Path(result.manifest.root).exists()
+        observer=registry.owner();observer.attach()
+        release_capacity(RuntimeControl(observer),0)
+        assert observer.close()
+        observer=registry.owner();observer.attach()
+        chosen=select(RuntimeControl(observer))
+        assert chosen.reference.epoch==2 and chosen.require_live()==second.manifest
+        assert observer._read_slot(63).head.state.value()["entries"][0] is None
+        assert observer.close() and not registry._owners and not processes.retained_processes

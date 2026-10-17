@@ -53,3 +53,12 @@ def test_development_interpreter_cannot_materialize_an_approved_input(native,tmp
         assert not any((Path(account.root)/"runtimes").iterdir())
         assert (Path(account.root)/"slot-0063.json").read_bytes()==before
         assert owner.close() and processes.retained_processes==0
+
+
+def test_install_and_cleanup_requests_cannot_be_exchanged():
+    from backend.core.storage.runtime_worker import RuntimeCleanupRequest
+    install=request()
+    cleanup=RuntimeCleanupRequest(install.host,install.slot,install.generation,install.source,install.plan,install.launch)
+    assert RuntimeCleanupRequest.from_bytes(cleanup.to_bytes())==cleanup
+    with pytest.raises(StorageBlocked):RuntimeInstallRequest.from_bytes(cleanup.to_bytes())
+    with pytest.raises(StorageBlocked):RuntimeCleanupRequest.from_bytes(install.to_bytes())

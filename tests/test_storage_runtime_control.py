@@ -217,3 +217,22 @@ def test_unknown_namespace_observation_never_issues_runtime_capacity(native, tmp
         assert coordinator._ticket is None and not owner._ready
         assert (Path(account.root)/"slot-0063.json").read_bytes() == before
         assert owner.close()
+
+
+def test_runtime_journal_tail_charges_the_other_slot_and_fresh_cleanup_retry():
+    from backend.core.storage.runtime_control import journal_debt
+    from backend.core.storage.journal_cells import MAX_SEQUENCE
+    from tests.test_storage_runtime_records import ready, upgraded, advance, worker
+    view=ready(initial(),0)
+    assert journal_debt(view.head.state.value()["entries"][0])==25
+    require_whole_tail(replace(view,head=replace(view.head,sequence=MAX_SEQUENCE-57)))
+    with pytest.raises(StorageBlocked):
+        require_whole_tail(replace(view,head=replace(view.head,sequence=MAX_SEQUENCE-56)))
+    view=upgraded();value=view.head.state.value()
+    value["entries"][0]["worker"]=worker("cleanup");view=advance(view,value)
+    value["entries"][0]["worker"]["phase"]="RETIRED";view=advance(view,value)
+    assert sum(journal_debt(entry) for entry in value["entries"])==44
+    edge=replace(view,head=replace(view.head,sequence=MAX_SEQUENCE-44))
+    require_whole_tail(edge,additional=0)
+    with pytest.raises(StorageBlocked):require_whole_tail(edge,additional=0,cleanup_slot=0)
+    require_whole_tail(replace(view,head=replace(view.head,sequence=MAX_SEQUENCE-48)),additional=0,cleanup_slot=0)

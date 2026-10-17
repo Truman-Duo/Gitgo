@@ -65,9 +65,32 @@ class RuntimeInstallPlan:
         return result
 
 
-def require_whole_tail(view):
-    """Reserve headroom for installation, activation, failure and retirement."""
-    require(view.head is not None and view.head.sequence<=journal_cells.MAX_SEQUENCE-32,
+def journal_debt(entry):
+    """Remaining conservative update allowance, shared by both runtime slots.
+
+    Normal progress spends at least one prepaid update. A failed cleanup still
+    retains twenty; another cleanup attempt must separately fund its increase
+    to twenty-four before INTENT. No retry resets the monotonic journal.
+    """
+    if entry is None:return 0
+    phase,event=entry["phase"],entry["worker"]
+    if phase=="RESERVED":
+        return 31 if event is None else {"INTENT":30,"CREATED":29,"ACCEPTED":28,"RETIRED":28}[event["phase"]]
+    if phase=="RETIRING" and event is not None and event["mode"]=="cleanup":
+        return {"INTENT":23,"CREATED":22,"ACCEPTED":21,"RETIRED":20}[event["phase"]]
+    return {"BUILDING":27,"MATERIALIZED":26,"READY":25,"ACTIVE":24,"RETIRING":24,"ABSENT":1}[phase]
+
+
+def require_whole_tail(view, *, additional=32, cleanup_slot=None):
+    """Charge all retained slots, not just the newest lifecycle's tail."""
+    require(view.head is not None and type(additional) is int and additional in (0,32),
+            "complete runtime lifecycle journal capacity required")
+    debts=[journal_debt(entry) for entry in view.head.state.value()["entries"]]
+    if cleanup_slot is not None:
+        require(type(cleanup_slot) is int and cleanup_slot in (0,1) and additional==0,
+                "bounded runtime cleanup allowance required")
+        debts[cleanup_slot]=max(debts[cleanup_slot],24)
+    require(view.head.sequence<=journal_cells.MAX_SEQUENCE-max(1,sum(debts)+additional),
             "complete runtime lifecycle journal capacity required")
     sample=dict(generation="ffffffff-ffff-ffff-ffff-ffffffffffff",source_manifest="f"*64,plan="f"*64,
         phase="MATERIALIZED",root=dict(platform="win32",volume=2**64-1,file_id=2**128-1),manifest="f"*64,
@@ -88,6 +111,12 @@ class RuntimeReservation:
     plan: RuntimeInstallPlan
 
 
+@dataclass(frozen=True)
+class RuntimeCleanupReservation:
+    plan: RuntimeInstallPlan
+    record: bytes
+
+
 class RuntimeControl:
     def __init__(self, host):
         require(type(host) is WindowsHostOwner,"owned canonical Host admission required")
@@ -97,6 +126,14 @@ class RuntimeControl:
         self._used=False
         self._ticket=None
         host._runtime_control=self
+
+    def _lease(self, *, exclusive):
+        host=self._host
+        host._require_gate()
+        require(type(exclusive) is bool and not hasattr(self,"_lease_mode"),"one exact runtime lease attempt required")
+        self._lease_mode="pending"
+        host._scope.lock(host._members["runtime.lease"],dict(self._anchor.members)["runtime.lease"],exclusive=exclusive)
+        self._lease_mode="exclusive" if exclusive else "shared"
 
     def _read(self):
         view=self._host._read_slot(63)
@@ -163,6 +200,7 @@ class RuntimeControl:
         host.require_input(source)
         self._used=True
         host._ready=False
+        self._lease(exclusive=True)
         prior=self._read()
         require_whole_tail(prior)
         value=prior.head.state.value()
@@ -182,7 +220,27 @@ class RuntimeControl:
         return ticket
 
     def require_ticket(self, ticket):
-        require(self._host.anchor==self._anchor and type(ticket) is RuntimeReservation and self._ticket is ticket,
+        require(self._host.anchor==self._anchor and type(ticket) in {RuntimeReservation,RuntimeCleanupReservation} and self._ticket is ticket
+                and self._lease_mode=="exclusive" and not self._host._scope._sealed,
                 "exact live runtime capacity ticket required")
         ticket.plan.require_host(self._anchor)
 
+
+    def reserve_cleanup(self, source, slot):
+        from .runtime_lifecycle import claim,entry_plan
+        self._host.require_input(source)
+        prior,value=claim(self,exclusive=True)
+        require_whole_tail(prior,additional=0,cleanup_slot=slot)
+        self._idle(value)
+        self._namespace(value)
+        entry,plan=entry_plan(self,value,slot)
+        require(entry["phase"]=="RETIRING" and (entry["worker"] is None or entry["worker"]["phase"]=="RETIRED"),
+                "retired runtime worker required before cleanup")
+        if entry["root"] is None:
+            # Cleanup cannot manufacture the missing native creation identity.
+            # A present unrecorded root stays quarantined without a new worker.
+            self._require_absence(plan.generation)
+        ticket=RuntimeCleanupReservation(plan,canonical(entry))
+        self._ticket=ticket
+        self._host._ready=True
+        return ticket

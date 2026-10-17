@@ -539,6 +539,59 @@ UCRT copies are excluded rather than weakening module-role checks. Both native
 Windows CI jobs run the public canonical-account entry on their disposable
 runners. Local tests instead use fresh private account-directory fixtures;
 only the test entry substitutes that internal attachment. Neither path qualifies
-the full State/Obs profile, frozen Host bootstrap, runtime activation/retirement,
-crash recovery, native VFS, or the complete StorageRuntime API. Those remaining
-joins still block guarded activation and completion of the storage milestone.
+the full State/Obs profile, frozen Host bootstrap, native VFS, or the complete
+StorageRuntime API. Those remaining joins still block guarded activation and
+completion of the storage milestone.
+
+
+## Runtime leases, activation, cleanup and crash recovery
+
+The existing `runtime.lease` object now supplies shared selection leases and
+exclusive lifecycle leases. Acquisition occurs under the canonical Host gate
+and binds its recorded native file identity. A parent retains the lease through
+gate handoff, the worker's actual native retirement and all enclosing resource
+closures. The child consumes the exact persisted launch; it does not reacquire
+the parent's exclusive lease. A fresh observer acquires its own exclusive lease
+only after the original owner closes. Unknown acquisition or close preserves
+debt and disables further admission.
+
+Selection requires the active generation, full content pins and exact epoch;
+it confirms the current runtime journal's flush and readback before returning a
+live reference. It is not a storage-operation ticket. Its shared lease survives
+gate handoff and blocks installation, activation and cleanup until owner close.
+Activation independently verifies READY bytes, then atomically advances epoch,
+switches ACTIVE and marks the old copy RETIRING in the same journal update.
+The old copy remains charged. Different build/content profiles remain refused.
+
+Cleanup uses the same persisted INTENT/CREATED/ACCEPTED native launch protocol,
+executing from the one approved input. It names only declared members, verifies
+partial file bytes against the input, and deletes children before their exact
+root. Worker exit or diagnostic output cannot establish absence. After native
+and original Host closure, the new observer verifies actual absence and closes
+that observation before recording ABSENT. A separate operation rechecks absence
+and commits slot removal before capacity becomes available. Interrupted cleanup
+keeps the generation charged; a later separately admitted cleanup verifies the
+remaining members. A present root whose creation identity was never recorded
+is refused before cleanup INTENT, without adopting its identity or deleting it.
+
+Crash recovery accepts only persisted exact parent and child process identities.
+It independently proves both have ended, closes every observation with a known
+result, and verifies either all materialized bytes or actual cleanup absence
+before advancing the journal. A living parent, missing child identity, unknown
+native query, or unknown observer close prevents retirement. The worker is never
+replayed. A cancelled reservation with no launch still needs a proper cleanup
+receipt before its slot can be released.
+
+Journal capacity includes the remaining allowance of both slots. Ordinary
+progress spends prepaid updates; the post-failure cleanup allowance remains
+charged, and each new cleanup attempt must fund its additional updates before
+INTENT. Neither a retry nor a new slot resets the monotonic sequence. This is
+bounded journal accounting, separate from file, memory, process and volume
+qualification. Actual multi-project State/Obs/WAL accounting remains required.
+
+Local acceptance includes real installer/cleanup jobs, incomplete deletion,
+atomic same-build upgrade, lease contention, acknowledgement loss and real
+parent-process exit. Both Windows native CI paths additionally exercise public
+canonical-account install, activate, upgrade, cleanup, refund and selection on
+disposable runners. These construction tests do not enable the default storage
+format or establish complete source/frozen product or power-loss acceptance.
