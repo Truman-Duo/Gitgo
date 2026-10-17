@@ -266,6 +266,17 @@ class WindowsHostOwner:
                 and value["slot"]==index,"project reservation belongs to a different Host envelope")
         return value
 
+    def take_input(self, source):
+        """Move the exact live input into this owner without adding a second pin."""
+        self.require_input(source)
+        require(len(self._resources)<16,"bounded native Host child resources required")
+        self._ready=False
+        destination=object.__new__(PinnedRuntime)
+        self._resources[id(destination)]=(source._library,destination)
+        source._move_into(destination)
+        self._ready=True
+        return destination
+
     def require_input(self, source):
         """Accept only the previously charged copy, with complete live native pins."""
         self._require_identity()

@@ -506,3 +506,39 @@ incomplete and preserves all enclosing resources; only confirmed native
 retirement allows their closure. Native current-process context observes the
 real image, system directory and creation identity without another open handle
 or environment-derived identity. This observation is not runtime approval.
+
+
+## Owned native runtime installation
+
+Runtime installation now consumes a closed plan bound to the canonical Host,
+one of its two prepaid destination slots, a fresh generation, the one charged
+input manifest and its complete content contract. Complete registered namespace
+and absence checks precede the durable reservation. An unknown reservation
+returns no live ticket; neither reopening nor owner closure refunds it.
+
+The parent transfers the existing input pins into its owned lifetime without
+creating a second input allowance. It records INTENT before native creation,
+creates one suspended Job process, and persists its actual PID/creation identity
+before gate handoff and resume. The worker accepts only its exact CREATED
+record. Its executable, Python paths, loaded modules, environment and ABI must
+match the approved input role. Installation writes only fresh bounded members,
+flushes and verifies them, then records MATERIALIZED. Output and exit status
+carry no authority. The fixed production entry accepts no Host-path override.
+
+The parent first confirms native Job retirement and closes every original Host
+resource. Only a newly attached canonical observer can independently pin and
+verify all installed bytes and record READY. A failed or interrupted installer
+remains RETIRING and charged. Lost terminal acknowledgement requires confirmed
+flush and exact readback, or a new evidence commit after prior writers close;
+the worker is never replayed. READY does not activate the installed runtime.
+
+The explicit builder assembles CPython and declared application dependencies
+into a closed input directory; it does not download, install, change permissions
+or approve its own output. Windows 10+ supplies the OS UCRT, so downlevel local
+UCRT copies are excluded rather than weakening module-role checks. Both native
+Windows CI jobs run the public canonical-account entry on their disposable
+runners. Local tests instead use fresh private account-directory fixtures;
+only the test entry substitutes that internal attachment. Neither path qualifies
+the full State/Obs profile, frozen Host bootstrap, runtime activation/retirement,
+crash recovery, native VFS, or the complete StorageRuntime API. Those remaining
+joins still block guarded activation and completion of the storage milestone.
