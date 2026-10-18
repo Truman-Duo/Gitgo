@@ -1,6 +1,7 @@
 """Build and exercise an actual onedir Host; source mocks are not package evidence."""
 from __future__ import annotations
 import os
+import argparse
 import sqlite3
 import shutil
 from pathlib import Path
@@ -8,6 +9,12 @@ import subprocess
 import sys
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--storage-native-library',type=Path)
+    args=parser.parse_args()
+    native=None if args.storage_native_library is None else args.storage_native_library.resolve(strict=True)
+    if native is not None and (sys.platform!='win32' or not native.is_file()):
+        parser.error('Native storage acceptance requires an explicit Windows build')
     root = Path(__file__).resolve().parents[1]
     # Upstream integration changes broader runtime/search/storage behavior.
     # Validate the complete source suite in the same delegated native context.
@@ -44,6 +51,13 @@ def main():
     environment.pop('GITGO_RIPGREP_PATH', None)
     subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests/test_native_sandbox.py',
                     '-k', 'packaged', '-q'], cwd=root, env=environment, check=True)
+    if native is not None:
+        storage_environment=dict(environment,GITGO_STORAGE_NATIVE_TEST_LIBRARY=str(native))
+        # This uses owned temporary-account fixtures. The separate native step
+        # verifies the unmodified public canonical locator in disposable CI.
+        storage_environment.pop('GITGO_STORAGE_CANONICAL_TEST',None)
+        subprocess.run([sys.executable,'-B','-m','pytest','tests/test_storage_protected_frozen.py','-q'],
+                       cwd=root,env=storage_environment,check=True)
 
 if __name__ == '__main__':
     main()

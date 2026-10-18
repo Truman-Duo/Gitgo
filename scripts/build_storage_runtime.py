@@ -82,7 +82,10 @@ def inputs(repository: Path, python_root: Path, packages: Path, native_root: Pat
             add("DLLs/"+source.name, source.read_bytes())
     # The qualified Conda input may place these extension dependencies here.
     # The regular CPython input already keeps them beside its extension modules.
-    for pattern in ("sqlite3.dll", "*ffi*.dll", "libcrypto*.dll", "libssl*.dll", "zlib*.dll", "bz2*.dll", "liblzma*.dll"):
+    # Conda names bzip2's dependency libbz2.dll; CPython 3.14 also has _zstd.
+    # These must remain beside their pinned extensions. An inherited frozen
+    # parent's DLL search directory must not supply either dependency.
+    for pattern in ("sqlite3.dll", "*ffi*.dll", "libcrypto*.dll", "libssl*.dll", "zlib*.dll", "bz2*.dll", "libbz2.dll", "liblzma*.dll", "zstd.dll"):
         for source in sorted((python_root/"Library"/"bin").glob(pattern)):
             add("DLLs/"+source.name, source.read_bytes())
     library = python_root/"Lib"

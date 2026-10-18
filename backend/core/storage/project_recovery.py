@@ -8,6 +8,7 @@ from dataclasses import replace
 from .host_records import require
 from .native_windows_process import WindowsProcessLibrary,WindowsStorageProcess,StorageProcessIdentity
 from .project_control import ProjectControl
+from .cycle_ledger import CycleLedger,COUNTS,READ_MODES
 from .project_records import ProjectRecord
 from .project_profile import ProjectProfile
 from .project_namespace import ProjectNamespace
@@ -22,7 +23,7 @@ def recover(control,slot,processes):
     prior=control.read(slot);state=prior.head.state;value=state.value();event=value["event"]
     require(event is not None and event["phase"] in {"CREATED","ACCEPTED"} and event["pid"]>0,
             "unknown native creation cannot be replayed or inferred from a project directory")
-    require(event["mode"] in {"initialize","verify_initialize"} and event["generation"]==0,
+    require(event["mode"] in {"initialize","verify_initialize",*dict(COUNTS),*READ_MODES} and event["generation"]==0,
             "closed project initialization recovery required")
     runtime_control=RuntimeControl(host)
     _,runtime=claim(runtime_control,exclusive=False)
@@ -48,6 +49,24 @@ def recover(control,slot,processes):
             "project recovery profile changed")
     record=None if state.project_bytes is None else ProjectRecord.from_bytes(state.project_bytes)
     after=state.with_event(dict(event,phase="RETIRED"))
+    operational=event["mode"] not in {"initialize","verify_initialize"}
+    cycle=None if state.cycle_bytes is None else CycleLedger.from_bytes(state.cycle_bytes)
+    if operational:
+        require(profile.operational is not None and record is not None and record.phase=="READY"
+                and "operation" in event,"operational recovery requires its closed profile and ready project")
+        require(event["mode"]=="read_checkpoint" and (cycle is None or cycle.phase=="SETTLED")
+                or cycle is not None and cycle.request==event["request"] and cycle.epoch==event["operation"]["epoch"],
+                "recovery cycle differs from original launch")
+        if cycle is not None and cycle.phase=="VERIFIED":
+            require(event["mode"]=="reset_wal" and event["phase"]=="ACCEPTED","reset evidence must belong to original accepted worker")
+            control.namespace()
+            host._ready=True
+            try:
+                from .operational_launch import require_zero_wals
+                namespace=ProjectNamespace(host,record,value["reservation"]["body"]["project"],profile.limits).pin()
+                require_zero_wals(namespace)
+            finally:host._ready=False
+            after=after.with_cycle(cycle.settle())
     if record is not None and record.phase=="VERIFIED":
         require(event["mode"]=="verify_initialize" and event["phase"]=="ACCEPTED",
                 "independent committed verification fact required")
@@ -61,4 +80,5 @@ def recover(control,slot,processes):
     # A missing root identity still remains absent from this record even when
     # both processes are known dead. It cannot become a later creation ticket.
     control.update(prior,after);host._ready=True
+    if operational:return "SETTLED" if after.cycle_bytes is None else CycleLedger.from_bytes(after.cycle_bytes).phase
     return "UNKNOWN" if record is None else record.phase

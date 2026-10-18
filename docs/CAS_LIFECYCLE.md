@@ -730,10 +730,10 @@ Tests cover actual selected native jobs, each construction boundary, independent
 verifier crashes, real parent exits, unknown native/SQL/journal responses,
 identity and ACL refusal, and legacy writer refusal. Both Windows CI paths
 include public canonical project initialization and verification in the same
-disposable Host used for runtime lifecycle acceptance. The complete publication
-profile, aggregate business/cleanup accounting, CAS preparation, collection,
-all-caller routing, genuine different-build upgrade and full product/platform
-acceptance remain separate requirements before storage-milestone completion.
+disposable Host used for runtime lifecycle acceptance. The explicit serial
+checkpoint profile below extends this foundation. Default legacy routing,
+automatic migration, different-build upgrades and new platform backends are
+separate work; they are not silently enabled by the checkpoint route.
 
 
 ## Complete immutable publication consistency
@@ -776,3 +776,85 @@ Plans without registration retain their existing digest bytes and call path.
 This optional value does not activate native checkpoint admission or CAS v2:
 durable preparation, aggregate capacity, selected-worker coordination and
 generation retirement remain required before that capability is enabled.
+
+
+## Explicit bounded protected checkpoint route
+
+`StorageRuntime.create_protected_project(registry, processes,
+workspace_hint=...)` creates a new project in an already installed canonical
+Windows Host whose pinned runtime carries the operational profile. It runs
+the actual initializer and a separate verifier. Retain the returned `project`
+and `slot`; `StorageRuntime.open_protected_project(...)` reopens that exact
+registration. These APIs accept trusted loaded Host dependencies, never a
+workspace-selected DLL, alternate state home, or implicit installation grant.
+
+The returned facade provides the existing `save_agent_checkpoint(snapshot)`
+and `load_agent_session_state(process_id)` methods, plus `recover()` and
+confirmed `close()`. Supply `expected_revision` explicitly (zero for a new
+process). Preserve the original bounded workspace hint when reopening; it is
+immutable registration metadata and does not authorize filesystem access.
+Other existing storage operations, including generic maintenance, fail before
+legacy I/O. Default `StorageRuntime(workspace)` behavior and migration
+checksums remain unchanged. This route does not migrate existing projects or
+enable all Agent, observability, Shell, Git, network, or sandbox capabilities.
+
+The pinned version-2 profile admits one serial preparation, eight CAS objects
+per checkpoint and 32 physical generations in the project, including pending
+and superseded copies. Each object is at most 64 KiB. Encoded operation input
+is at most 16 KiB and also shares a node/depth/byte budget with registration.
+Historical facts and logical roots are retained; reaching a bound refuses the
+operation rather than truncating history or substituting empty data. These
+bounds support the explicit checkpoint interface, not arbitrary workloads.
+Input, schema and operation limits are part of the descriptor digest.
+
+The Host commits the complete cycle debit and native launch INTENT together
+in its existing slot journal. The actual PID/creation time, request bytes,
+selected runtime and activation epoch must match before the worker accepts.
+The repository creates the immutable SQL/CAS plan; the worker commits complete
+preparation before file creation and actual native birth identity before bytes.
+State, outbox, logical project registration, current-digest mapping and physical
+generation ownership join one transaction. A present name with no recorded
+birth identity is never adopted or deleted during recovery.
+
+Each cycle reserves 28 worst-case WAL transaction attempts, including normal
+publication, cleanup, one bounded reconciliation for each cleanup category and
+housekeeping. An attempt is consumed before setting the native write ceiling or
+entering SQL. Unknown limit/COMMIT/extent outcomes seal the original owner and
+retain the entire range. The closed cleanup inventory reserves ordinary B-tree
+and overflow payload, transient DELETE balancing and fixed future metadata;
+it is valid only for the admitted schema and statement family. The native VFS
+still enforces main/WAL/journal/SHM ceilings and disables mmap/disk temporaries.
+The inspected SQLite implementations are 3.53.2 and 3.53.4; other versions cannot
+enable this profile without new qualification. The actual library bytes are
+bound by the approved runtime manifest, not merely a version string.
+
+The publishing worker's output is diagnostic. After its entire native lifetime
+retires, another selected worker checks committed facts and exact CAS bytes.
+Only that observation yields a checkpoint reference. Known publication and
+cleanup are separate: `StorageCleanupIncomplete.committed_reference` reports a
+verified checkpoint when cleanup still needs reconciliation. An unconfirmed
+verification raises `StorageCommitUnknown`; no publication is replayed to
+recover its response. Missing or uncertain output cannot become a later result.
+
+Cleanup first persists its exact retirement intent. It removes unpublished
+objects only against retained planned bytes and native identity; collection
+removes only superseded physical copies while retaining the verified current
+copy and every historical logical digest. Unknown absence remains charged.
+A reset worker verifies the remaining ownership and zero WALs, closes its SQL
+owners, then records VERIFIED. The parent records SETTLED only after complete
+native retirement and another exact namespace/zero-WAL observation. Runtime
+installation or activation changes are blocked while any cycle remains
+unsettled, so cleanup cannot lose its original runtime identity between workers.
+
+Source and frozen acceptance exercise real selected native jobs in owned
+temporary-account fixtures. A separate disposable-CI test exercises the public
+canonical locator and unmodified `-m` worker entry. Parent death, unknown child
+or file birth, input substitution, missing output, publication/cleanup crashes,
+revision/capacity refusal and source/frozen reopen are independent test cases.
+These tests do not claim power-loss durability or new platform backend support.
+
+The runtime builder includes the Conda `libbz2.dll` and CPython 3.14 `zstd.dll`
+dependencies beside their pinned extensions. A frozen parent's DLL search
+directory can otherwise affect child loading; native module origin checks stay
+enabled. See the [PyInstaller external-program guidance](https://pyinstaller.org/en/stable/common-issues-and-pitfalls.html#launching-external-programs-from-the-frozen-application)
+and [Windows DLL search order](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order).

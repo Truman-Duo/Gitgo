@@ -150,6 +150,10 @@ class RuntimeControl:
             if view.head is not None:
                 event=view.head.state.value()["event"]
                 require(event is None or event["phase"]=="RETIRED","project worker must retire before runtime installation")
+                if view.head.state.cycle_bytes is not None and self._lease_mode=="exclusive":
+                    from .cycle_ledger import CycleLedger
+                    require(CycleLedger.from_bytes(view.head.state.cycle_bytes).phase=="SETTLED",
+                            "unfinished storage cycle retains its runtime lease")
 
     def _namespace(self, value):
         host=self._host

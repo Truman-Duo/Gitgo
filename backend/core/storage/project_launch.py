@@ -43,10 +43,10 @@ class ProjectInitialization:
         event=prior.head.state.value()["event"]
         require(event is None or event["phase"]=="RETIRED","previous project worker retains debt")
         self._event=request.event(context)
-        self.control.update(prior,prior.head.state.with_event(self._event))
         root=PureWindowsPath(manifest.root)
         command=StorageWorkerCommand((str(root/"python.exe"),"-I","-S","-B","-m","backend.core.storage.project_worker",
             request.to_bytes().decode("ascii")),str(root),(("PATH",str(root)),("SYSTEMROOT",context.system_root),("WINDIR",context.system_root)))
+        self.control.update(prior,self._intent_state(prior,self._event))
         self._create_attempted=True
         self._worker.create(command)
         self._identity,resumed=self._worker.identity()
@@ -60,6 +60,8 @@ class ProjectInitialization:
         # and shared runtime lease remain until actual Job retirement.
         host._scope.close_handle(host._members[f"slot-{request.slot:04d}.lease"])
         self._worker.resume(self._identity);self._worker.release()
+
+    def _intent_state(self,prior,event):return prior.head.state.with_event(event)
 
     def _retire(self,cancel):
         require(self._started and type(cancel) is bool,"started project worker and explicit cancellation required")

@@ -59,6 +59,9 @@ def sqlite_library(selected):
 def execute(host,processes,request):
     control=ProjectControl(host)
     control.accept(request,processes)
+    if request.payload is not None:
+        from .operational_worker import execute as operate
+        return operate(control)
     profile=control.profile;anchor=control.anchor
     if request.mode=="initialize":
         creator=host._new(MetadataBootstrap,host._registry.trees,TreePurpose.BOOTSTRAP,anchor.account.sid)
@@ -79,7 +82,7 @@ def execute(host,processes,request):
         record=ProjectRecord.from_bytes(control.read(request.slot).head.state.project_bytes)
     namespace=ProjectNamespace(host,record,request.project,profile.limits).pin()
     namespace.require_empty_cas()
-    databases=ProjectDatabases(namespace,sqlite_library(control.selected),request.slot,profile.schemas)
+    databases=ProjectDatabases(namespace,sqlite_library(control.selected),request.slot,profile.schemas,profile=profile)
     if request.mode=="initialize":databases.initialize()
     else:databases.verify_initialized()
     for owner in reversed(tuple(databases.owners.values())):
@@ -98,8 +101,18 @@ def main():
                 =="backend.core.storage.project_worker","closed project worker entry required")
         request=ProjectRequest.from_bytes(sys.argv[1].encode("ascii"))
         host,processes=attach_selected(request)
-        execute(host,processes,request)
-        os.write(1,b'{"phase":"WORKER_FINISHED","authority":"diagnostic"}\n')
+        result=execute(host,processes,request)
+        if request.payload is None:
+            output=b'{"phase":"WORKER_FINISHED","authority":"diagnostic"}\n'
+        else:
+            from .journal_cells import canonical
+            output=canonical(dict(version=1,request=request.request,launch=request.launch,mode=request.mode,result=result))+b'\n'
+            require(len(output)<=262144,"bounded operation response required")
+        offset=0
+        while offset<len(output):
+            written=os.write(1,output[offset:offset+4096])
+            require(written>0,"operation response stream stopped")
+            offset+=written
         require(sys.stdin.buffer.read(1)==b"R","project worker release frame changed")
     except BaseException:
         try:os.write(2,b"Storage project worker stopped; committed facts and native retirement require reconciliation.\n")

@@ -2,7 +2,7 @@
 
 Call only inside an accepted qualified worker with the exact namespace held.
 Verification reads committed facts and never completes a partial migration.
-This inactive component is not the production storage router.
+Only the selected admitted worker may use the operational entry.
 """
 import hashlib
 import sqlite3
@@ -37,7 +37,7 @@ def schema_digest(connection):
 
 
 class ProjectDatabases:
-    def __init__(self, namespace, library, slot, expected_schema):
+    def __init__(self, namespace, library, slot, expected_schema, *, profile=None):
         require(type(namespace) is ProjectNamespace and type(library) is WindowsSqliteLibrary,
                 "owned exact project namespace and selected SQLite modules required")
         require(type(slot) is int and 0<=slot<namespace.anchor.layout.envelope.slots,"exact Host slot required")
@@ -47,7 +47,16 @@ class ProjectDatabases:
         for value in expected_schema:digest(value)
         self.namespace,self.library,self.slot=namespace,library,slot
         self.expected=dict(zip(ROLES,expected_schema));self.owners={};self.databases={}
-        self._sealed=False;self._attempted=set()
+        self._sealed=False;self._attempted=set();self.extra=()
+        if profile is not None:
+            from .project_profile import ProjectProfile
+            require(type(profile) is ProjectProfile and profile.sha256==namespace.record.profile
+                    and profile.schemas==expected_schema
+                    and profile.limits==tuple(namespace.limits[role] for role in ROLES),
+                    "database profile differs from selected native namespace")
+            if profile.operational is not None:
+                from .batch_sql import SCHEMA
+                self.extra=SCHEMA
 
     def _open(self,role):
         self.namespace.require_live()
@@ -64,6 +73,10 @@ class ProjectDatabases:
         db.execute("PRAGMA cache_spill=OFF")
         db.execute("PRAGMA cache_size=-16384")
         db.execute("PRAGMA trusted_schema=OFF")
+        if self.extra:
+            db.execute("PRAGMA temp_store=MEMORY")
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute("PRAGMA wal_autocheckpoint=0")
         return db
 
     def _binding(self,role):
@@ -86,14 +99,14 @@ class ProjectDatabases:
                 require(db.execute("PRAGMA journal_mode=WAL").fetchone()[0]=="wal","qualified WAL mode required")
                 StorageRuntime._apply_migrations(db,MIGRATIONS[role])
                 with authoritative_transaction(db):
-                    for sql in GUARD:db.execute(sql)
+                    for sql in (*GUARD,*(self.extra if role=="state" else ())):db.execute(sql)
                     db.execute("INSERT INTO storage_protocol VALUES(1,?)",(self._binding(role),))
                 self._verify(role,db)
             self.namespace.verify()
         except BaseException:
             self._stop();raise
 
-    def _verify(self,role,db):
+    def _verify(self,role,db, *, empty=True):
         require(db.execute("PRAGMA page_size").fetchone()[0]==4096
                 and db.execute("PRAGMA encoding").fetchone()[0]=="UTF-8"
                 and db.execute("PRAGMA auto_vacuum").fetchone()[0]==0,"database physical layout profile changed")
@@ -103,16 +116,17 @@ class ProjectDatabases:
         history=db.execute("SELECT version,name,checksum FROM schema_migration_records ORDER BY version LIMIT 257").fetchall()
         require([tuple(row) for row in history]==[(m.version,m.name,m.checksum) for m in MIGRATIONS[role]],
                 "committed repository migrations are incomplete or changed")
-        # The initializer has no business-write capability. A matching schema
-        # and binding cannot excuse unrelated rows appearing before readiness.
-        tables=db.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT IN ('storage_protocol','schema_migration_records') LIMIT 257").fetchall()
-        require(len(tables)<=256,"bounded initialization table inventory required")
-        for row in tables:
-            name=row[0]
-            require(type(name) is str and len(name)<=128,"bounded qualified table name required")
-            quoted='"'+name.replace('"','""')+'"'
-            require(db.execute("SELECT 1 FROM "+quoted+" LIMIT 1").fetchone() is None,
-                    "unexpected business rows before initialization readiness")
+        if empty:
+            # The initializer has no business-write capability. A matching schema
+            # and binding cannot excuse unrelated rows appearing before readiness.
+            tables=db.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT IN ('storage_protocol','schema_migration_records') LIMIT 257").fetchall()
+            require(len(tables)<=256,"bounded initialization table inventory required")
+            for row in tables:
+                name=row[0]
+                require(type(name) is str and len(name)<=128,"bounded qualified table name required")
+                quoted='"'+name.replace('"','""')+'"'
+                require(db.execute("SELECT 1 FROM "+quoted+" LIMIT 1").fetchone() is None,
+                        "unexpected business rows before initialization readiness")
         require(db.execute("PRAGMA journal_mode").fetchone()[0]=="wal","database journal profile changed")
         require([tuple(row) for row in db.execute("PRAGMA quick_check").fetchall()]==[("ok",)],
                 "database structural verification failed")
@@ -126,6 +140,20 @@ class ProjectDatabases:
                 db.execute("PRAGMA query_only=ON")
                 db.execute("BEGIN")
                 try:self._verify(role,db)
+                finally:db.execute("ROLLBACK")
+            self.namespace.verify()
+        except BaseException:
+            self._stop();raise
+
+
+    def open_operational(self):
+        require(self.extra and self.namespace.record.phase=="READY",
+                "operational access requires its explicit profile and ready project")
+        try:
+            for role in ROLES:
+                db=self._open(role)
+                db.execute("BEGIN")
+                try:self._verify(role,db,empty=role!="state")
                 finally:db.execute("ROLLBACK")
             self.namespace.verify()
         except BaseException:

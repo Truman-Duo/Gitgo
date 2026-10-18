@@ -316,8 +316,8 @@ def test_lost_actual_native_launch_return_never_replays_worker(
 def canonical_project_input():
     if os.environ.get("GITGO_STORAGE_CANONICAL_TEST") != "1":
         pytest.skip("Canonical account mutation belongs only to disposable CI acceptance")
-    from tests.test_storage_project_workers import project_runtime_input
-    with project_runtime_input() as result:
+    from tests.test_storage_operational_profile import operational_runtime_input
+    with operational_runtime_input() as result:
         yield result
 
 
@@ -383,4 +383,21 @@ def test_disposable_ci_public_canonical_runtime_installation(native, tmp_path_fa
         verified=finish(verification)
         assert verified.phase=="READY" and verified.record.identity==initialized.record.identity
         assert initialization._identity!=verification._identity
+        assert not registry._owners and not processes.retained_processes
+
+        # Same public canonical locator and actual -m selected workers. No
+        # temporary-account locator substitution in this disposable CI case.
+        from backend.core.storage import StorageRuntime
+        from backend.core.storage.models import StorageBlocked
+        with StorageRuntime.create_protected_project(registry,processes,workspace_hint='CI checkpoint') as store:
+            project,slot=store.project,store.slot
+            reference=store.save_agent_checkpoint(dict(process_id='p',session_id='s',messages=[],
+                expected_revision=0,session_metadata={'marker':'canonical'}))
+            assert reference.revision==1
+            with pytest.raises(StorageBlocked,match='UNSUPPORTED'):store.maintain_cas()
+        with StorageRuntime.open_protected_project(registry,processes,project=project,slot=slot,workspace_hint='CI checkpoint') as store:
+            assert store.load_agent_session_state('p')['marker']=='canonical'
+            assert store.save_agent_checkpoint(dict(process_id='p',session_id='s',messages=[],
+                expected_revision=1,session_metadata={'marker':'reopened'})).revision==2
+            assert store.load_agent_session_state('p')['marker']=='reopened'
         assert not registry._owners and not processes.retained_processes

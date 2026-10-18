@@ -32,7 +32,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,13 +66,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:GITGO_STORAGE_NATIVE_TEST_LIBRARY = Join-Path $output 'gitgo-storage-scope.dll'
           $env:GITGO_STORAGE_CANONICAL_TEST = "1"
-          python -B -m pytest tests/test_storage_project_records.py tests/test_storage_database_pins.py tests/test_storage_project_namespace.py tests/test_storage_project_workers.py tests/test_storage_cas_ownership.py tests/test_storage_windows_cas.py tests/test_storage_sqlite_ownership.py tests/test_storage_windows_sqlite.py tests/test_storage_windows_scope.py tests/test_storage_windows_process.py tests/test_storage_windows_journal.py tests/test_storage_windows_tree.py tests/test_storage_windows_host.py tests/test_storage_host_records.py tests/test_storage_runtime_manifest.py tests/test_storage_runtime_installation.py tests/test_storage_runtime_control.py tests/test_storage_runtime_worker.py tests/test_storage_runtime_launch.py tests/test_storage_runtime_lifecycle.py tests/test_storage_runtime_recovery.py tests/test_storage_slot_records.py tests/test_storage_runtime_records.py -q -x
+          python -B -m pytest tests/test_storage_operational_profile.py tests/test_storage_operational_workers.py tests/test_storage_operational_recovery.py tests/test_storage_protected_entry.py tests/test_storage_cycle_slot.py tests/test_storage_write_window.py tests/test_storage_batch_sql.py tests/test_storage_batch_retirement.py tests/test_storage_cycle_ledger.py tests/test_storage_project_records.py tests/test_storage_database_pins.py tests/test_storage_project_namespace.py tests/test_storage_project_workers.py tests/test_storage_cas_ownership.py tests/test_storage_windows_cas.py tests/test_storage_sqlite_ownership.py tests/test_storage_windows_sqlite.py tests/test_storage_windows_scope.py tests/test_storage_windows_process.py tests/test_storage_windows_journal.py tests/test_storage_windows_tree.py tests/test_storage_windows_host.py tests/test_storage_host_records.py tests/test_storage_runtime_manifest.py tests/test_storage_runtime_installation.py tests/test_storage_runtime_control.py tests/test_storage_runtime_worker.py tests/test_storage_runtime_launch.py tests/test_storage_runtime_lifecycle.py tests/test_storage_runtime_recovery.py tests/test_storage_slot_records.py tests/test_storage_runtime_records.py -q -x
       - name: Windows ACL recovery preflight
         if: runner.os == 'Windows'
         run: python -B -m pytest tests/test_windows_security_descriptor.py tests/test_windows_security_privileges.py tests/test_windows_acl_plan.py tests/test_windows_acl_provisioning.py tests/test_windows_acl_inheritance.py tests/test_windows_acl_sacl_inheritance.py tests/test_windows_acl_management.py -q -x
       - name: Windows source and packaged isolation
         if: runner.os == 'Windows'
-        run: python -B scripts/run_sandbox_acceptance.py
+        run: python -B scripts/run_sandbox_acceptance.py --storage-native-library "$env:RUNNER_TEMP\gitgo-storage-native\gitgo-storage-scope.dll"
       - name: Linux source and packaged isolation in delegated service
         if: runner.os == 'Linux'
         run: sudo systemd-run --quiet --wait --pipe --collect --uid="$(id -u)" --working-directory="$PWD" --setenv="LD_LIBRARY_PATH=$LD_LIBRARY_PATH" --setenv="GITGO_RIPGREP_PATH=$GITGO_RIPGREP_PATH" --unit=gitgo-sandbox-ci -p Delegate=yes "$(which python)" -B scripts/run_linux_sandbox_scope.py -- "$(which python)" -B scripts/run_sandbox_acceptance.py

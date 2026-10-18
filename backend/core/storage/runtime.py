@@ -60,6 +60,25 @@ from .support import _encode_page_cursor, _decode_page_cursor, validate_sqlite_r
 DatabaseName = Literal["state", "observability"]
 
 
+def _protected_checkpoint_catalogue():
+    """Build the fixed trusted catalogue entirely in memory at the facade.
+
+    The selected worker receives immutable schema facts, not a connection or
+    an alternate storage path. Stored project schema cannot qualify itself.
+    """
+    from contextlib import closing
+    from .project_schema import GUARD
+    from .batch_sql import SCHEMA
+    from .batch_inventory import catalogue
+    validate_sqlite_runtime()
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as db:
+        db.execute("PRAGMA temp_store=MEMORY")
+        StorageRuntime._apply_migrations(db, STATE_MIGRATIONS)
+        for sql in (*GUARD, *SCHEMA):
+            db.execute(sql)
+        return catalogue(db)
+
+
 def open_usability_source(project_root: str | Path) -> sqlite3.Connection:
     """Open committed traces read-only without a writer runtime or migrations.
 
@@ -176,6 +195,22 @@ class StorageRuntime:
     A runtime owns exactly one writer connection for each database and protects
     them with locks.  Large bodies live in CAS; SQLite rows contain references.
     """
+
+    @staticmethod
+    def create_protected_project(registry,processes,*,workspace_hint):
+        """Create a new bounded checkpoint store in an installed canonical Host.
+
+        Existing projects, workspace paths and environment configuration do
+        not switch routes implicitly. Unqualified operations refuse explicitly.
+        """
+        from .protected_runtime import ProtectedCheckpoints
+        return ProtectedCheckpoints.create(registry,processes,workspace_hint)
+
+    @staticmethod
+    def open_protected_project(registry,processes,*,project,slot,workspace_hint):
+        """Reopen an exact registered protected project without legacy I/O."""
+        from .protected_runtime import ProtectedCheckpoints
+        return ProtectedCheckpoints.open(registry,processes,project,slot,workspace_hint)
 
     def __init__(
         self,
