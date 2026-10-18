@@ -214,9 +214,21 @@ def test_windows_filesystem_escape_and_workspace_write(native_box):
 
 def test_windows_cleanup_reports_confirmed_tree_exit(native_box):
     workspace, policy, spawn = native_box
-    proc = spawn("import subprocess,sys;subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(120)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);print('parent-ran')")
+    # NUL is not accessible to every AppContainer identity. Keep the child
+    # output in its allowed workspace without adding device permissions.
+    child = "import time;from pathlib import Path;Path('child-ready').write_text('ran');time.sleep(120)"
+    source = (
+        "import subprocess,sys,time;from pathlib import Path;"
+        "sink=open('child-output.log','wb');"
+        f"subprocess.Popen([sys.executable,'-I','-c',{child!r}],stdout=sink,stderr=sink);"
+        "deadline=time.monotonic()+5;"
+        "exec('while not Path(\"child-ready\").exists() and time.monotonic()<deadline: time.sleep(0.01)');"
+        "assert Path('child-ready').read_text()=='ran';print('parent-ran')"
+    )
+    proc = spawn(source)
     code, output, error = finished(proc)
     assert code == 0 and output.strip() == 'parent-ran', error
+    assert (workspace / 'child-ready').read_text() == 'ran'
     assert proc.close_sandbox() == {'complete': True, 'mode': 'windows-job', 'issues': []}
 
 def test_windows_search_binary_runs_inside_native_boundary(native_box, isolated_python):
