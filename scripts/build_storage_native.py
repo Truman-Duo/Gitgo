@@ -30,7 +30,7 @@ def build(compiler: Path, output: Path, *, sqlite_header: Path, selftest: bool =
     prefix = [str(compiler), *(["cc"] if compiler.name.lower() == "zig.exe" else [])]
     flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I" + str(sqlite_header.parent)]
     result = {}
-    for name in ("scope", "process", "journal", "tree", "sqlite"):
+    for name in ("scope", "process", "journal", "tree", "sqlite", "cas_writer", "cas_generation"):
         library = output / f"gitgo-storage-{name}.dll"
         subprocess.run([*prefix, *flags, "-shared", str(root / f"backend/native/storage_{name}_windows.c"),
                         "-ladvapi32", "-luserenv", "-o", str(library)], check=True, timeout=120)

@@ -31,7 +31,7 @@ class Effects:
             def close(self):
                 effect.closes+=1;effect.opens-=1
                 if effect.mode=='close':raise RuntimeError('lost close result')
-        monkeypatch.setattr(n.sqlite3,'Connection',Database)
+        monkeypatch.setattr(n,'_OwnedStorageConnection',Database)
     def create(self,*args):
         ctypes.cast(args[-1],ctypes.POINTER(ctypes.c_uint64))[0]=257
         if self.mode=='register':raise RuntimeError('lost registration result')

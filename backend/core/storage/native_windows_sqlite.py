@@ -18,6 +18,7 @@ import threading
 import uuid
 
 from .models import StorageBlocked
+from .support import _StorageConnection
 
 _U64 = ctypes.c_uint64
 _I64 = ctypes.c_int64
@@ -217,6 +218,17 @@ class WindowsSqliteVfs:
         _LIVE.pop(id(self), None)
 
 
+class _OwnedStorageConnection(_StorageConnection):
+    """The existing repository quarantine also seals its enclosing VFS owner."""
+    def require_available(self):
+        super().require_available()
+        self._native_owner._require()
+
+    def quarantine(self):
+        super().quarantine()
+        self._native_owner._sealed = True
+
+
 class WindowsSqliteConnection:
     """Repository borrows the DB-API connection; this owner alone closes it."""
 
@@ -233,8 +245,9 @@ class WindowsSqliteConnection:
         _check("connection_lease", self._owner._call("lease", self._owner._cookie, 1))
         # Pre-own the actual object, including failure during Connection.__init__.
         # No application-defined factory or callback can substitute an owner.
-        self._database = sqlite3.Connection.__new__(sqlite3.Connection)
-        sqlite3.Connection.__init__(self._database,
+        self._database = _OwnedStorageConnection.__new__(_OwnedStorageConnection)
+        self._database._native_owner = self._owner
+        _OwnedStorageConnection.__init__(self._database,
             self._owner.path.as_uri() + "?mode=rw&vfs=" + self._owner._name.decode("ascii"),
             uri=True, isolation_level=None, timeout=.1, check_same_thread=True)
         self._initialized = True

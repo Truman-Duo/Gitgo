@@ -20,7 +20,7 @@ def binaries():
 
 
 @pytest.mark.parametrize("case", ["roundtrip","wal_ceiling","pinned_reader","outside_attach",
-    "thread","mmap_disabled","registration_lifetime","oversized_sidecar","same_bytes_foreign_module"])
+    "thread","mmap_disabled","registration_lifetime","oversized_sidecar","same_bytes_foreign_module", "repository_quarantine", "repository_schemas"])
 def test_actual_sqlite_native_profile(binaries,tmp_path_factory,case):
     fixture = Path(__file__).with_name("fixtures")/"storage_sqlite_case.py"
     result = subprocess.run([sys.executable,"-B",str(fixture),

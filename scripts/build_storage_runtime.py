@@ -26,7 +26,7 @@ from backend.core.storage.runtime_manifest import (
 
 DEPENDENCIES = ("httpx", "httpcore", "h11", "anyio", "idna", "certifi", "click", "rich", "pygments",
                 "markdown_it", "mdurl", "typing_extensions.py")
-NATIVE_LIBRARIES = tuple(f"gitgo-storage-{kind}.dll" for kind in ("scope", "process", "journal", "tree", "sqlite"))
+NATIVE_LIBRARIES = tuple(f"gitgo-storage-{kind}.dll" for kind in ("scope", "process", "journal", "tree", "sqlite", "cas_writer", "cas_generation"))
 
 
 def archive(entries):

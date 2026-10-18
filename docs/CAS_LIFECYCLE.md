@@ -640,3 +640,33 @@ native/Python acknowledgement-loss faults. These tests qualify construction
 boundaries only. The actual State/Obs profile, protected namespace integration,
 SQL/CAS publication, recovery/collection and all StorageRuntime callers remain
 necessary before guarded format activation or storage-milestone completion.
+
+
+### Native CAS object ownership and repository quarantine
+
+The Windows construction layer now owns finite CAS creation and generation
+lifetimes in native storage. Eight creation slots and 32 read/retirement slots
+are lifetime quotas in one worker; nominal handle closure does not replenish
+them. Every open binds the retained native parent and recorded file identity.
+Creation uses an exact digest/generation name, create-only disposition, a fixed
+64 KiB content limit and 4 KiB writes. The coordinator must persist the actual
+birth identity before writing bytes. A crash before that identity is committed
+leaves unknown debt and never permits adopting the file by name.
+
+Read and committed-retirement purposes require the exact full length and
+digest. A separate immutable unpublished-retirement purpose accepts a shorter
+file only against the recorded birth identity and verified prefix of the full
+immutable input. The enclosing coordinator must prove that the batch did not
+publish. Disposition is consumed before the OS effect. Unknown disposition or
+close cannot be repeated; independent absence and authoritative retirement
+remain prerequisites for refunding capacity.
+
+The native SQLite owner uses the existing fixed repository connection class.
+An unknown authoritative transaction quarantines that connection, its deferred
+cursors and the enclosing VFS owner, preventing another connection from reusing
+the uncertain writer. State and Observability migrations are exercised through
+the actual native VFS. Their commits remain independent.
+
+These are construction primitives and protocol tests. Protected project
+registration, aggregate admission, durable publication and independent worker
+recovery still have to join them before production CAS-v2 activation.
