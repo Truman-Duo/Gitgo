@@ -49,7 +49,10 @@ def main():
                    cwd=host.parent, check=True)
     environment = dict(os.environ, GITGO_SANDBOX_TEST_HOST=str(host))
     environment.pop('GITGO_RIPGREP_PATH', None)
-    subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests/test_native_sandbox.py',
+    packaged_tests = ['tests/test_native_sandbox.py']
+    if sys.platform == 'win32':
+        packaged_tests.append('tests/test_windows_sandbox_minimum.py')
+    subprocess.run([sys.executable, '-B', '-m', 'pytest', *packaged_tests,
                     '-k', 'packaged', '-q'], cwd=root, env=environment, check=True)
     if native is not None:
         storage_environment=dict(environment,GITGO_STORAGE_NATIVE_TEST_LIBRARY=str(native))

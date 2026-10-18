@@ -179,7 +179,8 @@ def native_box(isolated_python, tmp_path_factory):
         delete = api.userenv.DeleteAppContainerProfile
         delete.argtypes = [W.LPCWSTR]
         delete.restype = C.c_long
-        delete(policy.profile_name)
+        status = delete(policy.profile_name)
+        assert status == 0, f"Owned AppContainer profile cleanup failed: {status:#x}"
 
 
 def finished(proc, timeout=10):

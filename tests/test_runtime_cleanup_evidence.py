@@ -47,9 +47,17 @@ def test_pipeline_preserves_runtime_cleanup_and_never_reexecutes(tmp_path_factor
         assert process.recovery['resume_forbidden'] is True
         from backend.core.loop.read_approval import _RETAINED_ADMISSIONS
         key = (process.process_id, 'cleanup-call', 0)
-        # This fixture has no native owners. Close its retained empty stacks.
-        for owner in _RETAINED_ADMISSIONS.pop(key):
-            owner.close()
+        try:
+            # A new call identity must not bypass the process's retained debt.
+            retry = ToolPipeline().execute({'name': 'fixture', 'args': {}}, tool, ctx, 'retry', 0)
+            assert retry.is_error and 'SANDBOX_CLEANUP_PENDING' in retry.error
+            assert retry.receipt['effect_state'] == 'not_committed'
+            assert len(calls) == 1
+            assert key in _RETAINED_ADMISSIONS
+        finally:
+            # This fixture has no native owners. Close its retained empty stacks.
+            for owner in _RETAINED_ADMISSIONS.pop(key):
+                owner.close()
     if outcome in ('success','complete'):
         assert not actual.is_error
         assert actual.data == data
