@@ -35,7 +35,7 @@ def build(compiler: Path, output: Path, *, sqlite_header: Path, selftest: bool =
         subprocess.run([*prefix, *flags, "-shared", str(root / f"backend/native/storage_{name}_windows.c"),
                         "-ladvapi32", "-luserenv", "-o", str(library)], check=True, timeout=120)
         result[name + "_library"] = str(library)
-        cases = ("tree_pins", "tree_install", "tree_bootstrap", "tree_retirement", "tree_inventory") if name == "tree" else (("scope", "volume") if name == "scope" else (name,))
+        cases = ("tree_pins", "tree_install", "tree_bootstrap", "tree_retirement", "tree_inventory", "tree_data") if name == "tree" else (("scope", "volume") if name == "scope" else (name,))
         for case in cases if selftest else ():
             fault_name = case.replace("_", "-")
             executable = output / f"storage-{fault_name}-faults.exe"

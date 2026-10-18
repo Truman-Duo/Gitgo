@@ -56,7 +56,7 @@ def packaged_input():
 
 
 @contextmanager
-def launch_case(native, temporary, manifest, *, canonical=False):
+def launch_case(native, temporary, manifest, *, canonical=False, project_profile=None):
     scopes, trees, binaries = native
     journals = WindowsJournalLibrary(ctypes.CDLL(str(binaries/"gitgo-storage-journal.dll")))
     processes = WindowsProcessLibrary(ctypes.CDLL(str(binaries/"gitgo-storage-process.dll")))
@@ -71,6 +71,9 @@ def launch_case(native, temporary, manifest, *, canonical=False):
     account = HostAccount(sid, str(profile))
     source = PinnedRuntime(trees, manifest.to_bytes(), manifest.sha256, sid).pin()
     envelope = StorageEnvelope(1, 4096, 2, 256*1024*1024, metadata_classes(2), (FileEnvelope("state", 65536, 2),))
+    if project_profile is not None:
+        assert project_profile.sha256 == manifest.content.storage_profile
+        envelope = StorageEnvelope(1,4096,2,2*1024**3,metadata_classes(2),project_profile.file_classes())
     layout = HostLayout(with_runtime_copies(envelope, manifest.content), manifest.content)
     registry = WindowsHostRegistry(scopes, trees, journals, layout)
     host = registry.owner()
@@ -309,11 +312,21 @@ def test_lost_actual_native_launch_return_never_replays_worker(
         assert observer.close() and not registry._owners
 
 
-def test_disposable_ci_public_canonical_runtime_installation(native, tmp_path_factory, packaged_input):
+@pytest.fixture(scope="module")
+def canonical_project_input():
+    if os.environ.get("GITGO_STORAGE_CANONICAL_TEST") != "1":
+        pytest.skip("Canonical account mutation belongs only to disposable CI acceptance")
+    from tests.test_storage_project_workers import project_runtime_input
+    with project_runtime_input() as result:
+        yield result
+
+
+def test_disposable_ci_public_canonical_runtime_installation(native, tmp_path_factory, canonical_project_input):
     if os.environ.get("GITGO_STORAGE_CANONICAL_TEST") != "1":
         pytest.skip("Canonical account mutation belongs only to disposable CI acceptance")
     assert os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("CI") == "true"
-    with launch_case(native, tmp_path_factory, packaged_input, canonical=True) as case:
+    packaged_input, project_profile = canonical_project_input
+    with launch_case(native, tmp_path_factory, packaged_input, canonical=True, project_profile=project_profile) as case:
         registry, _, account, source, processes, launch = case
         launch.start(source, processes)
         result = finish(launch)
@@ -353,3 +366,21 @@ def test_disposable_ci_public_canonical_runtime_installation(native, tmp_path_fa
         assert chosen.reference.epoch==2 and chosen.require_live()==second.manifest
         assert observer._read_slot(63).head.state.value()["entries"][0] is None
         assert observer.close() and not registry._owners and not processes.retained_processes
+        from backend.core.storage.project_control import ProjectControl
+        from backend.core.storage.project_launch import ProjectInitialization
+        import uuid
+        project=str(uuid.uuid4())
+        owner=registry.owner();owner.attach()
+        control=ProjectControl(owner)
+        control.reserve(select(RuntimeControl(owner)),project)
+        initialization=ProjectInitialization(control);initialization.start(processes)
+        initialized=finish(initialization)
+        assert initialized.phase=="MATERIALIZED"
+        owner=registry.owner();owner.attach()
+        control=ProjectControl(owner)
+        control.reserve(select(RuntimeControl(owner)),project,verify_slot=initialized.slot)
+        verification=ProjectInitialization(control);verification.start(processes)
+        verified=finish(verification)
+        assert verified.phase=="READY" and verified.record.identity==initialized.record.identity
+        assert initialization._identity!=verification._identity
+        assert not registry._owners and not processes.retained_processes

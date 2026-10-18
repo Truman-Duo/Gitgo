@@ -251,7 +251,7 @@ def test_native_purpose_is_immutable_before_any_effect(native, tmp_path_factory,
             "retirement_begin": (TreePurpose.RETIRE, [None, None, None, None, 0]),
         }
         for name, (expected, args) in entries.items():
-            if purpose is expected:
+            if purpose is expected or name == "tree_root" and purpose is TreePurpose.DATA:
                 continue
             owner = trees.reserve(purpose, sid)
             assert trees._calls[name](owner._cookie, *args) == 5023

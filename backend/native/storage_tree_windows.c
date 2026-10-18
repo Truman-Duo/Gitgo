@@ -10,16 +10,16 @@
 #define GRP_OWNERS 4
 /* Purpose is immutable from reservation; phases may never select authority. */
 enum { TREE_PIN=0, TREE_INSTALL=1, TREE_INSTALLED=2, TREE_ABSENCE=3,
-       TREE_BOOTSTRAP=4, TREE_BOOTSTRAPPED=5, TREE_RETIRE=6, TREE_RETIRED=7 };
+       TREE_BOOTSTRAP=4, TREE_BOOTSTRAPPED=5, TREE_RETIRE=6, TREE_RETIRED=7, TREE_DATA=8 };
 #define GRP_NODES 1024
 #define GRP_BYTES (UINT64_C(256)*1024*1024)
 typedef NTSTATUS (NTAPI *CreateFn)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,
     PLARGE_INTEGER,ULONG,ULONG,ULONG,ULONG,PVOID,ULONG);
 typedef ULONG (WINAPI *ErrorFn)(NTSTATUS);
 typedef NTSTATUS (NTAPI *SecurityFn)(HANDLE,SECURITY_INFORMATION,PSECURITY_DESCRIPTOR,ULONG,PULONG);
-typedef struct Node {HANDLE handle;int phase,directory,writable,flushed;FILE_ID_INFO id;uint64_t length,written;} Node;
+typedef struct Node {HANDLE handle;int phase,directory,writable,flushed,bounded;FILE_ID_INFO id;uint64_t length,written;} Node;
 typedef struct Runtime {
-    SRWLOCK lock;uint64_t generation,bytes;DWORD pid,count;int occupied,sealed,installing,purpose;
+    SRWLOCK lock;uint64_t generation,bytes;DWORD pid,count,data_thread;int occupied,sealed,installing,purpose;
     Node nodes[GRP_NODES],ancestors[64];DWORD ancestor_count;
     IO_STATUS_BLOCK io;unsigned char security[65536],user[SECURITY_MAX_SID_SIZE];
     DWORD user_length;
@@ -30,7 +30,7 @@ static DWORD error(void){DWORD e=GetLastError();return e?e:ERROR_GEN_FAILURE;}
 static Runtime *get(uint64_t cookie){
     unsigned i=(unsigned)(cookie&255);Runtime *r;
     if(!i||i>GRP_OWNERS)return 0;r=&records[i-1];AcquireSRWLockExclusive(&r->lock);
-    if(!r->occupied||r->generation!=(cookie>>8)||r->pid!=GetCurrentProcessId()){
+    if(!r->occupied||r->generation!=(cookie>>8)||r->pid!=GetCurrentProcessId()||(r->purpose==TREE_DATA&&r->data_thread!=GetCurrentThreadId())){
         ReleaseSRWLockExclusive(&r->lock);return 0;
     }return r;
 }
@@ -43,7 +43,7 @@ static DWORD metadata(Node *n){
     length=((uint64_t)info.nFileSizeHigh<<32)|info.nFileSizeLow;
     if((info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)||
        (!!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))!=n->directory||
-       (!n->directory&&(info.nNumberOfLinks!=1||length!=n->length)))return ERROR_INVALID_DATA;
+       (!n->directory&&(info.nNumberOfLinks!=1||(n->bounded?length>n->length:length!=n->length))))return ERROR_INVALID_DATA;
     if(n->phase==2&&memcmp(&id,&n->id,sizeof(id)))return ERROR_INVALID_DATA;
     n->id=id;return 0;
 }
@@ -82,7 +82,7 @@ static int leaf_ok(const wchar_t *leaf){
 }
 API DWORD gitgo_tree_reserve(uint64_t *cookie,const void *user,DWORD length,DWORD purpose){
     Runtime *r=0;uint64_t generation;unsigned i;
-    if((purpose!=TREE_PIN&&purpose!=TREE_INSTALL&&purpose!=TREE_ABSENCE&&purpose!=TREE_BOOTSTRAP&&purpose!=TREE_RETIRE)||
+    if((purpose!=TREE_PIN&&purpose!=TREE_INSTALL&&purpose!=TREE_ABSENCE&&purpose!=TREE_BOOTSTRAP&&purpose!=TREE_RETIRE&&purpose!=TREE_DATA)||
        !cookie||!user||length>SECURITY_MAX_SID_SIZE||!IsValidSid((PSID)user)||GetLengthSid((PSID)user)!=length)
         return ERROR_INVALID_PARAMETER;
     *cookie=0;AcquireSRWLockExclusive(&pool);
@@ -90,7 +90,7 @@ API DWORD gitgo_tree_reserve(uint64_t *cookie,const void *user,DWORD length,DWOR
     if(!r){ReleaseSRWLockExclusive(&pool);return ERROR_NOT_ENOUGH_QUOTA;}
     AcquireSRWLockExclusive(&r->lock);generation=r->generation+1;
     memset((char*)r+offsetof(Runtime,generation),0,sizeof(*r)-offsetof(Runtime,generation));
-    r->generation=generation;r->occupied=1;r->pid=GetCurrentProcessId();r->purpose=(int)purpose;
+    r->generation=generation;r->occupied=1;r->pid=GetCurrentProcessId();r->purpose=(int)purpose;r->data_thread=GetCurrentThreadId();
     memcpy(r->user,user,length);r->user_length=length;*cookie=(generation<<8)|(i+1);
     ReleaseSRWLockExclusive(&r->lock);ReleaseSRWLockExclusive(&pool);return 0;
 }
@@ -98,7 +98,7 @@ API DWORD gitgo_tree_root(uint64_t cookie,HANDLE root,const uint64_t *identity,D
     Runtime *r=get(cookie);Node *n;DWORD e;HMODULE nt;CreateFn create;ErrorFn convert;
     UNICODE_STRING name;OBJECT_ATTRIBUTES attrs;NTSTATUS status;wchar_t empty[]=L"";
     if(!r)return ERROR_INVALID_HANDLE;
-    if(r->purpose!=TREE_PIN)return done(r,ERROR_INVALID_STATE);
+    if(r->purpose!=TREE_PIN&&r->purpose!=TREE_DATA)return done(r,ERROR_INVALID_STATE);
     if(r->sealed||r->count||!root||!identity||count!=3)return done(r,ERROR_INVALID_PARAMETER);
     r->sealed=1;r->count=1;n=&r->nodes[0];n->phase=1;n->directory=1;
     nt=GetModuleHandleW(L"ntdll.dll");if(!nt)return done(r,error());
@@ -194,7 +194,7 @@ API DWORD gitgo_tree_add(uint64_t cookie,DWORD parent,const wchar_t *leaf,int di
 API DWORD gitgo_tree_read(uint64_t cookie,DWORD index,uint64_t offset,void *data,DWORD size){
     Runtime *r=get(cookie);Node *n;DWORD e,count=0;LARGE_INTEGER where;
     if(!r)return ERROR_INVALID_HANDLE;
-    if(r->sealed||index>=r->count||!data||!size||size>65536)return done(r,ERROR_INVALID_PARAMETER);
+    if(r->purpose==TREE_DATA||r->sealed||index>=r->count||!data||!size||size>65536)return done(r,ERROR_INVALID_PARAMETER);
     n=&r->nodes[index];if(n->directory||(n->writable&&!n->flushed)||offset>n->length||size>n->length-offset)return done(r,ERROR_INVALID_PARAMETER);
     r->sealed=1;e=metadata(n);if(e)return done(r,e);
     where.QuadPart=(LONGLONG)offset;
@@ -222,14 +222,14 @@ API DWORD gitgo_tree_retire(uint64_t cookie){
     Runtime *r;unsigned i,index=(unsigned)(cookie&255);uint64_t generation=cookie>>8;
     if(!index||index>GRP_OWNERS||!generation)return ERROR_INVALID_HANDLE;
     AcquireSRWLockExclusive(&pool);r=&records[index-1];AcquireSRWLockExclusive(&r->lock);
-    if(r->pid!=GetCurrentProcessId()){
-        ReleaseSRWLockExclusive(&pool);return done(r,ERROR_INVALID_HANDLE);
+    if(r->pid!=GetCurrentProcessId()||(r->purpose==TREE_DATA&&r->data_thread!=GetCurrentThreadId())){
+        ReleaseSRWLockExclusive(&r->lock);ReleaseSRWLockExclusive(&pool);return ERROR_INVALID_HANDLE;
     }
     if(generation<r->generation||(generation==r->generation&&!r->occupied)){
         ReleaseSRWLockExclusive(&pool);return done(r,0);
     }
     if(generation!=r->generation){
-        ReleaseSRWLockExclusive(&pool);return done(r,ERROR_INVALID_HANDLE);
+        ReleaseSRWLockExclusive(&r->lock);ReleaseSRWLockExclusive(&pool);return ERROR_INVALID_HANDLE;
     }
     r->sealed=1;
     for(i=r->count;i;i--){Node *n=&r->nodes[i-1];
@@ -642,7 +642,7 @@ API DWORD gitgo_tree_inventory(uint64_t cookie,DWORD index,wchar_t *out,DWORD ca
     FILE_INFO_BY_HANDLE_CLASS query=FileIdBothDirectoryRestartInfo;
     FILE_ID_BOTH_DIR_INFO *entry;wchar_t leaf[129];
     if(!r)return ERROR_INVALID_HANDLE;
-    if(r->purpose!=TREE_PIN)return done(r,ERROR_INVALID_STATE);
+    if(r->purpose!=TREE_PIN&&r->purpose!=TREE_DATA)return done(r,ERROR_INVALID_STATE);
     if(r->sealed||index>=r->count||!r->nodes[index].directory||!out||capacity!=33025||!used||!count)
         return done(r,ERROR_INVALID_PARAMETER);
     *used=0;*count=0;out[0]=0;r->sealed=1;node=&r->nodes[index];
@@ -695,4 +695,65 @@ API DWORD gitgo_bootstrap_check_parent(uint64_t cookie,HANDLE parent,const uint6
     if(p->id.VolumeSerialNumber!=identity[0]||memcmp(p->id.FileId.Identifier,identity+1,16))return done(r,ERROR_INVALID_DATA);
     code=parent_security(r,p);if(code)return done(r,code);
     p->phase=2;r->sealed=0;return done(r,0);
+}
+
+
+/* The DATA purpose proves bounded metadata and holds identity/ACL pins only.
+ * It cannot read, create, write or delete members. Its logical byte allowance
+ * is separate from executable/input pinning; native node memory stays fixed.
+ * The caller must own the project's exclusive lease through every sidecar
+ * inspection and subsequent VFS lifetime. A closed probe grants no I/O ticket.
+ */
+#define DATA_NODES 32
+#define DATA_BYTES (UINT64_C(2)*1024*1024*1024)
+#define DATA_ABSENT ((DWORD)0xe0010001)
+API DWORD gitgo_data_add(uint64_t cookie,DWORD parent,const wchar_t *leaf,int directory,
+    uint64_t ceiling,const uint64_t *expected,DWORD words,DWORD *index){
+    Runtime *r=get(cookie);Node *n,*p;DWORD e;unsigned i;HMODULE nt;CreateFn create;ErrorFn convert;
+    UNICODE_STRING name;OBJECT_ATTRIBUTES attrs;NTSTATUS status;
+    if(!r)return ERROR_INVALID_HANDLE;
+    if(r->purpose!=TREE_DATA||r->sealed||!index||r->count>=DATA_NODES||parent>=r->count||
+       r->nodes[parent].phase!=2||!r->nodes[parent].directory||!leaf_ok(leaf)||
+       (directory!=0&&directory!=1)||(directory&&ceiling)||ceiling>DATA_BYTES||
+       ceiling>DATA_BYTES-r->bytes||(expected?words!=3:words!=0))return done(r,ERROR_INVALID_PARAMETER);
+    /* An unbound observation is restricted to the six SQLite sidecar names.
+     * Main files, gates and directories always require their recorded ID. */
+    if(!expected&&(directory||(wcscmp(leaf,L"state.sqlite3-wal")&&wcscmp(leaf,L"state.sqlite3-shm")&&
+       wcscmp(leaf,L"state.sqlite3-journal")&&wcscmp(leaf,L"observability.sqlite3-wal")&&
+       wcscmp(leaf,L"observability.sqlite3-shm")&&wcscmp(leaf,L"observability.sqlite3-journal"))))
+        return done(r,ERROR_INVALID_PARAMETER);
+    *index=UINT32_MAX;r->sealed=1;p=&r->nodes[parent];e=metadata(p);if(e)return done(r,e);
+    e=security(r,p,parent==0);if(e)return done(r,e);
+    nt=GetModuleHandleW(L"ntdll.dll");if(!nt)return done(r,error());
+    create=(CreateFn)(void*)GetProcAddress(nt,"NtCreateFile");convert=(ErrorFn)(void*)GetProcAddress(nt,"RtlNtStatusToDosError");
+    if(!create||!convert)return done(r,ERROR_PROC_NOT_FOUND);
+    n=&r->nodes[r->count++];n->phase=1;n->directory=directory;n->length=ceiling;n->bounded=1;r->bytes+=ceiling;
+    name.Buffer=(PWSTR)leaf;name.Length=(USHORT)(wcslen(leaf)*sizeof(wchar_t));name.MaximumLength=name.Length;
+    memset(&attrs,0,sizeof(attrs));attrs.Length=sizeof(attrs);attrs.RootDirectory=p->handle;attrs.ObjectName=&name;attrs.Attributes=0x40|0x1000;
+    /* Attribute-only opens do not participate in data share-access checks.
+     * Retain READ_DATA so omission of SHARE_DELETE actually prevents rename
+     * and deletion. The DATA API still refuses every content-read operation.
+     * https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew */
+    status=create(&n->handle,SYNCHRONIZE|READ_CONTROL|FILE_READ_ATTRIBUTES|FILE_READ_DATA,
+        &attrs,&r->io,0,0,FILE_SHARE_READ|FILE_SHARE_WRITE,1,0x200000|0x20|(directory?1:0x40),0,0);
+    if(status==(NTSTATUS)0xc0000034&&!n->handle&&!expected){n->phase=0;r->sealed=0;ReleaseSRWLockExclusive(&r->lock);return DATA_ABSENT;}
+    if(status<0)return done(r,convert(status));if(!n->handle)return done(r,ERROR_INVALID_HANDLE);
+    e=metadata(n);if(e)return done(r,e);
+    if(n->id.VolumeSerialNumber!=r->nodes[0].id.VolumeSerialNumber)return done(r,ERROR_INVALID_DATA);
+    if(expected&&(n->id.VolumeSerialNumber!=expected[0]||memcmp(n->id.FileId.Identifier,expected+1,16)))return done(r,ERROR_INVALID_DATA);
+    for(i=0;i<r->count-1;i++)if(r->nodes[i].phase==2&&!memcmp(&n->id,&r->nodes[i].id,sizeof(n->id)))return done(r,ERROR_INVALID_DATA);
+    e=security(r,n,0);if(e)return done(r,e);
+    n->phase=2;r->sealed=0;*index=r->count-1;return done(r,0);
+}
+API DWORD gitgo_data_release(uint64_t cookie,DWORD index){
+    Runtime *r=get(cookie);Node *n;
+    if(!r)return ERROR_INVALID_HANDLE;
+    if(r->purpose!=TREE_DATA||r->sealed||!index||index>=r->count)return done(r,ERROR_INVALID_PARAMETER);
+    n=&r->nodes[index];
+    /* Directory pins remain until the entire data domain closes. Individual
+     * known file probes can close; their finite node/byte allowance is spent. */
+    if(n->directory||n->phase!=2||!n->handle)return done(r,ERROR_INVALID_STATE);
+    n->phase=3;r->sealed=1;
+    if(!CloseHandle(n->handle))return done(r,error());
+    n->handle=0;n->phase=0;r->sealed=0;return done(r,0);
 }

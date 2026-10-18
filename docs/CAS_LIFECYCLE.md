@@ -670,3 +670,67 @@ the actual native VFS. Their commits remain independent.
 These are construction primitives and protocol tests. Protected project
 registration, aggregate admission, durable publication and independent worker
 recovery still have to join them before production CAS-v2 activation.
+
+
+## Selected-runtime project initialization
+
+The canonical Host's existing project slot now retains root and initial member
+identities. No second project reference file supplies authority. Empty-project
+records retain their previous encoding; an older decoder refuses an extended
+record. Construction advances through BUILDING, STRUCTURED, MATERIALIZED,
+VERIFIED and READY. The root identity precedes member creation. The complete
+member identity map precedes every database effect. A present root without its
+recorded creation identity remains unknown and cannot be adopted or recreated.
+
+A separate immutable native DATA purpose pins metadata while allowing SQLite
+writes. Its handles participate in Windows share checks and withhold deletion
+sharing. Main files, gates and directories require exact recorded identities;
+reparse points, aliases, extra links, permissive ACLs and oversized members are
+refused. Only the six closed State/Observability sidecar names admit unbound
+metadata inspection. Known sidecar probes close before SQLite owns their
+removal, while parent pins and exclusive control/data/CAS leases remain held.
+The fixed 32-node and 2 GiB logical inspection allowance is not an OS disk quota.
+Missing names and closed probes still consume their lifetime allowance.
+
+The pinned runtime may contain an explicit initialization-only storage profile.
+It binds both complete database families, actual SQLite version, repository
+migration checksums, pristine schema digests and closed operations. Its digest
+must equal the selected runtime and Host reservation profile. The package
+builder accepts this descriptor explicitly with --profile-file and verifies
+its requested digest. This profile cannot approve checkpoint publication or
+CAS cleanup, and the default StorageRuntime does not activate it.
+
+The parent commits INTENT and the actual suspended child's PID/creation time
+before resuming that child. Initialization executes the active installed
+interpreter with its complete module pins and runtime lease. The child checks
+its own native identity, exact persisted request and activation epoch before
+ACCEPTED. It opens the real State and Observability schemas only beneath the
+recorded project namespace and exclusive leases. Their SQL commits remain
+independent. Each database retains its canonical Host/project/native identity
+binding, and the legacy migration name becomes a guarded view. No compatibility
+UDF bypasses that guard. Unknown commit or close seals further work.
+
+MATERIALIZED alone never means READY. After the complete initializer and its
+original Host resources have retired, a separately admitted selected-runtime
+worker verifies committed schema, binding, physical layout and empty business
+tables. It does not resume migrations. Only this worker can record VERIFIED.
+Its native retirement and a fresh exact namespace observation precede READY.
+Diagnostic output and exit codes cannot provide these facts. A lost terminal
+journal acknowledgement requires exact state and durability confirmation;
+execution is never replayed to obtain another response.
+
+Crash recovery independently proves that both original native parent and child
+have ended and that every observation closed. A live parent, missing child
+identity or uncertain observation prevents retirement. Recovery preserves
+partial construction and never adopts an unrecorded root. A complete committed
+structure can undergo a later independent verification; an incomplete schema
+cannot be completed by that reader.
+
+Tests cover actual selected native jobs, each construction boundary, independent
+verifier crashes, real parent exits, unknown native/SQL/journal responses,
+identity and ACL refusal, and legacy writer refusal. Both Windows CI paths
+include public canonical project initialization and verification in the same
+disposable Host used for runtime lifecycle acceptance. The complete publication
+profile, aggregate business/cleanup accounting, CAS preparation, collection,
+all-caller routing, genuine different-build upgrade and full product/platform
+acceptance remain separate requirements before storage-milestone completion.

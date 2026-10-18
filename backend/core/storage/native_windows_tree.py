@@ -10,6 +10,8 @@ import ctypes as C
 from dataclasses import dataclass
 from enum import IntEnum
 import hashlib
+import os
+import threading
 from pathlib import PureWindowsPath
 import re
 import struct
@@ -32,6 +34,7 @@ class TreePurpose(IntEnum):
     ABSENCE = 3
     BOOTSTRAP = 4
     RETIRE = 6
+    DATA = 8
 
 
 class StorageTreeError(StorageBlocked):
@@ -98,6 +101,8 @@ class WindowsTreeLibrary:
         self._owners: dict[int, _TreeOwner] = {}
         words = C.POINTER(_U64)
         signatures = {
+            "data_add": [_U64, _U32, C.c_wchar_p, C.c_int, _U64, words, _U32, C.POINTER(_U32)],
+            "data_release": [_U64, _U32],
             "tree_inventory": [_U64, _U32, C.c_wchar_p, _U32, C.POINTER(_U32), C.POINTER(_U32)],
             "tree_abi": [], "tree_reserve": [words, C.c_void_p, _U32, _U32],
             "tree_root": [_U64, C.c_void_p, words, _U32],
@@ -141,7 +146,7 @@ class WindowsTreeLibrary:
             raise ValueError("An explicit native tree purpose is required")
         owner_type = {TreePurpose.PIN: RuntimePins, TreePurpose.INSTALL: RuntimeInstaller,
             TreePurpose.ABSENCE: RuntimeAbsence, TreePurpose.BOOTSTRAP: MetadataBootstrap,
-            TreePurpose.RETIRE: RuntimeRetirement}[purpose]
+            TreePurpose.RETIRE: RuntimeRetirement, TreePurpose.DATA: DatabasePins}[purpose]
         return owner_type(self, purpose, host_sid)
 
 
@@ -454,3 +459,82 @@ class RuntimeRetirement(_TreeOwner):
         _check("retirement_finish", self._call("retirement_finish", self._cookie))
         self._finished = True
         self._sealed = False
+
+
+class DatabasePins(RuntimePins):
+    """Owned exact identities and ACLs; database bytes remain VFS-owned.
+
+    Main files, gates and directories require recorded identities. A known
+    sidecar probe may close before SQLite opens it under the same exclusive
+    project lease. Neither an absent probe nor closing one refunds its finite
+    native node/byte allowance. This component never grants that outer lease.
+    """
+    def __init__(self, library, purpose, host_sid):
+        if purpose is not TreePurpose.DATA:
+            raise ValueError("An immutable database-metadata purpose is required")
+        self._pid, self._thread = os.getpid(), threading.get_ident()
+        self._released = set()
+        super().__init__(library,purpose,host_sid)
+
+    def _context(self):
+        if (os.getpid(),threading.get_ident()) != (self._pid,self._thread):
+            raise StorageTreeError("foreign_context",6)
+
+    def _require(self, *, mutable=False):
+        self._context()
+        super()._require(mutable=mutable)
+
+    def _index(self,index):
+        super()._index(index)
+        if index in self._released:
+            raise StorageTreeError("released_database_probe",6)
+
+    def _data_add(self, parent, name, expected, directory, ceiling):
+        self._require(mutable=True); self._index(parent)
+        name=_name(name); _number(ceiling,2*1024*1024*1024)
+        if type(directory) is not bool or directory and ceiling:
+            raise ValueError("An explicit database member kind and ceiling are required")
+        words=None if expected is None else _identity_words(expected)
+        index=_U32(2**32-1)
+        self._sealed=True
+        result=self._call("data_add",self._cookie,parent,name,directory,ceiling,
+                          words,0 if words is None else 3,C.byref(index))
+        if result==0xE0010001 and expected is None:
+            self._sealed=False
+            return None
+        _check("database_member",result)
+        self._nodes[index.value]=TreeNode(directory,ceiling,None)
+        self._sealed=False
+        return index.value
+
+    def add(self,parent,name,expected, *, directory=False,ceiling=0):
+        _identity_words(expected)
+        return self._data_add(parent,name,expected,directory,ceiling)
+
+    def inspect_sidecar(self,parent,name,ceiling):
+        if name not in {role+".sqlite3"+suffix for role in ("state","observability")
+                        for suffix in ("-wal","-shm","-journal")}:
+            raise ValueError("An exact SQLite sidecar name is required")
+        return self._data_add(parent,name,None,False,ceiling)
+
+    def release(self,index):
+        self._require(); self._index(index)
+        if not index or self._nodes[index].directory:
+            raise ValueError("Only a known individual file probe may close")
+        self._sealed=True
+        self._released.add(index) # Consume before a potentially unknown close.
+        _check("database_probe_close",self._call("data_release",self._cookie,index))
+        self._sealed=False
+
+    def root_path(self,*args,**kwargs):
+        raise ValueError("Database pins require an already owned native parent")
+
+    def read(self,*args,**kwargs):
+        raise ValueError("Database pins expose metadata only")
+
+    def digest(self,*args,**kwargs):
+        raise ValueError("Database content belongs to the qualified VFS")
+
+    def close(self):
+        self._context()
+        super().close()

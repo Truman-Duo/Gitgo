@@ -45,7 +45,7 @@ def archive(entries):
     return buffer.getvalue()
 
 
-def inputs(repository: Path, python_root: Path, packages: Path, native_root: Path, profile: str):
+def inputs(repository: Path, python_root: Path, packages: Path, native_root: Path, profile: str, *, profile_file: Path | None = None):
     if sys.platform != "win32" or sys.version_info[:2] != (3, 14) or struct.calcsize("P") != 8:
         raise RuntimeError("This build profile requires native Windows CPython 3.14 x64")
     if sys.getwindowsversion().major<10:
@@ -53,11 +53,20 @@ def inputs(repository: Path, python_root: Path, packages: Path, native_root: Pat
     digest(profile)
     if python_root.resolve(strict=True) != Path(sys.base_prefix).resolve(strict=True):
         raise ValueError("The input Python installation must be the actual build interpreter")
+    descriptor = None
+    if profile_file is not None:
+        from backend.core.storage.project_profile import ProjectProfile
+        with profile_file.resolve(strict=True).open("rb") as source:
+            descriptor = source.read(8193)
+        if not 0 < len(descriptor) <= 8192 or ProjectProfile.from_bytes(descriptor).sha256 != profile:
+            raise ValueError("Explicit storage profile does not match the requested content contract")
     files = {}
     def add(name, data):
         if name.casefold() in {key.casefold() for key in files}:
             raise ValueError("Duplicate package member")
         files[name] = data
+    if descriptor is not None:
+        add("storage-profile.json", descriptor)
     add("python.exe", (python_root/"python.exe").read_bytes())
     for source in sorted(python_root.glob("*.dll")):
         # CPython 3.14 supports Windows 10+. Its UCRT is always supplied by
@@ -104,13 +113,13 @@ def inputs(repository: Path, python_root: Path, packages: Path, native_root: Pat
     return files, content
 
 
-def build(repository: Path, python_root: Path, packages: Path, native_root: Path, output: Path, profile: str):
+def build(repository: Path, python_root: Path, packages: Path, native_root: Path, output: Path, profile: str, *, profile_file: Path | None = None):
     paths = [path.resolve(strict=True) for path in (repository, python_root, packages, native_root, output)]
     repository, python_root, packages, native_root, output = paths
     if any(output == source or output.is_relative_to(source) or source.is_relative_to(output)
            for source in (repository, python_root, packages, native_root)):
         raise ValueError("Runtime output must be separate from all build inputs")
-    files, content = inputs(repository, python_root, packages, native_root, profile)
+    files, content = inputs(repository, python_root, packages, native_root, profile, profile_file=profile_file)
     # Explicit build inputs, not production module discovery. No environment
     # variable selects a production DLL or supplies installation approval.
     scopes = WindowsScopeLibrary(ctypes.CDLL(str(native_root/"gitgo-storage-scope.dll")))
@@ -154,8 +163,9 @@ def main():
     for option in ("repository", "python-root", "packages", "native-root", "output"):
         parser.add_argument("--"+option, required=True, type=Path)
     parser.add_argument("--storage-profile", required=True)
+    parser.add_argument("--profile-file", type=Path)
     args = parser.parse_args()
-    manifest = build(args.repository, args.python_root, args.packages, args.native_root, args.output, args.storage_profile)
+    manifest = build(args.repository, args.python_root, args.packages, args.native_root, args.output, args.storage_profile, profile_file=args.profile_file)
     print(json.dumps(dict(root=manifest.root, manifest=manifest.sha256, content=manifest.content.contract,
                           files=len(manifest.content.files), bytes=sum(item.length for item in manifest.content.files))))
 

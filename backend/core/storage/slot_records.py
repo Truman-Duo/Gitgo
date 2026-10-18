@@ -9,6 +9,7 @@ import hashlib
 import re
 
 from .journal_cells import canonical, decode, require, number, guid, digest, JournalFormat
+from .project_records import ProjectRecord, slot_transition
 
 def reservation(value):
     require(type(value) is dict and set(value)=={'body','checksum'},'reservation envelope')
@@ -43,25 +44,41 @@ def event(value):
 class WorkerSlotState:
     reservation_bytes:bytes
     event_bytes:bytes|None=None
+    project_bytes:bytes|None=None
 
     def __post_init__(self):
         reservation(decode(self.reservation_bytes))
         event(None if self.event_bytes is None else decode(self.event_bytes))
+        if self.project_bytes is not None:
+            record=ProjectRecord.from_bytes(self.project_bytes)
+            require(record.profile==decode(self.reservation_bytes)['body']['fingerprint'],'reserved project profile')
 
     def value(self):
-        return dict(reservation=decode(self.reservation_bytes),event=None if self.event_bytes is None else decode(self.event_bytes))
+        value=dict(reservation=decode(self.reservation_bytes),event=None if self.event_bytes is None else decode(self.event_bytes))
+        if self.project_bytes is not None:value['project']=decode(self.project_bytes)
+        return value
 
-    def with_event(self,value):return WorkerSlotState(self.reservation_bytes,canonical(value))
+    def with_event(self,value):return WorkerSlotState(self.reservation_bytes,canonical(value),self.project_bytes)
+
+    def with_project(self,value):
+        require(type(value) is ProjectRecord,'immutable project fact required')
+        return WorkerSlotState(self.reservation_bytes,self.event_bytes,value.to_bytes())
 
 
 def transition(old,new):
     require(type(new) is WorkerSlotState,'immutable slot state')
     if old is None:
-        require(new.event_bytes is None,'reservation precedes worker intent');return
+        require(new.event_bytes is None and new.project_bytes is None,'reservation precedes all effects');return
     require(old.reservation_bytes==new.reservation_bytes,'reservation cannot change')
     a=None if old.event_bytes is None else decode(old.event_bytes)
     b=None if new.event_bytes is None else decode(new.event_bytes)
     require(b is not None,'worker debt cannot be erased')
+    previous=None if old.project_bytes is None else ProjectRecord.from_bytes(old.project_bytes)
+    current=None if new.project_bytes is None else ProjectRecord.from_bytes(new.project_bytes)
+    slot_transition(previous,current,a,b,decode(new.reservation_bytes)['body'])
+    if a==b:
+        require(previous!=current,'unchanged worker cannot replay its journal entry')
+        return
     if a is None or a['phase']=='RETIRED':
         require(b['phase']=='INTENT','fresh intent required')
         if a is not None:require(a['launch']!=b['launch'],'launch identity cannot replay')
@@ -76,9 +93,10 @@ def transition(old,new):
 
 def _parse_state(raw):
     value = decode(raw)
-    require(type(value) is dict and set(value)=={'reservation','event'}, 'worker slot payload')
+    require(type(value) is dict and set(value) in ({'reservation','event'},{'reservation','event','project'}), 'worker slot payload')
     return WorkerSlotState(canonical(value['reservation']),
-        None if value['event'] is None else canonical(value['event']))
+        None if value['event'] is None else canonical(value['event']),
+        canonical(value['project']) if 'project' in value else None)
 
 
 FORMAT = JournalFormat(b'GTSC\x01\x00\x00\x00', _parse_state,
