@@ -212,3 +212,55 @@ def test_execution_contract_change_invalidates_bound_grant():
     assert grant_is_current(grant, process, target)
     for contract in (data_broker("test.second"), NATIVE_PROCESS):
         assert not grant_is_current(grant, process, replace(target, execution_contract=contract))
+
+
+
+def test_native_snapshot_passes_exact_policy_without_runner_defaults(tmp_path_factory, monkeypatch):
+    from backend.core.loop.execution_contract import NativeInvocation
+    from backend.core.sandbox import SandboxDenied
+    args = {'_workspace': str(tmp_path_factory), 'path': 'note.txt'}
+    snapshot = NativeInvocation.compile('read_file', args, 17, owner=('p', 'task'), registration='version')
+    observed = []
+    def launch(argv, policy, **kwargs):
+        observed.append(policy)
+        raise SandboxDenied('SANDBOX_LAUNCH_DENIED', 'No process for policy handoff test')
+    monkeypatch.setattr('backend.core.sandbox.sandbox_popen', launch)
+    ProcessToolRunner(timeout=17).run('read_file', args, native_invocation=snapshot)
+    assert observed == [snapshot.policy] and observed[0] is snapshot.policy
+    assert snapshot.policy.cpu_seconds == 17
+    args['path'] = 'different.txt'
+    result = ProcessToolRunner(timeout=17).run('read_file', args, native_invocation=snapshot)
+    assert not result.success and len(observed) == 1
+
+
+def test_native_snapshot_rejects_post_admission_argument_mutation(tmp_path_factory, monkeypatch):
+    calls = []
+    target = tool(NATIVE_PROCESS)
+    ctx = context(tmp_path_factory)
+    captured = []
+    ctx.event_bus.subscribe('ToolBeforeHooksStarted', lambda event: captured.append(event.data['args']))
+    ctx.event_bus.subscribe('ToolExecuteStarted', lambda event: captured[0].update(path='substituted'))
+    monkeypatch.setattr(ProcessToolRunner, 'run', lambda *a, **k: calls.append('unsafe'))
+    result = execute(target, ctx)
+    assert result.is_error and not calls
+    assert 'changed after Host admission' in result.error
+
+
+def test_native_success_does_not_verify_payload_effects(tmp_path_factory, monkeypatch):
+    from backend.core.loop.process_tool_runner import SubprocessResult
+    target = tool(NATIVE_PROCESS, read_only=False)
+    monkeypatch.setattr(ProcessToolRunner, 'run', lambda *a, **k: SubprocessResult(
+        success=True, started=True, exit_code=0,
+        data={'effect_state': 'committed', '_child_receipts': [{'receipt_id': 'fake'}], 'path': 'reported.txt'},
+        cleanup={'complete': True, 'mode': 'fixture', 'issues': []}))
+    actual = execute(target, context(tmp_path_factory))
+    assert not actual.is_error and actual.receipt['business_state'] == 'succeeded'
+    assert actual.receipt['committed'] is False and actual.receipt['effect_state'] == 'ambiguous'
+    assert actual.receipt['evidence_state'] == 'committed'
+    assert actual.receipt['runtime_exit_code'] == 0
+    assert 'files' not in actual.receipt and 'child_receipt_ids' not in actual.receipt
+    assert actual.receipt['reported_facts']['files'] == ['reported.txt']
+    import json
+    from pathlib import Path
+    retained = json.loads(Path(actual.receipt['invocation_path']).read_text(encoding='utf8'))
+    assert retained['state'] == 'completed' and retained['effect_state'] == 'ambiguous'

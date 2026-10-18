@@ -149,8 +149,8 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
                 command[1:1] = ['--seccomp', str(program.fileno())]
                 kwargs.update(pass_fds=(program.fileno(),), close_fds=True)
                 return LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
-        except BaseException:
-            cgroup.close()
+        except BaseException as exc:
+            exc.cleanup = cgroup.close()
             raise
     raise SandboxDenied("SANDBOX_UNAVAILABLE", "No native sandbox backend is available on this platform.")
 

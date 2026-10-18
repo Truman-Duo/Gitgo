@@ -72,7 +72,11 @@ class ToolPipeline:
     def execute(self, tool_call, tool, ctx, execution_id, call_index=0):
         from .read_approval import AdmissionResources
         with AdmissionResources() as admission:
-            return self._execute(tool_call, tool, ctx, execution_id, call_index, admission=admission)
+            result = self._execute(tool_call, tool, ctx, execution_id, call_index, admission=admission)
+            cleanup = result.receipt.get("runtime_cleanup")
+            if cleanup is not None and cleanup.get("complete") is not True:
+                admission.retain(ctx.process, execution_id, call_index)
+            return result
 
     def _execute(
         self,
@@ -96,6 +100,10 @@ class ToolPipeline:
 
         start = time.time()
         runtime_metadata: dict = {}
+        if isinstance(supplied_args, dict) and any(str(key).startswith("_") for key in supplied_args):
+            return self._error_result(tool_name, execution_id, call_index, start,
+                "Private execution fields are Host-owned",
+                diagnostics={"nature": "governance", "code": "SANDBOX_POLICY_INVALID"})
         from .composite_runtime import call_key, state_for
         continuation_key = call_key(tool_call, execution_id, call_index)
         resume_state = None
@@ -120,6 +128,16 @@ class ToolPipeline:
             if tool_name != tool.name:
                 raise ValueError("Tool call does not match its Host registration identity")
             execution_contract = tool.validate_execution_contract()
+            from .permission_broker import tool_contract_digest
+            registered_digest = tool_contract_digest(tool)
+            runtime_metadata["registration"] = registered_digest
+            runtime_metadata["owner"] = (ctx.process.process_id, ctx.process.active_task_id or ctx.process.process_id)
+            if execution_contract.kind.value == "native_process" and any(
+                reason.get("code") == "NATIVE_CLEANUP_UNCONFIRMED"
+                for reason in (ctx.process.recovery or {}).get("reasons", [])
+                if isinstance(reason, dict)
+            ):
+                raise ValueError("SANDBOX_CLEANUP_PENDING: prior native resources require inspection")
         except (AttributeError, ValueError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
@@ -323,6 +341,10 @@ class ToolPipeline:
         # before an exact grant is spent.
         try:
             tool.validate_execution_contract()
+            if runtime_metadata["owner"] != (ctx.process.process_id, ctx.process.active_task_id or ctx.process.process_id):
+                raise ValueError("Task scope changed during invocation")
+            if tool_contract_digest(tool) != registered_digest:
+                raise ValueError("Tool identity or limits changed during invocation")
         except (AttributeError, ValueError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
@@ -380,6 +402,10 @@ class ToolPipeline:
         # before execution or its journal starts.
         try:
             tool.validate_execution_contract()
+            if runtime_metadata["owner"] != (ctx.process.process_id, ctx.process.active_task_id or ctx.process.process_id):
+                raise ValueError("Task scope changed during invocation")
+            if tool_contract_digest(tool) != registered_digest:
+                raise ValueError("Tool identity or limits changed during invocation")
         except (AttributeError, ValueError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
@@ -396,7 +422,13 @@ class ToolPipeline:
                 diagnostics={"nature": "system", "code": "TOOL_CANCELLED"},
             )
         from backend.core.loop.permission_broker import admit_invocation_grants
+        from .execution_contract import NativeInvocation, native_timeout
+        native_invocation = None
         try:
+            if execution_contract.kind.value == "native_process" and not tool.composite_spec:
+                native_invocation = NativeInvocation.compile(tool.runner_name or tool_name,
+                    {**args, "_workspace": str(ctx.workspace_path)}, native_timeout(tool, args),
+                    owner=runtime_metadata["owner"], registration=registered_digest)
             admitted_roots, admission_error = admit_invocation_grants(
                 ctx.process, tool, dict(raw_args or {}), dict(args or {}),
                 out_of_scope_resources(args, str(ctx.workspace_path)),
@@ -431,7 +463,7 @@ class ToolPipeline:
         if is_effectful_mutation(effect_value):
             invocation_path = self._write_invocation_state(
                 ctx, tool, tool_name, execution_id, call_index,
-                state="running", effect_state="not_committed",
+                state="running", effect_state="not_committed", evidence=runtime_metadata,
             )
             if not invocation_path:
                 result = self._error_result(
@@ -456,10 +488,11 @@ class ToolPipeline:
             # prepare hooks and mutable registry objects cannot substitute a new
             # callable/authority after the initial admission check.
             tool.validate_execution_contract()
-            effective_timeout = float(tool.timeout)
-            if tool.timeout_argument:
-                requested_timeout = float(args.get(tool.timeout_argument) or tool.timeout_default)
-                effective_timeout = min(effective_timeout, max(1.0, requested_timeout) + 5)
+            if runtime_metadata["owner"] != (ctx.process.process_id, ctx.process.active_task_id or ctx.process.process_id):
+                raise ValueError("Task scope changed during invocation")
+            if tool_contract_digest(tool) != registered_digest:
+                raise ValueError("Tool identity or limits changed during invocation")
+            effective_timeout = native_timeout(tool, args)
             budget = getattr(ctx.process, "task_budget", None)
             if budget is not None:
                 allowance = budget.reserve_time(effective_timeout + 5, reason=f"tool_phase:{tool_name}")
@@ -510,13 +543,14 @@ class ToolPipeline:
                             )
                 else:
                     result_data = self._execute_composite_plan(
-                        tool, args, ctx, execution_id, call_index, continuation_key,
+                        tool, args, ctx, execution_id, call_index, continuation_key, runtime_metadata=runtime_metadata,
                     )
             # Host registration selects native execution independently of business effect.
             elif execution_contract.kind.value == "native_process":
                 result_data = self._execute_isolated(
                     getattr(tool, "runner_name", "") or tool_name,
                     {**args, "_workspace": str(ctx.workspace_path)}, effective_timeout,
+                    native_invocation=native_invocation,
                     **({"read_binding": admission.read_binding} if admission.read_binding else {}),
                     cancellation_event=ctx.cancellation,
                     diagnostics=runner_diagnostics,
@@ -536,7 +570,7 @@ class ToolPipeline:
                 ctx, tool, tool_name, execution_id, call_index,
                 state="cancelled",
                 effect_state=effect_state,
-                path=invocation_path,
+                path=invocation_path, evidence=runtime_metadata,
             )
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
@@ -553,7 +587,7 @@ class ToolPipeline:
             self._write_invocation_state(
                 ctx, tool, tool_name, execution_id, call_index,
                 state="failed", effect_state="ambiguous",
-                path=invocation_path,
+                path=invocation_path, evidence=runtime_metadata,
             )
             # v0.45: classify error for CRASH vs BUSINESS distinction
             from backend.core.loop.error_taxonomy import classify_tool_error, ErrorNature
@@ -577,9 +611,9 @@ class ToolPipeline:
             return self._attach_runtime_cleanup(self._attach_runner_diagnostics(result, runner_diagnostics), runtime_metadata, ctx)
 
         self._publish_tool_notices(ctx, tool_name, execution_id, call_index, result_data)
-        if isinstance(result_data, dict) and result_data.get("_suspended"):
+        if runtime_metadata.get("suspended") is True:
             self._write_invocation_state(ctx, tool, tool_name, execution_id, call_index,
-                state="awaiting_user", effect_state="partial", path=invocation_path)
+                state="awaiting_user", effect_state="partial", path=invocation_path, evidence=runtime_metadata)
             result = ToolResult(tool_name=tool_name, execution_id=execution_id,
                 call_index=call_index, suspended=True, data={"execution_state": "awaiting_user"})
             return self._attach_runtime_cleanup(self._attach_runner_diagnostics(result, runner_diagnostics), runtime_metadata, ctx)
@@ -593,21 +627,21 @@ class ToolPipeline:
                 business_error = "TEST_FAILED"
         if business_error:
             effect_value = getattr(tool.effect, "value", str(tool.effect))
-            effect_state = str(result_data.get("effect_state", "")) or (
+            effect_state = runtime_metadata.get("effect_state") or (
                 "not_committed" if not is_effectful_mutation(effect_value)
                 else "ambiguous"
             )
             self._write_invocation_state(
                 ctx, tool, tool_name, execution_id, call_index,
                 state="business_error", effect_state=effect_state,
-                path=invocation_path,
+                path=invocation_path, evidence=runtime_metadata,
             )
             code = business_error
             detail = str(result_data.get("detail", ""))
             if code == "COMMAND_EXIT_NONZERO" and not detail:
                 detail = f"exit_code={result_data.get('exit_code')}"
             message = code if not detail else f"{code}: {detail}"
-            rollback_required = bool(result_data.get("_rollback_required"))
+            rollback_required = runtime_metadata.get("rollback_required") is True
             error_info = result_data.get("error_info")
             if code == "COMMAND_EXIT_NONZERO" and not isinstance(error_info, dict):
                 from backend.core.errors import error_payload
@@ -691,7 +725,7 @@ class ToolPipeline:
                 result.receipt["tool_result_locator"] = spill["locator"]
                 result.receipt["tool_result_digest"] = spill["digest"]
                 result.receipt["tool_result_chars"] = spill["total_chars"]
-            self._attach_child_lineage(result.receipt, result_data)
+            self._attach_child_lineage(result.receipt, result_data, runtime_metadata)
             if not getattr(tool, "composite_spec", None):
                 self._record_dependency_observation(ctx, tool_name, args, result_data)
             return self._attach_runtime_cleanup(self._attach_runner_diagnostics(result, runner_diagnostics), runtime_metadata, ctx)
@@ -717,15 +751,19 @@ class ToolPipeline:
             receipt["tool_result_locator"] = spill["locator"]
             receipt["tool_result_digest"] = spill["digest"]
             receipt["tool_result_chars"] = spill["total_chars"]
+        effect_state = self._observed_effect(effect_value, runtime_metadata, succeeded=True)
         self._write_invocation_state(
             ctx, tool, tool_name, execution_id, call_index,
-            state="committed", effect_state="committed",
-            path=invocation_path,
+            state="committed" if effect_state == "committed" else "completed", effect_state=effect_state,
+            path=invocation_path, evidence=runtime_metadata,
         )
         if invocation_path:
             receipt["invocation_path"] = invocation_path
-            receipt["effect_state"] = "committed"
-        self._attach_child_lineage(receipt, result_data)
+            receipt["effect_state"] = effect_state
+        if is_effectful_mutation(effect_value) and effect_state != "committed":
+            receipt["committed"] = False
+            receipt["effect_state"] = effect_state
+        self._attach_child_lineage(receipt, result_data, runtime_metadata)
         if not getattr(tool, "composite_spec", None):
             self._record_dependency_observation(ctx, tool_name, args, result_data)
         result = ToolResult(
@@ -761,9 +799,54 @@ class ToolPipeline:
 
         return result
 
+    @staticmethod
+    def _observed_effect(effect, metadata, *, succeeded):
+        if not is_effectful_mutation(effect):
+            return "not_committed"
+        if metadata.get("effect_state") in {"not_committed", "partial", "ambiguous"}:
+            return metadata["effect_state"]
+        children = metadata.get("child_receipts")
+        if children is not None:
+            changed = [r for r in children if is_effectful_mutation(r.get("effect", "read"))]
+            if not changed:
+                return "not_committed"
+            if all(r.get("committed") is True and r.get("effect_state") == "committed" for r in changed):
+                return "committed"
+            return "partial" if any(r.get("committed") for r in changed) else "ambiguous"
+        # Exit/protocol success observes the call, not arbitrary child effects.
+        if "launch_state" in metadata:
+            return "not_committed" if metadata["launch_state"] == "not_started" else "ambiguous"
+        return "committed" if succeeded else "ambiguous"
+
     @classmethod
     def _attach_runtime_cleanup(cls, result, runtime_metadata, ctx):
         """Keep supervisor facts separate from handler data and effect success."""
+        cls._attach_child_lineage(result.receipt, result.data, runtime_metadata)
+        result.receipt["business_state"] = "failed" if result.is_error else "awaiting_user" if result.suspended else "succeeded"
+        if "launch_state" in runtime_metadata and is_effectful_mutation(result.receipt.get("effect", "read")):
+            effect = cls._observed_effect(result.receipt["effect"], runtime_metadata, succeeded=not result.is_error)
+            result.receipt["effect_state"] = effect
+            if effect != "committed":
+                result.receipt["committed"] = False
+                result.diagnostics["effect_verification"] = "unverified"
+                reported = {}
+                for name in ("files", "command_exit_code", "command_completed", "test_passed", "test_completed", "test_seeds"):
+                    if name in result.receipt:
+                        reported[name] = result.receipt.pop(name)
+                if reported:
+                    result.receipt["reported_facts"] = reported
+        evidence = runtime_metadata.get("evidence_state", "not_required")
+        result.receipt["evidence_state"] = evidence
+        result.diagnostics["evidence_state"] = evidence
+        if evidence == "failed":
+            # Preserve business output/effects; a stale path is not this commit.
+            result.receipt["committed"] = False
+            result.formatted += "\n[Evidence update failed; retain this result and inspect recovery before repeating the operation.]"
+        if "execution_basis" in runtime_metadata:
+            result.receipt["execution_basis"] = runtime_metadata["execution_basis"]
+        if "launch_state" in runtime_metadata:
+            result.receipt["launch_state"] = runtime_metadata["launch_state"]
+            result.receipt["runtime_exit_code"] = runtime_metadata.get("exit_code")
         cleanup = runtime_metadata.get("cleanup")
         if not isinstance(cleanup, dict):
             return result
@@ -872,15 +955,19 @@ class ToolPipeline:
             diagnostics=diagnostics,
         )
 
-    def _execute_composite_plan(self, tool, args, ctx, execution_id, call_index, key):
+    def _execute_composite_plan(self, tool, args, ctx, execution_id, call_index, key, *, runtime_metadata=None):
         from .composite_runtime import run
-        return run(self, tool, args, ctx, execution_id, call_index, key)
+        return run(self, tool, args, ctx, execution_id, call_index, key, runtime_metadata=runtime_metadata)
 
     @staticmethod
-    def _attach_child_lineage(receipt: dict, result_data: dict | None) -> None:
+    def _attach_child_lineage(receipt: dict, result_data: dict | None, runtime_metadata=None) -> None:
         if not isinstance(result_data, dict):
             return
-        children = result_data.pop("_child_receipts", [])
+        # Only the in-process composite scheduler owns this side channel.
+        # Tool JSON remains data, even when it copies a real receipt ID.
+        from copy import deepcopy
+        result_data.pop("_child_receipts", None)
+        children = deepcopy((runtime_metadata or {}).get("child_receipts", []))
         if not isinstance(children, list) or not children:
             return
         child_ids = [
@@ -909,24 +996,34 @@ class ToolPipeline:
 
     def _execute_isolated(self, tool_name: str, args: dict,
                           timeout: float = 60.0,
-                          cancellation_event=None, diagnostics=None, runtime_metadata=None, read_binding=None) -> dict:
+                          cancellation_event=None, diagnostics=None, runtime_metadata=None, read_binding=None, native_invocation=None) -> dict:
         """通过 ProcessToolRunner 在子进程中执行工具。
 
         子进程崩溃→异常传播到 Step 4 的 catch 块→被 classify_tool_error 捕获。
         子进程超时→SubprocessResult.timed_out=True→抛出 TimeoutError。
         """
         from backend.core.loop.process_tool_runner import ProcessToolRunner
+        from .execution_contract import NativeInvocation
+        metadata = runtime_metadata if runtime_metadata is not None else {}
+        if native_invocation is None:
+            native_invocation = NativeInvocation.compile(tool_name, args, timeout,
+                owner=metadata.get("owner", ("", "")), registration=metadata.get("registration", ""))
+        native_invocation.check(tool_name, args, timeout)
+        metadata["execution_basis"] = native_invocation.digest
         runner = ProcessToolRunner(timeout=timeout)
         result = runner.run(
-            tool_name, args, cancellation_event=cancellation_event,
+            tool_name, args, cancellation_event=cancellation_event, native_invocation=native_invocation,
             **({"read_binding": read_binding} if read_binding else {}),
         )
         from backend.core.loop.runner_diagnostics import capture_runner_diagnostics, safe_runner_text
         if diagnostics is not None:
             diagnostics.update(capture_runner_diagnostics(result))
         error = safe_runner_text(getattr(result, "error", "") or "")
-        if runtime_metadata is not None and isinstance(getattr(result, "cleanup", None), dict):
-            runtime_metadata["cleanup"] = dict(result.cleanup)
+        if runtime_metadata is not None:
+            runtime_metadata["launch_state"] = "started" if getattr(result, "started", False) is True else getattr(result, "launch_state", "unknown")
+            runtime_metadata["exit_code"] = getattr(result, "exit_code", None)
+            if isinstance(getattr(result, "cleanup", None), dict):
+                runtime_metadata["cleanup"] = dict(result.cleanup)
         if not result.success:
             if "cancelled" in error.lower():
                 raise ToolExecutionCancelled(error,
@@ -1015,6 +1112,7 @@ class ToolPipeline:
         state: str,
         effect_state: str,
         path: str | None = None,
+        evidence: dict | None = None,
     ) -> str | None:
         """Persist the truth boundary for isolated side effects atomically."""
         if not ctx.workspace_path:
@@ -1056,6 +1154,8 @@ class ToolPipeline:
             tmp = target.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(str(tmp), str(target))
+            if evidence is not None:
+                evidence["evidence_state"] = "committed"
             return str(target)
         except (OSError, RuntimeError, ValueError) as exc:
             from .event_bus import ToolEvent
@@ -1064,7 +1164,9 @@ class ToolPipeline:
                       "message": ("Tool execution was blocked because its invocation journal could not be created."
                                   if not path else "Invocation journal update failed; retained results remain auditable and restart requires inspection."),
                       "severity": "warning", "error_type": type(exc).__name__}))
-            return path
+            if evidence is not None:
+                evidence["evidence_state"] = "failed"
+            return None
 
     def _error_result(self, tool_name, execution_id, call_index, start, error,
                        diagnostics: dict | None = None):

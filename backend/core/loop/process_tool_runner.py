@@ -36,6 +36,8 @@ class SubprocessResult:
     stderr_partial: bool = False
     effect_state: str = ""
     cleanup: dict | None = None
+    started: bool = False
+    launch_state: str = "unknown"
 
 
 class ProcessToolRunner:
@@ -53,7 +55,18 @@ class ProcessToolRunner:
     def run(self, tool_name: str, args: dict,
             timeout: float | None = None,
             cancellation_event: threading.Event | None = None,
-            *, read_binding=None) -> SubprocessResult:
+            *, read_binding=None, native_invocation=None) -> SubprocessResult:
+        observation = {}
+        result = self._run(tool_name, args, timeout, cancellation_event,
+                           read_binding=read_binding, observation=observation, native_invocation=native_invocation)
+        result.started = observation.get("started", False)
+        result.launch_state = "started" if result.started else observation.get("launch_state", "not_started")
+        result.cleanup = observation.get("cleanup", result.cleanup)
+        if result.cleanup is None and result.launch_state in {"unknown", "started"}:
+            result.cleanup = {"complete": False, "mode": "unknown", "issues": ["native_cleanup_not_observed"]}
+        return result
+
+    def _run(self, tool_name, args, timeout, cancellation_event, *, read_binding, observation, native_invocation):
         """在子进程中执行工具。
 
         Args:
@@ -94,8 +107,13 @@ class ProcessToolRunner:
             workspace = args.get("_workspace") or args.get("workspace_path")
             if not workspace:
                 raise SandboxDenied("SANDBOX_POLICY_INVALID", "Host execution workspace is required.")
-            policy = SandboxPolicy(Path(str(workspace)),
-                cpu_seconds=max(1, min(int(effective_timeout), 1800)))
+            from .execution_contract import NativeInvocation
+            if native_invocation is None:
+                native_invocation = NativeInvocation.compile(tool_name, args, effective_timeout)
+            if type(native_invocation) is not NativeInvocation:
+                raise SandboxDenied("SANDBOX_POLICY_INVALID", "Host invocation snapshot required")
+            native_invocation.check(tool_name, args, effective_timeout)
+            policy = native_invocation.policy
             child_env = sandbox_environment(child_env)
             input_data["_native_sandbox_workspace"] = str(policy.workspace)
             input_data["args"] = {**args, "_workspace": str(policy.workspace)}
@@ -116,6 +134,7 @@ class ProcessToolRunner:
                 creationflags=creation_flags(),
                 start_new_session=sys.platform != "win32",
             )
+            observation["started"] = True
             if not getattr(proc, "_gitgo_job_handle", None):
                 proc._gitgo_job_handle = attach_kill_job(proc)
             from backend.core.sandbox_io import BoundedCommunication
@@ -194,6 +213,8 @@ class ProcessToolRunner:
                 )
 
         except SandboxDenied as exc:
+            observation["cleanup"] = getattr(exc, "cleanup", None)
+            observation["launch_state"] = "unknown" if getattr(exc, "effect_state", "") == "ambiguous" else "not_started"
             spawned = locals().get("proc")
             if spawned is not None:
                 self._kill_tree(spawned)
@@ -203,7 +224,8 @@ class ProcessToolRunner:
                 stderr_partial=True,
                 duration_ms=(time.monotonic() - start) * 1000,
             )
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            observation["cleanup"] = getattr(exc, "cleanup", None)
             duration_ms = (time.monotonic() - start) * 1000
             return SubprocessResult(
                 success=False,
@@ -212,6 +234,8 @@ class ProcessToolRunner:
                 duration_ms=duration_ms,
             )
         except Exception as exc:
+            observation["cleanup"] = getattr(exc, "cleanup", None)
+            observation["launch_state"] = "unknown"
             spawned = locals().get("proc")
             if spawned is not None and spawned.poll() is None:
                 self._kill_tree(spawned)
@@ -230,10 +254,18 @@ class ProcessToolRunner:
             spawned = locals().get("proc")
             if spawned is not None:
                 from backend.core.process_control import close_job
-                close_job(getattr(spawned, "_gitgo_job_handle", None))
-                spawned._gitgo_job_handle = None
-                if hasattr(spawned, "close_sandbox"):
-                    spawned.close_sandbox()
+                try:
+                    close_job(getattr(spawned, "_gitgo_job_handle", None))
+                    spawned._gitgo_job_handle = None
+                    if hasattr(spawned, "close_sandbox"):
+                        spawned.close_sandbox()
+                    observation["cleanup"] = getattr(spawned, "_gitgo_cleanup", None) or {
+                        "complete": False, "mode": "unknown", "issues": ["native_cleanup_not_observed"]}
+                except Exception:
+                    # Preserve the tool result; retirement failure is a separate
+                    # Host fact and keeps admission owners in the Pipeline.
+                    observation["cleanup"] = {"complete": False, "mode": "unknown",
+                        "issues": ["native_cleanup_failed"]}
                 for stream in (spawned.stdin, spawned.stdout, spawned.stderr):
                     if stream is not None:
                         try:

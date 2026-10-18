@@ -211,6 +211,14 @@ def test_windows_filesystem_escape_and_workspace_write(native_box):
     assert secret.read_text() == "private"
 
 
+
+def test_windows_cleanup_reports_confirmed_tree_exit(native_box):
+    workspace, policy, spawn = native_box
+    proc = spawn("import subprocess,sys;subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(120)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);print('parent-ran')")
+    code, output, error = finished(proc)
+    assert code == 0 and output.strip() == 'parent-ran', error
+    assert proc.close_sandbox() == {'complete': True, 'mode': 'windows-job', 'issues': []}
+
 def test_windows_search_binary_runs_inside_native_boundary(native_box, isolated_python):
     """A real external engine must run with the same pipes as workspace search."""
     configured = os.environ.get('GITGO_RIPGREP_PATH')
@@ -924,6 +932,8 @@ def test_failed_resource_monitor_kills_started_tool(cross_platform_box, monkeypa
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, env=sandbox_environment(os.environ), start_new_session=sys.platform != 'win32')
     assert error.value.result()['effect_state'] == 'ambiguous'
+    assert error.value.cleanup['complete'] is True
+    assert error.value.cleanup['issues'] == []
     time.sleep(1.2)
     assert not (workspace / 'after-monitor-failure').exists()
 

@@ -48,6 +48,9 @@ class BasicAccounting(C.Structure):
                 ("active_processes", W.DWORD), ("terminated_processes", W.DWORD)]
 
 
+_PENDING_JOBS = {}  # Strong ownership until native retirement is confirmed.
+
+
 class NativeJobHandle(int):
     """One owned handle; synchronize accounting and close to prevent reuse races."""
     def __new__(cls, value, api):
@@ -56,16 +59,41 @@ class NativeJobHandle(int):
         handle._lock = threading.Lock()
         handle._closed = False
         handle._failure_reason = ""
+        handle.cleanup = {"complete": False, "mode": "windows-job", "issues": ["cleanup_not_observed"]}
         return handle
 
     def _close_locked(self):
-        if not self._closed:
-            self._closed = True
-            self._api.close(self)  # Sole, non-inheritable handle: kills the tree.
+        if self._closed:
+            return dict(self.cleanup)
+        _PENDING_JOBS[id(self)] = self
+        try:
+            self._api.terminate_job(self, 1)
+            deadline = time.monotonic() + 3
+            while True:
+                accounting = BasicAccounting()
+                if not self._api.query_job(self, 1, C.byref(accounting), C.sizeof(accounting), None):
+                    issues = ["job_exit_query_failed"]
+                    break
+                if accounting.active_processes == 0:
+                    if not self._api.close(self):
+                        issues = ["job_handle_close_failed"]
+                        break
+                    self._closed = True
+                    self.cleanup.update(complete=True, issues=[])
+                    _PENDING_JOBS.pop(id(self), None)
+                    return dict(self.cleanup)
+                if time.monotonic() >= deadline:
+                    issues = ["job_tree_still_active"]
+                    break
+                time.sleep(.01)
+        except OSError:
+            issues = ["job_retirement_unknown"]
+        self.cleanup.update(complete=False, issues=issues)
+        return dict(self.cleanup)
 
     def close(self):
         with self._lock:
-            self._close_locked()
+            return self._close_locked()
 
     @property
     def failure_reason(self):
@@ -74,8 +102,7 @@ class NativeJobHandle(int):
 
     def _fail_locked(self, reason):
         self._failure_reason = reason
-        self._api.terminate_job(self, 1)
-        self._close_locked()  # Kill-on-close also covers a failed termination call.
+        self._close_locked()
 
     def check_cpu(self, seconds):
         with self._lock:
@@ -171,6 +198,8 @@ class WindowsApi:
 
 class WindowsSandboxProcess(subprocess.Popen):
     def __init__(self, args, *, policy: SandboxPolicy, **kwargs):
+        if _PENDING_JOBS:
+            raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "An earlier native Job still owns unconfirmed resources; inspect cleanup before another launch.")
         self._sandbox_policy = policy
         self._gitgo_job_handle = None
         self._sandbox_job = None
@@ -207,7 +236,13 @@ class WindowsSandboxProcess(subprocess.Popen):
             denial = SandboxDenied("SANDBOX_LAUNCH_DENIED",
                 f"AppContainer runtime or accounting monitor could not start. Check runtime ACLs, Job support and Host resources: {exc}")
             denial.effect_state = "ambiguous" if self._child_created else "not_committed"
+            if self._sandbox_job is not None:
+                denial.cleanup = dict(self._sandbox_job.cleanup)
             raise denial from exc
+
+    def close_sandbox(self):
+        self._gitgo_cleanup = self._sandbox_job.close()
+        return dict(self._gitgo_cleanup)
 
     @property
     def sandbox_failure(self):

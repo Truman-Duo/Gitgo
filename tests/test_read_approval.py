@@ -268,6 +268,9 @@ def test_pipeline_transports_only_host_binding_and_releases_on_runner_failure(fi
         raise RuntimeError('launch failed')
     monkeypatch.setattr('backend.core.loop.process_tool_runner.ProcessToolRunner.run', run)
     result = ToolPipeline().execute({'name': tool.name, 'args': {**args, '_approved_read': {'forged': True}}}, tool, ctx, 'launch')
+    assert result.is_error and result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert not captured and grant["remaining_uses"] == 1
+    result = ToolPipeline().execute({"name": tool.name, "args": args}, tool, ctx, "launch")
     assert result.is_error and len(captured) == 1
     assert grant['remaining_uses'] == 0
     assert not process._read_approval_pins
@@ -427,3 +430,43 @@ def test_approval_path_uses_same_worktree_mapping_as_pipeline(fixture):
             {'path': str(root / args['path']), '_workspace': str(root)}, [],
             require_explicit=True, admission=admission)
         assert error is None and admission.read_binding is not None
+
+
+@pytest.mark.parametrize('report', ['complete', 'incomplete', 'missing'])
+def test_launch_failure_keeps_approved_read_pins_until_cleanup_confirmed(fixture, monkeypatch, report):
+    from backend.core.sandbox import SandboxDenied
+    from backend.core.loop.read_approval import _RETAINED_ADMISSIONS
+    process, tool, root, args, ctx = fixture
+    approve(fixture)
+    launches = []
+    def launch(*a, **kw):
+        launches.append('attempt')
+        failure = SandboxDenied('SANDBOX_LAUNCH_DENIED', 'Injected post-creation failure')
+        failure.effect_state = 'ambiguous'
+        if report != 'missing':
+            failure.cleanup = {'complete': report == 'complete', 'mode': 'fixture',
+                               'issues': [] if report == 'complete' else ['job_exit_query_failed']}
+        raise failure
+    monkeypatch.setattr('backend.core.sandbox.sandbox_popen', launch)
+    key = (process.process_id, 'launch-cleanup', 0)
+    try:
+        actual = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, ctx, 'launch-cleanup')
+        assert actual.is_error and launches == ['attempt']
+        assert actual.receipt['launch_state'] == 'unknown'
+        assert actual.receipt['runtime_cleanup']['complete'] is (report == 'complete')
+        revoke_read_requests(process)
+        if report == 'complete':
+            assert key not in _RETAINED_ADMISSIONS
+        else:
+            assert key in _RETAINED_ADMISSIONS and process.recovery['resume_forbidden']
+            if sys.platform == 'win32':
+                with pytest.raises(OSError):
+                    root.rename(root.with_name('must-remain-pinned'))
+            denied = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, ctx, 'second-launch')
+            assert denied.is_error and launches == ['attempt']
+    finally:
+        # The injected failure never created a native process. Release only the
+        # real metadata pins owned by this fixture after testing debt retention.
+        for owner in _RETAINED_ADMISSIONS.pop(key, []):
+            owner.close()
+    (root / args['path']).rename(root / 'released-after-confirmation.txt')

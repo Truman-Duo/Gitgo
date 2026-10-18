@@ -466,7 +466,9 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
                 dict(runtime.get("pending_tool_batch"))
                 if isinstance(runtime.get("pending_tool_batch"), dict) and not resume_forbidden else None
             ),
-            approval_grants=[] if resume_forbidden else list(runtime.get("approval_grants") or []),
+            # Grant consumption has no durable launch transaction yet.
+            # Restore evidence, never executable authority from a checkpoint.
+            approval_grants=[],
         )
         if process.pending_tool_batch and runtime.get("dynamic_tool_specs"):
             process.runtime_preferences["pending_definition_recovery"] = {
@@ -483,6 +485,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
                 "checkpoint_at": checkpoint_at,
                 "reasons": reasons,
                 "self_execute_lease_revoked": actor_kind == "supervisor",
+                "approval_grants_revoked": len(runtime.get("approval_grants") or []),
                 "dynamic_tools_revoked": sorted(
                     dict(runtime.get("dynamic_tool_specs") or {}).keys()
                 ),

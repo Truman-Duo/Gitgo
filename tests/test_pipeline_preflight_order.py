@@ -71,10 +71,10 @@ def test_exact_grant_rechecks_contract_changed_during_preparation(tmp_path_facto
     tool.prepare_args = changed
     ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     result = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, ctx, 'changed')
-    assert result.is_error and result.diagnostics['code'] == 'APPROVAL_GRANT_INVALID'
+    assert result.is_error and result.diagnostics['code'] == 'SANDBOX_POLICY_INVALID'
     assert not calls
     assert process.approval_grants[0]['remaining_uses'] == 1
-def test_search_authority_uses_effective_route_and_overrides_model_arguments(tmp_path_factory):
+def test_search_authority_refuses_private_input_and_uses_effective_route(tmp_path_factory):
     process = AgentProcess(process_id="search", role="worker", ring_level=RingLevel.RING_0,
         provider_id="configured-main", active_task_id="task", session=AgentSession())
     process.runtime_preferences.update(effective_provider_id="actual-backup", web_search_mode="provider")
@@ -87,6 +87,9 @@ def test_search_authority_uses_effective_route_and_overrides_model_arguments(tmp
                            workspace_path=str(tmp_path_factory), event_bus=EventBus())
     result = ToolPipeline().execute({"name": "web_search", "args": {
         "query": "ripgrep", "_web_search_provider_id": "model-spoofed"}}, tool, ctx, "search-call")
+    assert result.is_error and result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert not captured
+    result = ToolPipeline().execute({"name": "web_search", "args": {"query": "ripgrep"}}, tool, ctx, "search-clean")
     assert not result.is_error
     assert captured[0]["_web_search_provider_id"] == "actual-backup"
     assert captured[0]["_web_search_mode"] == "provider"

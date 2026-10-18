@@ -52,7 +52,8 @@ def _runtime_implementation_digest() -> str:
                ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner")]
     modules += ["backend.core.sandbox_read", "backend.core.sandbox_read_windows",
                 "backend.core.sandbox_read_plan", "backend.core.loop.read_approval",
-                "backend.core.loop.execution_contract", "backend.core.loop.process_tool_runner"]
+                "backend.core.loop.execution_contract", "backend.core.loop.process_tool_runner",
+                "backend.core.sandbox", "backend.core.sandbox_windows", "backend.core.sandbox_linux"]
     for module_name in modules:
         spec = importlib.util.find_spec(module_name)
         if spec is None or spec.loader is None:
@@ -76,6 +77,9 @@ def tool_contract_digest(tool) -> str:
     contract = {
         "name": tool.name,
         "runner_name": getattr(tool, "runner_name", ""),
+        "timeout": tool.timeout, "timeout_argument": tool.timeout_argument,
+        "timeout_default": tool.timeout_default,
+        "approval": str(tool.approval), "approval_per_invocation": tool.approval_per_invocation,
         "execution_contract": (
             tool.execution_contract.to_dict()
             if getattr(tool, "execution_contract", None) is not None else None

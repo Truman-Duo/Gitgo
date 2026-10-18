@@ -136,5 +136,11 @@ def runner_transport_only(monkeypatch):
     """
     def launch(argv, policy, **kwargs):
         from backend.core.process_control import spawn_managed
-        return spawn_managed(argv, **kwargs)
+        proc = spawn_managed(argv, **kwargs)
+        # Explicit protocol-seam observation, never native containment evidence.
+        def close_fixture():
+            proc._gitgo_cleanup = {"complete": proc.poll() is not None,
+                "mode": "test-transport-only", "issues": [] if proc.poll() is not None else ["fixture_root_alive"]}
+        proc.close_sandbox = close_fixture
+        return proc
     monkeypatch.setattr("backend.core.sandbox.sandbox_popen", launch)

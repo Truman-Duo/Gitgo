@@ -18,6 +18,7 @@ _LOCK = threading.RLock()
 _RECORD_FIELDS = ('request_id', 'tool_contract_digest', 'expires_at', 'tool_name',
                   'effect', 'resource', 'arguments_digest', 'read_binding', 'approval_scope')
 MAX_PINS = 64
+_RETAINED_ADMISSIONS = {}
 
 
 def requires_read_binding(tool):
@@ -118,6 +119,17 @@ class AdmissionResources(ExitStack):
     def __init__(self):
         super().__init__()
         self.read_binding = None
+
+    def retain(self, process, execution_id, call_index):
+        """Unknown tree lifetime cannot release the active metadata pins."""
+        key = (process.process_id, execution_id, call_index)
+        # Keep owners even if the process model is later discarded.
+        _RETAINED_ADMISSIONS.setdefault(key, []).append(self.pop_all())
+        process.recovery = {**(process.recovery or {}), "resume_forbidden": True,
+            "requires_manual_verification": True,
+            "reasons": list((process.recovery or {}).get("reasons") or []) +
+                [{"code": "NATIVE_CLEANUP_UNCONFIRMED", "execution_id": execution_id,
+                  "call_index": call_index, "effect_state": "ambiguous"}]}
 
 
 def current_pin(process, record):

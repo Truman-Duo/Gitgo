@@ -41,9 +41,15 @@ def trusted_bwrap(workspace: Path) -> str:
         'PATH-selected helpers and unsandboxed fallback are forbidden.')
 
 
+_PENDING_CGROUPS = {}
+
+
 class LinuxCgroup:
     def __init__(self, policy):
+        if _PENDING_CGROUPS:
+            raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "An earlier cgroup has unconfirmed cleanup.")
         self.path = None
+        self.cleanup = {"complete": False, "mode": "linux-cgroup", "issues": ["cleanup_not_observed"]}
         try:
             configured = os.environ.get("GITGO_SANDBOX_CGROUP_ROOT", "")
             if not configured:
@@ -63,8 +69,10 @@ class LinuxCgroup:
                                 'cpu.max': '100000 100000'}.items():
                 (self.path / name).write_text(str(value))
         except (OSError, ValueError) as exc:
-            self.close()
-            raise SandboxDenied('SANDBOX_UNAVAILABLE', f'Linux cgroup configuration is unavailable: {exc}') from exc
+            cleanup = self.close()
+            denial = SandboxDenied('SANDBOX_UNAVAILABLE', f'Linux cgroup configuration is unavailable: {exc}')
+            denial.cleanup = cleanup
+            raise denial from exc
 
     def kill(self):
         path = self.path
@@ -76,19 +84,25 @@ class LinuxCgroup:
 
     def close(self):
         if self.path is not None:
+            _PENDING_CGROUPS[id(self)] = self
             try:
                 self.kill()
                 deadline = time.monotonic() + 3
                 while 'populated 1' in (self.path / 'cgroup.events').read_text():
                     if time.monotonic() >= deadline:
-                        return
+                        self.cleanup.update(complete=False, issues=["cgroup_tree_still_active"])
+                        return dict(self.cleanup)
                     time.sleep(0.01)
                 self.path.rmdir()
                 self.path = None
             except OSError:
                 # A dead Host can leave an empty cgroup directory. Never move
                 # processes into the caller's cgroup or relax its limits.
-                pass
+                self.cleanup.update(complete=False, issues=["cgroup_retirement_unknown"])
+                return dict(self.cleanup)
+        _PENDING_CGROUPS.pop(id(self), None)
+        self.cleanup.update(complete=True, issues=[])
+        return dict(self.cleanup)
 
 class LinuxSandboxProcess(subprocess.Popen):
     def __init__(self, argv, *, cgroup, cpu_seconds, **kwargs):
@@ -145,4 +159,5 @@ class LinuxSandboxProcess(subprocess.Popen):
         super().terminate()
 
     def close_sandbox(self):
-        self._gitgo_cgroup.close()
+        self._gitgo_cleanup = self._gitgo_cgroup.close()
+        return dict(self._gitgo_cleanup)

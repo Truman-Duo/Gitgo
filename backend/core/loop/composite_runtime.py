@@ -65,11 +65,12 @@ def new_state(process, key, tool, inputs, catalog, components):
     return state
 
 
-def run(pipeline, tool, args, ctx, execution_id, call_index, key):
+def run(pipeline, tool, args, ctx, execution_id, call_index, key, *, runtime_metadata=None):
     from backend.core.tools.dynamic_tools import resolve_step_arguments
     from .operation_policy import decide_tool_operation, is_effectful_mutation
     from .event_bus import ToolEvent
 
+    runtime_metadata = {} if runtime_metadata is None else runtime_metadata
     catalog = ctx.artifacts.get("tool_catalog") or {}
     inputs = {k: v for k, v in args.items() if not str(k).startswith("_")}
     spec = tool.composite_spec or {}
@@ -88,6 +89,7 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key):
             "cursor": 0, "steps": {}, "receipts": [], "files": [], "outer_authorized": True}
     states = ctx.process.runtime_preferences.setdefault("composite_continuations", {})
     states[key] = state
+    runtime_metadata["child_receipts"] = state["receipts"]
     initial_receipt_count = len(state["receipts"])
     child_execution = execution_id + "__" + hashlib.sha256(key.encode()).hexdigest()[:16]
     for index in range(state["cursor"], len(spec.get("steps", []))):
@@ -102,9 +104,11 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key):
         if policy.requires_user and resumed_child is None and matching_grant(ctx.process, name, resolved,
                 per_invocation=base.approval_per_invocation, tool=base) is None:
             ctx.artifacts["nested_permission"] = {"tool": base, "arguments": resolved}
+            runtime_metadata["suspended"] = True
             return {"_suspended": True}
         child = pipeline.execute({"name": name, "args": resolved, "id": step_id}, base, ctx, child_execution, index)
         if child.suspended:
+            runtime_metadata["suspended"] = True
             return {"_suspended": True}
         receipt = {**dict(child.receipt or {}), "composite_tool": tool.name, "composite_step": step_id}
         state["receipts"].append(receipt)
@@ -118,11 +122,15 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key):
             data={"composite_tool": tool.name, "step_id": step_id, "is_error": child.is_error,
                   "error": child.error, "duration_ms": child.duration_ms, "receipt": receipt}))
         if child.is_error:
+            runtime_metadata["effect_state"] = "partial"
+            runtime_metadata["rollback_required"] = any(
+                is_effectful_mutation(r.get("effect", "read")) and (r.get("committed") or r.get("effect_state") in {"ambiguous", "partial"})
+                for r in state["receipts"][initial_receipt_count:])
             states.pop(key, None)
             return {"error": "DYNAMIC_STEP_FAILED", "failed_step": step_id, "step_error": child.error,
                 "step_diagnostics": child.diagnostics, "steps": state["steps"], "_child_receipts": state["receipts"],
                 "files": state["files"], "_rollback_required": any(
-                    is_effectful_mutation(r.get("effect", "read")) and r.get("committed") for r in state["receipts"][initial_receipt_count:]),
+                    is_effectful_mutation(r.get("effect", "read")) and (r.get("committed") or r.get("effect_state") in {"ambiguous", "partial"}) for r in state["receipts"][initial_receipt_count:]),
                 "retained_prefix_receipt_ids": [r.get("receipt_id") for r in state["receipts"][:initial_receipt_count]]}
     states.pop(key, None)
     return {"completed": True, "definition_digest": spec.get("digest", ""), "definition_version": spec.get("version", 1),

@@ -61,6 +61,18 @@ def test_safe_checkpoint_restores_only_as_explicit_candidate(tmp_path_factory: P
     workspace = _workspace(tmp_path_factory)
     state_home = tmp_path_factory / "state"
     _, original = _running_supervisor(workspace)
+    from backend.core.loop.agent_tool import AgentTool, ApprovalMode
+    from backend.core.loop.execution_contract import data_broker
+    from backend.core.loop.permission_broker import (
+        create_permission_request, grant_from_decision, matching_grant,
+    )
+    tool = AgentTool('approved_fixture', 'fixture', {}, lambda _: {},
+        approval=ApprovalMode.ASK, execution_contract=data_broker('test.fixture'))
+    create_permission_request(original, {'tool_name': tool.name, 'arguments': {},
+        'purpose': 'Approve a real task-scoped fixture'}, {tool.name: tool}, str(workspace))
+    assert grant_from_decision(original, original.pending_decision, 'allow_task')
+    assert matching_grant(original, tool.name, {}, per_invocation=False, tool=tool)
+    original.pending_decision = None
     original.session.append_assistant("durable partial answer")
     store = SessionStore(str(workspace), state_home=state_home)
     store.save_process_checkpoint(original)
@@ -80,6 +92,9 @@ def test_safe_checkpoint_restores_only_as_explicit_candidate(tmp_path_factory: P
     assert restored.session.session_id == session_id
     assert restored.session.messages[-1]["content"] == "durable partial answer"
     assert restored.recovery["self_execute_lease_revoked"] is True
+    assert restored.approval_grants == []
+    assert restored.recovery['approval_grants_revoked'] == 1
+    assert matching_grant(restored, tool.name, {}, per_invocation=False, tool=tool) is None
     reopened.close()
 
 

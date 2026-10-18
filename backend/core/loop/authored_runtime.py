@@ -16,10 +16,12 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeo
     inputs = {k: v for k, v in args.items() if not str(k).startswith("_")}
     state = state_for(ctx.process, key, tool, inputs, catalog) or new_state(
         ctx.process, key, tool, inputs, catalog, spec["host_tools"])
+    runtime_metadata["child_receipts"] = state["receipts"]
     journal = state.setdefault("host_results", [])
     child_execution = execution_id + "__" + hashlib.sha256(key.encode()).hexdigest()[:16]
     deadline = time.monotonic() + timeout
     def failed(code, detail):
+        runtime_metadata["effect_state"] = "partial" if state["receipts"] else "ambiguous"
         # Keep committed prefix evidence on protocol/launch failures. It must
         # remain inspectable and must never be replayed as a fresh operation.
         return {"error": code, "detail": detail,
@@ -53,15 +55,18 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeo
         if decide_tool_operation(base, resolved).requires_user and resuming is None and matching_grant(
                 ctx.process, name, resolved, per_invocation=base.approval_per_invocation, tool=base) is None:
             ctx.artifacts["nested_permission"] = {"tool": base, "arguments": resolved}
+            runtime_metadata["suspended"] = True
             return {"_suspended": True}
         child = pipeline.execute({"name": name, "args": resolved, "id": str(index)}, base, ctx, child_execution, index)
         if child.suspended:
+            runtime_metadata["suspended"] = True
             return {"_suspended": True}
         receipt = {**dict(child.receipt), "composite_tool": tool.name, "composite_step": str(index)}
         state["receipts"].append(receipt)
         if receipt.get("receipt_id"):
             ctx.process.tool_receipts.append(receipt)
         if child.is_error:
+            runtime_metadata["effect_state"] = "partial"
             ctx.process.runtime_preferences["composite_continuations"].pop(key, None)
             return {"error": "AUTHORED_HOST_LEAF_FAILED", "step_diagnostics": child.diagnostics,
                 "effect_state": "partial", "_child_receipts": state["receipts"], "detail": child.error}
