@@ -2,6 +2,9 @@
 from __future__ import annotations
 import hashlib
 from copy import deepcopy
+from dataclasses import asdict
+from ..project_registration import ProjectRegistration
+from ..host_records import require
 from ..checkpoint_plan import (
     CheckpointObjectBuilder, capture_basis, require_live_basis,
 )
@@ -13,16 +16,29 @@ from .ports import CheckpointsPort
 from ..support import _utc_now
 from ..transactions import authoritative_transaction
 
-def plan_agent_checkpoint(self: CheckpointsPort, snapshot: dict, *, limits: CheckpointLimits | None = None) -> CheckpointPublication:
+def plan_agent_checkpoint(
+    self: CheckpointsPort, snapshot: dict, *, limits: CheckpointLimits | None = None,
+    registration: ProjectRegistration | None = None,
+) -> CheckpointPublication:
     """Build the complete immutable publication without new file/SQL writes.
 
     Optional limits are supplied by a future qualified backend, never inferred
     from a workspace or permission grant. Legacy callers retain their existing
-    policy. The returned value is not an admission or materialization ticket.
+    policy. Explicit first-project registration consumes the same input budget
+    and State snapshot and joins publication; it cannot rewrite an existing
+    logical project. The returned value is not an admission or file ticket.
     """
     self._ensure_open()
     self._state.require_available()
-    snapshot = deepcopy(snapshot) if limits is None else limits.copy_snapshot(snapshot)
+    if registration is not None:
+        require(type(registration) is ProjectRegistration and type(limits) is CheckpointLimits,
+                "explicit qualified project registration and input budget required")
+        require(registration.project_id == self.paths.project_id, "registration differs from selected logical project")
+        # The entire semantic request shares one input allowance. Metadata is
+        # not a second uncharged channel around snapshot depth/byte/node limits.
+        snapshot = limits.copy_snapshot({"snapshot":snapshot,"registration":asdict(registration)})["snapshot"]
+    else:
+        snapshot = deepcopy(snapshot) if limits is None else limits.copy_snapshot(snapshot)
     process_id = str(snapshot.get("process_id", "")).strip()
     session_id = str(snapshot.get("session_id", "")).strip()
     if not process_id or not session_id:
@@ -41,7 +57,9 @@ def plan_agent_checkpoint(self: CheckpointsPort, snapshot: dict, *, limits: Chec
             # read-only transaction is part of the qualified attempt schedule.
             with authoritative_transaction(self._state):
                 footprint = capture_footprint(self._state, limits, process_id, session_id)
-                basis = capture_basis(self._state, process_id, parent_process_id)
+                basis = (capture_basis(self._state, process_id, parent_process_id)
+                         if registration is None else
+                         capture_basis(self._state, process_id, parent_process_id, registration=registration))
     require_live_basis(basis)
     require_revision(basis.revision, snapshot.get("expected_revision"))
     status = str(snapshot.get("status") or "running")
@@ -152,6 +170,8 @@ def plan_agent_checkpoint(self: CheckpointsPort, snapshot: dict, *, limits: Chec
         len(message_objects) + len(receipt_objects) + len(descriptors)
     )
     publication = CheckpointSqlBuilder()
+    if basis.registration is not None:
+        basis.registration.append(publication)
     for descriptor in descriptors.values():
         self._register_object(publication, descriptor)
     # A checkpoint is one ownership unit.  Record the complete CAS

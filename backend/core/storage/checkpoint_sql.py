@@ -75,8 +75,12 @@ def _binding_digest(statements, basis, objects, process_id, parent_process_id):
         [item.sql, [_encoded_scalar(value) for value in item.parameters],
          item.expected_rows] for item in statements
     ]
-    binding = ["checkpoint-sql-v1", process_id, parent_process_id,
-               asdict(basis), [dict(item.descriptor) for item in objects.members],
+    captured = asdict(basis)
+    version = "checkpoint-sql-v2" if basis.registration is not None else "checkpoint-sql-v1"
+    if basis.registration is None:
+        captured.pop("registration")  # Preserve existing legacy-plan digest bytes.
+    binding = [version, process_id, parent_process_id,
+               captured, [dict(item.descriptor) for item in objects.members],
                encoded]
     data = json.dumps(binding, ensure_ascii=False, sort_keys=True,
                       separators=(",", ":"), allow_nan=False).encode("utf8")

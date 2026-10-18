@@ -13,6 +13,7 @@ from typing import NamedTuple
 
 from .lifecycle import RevisionConflict
 from .models import StorageBlocked
+from .project_registration import ProjectBasis, capture_project_basis
 
 
 def _text(value, *, optional=False):
@@ -58,11 +59,14 @@ class CheckpointBasis:
     terminal_count: int
     deleted: bool
     parent_task_id: str | None
+    registration: ProjectBasis | None = None
 
     def __post_init__(self):
         # Frozen outer containers do not freeze mutable nested values. Accept
         # only the exact repository value shapes before deriving any digest.
         process, terminal = self.process, self.terminal
+        if self.registration is not None and type(self.registration) is not ProjectBasis:
+            raise StorageBlocked("checkpoint_project_basis_invalid")
         if (any(not _count(value) for value in (
                 self.event_sequence, self.event_count, self.terminal_count))
                 or type(self.deleted) is not bool
@@ -94,11 +98,12 @@ class CheckpointBasis:
         return self.process.runtime_ref if self.process else None
 
 
-def capture_basis(connection, process_id: str, parent_id: str) -> CheckpointBasis:
-    """One SELECT observes all planning dependencies in one SQLite snapshot.
+def capture_basis(connection, process_id: str, parent_id: str, *, registration=None) -> CheckpointBasis:
+    """Observe planning dependencies under the owning State lock/snapshot.
 
-    Call under the State lock. No separate reader, write transaction, object
-    read, repair or callback is needed to acquire or compare this basis.
+    The legacy basis needs one SELECT. Optional project registration adds a
+    bounded read in the caller's same transaction. Neither path reads objects,
+    repairs metadata, invokes caller callbacks or creates another connection.
     """
     cursor = connection.execute(
         """SELECT p.process_id, p.session_id, p.task_id, p.parent_process_id,
@@ -127,6 +132,7 @@ def capture_basis(connection, process_id: str, parent_id: str) -> CheckpointBasi
         ProcessBasis(*row[:7]) if row[0] is not None else None, int(row[7]), int(row[15]),
         TerminalBasis(*row[8:12]) if row[8] is not None else None, int(row[12]),
         bool(row[13]), str(row[14]) if row[14] else None,
+        capture_project_basis(connection, registration) if registration is not None else None,
     )
 
 
@@ -137,7 +143,8 @@ def require_live_basis(basis: CheckpointBasis):
 
 def recheck_basis(connection, process_id, parent_id, basis):
     """Invoke before publication writes, inside the final State transaction."""
-    current = capture_basis(connection, process_id, parent_id)
+    current = capture_basis(connection, process_id, parent_id,
+                            registration=basis.registration.request if basis.registration is not None else None)
     require_live_basis(current)
     if current != basis:
         raise RevisionConflict("STATE_REVISION_CHANGED: checkpoint dependencies changed; refresh before committing")

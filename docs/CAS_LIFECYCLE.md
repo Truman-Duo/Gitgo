@@ -751,3 +751,28 @@ This consistency check does not authenticate caller-supplied SQL or grant a
 file ticket. Only the existing repository builds executable statements.
 Durable preparation still has to bind the complete publication digest to the
 selected runtime, actual native generations and prepaid cleanup capacity.
+
+
+## First logical project registration
+
+Physical native initialization intentionally leaves business tables empty.
+The checkpoint repository accepts an explicit immutable `ProjectRegistration`
+only with a qualified input budget and matching logical project. Its bounded
+workspace hint is descriptive metadata, never filesystem access authority.
+Snapshot and registration metadata consume one shared input allowance.
+
+Planning observes the optional existing project row in the same State snapshot
+as checkpoint dependencies. SQL filters oversized or non-text retained fields
+before returning them to Python; the admitted owner must still bound SQLite
+heap, pages and query work. An absent row produces a closed INSERT before the
+session writes; an existing row must match and is not silently rewritten.
+Publication rechecks the complete captured row, then commits registration,
+checkpoint and outbox facts together. Failed or unknown COMMIT follows the same
+quarantine and independent committed-fact read as other authoritative writes;
+it does not replay registration in another transaction.
+
+The SQL digest includes this captured registration under a new binding version.
+Plans without registration retain their existing digest bytes and call path.
+This optional value does not activate native checkpoint admission or CAS v2:
+durable preparation, aggregate capacity, selected-worker coordination and
+generation retirement remain required before that capability is enabled.
