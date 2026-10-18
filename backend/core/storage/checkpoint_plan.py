@@ -15,6 +15,22 @@ from .lifecycle import RevisionConflict
 from .models import StorageBlocked
 
 
+def _text(value, *, optional=False):
+    if optional and value is None:
+        return True
+    if type(value) is not str:
+        return False
+    try:
+        value.encode("utf8", errors="strict")
+    except UnicodeError:
+        return False
+    return True
+
+
+def _count(value):
+    return type(value) is int and 0 <= value < (1 << 63)
+
+
 class ProcessBasis(NamedTuple):
     process_id: str
     session_id: str
@@ -42,6 +58,28 @@ class CheckpointBasis:
     terminal_count: int
     deleted: bool
     parent_task_id: str | None
+
+    def __post_init__(self):
+        # Frozen outer containers do not freeze mutable nested values. Accept
+        # only the exact repository value shapes before deriving any digest.
+        process, terminal = self.process, self.terminal
+        if (any(not _count(value) for value in (
+                self.event_sequence, self.event_count, self.terminal_count))
+                or type(self.deleted) is not bool
+                or not _text(self.parent_task_id, optional=True)
+                or process is not None and (
+                    type(process) is not ProcessBasis
+                    or not all(_text(value) for value in (
+                        process.process_id, process.session_id, process.status))
+                    or not all(_text(value, optional=True) for value in (
+                        process.task_id, process.parent_process_id, process.runtime_ref))
+                    or not _count(process.revision))
+                or terminal is not None and (
+                    type(terminal) is not TerminalBasis
+                    or not _count(terminal.sequence)
+                    or not all(_text(value) for value in (
+                        terminal.event_id, terminal.payload_ref, terminal.occurred_at)))):
+            raise StorageBlocked("checkpoint_basis_invalid")
 
     @property
     def revision(self):
@@ -112,6 +150,12 @@ class CheckpointObject:
     created_at: str
     media_type: str = "application/json"
 
+    def __post_init__(self):
+        if (type(self.data) is not bytes or type(self.digest) is not str
+                or hashlib.sha256(self.data).hexdigest() != self.digest
+                or not _text(self.created_at) or not _text(self.media_type)):
+            raise StorageBlocked("checkpoint_object_invalid")
+
     @property
     def descriptor(self):
         return MappingProxyType({
@@ -125,6 +169,14 @@ class CheckpointObject:
 class CheckpointObjects:
     members: tuple[CheckpointObject, ...]
     byte_length: int
+
+    def __post_init__(self):
+        if (type(self.members) is not tuple
+                or any(type(member) is not CheckpointObject for member in self.members)
+                or not _count(self.byte_length)
+                or self.byte_length != sum(len(member.data) for member in self.members)
+                or len({member.digest for member in self.members}) != len(self.members)):
+            raise StorageBlocked("checkpoint_objects_invalid")
 
     def materialize_legacy(self, write_blob):
         """Exact precomputed bytes only; this is not durable batch admission."""

@@ -86,7 +86,16 @@ def test_project_namespace_rejects_unqualified_members_before_sqlite(native,tmp_
         project,record=structure(host);path=Path(record.root_path(host.anchor,project))
         if case=="extra":(path/"data/unowned").write_bytes(b"x")
         if case=="wrong-id":
-            members=tuple((name,replace(value,file_id=value.file_id^1) if name=="data/state.sqlite3" else value)
+            # Adjacent NTFS identifiers can differ by one bit. Choose an ID
+            # absent from the complete recorded namespace so this test reaches
+            # native pin validation instead of failing the value's alias check.
+            anchor=host.anchor
+            recorded=(record.identity.root,*(value for _,value in record.identity.members),
+                      anchor.parent_identity,anchor.root_identity,anchor.source.root_identity,
+                      *(value for _,value in anchor.members))
+            used={value.file_id for value in recorded}
+            wrong=next(value for value in range(len(used)+1) if value not in used)
+            members=tuple((name,replace(value,file_id=wrong) if name=="data/state.sqlite3" else value)
                           for name,value in record.identity.members)
             record=replace(record,identity=replace(record.identity,members=members))
         if case=="nonempty-cas":(path/"data/cas/unowned").write_bytes(b"x")

@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 
+from .checkpoint_plan import CheckpointBasis, CheckpointObjects, _text
 from .lifecycle import RevisionConflict
 from .models import StorageBlocked
 
@@ -47,12 +48,64 @@ class CheckpointStatement:
     parameters: tuple
     expected_rows: int | None = None
 
+    def __post_init__(self):
+        if (not _text(self.sql) or not self.sql
+                or type(self.parameters) is not tuple
+                or self.expected_rows is not None and (
+                    type(self.expected_rows) is not int
+                    or not 0 <= self.expected_rows < (1 << 63))):
+            raise StorageBlocked("checkpoint_sql_statement_invalid")
+        for value in self.parameters:
+            _scalar(value)
+
+
+def _parameter_bytes(statements):
+    return sum(
+        len(value.encode("utf8")) if type(value) is str else
+        len(value) if type(value) is bytes else 0 if value is None else 8
+        for item in statements for value in item.parameters
+    )
+
+
+def _binding_digest(statements, basis, objects, process_id, parent_process_id):
+    if (type(basis) is not CheckpointBasis or type(objects) is not CheckpointObjects
+            or not _text(process_id) or not _text(parent_process_id)):
+        raise StorageBlocked("checkpoint_sql_binding_invalid")
+    encoded = [
+        [item.sql, [_encoded_scalar(value) for value in item.parameters],
+         item.expected_rows] for item in statements
+    ]
+    binding = ["checkpoint-sql-v1", process_id, parent_process_id,
+               asdict(basis), [dict(item.descriptor) for item in objects.members],
+               encoded]
+    data = json.dumps(binding, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False).encode("utf8")
+    return hashlib.sha256(data).hexdigest()
+
 
 @dataclass(frozen=True)
 class CheckpointSql:
     statements: tuple[CheckpointStatement, ...]
     digest: str
     parameter_bytes: int
+
+    def __post_init__(self):
+        if (type(self.statements) is not tuple
+                or any(type(item) is not CheckpointStatement for item in self.statements)
+                or type(self.digest) is not str or len(self.digest) != 64
+                or any(char not in "0123456789abcdef" for char in self.digest)
+                or type(self.parameter_bytes) is not int
+                or self.parameter_bytes != _parameter_bytes(self.statements)):
+            raise StorageBlocked("checkpoint_sql_plan_invalid")
+
+    def require_binding(self, basis, objects, process_id, parent_process_id):
+        # A stored digest is a claim until it has been recomputed against the
+        # complete immutable closure. This validates consistency, not authority
+        # to accept SQL from a caller or persisted external request.
+        expected = _binding_digest(self.statements, basis, objects,
+                                   process_id, parent_process_id)
+        if self.digest != expected:
+            raise StorageBlocked("checkpoint_sql_binding_mismatch")
 
     def apply(self, connection):
         """Use only after basis revalidation inside the owning transaction.
@@ -104,18 +157,5 @@ class CheckpointSqlBuilder:
             raise RuntimeError("checkpoint SQL plan already sealed")
         self._sealed = True
         statements = tuple(self._statements)
-        encoded = [
-            [item.sql, [_encoded_scalar(value) for value in item.parameters],
-             item.expected_rows] for item in statements
-        ]
-        parameter_bytes = sum(
-            len(value.encode("utf8")) if type(value) is str else
-            len(value) if type(value) is bytes else 0 if value is None else 8
-            for item in statements for value in item.parameters
-        )
-        binding = ["checkpoint-sql-v1", process_id, parent_process_id,
-                   asdict(basis), [dict(item.descriptor) for item in objects.members],
-                   encoded]
-        data = json.dumps(binding, ensure_ascii=False, sort_keys=True,
-                          separators=(",", ":"), allow_nan=False).encode("utf8")
-        return CheckpointSql(statements, hashlib.sha256(data).hexdigest(), parameter_bytes)
+        digest = _binding_digest(statements, basis, objects, process_id, parent_process_id)
+        return CheckpointSql(statements, digest, _parameter_bytes(statements))

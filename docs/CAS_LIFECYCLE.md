@@ -734,3 +734,20 @@ disposable Host used for runtime lifecycle acceptance. The complete publication
 profile, aggregate business/cleanup accounting, CAS preparation, collection,
 all-caller routing, genuine different-build upgrade and full product/platform
 acceptance remain separate requirements before storage-milestone completion.
+
+
+## Complete immutable publication consistency
+
+The checkpoint repository now validates the complete nested plan before it can
+be used for admission. CAS members contain exact immutable bytes whose SHA-256
+matches their descriptor; duplicate members and false aggregate sizes are
+refused. State dependencies and historical counts use immutable typed values.
+SQL statements retain adapter-free scalar tuples and exact parameter costs.
+Publication reconstructs the SQL digest from those statements, captured State
+dependencies, process identities and full object descriptors. Replacing a
+nested value while retaining an earlier digest is rejected before file effects.
+
+This consistency check does not authenticate caller-supplied SQL or grant a
+file ticket. Only the existing repository builds executable statements.
+Durable preparation still has to bind the complete publication digest to the
+selected runtime, actual native generations and prepaid cleanup capacity.

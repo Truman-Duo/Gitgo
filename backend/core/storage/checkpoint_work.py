@@ -11,7 +11,7 @@ import hashlib
 import json
 
 from .checkpoint_limits import CheckpointFootprint, CheckpointLimits, capture_footprint
-from .checkpoint_plan import CheckpointBasis, CheckpointObjects, recheck_basis
+from .checkpoint_plan import CheckpointBasis, CheckpointObjects, _text, recheck_basis
 from .checkpoint_sql import CheckpointSql
 from .fact_record import INSERT_FACT_SQL, RuntimeFactRecord
 from .lifecycle import CheckpointRef, RevisionConflict
@@ -35,6 +35,14 @@ class CheckpointPublication:
     footprint: CheckpointFootprint | None = None
 
     def __post_init__(self):
+        if (type(self.basis) is not CheckpointBasis
+                or type(self.objects) is not CheckpointObjects
+                or type(self.writes) is not CheckpointSql
+                or not all(_text(value) for value in (
+                    self.process_id, self.session_id, self.parent_process_id))):
+            raise StorageBlocked('checkpoint_publication_value_invalid')
+        self.writes.require_binding(self.basis, self.objects,
+                                    self.process_id, self.parent_process_id)
         if (type(self.facts) is not tuple or not 1 <= len(self.facts) <= 2
                 or any(type(fact) is not RuntimeFactRecord for fact in self.facts)
                 or len({fact.event_id for fact in self.facts}) != len(self.facts)):

@@ -131,6 +131,12 @@ class CheckpointFootprint:
     total_facts: int
     total_references: int
 
+    def __post_init__(self):
+        from dataclasses import fields
+        for field in fields(self):
+            value = getattr(self, field.name)
+            _require(type(value) is int and 0 <= value < (1 << 63), 'footprint')
+
 
 def capture_footprint(connection, limits: CheckpointLimits, process_id, session_id):
     """One snapshot and one SELECT; each count visits at most limit+1 rows.

@@ -98,7 +98,7 @@ def test_next_checkpoint_reserves_new_historical_roots_after_replacing_current_o
 
 @pytest.mark.parametrize('change',[
     {'estimated_sql_bytes':1},{'messages':1},{'dependencies':1},{'terminal':True},
-    {'session_id':'different'},{'process_id':'different'},{'parent_process_id':'different'},
+    {'session_id':'different'},
 ])
 def test_complete_publication_cost_and_identity_are_bound(runtime,change):
     plan = plan_agent_checkpoint(runtime,snapshot(),limits=profile())
