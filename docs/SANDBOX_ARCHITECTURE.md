@@ -35,13 +35,13 @@ macOS 生产沙箱保持关闭；能力审计通过不表示生产后端可用�
 
 | 验证对象 | 版本与结果 | 解释 |
 | --- | --- | --- |
-| PR #25 基础设施候选 | head `a65308c4c806db7e163ae47b5ca43be29d977cc6`；base `0b7c2ab6d9b0e4f2650fedff35fcad6fcc7d47c8`；2026-10-18 核对 25 项远端检查全部通过，包括 CI gate | 合并仍需维护者审查；后续提交不能继承旧候选的绿灯。 |
-| Windows 最小验收增量 | 测试提交 `c10f4e0`：定向 8 passed；实际 frozen Host 组合 16 passed、1 skipped | 两组有重叠，不能相加。跳过项为 Linux Unix socket 策略测试。该增量尚未进入上述 PR 候选，也没有对应新 head 的远端 CI 结论。 |
+| 此前已验收的 PR #25 候选 | head `a65308c4c806db7e163ae47b5ca43be29d977cc6`；base `0b7c2ab6d9b0e4f2650fedff35fcad6fcc7d47c8`；2026-10-18 核对 25 项远端检查全部通过，包括 CI gate | 合并仍需维护者审查；后续提交不能继承旧候选的绿灯。 |
+| Windows 最小验收增量 | 测试提交 `c10f4e0`：定向 8 passed；实际 frozen Host 组合 16 passed、1 skipped | 两组有重叠，不能相加。跳过项为 Linux Unix socket 策略测试。该测试增量随文档更新提交至 PR；本地通过不能代替更新后 head 的远端 CI。 |
 | 原有边界证据 | 复用 9 项已通过用例，并核对对应后端源码未变 | 覆盖 Host 强制退出、文件/网络、环境过滤、内存/进程/CPU、Host 租约及恢复。不是本次重新执行全量测试。 |
 
 最小验收经过实际 frozen Host、ToolPipeline、既有审批和原生 runner，验证授权工作区写入、外部合成私有文件读写拒绝、未知凭据环境变量过滤、可达网络端点拒绝，以及正常、取消、超时后的 Job 整树清理。
 清理未知保留债务并拒绝新调用的验证采用协议故障注入，不冒充真实 OS 故障。
 临时配置的权限撤销、AppContainer profile 删除和目录清理亦有成功检查。
 
-[PR #25](https://github.com/Truman-Duo/Gitgo/pull/25) 与[该候选检查](https://github.com/Truman-Duo/Gitgo/commit/a65308c4c806db7e163ae47b5ca43be29d977cc6/checks)记录基础设施交付范围。
+[PR #25](https://github.com/Truman-Duo/Gitgo/pull/25) 与[该历史候选检查](https://github.com/Truman-Duo/Gitgo/commit/a65308c4c806db7e163ae47b5ca43be29d977cc6/checks)记录基础设施交付范围。当前候选以 PR 的实际 head/base 和对应检查为准，不能沿用历史候选的通过结论。
 本轮文档整理不改变实现或扩大支持范围；需要复测时按[验收入口](NATIVE_SANDBOX.md#验证入口)选择对应层级。
