@@ -1,15 +1,29 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "version": "1.0.0-alpha.2",
   "windows_version": "1.0.0.2",
   "product_id": "gitgo-terminal",
   "display_name": "Gitgo",
   "primary_command": "gitgo",
   "command_aliases": [],
-  "layout": {
-    "dashboard": "gitgo.exe",
-    "native_host": "internal/gitgo-host/gitgo-host.exe",
-    "uninstaller": "uninstall.exe"
+  "layouts": {
+    "windows": {
+      "dashboard": "gitgo.exe",
+      "native_host": "internal/gitgo-host/gitgo-host.exe",
+      "uninstaller": "uninstall.exe"
+    },
+    "macos": {
+      "dashboard": "gitgo",
+      "native_host": "internal/gitgo-host/gitgo-host",
+      "installer": "install.sh",
+      "uninstaller": "uninstall.sh"
+    },
+    "linux": {
+      "dashboard": "gitgo",
+      "native_host": "internal/gitgo-host/gitgo-host",
+      "installer": "install.sh",
+      "uninstaller": "uninstall.sh"
+    }
   },
   "uninstall": {
     "remove_installation": true,

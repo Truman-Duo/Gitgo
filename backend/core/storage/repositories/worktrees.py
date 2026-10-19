@@ -1,5 +1,6 @@
 """Worktrees repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
+from ..transactions import authoritative_transaction
 from .ports import WorktreesPort
 from ..support import _utc_now
 
@@ -30,8 +31,7 @@ def save_worktree_state(self: WorktreesPort, record: dict) -> None:
             known_task = self._state.execute(
                 "SELECT 1 FROM tasks WHERE task_id=?", (task_id,)
             ).fetchone()
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._register_object(self._state, descriptor)
             self._state.execute(
                 """INSERT INTO worktrees(
@@ -69,10 +69,6 @@ def save_worktree_state(self: WorktreesPort, record: dict) -> None:
                     str(record.get("own_commit") or ""), descriptor["ref"],
                 ),
             )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
 
 
 def load_worktree_state(self: WorktreesPort, process_id: str) -> dict | None:

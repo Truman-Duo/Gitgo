@@ -12,6 +12,8 @@ def _compact_receipt(receipt: dict) -> dict:
     keys = (
         "receipt_id", "execution_id", "call_index", "tool_name", "effect",
         "effect_state", "succeeded", "committed", "error_code",
+        "evidence_state", "runtime_cleanup", "business_state", "launch_state",
+        "runtime_exit_code", "reported_facts", "execution_basis",
         "task_id", "test_id", "test_target", "test_passed", "test_seeds",
         "dynamic_tool_name", "definition_digest", "definition_version",
         "definition_steps", "child_receipt_ids",

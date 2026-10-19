@@ -25,13 +25,12 @@ if not defined GITGO_PYTHON if exist "%LOCALAPPDATA%\Gitgo\runtime\python\python
 if not defined GITGO_PYTHON if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" set "GITGO_PYTHON=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 if not defined GITGO_PYTHON if exist "%TEMP%\gitgo-realapi-python\python.exe" set "GITGO_PYTHON=%TEMP%\gitgo-realapi-python\python.exe"
 
-if not exist "%GITGO_BUN%" (
-    echo [gitgo] Bun was not found:
-    echo          %GITGO_BUN%
-    echo [gitgo] Set GITGO_BUN to the full path of bun.exe and try again.
-    pause
-    exit /b 1
+set "GITGO_BOOTSTRAP=%GITGO_BUN%"
+if not exist "%GITGO_BOOTSTRAP%" (
+    if not defined GITGO_NODE set "GITGO_NODE=node"
+    set "GITGO_BOOTSTRAP=node"
 )
+if not exist "%GITGO_BUN%" if defined GITGO_NODE set "GITGO_BOOTSTRAP=%GITGO_NODE%"
 
 if not defined GITGO_PYTHON (
     echo [gitgo] Python was not found:
@@ -66,7 +65,7 @@ if /i "%GITGO_NO_COLOR%"=="1" (
 )
 echo.
 
-"%GITGO_BUN%" run "%GITGO_ROOT%\cli\dashboard\src\main.tsx" %*
+"%GITGO_BOOTSTRAP%" "%GITGO_ROOT%\cli\dashboard\scripts\launch.mjs" %*
 set "GITGO_EXIT=%ERRORLEVEL%"
 
 if not "%GITGO_EXIT%"=="0" (

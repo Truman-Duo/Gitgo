@@ -4,7 +4,7 @@ import { build } from "bun";
 const dashboard = await build({
   entrypoints: ["./src/main.tsx"],
   outdir: "./dist",
-  target: "bun",
+  target: "node",
   format: "esm",
   naming: "[dir]/cli.[ext]",
   minify: true,
@@ -13,7 +13,7 @@ const dashboard = await build({
 const inspector = await build({
   entrypoints: ["./src/traceMain.tsx"],
   outdir: "./dist",
-  target: "bun",
+  target: "node",
   format: "esm",
   naming: "trace.[ext]",
   minify: true,

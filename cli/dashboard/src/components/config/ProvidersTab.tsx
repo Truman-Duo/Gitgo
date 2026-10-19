@@ -294,7 +294,8 @@ export const ProvidersTab = memo(function ProvidersTab({
     setStatusMsg("Saving...");
     const result = await saveProvider(p);
     if (result) {
-      leaveEdit(editId ? "Updated" : "Created");
+      leaveEdit(result.credential_cleanup?.pending
+        ? "Saved · old credential cleanup pending" : editId ? "Updated" : "Created");
     } else {
       setStatusMsg("Save failed");
     }

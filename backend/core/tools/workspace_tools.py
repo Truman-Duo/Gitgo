@@ -49,29 +49,30 @@ def _text_diff(path: str, before: str, after: str) -> str:
 
 
 def read_file(args: dict) -> dict:
-    workspace = _workspace(args)
     try:
-        path = _confined_path(workspace, args.get("path", ""), must_exist=True,
-                              allowed_roots=_allowed_roots(args))
+        workspace, path, root, relative = _read_target(args)
     except FileNotFoundError:
         return _read_failure("FILE_NOT_FOUND", str(args.get("path", "")))
-    if path.is_dir():
-        return _read_failure("IS_DIRECTORY", _rel(workspace, path))
+    label = str(path.relative_to(workspace)).replace("\\", "/") if path.is_relative_to(workspace) else str(path)
     offset = max(0, int(args.get("offset", 0) or 0))
     limit = max(1, min(int(args.get("limit", 2000) or 2000), 5000))
     try:
-        raw = path.read_bytes()
+        from backend.core.sandbox_read_plan import open_planned_read
+        with open_planned_read(root, relative) as opened:
+            raw = opened.read_bytes()
     except FileNotFoundError:
-        return _read_failure("FILE_NOT_FOUND", _rel(workspace, path))
+        return _read_failure("FILE_NOT_FOUND", label)
+    except IsADirectoryError:
+        return _read_failure("IS_DIRECTORY", label)
     except OSError as exc:
-        return _read_failure("READ_ERROR", _rel(workspace, path), detail=str(exc))
+        return _read_failure("READ_ERROR", label, detail=str(exc))
     if b"\x00" in raw[:8192]:
-        return _read_failure("BINARY_FILE", _rel(workspace, path))
+        return _read_failure("BINARY_FILE", label)
     text = raw.decode("utf-8-sig", errors="replace")
     lines = text.splitlines()
     selected = lines[offset:offset + limit]
     result = {
-        "path": _rel(workspace, path),
+        "path": label,
         "content": "\n".join(selected),
         "offset": offset,
         "returned_lines": len(selected),
@@ -87,6 +88,9 @@ def read_file(args: dict) -> dict:
         except ValueError:
             return _read_failure("VALIDATION_INPUT_CHANGED", str(path), detail="Only workspace inputs can be pinned for promotion")
         result["input_dependency"] = {"path": relative, "sha256": result["sha256"]}
+    if "_lesson_read_inventory" in args:
+        inventory = args["_lesson_read_inventory"]
+        result["lesson_recall"] = {key: inventory[key] for key in ("state", "error_type") if key in inventory}
     from backend.core.knowledge.prewrite import read_advisories
     try:
         result["lesson_advisories"] = read_advisories(workspace, path, raw.decode("utf-8", errors="replace"),
@@ -400,7 +404,7 @@ def apply_patch(args: dict) -> dict:
 
 
 def exec_command(args: dict) -> dict:
-    from backend.core.process_control import attach_kill_job, close_job, creation_flags
+    from backend.core.process_control import attach_kill_job, close_job, creation_flags, spawn_managed
     workspace = _workspace(args)
     cwd = _confined_path(workspace, args.get("cwd", "."), must_exist=True,
                          allowed_roots=_allowed_roots(args))
@@ -439,7 +443,7 @@ def exec_command(args: dict) -> dict:
     env = _safe_shell_environment()
     env["GITGO_AGENT_TOOL"] = "1"
     try:
-        started = subprocess.Popen(
+        started = spawn_managed(
             argv, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env, creationflags=creation_flags(),
             start_new_session=sys.platform != "win32",
@@ -453,7 +457,8 @@ def exec_command(args: dict) -> dict:
             terminate=lambda: _kill_tree(started, job_handle))
     except subprocess.TimeoutExpired:
         _kill_tree(started, job_handle)
-        return {"error": "COMMAND_TIMEOUT", "timeout": timeout, "argv": argv}
+        return {"error": "COMMAND_TIMEOUT", "timeout": timeout, "argv": argv,
+                "cleanup": getattr(started, "_gitgo_cleanup", {})}
     except (OSError, ValueError) as exc:
         _kill_tree(started, job_handle)
         return {"error": "COMMAND_ERROR", "detail": str(exc), "argv": argv}
@@ -466,6 +471,7 @@ def exec_command(args: dict) -> dict:
         "stdout": stdout,
         "stderr": stderr,
         "exit_code": started.returncode,
+        "cleanup": getattr(started, "_gitgo_cleanup", {}),
         "success": started.returncode == 0,
         "truncated": truncated,
     }
@@ -477,15 +483,15 @@ def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
 
 
 def shell_script(args: dict) -> dict:
-    """Execute one explicitly approved Bash program in the workspace.
+    """Execute one approved native shell program in the workspace.
 
     Approval is enforced by ToolPipeline before this isolated handler starts.
     The runner still confines cwd, strips likely credentials from the inherited
     environment, bounds input/output/time, and owns the spawned process tree.
-    It deliberately does not pretend to be an OS sandbox: the exact script is
-    the unit the user reviewed and approved.
+    ProcessToolRunner applies native OS isolation before loading this handler;
+    the exact script remains the unit the user reviewed and approved.
     """
-    from backend.core.process_control import attach_kill_job, close_job, creation_flags
+    from backend.core.process_control import attach_kill_job, close_job, creation_flags, spawn_managed
 
     workspace = _workspace(args)
     cwd = _confined_path(
@@ -502,21 +508,48 @@ def shell_script(args: dict) -> dict:
         return {"error": "PURPOSE_REQUIRED"}
     if "\x00" in script or len(script.encode("utf-8")) > 100_000:
         return {"error": "SCRIPT_INVALID", "detail": "script exceeds the 100KB boundary or contains NUL"}
-    shell = str(args.get("shell") or "bash").lower()
+    shell = str(args.get("shell") or "auto").lower()
     if shell == "auto":
         shell = "powershell" if sys.platform == "win32" else "bash"
     if shell not in {"bash", "powershell"}:
         return {"error": "SHELL_PROFILE_INVALID", "detail": "Choose bash, powershell or auto; scripts are never translated"}
-    from backend.core.tools.execution_profile import powershell_profile
-    resolution = powershell_profile() if shell == "powershell" else _resolve_bash()
-    if not resolution.get("path"):
-        return {
-            "error": resolution.get("error", "BASH_UNAVAILABLE"),
-            "detail": resolution.get("detail", "Install a verified Git for Windows Bash"),
-        }
-    bash = Path(resolution["path"])
+    if (sys.platform == "win32" and shell != "powershell") or (sys.platform != "win32" and shell != "bash"):
+        return {"error": "SANDBOX_CAPABILITY_UNSUPPORTED", "detail": "This native sandbox supports PowerShell on Windows and Bash on Linux; select that shell explicitly and use its syntax."}
+    resolution = {}
+    if sys.platform == "win32":
+        # MSYS Bash requires a shared global object namespace, incompatible
+        # with AppContainer. Use a Windows-native engine without weakening it.
+        from backend.core.executable_identity import windows_system_executable
+        engine = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")
+        # Server images may not autoload even the built-in modules in an
+        # AppContainer. Load known system manifests before executing the script.
+        bootstrap = "$env:PSModulePath=$PSHOME+'\\Modules';"
+        for module in ("Microsoft.PowerShell.Utility", "Microsoft.PowerShell.Management"):
+            bootstrap += (f"Import-Module ($PSHOME+'\\Modules\\{module}\\{module}.psd1') "
+                          "-ErrorAction Stop;")
+        # PowerShell's provider location can fall back to the drive root in
+        # AppContainer even when CreateProcess has the correct native cwd.
+        literal_cwd = str(cwd).replace("'", "''")
+        bootstrap += (f"$null=New-PSDrive -Name Gitgo -PSProvider FileSystem "
+                      f"-Root '{literal_cwd}' -ErrorAction Stop;"
+                      "Set-Location -LiteralPath 'Gitgo:\\' -ErrorAction Stop;")
+        command = ("[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+                   "try {" + bootstrap + "} catch { [Console]::Error.WriteLine($_);exit 1 };\n" + script)
+        shell_argv = [str(engine), "-NoLogo", "-NoProfile", "-NonInteractive",
+                      "-Command", command]
+    else:
+        resolution = _resolve_bash()
+        if not resolution.get("path"):
+            return {"error": resolution.get("error", "BASH_UNAVAILABLE"),
+                    "detail": resolution.get("detail", "Install Bash in the sandbox runtime.")}
+        bash = Path(resolution["path"])
+        shell_argv = [str(bash), "--noprofile", "--norc", "-c", script]
     timeout = max(1, min(int(args.get("timeout", 120) or 120), 1800))
     env = _safe_shell_environment()
+    if sys.platform == "win32":
+        # Do not discover modules through the real user's registry/profile or
+        # inherit PowerShell 7 module paths into the Windows PowerShell engine.
+        env["PSModulePath"] = str(engine.parent / "Modules")
     env["GITGO_AGENT_TOOL"] = "1"
     started = None
     job_handle = None
@@ -527,10 +560,8 @@ def shell_script(args: dict) -> dict:
                 assert_identity_unchanged(resolution["identity"])
             except (OSError, ValueError) as exc:
                 return {"error": "BASH_IDENTITY_UNVERIFIED", "detail": str(exc)}
-        started = subprocess.Popen(
-            ([str(bash), "--noprofile", "--norc", "-c", script] if shell == "bash" else
-             [str(bash), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-              "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " + script]),
+        started = spawn_managed(
+            shell_argv,
             cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", env=env,
             creationflags=creation_flags(), start_new_session=sys.platform != "win32",
@@ -543,7 +574,8 @@ def shell_script(args: dict) -> dict:
         if started is not None:
             _kill_tree(started, job_handle)
             job_handle = None
-        return {"error": "SHELL_TIMEOUT", "timeout": timeout}
+        return {"error": "SHELL_TIMEOUT", "timeout": timeout,
+                "cleanup": getattr(started, "_gitgo_cleanup", {})}
     except (OSError, ValueError) as exc:
         if started is not None:
             _kill_tree(started, job_handle)
@@ -557,6 +589,7 @@ def shell_script(args: dict) -> dict:
         "cwd": _rel(workspace, cwd),
         "purpose": purpose,
         "shell": shell,
+        "cleanup": getattr(started, "_gitgo_cleanup", {}),
         "stdout": stdout[-_MAX_OUTPUT:],
         "stderr": stderr[-_MAX_OUTPUT:],
         "exit_code": started.returncode,
@@ -649,6 +682,33 @@ def _workspace(args: dict) -> Path:
     if not workspace.exists() or not workspace.is_dir():
         raise ValueError(f"invalid workspace: {workspace}")
     return workspace
+
+
+def _read_target(args: dict) -> tuple[Path, Path, Path, str]:
+    """Select names only; ReadRoot enforces lookup using the opened objects.
+
+    Do not resolve symlinks here and erase the evidence needed by the kernel.
+    _workspace/_allowed_roots are Host inputs, never model authority. Existing
+    file grants select that one name under its parent, not sibling operations.
+    """
+    from backend.core.sandbox_read import ReadBoundaryError, relative_parts
+    workspace = Path(str(args.get("_workspace") or Path.cwd()))
+    raw = args.get("path", "")
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise ReadBoundaryError("A file path is required")
+    requested = Path(raw)
+    if ".." in requested.parts or (requested.anchor and not requested.is_absolute()):
+        raise ReadBoundaryError("File path escapes the read boundary")
+    path = requested if requested.is_absolute() else workspace / requested
+    roots = [workspace, *(Path(str(item)) for item in args.get("_allowed_roots", []))]
+    for root in roots:
+        if path.is_relative_to(root):
+            if path == root:
+                return workspace, path, root.parent, root.name
+            relative = str(path.relative_to(root))
+            relative_parts(relative)
+            return workspace, path, root, relative
+    raise ReadBoundaryError("File path escapes the approved resource scope")
 
 
 def _allowed_roots(args: dict) -> list[Path]:

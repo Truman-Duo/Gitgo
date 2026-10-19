@@ -1,16 +1,24 @@
 """Mount trusted definitions separately from granting execution authority."""
 from .agent_tool import AgentTool, ToolEffect, ApprovalMode, CancellationMode
+from .execution_contract import NATIVE_PROCESS, data_broker
 
 
 def mounted_tool(spec):
     spec = dict(spec)
     mode = spec.get("execution_mode")
+    if mode in {"host_pipeline", "authored_host_python"}:
+        contract = data_broker("host.composite")
+    elif mode in {"authored_pure_python", "authored_privileged_python"}:
+        contract = NATIVE_PROCESS
+    else:
+        raise ValueError("Unknown dynamic execution mode")
     privileged = mode == "authored_privileged_python"
     effect = ToolEffect(spec.get("effect") or "read")
     return AgentTool(spec["name"], str(spec.get("description") or ""), spec.get("parameters"),
         lambda args: {"error": "DYNAMIC_TOOL_REQUIRES_PIPELINE"}, read_only=effect == ToolEffect.READ,
+        execution_contract=contract,
         effect=effect, resources=list(spec.get("resources") or []), timeout=float(spec.get("timeout") or 30),
-        cancellation=CancellationMode.COOPERATIVE if mode == "host_pipeline" else CancellationMode.ISOLATED_PROCESS,
+        cancellation=CancellationMode.COOPERATIVE if mode in {"host_pipeline", "authored_host_python"} else CancellationMode.ISOLATED_PROCESS,
         approval=ApprovalMode.ASK if privileged else ApprovalMode.ALLOW,
         approval_per_invocation=privileged, composite_spec=spec)
 

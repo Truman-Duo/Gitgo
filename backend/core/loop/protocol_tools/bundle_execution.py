@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 import json
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
@@ -187,6 +188,7 @@ def install(ctx):
 
 
     tools["delegate_task_bundle"] = AgentTool(
+        execution_contract=data_broker("host.runtime.delegate_task_bundle"),
         name="delegate_task_bundle",
         description=(
             load_prompt('tools/delegate_task_bundle')

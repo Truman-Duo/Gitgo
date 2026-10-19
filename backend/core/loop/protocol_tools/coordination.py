@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 
 def install(ctx):
@@ -30,6 +31,7 @@ def install(ctx):
 
 
     tools["list_coordination_events"] = AgentTool(
+        execution_contract=data_broker("host.runtime.list_coordination_events"),
         name="list_coordination_events",
         description=(
             load_prompt('tools/list_coordination_events')
@@ -103,6 +105,7 @@ def install(ctx):
 
 
     tools["resolve_coordination_event"] = AgentTool(
+        execution_contract=data_broker("host.runtime.resolve_coordination_event"),
         name="resolve_coordination_event",
         description=(
             load_prompt('tools/resolve_coordination_event')

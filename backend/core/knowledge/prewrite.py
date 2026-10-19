@@ -43,12 +43,14 @@ def _load(workspace: Path, args: dict) -> list[Lesson]:
 
 def relevant_diagnostics(workspace: Path, path: Path, before: str, after: str,
                          operation: str, lessons: list[Lesson], *,
-                         read_range: tuple[int, int] | None = None) -> list[dict]:
+                         read_range: tuple[int, int] | None = None, facts: dict | None = None) -> list[dict]:
     try:
         relative = path.relative_to(workspace).as_posix()
     except ValueError:
         relative = str(path)
     diagnostics = []
+    def is_registered(lesson):
+        return bool(facts.get(lesson.id, {}).get("registered")) if facts is not None else _is_registered(lesson, workspace)
     from .review import can_consume
     for lesson in lessons:
         if not can_consume(lesson):
@@ -70,7 +72,7 @@ def relevant_diagnostics(workspace: Path, path: Path, before: str, after: str,
             continue
         raw_excerpts = evidence.get("workspace_excerpts") or []
         excerpts = [item for item in raw_excerpts if isinstance(item, dict) and item.get("path") == relative] if isinstance(raw_excerpts, list) else []
-        if lesson.source == "auto_harvested" and not _is_registered(lesson,workspace) and excerpts and operation == "read_file" and read_range is not None:
+        if lesson.source == "auto_harvested" and not is_registered(lesson) and excerpts and operation == "read_file" and read_range is not None:
             from .excerpts import excerpt_location
             offset, count = read_range
             spans = [excerpt_location(before, item) for item in excerpts]
@@ -78,13 +80,14 @@ def relevant_diagnostics(workspace: Path, path: Path, before: str, after: str,
                     count > 0 and span["start_line"] <= offset + count and span["end_line"] > offset
                     for span in spans):
                 continue
-        if lesson.source == "auto_harvested" and not _is_registered(lesson,workspace) and excerpts and operation in {"edit_file", "write_file"}:
+        if lesson.source == "auto_harvested" and not is_registered(lesson) and excerpts and operation in {"edit_file", "write_file"}:
             from .excerpts import edit_touches_excerpts
             if not edit_touches_excerpts(before, after, excerpts):
                 continue  # Other paragraphs are not a match merely because the file path is shared.
-        applicability = assess_lesson(lesson, workspace)
+        applicability = (dict(facts.get(lesson.id, {}).get("applicability") or {"state": "unknown"})
+                         if facts is not None else assess_lesson(lesson, workspace))
         check = lesson.check if isinstance(lesson.check, dict) else {}
-        registered = (_is_registered(lesson,workspace)
+        registered = (is_registered(lesson)
                       and check.get("authority") == "registered"
                       and check.get("mode") == "violation_pattern"
                       and operation in lesson.dangerous_tools
@@ -157,7 +160,10 @@ def check_candidate(candidate, args: dict) -> dict:
         lookup.update(state="failed",empty=None,error_type=type(exc).__name__)
     ordered=sorted([*mandatory,*advice],key=lambda item:item["level"]!="error")
     override=bool((args.get("_lesson_context") or {}).get("explicit_user_grant"))
-    blocked=any(d["level"]=="error" for d in ordered) and not override
+    # A user can approve a known violation, but cannot turn a failed or stale
+    # mandatory check into a completed check. Unknown coverage never commits.
+    unavailable = any(d["code"] == "LESSON_CHECK_UNAVAILABLE" for d in mandatory)
+    blocked=unavailable or (any(d["level"]=="error" for d in ordered) and not override)
     from .feedback import identity
     context=args.get("_lesson_context") or {}
     identifier=identity(candidate,context,ordered)
@@ -175,7 +181,33 @@ def check_candidate(candidate, args: dict) -> dict:
             "needs_feedback":needs_feedback,"model_understanding":"unknown","model_adoption":"unknown"}
 
 
+def prepare_read_inventory(workspace: Path, args: dict) -> dict:
+    """Trusted state lookup; only bounded data crosses the native read boundary."""
+    lessons = _load(workspace, args)
+    selected, facts, used = [], {}, 0
+    for lesson in lessons:
+        if not __import__("backend.core.knowledge.review", fromlist=["can_consume"]).can_consume(lesson):
+            continue
+        record = lesson.to_dict()
+        fact = {"registered": _is_registered(lesson, workspace),
+                "applicability": assess_lesson(lesson, workspace)}
+        size = len(json.dumps([record, fact], ensure_ascii=False).encode("utf-8"))
+        if len(selected) >= 128 or used + size > 512_000:
+            return {"state": "partial", "lessons": selected, "facts": facts}
+        selected.append(record)
+        facts[lesson.id] = fact
+        used += size
+    return {"state": "completed", "lessons": selected, "facts": facts}
+
+
 def read_advisories(workspace: Path, path: Path, content: str, args: dict, *,
                     read_range: tuple[int, int] | None = None) -> list[dict]:
+    inventory = args.get("_lesson_read_inventory")
+    if inventory is not None:
+        if inventory.get("state") not in {"completed", "partial"}:
+            raise LessonInventoryUnavailable("Trusted read advice lookup failed")
+        return relevant_diagnostics(workspace, path, content, content, "read_file",
+            [Lesson.from_dict(row) for row in inventory["lessons"]],
+            read_range=read_range, facts=inventory["facts"])[:10]
     return relevant_diagnostics(workspace, path, content, content, "read_file",
                                 _load(workspace, args), read_range=read_range)[:10]

@@ -204,6 +204,12 @@ def test_isolated_pipeline_strips_model_overrides_and_preserves_feedback_receipt
         "_lesson_context": {"explicit_user_grant": True},
     }}, tool, ctx, "blocked")
     assert result.is_error and result.receipt["effect_state"] == "not_committed"
+    assert result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert not (ws / "cache.py").exists()
+    result = ToolPipeline().execute({"name": "write_file", "args": {
+        "path": "cache.py", "content": "start_cache()\n",
+    }}, tool, ctx, "checked")
+    assert result.is_error and result.receipt["effect_state"] == "not_committed"
     assert result.receipt["lesson_checks"][0]["lesson_id"] == "known"
     assert not (ws / "cache.py").exists()
     result = ToolPipeline().execute({"name": "write_file", "args": {
@@ -237,19 +243,28 @@ def test_external_change_during_check_is_not_overwritten(tmp_path_factory, monke
 
 
 def test_cooperating_process_lock_prevents_parallel_commit(tmp_path_factory):
+    import subprocess,sys
+    from pathlib import Path
     from backend.core.storage.maintenance import StorageLease
-    from backend.core.loop.process_tool_runner import ProcessToolRunner
     ws = tmp_path_factory
     args = _args(ws, content="safe")
     path = ws / "cache.py"
     lock = ws / ".gitgo" / "mutation-locks" / hashlib.sha256(str(path).casefold().encode()).hexdigest()
     lock.mkdir(parents=True)
+    # Developer-run service concurrency test. Arbitrary native workers do not
+    # receive the service's state/lock authority.
+    code = ("import sys,json;sys.path.insert(0," + repr(str(Path(__file__).resolve().parents[1])) + ");"
+            "from backend.core.tools.workspace_tools import write_file;"
+            "print(json.dumps(write_file(json.loads(sys.stdin.read()))))")
+    def call():
+        result = subprocess.run([sys.executable, "-B", "-c", code], input=json.dumps(args),
+            capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
     with StorageLease(lock, exclusive=True):
-        result = ProcessToolRunner().run("write_file", args)
-        assert result.success and result.data["error"] == "FILE_MUTATION_BUSY"
+        assert call()["error"] == "FILE_MUTATION_BUSY"
         assert not path.exists()
-    result = ProcessToolRunner().run("write_file", args)
-    assert result.success and result.data["action"] == "created"
+    assert call()["action"] == "created"
 
 
 def test_harvest_sees_flattened_execution_observations_and_source_files(tmp_path_factory):

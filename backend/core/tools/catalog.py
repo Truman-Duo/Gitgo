@@ -12,6 +12,8 @@ import sys
 
 from backend.core.prompt_templates import load_prompt, render_prompt
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, data_broker
+
 from backend.core.loop.agent_tool import (
     AgentTool,
     ApprovalMode,
@@ -31,9 +33,18 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
     common = {
         "prepare_args": inject_workspace,
         "isolated": True,
+        "execution_contract": NATIVE_PROCESS,
         "cancellation": CancellationMode.ISOLATED_PROCESS,
         "composable": True,
     }
+    def file_service(name):
+        from backend.core.tools import workspace_tools
+        def execute(args):
+            return getattr(workspace_tools, name)(args)
+        return {**common, "isolated": False,
+                "execution_contract": data_broker("files.workspace." + name),
+                "cancellation": CancellationMode.NON_INTERRUPTIBLE,
+                "execute": execute}
     return {
         "read_file": AgentTool(
             name="read_file",
@@ -56,7 +67,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             resources=[],
             runner_name="read_file",
             idempotent=True,
-            **common,
+            **{**common, "execution_contract": NATIVE_FILE_READ},
         ),
         "list_files": AgentTool(
             name="list_files",
@@ -228,13 +239,12 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "required": ["path", "old_string", "new_string", "expected_sha256"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="edit_file",
             idempotent=False,
-            **common,
+            **file_service("edit_file"),
         ),
         "write_file": AgentTool(
             name="write_file",
@@ -253,13 +263,12 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "required": ["path", "content"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="write_file",
             idempotent=False,
-            **common,
+            **file_service("write_file"),
         ),
         "delete_file": AgentTool(
             name="delete_file",
@@ -343,7 +352,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "type": "object",
                 "properties": {
                     "script": {"type": "string"},
-                    "shell": {"type": "string", "enum": ["bash", "powershell", "auto"], "default": "bash"},
+                    "shell": {"type": "string", "enum": ["bash", "powershell", "auto"], "default": "auto"},
                     "purpose": {"type": "string"},
                     "cwd": {"type": "string"},
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 1800},

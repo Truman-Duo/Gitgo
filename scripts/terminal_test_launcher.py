@@ -64,14 +64,16 @@ class WindowsProcess:
             size = wintypes.DWORD(len(name))
             if not self.api.QueryFullProcessImageNameW(self.handle, 0, name, ctypes.byref(size)):
                 error = ctypes.get_last_error()
-                # A process may exit after OpenProcess. Only a signaled handle
-                # permits treating a failed identity query as an exited process.
+                # Exit can race the identity query. A signaled OS handle is
+                # authoritative; query failures on live processes still deny.
                 if not self.alive():
                     raise ProcessLookupError(pid)
                 raise ctypes.WinError(error)
             times = [wintypes.FILETIME() for _ in range(4)]
             if not self.api.GetProcessTimes(self.handle, *(ctypes.byref(item) for item in times)):
                 error = ctypes.get_last_error()
+                # Exit can race the identity query. A signaled OS handle is
+                # authoritative; query failures on live processes still deny.
                 if not self.alive():
                     raise ProcessLookupError(pid)
                 raise ctypes.WinError(error)

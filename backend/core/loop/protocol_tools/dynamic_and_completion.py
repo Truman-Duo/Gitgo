@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ApprovalMode, CancellationMode, ToolEffect
 from backend.core.loop.completion_protocol import COMPLETE_TASK_PARAMETERS, CompletionClaim
 
@@ -71,6 +72,7 @@ def install(ctx):
                 return {"error": str(exc), "defined": False}
 
             dynamic = AgentTool(
+                execution_contract=data_broker("host.composite"),
                 name=spec["name"],
                 description=spec["description"],
                 parameters=spec["parameters"],
@@ -96,6 +98,7 @@ def install(ctx):
             }
 
         tools["define_tool"] = AgentTool(
+            execution_contract=data_broker("host.runtime.define_tool"),
             name="define_tool",
             description=(
                 load_prompt('tools/define_tool')
@@ -364,6 +367,7 @@ def install(ctx):
                     "tests_passed": len(spec["tests"])}
 
         tools["author_tool"] = AgentTool(
+            execution_contract=data_broker("host.runtime.author_tool"),
             name="author_tool",
             description=(
                 load_prompt('tools/author_tool')
@@ -408,6 +412,7 @@ def install(ctx):
             return {"accepted": True, **process.review_claim}
 
         tools["complete_review"] = AgentTool(
+            execution_contract=data_broker("host.runtime.complete_review"),
             name="complete_review",
             description=load_prompt('tools/complete_review'),
             parameters={
@@ -436,6 +441,7 @@ def install(ctx):
 
 
     tools["complete_task"] = AgentTool(
+        execution_contract=data_broker("host.runtime.complete_task"),
         name="complete_task",
         description=(
             load_prompt('tools/complete_task')

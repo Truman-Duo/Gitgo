@@ -51,7 +51,8 @@ export function useLLMConfig(client: BackendClient | null, project = "") {
       setActiveProvider(result?.active_provider || "");
       setFailoverEnabled(Boolean(result?.failover_enabled));
       setFailoverOrder(result?.failover_order || []);
-      setError(null);
+      setError(result?.credential_cleanup?.pending
+        ? "Configuration saved; old credential cleanup pending. Retry the operation or uninstall cleanup." : null);
       if (project) {
         const status: any = await loopStatus(client, project);
         setHealth(Object.fromEntries((status?.providers || []).map((p: any) => [p.id, p])));

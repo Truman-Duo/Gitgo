@@ -1292,6 +1292,7 @@ class ApplicationServices:
                 "failover_enabled": config.get("failover_enabled", False),
                 "failover_order": config.get("failover_order", []),
                 "circuit_breaker": config.get("circuit_breaker", {}),
+                "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
                 "health_scope": "owning_project_daemon"}
 
     def provider_failover_configure(self, enabled: bool, order: list[str], circuit_breaker: dict | None = None) -> dict:
@@ -1368,6 +1369,7 @@ class ApplicationServices:
         if saved is None:
             raise OperationError("UPDATE_FAILED", f"Provider '{provider_id}' could not be updated")
         return {"status": "updated" if existing else "created",
+                "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
                 "provider": _public_provider(saved.to_dict())}
 
     def provider_switch(self, provider_id: str) -> dict:
@@ -1383,6 +1385,7 @@ class ApplicationServices:
         if not LLMConfigManager.delete(provider_id):
             raise OperationError("PROVIDER_NOT_FOUND", f"Provider '{provider_id}' was not found")
         return {"status": "deleted", "provider_id": provider_id,
+                "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
                 "active_provider": LLMConfigManager.load().get("active_provider", "")}
 
     def provider_test(self, provider_id: str, timeout: int = 30) -> dict:

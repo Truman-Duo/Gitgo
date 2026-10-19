@@ -12,6 +12,7 @@ from backend.core.loop.models import AgentProcess, RingLevel
 from backend.core.loop.session import AgentSession
 from backend.core.loop.tools import ToolRegistry
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
+from backend.core.loop.execution_contract import data_broker
 from backend.core.loop.event_bus import EventBus
 from backend.core.loop.execution_context import ExecutionContext
 from backend.core.loop.tool_pipeline import ToolPipeline
@@ -76,7 +77,7 @@ def test_preflight_block_help_real_evidence_then_single_effect(tmp_path_factory)
         {"id": "change", "kind": "change", "files": ["app.py"], "depends_on": ["red"]},
         {"id": "green", "kind": "check", "test_id": "regression", "passed": True, "depends_on": ["change"]}]})
     calls = []
-    tool = AgentTool(name="edit_file", description="test", parameters={"type": "object"},
+    tool = AgentTool(execution_contract=data_broker("test.guidance_fixture"), name="edit_file", description="test", parameters={"type": "object"},
         execute=lambda args: calls.append(args) or {"path": "app.py"}, effect=ToolEffect.WORKSPACE_WRITE)
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     pipeline = ToolPipeline()
@@ -102,7 +103,7 @@ def test_known_business_error_preserves_effect_and_exact_producer_actions(tmp_pa
     payload = error_payload("FILE_CHANGED", state_changed=True, occurrence_id="original",
         next_actions=[{"action": "inspect_this_exact_target"}])
     payload.update(effect_state="partial", execution_state="started", detail="concurrent writer")
-    tool = AgentTool(name="probe", description="probe", parameters={"type": "object"}, execute=lambda _: payload,
+    tool = AgentTool(execution_contract=data_broker("test.guidance_fixture"), name="probe", description="probe", parameters={"type": "object"}, execute=lambda _: payload,
         effect=ToolEffect.WORKSPACE_WRITE)
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     result = ToolPipeline().execute({"name": "probe", "args": {}}, tool, ctx, "probe")
@@ -120,7 +121,7 @@ def test_postcommit_warning_is_still_success_and_is_delivered_with_help(tmp_path
         calls.append(1)
         return {"path": "app.py", "knowledge_capture_warning": {
             "code": "SOURCE_EXCERPTS_UNAVAILABLE", "message": "Committed; observer failed."}}
-    tool = AgentTool(name="probe", description="probe", parameters={"type": "object"}, execute=commit,
+    tool = AgentTool(execution_contract=data_broker("test.guidance_fixture"), name="probe", description="probe", parameters={"type": "object"}, execute=commit,
         effect=ToolEffect.WORKSPACE_WRITE)
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     result = ToolPipeline().execute({"name": "probe", "args": {}}, tool, ctx, "committed")

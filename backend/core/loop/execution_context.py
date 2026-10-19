@@ -47,3 +47,5 @@ class ExecutionContext:
 
     def cancel(self) -> None:
         self.cancellation.set()
+        from .read_approval import revoke_read_requests
+        revoke_read_requests(self.process)

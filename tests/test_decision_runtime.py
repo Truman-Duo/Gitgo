@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import json
 import threading
 import time
@@ -508,7 +510,7 @@ def test_completion_tool_is_terminal_after_host_evidence_passes(tmp_path_factory
         task_budget_limits={"max_seconds": 10},
     )
     edit = AgentTool(
-        name="edit",
+        execution_contract=data_broker("test.fixture"), name="edit",
         description="Apply one bounded test edit.",
         parameters={"type": "object", "properties": {}, "required": []},
         execute=lambda _args: {"success": True, "file": "bounded.txt"},
@@ -587,7 +589,7 @@ def test_plain_text_after_host_evidence_compiles_terminal_claim(tmp_path_factory
         task_budget_limits={"max_seconds": 10},
     )
     edit = AgentTool(
-        name="edit",
+        execution_contract=data_broker("test.fixture"), name="edit",
         description="Apply one bounded test edit.",
         parameters={"type": "object", "properties": {}, "required": []},
         execute=lambda _args: {"success": True, "file": "bounded.txt"},

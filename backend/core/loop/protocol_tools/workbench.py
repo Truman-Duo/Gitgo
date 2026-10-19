@@ -1,4 +1,5 @@
 """Workbench application tool and a narrowly scoped legacy arithmetic adapter."""
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.errors import error_payload
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.prompt_templates import load_prompt
@@ -120,6 +121,7 @@ def install(ctx):
         return invoke(args, sheets, sources, material_context)
 
     ctx.tools["workbench"] = AgentTool(
+        execution_contract=data_broker("runtime.workbench"),
         name="workbench", description=load_prompt("tools/workbench"),
         parameters={"type": "object", "properties": {
             "operation": {"type": "string", "enum": _OPERATIONS},
@@ -158,6 +160,7 @@ def install(ctx):
         return {"expression": result["expression"], "result": result["result"]}
 
     ctx.tools["calculate"] = AgentTool(
+        execution_contract=HOST_COMPUTE,
         name="calculate", description=load_prompt("tools/calculate"),
         parameters={"type": "object", "properties": {"expression": {"type": "string"}},
                     "required": ["expression"]},

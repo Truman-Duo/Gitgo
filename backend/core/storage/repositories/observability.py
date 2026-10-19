@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from typing import Iterable
+from ..transactions import authoritative_transaction
 from ..models import StorageBlocked
 from ..redaction import redact_for_persistence
 from .ports import ObservabilityPort
@@ -28,6 +29,7 @@ def append_event(
     execution must not fail because verbose telemetry cannot be retained.
     """
     self._ensure_open()
+    self._observability.require_available()
     encoded = summary.encode("utf-8")
     logical = len(encoded) + len(payload_ref or "") + 256
     if logical > self.policy.max_observability_record_bytes:
@@ -66,6 +68,7 @@ def _reserve_observability_write(
     covers the complete SQLite file family and the shared physical-write
     budget; callers must not retry in a hot loop when this returns false.
     """
+    self._observability.require_available()
     health = self.check_health()
     estimated_write = self._estimated_sqlite_write(logical)
     allowed = not (
@@ -145,8 +148,7 @@ def append_trace_record(
     severity = str(safe_record.get("severity") or "info")
     proposed = int(safe_record.get("seq", 0) or 0)
     with self._observability_lock:
-        self._observability.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._observability):
             row = self._observability.execute(
                 "SELECT MAX(sequence) FROM trace_events WHERE trace_id=?",
                 (trace_id,),
@@ -171,10 +173,6 @@ def append_trace_record(
                     int(safe_record.get("monotonic_ns", 0) or 0),
                 ),
             )
-            self._observability.execute("COMMIT")
-        except BaseException:
-            self._observability.execute("ROLLBACK")
-            raise
     return safe_record
 
 
@@ -412,8 +410,7 @@ def import_trace_records(
                 )
 
         with self._observability_lock:
-            self._observability.execute("BEGIN IMMEDIATE")
-            try:
+            with authoritative_transaction(self._observability):
                 for (
                     safe, _encoded_detail, detail_ref, detail_bytes,
                     record_json, _logical,
@@ -434,10 +431,6 @@ def import_trace_records(
                         ),
                     )
                     inserted += max(0, int(row_cursor.rowcount or 0))
-                self._observability.execute("COMMIT")
-            except BaseException:
-                self._observability.execute("ROLLBACK")
-                raise
     return inserted
 
 

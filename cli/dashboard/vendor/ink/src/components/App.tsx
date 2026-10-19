@@ -264,7 +264,10 @@ export default class App extends PureComponent<Props, State> {
     }
     // ignore calling setRawMode on an handle stdin it cannot be called
     if (this.isRawModeSupported()) {
-      this.handleSetRawMode(false);
+      // Parent teardown can run before child input subscriptions are removed.
+      // Restoration must not depend on their reference count at this point.
+      this.rawModeEnabledCount = 0;
+      this.disableRawMode();
     } else {
       // Even when raw mode was never enabled (e.g. non-TTY stdin on
       // Windows Node.js), ensure stdin is unref'd so the process can
@@ -369,16 +372,19 @@ export default class App extends PureComponent<Props, State> {
         return;
       }
 
-      this.props.stdout.write(DISABLE_MODIFY_OTHER_KEYS);
-      this.props.stdout.write(DISABLE_KITTY_KEYBOARD);
-      // Disable terminal focus reporting (DECSET 1004)
-      this.props.stdout.write(DFE);
-      // Disable bracketed paste mode
-      this.props.stdout.write(DBP);
-      stdin.setRawMode(false);
-      stdin.removeListener('readable', this.handleReadable);
-      stdin.unref();
+      this.disableRawMode();
     }
+  };
+
+  disableRawMode = (): void => {
+    const {stdin, stdout} = this.props;
+    stdout.write(DISABLE_MODIFY_OTHER_KEYS);
+    stdout.write(DISABLE_KITTY_KEYBOARD);
+    stdout.write(DFE);
+    stdout.write(DBP);
+    stdin.setRawMode(false);
+    stdin.removeListener('readable', this.handleReadable);
+    stdin.unref();
   };
 
   // Helper to flush incomplete escape sequences

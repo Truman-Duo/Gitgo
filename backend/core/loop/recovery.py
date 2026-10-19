@@ -10,6 +10,8 @@ from __future__ import annotations
 from backend.core.prompt_templates import render_prompt
 
 import json
+import math
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -45,21 +47,56 @@ def _timestamp(value: str) -> float:
 
 
 def inspect_post_checkpoint_invocations(
-    workspace: str | Path, process_id: str, checkpoint_at: str,
+    workspace: str | Path, process_id: str, checkpoint_at: str, *, paths=None, state_home=None,
 ) -> list[dict]:
     """Find effectful invocation truth written after the durable checkpoint."""
-    root = Path(workspace) / ".gitgo" / "tool_invocations"
-    if not root.is_dir():
-        return []
+    from backend.core.storage.invocation_journal import invocation_journal_root
     checkpoint_ts = _timestamp(checkpoint_at)
     findings: list[dict] = []
-    for path in root.glob("*.json"):
+
+    def unavailable(journal, detail):
+        return {
+            "code": "INVOCATION_EVIDENCE_UNAVAILABLE", "detail": detail,
+            "tool_name": "unknown", "state": "unknown", "effect_state": "ambiguous",
+            "execution_id": "", "journal": str(journal),
+            "owner_scope": "host", "updated_at": checkpoint_ts,
+        }
+
+    try:
+        root = invocation_journal_root(workspace, paths=paths, state_home=state_home)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return [unavailable("", str(exc))]
+    legacy = Path(workspace) / ".gitgo" / "tool_invocations"
+    # Workspace records have no authenticity proof. Preserve them for review,
+    # but never import a tool-writable "committed" claim as Host truth.
+    if legacy.exists() or legacy.is_symlink():
+        findings.append({
+            "code": "LEGACY_INVOCATION_JOURNAL_UNTRUSTED",
+            "tool_name": "unknown", "state": "unknown", "effect_state": "ambiguous",
+            "execution_id": "", "journal": str(legacy),
+            "owner_scope": "untrusted_workspace", "updated_at": checkpoint_ts,
+        })
+    try:
+        with os.scandir(root) as entries:
+            records = [Path(entry.path) for entry in entries if entry.name.endswith(".json")]
+    except FileNotFoundError:
+        records = []  # A project without effectful invocations has no journal yet.
+    except OSError as exc:
+        return findings + [unavailable(root, str(exc))]
+    for path in records:
         try:
+            if path.resolve(strict=True).parent != root:
+                raise ValueError("Invocation record is redirected outside its Host journal")
             item = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            if not isinstance(item, dict):
+                raise ValueError("Invocation record must be an object")
+            updated_at = float(item.get("updated_at", 0.0) or 0.0)
+            if not math.isfinite(updated_at):
+                raise ValueError("Invocation timestamp is not finite")
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            findings.append(unavailable(path, str(exc)))
             continue
         owner = str(item.get("process_id") or "")
-        updated_at = float(item.get("updated_at", 0.0) or 0.0)
         if owner and owner != process_id:
             continue
         if updated_at <= checkpoint_ts:
@@ -309,6 +346,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             budget_by_root[root_id] = TaskTreeBudget.from_snapshot(latest)
         budget = budget_by_root[root_id]
         persisted_status = str(raw_process.get("status") or "running")
+        prior_recovery = dict(runtime.get("recovery") or {})
         pending_decision = runtime.get("pending_decision")
         checkpoint_at = str(
             (state.get("session_checkpoint") or {}).get("checkpoint_at") or ""
@@ -322,6 +360,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
         )
         findings = inspect_post_checkpoint_invocations(
             process_workspace, process_id, checkpoint_at,
+            paths=session_store._storage.paths,
         ) if process_id in incomplete else []
         if process_id in incomplete:
             findings.extend(inspect_worktree_recovery(durable_worktree))
@@ -330,20 +369,41 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             findings.append({"code": "HOST_FINALIZATION_INCOMPLETE", "effect_state": "ambiguous",
                              "detail": "Provider result was not finalized by Host; inspect retained effects in a new task."})
 
+        # A quiet journal cannot resolve an earlier Host restriction. Merge new
+        # observations into the committed recovery facts without weakening them.
+        reasons = list(prior_recovery.get("reasons") or [])
+        current_reasons = []
+        if profile_error:
+            current_reasons.append({"code": "CAPABILITY_PROFILE_UNAVAILABLE", "detail": profile_error})
+        current_reasons.extend(findings)
+        commit_unknown = prior_recovery.get("checkpoint_commit") == "unknown"
+        if commit_unknown:
+            current_reasons.append({"code": "STORAGE_COMMIT_UNKNOWN"})
+        for reason in current_reasons:
+            if reason not in reasons:
+                reasons.append(reason)
+        resume_forbidden = bool(
+            prior_recovery.get("resume_forbidden") or commit_unknown or profile_error
+            or provisional_terminal or any(
+                str(item.get("code") or "").startswith("WORKTREE_")
+                or item.get("code") == "INVOCATION_EVIDENCE_UNAVAILABLE"
+                for item in reasons
+            )
+        )
+        requires_verification = bool(
+            prior_recovery.get("requires_manual_verification") or reasons or resume_forbidden
+        )
+
         if process_id not in incomplete:
             try:
                 restored_status = ProcessStatus(persisted_status)
             except ValueError:
                 restored_status = ProcessStatus.FAILED
+        elif resume_forbidden or requires_verification:
+            # A pending card cannot bypass unresolved Host recovery restrictions.
+            restored_status = ProcessStatus.RECOVERY_REVIEW_REQUIRED
         elif pending_decision:
             restored_status = ProcessStatus.AWAITING_USER
-        elif profile_error:
-            # A missing/changed server-owned profile cannot be authorized by a
-            # user attestation. Keep the process visible for discard and
-            # diagnosis, but never turn it into a runnable text-only agent.
-            restored_status = ProcessStatus.RECOVERY_REVIEW_REQUIRED
-        elif findings:
-            restored_status = ProcessStatus.RECOVERY_REVIEW_REQUIRED
         else:
             restored_status = ProcessStatus.RESUME_AVAILABLE
 
@@ -409,12 +469,16 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             mailbox=AgentMailbox.from_durable_snapshot(runtime.get("mailbox")),
             task_budget=budget,
             context_version=max(1, int(runtime.get("context_version", 1) or 1)),
-            pending_decision=(dict(pending_decision) if isinstance(pending_decision, dict) else None),
+            recovery=prior_recovery or None,
+            pending_decision=(dict(pending_decision)
+                              if isinstance(pending_decision, dict) and not resume_forbidden else None),
             pending_tool_batch=(
                 dict(runtime.get("pending_tool_batch"))
-                if isinstance(runtime.get("pending_tool_batch"), dict) else None
+                if isinstance(runtime.get("pending_tool_batch"), dict) and not resume_forbidden else None
             ),
-            approval_grants=list(runtime.get("approval_grants") or []),
+            # Grant consumption has no durable launch transaction yet.
+            # Restore evidence, never executable authority from a checkpoint.
+            approval_grants=[],
         )
         if process.pending_tool_batch and runtime.get("dynamic_tool_specs"):
             process.runtime_preferences["pending_definition_recovery"] = {
@@ -425,24 +489,18 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
         )
         process.estimated_tokens = session.estimate_tokens()
         if process_id in incomplete:
-            reasons = []
-            if profile_error:
-                reasons.append({"code": "CAPABILITY_PROFILE_UNAVAILABLE", "detail": profile_error})
-            reasons.extend(findings)
-            worktree_forbidden = any(
-                str(item.get("code") or "").startswith("WORKTREE_")
-                for item in findings
-            )
             process.recovery = {
+                **prior_recovery,
                 "state": restored_status.value,
                 "checkpoint_at": checkpoint_at,
                 "reasons": reasons,
                 "self_execute_lease_revoked": actor_kind == "supervisor",
+                "approval_grants_revoked": len(runtime.get("approval_grants") or []),
                 "dynamic_tools_revoked": sorted(
                     dict(runtime.get("dynamic_tool_specs") or {}).keys()
                 ),
-                "requires_manual_verification": bool(findings or profile_error),
-                "resume_forbidden": bool(profile_error or worktree_forbidden or provisional_terminal),
+                "requires_manual_verification": requires_verification,
+                "resume_forbidden": resume_forbidden,
             }
         manager.register_restored(process)
 

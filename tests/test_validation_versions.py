@@ -10,7 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from tests.test_alpha3_native_source import isolated_python, source_runtime, source_native_runner
 
+from backend.core.loop.execution_contract import data_broker
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.completion_protocol import CompletionClaim, HostCompletionEvaluator, HostCompletionEvidence
 from backend.core.loop.execution_context import ExecutionContext
@@ -32,7 +34,7 @@ def case(tmp_path_factory, monkeypatch):
     project = tmp_path / 'test-project'
     project.mkdir()
     close_owned_storage()
-    monkeypatch.setenv('GITGO_STATE_HOME', str(project / '.gitgo' / 'state'))
+    monkeypatch.setenv('GITGO_STATE_HOME', str(tmp_path / 'state'))
     monkeypatch.setenv('GITGO_CONFIG_PATH', str(tmp_path / 'config.json'))
     p, _ = _supervisor(project)
     p.task_kind = 'action'
@@ -41,7 +43,8 @@ def case(tmp_path_factory, monkeypatch):
     catalog['run_test'] = AgentTool(name='run_test', description='Run the product registered test implementation',
         parameters={'type':'object','properties':{'test_id':{'type':'string'},'target':{'type':'string'}},
                     'required':['test_id','target']},
-        execute=lambda a: run_registered_test(project, a), read_only=False, effect=ToolEffect.PROCESS)
+        execute=lambda a: run_registered_test(project, a), read_only=False, effect=ToolEffect.PROCESS,
+        execution_contract=data_broker('test.validation_registered_test'))
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(project),
         event_bus=EventBus(), cancellation=p.cancellation_event)
     def execute(name, args, *, expected_error=False):
@@ -132,7 +135,8 @@ def test_permission_rejects_changed_args_and_wrong_task(case):
     tool=AgentTool(name='audit_sensitive',description='Harmless in-memory approval fixture',
         parameters={'type':'object','properties':{'value':{'type':'string'}},'required':['value']},
         execute=lambda a: calls.append(a['value']) or {'ok':True},
-        read_only=False,effect=ToolEffect.PROCESS,approval=ApprovalMode.ASK,approval_per_invocation=True)
+        read_only=False,effect=ToolEffect.PROCESS,approval=ApprovalMode.ASK,approval_per_invocation=True,
+        execution_contract=data_broker('test.validation_approval'))
     p.tool_registry.add_scoped('audit_sensitive')
     args={'value':'original'}
     create_permission_request(p,{'tool_name':tool.name,'arguments':args,'purpose':'observe the exact grant boundary',
@@ -154,7 +158,7 @@ def test_permission_rejects_changed_args_and_wrong_task(case):
     assert spent.is_error and calls==['original']
 
 @pytest.mark.parametrize("pin", [False, True])
-def test_promotion_rechecks_explicit_read_dependency(case, pin):
+def test_promotion_rechecks_explicit_read_dependency(case, pin, source_native_runner):
     from tests.test_agent_delivery_continuation import setup, delegate, cleanup
     from tests.test_agent_dag_worktree import _git
     project,_,_,_,_=case
@@ -175,7 +179,8 @@ def test_promotion_rechecks_explicit_read_dependency(case, pin):
             child.tool_receipts.append(result.receipt)
             child.session.append_tool_result(result.formatted,tool_name=name,data=result.data,receipt=result.receipt)
             return result
-        read=invoke('read_file',{'path':'settings.txt','bind_dependency':pin})
+        with source_native_runner(child_root):
+            read=invoke('read_file',{'path':'settings.txt','bind_dependency':pin})
         assert read.data['content'].startswith('old configuration')
         invoke('write_file',{'path':'app.txt','content':'generated using old configuration\n','create_only':False,
             'expected_sha256':hashlib.sha256((child_root/'app.txt').read_bytes()).hexdigest()})
@@ -268,7 +273,7 @@ def test_required_test_cannot_borrow_another_target_run(case):
     assert not claim(p).allowed
 
 
-def test_pinned_dag_input_is_checked_against_integrated_predecessor(case):
+def test_pinned_dag_input_is_checked_against_integrated_predecessor(case, source_native_runner):
     from tests.test_agent_delivery_continuation import setup,delegate,cleanup
     from tests.test_agent_dag_worktree import _git
     project,_,_,_,_=case
@@ -299,7 +304,8 @@ def test_pinned_dag_input_is_checked_against_integrated_predecessor(case):
             'expected_sha256':hashlib.sha256((upfolder/'settings.txt').read_bytes()).hexdigest()})
         seal(upstream)
         child,folder,invoke=start(depends_on=[upstream.process_id],target_files=['app.txt'])
-        assert invoke('read_file',{'path':'settings.txt','bind_dependency':True}).data['content']=='new upstream'
+        with source_native_runner(folder):
+            assert invoke('read_file',{'path':'settings.txt','bind_dependency':True}).data['content']=='new upstream'
         invoke('write_file',{'path':'app.txt','content':'generated from new upstream\n','create_only':False,
             'expected_sha256':hashlib.sha256((folder/'app.txt').read_bytes()).hexdigest()})
         seal(child)

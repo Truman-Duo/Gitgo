@@ -92,7 +92,7 @@ def test_typed_timeout_keeps_effect_uncertainty_without_auto_replay(tmp_path_fac
     expected = "ambiguous" if effect == ToolEffect.WORKSPACE_WRITE else "not_committed"
     assert result.receipt["effect_state"] == expected
     assert result.diagnostics["error_info"]["effect_state"] == expected
-    assert result.diagnostics["error_info"]["catalog_id"] == "GITGO-E3801"
+    assert result.diagnostics["error_info"]["catalog_id"] == "GITGO-E3810"
     if effect == ToolEffect.WORKSPACE_WRITE:
         assert (tmp_path_factory / "partial.txt").read_text() == "effect before timeout"
 
@@ -125,5 +125,5 @@ def test_isolated_runner_timeout_flag_reaches_the_same_typed_diagnostic(tmp_path
     ctx = context(tmp_path_factory, ["probe"])
     result = ToolPipeline().execute({"name": "probe", "args": {}}, tool, ctx, "isolated-timeout")
     assert result.diagnostics["code"] == "TOOL_TIMEOUT"
-    assert result.diagnostics["error_info"]["catalog_id"] == "GITGO-E3801"
+    assert result.diagnostics["error_info"]["catalog_id"] == "GITGO-E3810"
     assert result.diagnostics["error_info"]["effect_state"] == result.receipt["effect_state"] == "not_committed"

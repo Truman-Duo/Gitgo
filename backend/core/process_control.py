@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
+import json
+import socket
+from pathlib import Path
 
 
 def creation_flags() -> int:
@@ -91,6 +95,10 @@ def attach_kill_job(proc: subprocess.Popen):
 def close_job(job_handle) -> None:
     if sys.platform != "win32" or not job_handle:
         return
+    owned_close = getattr(job_handle, "close", None)
+    if owned_close is not None:
+        owned_close()
+        return
     try:
         import ctypes
         from ctypes import wintypes
@@ -101,10 +109,81 @@ def close_job(job_handle) -> None:
         pass
 
 
+def spawn_managed(argv, **kwargs):
+    """Establish owned lifetime BEFORE the command runs, not at cancellation."""
+    if sys.platform == "win32":
+        return subprocess.Popen(argv, **kwargs)
+    parent, child = socket.socketpair()
+    # Frozen first launch may include platform loader/signature checks. Keep a
+    # separate, bounded startup limit rather than misclassifying a cold Host.
+    parent.settimeout(20 if getattr(sys, "frozen", False) else 5)
+    if getattr(sys, "frozen", False):
+        launch = [sys.executable, "--gitgo-internal-role", "unix-scope", str(child.fileno())]
+    else:
+        launch = [sys.executable, str(Path(__file__).with_name("unix_process_scope.py")), str(child.fileno())]
+    proc = None
+    try:
+        kwargs["start_new_session"] = True
+        kwargs["pass_fds"] = (child.fileno(),)
+        proc = subprocess.Popen(launch, **kwargs)
+        child.close()
+        proc._gitgo_scope_socket = parent
+        proc._gitgo_cleanup = {"complete": False, "issues": ["cleanup_not_observed"]}
+        parent.sendall(json.dumps(argv).encode() + b"\n")
+        data = bytearray()
+        while b"\n" not in data and len(data) < 4096:
+            chunk = parent.recv(4096 - len(data))
+            if not chunk: break
+            data.extend(chunk)
+        line, _, remainder = data.partition(b"\n")
+        ready = json.loads(line)
+        proc._gitgo_scope_buffer = remainder
+        if "spawn_error" in ready:
+            raise OSError(ready["spawn_error"], "Managed command spawn failed")
+        if not isinstance(ready.get("spawned"), int):
+            raise OSError("Managed command readiness missing")
+        proc.args = argv
+        return proc
+    except BaseException:
+        parent.close(); child.close()
+        if proc is not None:
+            try: proc.wait(timeout=3)  # EOF asks the owning supervisor to clean up
+            except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=5)
+        raise
+
+
+def finish_scope(proc):
+    control = getattr(proc, "_gitgo_scope_socket", None)
+    if control is None:
+        return
+    try:
+        control.settimeout(1)
+        data = bytearray(getattr(proc, "_gitgo_scope_buffer", b""))
+        while not data.endswith(b"\n") and len(data) < 4096:
+            chunk = control.recv(4096 - len(data))
+            if not chunk: break
+            data.extend(chunk)
+        report = json.loads(data)
+        proc._gitgo_cleanup = report["cleanup"]
+        if report.get("command_exit") is not None:
+            proc.returncode = int(report["command_exit"])
+    except (OSError, ValueError, KeyError, TypeError):
+        proc._gitgo_cleanup = {"complete": False, "issues": ["supervisor_report_missing"]}
+    finally:
+        control.close()
+        proc._gitgo_scope_socket = None
+
+
 def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
     """Terminate descendants and wait until the root process is reaped."""
+    cgroup = getattr(proc, "_gitgo_cgroup", None)
+    if cgroup is not None:
+        cgroup.kill()
     if proc.poll() is not None:
         close_job(job_handle)
+        if cgroup is not None:
+            cgroup.close()
+        finish_scope(proc)
         return
     try:
         if sys.platform == "win32":
@@ -118,11 +197,12 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
         else:
-            try:
-                os.killpg(proc.pid, 9)
-            except ProcessLookupError:
-                pass
-            except OSError:
+            if getattr(proc, "_gitgo_scope_socket", None) is not None:
+                # Direct Popen child: no sampled PID/PGID may widen authority.
+                proc.terminate()
+            else:
+                if cgroup is None:
+                    proc._gitgo_cleanup = {"complete": False, "issues": ["unmanaged_root_only"]}
                 proc.kill()
         try:
             proc.wait(timeout=5)
@@ -131,3 +211,6 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
             proc.wait(timeout=5)
     finally:
         close_job(job_handle)
+        if cgroup is not None:
+            cgroup.close()
+        finish_scope(proc)

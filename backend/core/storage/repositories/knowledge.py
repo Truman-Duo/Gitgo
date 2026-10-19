@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import uuid
+from ..transactions import authoritative_transaction
 from ..redaction import redact_for_persistence
 from .ports import KnowledgePort
 from ..support import _utc_now
@@ -25,8 +26,7 @@ def append_history_record(
     logical = int(descriptor["byte_length"]) + 512
     self._reserve_authoritative_write(logical)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._register_object(self._state, descriptor)
             cursor = self._state.execute(
                 """INSERT OR IGNORE INTO history_events(
@@ -63,10 +63,6 @@ def append_history_record(
                             "DELETE FROM history_events WHERE sequence<?",
                             (int(cutoff[0]),),
                         )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return identifier
 
 
@@ -87,8 +83,7 @@ def replace_history_records(self: KnowledgePort, records: list[dict]) -> None:
         prepared.append((identifier, safe, descriptor))
     self._reserve_authoritative_write(logical)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._state.execute("DELETE FROM history_events")
             for identifier, safe, descriptor in prepared:
                 self._register_object(self._state, descriptor)
@@ -110,10 +105,6 @@ def replace_history_records(self: KnowledgePort, records: list[dict]) -> None:
                         _utc_now(),
                     ),
                 )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
 
 
 def load_history_records(self: KnowledgePort, *, limit: int | None = None) -> list[dict]:
@@ -167,35 +158,33 @@ def upsert_lesson_record(
     self._reserve_authoritative_write(int(descriptor["byte_length"]) + 512)
     now = _utc_now()
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
         try:
-            self._register_object(self._state, descriptor)
-            self._state.execute(
-                """INSERT INTO lessons(
-                       lesson_id, scope, project_name, tech_stack, category,
-                       severity, content_hash, record_ref, created_at, updated_at
-                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(lesson_id) DO UPDATE SET
-                       scope=excluded.scope,
-                       project_name=excluded.project_name,
-                       tech_stack=excluded.tech_stack,
-                       category=excluded.category,
-                       severity=excluded.severity,
-                       content_hash=excluded.content_hash,
-                       record_ref=excluded.record_ref,
-                       updated_at=excluded.updated_at""",
-                (
-                    lesson_id, scope, project_name,
-                    str(safe.get("tech_stack") or ""),
-                    str(safe.get("category") or ""),
-                    str(safe.get("severity") or "medium"),
-                    content_hash, str(descriptor["ref"]),
-                    str(safe.get("created_at") or now), now,
-                ),
-            )
-            self._state.execute("COMMIT")
+            with authoritative_transaction(self._state):
+                self._register_object(self._state, descriptor)
+                self._state.execute(
+                    """INSERT INTO lessons(
+                           lesson_id, scope, project_name, tech_stack, category,
+                           severity, content_hash, record_ref, created_at, updated_at
+                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(lesson_id) DO UPDATE SET
+                           scope=excluded.scope,
+                           project_name=excluded.project_name,
+                           tech_stack=excluded.tech_stack,
+                           category=excluded.category,
+                           severity=excluded.severity,
+                           content_hash=excluded.content_hash,
+                           record_ref=excluded.record_ref,
+                           updated_at=excluded.updated_at""",
+                    (
+                        lesson_id, scope, project_name,
+                        str(safe.get("tech_stack") or ""),
+                        str(safe.get("category") or ""),
+                        str(safe.get("severity") or "medium"),
+                        content_hash, str(descriptor["ref"]),
+                        str(safe.get("created_at") or now), now,
+                    ),
+                )
         except sqlite3.IntegrityError:
-            self._state.execute("ROLLBACK")
             if scope == "pending":
                 existing = self._state.execute(
                     """SELECT lesson_id FROM lessons
@@ -205,9 +194,6 @@ def upsert_lesson_record(
                 ).fetchone()
                 if existing is not None:
                     return str(existing["lesson_id"])
-            raise
-        except BaseException:
-            self._state.execute("ROLLBACK")
             raise
     return lesson_id
 
@@ -254,13 +240,11 @@ def record_lesson_retrieval(self: KnowledgePort, lesson_id: str, retrieved_at: s
     """Merge statistics against the latest record in one cross-writer transaction."""
     self._ensure_open()
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             row = self._state.execute(
                 "SELECT record_ref FROM lessons WHERE lesson_id=?", (lesson_id,),
             ).fetchone()
             if row is None:
-                self._state.execute("COMMIT")
                 return False
             record = dict(self._read_json_blob(str(row["record_ref"])))
             record["trigger_count"] = int(record.get("trigger_count") or 0) + 1
@@ -276,11 +260,7 @@ def record_lesson_retrieval(self: KnowledgePort, lesson_id: str, retrieved_at: s
                 "UPDATE lessons SET record_ref=?, updated_at=? WHERE lesson_id=?",
                 (descriptor["ref"], _utc_now(), lesson_id),
             )
-            self._state.execute("COMMIT")
             return True
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
 
 
 def record_lesson_verification(self: KnowledgePort, lesson_id: str,
@@ -293,8 +273,7 @@ def record_lesson_verification(self: KnowledgePort, lesson_id: str,
     """
     self._ensure_open()
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             row = self._state.execute(
                 "SELECT scope, record_ref FROM lessons WHERE lesson_id=?", (lesson_id,),
             ).fetchone()
@@ -330,11 +309,7 @@ def record_lesson_verification(self: KnowledgePort, lesson_id: str,
                 ("instance" if row["scope"] == "pending" else row["scope"],
                  descriptor["ref"], _utc_now(), lesson_id),
             )
-            self._state.execute("COMMIT")
             return record
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
 
 
 def delete_lesson_record(
@@ -405,8 +380,7 @@ def save_harvest_signal_records(self: KnowledgePort, records: list[dict], *, cre
         lease_owner=excluded.lease_owner, retry_count=excluded.retry_count,
         updated_at=excluded.updated_at"""
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             for safe, descriptor, expected in prepared:
                 if expected is not None:
                     current = self._state.execute(
@@ -436,10 +410,6 @@ def save_harvest_signal_records(self: KnowledgePort, records: list[dict], *, cre
                     ),
                 )
                 changed += cursor.rowcount
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return changed
 
 
@@ -477,8 +447,7 @@ def resolve_harvest_proposal_records(self: KnowledgePort, project: str, proposal
     import json
     self._ensure_open()
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             rows = self._state.execute("""SELECT signal_id,payload_ref FROM governance_signals
                 WHERE project_id=? AND signal_id LIKE 'hs_%' AND state='awaiting_confirmation'""",
                 (self.paths.project_id,)).fetchall()
@@ -533,13 +502,9 @@ def resolve_harvest_proposal_records(self: KnowledgePort, project: str, proposal
                 self._state.execute("""UPDATE governance_signals SET payload_ref=?,state=?,
                     lease_owner=NULL,updated_at=? WHERE signal_id=? AND project_id=?""",
                     (desc["ref"], safe["state"], _utc_now(), safe["signal_id"], self.paths.project_id))
-            self._state.execute("COMMIT")
             return {"proposal_id": proposal_id, "proposal_version": version,
                     "status": "accepted" if actually_accepted else "dismissed",
                     "signal_ids": source_ids, "lesson_ids": list(dict.fromkeys(saved_ids))}
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
 
 
 def configure_lesson_checker(self, change: dict, *, grant_id: str) -> dict:
@@ -549,8 +514,7 @@ def configure_lesson_checker(self, change: dict, *, grant_id: str) -> dict:
     from ...knowledge.models import Lesson
     self._ensure_open()
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             row=self._state.execute("SELECT record_ref FROM lessons WHERE lesson_id=?",(change["lesson_id"],)).fetchone()
             if row is None:raise ValueError("LESSON_NOT_FOUND")
             record=dict(self._read_json_blob(str(row["record_ref"])))
@@ -558,7 +522,6 @@ def configure_lesson_checker(self, change: dict, *, grant_id: str) -> dict:
             previous=[e for e in record.get("resolution_history",[]) if isinstance(e,dict) and e.get("kind")=="checker_configuration" and e.get("grant_id")==grant_id]
             if previous:
                 if previous[-1].get("change_digest")!=change_digest:raise ValueError("CHECKER_DECISION_CHANGED")
-                self._state.execute("COMMIT")
                 return {"lesson":record,"applied":False,"status":"already_applied"}
             if content_version(record)!=change["expected_version"]:raise ValueError("LESSON_CONTENT_CHANGED")
             if not can_consume(Lesson.from_dict(record)):raise ValueError("LESSON_REVIEW_REQUIRED")
@@ -578,8 +541,4 @@ def configure_lesson_checker(self, change: dict, *, grant_id: str) -> dict:
             self._reserve_authoritative_write(len(self._encoded_object(record))+512)
             self._register_object(self._state,descriptor)
             self._state.execute("UPDATE lessons SET record_ref=?,updated_at=? WHERE lesson_id=?",(descriptor["ref"],_utc_now(),change["lesson_id"]))
-            self._state.execute("COMMIT")
             return {"lesson":record,"applied":True,"status":"applied"}
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise

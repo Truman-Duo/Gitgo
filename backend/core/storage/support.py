@@ -219,6 +219,7 @@ class _StorageCursor(sqlite3.Cursor):
     """Report corruption on execute AND deferred row reads through one boundary."""
 
     def _checked(self, method, *args, **kwargs):
+        self.connection.require_available()
         try:
             return method(*args, **kwargs)
         except sqlite3.DatabaseError as exc:
@@ -251,9 +252,27 @@ class _StorageCursor(sqlite3.Cursor):
 
 class _StorageConnection(sqlite3.Connection):
     fault_callback = None
+    quarantined = False
+
+    def require_available(self):
+        if self.quarantined:
+            from .models import StorageCommitUnknown
+            raise StorageCommitUnknown("connection")
+
+    def quarantine(self):
+        self.quarantined = True
 
     def cursor(self, factory=_StorageCursor):
+        self.require_available()
         return super().cursor(factory)
+
+    def commit(self):
+        self.require_available()
+        return super().commit()
+
+    def rollback(self):
+        self.require_available()
+        return super().rollback()
 
     def execute(self, *args, **kwargs):
         return self.cursor().execute(*args, **kwargs)

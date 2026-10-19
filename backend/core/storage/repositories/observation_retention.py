@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
+from ..transactions import authoritative_transaction
 from .ports import ObservationRetentionPort
 
 def maintain_observability(self: ObservationRetentionPort, *, force: bool = False) -> dict:
@@ -54,8 +55,7 @@ def maintain_observability(self: ObservationRetentionPort, *, force: bool = Fals
     ):
         return {"ran": False, "deleted": 0, "throttled": True}
     with self._observability_lock:
-        self._observability.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._observability):
             event_rows = self._observability.execute(
                 """SELECT event_id, event_type, severity, occurred_at
                    FROM events WHERE occurred_at<? ORDER BY occurred_at LIMIT ?""",
@@ -125,8 +125,4 @@ def maintain_observability(self: ObservationRetentionPort, *, force: bool = Fals
                     json.dumps({"cutoff": cutoff, "deleted": deleted}),
                 ),
             )
-            self._observability.execute("COMMIT")
-        except BaseException:
-            self._observability.execute("ROLLBACK")
-            raise
     return {"ran": True, "deleted": deleted, "cutoff": cutoff}

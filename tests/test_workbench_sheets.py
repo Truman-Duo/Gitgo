@@ -36,7 +36,7 @@ def test_many_sheets_revisions_and_explicit_historical_continuation_survive_rest
         assert sheets.open(c["sheet_id"])["cells"][0]["source"] == "old"
         assert sheets.open(a["sheet_id"], a["revision"])["version_state"] == "historical"
         assert b["sequence"] == 2 and b["parent_revision"] == a["revision"]
-        roots, _, _ = runtime._cas_reference_inventory()
+        roots = runtime._cas_reference_inventory().require_complete()
         assert {a["revision"].split(":")[1], b["revision"].split(":")[1], c["revision"].split(":")[1]} <= roots
     with StorageRuntime(root, state_home=root / "state") as reopened:
         sheets = store(reopened)

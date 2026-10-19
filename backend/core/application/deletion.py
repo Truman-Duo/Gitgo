@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import time
 import uuid
 from dataclasses import asdict
@@ -36,12 +37,38 @@ def fingerprint(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def _is_macos_system_alias(target: Path, resolved: Path) -> bool:
+    """Allow Apple's stable root aliases without allowing user redirections.
+
+    macOS exposes /var, /tmp and /etc as OS-owned aliases into /private.  A
+    workspace beneath those roots is not a user-selected symlink, even though
+    ``Path.resolve`` changes its spelling.
+    """
+    if sys.platform != "darwin":
+        return False
+    for visible, canonical in (
+        (Path("/var"), Path("/private/var")),
+        (Path("/tmp"), Path("/private/tmp")),
+        (Path("/etc"), Path("/private/etc")),
+    ):
+        try:
+            relative = target.relative_to(visible)
+        except ValueError:
+            continue
+        # Do not resolve the expected spelling: doing so would also follow a
+        # user-controlled symlink deeper under /var or /tmp and accidentally
+        # bless that redirection as an Apple-owned alias.
+        return resolved == canonical / relative
+    return False
+
+
 def checked_directory(raw: str, *, protected: list[Path]) -> Path:
     if not raw or not Path(raw).is_absolute():
         raise blocked("Deletion target must be an explicit absolute directory")
-    target = Path(raw)
+    target = Path(os.path.abspath(raw))
     resolved = target.resolve(strict=True)
-    if target != resolved or target.is_symlink() or getattr(target, "is_junction", lambda: False)():
+    redirected = target != resolved and not _is_macos_system_alias(target, resolved)
+    if redirected or target.is_symlink() or getattr(target, "is_junction", lambda: False)():
         raise blocked("Refusing redirected deletion target")
     if not resolved.is_dir() or len(resolved.parts) < 3:
         raise blocked("Refusing broad or non-directory deletion target")

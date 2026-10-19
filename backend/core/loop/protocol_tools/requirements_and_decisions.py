@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ApprovalMode, ToolEffect
 from backend.core.loop.code_dossier import build_code_dossier
 from backend.core.loop.decision_support import collect_decision_evidence
@@ -23,6 +24,7 @@ def install(ctx):
 
 
     tools["engineering_workflow"] = AgentTool(
+        execution_contract=data_broker("host.runtime.engineering_workflow"),
         name="engineering_workflow",
         description=(
             load_prompt('tools/engineering_workflow')
@@ -75,6 +77,7 @@ def install(ctx):
             }
 
         tools["code_dossier"] = AgentTool(
+            execution_contract=data_broker("host.runtime.code_dossier"),
             name="code_dossier",
             description=(
                 load_prompt('tools/code_dossier')
@@ -112,7 +115,7 @@ def install(ctx):
         if args.get("operation")!="request":return {"error":"INVALID_CHECKER_OPERATION"}
         return request_change(process,storage,workspace_path,args)
 
-    tools["lesson_checker"] = AgentTool(name="lesson_checker",description=load_prompt('tools/lesson_checker'),
+    tools["lesson_checker"] = AgentTool(execution_contract=data_broker("runtime.lesson_checker"), name="lesson_checker",description=load_prompt('tools/lesson_checker'),
         parameters={"type":"object","properties":{
             "operation":{"type":"string","enum":["inspect","request"]},"lesson_id":{"type":"string"},
             "expected_version":{"type":"string"},"action":{"type":"string","enum":["enable","disable"]},
@@ -121,6 +124,7 @@ def install(ctx):
         effect=ToolEffect.READ,read_only=True,idempotent=False)
 
     tools["decision_evidence"] = AgentTool(
+        execution_contract=data_broker("host.runtime.decision_evidence"),
         name="decision_evidence",
         description=(
             load_prompt('tools/decision_evidence')
@@ -163,6 +167,7 @@ def install(ctx):
 
 
     tools["capability_status"] = AgentTool(
+        execution_contract=data_broker("host.runtime.capability_status"),
         name="capability_status",
         description=(
             load_prompt('tools/capability_status')
@@ -291,6 +296,7 @@ def install(ctx):
 
 
     tools["configure_capability"] = AgentTool(
+        execution_contract=data_broker("host.runtime.configure_capability"),
         name="configure_capability",
         description=(
             load_prompt('tools/configure_capability')
@@ -383,6 +389,7 @@ def install(ctx):
 
 
     tools["acknowledge_governance_signal"] = AgentTool(
+        execution_contract=data_broker("host.runtime.acknowledge_governance_signal"),
         name="acknowledge_governance_signal",
         description=(
             load_prompt('tools/acknowledge_governance_signal')
@@ -406,6 +413,7 @@ def install(ctx):
 
     if process.actor_kind in {"supervisor", "worker", "reviewer"}:
         tools["request_user_decision"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_user_decision"),
             name="request_user_decision",
             description=(
                 load_prompt('tools/request_user_decision')
@@ -457,6 +465,7 @@ def install(ctx):
         )
         from backend.core.loop.permission_broker import create_permission_request
         tools["request_permission"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_permission"),
             name="request_permission",
             description=(
                 load_prompt('tools/request_permission')
@@ -518,6 +527,7 @@ def install(ctx):
             return {"accepted": True, **result}
 
         tools["publish_interface_update"] = AgentTool(
+            execution_contract=data_broker("host.runtime.publish_interface_update"),
             name="publish_interface_update",
             description=(
                 load_prompt('tools/publish_interface_update')
@@ -574,6 +584,7 @@ def install(ctx):
             return {"accepted": True, **event}
 
         tools["escalate_to_supervisor"] = AgentTool(
+            execution_contract=data_broker("host.runtime.escalate_to_supervisor"),
             name="escalate_to_supervisor",
             description=(
                 load_prompt('tools/escalate_to_supervisor')

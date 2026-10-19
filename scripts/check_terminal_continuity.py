@@ -66,7 +66,7 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
             ConfigManager.save(Config(projects=[project]), config_path, allow_empty=True)
             llm_path = root / "llm_config.json"
             llm_path.write_text(json.dumps({"providers": [{
-                "id": "continuity", "name": "Local acceptance", "api_key": "local-test-only",
+                "id": "continuity", "name": "Local acceptance", "kind": "local", "auth_mode": "none",
                 "base_url": f"http://127.0.0.1:{server.server_port}/v1",
                 "model_id": "continuity", "protocol": "openai_chat",
             }], "active_provider": "continuity"}), encoding="utf-8")
@@ -79,7 +79,7 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
             def start(terminal):
                 current = dict(env)
                 current["GITGO_FRONTEND_ORIGIN"] = json.dumps({"version": 1, "terminal": terminal,
-                    "platform": "win32", "source": "packaged_protocol_acceptance"})
+                    "platform": sys.platform, "source": "packaged_protocol_acceptance"})
                 return ProtocolClient(host, current, arguments=["-u", "-m", "backend.core.native_host"] if source else None)
 
             def call(client, operation, args=None):
@@ -151,8 +151,20 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
                 finally:
                     connection.close()
             assert sorted(origins) == ["git_bash", "windows_console", "windows_console"], origins
-            from backend.core.usability.collector import read_summary
-            summary = read_summary(stores[0])
+            if source:
+                from backend.core.usability.collector import read_summary
+                summary = read_summary(stores[0])
+            else:
+                # Read with the package's validated SQLite, not the independent
+                # worker's potentially unsafe system library. No build-library
+                # paths or replacements are injected into the installed Host.
+                from backend.core.child_process import INTERNAL_ROLE_FLAG, PYTHON_ROLE
+                code = ('import json,sys;from pathlib import Path;'
+                        'from backend.core.usability.collector import read_summary;'
+                        'print(json.dumps(read_summary(Path(sys.argv[1]))))')
+                summary = json.loads(subprocess.check_output(
+                    [str(host), INTERNAL_ROLE_FLAG, PYTHON_ROLE, '-c', code, str(stores[0])],
+                    env=env, text=True, encoding='utf-8', timeout=30))
             statistics = {event: sum(row["total"] for row in summary["daily"] if row["metric"] == "events" and row["event"] == event)
                           for event in ("task_admitted", "provider_request_started", "provider_usage", "agent_complete")}
             assert all(count == 3 for count in statistics.values()), statistics

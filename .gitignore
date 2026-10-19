@@ -18,6 +18,7 @@ dist-terminal/
 dist-installer/
 *.exe
 *.spec
+.*.bun-build
 
 # Runtime (session, daemon PID, etc.)
 .gitgo/

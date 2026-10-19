@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
 from backend.core.loop.completion_protocol import CompletionClaim
@@ -70,6 +71,7 @@ def install(ctx):
 
 
     tools["declare_task_contract"] = AgentTool(
+        execution_contract=data_broker("host.runtime.declare_task_contract"),
         name="declare_task_contract",
         alignment_contract=lambda args: preview_contract(process,
             validate_contract_proposal(args, workspace_path or process.worktree_path)),
@@ -219,6 +221,7 @@ def install(ctx):
 
 
     tools["complete_supervision"] = AgentTool(
+        execution_contract=data_broker("host.runtime.complete_supervision"),
         name="complete_supervision",
         description=(
             load_prompt('tools/complete_supervision')
@@ -318,6 +321,7 @@ def install(ctx):
 
 
     tools["request_self_execute"] = AgentTool(
+        execution_contract=data_broker("host.runtime.request_self_execute"),
         name="request_self_execute",
         description=(
             load_prompt('tools/request_self_execute')

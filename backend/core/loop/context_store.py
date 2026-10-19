@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import data_broker
+
 import difflib
 import hashlib
 import json
@@ -424,6 +426,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
 
     tools = {
         "context_open": AgentTool(
+            execution_contract=data_broker("host.context.context_open"),
             name="context_open", description=load_prompt('tools/context_open'),
             parameters={"type": "object", "properties": {
                             "ref": {"type": "string"},
@@ -433,6 +436,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
             execute=context_open, effect=ToolEffect.READ, idempotent=True,
         ),
         "context_search": AgentTool(
+            execution_contract=data_broker("host.context.context_search"),
             name="context_search", description=load_prompt('tools/context_search'),
             parameters={"type": "object", "properties": {
                 "query": {"type": "string"}, "namespace": {"type": "string"},
@@ -440,6 +444,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
             execute=context_search, effect=ToolEffect.READ, idempotent=True,
         ),
         "dependency_query": AgentTool(
+            execution_contract=data_broker("host.context.dependency_query"),
             name="dependency_query", description=load_prompt('tools/dependency_query'),
             parameters={"type": "object", "properties": {
                 "path": {"type": "string"}, "min_confidence": {"type": "number"},
@@ -447,6 +452,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
             execute=dependency_query, effect=ToolEffect.READ, idempotent=True,
         ),
         "artifact_read": AgentTool(
+            execution_contract=data_broker("host.context.artifact_read"),
             name="artifact_read", description=load_prompt('tools/artifact_read'),
             parameters={"type": "object", "properties": {
                 "path": {"type": "string"}, "sha256": {"type": "string"},
@@ -476,6 +482,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
                 )
 
         tools["tool_result_open"] = AgentTool(
+            execution_contract=data_broker("host.context.tool_result_open"),
             name="tool_result_open",
             description=(
                 "Open or search a content-addressed oversized tool result. Use the "
