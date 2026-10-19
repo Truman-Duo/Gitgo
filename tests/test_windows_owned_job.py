@@ -246,6 +246,24 @@ def test_invalid_command_report_still_cleans_descendants_and_stays_failed(tmp_pa
         scope.finish(cancel=True)
 
 
+def test_launch_error_reports_unverified_cleanup_in_message(monkeypatch):
+    from backend.core import windows_job
+    api = windows_job._api()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(windows_job, "_api", lambda: api)
+            patch.setattr(api, "AssignProcessToJobObject", lambda *args: 0)
+            patch.setattr(api, "TerminateJobObject", lambda *args: 0)
+            with pytest.raises(OSError, match="launch failed.*cleanup remains unverified") as failure:
+                spawn_managed([sys.executable, "-c", "raise RuntimeError('must not run')"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            assert isinstance(failure.value.__cause__, OSError)
+            assert len(windows_job._pending_scopes) == 1
+    finally:
+        windows_job.retry_pending_cleanup()
+    assert not windows_job._pending_scopes
+
+
 def test_parent_crash_guardian_cleans_before_releasing_inherited_lease(tmp_path_factory):
     from backend.core.update import windows_storage as win
     from backend.core.update.validation import UpdateError

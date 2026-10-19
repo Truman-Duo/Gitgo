@@ -198,6 +198,9 @@ def spawn(argv, **options):
     except BaseException as error:
         scope.finish(cancel=True)
         if not scope.finished:
+            if isinstance(error, Exception):
+                raise OSError("Windows command launch failed and owned Job cleanup remains unverified; "
+                    "resources retained and new launches blocked") from error
             error.add_note("Windows owned Job cleanup is unverified; resources retained and new launches blocked")
         raise
     finally:
