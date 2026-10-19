@@ -1,0 +1,1 @@
+Write a complete workspace file atomically. For a new path, omit create_only (it defaults to true). For an existing path, first call read_file, then set create_only=false and pass that current expected_sha256. Never delete an existing file merely to overwrite it.

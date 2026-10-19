@@ -6,7 +6,7 @@
 // the overlay's cmdInput/suggestions/status instead of the default scene props.
 import React, { memo, useState, useEffect } from "react";
 import { Box, Text, Ansi } from "@anthropic/ink";
-import type { BorderTextOptions } from "@anthropic/ink";
+// import type { BorderTextOptions } from "@anthropic/ink"; // reserved for Auto/Manual badge
 import { TextInput } from "./TextInput.js";
 import { isChatScene, type Scene, type Mode } from "../state/store.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
@@ -96,6 +96,8 @@ export const CommandBar = memo(function CommandBar({
   );
   const contextValue = contextPct || "";
 
+  // Reserved for future Auto/Manual display; border color currently identifies the editor.
+  /*
   // Mode badge rendered in the bottom border via borderText.
   const modeBadge: BorderTextOptions = {
     content: effectiveCommand
@@ -105,6 +107,8 @@ export const CommandBar = memo(function CommandBar({
     align: "start",
     offset: 0,
   };
+
+  */
 
   // Footer override hidden → render nothing (after all hooks to keep order stable).
   if (footerOverride && footerOverride.hidden) {
@@ -131,8 +135,7 @@ export const CommandBar = memo(function CommandBar({
           borderLeft={false}
           borderRight={false}
           borderColor={effectiveColor}
-          borderText={modeBadge}
-          backgroundColor={effectiveCommand ? colors.input.command.bg : undefined}
+          // borderText={modeBadge} // reserved for Auto/Manual
         >
           <Box flexDirection="row">
             {effectiveCommand && !explicitCommand ? null : (

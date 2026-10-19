@@ -289,7 +289,8 @@ class EngineeringWorkflow:
         self.process.update_context_snapshot(lambda ctx: {**ctx, KEY: copy.deepcopy(state)})
 
     def notice(self, code, message, **details):
-        event = {"event": "progress_summary", "phase": KEY, "code": code,
+        from backend.core.errors import notice_guidance
+        event = {**notice_guidance(code), "event": "progress_summary", "phase": KEY, "code": code,
                  "message": message, "task_id": task_id(self.process),
                  "process_id": self.process.process_id, **details}
         # An event transport failure never erases the durable, model-visible notice.
@@ -339,7 +340,7 @@ class EngineeringWorkflow:
                 walk(receipt, index)
         return rows
 
-    def _valid_record(self, node, record):
+    def _valid_record(self, node, record, *, validation_cache=None):
         if record.get('defaulted'):
             source = self._answers(node)
             from .alignment_evidence import answer_digest
@@ -373,6 +374,11 @@ class EngineeringWorkflow:
             return bool(resolution and answers[-1].get("decision_id") == record["decision_id"]
                         and resolution.get("value") == record.get("value")
                         and resolution.get('choice_key', resolution['value']) == record.get('choice_key', record['value']))
+        if node["kind"] == "check" and node.get("passed") and node.get("tool_name", "run_test") == "run_test":
+            from .validation_evidence import test_receipt_assessment
+            receipt = next((r for _, r in self._receipts() if r.get("receipt_id") == record.get("receipt_id")), None)
+            if receipt is None or test_receipt_assessment(self.process, receipt, cache=validation_cache)["state"] != "current":
+                return False
         ids = record.get("receipt_ids") or [record.get("receipt_id")]
         return all(any(r.get("receipt_id") == rid and (node["kind"] == "check" or r.get("committed") is True)
                        for _, r in self._receipts()) for rid in ids)
@@ -434,6 +440,7 @@ class EngineeringWorkflow:
         def dependency_version(node):
             return {d: hashlib.sha256(json.dumps(records.get(d), sort_keys=True).encode()).hexdigest()
                     for d in node["depends_on"]}
+        validation_cache = {}
         # Invalidation propagates through dependencies, including decisions
         # amended by the user and documents changed after their last review.
         for _ in range(len(nodes) + 1):
@@ -448,7 +455,7 @@ class EngineeringWorkflow:
                     and r.get("effect") == "workspace_write"
                     and (node["kind"] == "check" or bool(set(node["files"]).intersection(self._receipt_files(r))))
                     for index, r in receipts)
-                if record and (later_write or any(d not in records for d in node["depends_on"]) or record.get("dependencies", {}) != dependency_version(node) or not self._valid_record(node, record)):
+                if record and (later_write or any(d not in records for d in node["depends_on"]) or record.get("dependencies", {}) != dependency_version(node) or not self._valid_record(node, record, validation_cache=validation_cache)):
                     records.pop(name)
                     if node["kind"] == "decision" and (any(d not in records for d in node['depends_on'])
                             or record.get('dependencies', {}) != dependency_version(node)):
@@ -490,6 +497,9 @@ class EngineeringWorkflow:
                         matched = receipt.get("tool_name") == "exec_command" and receipt.get("command_digest") == command_digest(node) and receipt.get("command_exit_code") == (0 if node["passed"] else 1) and receipt.get("command_completed") is True
                     if kind == "observation":
                         matched = receipt.get("tool_name") in node["tools"] and receipt.get("succeeded") is True and receipt.get("effect") in {"read", "external_read"}
+                    if matched and kind == "check" and node["passed"] and receipt.get("tool_name") == "run_test":
+                        from .validation_evidence import test_receipt_assessment
+                        matched = test_receipt_assessment(self.process, receipt, cache=validation_cache)["state"] == "current"
                     if matched:
                         records[name] = {"receipt_id": receipt["receipt_id"], "receipt_index": index,
                                          "dependencies": dependency_version(node)}

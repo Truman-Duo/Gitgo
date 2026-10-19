@@ -18,6 +18,6 @@ export function RuntimeChildShell({ tab, children }: { tab: string; children: Re
   return <Box flexDirection="column" paddingTop={1} paddingLeft={1} flexGrow={1}>
     <HorizontalHeaderStrip items={[...RUNTIME_TABS]} selected={selected} width={w} contentFocused />
     <Text color={colors.divider.color}>{separator(w)}</Text>
-    <Box flexDirection="column" flexGrow={1}>{children}</Box>
+    <Box flexDirection="column" flexGrow={1} minHeight={0}>{children}</Box>
   </Box>;
 }

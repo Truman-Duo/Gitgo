@@ -77,7 +77,7 @@ export function useGitgoData(
         p, pendingSummariesRef.current[p.name],
       ));
 
-      // Group: running → pending → unavailable → finished → new.
+      // Group: running → completed/waiting → unavailable.
       const flat = sortedRows(rows);
 
       // Atomic and change-aware: a project-list poll must not repaint an open
@@ -122,7 +122,7 @@ export function useGitgoData(
       "session_recovery_resumed", "session_recovery_discarded",
       "session_recovery_blocked", "session_rewound",
       "context_compaction_completed", "context_compaction_failed",
-      "deletion_status", "storage_health",
+      "deletion_status", "storage_health", "project_lifecycle_changed",
     ]);
     const unsubscribe = client.subscribeEvents((event) => {
       if (!stateEvents.has(String(event.event || ""))) return;

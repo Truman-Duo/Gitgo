@@ -168,6 +168,8 @@ def test_knowledge_export_marks_stale_lesson_instead_of_presenting_raw_rule_as_c
     )
     monkeypatch.setattr(LessonManager, "load_abstract", lambda _workspace: [])
     monkeypatch.setattr(LessonManager, "load_instance", lambda _workspace, _project: [])
+    from tests.knowledge_fixtures import review_fixture
+    review_fixture(lesson)
     monkeypatch.setattr(LessonManager, "load_pending", lambda _workspace, _project: [lesson])
     monkeypatch.setattr(harvest, "harvest_status", lambda _project: {"states": {}})
     session = SimpleNamespace(

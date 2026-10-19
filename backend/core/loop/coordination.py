@@ -113,6 +113,29 @@ def pending_coordination_events(ledger: list[dict] | None) -> list[dict]:
     ]
 
 
+def supervisor_wait_interruption(supervisor, process_ids: list[str]) -> dict | None:
+    """Return only actual unresolved owner actions relevant to the selected wait.
+
+    Notification is not approval. Rework already requested is left to the worker;
+    resolved events and unrelated siblings must not make a normal wait spin.
+    """
+    selected = set(process_ids)
+    with supervisor._coordination_lock:
+        events = pending_coordination_events(supervisor.session.host_ledger)
+    actionable = [event for event in events
+        if event.get("owner_process_id") == supervisor.process_id
+        and event.get("requires_supervisor_action")
+        and event.get("status") in {"pending", "awaiting_supervisor", "awaiting_user"}
+        and selected.intersection([event.get("source_process_id"),
+                                   *list(event.get("affected_process_ids") or [])])]
+    if not actionable:
+        return None
+    return {"reason": "supervisor_action_required",
+            "event_ids": [event["coordination_event_id"] for event in actionable],
+            "source_process_ids": list(dict.fromkeys(event["source_process_id"] for event in actionable)),
+            "next_actions": ["list_coordination_events", "resolve_coordination_event"]}
+
+
 def coordination_summary(process) -> dict[str, Any]:
     context, _version = process.read_context_snapshot()
     events = list(context.get("coordination_events") or [])

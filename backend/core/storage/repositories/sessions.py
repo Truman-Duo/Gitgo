@@ -2,7 +2,7 @@
 from __future__ import annotations
 import uuid
 from .ports import SessionsPort
-from ..support import _utc_now
+from ..support import _utc_now, state_read_snapshot
 
 def append_session_event(
     self, process_id: str, event_type: str, data: dict | None = None,
@@ -69,7 +69,7 @@ def append_session_event(
 
 def load_agent_session_state(self: SessionsPort, process_id: str) -> dict | None:
     self._ensure_open()
-    with self._state_lock:
+    with state_read_snapshot(self._state, self._state_lock):
         process_row = self._state.execute(
             """SELECT session_id, checkpoint_event_sequence, runtime_state_ref
                FROM session_processes WHERE process_id=?""",

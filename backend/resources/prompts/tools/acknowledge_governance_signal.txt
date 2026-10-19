@@ -1,0 +1,1 @@
+Acknowledge one active rejection signal after semantically addressing it. Use its exact signal_id and cite any successful Host receipt IDs that prove the correction; this replaces copying or keyword-matching the instruction.

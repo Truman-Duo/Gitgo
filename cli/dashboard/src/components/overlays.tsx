@@ -212,7 +212,7 @@ export function renderOverlay(
         cols={ctx.w} onDismiss={ctx.popOverlay} /> : null;
     }
     case "statsOverview":
-      return <StatsOverview client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} />;
+      return <StatsOverview client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} onInspect={project => ctx.dispatch({type: "push_overlay", overlay: "statsPanel", props: {project}})} />;
     case "btwPanel":
       return <BtwPanel client={ctx.client}
         project={String(overlay.props?.project || ctx.activeProject || "")}

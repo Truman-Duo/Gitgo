@@ -42,6 +42,22 @@ def test_frozen_children_use_private_host_roles(monkeypatch):
     ]
 
 
+def test_source_child_imports_its_own_worktree_with_embedded_python(tmp_path_factory, monkeypatch):
+    from backend.core.child_process import tool_runner_command
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    root = tmp_path_factory / "checkout with spaces"
+    module = root / "backend" / "core" / "tools"
+    module.mkdir(parents=True)
+    for package in (root / "backend", root / "backend" / "core", module):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (module / "runner.py").write_text("print('selected-worktree')", encoding="utf-8")
+    completed = subprocess.run(tool_runner_command(root), cwd=tmp_path_factory,
+                               capture_output=True, text=True, timeout=15)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "selected-worktree"
+
+
 def test_terminal_product_manifest_has_one_public_command_and_safe_uninstall():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "packaging" / "product.json").read_text(encoding="utf-8"))

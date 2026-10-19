@@ -140,6 +140,7 @@ class ProjectConfig:
     outbound_policy: dict = field(default_factory=default_outbound_policy)
     archived: bool = False
     pending_hard_delete_at: str = ""  # ISO timestamp, empty = no pending delete
+    unavailable_entry: dict = field(default_factory=dict)  # first failed entry, bound to workspace
 
     # ── 向后兼容 property ─────────────────────────────────
 
@@ -231,6 +232,7 @@ class ProjectConfig:
             outbound_policy=outbound,
             archived=d.get("archived", False),
             pending_hard_delete_at=d.get("pending_hard_delete_at", ""),
+            unavailable_entry=dict(d.get("unavailable_entry") or {}),
         )
 
 
@@ -241,8 +243,10 @@ class Config:
     projects: list[ProjectConfig] = field(default_factory=list)
     language: str = "en"  # UI copy only; commands/protocol identifiers stay stable
     verbose: bool = False
+    diff_layout: str = "split"
     auto_compact: bool = True
     agent_routing: str = "owner"
+    prompt_profile: str = "default"
     theme: str = "system"  # 主题: "light" | "dark" | "system"
     animation: bool = True  # 是否启用动画
     external_editor: str = ""
@@ -265,8 +269,10 @@ class Config:
                 projects=[ProjectConfig.from_dict(p) for p in d["projects"]],
                 language=d.get("language", "en"),
                 verbose=bool(d.get("verbose", False)),
+                diff_layout="unified" if d.get("diff_layout") == "unified" else "split",
                 auto_compact=bool(d.get("auto_compact", True)),
                 agent_routing="fresh" if d.get("agent_routing") == "fresh" else "owner",
+                prompt_profile=d.get("prompt_profile", "default"),
                 theme=d.get("theme", "system"),
                 animation=d.get("animation", True),
                 external_editor=str(d.get("external_editor", "") or ""),
@@ -288,8 +294,10 @@ class Config:
             revision=max(0, int(d.get("revision", 0) or 0)),
             language=d.get("language", "en"),
             verbose=bool(d.get("verbose", False)),
+            diff_layout="unified" if d.get("diff_layout") == "unified" else "split",
             auto_compact=bool(d.get("auto_compact", True)),
             agent_routing="fresh" if d.get("agent_routing") == "fresh" else "owner",
+            prompt_profile=d.get("prompt_profile", "default"),
             theme=d.get("theme", "system"),
             animation=d.get("animation", True),
             external_editor=str(d.get("external_editor", "") or ""),

@@ -1150,7 +1150,13 @@ function renderNodeToOutput(
           // on the assumption that plain-space fill + unchanged children =
           // valid composite, but children CAN reposition (ScrollBox remeasure
           // on re-render → /permissions body blanked on Down arrow, #25436).
-          ownBackgroundColor || node.style.opaque ? undefined : prevScreen,
+          // A growing/shrinking clip exposes cells that were not painted in
+          // the previous frame. Descendant bounds can stay identical while
+          // their cached pixels contain an old sibling border (animated cards).
+          // Repaint this subtree when its clip geometry changes, as ScrollBox
+          // already does; steady-state clipped subtrees retain the blit path.
+          ownBackgroundColor || node.style.opaque || (needsClip && positionChanged)
+            ? undefined : prevScreen,
           boxBackgroundColor,
         )
       }

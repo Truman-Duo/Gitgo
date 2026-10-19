@@ -63,7 +63,8 @@ for (const altScreen of [true, false]) {
         expect(buffer.value).toBe(draft.replace(/\r\n/g, "\n"));
         const lines = screenLines(ink);
         expect(lines.join("\n")).toContain("Conversation remains visible");
-        expect(lines.filter(line => line.includes("NORMAL")).length).toBe(1);
+        expect(lines.filter(line => /^─{10,}/u.test(line)).length).toBe(2);
+        expect(lines.join("\n")).not.toContain("NORMAL");
         const caret = (ink as any).displayCursor;
         expect(caret).not.toBeNull();
         expect(caret.y).toBeGreaterThanOrEqual(0);
@@ -76,7 +77,8 @@ for (const altScreen of [true, false]) {
         await wait();
         const cleared = screenLines(ink);
         expect(cleared.join("\n")).toContain("Conversation remains visible");
-        expect(cleared.filter(line => line.includes("NORMAL")).length).toBe(1);
+        expect(cleared.filter(line => /^─{10,}/u.test(line)).length).toBe(2);
+        expect(cleared.join("\n")).not.toContain("NORMAL");
       }
     } finally {
       root.unmount(); root.cleanup();

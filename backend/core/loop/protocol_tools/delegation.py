@@ -1,5 +1,7 @@
 """delegation protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
 from pathlib import Path
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
@@ -246,17 +248,10 @@ def install(ctx):
     tools["delegate_task"] = AgentTool(
         name="delegate_task",
         description=(
-            "Delegate an executor-ready task contract to an independent B Agent. "
-            "The host starts it asynchronously and serializes overlapping writes. "
-            "Every new B escrows part of the task-tree provider/output budget. "
-            "Do not delegate routine file persistence or testing after A has already "
-            "derived the solution; request a self-execution lease instead. "
-            + ("Default routing: for related changes/iterations inspect list_agents and "
-               "set continue_process_id to the original terminal B, preserving its context. "
-               "Use send_feedback if it is still running. Only create a new B for distinct "
-               "responsibility or when explicitly justified. "
+            load_prompt('tools/delegate_task')
+            + (load_prompt('tools/delegate_task_owner')
                if process.runtime_preferences.get("agent_routing", "owner") == "owner"
-               else "The user prefers a fresh B for each new task; explicit continuation remains available. ")
+               else load_prompt('tools/delegate_task_fresh'))
             + "display_name is an optional short human-readable worker name."
         ),
         parameters={

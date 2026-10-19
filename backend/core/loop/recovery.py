@@ -7,6 +7,8 @@ ephemeral self-execution leases, and waits for an explicit user action.
 
 from __future__ import annotations
 
+from backend.core.prompt_templates import render_prompt
+
 import json
 import subprocess
 from datetime import datetime
@@ -294,9 +296,17 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
         root_id = _root_id(process_id, states)
         if root_id not in budget_by_root:
             root_runtime = dict(states[root_id].get("runtime_state") or {})
-            budget_by_root[root_id] = TaskTreeBudget.from_snapshot(
-                root_runtime.get("task_budget") or runtime.get("task_budget")
-            )
+            anchor = root_runtime.get("task_budget") or runtime.get("task_budget")
+            snapshots = [dict(item.get("runtime_state") or {}).get("task_budget")
+                         for pid, item in states.items() if _root_id(pid, states) == root_id]
+            snapshots = [item for item in snapshots if item and anchor
+                         and item.get("task_id") == anchor.get("task_id")]
+            # A child's committed terminal checkpoint can contain a newer
+            # shared ledger than A's last checkpoint. Never resurrect consumed
+            # capacity or active escrow from an older root projection.
+            latest = max(snapshots, key=lambda item: (int(item.get("revision", 0)),
+                         float(dict(item.get("used") or {}).get("elapsed_seconds", 0)))) if snapshots else anchor
+            budget_by_root[root_id] = TaskTreeBudget.from_snapshot(latest)
         budget = budget_by_root[root_id]
         persisted_status = str(raw_process.get("status") or "running")
         pending_decision = runtime.get("pending_decision")
@@ -512,11 +522,10 @@ def recovery_instruction(process: AgentProcess, user_note: str, *, verified: boo
     revoked = " Any previous A self-execution lease and dynamic tool definitions were revoked."
     note = f"\nUser recovery note: {user_note.strip()}" if user_note.strip() else ""
     return (
-        "[HOST RECOVERY CHECKPOINT]\n"
-        + attestation
-        + revoked
-        + " Do not assume an unfinished tool call succeeded or failed, and do not "
-          "repeat it automatically. Inspect current project state before any new "
-          "effectful operation. Continue the same task from durable evidence."
-        + note
+        render_prompt(
+            'recovery/checkpoint',
+            attestation=format(attestation, ''),
+            revoked=format(revoked, ''),
+            note=format(note, ''),
+        )
     )

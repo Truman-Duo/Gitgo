@@ -1,0 +1,4 @@
+[COMPLETION FEEDBACK]
+The completion evaluator rejected this submission. These gate records describe this evaluation, not an instruction to repeat successful effects:
+${gates}
+Use the supplied code/guidance_ref to look up unfamiliar handling instructions when needed. Inspect current evidence for the unresolved gate; an old rejection may already be resolved. Preserve real user decisions and scope. Submit a new completion claim only after the evidence or authorized scope changes; explanation alone does not satisfy a gate.

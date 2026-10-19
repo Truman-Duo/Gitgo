@@ -1,0 +1,1 @@
+Build one deterministic dossier, shard a large task, and start all bounded B contracts in one call. Host handles enumeration, copying, budget checks and dispatch; A remains responsible for semantic review.

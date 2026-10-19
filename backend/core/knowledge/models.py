@@ -11,6 +11,20 @@ from datetime import datetime
 from typing import Optional
 
 
+QUALIFICATION_KEYS = ("knowledge_type", "conditions", "validation", "novelty", "limitations")
+
+
+def normalize_qualification(value: dict) -> dict:
+    if not isinstance(value, dict) or not isinstance(value.get("knowledge_type"), str) or value.get("knowledge_type") not in {
+            "compatibility", "failure_recovery", "project_constraint", "procedure"}:
+        raise ValueError("Knowledge requires a bounded qualification")
+    for key in QUALIFICATION_KEYS[1:]:
+        field_value = value.get(key)
+        if not isinstance(field_value, str) or not 1 <= len(field_value.strip()) <= 2000:
+            raise ValueError("Knowledge qualification is incomplete")
+    return {key: value[key] for key in QUALIFICATION_KEYS}
+
+
 @dataclass
 class Lesson:
     """一条知识教训。抽象层不含项目名/文件路径/人名。"""
@@ -29,6 +43,7 @@ class Lesson:
     dangerous_tools: list[str] = field(default_factory=list)
     prerequisite_tools: list[str] = field(default_factory=list)
     required_tools: list[str] = field(default_factory=list)
+    checker_revision: int = 0  # Monotonic configuration generation, including disable.
     check: dict | None = None  # {"pattern": "正则"}
 
     # ── 元数据 ──
@@ -41,6 +56,7 @@ class Lesson:
     created_at: str = ""
     verified_count: int = 0
     verified_in: list[str] = field(default_factory=list)
+    verifications: list[dict] = field(default_factory=list)
 
     # ── 有效性追踪（回收 + 联想消费）──
     trigger_count: int = 0            # 总触发次数
@@ -56,6 +72,8 @@ class Lesson:
 
     # ── 生命周期与证据适用性 ──
     evidence: dict | None = None
+    qualification: dict | None = None
+    review: dict | None = None
     expires_at: str = ""
     superseded_by: str = ""
 
@@ -78,6 +96,7 @@ class Lesson:
             prerequisite_tools=d.get("prerequisite_tools", []),
             required_tools=d.get("required_tools", []),
             check=d.get("check"),
+            checker_revision=int(d.get("checker_revision") or 0),
             source=d.get("source", "manual"),
             origin=d.get("origin", ""),
             abstract=d.get("abstract", False),
@@ -86,12 +105,15 @@ class Lesson:
             created_at=d.get("created_at", ""),
             verified_count=d.get("verified_count", 0),
             verified_in=d.get("verified_in", []),
+            verifications=d.get("verifications", []),
             trigger_count=d.get("trigger_count", 0),
             applied_count=d.get("applied_count", 0),
             violated_after_count=d.get("violated_after_count", 0),
             recent_retrievals=d.get("recent_retrievals", []),
             harvest_retry_count=d.get("harvest_retry_count", 0),
             evidence=d.get("evidence") if isinstance(d.get("evidence"), dict) else None,
+            qualification=d.get("qualification") if isinstance(d.get("qualification"), dict) else None,
+            review=d.get("review") if isinstance(d.get("review"), dict) else None,
             expires_at=d.get("expires_at", ""),
             superseded_by=d.get("superseded_by", ""),
         )

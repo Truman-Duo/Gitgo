@@ -1,13 +1,15 @@
 """Usage repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
+from datetime import datetime, timezone, timedelta
 from .ports import UsagePort
 from ..support import _encode_page_cursor, _decode_page_cursor
 
-def read_task_usage(self: UsagePort, *, limit: int = 100, cursor: str = "") -> dict:
+def read_task_usage(self: UsagePort, *, limit: int = 100, cursor: str = "", day_offset_minutes: int = 0) -> dict:
     """Return authoritative root-task usage without reading verbose traces."""
     self._ensure_open()
     bounded = max(1, min(int(limit), 1000))
     page_after = _decode_page_cursor(str(cursor or ""))
+    offset = max(-840, min(840, int(day_offset_minutes)))
     with self._state_lock:
         totals = self._state.execute(
             """SELECT COUNT(*), COALESCE(SUM(provider_calls), 0),
@@ -82,6 +84,22 @@ def read_task_usage(self: UsagePort, *, limit: int = 100, cursor: str = "") -> d
     task_rows.sort(key=lambda item: (
         str(item.get("updated_at") or ""), str(item.get("task_id") or ""),
     ), reverse=True)
+    daily = {}
+    undated_tasks = 0
+    for item in task_rows:
+        try:
+            timestamp = datetime.fromisoformat(str(item.get("created_at") or "").replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            day = timestamp.astimezone(timezone(timedelta(minutes=offset))).date().isoformat()
+        except (ValueError, TypeError):
+            undated_tasks += 1
+            continue
+        bucket = daily.setdefault(day, {"date": day, "task_count": 0, "provider_calls": 0,
+            "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "tool_calls": 0})
+        bucket["task_count"] += 1
+        for key in ("provider_calls", "input_tokens", "output_tokens", "cache_read_tokens", "tool_calls"):
+            bucket[key] += int(item.get(key, 0) or 0)
     if page_after is not None:
         task_rows = [item for item in task_rows if (
             str(item.get("updated_at") or ""), str(item.get("task_id") or ""),
@@ -96,6 +114,10 @@ def read_task_usage(self: UsagePort, *, limit: int = 100, cursor: str = "") -> d
     )
     return {
         "summary": summary,
+        "daily": [daily[day] for day in sorted(daily)],
+        "day_offset_minutes": offset,
+        "undated_tasks": undated_tasks,
+        "cost_usd": None,
         "tasks": page,
         "page": {
             "limit": bounded, "cursor": str(cursor or ""),

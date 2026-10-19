@@ -76,7 +76,7 @@ def test_missing_or_unsafe_reference_is_a_public_failure(tmp_path_factory):
 @pytest.mark.parametrize("unsafe", [False, True])
 def test_staging_hashes_archive_without_extracting_or_running_images(tmp_path_factory, monkeypatch, unsafe):
     monkeypatch.setattr(staging, "ROOT", tmp_path_factory)
-    cache = tmp_path_factory / ".gitgo/terminal-reference"
+    cache = tmp_path_factory / "dev-artifacts/terminal-reference"
     cache.mkdir(parents=True)
     archive = cache / "Git-2.53.0.2-64-bit.tar.bz2"
     names = [*staging.IMAGES, *( ["usr/bin/../../outside.dll"] if unsafe else ["usr/bin/extra.dll"])]

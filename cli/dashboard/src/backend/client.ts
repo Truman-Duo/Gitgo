@@ -91,12 +91,17 @@ export function buildNativeTaskCall(args: NativeTaskRequest): {
 }
 
 export function nativeHostCommand(
-  pythonPath: string, hostExecutable = "",
+  pythonPath: string, hostExecutable = "", sourceRoot = process.cwd(),
 ): {command: string; args: string[]} {
   const installed = hostExecutable.trim();
+  // Embedded Python can ignore cwd/PYTHONPATH and keep another checkout in
+  // its ._pth. Bind the same trusted source root as the frontend via argv,
+  // without changing the shared interpreter or the installed Host path.
+  const bootstrap = "import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); "
+    + "runpy.run_module('backend.core.native_host',run_name='__main__')";
   return installed
     ? {command: installed, args: []}
-    : {command: pythonPath, args: ["-u", "-m", "backend.core.native_host"]};
+    : {command: pythonPath, args: ["-u", "-c", bootstrap, sourceRoot]};
 }
 
 export class NativeHostClient implements BackendClient {
@@ -128,7 +133,7 @@ export class NativeHostClient implements BackendClient {
   async start(): Promise<void> {
     if (this.proc) return;
     const installedHost = this.hostExecutable.trim();
-    const {command, args} = nativeHostCommand(this.pythonPath, installedHost);
+    const {command, args} = nativeHostCommand(this.pythonPath, installedHost, this.gitgoDir);
     this.proc = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: installedHost ? dirname(installedHost) : this.gitgoDir,

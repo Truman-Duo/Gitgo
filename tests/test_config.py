@@ -178,3 +178,24 @@ def test_legacy_privacy_fields_migrate_to_canonical_outbound_policy():
     assert project.outbound_policy["severity_threshold"] == "high"
     assert project.outbound_policy["content_level"] == 3
     assert project.outbound_policy["deep_scan"] is True
+
+
+def test_diff_layout_legacy_default_and_saved_config():
+    from backend.core.application import ApplicationServices, OperationError
+    import pytest
+
+    for payload in [{}, {"projects": []}, {"projects": [], "diff_layout": "unknown"}]:
+        assert Config.from_dict(payload).diff_layout == "split"
+    ConfigManager.save(Config(projects=[]))
+    service = ApplicationServices()
+    assert service.config_get()["diff_layout"] == "split"
+    for choice in ["unified", "split"]:
+        service.config_set("diff_layout", choice)
+        assert ConfigManager.load().diff_layout == choice
+        assert service.config_get()["diff_layout"] == choice
+        assert service.config_get("diff_layout")["value"] == choice
+    for invalid in ["auto", "", True, None, ["unified"]]:
+        with pytest.raises(OperationError) as failure:
+            service.config_set("diff_layout", invalid)
+        assert failure.value.code == "INVALID_VALUE"
+        assert ConfigManager.load().diff_layout == "split"

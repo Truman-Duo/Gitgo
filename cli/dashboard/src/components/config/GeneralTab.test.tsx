@@ -129,3 +129,35 @@ describe("General terminal choices", () => {
     }
   });
 });
+
+describe("General prompt instances", () => {
+  test("selects a named instance through the real config operation", async () => {
+    const saved: any[] = [], notices: string[] = [];
+    const client: BackendClient = {ready: true, close() {}, async callTool(operation, args = {}) {
+      if (operation === "config.get") return {prompt_profile: "default", prompt_profiles: [
+        {id: "default", label: "Baseline"}, {id: "workbench", label: "Workbench"},
+      ]};
+      if (operation === "config.terminals") return {options: [], warnings: []};
+      if (operation === "config.set") {saved.push(args); return {ok: true};}
+      return {};
+    }};
+    const streams = terminalStreams(); let output = "";
+    streams.stdout.on("data", (data: Buffer) => {output += data.toString();});
+    function Fixture() {
+      const input = useTextInput();
+      return <InputProvider><GeneralTab client={client} project="test" cmdInput={input}
+        initialSetting="prompt_profile" contentFocused onFooter={() => {}} report={() => {}}
+        onStatusUpdate={message => notices.push(message)}
+        shell={{back() {}, goToTab() {}, tabPrev() {}, tabNext() {}, leaveContent() {}}}/></InputProvider>;
+    }
+    const root = renderSync(<Fixture/>, {...streams, patchConsole: false, exitOnCtrlC: false});
+    const wait = () => new Promise(resolve => setTimeout(resolve, 60));
+    try {
+      await wait(); streams.stdin.write("\r"); await wait();
+      streams.stdin.write("\x1b[C"); await wait(); streams.stdin.write("\r"); await wait();
+      expect(saved).toEqual([{key: "prompt_profile", value: "workbench"}]);
+      expect(output).toContain("Workbench");
+      expect(notices.some(message => message.includes("new runs use this instance"))).toBe(true);
+    } finally {root.unmount(); root.cleanup(); streams.stdin.destroy(); streams.stdout.destroy(); streams.stderr.destroy();}
+  });
+});

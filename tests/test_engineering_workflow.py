@@ -9,6 +9,7 @@ from backend.core.loop.session import AgentSession
 from backend.core.loop.completion_protocol import HostCompletionEvaluator
 from backend.core.loop.task_contract import validate_contract_proposal, publish_contract
 from backend.core.loop.event_bus import EventBus, ToolEvent
+from backend.core.loop.validation_evidence import workspace_version
 
 
 def process(root):
@@ -31,7 +32,8 @@ def receipt(p, id, **fields):
 
 def check(p, id, passed, **fields):
     receipt(p, id, tool_name="run_test", effect="process", test_id="regression",
-            test_passed=passed, test_seeds=[42], test_completed=True, **fields)
+            test_passed=passed, test_seeds=[42], test_completed=True,
+            validation_version=workspace_version(p.worktree_path), **fields)
 
 
 def test_tdd_enforces_red_change_green_and_does_not_trust_model_claims(tmp_path_factory):
@@ -256,6 +258,7 @@ def test_real_pipeline_keeps_failed_check_evidence_and_gates_product_changes(tmp
     assert not changed.is_error and writes
     p.tool_receipts.append(changed.receipt)
     run.execute = lambda _args: {"test_id": "regression", "target": "tests/test_app.py", "passed": True,
+                                 "validation_version": workspace_version(p.worktree_path),
                                  "seed_results": [{"seed": 42, "exit_code": 0}]}
     green = pipeline.execute({"name": "run_test", "args": {}}, run, ctx, "green")
     p.tool_receipts.append(green.receipt)

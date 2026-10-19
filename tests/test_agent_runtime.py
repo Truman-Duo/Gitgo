@@ -416,7 +416,7 @@ class PromptAndReasoningStateTests(unittest.TestCase):
         self.assertEqual([s.name for s in sections], [
             "Base identity", "Behavior and delivery standard",
             "Role and authority", "Capabilities",
-            "User collaboration protocol",
+            "Source authority", "User collaboration protocol",
             "Runtime environment", "Interaction contract",
         ])
         self.assertNotIn("high level rule", text)
@@ -924,6 +924,14 @@ class HostCompletionTests(unittest.TestCase):
             )
             self.assertFalse(still_stale.allowed)
             process.tool_receipts[-1]["task_id"] = process.active_task_id
+            self.assertFalse(HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE", []).allowed)
+            from backend.core.loop.validation_evidence import workspace_version
+            from backend.core.loop.test_manifest import TestManifest
+            manifest = TestManifest.load(workspace)
+            manifest.records["unit:core"].validation_version = workspace_version(workspace)
+            manifest.save()
+            process.tool_receipts[-1].update(test_target="tests/test_core.py",
+                validation_version=manifest.records["unit:core"].validation_version)
             self.assertTrue(HostCompletionEvaluator.evaluate(
                 process, "TASK_COMPLETE", [],
             ).allowed)
@@ -1414,7 +1422,10 @@ class AmbiguousReplayTests(unittest.TestCase):
             "backend.core.knowledge.lesson.LessonManager.save_pending",
         ) as saved, patch(
             "backend.core.knowledge.harvest.complete_harvest",
-        ) as completed:
+        ) as completed, patch(
+            "backend.core.knowledge.harvest.stage_harvest_proposal",
+            return_value={"proposal_id": "proposal-1", "proposal_version": "version-1"},
+        ) as staged:
             started = _start_background_harvest(
                 daemon_ctx,
                 event_queue=events,
@@ -1428,14 +1439,14 @@ class AmbiguousReplayTests(unittest.TestCase):
         self.assertTrue(started)
         self.assertTrue(daemon_ctx["knowledge_harvest_inflight"].startswith("harvest_"))
         marked.assert_called_once_with("project")
-        saved.assert_called_once()
-        completed.assert_called_once_with(
-            "project", ["signal-1"], ["lesson-background"],
-        )
+        saved.assert_not_called()
+        completed.assert_not_called()
+        staged.assert_called_once_with("project", ["signal-1"], [lesson], summary_report={})
         result = events.get_nowait()
         self.assertEqual(result["event"], "knowledge_harvest_result")
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "awaiting_confirmation")
         self.assertEqual(result["count"], 1)
+        self.assertEqual(result["proposal"]["proposal_version"], "version-1")
 
     def test_background_harvest_does_not_start_a_second_worker(self):
         daemon_ctx = {"knowledge_harvest_inflight": "harvest-existing"}

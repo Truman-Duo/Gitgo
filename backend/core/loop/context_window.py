@@ -13,6 +13,8 @@ Harness 智能保留: 利用 contract / lesson / rejection 信息决定裁剪优
 
 from __future__ import annotations
 
+from backend.core.prompt_templates import render_prompt
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -65,7 +67,7 @@ class ContextWindow:
                 llm_provider, harness_data: dict | None = None,
                 retention_suggestions: list[str] | None = None,
                 task_budget=None, cancel_event=None,
-                budget_process_id: str = "", on_provider_notice=None) -> bool:
+                budget_process_id: str = "", on_provider_notice=None, reserve_call=None) -> bool:
         """LLM 摘要压缩（付费操作，仅 >90% 时触发）。
 
         将中间消息替换为结构化摘要。返回是否成功。
@@ -107,23 +109,20 @@ class ContextWindow:
         foldable_text = "\n".join(text_parts)
 
         compact_prompt = (
-            f"{retention_prefix}"
-            "将以下 Agent 对话历史压缩为结构化摘要。保留:\n"
-            "- 关键决策和原因\n"
-            "- 涉及的文件路径\n"
-            "- 错误和修复方法\n"
-            "- 未完成的待办事项\n\n"
-            f"对话历史:\n{foldable_text}\n\n"
-            "摘要:"
+            render_prompt(
+                'context/compact',
+                retention_prefix=format(retention_prefix, ''),
+                foldable_text=format(foldable_text, ''),
+            )
         )
 
         try:
             routed = hasattr(llm_provider, "stream_session_events")
             if task_budget is not None and not routed:
-                task_budget.begin_provider_call(budget_process_id)
+                (reserve_call() if reserve_call is not None else task_budget.begin_provider_call(budget_process_id))
             def before_attempt(_index, _client):
                 if task_budget is not None:
-                    task_budget.begin_provider_call(budget_process_id)
+                    (reserve_call() if reserve_call is not None else task_budget.begin_provider_call(budget_process_id))
                 return 60
             def notify(notice):
                 if on_provider_notice is not None:

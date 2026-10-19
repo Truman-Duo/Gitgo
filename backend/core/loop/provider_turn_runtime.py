@@ -10,6 +10,7 @@ import time
 from .answer_continuation import clear_answer_fragments, pending_answer_text, remember_answer_fragment
 from .context_window import ContextWindow
 from .lifecycle import transition
+from .budget_runtime import reserve_provider_call
 from .budget import TaskBudgetExceeded
 from .llm import StreamCancelledError, StreamInterruptedError
 from .llm_adapter import parse_tool_calls
@@ -56,12 +57,15 @@ class ProviderTurnRuntime:
 
     def before_attempt(self, _index, _client):
         if self.process.task_budget is not None:
-            self.process.task_budget.begin_provider_call(self.process.process_id)
+            reserve_provider_call(self.process, self.emit)
         return _provider_idle_timeout(self.process)
 
     def route_notice(self, artifact):
         self.route_changed(artifact)
         if artifact.get('event') == 'provider_request_started':
+            from backend.core.knowledge.feedback import observe_provider_input
+            observe_provider_input(self.process,self.session.to_provider_messages(
+                dynamic_envelope=self.envelope(),provider_route=self.route()))
             self.emit({**self.request_observation, **artifact}, detail={
                 'messages': self.session.to_provider_messages(
                     dynamic_envelope=self.envelope(), provider_route=self.route()),
@@ -86,7 +90,7 @@ class ProviderTurnRuntime:
     def prepare(self):
         budget_call_index = 0
         if self.process.task_budget is not None and (not hasattr(self.provider, 'stream_session_events')):
-            budget_call_index = self.process.task_budget.begin_provider_call(self.process.process_id)
+            budget_call_index = reserve_provider_call(self.process, self.emit)
         self.budget_prefix = f'provider-{budget_call_index}:'
         self.idle_timeout = _provider_idle_timeout(self.process)
         self.output_limit = max(1, int(getattr(self.provider, 'max_output_tokens', 4096)))
@@ -123,6 +127,9 @@ class ProviderTurnRuntime:
             'cache_intent': self.cache_intent.to_dict(),
         }
         if not hasattr(self.provider, 'stream_session_events'):
+            from backend.core.knowledge.feedback import observe_provider_input
+            observe_provider_input(self.process,self.session.to_provider_messages(
+                dynamic_envelope=self.envelope(),provider_route=self.route()))
             self.emit(
                 self.request_observation,
                 detail={
@@ -324,7 +331,7 @@ class ProviderTurnRuntime:
         try:
             routed_chat = hasattr(self.provider, 'stream_session_events')
             if self.process.task_budget is not None and (not routed_chat):
-                self.process.task_budget.begin_provider_call(self.process.process_id)
+                reserve_provider_call(self.process, self.emit)
             response = self.provider.chat(
                 (
                     self.session.to_provider_messages(

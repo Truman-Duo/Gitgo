@@ -274,3 +274,14 @@ describe("native stream reducer", () => {
     expect(state.notices[2]?.severity).toBe("success");
   });
 });
+
+
+test("separate proposal notices survive deduplication while no-knowledge completion stays quiet", () => {
+  let state = initStreamState();
+  for (const id of ["first", "second", "first"]) {
+    state = reduceStreamEvent(state, {event: "lesson_harvest_proposed", proposal: {proposal_id: id}, count: 1});
+  }
+  expect(state.notices).toHaveLength(2);
+  state = reduceStreamEvent(state, {event: "lesson_harvest_completed", count: 0});
+  expect(state.notices).toHaveLength(2);
+});

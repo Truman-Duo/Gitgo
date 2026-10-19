@@ -104,6 +104,7 @@ class TestRecord:
     seeds: list[int] = field(default_factory=list)
     results: list[SeedResult] = field(default_factory=list)
     last_run_at: str = ""
+    validation_version: dict | None = None
 
     @property
     def passed(self) -> bool:
@@ -117,6 +118,7 @@ class TestRecord:
             "results": [r.to_dict() for r in self.results],
             "passed": self.passed,
             "last_run_at": self.last_run_at,
+            "validation_version": self.validation_version,
         }
 
     @classmethod
@@ -132,6 +134,7 @@ class TestRecord:
                 output_tail=str(item.get("output_tail", "")),
             ) for item in raw.get("results", [])],
             last_run_at=str(raw.get("last_run_at", "")),
+            validation_version=raw.get("validation_version"),
         )
 
 
@@ -211,7 +214,8 @@ class TestManifest:
         if not record.test_id.strip():
             raise ValueError("test_id is required")
         previous = self.records.get(record.test_id)
-        if previous is not None and previous.target == record.target:
+        if (previous is not None and previous.target == record.target
+                and previous.validation_version == record.validation_version):
             # Separate invocations for different deterministic seeds must not
             # erase earlier evidence.  Keep the latest result for each seed,
             # preserving first-seen seed order for stable, reviewable output.
@@ -224,10 +228,12 @@ class TestManifest:
                 seeds=merged_seeds,
                 results=[by_seed[seed] for seed in merged_seeds if seed in by_seed],
                 last_run_at=record.last_run_at,
+                validation_version=record.validation_version,
             )
         self.records[record.test_id] = record
 
-    def evaluate_required(self, required_ids: list[str]) -> tuple[bool, list[str]]:
+    def evaluate_required(self, required_ids: list[str], *, validation_cache=None) -> tuple[bool, list[str]]:
+        validation_cache = {} if validation_cache is None else validation_cache
         failures = []
         for test_id in required_ids:
             record = self.records.get(test_id)
@@ -235,6 +241,13 @@ class TestManifest:
                 failures.append(f"{test_id}:not_registered")
             elif not record.passed:
                 failures.append(f"{test_id}:not_passing")
+            else:
+                from .validation_evidence import assess_version
+                assessment = assess_version(record.validation_version, self.workspace, cache=validation_cache)
+                if assessment["state"] != "current":
+                    changed = assessment.get("changed_files") or []
+                    suffix = " [" + ", ".join(changed[:10]) + "]" if changed else ""
+                    failures.append(f"{test_id}:" + assessment["reason"] + suffix)
         return not failures, failures
 
 
@@ -258,6 +271,13 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
     if not target_path.exists() or not target_path.is_file():
         return {"error": f"test target not found: {target_path_text}"}
 
+    from .validation_evidence import workspace_version, version_summary
+    declared = args.get("input_files")
+    if declared is not None:
+        if not isinstance(declared, list) or not all(isinstance(p, str) and p for p in declared):
+            return {"error": "input_files must be an explicit list of workspace files"}
+        declared = list(dict.fromkeys([*declared, target_path_text]))
+    validation = workspace_version(workspace, input_files=declared)
     import time
     results: list[SeedResult] = []
     for seed in seeds:
@@ -266,9 +286,9 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
         env["GITGO_TEST_SEED"] = str(seed)
         started = time.monotonic()
         try:
-            from backend.core.child_process import python_command
+            from backend.core.child_process import workspace_python_command
             completed = subprocess.run(
-                python_command(["-m", "pytest", target, "-q"]),
+                workspace_python_command(["python", "-m", "pytest", target, "-q"], workspace),
                 cwd=str(workspace), env=env, capture_output=True, text=True,
                 timeout=timeout, shell=False,
             )
@@ -284,12 +304,19 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
             output_tail=output[-4000:],
         ))
 
+    after = workspace_version(workspace, input_files=declared)
+    if validation != after:
+        validation = {"state": "unavailable", "reason": "validation_inputs_changed_during_test"}
+    # Persist the aggregate identity and coverage, not one repeated file/hash
+    # map per test ID. Revalidation recomputes exactly that declared scope.
+    validation = version_summary(validation)
     record = TestRecord(
         test_id=test_id,
         target=target,
         seeds=seeds,
         results=results,
         last_run_at=datetime.now().isoformat(),
+        validation_version=validation,
     )
     manifest = TestManifest.load(workspace)
     manifest.register(record)
@@ -300,4 +327,9 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
         "exit_code": 0 if record.passed else 1,
         "seed_results": [result.to_dict() for result in results],
         "manifest_path": str(manifest.path),
+        "validation_version": validation,
+        "verification_state": "current" if validation.get("state") == "observed" else "needs_recheck",
+        **({"warnings": [{"code": "VALIDATION_INPUT_CHANGED", "message":
+            "The test exit result is recorded, but its validation inputs are unknown or changed. Inspect validation_version and rerun with a valid bounded input_files scope."}]}
+           if validation.get("state") != "observed" else {}),
     }

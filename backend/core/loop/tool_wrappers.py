@@ -221,6 +221,10 @@ def lesson_list(args: dict) -> dict:
         abstract = LessonManager.load_abstract(workspace)
         instances = LessonManager.load_instance(workspace, project_name)
         pending = LessonManager.load_pending(workspace, project_name)
+        from backend.core.knowledge.review import can_consume
+        abstract = [item for item in abstract if can_consume(item)]
+        instances = [item for item in instances if can_consume(item)]
+        pending = [item for item in pending if can_consume(item)]
         return {
             "abstract": [l.to_dict() for l in abstract],
             "instances": [l.to_dict() for l in instances],

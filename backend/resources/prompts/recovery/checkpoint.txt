@@ -1,0 +1,2 @@
+[HOST RECOVERY CHECKPOINT]
+${attestation}${revoked} Do not assume an unfinished tool call succeeded or failed, and do not repeat it automatically. Inspect current project state before any new effectful operation. Continue the same task from durable evidence.${note}

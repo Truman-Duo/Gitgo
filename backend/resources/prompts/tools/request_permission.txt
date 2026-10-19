@@ -1,0 +1,1 @@
+Request authority only when a structured Host error explicitly prescribes this shortcut for an out-of-scope resource or capability expansion. Do not call it before an ordinary or public-read tool: invoke that tool once and let the Host allow it or suspend it atomically. Describe the intended outcome in user terms; the Host binds exact API, target, scope and expiry.

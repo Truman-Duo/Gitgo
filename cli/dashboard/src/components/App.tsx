@@ -1,3 +1,4 @@
+import {DiffLayoutContext} from "../theme/diffLayoutContext.js";
 // src/components/App.tsx — Three-scene routing with createStore
 import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import { Box, Text, useApp, useTerminalSize } from "@anthropic/ink";
@@ -12,7 +13,7 @@ import { getCommands, type CommandContext } from "../commands.js";
 import { resolveSceneKey, type InputContext, type InputAction, type TextBuffer, type TextOp } from "../input/keymap.js";
 import type { ChatScrollHandle, PendingDecision } from "../types.js";
 import {projectRound, answerRound, previousRound} from "../hooks/decisionRound.js";
-import { runCommandEffect, stopProcessEffect, type RunCommandDeps, type StopProcessDeps } from "../effects/run.js";
+import { enterProjectEffect, runCommandEffect, stopProcessEffect, type RunCommandDeps, type StopProcessDeps } from "../effects/run.js";
 import { noticeToActions } from "../notices.js";
 import { useTextInput, type UseTextInputReturn, applyTextOp as applyTextOpToBuf } from "../hooks/useTextInput.js";
 import { Overview } from "./Overview.js";
@@ -21,7 +22,7 @@ import { ProcessList, visibleBProcesses } from "./ProcessList.js";
 import { AgentDetail, AgentDetailScene } from "./AgentDetail.js";
 import { CommandBar, type FooterConfig } from "./CommandBar.js";
 import { renderOverlay } from "./overlays.js";
-import { ScrollableInputLayer } from "../input/runtime.js";
+import { InputLayer, ScrollableInputLayer } from "../input/runtime.js";
 import { chordLabel } from "../input/bindings.js";
 import { notifyGeneralConfigChanged, useGeneralConfig } from "../hooks/useGeneralConfig.js";
 import { runningWorkers } from "../daemon/agentLabels.js";
@@ -63,7 +64,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
 
   const scene = useStore(appStore, (s) => s.scene);
   const activeProject = useStore(appStore, (s) => s.activeProject);
-  const loopData = useLoopData(client, activeProject, 2); // single runtime poll source for the active project
+  const loopData = useLoopData(client, scene === "projects" ? null : activeProject, 2); // single runtime poll source for the active project
   const { providers, processes } = loopData;
   const activeAgentId = useStore(appStore, (s) => s.activeAgentId);
   const processListSelIdx = useStore(appStore, (s) => s.processListSelIdx);
@@ -379,6 +380,14 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     [dispatch, textInput, cmdInput],
   );
 
+  useEffect(() => {
+    if (loading || error || !activeProject || scene === "projects") return;
+    if (!projects.some(project => project.name === activeProject)) {
+      navigate("projects", {activeProject: null, activeAgentId: null});
+      dispatch({type: "set_cmd_result", text: `Project '${activeProject}' left the active list. Open /bin to restore it.`});
+    }
+  }, [projects, loading, error, activeProject, scene, navigate, dispatch]);
+
   // Explicit terminal smoke mode enters the real workspace scene and submits
   // one task through the same sendChatRef used by keyboard input.  It is inert
   // in normal launches and intentionally does not bypass App/ChatPanel render.
@@ -493,13 +502,24 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     applyTextOpToBuf(op, buf);
   }, [cmdInput, llmCmdInput, textInput]);
 
+  const projectEntryGeneration = useRef(0);
   const applyInputActions = useCallback((acts: InputAction[]) => {
     const prepared = acts.map(a => a.kind === "effect" && a.effect.type === "send_chat"
       ? {...a, effect: {...a.effect, text: textInput.materialize(a.effect.text)}} as InputAction
       : a);
     for (const a of prepared) {
       if (a.kind === "state") {
-        dispatch(a.action);
+        if (a.action.type === "navigate" && a.action.scene === "workspace" && scene === "projects") {
+          const name = a.action.patch?.activeProject;
+          if (name) {
+            const generation = ++projectEntryGeneration.current;
+            void enterProjectEffect(client, name, dispatch,
+              () => projectEntryGeneration.current === generation && appStore.getState().scene === "projects");
+          }
+        } else {
+          projectEntryGeneration.current++;
+          dispatch(a.action);
+        }
       } else if (a.kind === "text") {
         applyTextOp(a.buffer, a.op);
       } else {
@@ -520,7 +540,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         else if (e.type === "report_notice") for (const a of noticeToActions(e.code, e.params)) dispatch(a);
       }
     }
-  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput]);
+  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput, client, scene]);
 
   // ── Keyboard dispatch (global) ───────────────────────────
   useInput((input: string, key: any) => {
@@ -600,22 +620,23 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");
+  const runtimeOwnsViewport = ["runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview"].includes(topOverlay?.type || "");
   const footerDrawer = inlineOverlay
     ? <ScrollableInputLayer>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
     : null;
 
   return (
+    <DiffLayoutContext.Provider value={generalConfig.diffLayout}>
     <Box flexDirection="column" width={w} height={h} flexShrink={0}>
       {error ? (
         <Box paddingLeft={1}><Text color={colors.danger}>Error: {error}</Text></Box>
       ) : null}
-      {activeProject && loopData.error ? (
-        <Box paddingLeft={1}><Text color={colors.danger}>Runtime status unavailable: {loopData.error}</Text></Box>
-      ) : null}
 
       <Box flexGrow={1} flexBasis={0} minHeight={0} overflow="hidden" display={scene === "workspace" && (!topOverlay || inlineOverlay) ? "none" : "flex"}>
       {overlayStack.length > 0 && !inlineOverlay ? (
-        <ScrollableInputLayer>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
+        runtimeOwnsViewport
+          ? <InputLayer priority={100}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer>
+          : <ScrollableInputLayer>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
       ) : loading ? (
         <Box paddingLeft={1} paddingTop={1}><Text dimColor>Loading projects...</Text></Box>
       ) : scene === "process_list" && activeProject ? (
@@ -689,7 +710,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         mode={mode}
         textInput={textInput}
         cmdInput={cmdInput}
-        cmdResult={cmdResult}
+        cmdResult={cmdResult || (scene !== "projects" && !topOverlay && loopData.error ? `Runtime status unavailable: ${loopData.error}` : "")}
         statusText={derivedStatus}
         suggestions={suggestions}
         suggestionIdx={suggestionIdx}
@@ -704,5 +725,6 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         language={generalConfig.language}
       />
     </Box>
+    </DiffLayoutContext.Provider>
   );
 }

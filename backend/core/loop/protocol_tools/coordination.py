@@ -1,5 +1,7 @@
 """coordination protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 
 def install(ctx):
@@ -30,8 +32,7 @@ def install(ctx):
     tools["list_coordination_events"] = AgentTool(
         name="list_coordination_events",
         description=(
-            "List Host-routed worker escalation and dependency-interface events owned "
-            "by this A. Use pending for decisions still needed or all for audit history."
+            load_prompt('tools/list_coordination_events')
         ),
         parameters={
             "type": "object",
@@ -104,10 +105,7 @@ def install(ctx):
     tools["resolve_coordination_event"] = AgentTool(
         name="resolve_coordination_event",
         description=(
-            "Resolve a Host-routed coordination event. Interface revisions require "
-            "accept_revision, request_rework, or ask_user; accepting mechanically "
-            "updates the versioned interface document and releases affected downstream "
-            "B Agents. This is the only route for changing a cross-B task boundary."
+            load_prompt('tools/resolve_coordination_event')
         ),
         parameters={
             "type": "object",

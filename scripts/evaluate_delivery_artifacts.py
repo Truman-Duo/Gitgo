@@ -1,4 +1,9 @@
 """Real Native Host delivery checks in an owned, isolated workspace."""
+
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
 from pathlib import Path
 import copy
 import hashlib
@@ -15,7 +20,7 @@ from backend.core.llm_config import LLMConfigManager
 
 
 def main():
-    root = ROOT / '.gitgo' / 'delivery-evaluation' / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
+    root = development_root(ROOT) / 'delivery-evaluation' / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
     workspace = root / 'workspace'
     workspace.mkdir(parents=True)
     source = digest_production()

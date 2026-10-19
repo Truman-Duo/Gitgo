@@ -79,6 +79,27 @@ def release_storage(workspace: str | Path) -> None:
         runtime.close()
 
 
+def get_shared_knowledge_storage(state_home: str | Path, *, create: bool = False) -> StorageRuntime | None:
+    """Reuse the existing bounded writer lifecycle for the user knowledge realm."""
+    home = Path(state_home).resolve()
+    if not create and not (home / "shared" / "knowledge" / "state.sqlite3").is_file():
+        return None
+    key = "shared-knowledge:" + str(home).casefold()
+    evicted = None
+    with _lock:
+        runtime = _owned.get(key)
+        if runtime is not None and not runtime._closed:
+            _owned.move_to_end(key)
+            return runtime
+        runtime = StorageRuntime(home, state_home=home, shared_knowledge=True)
+        _owned[key] = runtime
+        if len(_owned) > _MAX_OWNED_RUNTIMES:
+            _, evicted = _owned.popitem(last=False)
+    if evicted is not None:
+        evicted.close()
+    return runtime
+
+
 def close_owned_storage() -> None:
     with _lock:
         runtimes = list(_owned.values())

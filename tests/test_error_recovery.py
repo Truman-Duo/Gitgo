@@ -181,11 +181,15 @@ class TestTransactionRollback:
 
         assert called is False
         assert execution._rolled_back is False
-        assert results[0].diagnostics == {
+        assert {key: results[0].diagnostics[key] for key in ("nature", "code", "source")} == {
             "nature": "business",
             "code": "INVALID_TOOL_ARGUMENTS",
             "source": "llm",
         }
+        info = results[0].diagnostics["error_info"]
+        assert info["catalog_id"] == "GITGO-E3507"
+        assert info["guidance_ref"]["arguments"] == {"focus": "guidance", "identifier": "GITGO-E3507"}
+        assert info["occurrence_id"].startswith("err_")
 
     def test_write_detection_uses_effect_contract(self):
         from backend.core.loop.tool_execution import ToolExecution

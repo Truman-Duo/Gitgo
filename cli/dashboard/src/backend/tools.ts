@@ -1,4 +1,6 @@
 // Typed wrappers for transport-neutral native application operations.
+export type LessonProposalRef = {proposal_id: string; proposal_version: string; candidate_index: number;
+  draft?: {trigger: string; rule: string; qualification: Record<string, string>}};
 import type { BackendClient } from "./client.js";
 
 export const listProjects = (c: BackendClient) => c.callTool("project.list");
@@ -17,18 +19,25 @@ export const publishGet = (c: BackendClient, project: string) => c.callTool("pub
 export const publishSet = (c: BackendClient, project: string, section: string, value: unknown) =>
   c.callTool("publish.set", {project, section, value});
 export const listArchivedProjects = (c: BackendClient) => c.callTool("project.list_archived");
+export const enterProject = (c: BackendClient, name: string) => c.callTool("project.enter", {name});
 export const archiveProject = (c: BackendClient, name: string) => c.callTool("project.archive", { name });
 export const deleteProject = (c: BackendClient, name: string, mode: "soft" | "hard") => c.callTool("project.delete", { name, mode });
 export const cancelPendingDelete = (c: BackendClient, name: string) => c.callTool("project.cancel_delete", { name });
 
 export const lessonList = (c: BackendClient, project: string) => c.callTool("lesson.list", { project });
 export const lessonSearch = (c: BackendClient, project: string, query: string) => c.callTool("lesson.search", { project, query });
-export const lessonVerify = (c: BackendClient, project: string, lessonId: string) => c.callTool("lesson.verify", { project, lesson_id: lessonId });
+export const lessonVerify = (c: BackendClient, project: string, lessonId: string, expectedVersion: string) =>
+  c.callTool("lesson.verify", { project, lesson_id: lessonId, expected_version: expectedVersion });
 export const lessonHarvestPreview = (c: BackendClient, project: string, observation: string) =>
   c.callTool("lesson.harvest.preview", { project, observation });
 export const lessonHarvestResolve = (
-  c: BackendClient, project: string, proposalId: string, action: "accept" | "discard",
-) => c.callTool("lesson.harvest.resolve", { project, proposal_id: proposalId, action });
+  c: BackendClient, project: string, proposalId: string, action: "accept" | "discard", expectedVersion: string,
+  candidateReviews?: any[],
+) => c.callTool("lesson.harvest.resolve", { project, proposal_id: proposalId, action, expected_version: expectedVersion,
+  ...(candidateReviews ? {candidate_reviews: candidateReviews} : {}) });
+export const lessonHarvestList = (c: BackendClient, project: string) => c.callTool("lesson.harvest.list", {project});
+export const lessonHarvestContext = (c: BackendClient, project: string, ref: {proposal_id: string; proposal_version: string; candidate_index: number}) =>
+  c.callTool("lesson.harvest.context", {project, proposal_id: ref.proposal_id, expected_version: ref.proposal_version, candidate_index: ref.candidate_index});
 export const contractShow = (c: BackendClient, project: string) => c.callTool("contract.show", { project });
 export const governanceQuality = (c: BackendClient, project: string) => c.callTool("governance.quality", { project });
 export const governancePatterns = (c: BackendClient, project: string) => c.callTool("governance.patterns", { project });
@@ -56,7 +65,7 @@ export const loopStatus = (c: BackendClient, project: string) => c.callTool("run
 export const runtimeSummaries = (c: BackendClient) => c.callTool("runtime.summaries");
 export const runtimeUsage = (
   c: BackendClient, project = "", limit = 100, cursor = "",
-) => c.callTool("runtime.usage", { project, limit, cursor });
+) => c.callTool("runtime.usage", { project, limit, cursor, day_offset_minutes: -new Date().getTimezoneOffset() });
 export const runtimeTrace = (
   c: BackendClient, project: string, args: Record<string, any>,
 ) => c.callTool("runtime.trace", { project, ...args });
@@ -76,9 +85,11 @@ export const btwAsk = (
   c: BackendClient, project: string, question: string,
   sidecarId = "", history: Array<{ role: "user" | "assistant"; content: string }> = [],
   processIds: string[] = [], onEvent?: (event: Record<string, any>) => void,
+  lessonProposal?: LessonProposalRef,
 ) => c.callTool("runtime.btw", {
   project, question, sidecar_id: sidecarId, history,
   process_ids: processIds, process_id: processIds[0] || "",
+  ...(lessonProposal ? {lesson_proposal: lessonProposal} : {}),
 }, 140, onEvent);
 export const cancelBtw = (
   c: BackendClient, project: string, sidecarId: string,

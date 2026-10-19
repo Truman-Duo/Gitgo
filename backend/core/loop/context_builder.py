@@ -188,7 +188,8 @@ def _get_relevant_lessons(workspace_path: str | Path, project_name: str) -> list
         setattr(lesson, "_gitgo_trust_tier", "verified")
     for lesson in pending:
         setattr(lesson, "_gitgo_trust_tier", "pending")
-    lessons = verified + pending
+    from backend.core.knowledge.review import can_consume
+    lessons = [lesson for lesson in verified + pending if can_consume(lesson)]
     return lessons
 
 

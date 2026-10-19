@@ -4,8 +4,7 @@
 import React, { memo } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { ProjectRow } from "../hooks/useGitgoData.js";
-import { colors, usePanelSize, statusDot, truncate, padEndWidth, useSelectionStyle, projectStatusDot } from "../theme/index.js";
-import type { StatusState } from "../theme/index.js";
+import { colors, usePanelSize, truncate, padEndWidth, useSelectionStyle } from "../theme/index.js";
 import { projectRuntimeCategory } from "../projectRuntimeState.js";
 
 type Props = { projects: ProjectRow[]; sel: number; mode: "NORMAL" | "COMMAND"; cols: number; listActive: boolean; language?: "en" | "zh" };
@@ -23,14 +22,10 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
   const running = projects.filter(p => projectRuntimeCategory(p) === "running");
   const pending = projects.filter(p => projectRuntimeCategory(p) === "pending");
   const unavailable = projects.filter(p => projectRuntimeCategory(p) === "unavailable");
-  const finished = projects.filter(p => projectRuntimeCategory(p) === "finished");
-  const newProjects = projects.filter(p => projectRuntimeCategory(p) === "new");
   const groups = [
     { label: language === "zh" ? "运行中" : "Running", items: running, start: 0 },
-    { label: language === "zh" ? "等待中" : "Pending", items: pending, start: running.length },
+    { label: language === "zh" ? "已完成 / 等待" : "Completed / Waiting", items: pending, start: running.length },
     { label: language === "zh" ? "不可用" : "Unavailable", items: unavailable, start: running.length + pending.length },
-    { label: language === "zh" ? "已完成" : "Finished", items: finished, start: running.length + pending.length + unavailable.length },
-    { label: language === "zh" ? "新建" : "New", items: newProjects, start: running.length + pending.length + unavailable.length + finished.length },
   ];
 
   return (
@@ -39,7 +34,6 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
         <Text dimColor>{language === "zh" ? "项目" : "Projects"}</Text>
       </Box>
 
-      {/* Status is a row-level signal inside Name, not a separate column. */}
       <Box flexDirection="row">
         <Text bold>{"Name".padEnd(nameW)}</Text>
         <Text bold dimColor>{"Procs".padEnd(procW)}</Text>
@@ -66,19 +60,17 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
               const highlightBg = isSelected && tableFocused ? colors.selection.row.bg : undefined;
               const nameStyle = useSelectionStyle(isSelected && tableFocused ? "focused" : "non-focused", "row");
 
-              const dot = statusDot(projectStatusDot(p.daemonOnline, p.activeProcessCount));
               const procBadge = p.activeProcessCount > 0 ? String(p.activeProcessCount) : "";
               const procColor = p.activeProcessCount > 0 ? colors.accent : undefined;
               const procStr = (procBadge || "-").padEnd(procW);
 
-              const pathBase = p.workspace.split("/").pop() || p.workspace.split("\\").pop() || p.workspace;
-              const nameTextW = Math.max(1, nameW - 2);
+              const pathBase = p.workspace.split(/[\\/]/).filter(Boolean).pop() || p.workspace;
+              const nameTextW = Math.max(1, nameW);
               const paddedName = padEndWidth(truncate(p.name, nameTextW), nameTextW);
               const pathStr = truncate(pathBase, pathW);
 
               return (
                 <Box key={p.name} flexDirection="row" backgroundColor={highlightBg}>
-                  <Text color={dot.color} backgroundColor={highlightBg}>{dot.char} </Text>
                   <Text
                     color={nameStyle.fg}
                     bold={nameStyle.bold}

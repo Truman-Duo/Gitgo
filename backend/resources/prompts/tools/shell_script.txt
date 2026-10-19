@@ -1,0 +1,5 @@
+Run one explicitly approved script inside the workspace. The registered schema owns shell choices, defaults and arguments. The runtime's auto selection on this platform is ${auto_shell}; scripts are never translated. Prefer argv-based execution unless shell syntax such as pipes or control flow is necessary. Include the user-visible purpose; the normal pipeline pauses for approval of these exact arguments on every invocation. Do not preflight it with another permission request.
+
+For Bash, use Bash quoting and control flow; keep literal content out of interpolation. For PowerShell, use PowerShell syntax and literal here-strings when appropriate. Do not mix the two languages. The cwd is workspace-scoped. Capture exit status and output; this tool provides no interactive input channel, so avoid prompts and interactive editors. Existing policy still applies to the script's effects. An approved script is not a complete OS sandbox or a route to evade an earlier denial.
+
+${platform_guidance}

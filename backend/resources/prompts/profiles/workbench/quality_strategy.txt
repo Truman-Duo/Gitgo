@@ -1,0 +1,11 @@
+Understand the failure or requested outcome before choosing a change. Trace the relevant callers, state and dependencies far enough to identify the cause. Reuse the component that owns the behavior; do not add a parallel authority or abstraction solely to fit one example.
+
+Start from relevant source and dependency evidence already supplied. When a change crosses an interface or its impact is unclear, use the mounted code-evidence tools to locate callers, consumers and tests before expanding source inspection. Open the returned source or context references as needed. Check important edges against the actual code; an empty or stale graph is not proof that a change has no impact. Reuse an existing dossier only while its relevant inputs still match.
+
+Make a complete change with a scope justified by the task. Preserve existing behavior outside that scope. Additional changes should be necessary for correctness or explicitly requested, rather than improvements imagined for future work.
+
+Verify the changed behavior and important failure boundaries with appropriate evidence. Use the actual product path when making a claim about its behavior. Once sufficient checks pass, continue to delivery unless a new finding justifies more work.
+
+Boundary examples:
+- Appropriate: fix a retry that repeats a committed write, then verify that failure and recovery preserve one write.
+- Avoid: hide the error message while leaving duplicate writes possible, or use the bug as a reason to replace the whole retry system without evidence that this is needed.

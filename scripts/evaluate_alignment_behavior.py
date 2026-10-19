@@ -5,6 +5,11 @@ Does not prescribe tools, print secrets, change installed configuration, or asse
 """
 from __future__ import annotations
 
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
+
 import argparse
 import copy
 from datetime import datetime
@@ -158,6 +163,10 @@ def run_case(case, root, cfg, llm, selected, project):
     name, prompt, persona, criterion = case
     home = root / name
     home.mkdir()
+    cfg = copy.deepcopy(cfg)
+    workspace = home / 'test-project'
+    workspace.mkdir()
+    cfg.projects[0].workspace_path = str(workspace)
     ConfigManager.save(cfg, home / 'config.json', allow_empty=True)
     saved = {key: os.environ.get(key) for key in ('GITGO_LLM_CONFIG_PATH', 'GITGO_LLM_SECRET_PATH')}
     try:
@@ -173,7 +182,7 @@ def run_case(case, root, cfg, llm, selected, project):
     env = os.environ.copy()
     for key in ('GITGO_LLM_BASE_URL', 'GITGO_LLM_API_KEY', 'GITGO_LLM_MODEL', 'GITGO_LLM_PROTOCOL'):
         env.pop(key, None)
-    env.update({'GITGO_CONFIG_PATH': str(home / 'config.json'), 'GITGO_STATE_HOME': str(home / 'state'),
+    env.update({'GITGO_CONFIG_PATH': str(home / 'config.json'), 'GITGO_STATE_HOME': str(test_state_home(home / 'test-project')),
                 'GITGO_LLM_CONFIG_PATH': str(home / 'llm.json'), 'GITGO_LLM_SECRET_PATH': str(home / 'secrets.json'),
                 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'})
     record = {'case': name, 'prompt': prompt, 'persona': persona, 'criterion': criterion,
@@ -196,7 +205,7 @@ def run_case(case, root, cfg, llm, selected, project):
             pending = next((p['pending_decision'] for p in status.get('processes', {}).values() if p.get('pending_decision')), None)
             record['turns'].append({'response': response, 'pending': pending,
                                     'elapsed_seconds': round(time.monotonic() - turn_started, 3),
-                                    'evidence': read_evidence(home / 'state', (pending or {}).get('task_id', ''), response.get('response', ''))})
+                                    'evidence': read_evidence(test_state_home(home / 'test-project'), (pending or {}).get('task_id', ''), response.get('response', ''))})
             (home / 'result.json').write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
             if (root / 'STOP_REQUESTED').exists():
                 record['stopped_between_turns'] = True
@@ -328,7 +337,7 @@ def main():
     llm = {**llm, 'providers': [copy.deepcopy(selected)], 'active_provider': selected['id'], 'failover_enabled': False, 'failover_order': []}
     cfg = copy.deepcopy(ConfigManager.load())
     cfg.projects = [next(p for p in cfg.projects if p.name == args.project)]
-    root = ROOT / '.gitgo' / 'grill-evaluation' / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
+    root = development_root(ROOT) / 'grill-evaluation' / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
     root.mkdir(parents=True)
     print(json.dumps({'run': str(root), 'model': selected['model_id'], 'cases': len(selected_cases)}, ensure_ascii=False), flush=True)
     summaries = []

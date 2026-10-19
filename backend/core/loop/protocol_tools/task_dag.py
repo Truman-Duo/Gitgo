@@ -1,5 +1,7 @@
 """task dag protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
 from pathlib import Path
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
@@ -212,6 +214,11 @@ def install(ctx):
                     "delegated": False,
                     "error": f"DAG needs {len(nodes)} agents but budget has {remaining}",
                 }
+        if process.task_budget is not None:
+            try:
+                process.task_budget.preflight_children([by_id[item] for item in order], parent_id=process.process_id)
+            except (ValueError, RuntimeError) as exc:
+                return {"delegated": False, "error": str(exc), "execution_state": "not_started"}
         admitted: dict[str, str] = {}
         created: list[str] = []
         for node_id in order:
@@ -252,9 +259,7 @@ def install(ctx):
     tools["delegate_task_dag"] = AgentTool(
         name="delegate_task_dag",
         description=(
-            "Admit a complete sibling DAG in one Host-validated operation. Use "
-            "local node_id/depends_on values; the Host resolves process ids, "
-            "schedules ready nodes and injects upstream outcomes."
+            load_prompt('tools/delegate_task_dag')
         ),
         parameters={
             "type": "object",

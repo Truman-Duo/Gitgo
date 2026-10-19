@@ -7,6 +7,11 @@ JSONL ledger never contains the credential.
 
 from __future__ import annotations
 
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root
+
 from collections import Counter
 import io
 import json
@@ -63,7 +68,7 @@ If any hard fact fails, report it without replacement workers or paid retries.
 
 
 def _ledger_path() -> Path:
-    root = PROJECT_ROOT / ".gitgo" / "real_api_acceptance"
+    root = development_root(PROJECT_ROOT) / "real_api_acceptance"
     root.mkdir(parents=True, exist_ok=True)
     for number in range(1, 100):
         suffix = "" if number == 1 else f"_run{number}"

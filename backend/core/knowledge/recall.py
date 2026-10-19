@@ -6,6 +6,8 @@ v0.35 Phase 2: L0 grep + 轻量排序 / L1 多向量语义搜索 / L2 RAG
 
 from __future__ import annotations
 
+from backend.core.prompt_templates import render_prompt
+
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,6 +32,21 @@ COMMON_WORDS = {
 
 NOISE_WARNING_THRESHOLD = 0.3
 DEFAULT_TOP_K = 10
+MIN_SEMANTIC_SCORE = 0.5  # Retrieval heuristic, never enforcement authority.
+
+
+def _recall_lessons(workspace: Path, project: str) -> list[Lesson]:
+    """All knowledge tiers share the same recall surface and applicability check."""
+    lessons = LessonManager.load_abstract(workspace)
+    if project:
+        lessons += LessonManager.load_instance(workspace, project)
+        lessons += LessonManager.load_pending(workspace, project)
+    from .review import can_consume
+    return list({item.id or lesson_content_identity(item): item for item in lessons if can_consume(item)}.values())
+
+
+def lesson_content_identity(lesson: Lesson) -> str:
+    return lesson.trigger + "\n" + lesson.rule
 
 
 # ── L0: grep + 轻量排序 ──────────────────────────────────
@@ -60,10 +77,9 @@ def filter_by_relevance(
     task_description: str,
     threshold: float = 0.5,
 ) -> list[Lesson]:
-    """检索时实时过滤——per-agent scope 的核心。
+    """Optional lexical task filter; never use it before semantic retrieval.
 
-    优先用 embedding 相似度（如果 EMBEDDING_AVAILABLE）。
-    Fallback: 子字符串匹配（去除常用词）。
+    ``threshold`` is retained for older callers, not a semantic score.
     """
     # Fallback: 子字符串匹配
     keywords = set(task_description.lower().split()) - COMMON_WORDS
@@ -121,8 +137,8 @@ def recall_grep(
          "noise_signal": str|None}
     """
     ws = Path(workspace) if workspace else Path(".")
-    lessons = LessonManager.load_instance(ws, project)
-    lessons += LessonManager.load_pending(ws, project)
+    lessons = _recall_lessons(ws, project)
+    top_k = max(1, min(int(top_k), 100))
 
     # Per-agent scope: 实时过滤
     if agent_context and agent_context.get("task_description"):
@@ -193,34 +209,46 @@ def recall_semantic(
         return recall_grep(query, project, top_k, agent_context, workspace)
 
     ws = Path(workspace) if workspace else Path(".")
-    lessons = LessonManager.load_instance(ws, project)
-    lessons += LessonManager.load_pending(ws, project)
-
-    if agent_context and agent_context.get("task_description"):
-        lessons = filter_by_relevance(
-            lessons, agent_context["task_description"],
-        )
+    lessons = _recall_lessons(ws, project)
+    top_k = max(1, min(int(top_k), 100))
 
     if not lessons:
         return {"lessons": [], "total_matches": 0, "text": "无匹配结果", "noise_signal": None}
 
     # 嵌入查询
     query_emb = provider.embed(query)
+    if not query_emb or _cosine_similarity(query_emb, query_emb) == 0:
+        result = recall_grep(query, project, top_k, agent_context, workspace)
+        result.update(retrieval_mode="lexical_fallback",
+                      degraded_reason="query_embedding_unavailable")
+        return result
 
     # 对每条 lesson 计算 trigger 和 rule 的相似度
     scored = []
+    embedding_failures = 0
     for l in lessons:
         trigger_emb = provider.embed(l.trigger) if l.trigger else None
         rule_emb = provider.embed(l.rule) if l.rule else None
+        embedding_failures += int(bool(l.trigger) and trigger_emb is None)
+        embedding_failures += int(bool(l.rule) and rule_emb is None)
 
         trigger_sim = _cosine_similarity(query_emb, trigger_emb) if trigger_emb else 0
         rule_sim = _cosine_similarity(query_emb, rule_emb) if rule_emb else 0
         score = max(trigger_sim, rule_sim)
-        scored.append((l, score))
+        if score >= MIN_SEMANTIC_SCORE:
+            scored.append((l, score))
 
-    scored.sort(key=lambda x: -x[1])
+    if embedding_failures and not scored:
+        result = recall_grep(query, project, top_k, agent_context, workspace)
+        result.update(retrieval_mode="lexical_fallback",
+                      degraded_reason="lesson_embeddings_unavailable")
+        return result
+
+    applicability = {id(item): assess_lesson(item, ws) for item, _ in scored}
+    scored.sort(key=lambda x: (
+        applicability[id(x[0])].get("state") != "current", -x[1], *_sort_key(x[0]),
+    ))
     result = [l for l, _ in scored[:top_k]]
-    applicability = {id(item): assess_lesson(item, ws) for item in result}
 
     for l in result:
         record_retrieval(l, workspace=str(ws), project=project)
@@ -242,6 +270,8 @@ def recall_semantic(
         "total_matches": len(scored),
         "text": "\n".join(lines),
         "noise_signal": None,
+        "retrieval_mode": "semantic",
+        "partial": bool(embedding_failures),
     }
 
 
@@ -275,12 +305,7 @@ def recall_rag(
         lessons_text = summary + lessons_text[:2000]
 
     prompt = (
-        "根据以下检索到的项目经验教训，回答用户的查询。\n"
-        "综合多条 lesson 的信息，给出一个连贯的答案。\n"
-        "如果检索结果不足以回答，请说明。\n\n"
-        f"用户查询: {query}\n\n"
-        f"检索结果:\n{lessons_text}\n\n"
-        "综合回答:"
+        render_prompt('knowledge/rag', query=format(query, ''), lessons_text=format(lessons_text, ''))
     )
 
     return {
@@ -295,7 +320,9 @@ def recall_rag(
 # ── 辅助 ──────────────────────────────────────────────────
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
+    import math
+    if (not a or not b or len(a) != len(b)
+            or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in [*a, *b])):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = sum(x * x for x in a) ** 0.5

@@ -55,42 +55,17 @@ def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[st
         return None
 
 
-def _harvest_from_rejection_chain(
-    project_name: str, rejections: list, session: SyncSession
-) -> None:
-    """从连续 rejection 中提取 pending lesson。"""
-    from backend.core.knowledge.lesson import LessonManager
-    from backend.core.knowledge.models import Lesson
+def _harvest_from_rejection_chain(project_name: str, rejections: list, session: SyncSession) -> None:
+    """Actual task revisions are not frequency-derived knowledge."""
     from backend.core.history import HistoryManager
-
-    recent_3 = rejections[-3:]
-    reasons = []
-    for r in recent_3:
-        d = r.detail if isinstance(r.detail, dict) else {}
-        reasons.append(d.get("reason", ""))
-
-    last_detail = recent_3[-1].detail if isinstance(recent_3[-1].detail, dict) else {}
-    final_rule = last_detail.get("instruction", "")
-
-    lesson = Lesson(
-        tech_stack="",
-        category="process",
-        severity="high",
-        trigger=f"连续 3 次被人否定: {'; '.join(reasons[-2:])}",
-        rule=final_rule or "人连续纠正了多次方向性错误，最终方案需要被记录。",
-    )
-    lesson.id = f"rejection_{project_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-    ws = Path(session.workspace_path)
-    LessonManager.save_pending(ws, lesson)
-
-    HistoryManager.add_operation(
-        project_name, "governance_lesson", "success",
-        {"harvested_count": 1, "lesson_id": lesson.id, "trigger": "rejection_chain"},
-        correlation_id=session._correlation_id,
-    )
-    _emit({"event": "lesson_harvested", "lesson_id": lesson.id,
-           "trigger": "rejection_chain"})
+    from backend.core.knowledge.harvest import capture_signal
+    with HistoryManager.workspace_scope(str(session.workspace_path)):
+        for revision in rejections[-3:]:
+            detail = revision.detail if isinstance(revision.detail, dict) else {}
+            identity = str(getattr(revision, "correlation_id", "") or "") + ":" + str(revision.timestamp)
+            capture_signal("user_task_revision", {"information_kind": "task",
+                "reason": detail.get("reason", ""), "instruction": detail.get("instruction", ""),
+                "source": "user_task_revision"}, project_name, source_event_id=identity)
 
 
 def _runtime_llm_from_config(cfg):

@@ -1,0 +1,1 @@
+[HOST NO-PROGRESS RECOVERY] The prior direct-answer turn spent its output budget without public text or a tool call. Do not repeat or extend the hidden analysis. Treat quoted input literally unless the user explicitly asked for decoding. Either make one bounded evidence call now, or provide the concise public answer immediately.

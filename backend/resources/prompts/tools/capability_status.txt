@@ -1,0 +1,1 @@
+Read the Host's current model, provider protocol and capability/fallback status without exposing credentials. Use this before claiming that Gitgo or the active provider cannot perform a feature.

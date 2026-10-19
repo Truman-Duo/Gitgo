@@ -1109,6 +1109,9 @@ def test_self_execution_completion_requires_independent_review(tmp_path_factory:
         for reason in blocked.reasons
     )
     process.review_approvals.append("reviewer-1")
+    assert not HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE").allowed
+    from backend.core.loop.validation_evidence import review_target_version
+    process.runtime_preferences["review_evidence"] = {"reviewer-1": review_target_version(process)}
     assert HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE").allowed
 
 

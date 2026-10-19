@@ -1,0 +1,1 @@
+Start an independent read-only Reviewer B for a completed B result or for this supervisor's Level-2 self-executed work. For bounded self-work, submit complete_task first: the Host will request an independent review only when the verification tier requires one. Hidden reasoning is not shared.

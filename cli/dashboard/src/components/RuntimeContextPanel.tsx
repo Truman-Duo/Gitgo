@@ -4,7 +4,7 @@ import type {ScrollBoxHandle} from "@anthropic/ink";
 import type {ProcessInfo} from "../hooks/useLoopData.js";
 import {chordLabel, matchChord} from "../input/bindings.js";
 import {useManagedInput as useInput, useScrollInput} from "../input/runtime.js";
-import {colors, useSelectionStyle} from "../theme/index.js";
+import {colors, truncate, padEndWidth, usePanelSize} from "../theme/index.js";
 
 type Props = {
   project: string;
@@ -13,23 +13,20 @@ type Props = {
   interactive?: boolean;
 };
 
-const ProcessTab = memo(function ProcessTab({
-  label, selected,
-}: {label: string; selected: boolean}) {
-  const style = useSelectionStyle(selected ? "focused" : "non-focused", "block");
-  return <Text {...style}>{label + "  "}</Text>;
-});
+import { HorizontalHeaderStrip } from "./HorizontalHeaderStrip.js";
 
 export const RuntimeContextPanel = memo(function RuntimeContextPanel({
   project, processes, onDismiss, interactive = true,
 }: Props) {
-  const [index, setIndex] = useState(0);
+  const [selectedId, setSelectedId] = useState("");
+  const {w} = usePanelSize({minWidth: 20, widthOffset: 6});
   const scrollRef = useRef<ScrollBoxHandle>(null);
   useScrollInput(scrollRef, interactive);
   const rows = useMemo(() => Object.values(processes).sort((left, right) =>
-    (left.actor_kind === "supervisor" ? -1 : right.actor_kind === "supervisor" ? 1 : 0)
+    (Number(right.actor_kind === "supervisor") - Number(left.actor_kind === "supervisor"))
       || left.created_at.localeCompare(right.created_at)), [processes]);
-  const selected = rows[Math.min(index, Math.max(0, rows.length - 1))];
+  const index = Math.max(0, rows.findIndex(row => row.process_id === selectedId));
+  const selected = rows[index];
 
   useInput((input, key) => {
     if (matchChord("escape", input, key)) {
@@ -37,14 +34,17 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
       return;
     }
     if (matchChord("left", input, key) || matchChord("up", input, key)) {
-      setIndex(value => Math.max(0, value - 1));
+      setSelectedId(rows[Math.max(0, index - 1)]?.process_id || "");
     } else if (matchChord("right", input, key) || matchChord("down", input, key)) {
-      setIndex(value => Math.min(Math.max(0, rows.length - 1), value + 1));
+      setSelectedId(rows[Math.min(rows.length - 1, index + 1)]?.process_id || "");
     }
   }, {isActive: interactive});
 
+  const sideBySide = w >= 88;
+  const legendLabelWidth = Math.max(8, Math.min(32, w - (sideBySide ? 25 : 0) - 23));
+  const legendName = (name: string) => padEndWidth(truncate(name, legendLabelWidth), legendLabelWidth);
   const context = selected?.context;
-  const used = Number(context?.used_tokens || context?.estimated_tokens || selected?.estimated_tokens || 0);
+  const used = Number(context?.used_tokens ?? context?.estimated_tokens ?? selected?.estimated_tokens ?? 0);
   const limit = Number(context?.limit || 0);
   const percent = limit ? Math.min(999, used / limit * 100) : 0;
   const sections = context?.breakdown?.sections || [];
@@ -52,8 +52,8 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
   const free = Number(context?.free_tokens ?? Math.max(0, limit - used - reserve));
   const cache = Number(
     selected?.cache_summary?.eligible_hit_ratio
-      || selected?.cache_summary?.raw_hit_ratio
-      || 0,
+      ?? selected?.cache_summary?.raw_hit_ratio
+      ?? 0,
   );
 
   const gridSegments = (() => {
@@ -84,36 +84,37 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
 
   return <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
     <Text bold>Context Usage — {project}</Text>
-    <Box flexDirection="row" marginTop={1}>
-      {rows.map((process, rowIndex) => <ProcessTab
-        key={process.process_id}
-        selected={rowIndex === index}
-        label={process.actor_kind === "supervisor" ? "Main process" : process.display_name || "Subprocess"}
-      />)}
+    <Box marginTop={1}>
+      <HorizontalHeaderStrip items={rows.map(process => ({id: process.process_id,
+        label: truncate(process.actor_kind === "supervisor" ? "Main process" : process.display_name || "Subprocess", Math.min(22, Math.max(8, w - 10)))}))}
+        selected={index} width={w} contentFocused={!interactive}/>
     </Box>
+    {selected ? <Text dimColor wrap="truncate-end">{index + 1}/{rows.length}  ·  {selected.display_name || (selected.actor_kind === "supervisor" ? "Main process" : "Subprocess")}  ·  {selected.process_id.slice(0, 8)}</Text> : null}
     <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>
     {!selected ? <Text dimColor>No durable process context yet.</Text> :
       <Box flexDirection="column" marginTop={1}>
-        <Text bold>{selected.model_id || "Unknown model"}</Text>
+        <Text bold>{selected.model_id && selected.model_id !== "unknown" ? selected.model_id : "Model not recorded for this process"}</Text>
         <Text>{used.toLocaleString()} / {limit ? limit.toLocaleString() : "unknown"} tokens ({percent.toFixed(1)}%)</Text>
-        <Text dimColor>{context?.measurement === "provider" ? "provider measured" : "estimated"}   epoch {context?.epoch ?? 0}   cache {Math.round(cache * 100)}%</Text>
-        {limit > 0 ? <Box flexDirection="column" marginTop={1}>
+        <Text dimColor>{context?.measurement === "provider" ? "provider measured" : context?.measurement === "provider+increment_estimate" ? "provider + new content estimate" : "estimated"}   epoch {context?.epoch ?? 0}   cache {Math.round(cache * 100)}%</Text>
+        <Box flexDirection={sideBySide ? "row" : "column"} marginTop={1}>
+        {limit > 0 ? <Box flexDirection="column" width={22} flexShrink={0} marginRight={sideBySide ? 3 : 0}>
           {Array.from({length: 10}, (_, row) => <Box key={row} flexDirection="row">
             {gridCells.slice(row * 10, row * 10 + 10).map((cell, column) =>
               <Text key={`${row}-${column}`} color={cell.color}>■ </Text>)}
           </Box>)}
         </Box> : null}
-        <Box marginTop={1} flexDirection="column">
+        <Box marginTop={sideBySide ? 0 : 1} flexDirection="column" flexGrow={1} minWidth={0}>
           {sections.length === 0
             ? <Text dimColor>Section measurements will appear after the next prompt compilation.</Text>
             : sections.map((section, sectionIndex) => <Text key={section.name}>
               <Text color={colors.contextMap.categories[sectionIndex % colors.contextMap.categories.length]}>■</Text>
-              {" "}{section.name.padEnd(29)} {section.estimated_tokens.toLocaleString().padStart(8)}   {limit ? (section.estimated_tokens / limit * 100).toFixed(1).padStart(5) : "  0.0"}%
+              {" "}{legendName(section.name)} {section.estimated_tokens.toLocaleString().padStart(8)}   {limit ? (section.estimated_tokens / limit * 100).toFixed(1).padStart(5) : "  0.0"}%
             </Text>)}
           {limit > 0 ? <>
-            <Text><Text color={colors.contextMap.free}>■</Text>{" "}{"Free space".padEnd(29)} {Math.max(0, free).toLocaleString().padStart(8)}   {(Math.max(0, free) / limit * 100).toFixed(1).padStart(5)}%</Text>
-            {reserve > 0 ? <Text><Text color={colors.contextMap.compact}>■</Text>{" "}{"Autocompact buffer".padEnd(29)} {reserve.toLocaleString().padStart(8)}   {(reserve / limit * 100).toFixed(1).padStart(5)}%</Text> : null}
+            <Text><Text color={colors.contextMap.free}>■</Text>{" "}{legendName("Free space")} {Math.max(0, free).toLocaleString().padStart(8)}   {(Math.max(0, free) / limit * 100).toFixed(1).padStart(5)}%</Text>
+            {reserve > 0 ? <Text><Text color={colors.contextMap.compact}>■</Text>{" "}{legendName("Autocompact buffer")} {reserve.toLocaleString().padStart(8)}   {(reserve / limit * 100).toFixed(1).padStart(5)}%</Text> : null}
           </> : null}
+        </Box>
         </Box>
       </Box>}
     </ScrollBox>

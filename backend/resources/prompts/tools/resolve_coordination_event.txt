@@ -1,0 +1,1 @@
+Resolve a Host-routed coordination event. Interface revisions require accept_revision, request_rework, or ask_user; accepting mechanically updates the versioned interface document and releases affected downstream B Agents. This is the only route for changing a cross-B task boundary.

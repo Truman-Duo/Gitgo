@@ -1,0 +1,1 @@
+Apply a Host capability strategy only after the user has explicitly chosen it. The Host presents an approval card before changing global configuration. This never accepts API keys; sensitive provider credentials remain in /config.

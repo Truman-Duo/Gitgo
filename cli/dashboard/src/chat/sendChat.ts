@@ -54,7 +54,7 @@ function completedRound(outcome: any, state = initStreamState()): CompletedRound
     trace_id: String(outcome?.metadata?.trace_id || outcome?.task_id || ""),
     process_id: String(outcome?.process_id || ""),
     reasoning: state.reasoning || undefined,
-    activity: state.activity.length > 0 ? state.activity : undefined,
+    activity: state.activity.length > 0 ? state.activity.filter(item => item.kind !== "draft") : undefined,
     provider_usage: state.providerUsage,
   };
 }

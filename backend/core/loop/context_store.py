@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
+from backend.core.prompt_templates import load_prompt
 from backend.core.unicode_safety import normalize_unicode_text, normalize_unicode_value
 
 
@@ -156,6 +157,24 @@ class ContextObjectStore:
             digest=digest, media_type=str(payload.get("media_type", "text/plain")),
             content=content, metadata=dict(payload.get("metadata", {})),
         )
+
+    def reference_info(self, ref: str) -> dict:
+        """Describe identity and the matching logical ref's dependency metadata.
+
+        Blob metadata is content-addressed and may have been written under
+        another logical name first. It is not authority for this ref's producer
+        or edges. Historical refs lack a versioned metadata envelope here.
+        """
+        item = self.resolve(ref)
+        current = self._load_refs().get(item.logical_name) or {}
+        digest = str(current.get("digest") or "")
+        matches = digest == item.digest
+        return {"ref": item.ref, "logical_name": item.logical_name,
+                "digest": item.digest, "current_digest": digest,
+                "version_state": "current" if matches else "historical" if digest else "unknown",
+                "dependency_metadata_state": "matching_ref" if matches else "unavailable",
+                "producer": str(current.get("producer") or item.logical_name) if matches else "unknown",
+                "depends_on": dict(current.get("depends_on") or {}) if matches else {}}
 
     def search(self, query: str, *, namespace: str = "", limit: int = 20) -> list[dict]:
         needle = query.casefold().strip()
@@ -405,7 +424,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
 
     tools = {
         "context_open": AgentTool(
-            name="context_open", description="Resolve and materialize a latest or pinned context ref.",
+            name="context_open", description=load_prompt('tools/context_open'),
             parameters={"type": "object", "properties": {
                             "ref": {"type": "string"},
                             "offset": {"type": "integer", "minimum": 0},
@@ -414,21 +433,21 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
             execute=context_open, effect=ToolEffect.READ, idempotent=True,
         ),
         "context_search": AgentTool(
-            name="context_search", description="Search addressable project context objects.",
+            name="context_search", description=load_prompt('tools/context_search'),
             parameters={"type": "object", "properties": {
                 "query": {"type": "string"}, "namespace": {"type": "string"},
                 "limit": {"type": "integer"}}, "required": ["query"]},
             execute=context_search, effect=ToolEffect.READ, idempotent=True,
         ),
         "dependency_query": AgentTool(
-            name="dependency_query", description="Query evidence-ranked dependents for a workspace file.",
+            name="dependency_query", description=load_prompt('tools/dependency_query'),
             parameters={"type": "object", "properties": {
                 "path": {"type": "string"}, "min_confidence": {"type": "number"},
                 "include_dismissed": {"type": "boolean"}}, "required": ["path"]},
             execute=dependency_query, effect=ToolEffect.READ, idempotent=True,
         ),
         "artifact_read": AgentTool(
-            name="artifact_read", description="Read a workspace artifact, optionally pinned by SHA-256.",
+            name="artifact_read", description=load_prompt('tools/artifact_read'),
             parameters={"type": "object", "properties": {
                 "path": {"type": "string"}, "sha256": {"type": "string"},
                 "offset": {"type": "integer", "minimum": 0},

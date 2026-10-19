@@ -35,7 +35,9 @@ def test_legacy_knowledge_import_is_idempotent_and_becomes_single_authority(
         assert [item.id for item in LessonManager.load_pending(workspace, "demo")] == [
             "legacy-lesson",
         ]
-        verified = LessonManager.verify(workspace, "legacy-lesson", "demo")
+        from backend.core.knowledge.review import can_consume
+        assert not can_consume(LessonManager.load_pending(workspace, "demo")[0])
+        verified = LessonManager.verify(workspace, "legacy-lesson", "demo", user_confirmation=True)
         assert verified is not None
         assert storage.lesson_count(scope="pending", project_name="demo") == 0
         assert storage.lesson_count(scope="instance", project_name="demo") == 1

@@ -8,7 +8,7 @@ from typing import Iterable
 from ..models import StorageBlocked
 from ..redaction import redact_for_persistence
 from .ports import ObservabilityPort
-from ..support import _utc_now
+from ..support import _MinuteBudget, _utc_now
 
 def append_event(
     self,
@@ -32,15 +32,7 @@ def append_event(
     logical = len(encoded) + len(payload_ref or "") + 256
     if logical > self.policy.max_observability_record_bytes:
         raise ValueError("observability event is too large; store the body in CAS")
-    health = self.check_health()
-    estimated_write = self._estimated_sqlite_write(logical)
-    if (
-        health.observability_bytes + estimated_write > self.policy.observability_max_bytes
-        or health.total_bytes + estimated_write > self.policy.total_max_bytes
-        or not self._global_sqlite_budget.reserve(estimated_write)
-        or not self._observability_budget.reserve(logical)
-    ):
-        self._publish_degraded("observability_write_throttled")
+    if not self._reserve_observability_write(logical):
         return False
     now = _utc_now()
     with self._observability_lock:
@@ -80,8 +72,10 @@ def _reserve_observability_write(
         health.observability_bytes + estimated_write
         > self.policy.observability_max_bytes
         or health.total_bytes + estimated_write > self.policy.total_max_bytes
-        or not self._global_sqlite_budget.reserve(estimated_write)
-        or not self._observability_budget.reserve(logical)
+        or not _MinuteBudget.reserve_all(
+            (self._global_sqlite_budget, estimated_write),
+            (self._observability_budget, logical),
+        )
     )
     if not allowed and publish_degraded:
         self._publish_degraded("observability_write_throttled")

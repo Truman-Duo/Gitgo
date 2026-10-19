@@ -18,7 +18,8 @@ function short(value: unknown, maximum = 120): string {
 function noticeKey(event: TraceLifecycleEvent, label: string, detail: string): string {
   const seq = event.seq;
   if (typeof seq === "number" || typeof seq === "string") return `trace:${seq}`;
-  const identity = event.decision_id || event.detail_ref || event.dossier_ref ||
+  const identity = event.proposal_id || asRecord(event.proposal).proposal_id || event.harvest_id
+    || event.decision_id || event.detail_ref || event.dossier_ref ||
     event.context_epoch || event.governance_version || event.step || event.status || detail;
   return [event.event, event.process_id || "host", identity || label].join(":");
 }
@@ -117,6 +118,13 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
         `${Number(ev.count || 0)} pending lesson${Number(ev.count || 0) === 1 ? "" : "s"} · review in /runtime lesson`,
         "success",
       );
+    case "lesson_harvest_proposed":
+      return makeNotice(ev, "Knowledge proposal ready",
+        "Waiting for your review in /runtime lesson", "info");
+    case "lesson_harvest_completed":
+      return null; // No candidate means no review request or conversation clutter.
+    case "lesson_harvest_resolved":
+      return ev.status === "dismissed" ? makeNotice(ev, "Knowledge proposal discarded", "", "info") : null;
     case "lesson_harvest_failed":
       return makeNotice(
         ev,

@@ -1,0 +1,1 @@
+Legacy arithmetic-only interface for an explicitly retained old capability contract. It delegates to the workbench calculation implementation and does not grant other workbench operations. Current task profiles use the workbench tool.

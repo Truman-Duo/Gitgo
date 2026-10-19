@@ -1,0 +1,1 @@
+A contract flag about unresolved user decisions applies only to a real semantic or product choice. Capability staging is resolved by the Host route above and is not a reason to ask the user or abandon the task.

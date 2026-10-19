@@ -30,6 +30,7 @@ from .models import (
 from .paths import (
     StoragePaths, resolve_existing_storage_paths, resolve_storage_paths,
     validate_storage_location,
+    resolve_shared_knowledge_paths,
 )
 from .redaction import redact_for_persistence
 from .maintenance import StorageLease
@@ -182,9 +183,15 @@ class StorageRuntime:
         policy: StoragePolicy | None = None,
         health_listener: Callable[[dict], None] | None = None,
         exclusive_maintenance: bool = False,
+        shared_knowledge: bool = False,
     ):
         validate_sqlite_runtime()
-        self.paths = resolve_storage_paths(workspace, state_home=state_home)
+        if shared_knowledge:
+            if state_home is None:
+                raise ValueError("shared knowledge requires an explicit state home")
+            self.paths = resolve_shared_knowledge_paths(state_home)
+        else:
+            self.paths = resolve_storage_paths(workspace, state_home=state_home)
         self.policy = policy or StoragePolicy()
         self._health_listener = health_listener
         self._state_lock = threading.RLock()
@@ -437,6 +444,14 @@ class StorageRuntime:
     def get_state_ref(self, namespace: str, key: str) -> str | None:
         return _objects_repository.get_state_ref(self, namespace, key)
 
+    def commit_state_revision(self, namespace: str, key: str, value_ref: str, *,
+                              expected_ref: str | None, revision_key: str) -> bool:
+        return _objects_repository.commit_state_revision(
+            self, namespace, key, value_ref, expected_ref=expected_ref, revision_key=revision_key)
+
+    def list_state_refs(self, namespace: str, *, prefix: str, after: str = "", limit: int = 50) -> list[dict]:
+        return _objects_repository.list_state_refs(self, namespace, prefix=prefix, after=after, limit=limit)
+
     def _write_blob_file(self, data: bytes, *, media_type: str='application/octet-stream') -> dict:
         'Write one immutable file without opening a SQLite transaction.'
         return _objects_repository._write_blob_file(self, data, media_type=media_type)
@@ -464,9 +479,9 @@ class StorageRuntime:
         'Persist one oversized tool result as a content-addressed object.'
         return _objects_repository.put_tool_result(self, content, process_id=process_id, task_id=task_id, tool_name=tool_name, media_type=media_type)
 
-    def read_tool_result(self, locator: str, *, offset: int=0, max_chars: int=24000, json_pointer: str='', query: str='') -> dict:
+    def read_tool_result(self, locator: str, *, offset: int=0, max_chars: int=24000, json_pointer: str='', query: str='', owner_process_id: str='') -> dict:
         'Read a bounded page from an addressable tool result.'
-        return _objects_repository.read_tool_result(self, locator, offset=offset, max_chars=max_chars, json_pointer=json_pointer, query=query)
+        return _objects_repository.read_tool_result(self, locator, offset=offset, max_chars=max_chars, json_pointer=json_pointer, query=query, owner_process_id=owner_process_id)
 
     def save_custom_tool(self, spec: dict, source: str, *, replace: bool=False) -> dict:
         'Persist one project-scoped authored tool as an immutable version.'
@@ -509,9 +524,9 @@ class StorageRuntime:
             from .lifecycle import check_revision
             return check_revision(self._state, process_id, None)
 
-    def read_task_usage(self, *, limit: int=100, cursor: str='') -> dict:
+    def read_task_usage(self, *, limit: int=100, cursor: str='', day_offset_minutes: int=0) -> dict:
         'Return authoritative root-task usage without reading verbose traces.'
-        return _usage_repository.read_task_usage(self, limit=limit, cursor=cursor)
+        return _usage_repository.read_task_usage(self, limit=limit, cursor=cursor, day_offset_minutes=day_offset_minutes)
 
     def append_session_event(self, process_id: str, event_type: str, data: dict | None=None, *, occurred_at: str | None=None, sequence: int | None=None, event_id: str | None=None) -> int:
         return _sessions_repository.append_session_event(self, process_id, event_type, data, occurred_at=occurred_at, sequence=sequence, event_id=event_id)
@@ -533,9 +548,9 @@ class StorageRuntime:
         'Project one durable provider session into the canonical public chat.'
         return _presentation_repository._public_session_messages(self, session_id)
 
-    def read_latest_conversations(self) -> dict:
+    def read_latest_conversations(self, *, agent_conversations: dict | None = None) -> dict:
         'Return the latest durable root conversation and its Agent tree.'
-        return _presentation_repository.read_latest_conversations(self)
+        return _presentation_repository.read_latest_conversations(self, agent_conversations=agent_conversations)
 
     def read_process_presentation(self, process_id: str) -> dict:
         return _presentation_repository.read_process_presentation(self, process_id)
@@ -648,18 +663,32 @@ class StorageRuntime:
     def get_lesson_record(self, lesson_id: str) -> tuple[str, dict] | None:
         return _knowledge_repository.get_lesson_record(self, lesson_id)
 
+    def configure_lesson_checker(self, change: dict, *, grant_id: str) -> dict:
+        return _knowledge_repository.configure_lesson_checker(self,change,grant_id=grant_id)
+
+    def record_lesson_retrieval(self, lesson_id: str, retrieved_at: str) -> bool:
+        return _knowledge_repository.record_lesson_retrieval(self, lesson_id, retrieved_at)
+
+    def record_lesson_verification(self, lesson_id: str, project_id: str, project_name: str, *, user_confirmation: bool = False, expected_version: str = "") -> dict:
+        return _knowledge_repository.record_lesson_verification(self, lesson_id, project_id, project_name, user_confirmation=user_confirmation, expected_version=expected_version)
+
     def delete_lesson_record(self, lesson_id: str, *, project_name: str | None=None, scopes: tuple[str, ...]=('pending', 'instance')) -> bool:
         return _knowledge_repository.delete_lesson_record(self, lesson_id, project_name=project_name, scopes=scopes)
 
     def lesson_count(self, *, scope: str, project_name: str='') -> int:
         return _knowledge_repository.lesson_count(self, scope=scope, project_name=project_name)
 
-    def save_harvest_signal_records(self, records: list[dict]) -> int:
+    def save_harvest_signal_records(self, records: list[dict], *, create_only: bool = False) -> int:
         'Upsert changed harvest signals into the shared governance bus.'
-        return _knowledge_repository.save_harvest_signal_records(self, records)
+        return _knowledge_repository.save_harvest_signal_records(self, records, create_only=create_only)
 
-    def load_harvest_signal_records(self) -> list[dict]:
-        return _knowledge_repository.load_harvest_signal_records(self)
+    def load_harvest_signal_records(self, *, with_version: bool = False) -> list[dict]:
+        return _knowledge_repository.load_harvest_signal_records(self, with_version=with_version)
+
+    def resolve_harvest_proposal_records(self, project: str, proposal_id: str, *, accepted: bool,
+                                         candidates: list[dict] | None, expected_version: str) -> dict:
+        return _knowledge_repository.resolve_harvest_proposal_records(self, project, proposal_id,
+            accepted=accepted, candidates=candidates, expected_version=expected_version)
 
     def harvest_signal_count(self) -> int:
         return _knowledge_repository.harvest_signal_count(self)

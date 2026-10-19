@@ -1,0 +1,1 @@
+[HOST PROVIDER CONTINUATION] The provider reached ${provider_incomplete_reason}. Continue from the saved partial reasoning/output without repeating prior analysis. Finish concisely within the remaining task budget. If public text was emitted, continue from its exact end without restarting: the Host retains and joins those public fragments for delivery.${tool_hint}

@@ -6,6 +6,8 @@ A Agent 通过 ContextBuilder 注入治理简报作为 system prompt。
 
 from __future__ import annotations
 
+from backend.core.prompt_templates import load_prompt
+
 import json
 import re
 import threading
@@ -896,7 +898,7 @@ class AgentSession:
         - 新格式: {"signals": [GovernanceSignal, ...], "brief": "..."}
         - 旧格式: {"phase_brief": "...", "contract_summary": "...", ...}
         """
-        parts = [f"你是项目治理执行 Agent (ring 3)。"]
+        parts = [load_prompt('legacy/governance_identity')]
 
         # 新格式：直接使用 brief 文本
         brief_text = brief.get("brief")

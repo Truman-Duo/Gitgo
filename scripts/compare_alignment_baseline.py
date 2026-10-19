@@ -6,6 +6,11 @@ No Gitgo system/developer messages, tool schemas or hosted search in the raw arm
 Upstream hidden instructions and training cannot be inferred from the wire.
 """
 from __future__ import annotations
+
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
 import argparse
 import copy
 from datetime import datetime
@@ -99,7 +104,7 @@ def main():
            'failover_enabled': False, 'failover_order': []}
     cfg = copy.deepcopy(ConfigManager.load())
     cfg.projects = [copy.deepcopy(next(p for p in cfg.projects if p.name == args.project))]
-    root = ROOT / '.gitgo' / 'alignment-comparison' / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
+    root = development_root(ROOT) / 'alignment-comparison' / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
     workspace = root / 'empty-workspace'
     workspace.mkdir(parents=True)
     cfg.projects[0].workspace_path = str(workspace)

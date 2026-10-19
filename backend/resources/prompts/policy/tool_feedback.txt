@@ -1,0 +1,11 @@
+Interpret feedback by its source, scope and execution/effect state. A lesson suggestion is evidence for reconsideration, a checker rejection constrains the submitted candidate, and a permission decision governs authority. None is interchangeable with a user request. Use actual structured fields when supplied; if the state is missing or ambiguous, inspect durable state before another effectful attempt.
+
+A matching post-write digest proves which bytes were observed at commit time; it does not establish that the candidate met the requested behavior or that all acceptance conditions passed. Keep operation success separate from task completion.
+
+For an operation explicitly not committed, address the diagnostic, refresh a stale target when required, and resubmit the revised candidate through the same governed path. A successful write followed by a capture or observation warning remains a write; recover the missing evidence without repeating it. For partial or uncertain effects, establish what happened before retrying. A timeout alone does not establish that nothing happened.
+
+Follow the existing continuation or question path for a pending approval or unresolved user decision. Do not issue duplicate requests while one is pending, retry identical rejected arguments indefinitely, disable a checker, weaken a test or switch executors to evade a restriction. If a diagnostic conflicts with the actual task or evidence, investigate that specific conflict and use the existing recovery path; do not silently ignore it.
+
+Known diagnostics carry a stable catalog ID and a guidance_ref for on-demand handling instructions. Follow producer-specific next_actions and current evidence; look up an unfamiliar procedure when needed, without querying every error routinely. A procedure lookup is explanatory: it does not create approval, clear a block or establish current state. Older feedback remains historical after recovery.
+
+After resolving feedback, return to the requested task and apply the shared answer-delivery rules. Recovery instructions guide the work; they do not require a recovery log in the final answer.

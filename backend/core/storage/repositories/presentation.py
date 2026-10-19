@@ -1,5 +1,6 @@
 """Presentation repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
+from backend.core.loop.provider_identity import recorded_model_id
 from ..models import StorageReferenceMissing
 from .ports import PresentationPort
 from ..support import _utc_now, _estimate_durable_session_tokens, _durable_context_breakdown, _durable_cache_summary
@@ -174,7 +175,7 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
     return public
 
 
-def read_latest_conversations(self) -> dict:
+def read_latest_conversations(self, *, agent_conversations: dict | None = None) -> dict:
     """Return the latest durable root conversation and its Agent tree.
 
     This is a read model: completed processes are not resurrected in APM and
@@ -204,11 +205,15 @@ def read_latest_conversations(self) -> dict:
         ).fetchall()
 
     conversations = {
-        str(row["process_id"]): self._public_session_messages(str(row["session_id"]))
+        str(row["process_id"]): (
+            agent_conversations[str(row["process_id"])]
+            if agent_conversations is not None and str(row["process_id"]) in agent_conversations
+            else self._public_session_messages(str(row["session_id"]))
+        )
         for row in rows
     }
     session_id = str(root["session_id"])
-    main_conversation = self._public_session_messages(session_id)
+    main_conversation = list(conversations.get(root_id, []))
     # B questions remain authoritative in the B session ledger.  A gets a
     # compact read projection so it can supervise without duplicating the
     # full option payload or becoming a manual message relay.
@@ -358,7 +363,7 @@ def read_project_b_processes(self) -> dict[str, dict]:
         durable_state = None
         if not runtime.get("estimated_tokens") or not runtime.get("context"):
             try:
-                durable_state = self.load_agent_process_state(process_id)
+                durable_state = {"session": self.load_agent_session_state(process_id)}
             except StorageReferenceMissing as exc:
                 storage_error = storage_error or exc
         durable_session = dict((durable_state or {}).get("session") or {})
@@ -389,11 +394,15 @@ def read_project_b_processes(self) -> dict[str, dict]:
         context_snapshot = dict(runtime.get("context_snapshot") or {})
         from backend.core.loop.coordination import coordination_summary_from_context
         display_name = ""
+        identity_ledger = []
         if row["metadata_ref"]:
             try:
                 loaded_metadata = self._read_json_blob(str(row["metadata_ref"]))
                 if isinstance(loaded_metadata, dict):
                     display_name = str(loaded_metadata.get("display_name") or "")
+                    if not runtime.get("model_id") or runtime.get("model_id") == "unknown":
+                        ref = loaded_metadata.get("host_ledger_ref")
+                        identity_ledger = self._read_json_blob(str(ref)) if ref else loaded_metadata.get("host_ledger", [])
             except StorageReferenceMissing as exc:
                 storage_error = storage_error or exc
         processes[process_id] = {
@@ -425,7 +434,7 @@ def read_project_b_processes(self) -> dict[str, dict]:
                 ),
             },
             "provider_id": str(runtime.get("provider_id") or ""),
-            "model_id": str(runtime.get("model_id") or ""),
+            "model_id": recorded_model_id(runtime.get("model_id"), identity_ledger),
             "estimated_tokens": estimated_tokens,
             "active_task_id": str(row["task_id"] or ""),
             "task_kind": str(runtime.get("task_kind") or ""),
@@ -478,12 +487,30 @@ def read_latest_root_process(self) -> dict | None:
     controller: a pending decision, recovery state, context meter, and A
     status must survive a cold Dashboard/Daemon restart.
     """
-    state = self.load_latest_root_process_state()
-    if not state:
+    self._ensure_open()
+    # Displaying a control snapshot must not invoke recovery, which hydrates
+    # every provider continuation, historical message and receipt.
+    with self._state_lock:
+        selected = self._state.execute(
+            """SELECT sp.*, s.metadata_ref, t.contract_ref FROM session_processes sp
+               LEFT JOIN sessions s ON s.session_id=sp.session_id
+               LEFT JOIN tasks t ON t.task_id=sp.task_id
+               WHERE sp.parent_process_id IS NULL
+               ORDER BY sp.updated_at DESC, sp.created_at DESC LIMIT 1"""
+        ).fetchone()
+    if selected is None:
         return None
-    row = dict(state.get("process") or {})
-    runtime = dict(state.get("runtime_state") or {})
-    durable_session = dict(state.get("session") or {})
+    row = dict(selected)
+    runtime = dict(self._read_json_blob(str(row["runtime_state_ref"])) or {}) if row.get("runtime_state_ref") else {}
+    metadata = dict(self._read_json_blob(str(row["metadata_ref"])) or {}) if row.get("metadata_ref") else {}
+    contract = dict(self._read_json_blob(str(row["contract_ref"])) or {}) if row.get("contract_ref") else {}
+    durable_session = metadata
+    if not runtime.get("context") or not runtime.get("estimated_tokens"):
+        durable_session = dict(self.load_agent_session_state(str(row["process_id"])) or metadata)
+    identity_ledger = []
+    if not runtime.get("model_id") or runtime.get("model_id") == "unknown":
+        ref = metadata.get("host_ledger_ref")
+        identity_ledger = self._read_json_blob(str(ref)) if ref else metadata.get("host_ledger", [])
     estimated_tokens = int(runtime.get("estimated_tokens", 0) or 0)
     if estimated_tokens <= 0 and durable_session:
         estimated_tokens = _estimate_durable_session_tokens(durable_session)
@@ -500,7 +527,6 @@ def read_latest_root_process(self) -> dict | None:
     cache_summary = dict(runtime.get("cache_summary") or {})
     if not cache_summary and durable_session:
         cache_summary = _durable_cache_summary(durable_session)
-    contract = dict((state.get("task") or {}).get("contract") or {})
     process_id = str(row.get("process_id") or "")
     if not process_id:
         return None
@@ -538,7 +564,7 @@ def read_latest_root_process(self) -> dict | None:
             ),
         },
         "provider_id": str(runtime.get("provider_id") or ""),
-        "model_id": str(runtime.get("model_id") or ""),
+        "model_id": recorded_model_id(runtime.get("model_id"), identity_ledger),
         "estimated_tokens": estimated_tokens,
         "active_task_id": str(row.get("task_id") or ""),
         "task_kind": str(

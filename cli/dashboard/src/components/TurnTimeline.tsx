@@ -15,6 +15,7 @@ type Props = {
   verbose: boolean;
   width: number;
   active?: boolean;
+  preview?: boolean;
   elapsedMs?: number;
   providerUsage?: ProviderUsageSummary;
   renderDetail?: (ref: string, key: React.Key) => ReactNode;
@@ -50,7 +51,7 @@ function aggregateTool(first: ToolCallCard, rest: ToolCallCard[]): ToolCallCard 
 /** Shared ordered renderer for main/subprocess live and completed trace capsules. */
 export function TurnTimeline({
   activity, tools, notices, verbose, width, active = false, elapsedMs = 0,
-  providerUsage, renderDetail,
+  providerUsage, renderDetail, preview = false,
 }: Props) {
   const firstReasoningIndex = activity.findIndex(item => item.kind === "reasoning");
   const usage = providerUsage
@@ -76,17 +77,20 @@ export function TurnTimeline({
       let row: ReactNode = null;
       if (item.kind === "reasoning") {
         if (verbose || index === firstReasoningIndex) {
+          const thinkingActive = active && (!verbose || index === activity.length - 1);
           row = <Box flexDirection="column">
-            {index === firstReasoningIndex ? <Box flexDirection="row">
-              {active ? <Spinner frames={colors.spinner.thinkingFrames}
+            {verbose || index === firstReasoningIndex ? <Box flexDirection="row">
+              {thinkingActive ? <Spinner frames={colors.spinner.thinkingFrames}
                 intervalMs={colors.spinner.thinkingIntervalMs} color={colors.warning}/> : null}
-              <Text dimColor>{active ? " Thinking… " + formatDuration(elapsedMs) : "Thinking"}{usage}</Text>
+              <Text dimColor>{thinkingActive ? " Thinking… " + formatDuration(elapsedMs) : "Thinking"}{index === firstReasoningIndex ? usage : ""}</Text>
             </Box> : null}
             {verbose ? <Box paddingLeft={2}>
               <MarkdownText content={item.text} width={Math.max(10, width - 4)} dimColor/>
             </Box> : null}
           </Box>;
         }
+      } else if (item.kind === "draft") {
+        if (verbose) row = <Box flexDirection="column"><Text dimColor>Response draft</Text><Box paddingLeft={2}><MarkdownText content={item.text} width={Math.max(10,width-4)} dimColor/></Box></Box>;
       } else if (item.kind === "progress") {
         if (item.visibility === "public" || verbose) {
           row = <Box flexDirection="row">
@@ -111,7 +115,11 @@ export function TurnTimeline({
             count={siblings.length + 1} suppressDetails expanded={false}
             width={Math.max(20, width - 2)}/>;
         } else {
-          row = tool ? <ToolCallDisplay tool={tool} expanded={verbose} width={Math.max(20, width - 2)}/> : null;
+          const display = tool ? <ToolCallDisplay tool={tool} expanded={verbose} compactPreview={active || preview} width={Math.max(20, width - 2)}/> : null;
+          row = tool?.composite_tool ? <Box flexDirection="column" marginLeft={1} paddingLeft={1}
+            borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor={colors.chat.turnGuide}>
+            <Text dimColor>{tool.composite_tool} / {tool.step_id || "step"}</Text>{display}
+          </Box> : display;
         }
       } else {
         const notice = notices[item.noticeIndex];

@@ -128,6 +128,10 @@ if (-not (Get-ChildItem -LiteralPath $terminalReferences -Filter "git-for-window
     throw "Official terminal provenance references are missing; stage references before packaging"
 }
 $versionFile = Join-Path $root "build\terminal-host\version-info.txt"
+$promptResources = Join-Path $root "backend\resources\prompts"
+if (-not (Test-Path -LiteralPath (Join-Path $promptResources "identity\answer.txt"))) {
+    throw "Bundled Harness prompts are missing; restore resources before packaging"
+}
 & $Python -B (Join-Path $root "scripts\write_windows_version.py") --output $versionFile
 if ($LASTEXITCODE -ne 0) { throw "Windows Host version metadata generation failed" }
 $pyInstallerArguments = @(
@@ -138,6 +142,7 @@ $pyInstallerArguments = @(
     "--specpath", (Join-Path $root "build\terminal-host"),
     "--version-file", $versionFile,
     "--add-data", "$terminalReferences;backend/resources/terminal_provenance",
+    "--add-data", "$promptResources;backend/resources/prompts",
     (Join-Path $root "backend\core\native_host_entry.py")
 )
 if ($useExternalPyInstaller) {

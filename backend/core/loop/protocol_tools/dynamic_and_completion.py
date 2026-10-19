@@ -1,5 +1,7 @@
 """dynamic and completion protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
 from backend.core.loop.agent_tool import AgentTool, ApprovalMode, CancellationMode, ToolEffect
 from backend.core.loop.completion_protocol import COMPLETE_TASK_PARAMETERS, CompletionClaim
 
@@ -96,8 +98,7 @@ def install(ctx):
         tools["define_tool"] = AgentTool(
             name="define_tool",
             description=(
-                "Define one task-scoped composite tool from tools already authorized in "
-                "this capability. It cannot add authority or execute arbitrary Python."
+                load_prompt('tools/define_tool')
             ),
             parameters={
                 "type": "object",
@@ -365,15 +366,7 @@ def install(ctx):
         tools["author_tool"] = AgentTool(
             name="author_tool",
             description=(
-                "Manage project-saved Python shortcuts. Pure mode is statically confined. "
-                "Host mode keeps pure code but supports call_tool(name, arguments) for declared host_tools; "
-                "every leaf uses the canonical Host pipeline and exact permission, and resumes without replaying effects. "
-                "Registration tests supply mock host_results (tool_name,arguments_digest,result); no live effects run. "
-                "Privileged mode may use imports, files, processes or network, but binds the "
-                "source digest and registration contract to explicit user approval, and every "
-                "later invocation requires a new exact approval. register/replace creates an "
-                "immutable tested version; use mounts it for this task; detach keeps the asset; "
-                "delete archives it; restore reactivates it."
+                load_prompt('tools/author_tool')
             ),
             parameters={"type": "object", "properties": {
                 "operation": {"type": "string", "enum": [
@@ -416,7 +409,7 @@ def install(ctx):
 
         tools["complete_review"] = AgentTool(
             name="complete_review",
-            description="Submit the independent review verdict and evidence to the host gate.",
+            description=load_prompt('tools/complete_review'),
             parameters={
                 "type": "object",
                 "properties": {
@@ -445,8 +438,7 @@ def install(ctx):
     tools["complete_task"] = AgentTool(
         name="complete_task",
         description=(
-            "Submit the action result and verification evidence for deterministic "
-            "host evaluation. This does not self-approve completion."
+            load_prompt('tools/complete_task')
         ),
         parameters=COMPLETE_TASK_PARAMETERS,
         execute=complete_task,

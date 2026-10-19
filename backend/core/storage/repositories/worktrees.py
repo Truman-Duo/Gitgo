@@ -15,6 +15,7 @@ def save_worktree_state(self: WorktreesPort, record: dict) -> None:
         for key in (
             "upstream_commits", "changed_files", "runtime_offsets", "error", "created_at",
             "updated_at", "isolated", "promoted", "promoted_at",
+            "resumed_from_process_id", "continuation_commit", "input_dependencies",
         )
     }
     descriptor = self._write_blob_file(

@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from tests.knowledge_fixtures import qualified_response, review_fixture
+import json
 
 
 # ── Fixtures ──────────────────────────────────────────────────
@@ -198,22 +200,23 @@ class TestHarvestLLMFallback:
 
         class Provider:
             def chat(self, *_args, **_kwargs):
-                return ('[{"trigger":"auth.py","rule":'
+                return qualified_response(_args[0], json.loads('[{"trigger":"auth.py","rule":'
                         '"When auth changes, rerun the authentication checks and verify success",'
-                        '"severity":"high","category":"process"}]')
+                        '"severity":"high","category":"process"}]'))
 
         lessons = harvest_llm_summary([
             {"signal_id": "hs-1", "signal_type": "contract_drift",
              "trigger": "auth.py", "detail": {"file": "auth.py"}},
         ], Provider(), str(tmp_workspace), "testproject", raise_on_error=True)
         assert len(lessons) == 1
+        review_fixture(lessons[0])
         assert assess_lesson(lessons[0], tmp_workspace)["state"] == "current"
         source.write_text("version two", encoding="utf-8")
         stale = assess_lesson(lessons[0], tmp_workspace)
         assert stale == {"state": "needs_recheck", "reason": "source_file_changed",
                          "path": "auth.py"}
 
-    def test_governance_context_exposes_pending_lesson_with_applicability(
+    def test_governance_context_preserves_but_does_not_expose_unreviewed_pending(
         self, tmp_workspace,
     ):
         from backend.core.knowledge.manager import LessonManager
@@ -230,9 +233,8 @@ class TestHarvestLLMFallback:
             "testproject", tmp_workspace, current_policy_results={},
             source_snapshot={"entries": []},
         )
-        assert context["lessons"][0]["id"] == "pending-1"
-        assert context["lessons"][0]["scope"] == "pending"
-        assert context["lessons"][0]["applicability"]["state"] == "current"
+        assert not context.get("lessons")
+        assert len(LessonManager.load_pending(tmp_workspace, "testproject")) == 1
 
 
 # ── recall_grep 检索 ─────────────────────────────────────────
@@ -299,6 +301,7 @@ class TestRecallGrep:
             project_name="testproject", source="auto_harvested",
             evidence={"schema_version": 1, "workspace_files": {"auth.py": "old-digest"}},
         ))
+        LessonManager.verify(tmp_workspace, "stale", "testproject", user_confirmation=True)
         result = recall_grep(
             "auth", "testproject", workspace=str(tmp_workspace),
         )
@@ -429,7 +432,7 @@ class TestLessonManagerDedup:
 
 
 class TestAutoDiscardInvalid:
-    def test_nonexistent_file_discarded(self, tmp_workspace):
+    def test_missing_file_keeps_history_for_revalidation(self, tmp_workspace):
         from backend.core.knowledge.manager import LessonManager
         from backend.core.knowledge.models import Lesson
         from backend.core.knowledge.harvest import auto_discard_invalid
@@ -442,9 +445,13 @@ class TestAutoDiscardInvalid:
             project_name="testproject",
         ))
         n = auto_discard_invalid(tmp_workspace, "testproject")
-        assert n >= 1
+        assert n == 0
+        from backend.core.knowledge.applicability import assess_lesson
+        pending = LessonManager.load_pending(tmp_workspace, "testproject")
+        assert len(pending) == 1
+        assert assess_lesson(pending[0], tmp_workspace)["state"] == "needs_recheck"
 
-    def test_short_rule_discarded(self, tmp_workspace):
+    def test_short_rule_retained_for_explicit_review(self, tmp_workspace):
         from backend.core.knowledge.manager import LessonManager
         from backend.core.knowledge.models import Lesson
         from backend.core.knowledge.harvest import auto_discard_invalid
@@ -456,7 +463,8 @@ class TestAutoDiscardInvalid:
             project_name="testproject",
         ))
         n = auto_discard_invalid(tmp_workspace, "testproject")
-        assert n >= 1
+        assert n == 0
+        assert LessonManager.pending_count(tmp_workspace, "testproject") == 1
 
 
 # ── EmbeddingProvider ────────────────────────────────────────
@@ -497,7 +505,7 @@ class MockLLMProvider:
         if self.should_fail:
             raise RuntimeError("LLM API connection failed")
         import json
-        return json.dumps(self.response_data, ensure_ascii=False)
+        return qualified_response(messages, self.response_data)
 
 
 # ── Chain 1: Signal Capture → Harvest Trigger → LLM Summary → Save ──
@@ -740,7 +748,7 @@ class TestChainSignalToLesson:
 
         resolved = harvest.resolve_harvest_proposal(
             "testproject", proposal["proposal_id"],
-            accepted=True, lesson_ids=["lesson-1"],
+            accepted=True, expected_version=proposal["proposal_version"],
         )
         assert resolved["status"] == "accepted"
         assert harvest.get_harvest_proposal("testproject", proposal["proposal_id"]) is None
@@ -928,17 +936,17 @@ class TestChainPendingDigest:
 
         # L1 Digest：auto discard
         discarded = auto_discard_invalid(tmp_workspace, "testproject")
-        assert discarded == 2  # bad_short + bad_file 被清理
+        assert discarded == 0  # Legacy records are preserved for explicit review.
 
         # 消化后：2 条好的保留
         remaining = LessonManager.pending_count(tmp_workspace, "testproject")
-        assert remaining == 2
+        assert remaining == 4
         pending = LessonManager.load_pending(tmp_workspace, "testproject")
         retained_ids = {p.id for p in pending}
         assert "good_1" in retained_ids
         assert "good_2" in retained_ids
-        assert "bad_short" not in retained_ids
-        assert "bad_file" not in retained_ids
+        assert "bad_short" in retained_ids
+        assert "bad_file" in retained_ids  # Source changes require revalidation.
 
 
 # ── Chain 5: Full End-to-End (no daemon, no real LLM) ──
@@ -1008,6 +1016,8 @@ class TestChainEndToEnd:
 
         pending = LessonManager.load_pending(tmp_workspace, "testproject")
         assert len(pending) >= 2
+        for item in pending:
+            LessonManager.verify(tmp_workspace, item.id, "testproject", user_confirmation=True)
 
         # ── 检索阶段 ──
         r1 = recall_grep("core auth", "testproject",

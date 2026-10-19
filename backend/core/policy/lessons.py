@@ -65,6 +65,9 @@ class LessonTriggerCheck(PolicyCheck):
                 lessons += LessonManager.load_pending(Path(ws), session.project.name)
 
         for lesson in lessons:
+            from backend.core.knowledge.review import can_consume
+            if not can_consume(lesson):
+                continue
             from backend.core.knowledge.applicability import assess_lesson
             applicability = assess_lesson(lesson, ws)
             if applicability.get("state") != "current":
@@ -77,6 +80,9 @@ class LessonTriggerCheck(PolicyCheck):
             matched_trigger = any(
                 trigger.lower() in f.lower() for f in changed_files
             ) or trigger.lower() in changed_content.lower()
+            check = getattr(lesson, "check", None)
+            if isinstance(check,dict) and check.get("paths"):
+                matched_trigger=any(f.replace("\\","/") in check["paths"] for f in changed_files)
             match_mode = "lexical_candidate"
             check = getattr(lesson, 'check', None)
 
@@ -91,13 +97,14 @@ class LessonTriggerCheck(PolicyCheck):
             # lexical match to enforcement authority.
             if (
                 matched_trigger
+                and __import__("backend.core.knowledge.prewrite",fromlist=["_is_registered"])._is_registered(lesson,ws)
                 and isinstance(check, dict)
                 and check.get("pattern")
                 and check.get("mode") == "violation_pattern"
                 and check.get("authority") == "registered"
             ):
                 try:
-                    if re.search(check["pattern"], changed_content):
+                    if (str(check["literal"]) in changed_content if "literal" in check else re.search(check["pattern"], changed_content)):
                         match_mode = "registered_pattern"
                 except re.error:
                     # An invalid registered checker has no enforcement

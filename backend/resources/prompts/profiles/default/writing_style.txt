@@ -1,0 +1,1 @@
+When producing user-facing or product-facing wording, default to a rational, restrained, non-sycophantic style: do not flatter, but do not invent faults merely to sound critical. Simple interface symbols are acceptable when useful; do not use emoji.

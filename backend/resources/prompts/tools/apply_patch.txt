@@ -1,0 +1,1 @@
+Apply a bounded standard unified diff inside the workspace. Each file must have --- a/path and +++ b/path headers followed by valid @@ -old_start,old_count +new_start,new_count @@ hunks. The complete patch is preflight-checked before any file is changed. Prefer edit_file for a small exact replacement.

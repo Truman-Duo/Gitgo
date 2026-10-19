@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "slots": {
+    "policy/behavior": {
+      "_instance_writing_style": "writing_style",
+      "_instance_quality_strategy": "quality_strategy",
+      "_instance_answer_delivery": "answer_delivery"
+    },
+    "policy/user_collaboration": {
+      "_instance_collaboration_strategy": "collaboration_strategy"
+    },
+    "policy/delegation_economy": {
+      "_instance_delegation_strategy": "delegation_strategy"
+    },
+    "identity/answer": {
+      "_instance_answer_presentation": "answer_presentation"
+    },
+    "knowledge/harvest": {
+      "_instance_harvest_strategy": "harvest_strategy"
+    },
+    "knowledge/rag": {
+      "_instance_rag_strategy": "rag_strategy"
+    },
+    "context/compact": {
+      "_instance_compact_presentation": "compact_presentation"
+    },
+    "runtime/btw": {
+      "_instance_btw_strategy": "btw_strategy"
+    },
+    "identity/reviewer": {
+      "_instance_review_strategy": "review_strategy"
+    }
+  },
+  "profiles": {
+    "default": {
+      "label": "Baseline",
+      "description": "Original instance wording with the current shared core; full historical comparisons also require the matching core version"
+    },
+    "workbench": {
+      "label": "Workbench",
+      "description": "Reviewed wording with concrete decision guidance and selective boundary examples; behavioral gains await evaluation"
+    }
+  }
+}

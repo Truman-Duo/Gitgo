@@ -1,14 +1,15 @@
 """Generation preferences by workload, independent of task semantics.
 
 Responses defines an optional reasoning effort parameter. Try its conservative
-low setting for isolated alignment work; an explicit parameter rejection may
+low setting for isolated alignment and knowledge summaries; an explicit parameter rejection may
 negotiate back to the provider default once. Never infer support from model names.
 """
 import json
 
 
 def reasoning_effort(protocol, purpose, unsupported=False):
-    return 'low' if str(getattr(protocol, 'value', protocol)) == 'openai_responses' and purpose == 'alignment' and not unsupported else None
+    return 'low' if (str(getattr(protocol, 'value', protocol)) == 'openai_responses'
+                     and purpose in {'alignment', 'knowledge_harvest'} and not unsupported) else None
 
 
 def rejects_reasoning_preference(error):

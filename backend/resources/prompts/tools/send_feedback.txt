@@ -1,0 +1,1 @@
+Send corrective or additional instructions to a B Agent mailbox. Delivery is applied at the next safe turn boundary.

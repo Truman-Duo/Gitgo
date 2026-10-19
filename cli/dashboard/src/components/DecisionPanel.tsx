@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { PendingDecision } from "../types.js";
+import { AnimatedReveal } from "./AnimatedReveal.js";
 import { colors } from "../theme/index.js";
 
 type Props = {
@@ -10,10 +11,26 @@ type Props = {
   submitting: boolean;
   active?: boolean;
   answer?: string | null;
+  expanded?: boolean;
+  onExpandedChange?: (value: boolean) => void;
 };
 
-export function DecisionPanel({ decision, selectedIndex, composing, submitting, active = true, answer }: Props) {
-  const [expanded, setExpanded] = useState(false);
+export function DecisionPanel({
+  decision,
+  selectedIndex,
+  composing,
+  submitting,
+  active = true,
+  answer,
+  expanded: controlledExpanded,
+  onExpandedChange,
+}: Props) {
+  const [localExpanded, setLocalExpanded] = useState(false);
+  const expanded = controlledExpanded ?? localExpanded;
+  const toggle = () => {
+    if (controlledExpanded === undefined) setLocalExpanded(!expanded);
+    onExpandedChange?.(!expanded);
+  };
   const showOptions = active || expanded;
   const permission = decision.kind === "permission";
   return (
@@ -26,69 +43,121 @@ export function DecisionPanel({ decision, selectedIndex, composing, submitting, 
       marginTop={1}
       marginBottom={1}
     >
-      <Box onClick={() => setExpanded(value => !value)}>
-        <Text bold>{active
-          ? decision.kind === "permission" ? "Permission required" : `${decision.kind || "decision"} required`
-          : answer ? "Decision answered" : "Decision"}{!active ? expanded ? " ▾" : " ▸" : ""}</Text>
+      <Box onClick={toggle}>
+        <Text bold>
+          {active
+            ? decision.kind === "permission"
+              ? "Permission required"
+              : `${decision.kind || "decision"} required`
+            : answer
+              ? "Decision answered"
+              : "Decision"}
+          {!active ? (expanded ? " ▾" : " ▸") : ""}
+        </Text>
       </Box>
-      {active || expanded ? <>
-      <Text bold>{decision.round_position ? `${decision.round_position} · ` : ""}{decision.question}</Text>
-      {decision.questions && decision.questions.length > 1 && !decision.round_position ? decision.questions.map(q => <Text key={q.node_id}>{q.question}</Text>) : null}
-      {answer ? <Text>{formatAnswer(answer)}</Text> : null}
-      </> : null}
-      {showOptions ? <>
-      <Text dimColor>{permission ? "Why approval is needed" : "Why only you can decide"}: {decision.why_user_must_decide}</Text>
-      {decision.permission_request ? <Box flexDirection="column">
-        <Text>Purpose: {decision.permission_request.purpose}</Text>
-        <Text>Target: {decision.permission_request.resource}</Text>
-        {expanded ? <>
-          <Text dimColor>Effect: {decision.permission_request.effect}</Text>
-          {decision.permission_request.arguments_preview
-            ? <Text dimColor>Invocation: {decision.permission_request.arguments_preview}</Text>
-            : null}
-          <Text dimColor>Technical details: {decision.permission_request.api_details}</Text>
-        </> : null}
-      </Box> : null}
-      <Box flexDirection="column" marginTop={1}>
-        {decision.options.map((option, index) => {
-          const selected = active && index === selectedIndex;
-          const bg = selected ? colors.selection.block.bg : undefined;
-          const fg = selected ? colors.selection.block.fg : undefined;
-          return (
-          <Box key={`${decision.decision_id}:${option.label}`} flexDirection="column" marginBottom={1}>
-            <Text color={fg} backgroundColor={bg} bold={selected}>
-              {selected ? "› " : "  "}{index + 1}. {option.label}{option.recommended ? " · recommended" : ""}
-            </Text>
-            {permission ? <>
-              <Text>   Effect: {option.immediate_effect}</Text>
-              <Text dimColor>   Then: {option.downstream_effect}</Text>
-              {expanded ? <>
-                <Text dimColor>   Principle: {option.principle}</Text>
-                <Text>   Risk: {option.risks}</Text>
-                <Text dimColor>   Reversibility: {option.reversibility}</Text>
-              </> : null}
-            </> : decision.kind === "clarification" ? <Text dimColor>   {option.description || option.immediate_effect}</Text> : <>
-              <Text dimColor>   Principle: {option.principle}</Text>
-              <Text>   Immediate: {option.immediate_effect}</Text>
-              <Text>   Downstream: {option.downstream_effect}</Text>
-              <Text>   Risk: {option.risks}</Text>
-              <Text dimColor>   Reversibility: {option.reversibility}</Text>
-            </>}
+      <AnimatedReveal expanded={showOptions}>
+        <Text bold>
+          {decision.round_position ? `${decision.round_position} · ` : ""}
+          {decision.question}
+        </Text>
+        {decision.questions &&
+        decision.questions.length > 1 &&
+        !decision.round_position
+          ? decision.questions.map((q) => (
+              <Text key={q.node_id}>{q.question}</Text>
+            ))
+          : null}
+        {answer ? <Text>{formatAnswer(answer)}</Text> : null}
+
+        <Text dimColor>
+          {permission ? "Why approval is needed" : "Why only you can decide"}:{" "}
+          {decision.why_user_must_decide}
+        </Text>
+        {decision.permission_request ? (
+          <Box flexDirection="column">
+            <Text>Purpose: {decision.permission_request.purpose}</Text>
+            <Text>Target: {decision.permission_request.resource}</Text>
+            {expanded ? (
+              <>
+                <Text dimColor>
+                  Effect: {decision.permission_request.effect}
+                </Text>
+                {decision.permission_request.arguments_preview ? (
+                  <Text dimColor>
+                    Invocation: {decision.permission_request.arguments_preview}
+                  </Text>
+                ) : null}
+                <Text dimColor>
+                  Technical details: {decision.permission_request.api_details}
+                </Text>
+              </>
+            ) : null}
           </Box>
-          );
-        })}
-      </Box>
-      </> : null}
-      {active ? <Text dimColor>
-        {decision.round_position && !decision.round_position.startsWith("1/") ? "← previous question · " : ""}
-        {submitting
-          ? "Submitting the selected decision…"
-          : composing
-          ? "Editing decision reply in the NORMAL bar · Enter send · Esc return to choices"
-          : decision.options.length > 0
-          ? `↑↓ or 1-${decision.options.length} select · Enter confirm${decision.allow_free_form ? " · A amend · D discuss" : ""}`
-          : "Type your reply in the NORMAL bar and press Enter"}
-      </Text> : null}
+        ) : null}
+        <Box flexDirection="column" marginTop={1}>
+          {decision.options.map((option, index) => {
+            const selected = active && index === selectedIndex;
+            const bg = selected ? colors.selection.block.bg : undefined;
+            const fg = selected ? colors.selection.block.fg : undefined;
+            return (
+              <Box
+                key={`${decision.decision_id}:${option.label}`}
+                flexDirection="column"
+                marginBottom={1}
+              >
+                <Text color={fg} backgroundColor={bg} bold={selected}>
+                  {selected ? "› " : "  "}
+                  {index + 1}. {option.label}
+                  {option.recommended ? " · recommended" : ""}
+                </Text>
+                {permission ? (
+                  <>
+                    <Text> Effect: {option.immediate_effect}</Text>
+                    <Text dimColor> Then: {option.downstream_effect}</Text>
+                    {expanded ? (
+                      <>
+                        <Text dimColor> Principle: {option.principle}</Text>
+                        <Text> Risk: {option.risks}</Text>
+                        <Text dimColor>
+                          {" "}
+                          Reversibility: {option.reversibility}
+                        </Text>
+                      </>
+                    ) : null}
+                  </>
+                ) : decision.kind === "clarification" ? (
+                  <Text dimColor>
+                    {" "}
+                    {option.description || option.immediate_effect}
+                  </Text>
+                ) : (
+                  <>
+                    <Text dimColor> Principle: {option.principle}</Text>
+                    <Text> Immediate: {option.immediate_effect}</Text>
+                    <Text> Downstream: {option.downstream_effect}</Text>
+                    <Text> Risk: {option.risks}</Text>
+                    <Text dimColor> Reversibility: {option.reversibility}</Text>
+                  </>
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+      </AnimatedReveal>
+      {active ? (
+        <Text dimColor>
+          {decision.round_position && !decision.round_position.startsWith("1/")
+            ? "← previous question · "
+            : ""}
+          {submitting
+            ? "Submitting the selected decision…"
+            : composing
+              ? "Editing decision reply in the NORMAL bar · Enter send · Esc return to choices"
+              : decision.options.length > 0
+                ? `↑↓ or 1-${decision.options.length} select · Enter confirm${decision.allow_free_form ? " · A amend · D discuss" : ""}`
+                : "Type your reply in the NORMAL bar and press Enter"}
+        </Text>
+      ) : null}
     </Box>
   );
 }
@@ -97,6 +166,8 @@ function formatAnswer(answer: string) {
   try {
     const value = JSON.parse(answer);
     if (value.answers) return Object.values(value.answers).join("\n");
-  } catch { /* ordinary text */ }
+  } catch {
+    /* ordinary text */
+  }
   return answer;
 }

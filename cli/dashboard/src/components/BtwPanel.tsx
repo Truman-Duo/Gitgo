@@ -3,7 +3,7 @@ import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../input/runtime.js";
 import type { BackendClient } from "../backend/client.js";
 import {
-  btwAsk, cancelBtw, saveBtwNote, sendRuntimeFeedback, stopProcess,
+  btwAsk, cancelBtw, saveBtwNote, sendRuntimeFeedback, stopProcess, type LessonProposalRef,
 } from "../backend/tools.js";
 import { initStreamState, reduceStreamEvent, type StreamState } from "../daemon/streamReducer.js";
 import type { StreamEvent } from "../daemon/streamEvents.js";
@@ -18,6 +18,7 @@ type Props = {
   question: string; answer: string; reasoning?: string; sidecarId: string;
   processes: Record<string, ProcessInfo>;
   verbose?: boolean;
+  lessonProposal?: LessonProposalRef;
   onDismiss: () => void; onApply: (text: string) => void;
 };
 
@@ -42,7 +43,8 @@ export function buildBtwSources(
 
 export function BtwPanel(props: Props) {
   const [selection, setSelection] = useState(0);
-  const [focus, setFocus] = useState<"sources" | "input" | "choices">("sources");
+  const [focus, setFocus] = useState<"sources" | "input" | "choices">(props.lessonProposal ? "input" : "sources");
+  const choices = props.lessonProposal ? ["Return to review"] : CHOICES;
   const draft = useTextInput("");
   const [answer, setAnswer] = useState(props.answer);
   const [reasoning, setReasoning] = useState(props.reasoning || "");
@@ -61,7 +63,7 @@ export function BtwPanel(props: Props) {
   const [selectedSources, setSelectedSources] = useState<string[]>(() =>
     props.processId ? [props.processId] : [],
   );
-  const [scopeConfirmed, setScopeConfirmed] = useState(false);
+  const [scopeConfirmed, setScopeConfirmed] = useState(!!props.lessonProposal);
 
   useEffect(() => { historyRef.current = history; }, [history]);
 
@@ -77,7 +79,14 @@ export function BtwPanel(props: Props) {
     void btwAsk(
       props.client, props.project, clean, sidecarId, prior, selectedSources,
       (raw) => setStream((current) => reduceStreamEvent(current, raw as StreamEvent)),
+      props.lessonProposal,
     ).then((value: any) => {
+      if (value?.pending_decision && value?.decision_process_id) {
+        // The canonical process/question queue renders the existing card.
+        // Closing this side discussion neither answers nor grants permission.
+        props.onDismiss();
+        return;
+      }
       const next = String(value?.answer || "");
       setAnswer(next);
       setReasoning(String(value?.reasoning_content || ""));
@@ -90,7 +99,7 @@ export function BtwPanel(props: Props) {
     }).catch((caught: any) => {
       setError(caught instanceof Error ? caught.message : String(caught));
     }).finally(() => setBusy(false));
-  }, [busy, props.client, props.project, selectedSources, sidecarId]);
+  }, [busy, props.client, props.project, props.lessonProposal, selectedSources, sidecarId]);
 
   useEffect(() => {
     if (initialStarted.current || !scopeConfirmed) return;
@@ -103,7 +112,9 @@ export function BtwPanel(props: Props) {
     const applyText = `BTW discussion:\nQuestion: ${props.question}\nConclusion: ${visibleAnswer}`;
     setBusy(true);
     void (async () => {
-      if (selection === 1) {
+      if (props.lessonProposal) {
+        props.onDismiss(); return;
+      } else if (selection === 1) {
         await saveBtwNote(props.client, props.project, sidecarId, applyText);
       } else if (selection === 2 && props.processId) {
         await sendRuntimeFeedback(props.client, props.project, props.processId, applyText);
@@ -127,7 +138,8 @@ export function BtwPanel(props: Props) {
       return;
     }
     if (key.tab) {
-      setFocus((value) => value === "sources" ? "input" : value === "input" ? "choices" : "sources");
+      setFocus((value) => props.lessonProposal ? (value === "input" ? "choices" : "input")
+        : value === "sources" ? "input" : value === "input" ? "choices" : "sources");
       return;
     }
     if (focus === "sources") {
@@ -149,9 +161,9 @@ export function BtwPanel(props: Props) {
     }
     if (focus === "choices") {
       if (key.leftArrow) {
-        setSelection((value) => (value + CHOICES.length - 1) % CHOICES.length);
+        setSelection((value) => (value + choices.length - 1) % choices.length);
       } else if (key.rightArrow) {
-        setSelection((value) => (value + 1) % CHOICES.length);
+        setSelection((value) => (value + 1) % choices.length);
       } else if (key.upArrow) {
         setFocus("input");
       } else if (key.return && !busy) {
@@ -233,7 +245,7 @@ export function BtwPanel(props: Props) {
         />
       </Box>
       <Box marginTop={1} flexDirection="row" gap={1}>
-        {CHOICES.map((choice, index) => {
+        {choices.map((choice, index) => {
           const active = focus === "choices" && index === selection;
           return (
             <Text key={choice} bold={active}

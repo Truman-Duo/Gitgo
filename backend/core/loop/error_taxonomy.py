@@ -181,7 +181,7 @@ def classify_tool_error(exception: Exception,
     Defaults to TOOL/CRASH — the caller (tool_pipeline) should override
     nature to BUSINESS when the tool completed but returned a business failure.
     """
-    if timeout:
+    if timeout or isinstance(exception, TimeoutError):
         return ClassifiedError(
             source=ErrorSource.TOOL,
             severity=ErrorSeverity.ERROR,

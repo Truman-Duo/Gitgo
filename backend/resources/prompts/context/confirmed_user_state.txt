@@ -1,0 +1,1 @@
+Host projection of the newest confirmed value per topic. Older values for the same topic are superseded; ask a verification question if new evidence makes one stale. Do not recite this internal state unless useful.

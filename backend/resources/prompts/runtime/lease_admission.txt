@@ -1,0 +1,1 @@
+The Host accepted a self-execute contract but has not issued its task-scoped lease. Call request_self_execute before attempting or describing the protected work.

@@ -6,6 +6,11 @@ model calls. Windows process handles distinguish process exit from PID reuse.
 """
 from __future__ import annotations
 
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
+
 import argparse
 import ctypes
 from ctypes import wintypes
@@ -21,7 +26,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-BASE = ROOT / ".gitgo" / "terminal-tests"
+BASE = development_root(ROOT) / "terminal-tests"
 RUN_NAME = re.compile(r"run-[0-9a-f]{32}\Z")
 
 

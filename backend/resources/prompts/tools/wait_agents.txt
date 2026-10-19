@@ -1,0 +1,1 @@
+Wait for selected B Agents with a bounded, cancellation-aware timeout. Returns early with interruption when a relevant coordination event needs your action; inspect and resolve it through the existing coordination tools before waiting again. An interruption does not mean the workers finished or that a revision was accepted.

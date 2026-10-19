@@ -1,13 +1,11 @@
 // src/components/RuntimeMenu.tsx — /runtime secondary menu (LLMConfig-style tab header)
-// Tab header: only the active tab gets a background; inactive tabs are transparent.
-// (The dim "detail" background appears only when a tab is expanded internally,
-//  which this menu does not yet have.)
-import React, { memo, useEffect, useState } from "react";
-import { Box, Text } from "@anthropic/ink";
-import { useManagedInput as useInput } from "../input/runtime.js";
+// Root tabs own navigation until Enter moves focus into the selected page.
+import React, { memo, useEffect, useRef, useState } from "react";
+import { Box, ScrollBox, Text, type ScrollBoxHandle } from "@anthropic/ink";
+import { useManagedInput as useInput, useScrollInput } from "../input/runtime.js";
 import { resolveRuntimeMenuKey } from "../input/overlays/runtimeMenu.js";
 import { colors, usePanelSize, separator } from "../theme/index.js";
-import { chordLabel } from "../input/bindings.js";
+import { chordLabel, matchChord } from "../input/bindings.js";
 import { HorizontalHeaderStrip, clampHeaderIndex } from "./HorizontalHeaderStrip.js";
 import type { BackendClient } from "../backend/client.js";
 import type { ProcessInfo } from "../hooks/useLoopData.js";
@@ -45,6 +43,11 @@ export const RuntimeMenu = memo(function RuntimeMenu({
   const { w } = usePanelSize({ minWidth: 40, widthOffset: 4 });
   const [selIdx, setSelIdx] = useState(0);
   const [contentFocused, setContentFocused] = useState(false);
+  const scrollRef = useRef<ScrollBoxHandle>(null);
+  const activeId = ITEMS[selIdx]?.id || "lesson";
+  const ownsScroll = ["lesson", "governance", "context", "tools", "memory"].includes(activeId);
+  useScrollInput(scrollRef, contentFocused && !ownsScroll);
+  useEffect(() => { scrollRef.current?.scrollTo(0); }, [activeId]);
   const [contract, setContract] = useState<any>(null);
   const [contractError, setContractError] = useState("");
 
@@ -70,8 +73,12 @@ export const RuntimeMenu = memo(function RuntimeMenu({
     }
   }, {isActive: !contentFocused});
 
+  useInput((input, key) => {
+    if (matchChord("escape", input, key)) { setContentFocused(false); return; }
+    return false;
+  }, {isActive: contentFocused && ITEMS[selIdx]?.id === "contract"});
+
   const leaveContent = () => setContentFocused(false);
-  const activeId = ITEMS[selIdx]?.id || "lesson";
   const content = activeId === "lesson"
     ? <LessonsPanel client={client} project={project} cols={_cols} onDismiss={leaveContent}
         interactive={contentFocused} cmdInput={cmdInput} onFooter={onFooter}/>
@@ -98,7 +105,8 @@ export const RuntimeMenu = memo(function RuntimeMenu({
         <Text color={colors.divider.color}>{separator(w)}</Text>
       </Box>
 
-      <Box flexDirection="column" flexGrow={1} paddingTop={1}>{content}</Box>
+      {ownsScroll ? <Box flexDirection="column" flexGrow={1} minHeight={0}>{content}</Box>
+        : <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>{content}</ScrollBox>}
     </Box>
   );
 });

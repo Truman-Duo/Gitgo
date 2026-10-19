@@ -1,11 +1,12 @@
 """Recovery repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
 from .ports import RecoveryPort
+from ..support import state_read_snapshot
 
 def load_agent_process_state(self: RecoveryPort, process_id: str) -> dict | None:
     """Return task/runtime state alongside the restored session snapshot."""
-    session_state = self.load_agent_session_state(process_id)
-    with self._state_lock:
+    with state_read_snapshot(self._state, self._state_lock):
+        session_state = self.load_agent_session_state(process_id)
         row = self._state.execute(
             """SELECT process_id, session_id, task_id, parent_process_id,
                       role, actor_kind, capability_profile_id, status,
@@ -87,10 +88,10 @@ def load_agent_process_state(self: RecoveryPort, process_id: str) -> dict | None
 def load_latest_root_process_state(self) -> dict | None:
     """Load the latest durable A process, including terminal sessions."""
     self._ensure_open()
-    with self._state_lock:
+    with state_read_snapshot(self._state, self._state_lock):
         row = self._state.execute(
             """SELECT process_id FROM session_processes
                WHERE parent_process_id IS NULL
                ORDER BY updated_at DESC, created_at DESC LIMIT 1"""
         ).fetchone()
-    return self.load_agent_process_state(str(row["process_id"])) if row else None
+        return self.load_agent_process_state(str(row["process_id"])) if row else None

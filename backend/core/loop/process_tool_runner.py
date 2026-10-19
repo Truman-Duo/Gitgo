@@ -74,7 +74,7 @@ class ProcessToolRunner:
             })
             source_root = Path(__file__).resolve().parents[3]
             proc = subprocess.Popen(
-                tool_runner_command(),
+                tool_runner_command(source_root),
                 # DaemonClient starts ``python -m gitgo`` from the package's
                 # parent directory.  Relying on inherited cwd therefore makes
                 # the top-level ``backend`` module disappear only in real

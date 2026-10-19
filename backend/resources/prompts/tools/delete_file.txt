@@ -1,0 +1,1 @@
+Recoverably delete one workspace file after reading its current SHA-256. The Host moves it into project-local .gitgo/trash, returns a restore reference and emits a deletion diff. Directories and .gitgo internals cannot be deleted through this tool.

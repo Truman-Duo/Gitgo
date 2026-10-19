@@ -30,7 +30,8 @@ OBSERVATION_FILE = "dependency_observations.jsonl"
 
 _IGNORED_PARTS = {
     ".git", ".gitgo", ".venv", "venv", "node_modules", "__pycache__",
-    "build", "dist", "out", "target", ".pytest_cache", ".mypy_cache",
+    "build", "dist", "dev-artifacts", "dist-terminal", "dist-installer",
+    "out", "target", ".pytest_cache", ".mypy_cache",
 }
 _SOURCE_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",

@@ -1,0 +1,1 @@
+Host-routed events only; workers did not talk privately. Resolve interface revisions before dependent workers start. Use list_coordination_events for full details and resolve_coordination_event for the decision. If material product judgement remains, use request_user_decision rather than guessing.

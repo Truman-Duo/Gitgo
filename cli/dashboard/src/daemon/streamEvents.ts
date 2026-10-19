@@ -111,7 +111,7 @@ export type TraceLifecycleEvent = {
     "task_admitted" | "mailbox_applied" | "user_decision_received" |
     "decision_resumed" | "context_compaction_requested" |
     "context_compaction_failed" | "stream_recovery" | "progress_summary" |
-    "lessons_harvested" | "lesson_harvest_failed" | "lessons_verified" | "lessons_discarded" |
+    "lessons_harvested" | "lesson_harvest_proposed" | "lesson_harvest_completed" | "lesson_harvest_resolved" | "lesson_harvest_failed" | "lessons_verified" | "lessons_discarded" |
     "provider_switched" | "architecture_warning" | "runtime_fact" | "runtime_projection_failed";
   process_id?: string;
   step?: number;

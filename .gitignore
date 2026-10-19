@@ -69,3 +69,6 @@ docs/tool-inventory.json
 # Local-only legacy material. Only legacy/README.md is published.
 legacy/docs/
 legacy/artifacts/
+
+# Developer-owned outputs; never product .gitgo state
+/dev-artifacts/

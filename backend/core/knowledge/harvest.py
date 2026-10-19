@@ -1,3 +1,4 @@
+
 import json
 import hashlib
 import re
@@ -14,481 +15,64 @@ from .models import Lesson
 from .manager import LessonManager
 
 
-def harvest_lessons(
-    workspace_path: Path,
-    project_name: str,
-    tech_stack: str = "",
-) -> list[Lesson]:
-    """sync 成功后自动检测值得记录的教训。
-
-    四个数据源（功能耦合，代码解耦）：
-    1. WORKSPACE 侧 — 从 git log + CLAUDE.md 直接收割
-    2. BACKUP 侧 — 从 scan history 检测跨轮次反复修改
-    3. GOVERNANCE 侧 — 所有 governance event + 操作级 event → lesson bridge
-    4. 实例→抽象提升 — 按 tech_stack 标签自动提升到对应抽象文件
-    """
-    harvested = []
-
-    # ── Phase 1: Workspace 侧收割 ──
-    harvested.extend(_harvest_from_git_log(workspace_path, project_name, tech_stack))
-    harvested.extend(_harvest_from_claude_md(workspace_path, project_name, tech_stack))
-
-    # ── Phase 2: Backup 侧收割 ──
-    harvested.extend(_harvest_from_scan_history(project_name, tech_stack))
-
-    # ── Phase 3: Governance signals → lesson bridge ──
-    harvested.extend(_harvest_from_governance_signals(workspace_path, project_name, tech_stack))
-
-    # ── Dedup: skip triggers already in pending ──
-    existing = LessonManager.load_pending(workspace_path, project_name)
-    existing_triggers = {getattr(e, 'trigger', '') for e in existing}
-    harvested = [h for h in harvested if getattr(h, 'trigger', '') not in existing_triggers]
-
-    # ── Phase 4: 实例→抽象自动提升 ──
-    try:
-        instances = LessonManager.load_instance(workspace_path, project_name)
-        for lesson in instances:
-            vc = getattr(lesson, 'verified_count', 0)
-            sev = getattr(lesson, 'severity', '')
-            if vc >= 5 and sev in ('high', 'critical') and not getattr(lesson, 'abstract', False):
-                try:
-                    LessonManager.promote_to_abstract(
-                        workspace_path, lesson.id, project_name,
-                        getattr(lesson, 'tech_stack', ''),
-                    )
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    return harvested
+def harvest_lessons(workspace_path: Path, project_name: str, tech_stack: str = "") -> list[Lesson]:
+    """Legacy discovery records observations, never saves or promotes lessons."""
+    with HistoryManager.workspace_scope(str(workspace_path)):
+        _harvest_from_git_log(workspace_path, project_name, tech_stack)
+        _harvest_from_claude_md(workspace_path, project_name, tech_stack)
+        _harvest_from_scan_history(project_name, tech_stack)
+        _harvest_from_governance_signals(workspace_path, project_name, tech_stack)
+    return []
 
 
-def _harvest_from_governance_signals(
-    workspace_path: Path,
-    project_name: str,
-    tech_stack: str = "",
-) -> list[Lesson]:
-    """从 governance event log + 操作级 event 中提取信号生成 lesson。
-
-    覆盖全部 governance event 类型：
-    - integrity_warning → [identity] lesson
-    - governance_drift → [drift] lesson
-    - governance_synced → [workflow] burst detection（单次聚合过多 commit）
-    - governance_memory_snapshot → [identity] snapshot trend
-    - governance_contract_updated → [contract] feature tracking
-    - governance_lesson → [meta] harvest trend
-    - sync → [workflow] file count trend
-    - formalize → [workflow] commit pattern
-    - scan → [workflow] entropy trend
-    """
-    harvested = []
-    entries = HistoryManager.load()
-    recent = [e for e in entries if e.project_name == project_name][-20:]
-
-    # 统计聚合信息
-    sync_events = [e for e in recent if e.operation == "sync"]
-    formalize_events = [e for e in recent if e.operation == "formalize"]
-    scan_events = [e for e in recent if e.operation == "scan"]
-
-    for e in recent:
-        detail = e.detail if isinstance(e.detail, dict) else {}
-
-        # ── integrity_warning ──
-        if e.operation == "integrity_warning":
-            rule = detail.get("rule", "")
-            if rule == "mass_override":
-                lesson = Lesson(
-                    tech_stack=tech_stack, category="identity", severity="high",
-                    trigger="Mass override detected by Identity Guard",
-                    rule=f"首次 sync 或项目被覆盖：{detail.get('changed_count', 0)}/{detail.get('total_count', 0)} 文件变更。"
-                          "如果这不是故意的项目替换，请检查 workspace 是否被其他项目覆盖。",
-                    source="auto_harvested", abstract=False, project_name=project_name,
-                )
-                lesson.id = f"signal_mass_override_{project_name}"
-                LessonManager.save_pending(workspace_path, lesson)
-                harvested.append(lesson)
-            elif rule == "structure_collapse":
-                lesson = Lesson(
-                    tech_stack=tech_stack, category="identity", severity="high",
-                    trigger="Directory structure collapsed",
-                    rule=f"目录骨架崩塌：Jaccard {detail.get('jaccard', 0):.2f}。"
-                          "旧目录: {', '.join(detail.get('old_dirs', []))}。"
-                          "项目可能已被替换。",
-                    source="auto_harvested", abstract=False, project_name=project_name,
-                )
-                lesson.id = f"signal_collapse_{project_name}"
-                LessonManager.save_pending(workspace_path, lesson)
-                harvested.append(lesson)
-
-        # ── governance_drift ──
-        elif e.operation == "governance_drift":
-            rules = detail.get("rules", [])
-            lesson = Lesson(
-                tech_stack=tech_stack, category="drift", severity="high",
-                trigger="Drift detected during push",
-                rule=f"检测到 {detail.get('alert_count', 0)} 项合约偏差: {', '.join(rules)}。"
-                      "检查是否 LLM 在绕过问题而非解决。",
-                source="auto_harvested", abstract=False, project_name=project_name,
-            )
-            lesson.id = f"signal_drift_{project_name}"
-            LessonManager.save_pending(workspace_path, lesson)
-            harvested.append(lesson)
-
-        # ── governance_synced → burst detection ──
-        elif e.operation == "governance_synced":
-            commit = detail.get("commit", "")
-            # 从对应的 formalize event 获取 source_indices 数量
-            related_fc = [fe for fe in formalize_events
-                          if fe.detail and isinstance(fe.detail, dict)
-                          and fe.detail.get("commit") == commit]
-            if related_fc:
-                source_count = len(related_fc[0].detail.get("source_indices", []))
-                if source_count >= 5:
-                    lesson = Lesson(
-                        tech_stack=tech_stack, category="workflow", severity="low",
-                        trigger=f"Burst formalize: {source_count} workspace commits aggregated into {commit}",
-                        rule=f"单次 sync 聚合了 {source_count} 个 workspace commit。"
-                              "如果这是首次 sync 则正常；如果是增量 sync，说明 sync 间隔过长。",
-                        source="auto_harvested", abstract=False, project_name=project_name,
-                    )
-                    lesson.id = f"signal_burst_{project_name}_{commit.replace('[','').replace(']','').replace(' ','_')}"
-                    LessonManager.save_pending(workspace_path, lesson)
-                    harvested.append(lesson)
-
-        # ── governance_memory_snapshot → trend ──
-        elif e.operation == "governance_memory_snapshot":
-            sources = detail.get("sources", [])
-            if not sources:
-                lesson = Lesson(
-                    tech_stack=tech_stack, category="identity", severity="medium",
-                    trigger="Memory snapshot returned empty",
-                    rule="工具记忆快照为空。可能 .claude/ .codex/ .codebuddy/ 目录均不存在或为空。",
-                    source="auto_harvested", abstract=False, project_name=project_name,
-                )
-                lesson.id = f"signal_empty_snapshot_{project_name}"
-                LessonManager.save_pending(workspace_path, lesson)
-                harvested.append(lesson)
-
-        # ── governance_contract_updated → feature tracking ──
-        elif e.operation == "governance_contract_updated":
-            feature = detail.get("feature", "")[:80]
-            # 检查是否是新的 feature type
-            existing_features = [
-                fe for fe in recent
-                if fe.operation == "governance_contract_updated"
-                and fe.detail and isinstance(fe.detail, dict)
-            ]
-            if len(existing_features) >= 5:
-                lesson = Lesson(
-                    tech_stack=tech_stack, category="contract", severity="low",
-                    trigger=f"Contract growing: {len(existing_features)} features confirmed",
-                    rule=f"项目合约已积累 {len(existing_features)} 个 decided features。"
-                          "建议定期 review 合约，清理已废弃的功能条目。",
-                    source="auto_harvested", abstract=False, project_name=project_name,
-                )
-                lesson.id = f"signal_contract_growth_{project_name}"
-                LessonManager.save_pending(workspace_path, lesson)
-                harvested.append(lesson)
-
-    # ── 聚合趋势检测（跨事件分析）──
-
-    # sync 文件数趋势
-    if len(sync_events) >= 3:
-        file_counts = [
-            e.detail.get("file_count", 0) for e in sync_events
-            if isinstance(e.detail, dict)
-        ][-5:]
-        if file_counts and max(file_counts) > 50:
-            lesson = Lesson(
-                tech_stack=tech_stack, category="workflow", severity="low",
-                trigger=f"Large sync: avg {sum(file_counts)//len(file_counts)} files over last {len(file_counts)} syncs",
-                rule="sync 文件数持续较高。考虑将大文件（data/、dist/、build/）加入 force_exclude。",
-                source="auto_harvested", abstract=False, project_name=project_name,
-            )
-            lesson.id = f"trend_large_sync_{project_name}"
-            LessonManager.save_pending(workspace_path, lesson)
-            harvested.append(lesson)
-
-    # ── push 频率趋势 ──
-    push_events = [e for e in recent if e.operation in ("push", "governance_pushed")]
-    if len(push_events) >= 3:
-        lesson = Lesson(
-            tech_stack=tech_stack, category="workflow", severity="low",
-            trigger=f"Push frequency: {len(push_events)} pushes in recent history",
-            rule="push 频率正常。" if len(push_events) <= 5
-            else "push 频率较高，考虑减少 push 次数以保持 commit 历史整洁。",
-            source="auto_harvested", abstract=False, project_name=project_name,
-        )
-        lesson.id = f"trend_push_freq_{project_name}"
-        LessonManager.save_pending(workspace_path, lesson)
-        harvested.append(lesson)
-
-    # ── post-hoc 修正模式 ──
-    edit_events = [e for e in recent
-                   if e.operation in ("governance_edited", "governance_renumbered",
-                                      "governance_dissolved")]
-    if len(edit_events) >= 2:
-        lesson = Lesson(
-            tech_stack=tech_stack, category="workflow", severity="medium",
-            trigger=f"{len(edit_events)} post-hoc corrections to formal commits",
-            rule="formal commit 创建后被编辑/重新编号/dissolve。"
-                  "这可能表示提交前的 review 不够充分。",
-            source="auto_harvested", abstract=False, project_name=project_name,
-        )
-        lesson.id = f"trend_posthoc_{project_name}"
-        LessonManager.save_pending(workspace_path, lesson)
-        harvested.append(lesson)
-
-    # ── meta: 系统自省 ──
-    lesson_events = [e for e in recent if e.operation == "governance_lesson"]
-    if len(lesson_events) >= 3:
-        total_harvested = sum(
-            e.detail.get("harvested_count", 0)
-            for e in lesson_events if isinstance(e.detail, dict)
-        )
-        lesson = Lesson(
-            tech_stack=tech_stack, category="meta", severity="low",
-            trigger=f"Lesson system: {total_harvested} lessons harvested over {len(lesson_events)} rounds",
-            rule="知识传承系统正在积累教训。定期 review pending lessons 并确认有价值的条目。",
-            source="auto_harvested", abstract=False, project_name=project_name,
-        )
-        lesson.id = f"meta_lesson_harvest_{project_name}"
-        LessonManager.save_pending(workspace_path, lesson)
-        harvested.append(lesson)
-
-    # ── trial 外部贡献 ──
-    trial_accepts = [e for e in recent if e.operation in ("triage_accept", "triage_promote")]
-    if trial_accepts:
-        lesson = Lesson(
-            tech_stack=tech_stack, category="workflow", severity="low",
-            trigger=f"{len(trial_accepts)} external contributions processed via trial",
-            rule="trial 仓库有外部贡献被 accept/promote。"
-                  "定期检查 trial 仓库的健康状态和贡献质量。",
-            source="auto_harvested", abstract=False, project_name=project_name,
-        )
-        lesson.id = f"trend_trial_{project_name}"
-        LessonManager.save_pending(workspace_path, lesson)
-        harvested.append(lesson)
-
-    # ── formal commit 生命周期 ──
-    delete_events = [e for e in recent if e.operation == "delete_formal"]
-    if delete_events:
-        lesson = Lesson(
-            tech_stack=tech_stack, category="workflow", severity="low",
-            trigger=f"{len(delete_events)} formal commits deleted",
-            rule="formal commit 被删除。检查是否有 workflow 流程问题导致需要经常删除 formal commit。",
-            source="auto_harvested", abstract=False, project_name=project_name,
-        )
-        lesson.id = f"trend_delete_{project_name}"
-        LessonManager.save_pending(workspace_path, lesson)
-        harvested.append(lesson)
-
-    return harvested
-
-
-def _harvest_from_git_log(
-    workspace_path: Path,
-    project_name: str,
-    tech_stack: str = "",
-) -> list[Lesson]:
-    """从 workspace git log 中检测同一文件被反复修改的模式。
-
-    例：连续 5 个 commit 都在改同一个文件 → 生成 pending lesson。
-    不需要任何 scan history——只看 workspace 自己的 git log。
-    """
-    harvested = []
-    try:
-        import subprocess, sys
-        result = subprocess.run(
-            ["git", "log", "--format=%H|%s", "--name-only", "-30"],
-            cwd=str(workspace_path), capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            creationflags=0x08000000 if sys.platform == "win32" else 0,
-        )
-        if result.returncode != 0:
-            return harvested
-
-        # 解析 git log: 每个 commit 后跟修改的文件列表
-        file_commits: dict[str, list[str]] = {}
-        current_commit = ""
-        current_subject = ""
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if "|" in line and not line.startswith(" ") and not line.endswith((".py", ".md", ".json", ".txt", ".yaml", ".toml")):
-                # commit line: hash|subject
-                current_commit, current_subject = line.split("|", 1)
-            elif current_commit and not line.startswith(" "):
-                # file line
-                file_commits.setdefault(line, []).append(current_subject)
-
-        # Exclude build artifacts and version logs — not code, not knowledge
-        _NOISE_EXTS = {".spec", ".json", ".txt", ".toml", ".cfg", ".ini", ".lock", ".pyc"}
-        _NOISE_FILES = {"version.md", "pyproject.toml", "requirements.txt"}
-        for path, subjects in file_commits.items():
-            if len(subjects) >= 3:
-                ext = Path(path).suffix.lower()
-                fname = Path(path).name.lower()
-                if ext in _NOISE_EXTS or fname in _NOISE_FILES:
-                    continue
-                lesson = Lesson(
-                    tech_stack=tech_stack,
-                    category="process",
-                    severity="medium",
-                    trigger=f"文件 {path} 被连续修改 {len(subjects)} 次（最近 commit）",
-                    rule=f"文件 {path} 经历了多次修改后最终通过 sync 确认。"
-                          f"最近修改: {', '.join(subjects[:3])}",
-                    source="auto_harvested",
-                    abstract=False,
-                    project_name=project_name,
-                    resolution_history={
-                        "file": path,
-                        "commit_count": len(subjects),
-                        "recent_subjects": subjects[:5],
-                        "show_by_default": False,
-                    },
-                )
-                lesson.id = f"gitlog_{project_name}_{path.replace('/', '_').replace('.', '_')}"
-                LessonManager.save_pending(workspace_path, lesson)
-                harvested.append(lesson)
-
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-    return harvested
-
-
-def _harvest_from_claude_md(
-    workspace_path: Path,
-    project_name: str,
-    tech_stack: str = "",
-) -> list[Lesson]:
-    """从 workspace 的 CLAUDE.md 中提取已记录的教训/约束。
-
-    解析标题含以下关键词的章节:
-    - 中文: 已知问题 / 注意事项 / 约束 / 禁止 / 避坑 / 关键 / 打包
-    - 英文: pitfall / constraint / rule / warning
-    - 符号: ⚠️
-    - 表格行: | 问题 | 原因 | 解决 | → 每行一条 lesson
-    """
-    harvested = []
-    claude_md = workspace_path / "CLAUDE.md"
-    if not claude_md.exists():
-        return harvested
-
-    try:
-        content = claude_md.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return harvested
-
-    import re
-
-    # 匹配关键词
-    section_kw = ("已知问题", "注意事项", "约束", "禁止", "避坑", "关键设计约束",
-                  "打包", "踩坑", "API 差异", "API 改名",
-                  "pitfall", "constraint", "rule", "warning", "⚠")
-
-    # 按 H2 拆分大节，保留完整的子节内容
-    h2_sections = re.split(r'^##\s+', content, flags=re.M)
-    for h2 in h2_sections:
-        lines = h2.strip().split("\n")
-        title = lines[0].strip().lower() if lines else ""
-        if not any(kw.lower() in title for kw in section_kw):
+def _observe_history(project_name: str, operations=None) -> list[Lesson]:
+    for entry in HistoryManager.load()[-50:]:
+        if entry.project_name != project_name:
             continue
-
-        # 该节（含所有子节）的全部文本作为收割范围
-        body = "\n".join(lines[1:])
-
-        # 提取列表项
-        items = []
-        for line in body.split("\n"):
-            stripped = line.strip()
-            # 列表项
-            if (stripped.startswith("- ") or stripped.startswith("* ") or
-                re.match(r'^\d+\.\s', stripped)):
-                text = re.sub(r'^\d+\.\s+', '', stripped)
-                text = text.lstrip('-* ').strip()
-                if len(text) >= 10:
-                    items.append(text)
-            # 表格行
-            elif stripped.startswith("|") and "---" not in stripped and "问题" not in stripped:
-                parts = [p.strip() for p in stripped.split("|") if p.strip()]
-                if len(parts) >= 3:
-                    items.append(f"{parts[0]} -> {parts[-1]}")
-
-        for item in items:
-            if len(item) < 10:
-                continue
-            lesson = Lesson(
-                tech_stack=tech_stack,
-                category="documented",
-                severity="high",
-                trigger=title,
-                rule=item[:200],
-                source="auto_harvested",
-                abstract=False,
-                project_name=project_name,
-            )
-            lesson.id = f"claude_{project_name}_{hash(item) & 0xffff:04x}"
-            LessonManager.save_pending(workspace_path, lesson)
-            harvested.append(lesson)
-
-    return harvested
+        if entry.operation.startswith(("harvest", "knowledge_")) or entry.operation == "unprocessed_signal":
+            continue
+        if operations is not None and entry.operation not in operations:
+            continue
+        raw = {"operation": entry.operation, "status": entry.status,
+               "timestamp": entry.timestamp, "detail": entry.detail}
+        identity = hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
+        capture_signal("history_observation", {"source_record": raw, "information_kind": "unclassified"},
+                       project_name, source_event_id=identity)
+    return []
 
 
-def _harvest_from_scan_history(
-    project_name: str,
-    tech_stack: str = "",
-) -> list[Lesson]:
-    """从 scan history 检测跨轮次反复修改（原有逻辑）。"""
-    harvested = []
-    entries = HistoryManager.load()
-    project_entries = [e for e in entries if e.project_name == project_name]
+def _harvest_from_governance_signals(workspace_path, project_name, tech_stack=""):
+    return _observe_history(project_name)
 
-    if len(project_entries) < 2:
-        return harvested
 
-    recent = project_entries[-20:]
-    scan_entries = [
-        e for e in recent
-        if e.operation == "scan" and e.detail and isinstance(e.detail, dict)
-    ]
-    if not scan_entries:
-        return harvested
+def _harvest_from_scan_history(project_name, tech_stack=""):
+    return _observe_history(project_name, {"scan", "sync"})
 
-    file_occurrences: dict[str, list[str]] = {}
-    for e in scan_entries:
-        detail = e.detail or {}
-        entries_list = detail.get("entries", [])
-        for entry in entries_list if isinstance(entries_list, list) else []:
-            if isinstance(entry, dict):
-                path = entry.get("path", "")
-                status = entry.get("status", "")
-                if status != "same":
-                    file_occurrences.setdefault(path, []).append(e.timestamp)
 
-    for path, timestamps in file_occurrences.items():
-        if len(timestamps) >= 3:
-            lesson = Lesson(
-                tech_stack=tech_stack,
-                category="process",
-                severity="medium",
-                trigger=f"文件 {path} 在多次 sync 中反复修改（{len(timestamps)}次）",
-                rule=f"跨轮次收割: 文件 {path} 经历了 {len(timestamps)} 次独立 sync 后才最终确认。",
-                source="auto_harvested",
-                abstract=False,
-                project_name=project_name,
-                resolution_history={
-                    "file": path, "occurrences": timestamps,
-                    "show_by_default": False,
-                },
-            )
-            lesson.id = f"scan_{project_name}_{path.replace('/', '_').replace('.', '_')}"
-            harvested.append(lesson)
+def _harvest_from_git_log(workspace_path, project_name, tech_stack=""):
+    try:
+        result = subprocess.run(["git", "log", "-5", "--format=%H %s", "--name-status"],
+            cwd=str(workspace_path), capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        capture_signal("discovery_unavailable", {"source": "git_log", "error_type": type(exc).__name__},
+                       project_name, source_event_id="git_log:" + type(exc).__name__)
+        return []
+    if result.returncode == 0 and result.stdout.strip():
+        raw = result.stdout[:8000]
+        capture_signal("vcs_observation", {"changes": raw, "truncated": len(result.stdout) > 8000},
+            project_name, source_event_id=hashlib.sha256(raw.encode()).hexdigest())
+    return []
 
-    return harvested
+
+def _harvest_from_claude_md(workspace_path, project_name, tech_stack=""):
+    path = Path(workspace_path) / "CLAUDE.md"
+    if not path.is_file():
+        return []
+    content = path.read_text(encoding="utf-8", errors="replace")
+    capture_signal("document_observation", {"path": "CLAUDE.md", "content": content[:8000],
+        "truncated": len(content) > 8000, "source_authority": "project_document"},
+        project_name, source_event_id=hashlib.sha256(content.encode()).hexdigest())
+    return []
 
 
 # ── v0.35: 信号捕获 + 调度 + LLM 总结 ──────────────────────
@@ -536,7 +120,7 @@ def _load_signal_store() -> dict:
         except (OSError, ValueError, json.JSONDecodeError):
             # Keep the legacy source for a later idempotent retry.
             raise
-    records = runtime.load_harvest_signal_records()
+    records = runtime.load_harvest_signal_records(with_version=True)
     return {
         "version": _SIGNAL_STORE_VERSION,
         "records": {
@@ -563,35 +147,40 @@ def _signal_id(project_name: str, signal_type: str,
     return "hs_" + uuid.uuid4().hex
 
 
+class CaptureAuditIncomplete(RuntimeError):
+    """Signal committed; audit failure must not reset its durable lifecycle."""
+    def __init__(self, signal_id):
+        super().__init__("Harvest observation committed; its audit append failed")
+        self.signal_id = signal_id
+
+
 def capture_signal(signal_type: str, detail: dict, project_name: str, *,
-                   source_event_id: str = "") -> str:
-    """Persist one idempotent harvest event in the pending state."""
+                   source_event_id: str = "", storage=None) -> str:
+    """Insert an idempotent pending observation, never reset a durable lifecycle.
+
+    Runtime-bound callers pass storage explicitly; legacy static consumers
+    continue using their existing project binding and migration path.
+    """
     signal_id = _signal_id(project_name, signal_type, source_event_id)
     now = datetime.now().isoformat()
-    with _signal_store_lock:
-        store = _load_signal_store()
-        if signal_id in store["records"]:
-            return signal_id
-        store["records"][signal_id] = {
-            "signal_id": signal_id,
-            "project_name": project_name,
-            "signal_type": signal_type,
-            "detail": dict(detail),
-            "source_event_id": source_event_id,
-            "state": "pending",
-            "retry_count": 0,
-            "lease_id": "",
-            "lease_until": 0.0,
-            "lesson_ids": [],
-            "created_at": now,
-            "updated_at": now,
-        }
-        _save_signal_store(store)
-    HistoryManager.add_operation(
-        project_name, "unprocessed_signal", "recorded",
-        {"signal_id": signal_id, "signal_type": signal_type},
-        correlation_id=signal_id,
-    )
+    runtime = storage if storage is not None else HistoryManager._storage()
+    if storage is None:
+        with _signal_store_lock:
+            _load_signal_store()  # Complete the existing legacy import, if any.
+    record = {"signal_id": signal_id, "project_name": project_name,
+              "signal_type": signal_type, "detail": dict(detail),
+              "source_event_id": source_event_id, "state": "pending",
+              "retry_count": 0, "lease_id": "", "lease_until": 0.0,
+              "lesson_ids": [], "created_at": now, "updated_at": now}
+    inserted = runtime.save_harvest_signal_records([record], create_only=True)
+    if inserted:
+        try:
+            runtime.append_history_record({"timestamp": now, "project_name": project_name,
+                "operation": "unprocessed_signal", "status": "recorded",
+                "detail": {"signal_id": signal_id, "signal_type": signal_type},
+                "correlation_id": signal_id}, event_id="capture_" + signal_id)
+        except Exception as exc:
+            raise CaptureAuditIncomplete(signal_id) from exc
     return signal_id
 
 
@@ -618,12 +207,12 @@ def get_unprocessed_signals(project_name: str,
                 continue
             detail = dict(record.get("detail") or {})
             signals.append({
+                **detail,
                 "signal_id": record["signal_id"],
                 "timestamp": record.get("created_at", ""),
                 "correlation_id": record["signal_id"],
                 "signal_type": record.get("signal_type", "unknown"),
                 "harvest_retry_count": int(record.get("retry_count", 0)),
-                **detail,
             })
         if changed:
             _save_signal_store(store)
@@ -654,6 +243,23 @@ def harvest_status(project_name: str) -> dict:
             if row.get("state") == "awaiting_confirmation" and row.get("proposal_id")
         ],
     }
+
+
+def task_failure_relations(project_name: str, task_id: str, context: dict, receipt: dict) -> list[dict]:
+    from .evidence_context import correlation_hint
+    with _signal_store_lock:
+        store = _load_signal_store()
+        rows = [row for row in store["records"].values()
+                if row.get("project_name") == project_name and row.get("signal_type") == "execution_failure"
+                and (row.get("detail") or {}).get("task_id") == task_id]
+        rows.sort(key=lambda row: (str(row.get("created_at") or ""), str(row["signal_id"])))
+        return [{"signal_id": row["signal_id"], **correlation_hint(row.get("detail") or {}, context, receipt)}
+                for row in rows[-10:]]
+
+
+def task_failure_sources(project_name: str, task_id: str) -> list[str]:
+    """Compatibility lookup; only temporal candidate observations, not repairs."""
+    return [item["signal_id"] for item in task_failure_relations(project_name, task_id, {}, {})]
 
 
 def lease_harvest_signals(project_name: str, *, limit: int = LLM_BATCH_MAX,
@@ -705,7 +311,6 @@ def lease_harvest_signal_ids(
             record["updated_at"] = datetime.now().isoformat()
             leased_ids.append(signal_id)
         _save_signal_store(store)
-    available = {item["signal_id"]: item for item in get_unprocessed_signals(project_name)}
     # get_unprocessed_signals intentionally hides active leases, so rebuild the
     # exact public signal projection from durable records.
     with _signal_store_lock:
@@ -715,18 +320,19 @@ def lease_harvest_signal_ids(
             record = store["records"].get(signal_id) or {}
             detail = dict(record.get("detail") or {})
             result.append({
+                **detail,
                 "signal_id": signal_id,
                 "timestamp": record.get("created_at", ""),
                 "correlation_id": signal_id,
                 "signal_type": record.get("signal_type", "unknown"),
                 "harvest_retry_count": int(record.get("retry_count", 0)),
-                **detail,
             })
     return result
 
 
 def stage_harvest_proposal(
     project_name: str, signal_ids: list[str], lessons: list[Lesson],
+    *, summary_report: dict | None = None,
 ) -> dict:
     """Persist a semantic proposal until the user confirms or dismisses it."""
     proposal_id = "hp_" + uuid.uuid4().hex
@@ -750,14 +356,20 @@ def stage_harvest_proposal(
         if not matched:
             raise ValueError("harvest proposal has no leased source signals")
         _save_signal_store(store)
-    HistoryManager.add_operation(
-        project_name, "harvest_proposal", "awaiting_confirmation",
-        {"proposal_id": proposal_id, "signal_ids": matched,
-         "candidate_count": len(candidates)},
-        correlation_id=proposal_id,
-    )
-    return {"proposal_id": proposal_id, "signal_ids": matched,
-            "candidates": candidates}
+    from .review import proposal_version
+    result = {"proposal_id": proposal_id, "signal_ids": matched, "candidates": candidates,
+              "proposal_version": proposal_version(project_name, proposal_id, matched, candidates)}
+    try:
+        HistoryManager.add_operation(
+            project_name, "harvest_proposal", "awaiting_confirmation",
+            {"proposal_id": proposal_id, "signal_ids": matched,
+             "candidate_count": len(candidates),
+             **({"summary": summary_report} if summary_report is not None else {})},
+            correlation_id=proposal_id,
+        )
+    except Exception as exc:
+        result["audit_warning"] = type(exc).__name__
+    return result
 
 
 def get_harvest_proposal(project_name: str, proposal_id: str) -> dict | None:
@@ -771,54 +383,121 @@ def get_harvest_proposal(project_name: str, proposal_id: str) -> dict | None:
         ]
     if not rows:
         return None
+    from .review import proposal_version
     return {
         "proposal_id": proposal_id,
+        "created_at": min(str(row.get("updated_at") or row.get("created_at") or "") for row in rows),
+        "task_ids": sorted({str((row.get("detail") or {}).get("task_id")) for row in rows
+                            if (row.get("detail") or {}).get("task_id")}),
         "signal_ids": [str(row["signal_id"]) for row in rows],
         "candidates": list(rows[0].get("proposal_lessons") or []),
+        "proposal_version": proposal_version(
+            project_name, proposal_id, [str(row["signal_id"]) for row in rows],
+            list(rows[0].get("proposal_lessons") or [])),
     }
 
 
-def resolve_harvest_proposal(
-    project_name: str, proposal_id: str, *, accepted: bool,
-    lesson_ids: list[str] | None = None,
-) -> dict:
-    """Resolve one explicit proposal exactly once and keep its audit trail."""
+
+def get_harvest_proposal_context(project_name: str, proposal_id: str, expected_version: str,
+                                 candidate_index: int = 0, user_draft: dict | None = None) -> dict:
+    """Bounded, authoritative read-only discussion data; never a review receipt."""
+    proposal = get_harvest_proposal(project_name, proposal_id)
+    if proposal is None:
+        raise ValueError("HARVEST_PROPOSAL_NOT_FOUND")
+    if not expected_version or expected_version != proposal["proposal_version"]:
+        raise ValueError("HARVEST_PROPOSAL_CHANGED")
+    candidates = proposal["candidates"]
+    if type(candidate_index) is not int or not 0 <= candidate_index < len(candidates):
+        raise ValueError("INVALID_HARVEST_CANDIDATE")
+    candidate = dict(candidates[candidate_index])
+    from .models import QUALIFICATION_KEYS
+    qualification = {key: value for key, value in dict(candidate.get("qualification") or {}).items()
+                     if key in QUALIFICATION_KEYS}
+    truncated = [key for key, value in qualification.items() if len(str(value)) > 600]
+    candidate = {"trigger": str(candidate.get("trigger") or "")[:240],
+                 "rule": str(candidate.get("rule") or "")[:2000],
+                 "qualification": {key: str(value)[:600] for key, value in qualification.items()},
+                 "qualification_truncated_fields": truncated}
+    draft = None
+    if user_draft is not None:
+        from .models import normalize_qualification
+        if not isinstance(user_draft, dict) or set(user_draft) - {"trigger", "rule", "qualification"}:
+            raise ValueError("INVALID_HARVEST_DRAFT")
+        if (not isinstance(user_draft.get("trigger"), str) or not 1 <= len(user_draft["trigger"]) <= 240
+                or not isinstance(user_draft.get("rule"), str) or not 20 <= len(user_draft["rule"]) <= 2000):
+            raise ValueError("INVALID_HARVEST_DRAFT")
+        draft = {"trigger": user_draft["trigger"], "rule": user_draft["rule"],
+                 "qualification": normalize_qualification(user_draft.get("qualification")),
+                 "authority": "user draft; not submitted or accepted"}
+    original = candidates[candidate_index]
+    original_evidence = original.get("evidence") or {}
+    raw_excerpts = original_evidence.get("workspace_excerpts") or []
+    excerpts = raw_excerpts if isinstance(raw_excerpts, list) else []
+    selected_excerpts = [{key: item.get(key) for key in ("excerpt_id", "signal_id", "path", "start_line", "end_line", "sha256")} |
+        {"text": str(item.get("text") or "")[:2000], "truncated": len(str(item.get("text") or "")) > 2000}
+        for item in excerpts[:12] if isinstance(item, dict)]
+    binding = {"scope": "selected_source_excerpts" if selected_excerpts else
+                      "whole_file" if original_evidence.get("workspace_files") else "source_observations",
+               "selected_excerpts": selected_excerpts, "excerpts_partial": len(excerpts) > 12,
+               "coverage": "Captured post-change text snapshots. Text continuity does not establish semantic validity, dependency coverage or causal repair."}
+    refs = set(original_evidence.get("source_signal_ids") or proposal["signal_ids"])
     with _signal_store_lock:
         store = _load_signal_store()
-        matched = []
-        for record in store["records"].values():
-            if record.get("project_name") != project_name:
-                continue
-            if record.get("proposal_id") != proposal_id:
-                continue
-            if record.get("state") != "awaiting_confirmation":
-                continue
-            record["state"] = "processed" if accepted else "dismissed"
-            record["lesson_ids"] = list(dict.fromkeys(lesson_ids or []))
-            record["proposal_lessons"] = []
-            record["updated_at"] = datetime.now().isoformat()
-            matched.append(str(record["signal_id"]))
-        if not matched:
-            raise ValueError("harvest proposal is missing or already resolved")
-        _save_signal_store(store)
-    status = "accepted" if accepted else "dismissed"
-    HistoryManager.add_operation(
-        project_name, "harvest_proposal", status,
-        {"proposal_id": proposal_id, "signal_ids": matched,
-         "lesson_ids": list(lesson_ids or [])},
-        correlation_id=proposal_id,
-    )
-    return {"proposal_id": proposal_id, "status": status,
-            "signal_ids": matched, "lesson_ids": list(lesson_ids or [])}
+        records = [row for row in store["records"].values()
+                   if row.get("project_name") == project_name
+                   and row.get("proposal_id") == proposal_id
+                   and row.get("state") == "awaiting_confirmation"]
+        # Revalidate after the read, including terminal state and content changes.
+        from .review import proposal_version
+        if (not records or proposal_version(project_name, proposal_id,
+                [row["signal_id"] for row in records],
+                list(records[0].get("proposal_lessons") or [])) != expected_version):
+            raise ValueError("HARVEST_PROPOSAL_CHANGED")
+        if any(row.get("proposal_lessons") != records[0].get("proposal_lessons") for row in records):
+            raise ValueError("HARVEST_PROPOSAL_INCONSISTENT")
+        selected = [row for row in records if row["signal_id"] in refs]
+        sources = []
+        for row in selected[:12]:
+            text = json.dumps(row.get("detail") or {}, ensure_ascii=False, default=str)
+            sources.append({"signal_id": row["signal_id"], "signal_type": row["signal_type"],
+                "created_at": row.get("created_at"), "source_event_id": row.get("source_event_id"),
+                "excerpt": text[:1000], "truncated": len(text) > 1000})
+    return {"project": project_name, "proposal_id": proposal_id, "proposal_version": expected_version,
+            "candidate_index": candidate_index, "candidate": candidate, "user_draft": draft,
+            "sources": sources, "sources_partial": len(selected) > 12, "evidence_binding": binding,
+            "coverage": "Selected attributed sources only. Other evidence, prompts, documents and releases have not been exhaustively searched.",
+            "authority": "unconfirmed read-only proposal; discussion cannot accept or execute it"}
+
+
+def resolve_harvest_proposal(project_name: str, proposal_id: str, *, accepted: bool,
+                             lesson_ids: list[str] | None = None,
+                             candidates: list[dict] | None = None, expected_version: str = "") -> dict:
+    """Review admission and terminal source state commit together, not in two steps."""
+    proposal = get_harvest_proposal(project_name, proposal_id)
+    if proposal is None:
+        raise ValueError("HARVEST_PROPOSAL_NOT_FOUND")
+    if lesson_ids:
+        raise ValueError("Pre-saving knowledge before proposal confirmation is not supported")
+    with _signal_store_lock:
+        result = HistoryManager._storage().resolve_harvest_proposal_records(
+            project_name, proposal_id, accepted=accepted, candidates=candidates,
+            expected_version=expected_version or proposal["proposal_version"])
+    try:
+        HistoryManager.add_operation(project_name, "harvest_proposal", result["status"],
+            result, correlation_id=proposal_id)
+    except Exception as exc:
+        # The content/source transaction is already committed. Never replay it.
+        result["audit_warning"] = type(exc).__name__
+    return result
 
 
 def complete_harvest(project_name: str, signal_ids: list[str],
-                     lesson_ids: list[str]) -> None:
+                     lesson_ids: list[str], *, summary_report: dict | None = None) -> None:
     with _signal_store_lock:
         store = _load_signal_store()
         for signal_id in signal_ids:
             record = store["records"].get(signal_id)
-            if record is None or record.get("project_name") != project_name:
+            if record is None or record.get("project_name") != project_name or record.get("state") != "leased":
                 continue
             record["state"] = "processed"
             record["lesson_ids"] = list(dict.fromkeys(lesson_ids))
@@ -828,17 +507,19 @@ def complete_harvest(project_name: str, signal_ids: list[str],
         _save_signal_store(store)
     HistoryManager.add_operation(
         project_name, "harvest_batch", "success",
-        {"signal_ids": list(signal_ids), "lesson_ids": list(lesson_ids)},
+        {"signal_ids": list(signal_ids), "lesson_ids": list(lesson_ids),
+         **({"summary": summary_report} if summary_report is not None else {})},
     )
 
 
-def fail_harvest(project_name: str, signal_ids: list[str], error: str) -> None:
+def fail_harvest(project_name: str, signal_ids: list[str], error: str, *,
+                 summary_report: dict | None = None) -> None:
     with _signal_store_lock:
         store = _load_signal_store()
         dead = []
         for signal_id in signal_ids:
             record = store["records"].get(signal_id)
-            if record is None or record.get("project_name") != project_name:
+            if record is None or record.get("project_name") != project_name or record.get("state") != "leased":
                 continue
             retries = int(record.get("retry_count", 0)) + 1
             record["retry_count"] = retries
@@ -854,7 +535,8 @@ def fail_harvest(project_name: str, signal_ids: list[str], error: str) -> None:
         project_name, "harvest_batch",
         "dead_letter" if dead else "retry",
         {"signal_ids": list(signal_ids), "dead_letter_ids": dead,
-         "error": error[:1000]},
+         "error": error[:1000],
+         **({"summary": summary_report} if summary_report is not None else {})},
     )
 
 
@@ -930,48 +612,17 @@ def is_testable_proposition(rule: str) -> bool:
 
 def harvest_llm_summary(signals: list[dict], llm_provider,
                         workspace_path: str, project_name: str, *,
-                        raise_on_error: bool = False, on_provider_notice=None) -> list[Lesson]:
-    """LLM 总结未处理信号 → lesson。降级：失败→重试→退避→废弃。"""
+                        raise_on_error: bool = False, on_provider_notice=None,
+                        summary_report: dict | None = None) -> list[Lesson]:
+    """Bounded semantic candidates; durable retries remain caller-owned."""
     if not signals:
         return []
 
     batch = signals[:LLM_BATCH_MAX]
-    signal_text = []
-    for i, s in enumerate(batch):
-        signal_text.append(
-            f"信号{i+1}: type={s.get('signal_type')} "
-            f"trigger={s.get('trigger','')} detail={s.get('detail',{})}"
-        )
-
-    prompt = (
-        "你是项目知识收割 Agent。根据以下信号提取教训。\n\n"
-        "严格要求:\n"
-        "1. rule 应明确说明适用条件、动作和可观察的验证结果，不限定固定措辞\n"
-        "2. 不接受无法指导后续行动的纯描述性 lesson\n"
-        "3. trigger 是相关性检索提示，不具有治理执行权\n"
-        "4. 不要生成 check；机器可执行 checker 必须由 Host 单独注册并声明极性\n"
-        "5. 信号不足以形成 actionable lesson → 返回 []\n"
-        "6. 每条默认写入 pending\n\n"
-        "返回 JSON: "
-        '[{"trigger":"...","rule":"condition, action, observable result",'
-        '"severity":"high|medium|low","category":"process|...",'
-        '"dangerous_tools":[],"prerequisite_tools":[],"required_tools":[]}]\n\n'
-        f"信号 ({len(batch)} 条):\n" + "\n".join(signal_text)
-    )
-
     try:
-        response = llm_provider.chat(
-            [{"role": "user", "content": prompt}],
-            max_tokens=4096, timeout=30,
-            **({"on_notice": on_provider_notice} if on_provider_notice is not None
-               and hasattr(llm_provider, "stream_session_events") else {}),
-        )
-        text = response.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        lessons_data = json.loads(text.strip())
+        from .summary import summarize
+        return summarize(batch, llm_provider, workspace_path, project_name,
+                         on_notice=on_provider_notice, report=summary_report)
     except Exception:
         if raise_on_error:
             raise
@@ -984,84 +635,13 @@ def harvest_llm_summary(signals: list[dict], llm_provider,
             ) + 1
         return []
 
-    from .applicability import capture_lesson_evidence
-    evidence = capture_lesson_evidence(workspace_path, batch)
-    lessons = []
-    for data in lessons_data if isinstance(lessons_data, list) else []:
-        rule = data.get("rule", "")
-        if not is_testable_proposition(rule):
-            continue
-        lessons.append(Lesson(
-            trigger=data.get("trigger", ""), rule=rule,
-            severity=data.get("severity", "medium"),
-            category=data.get("category", "process"),
-            dangerous_tools=data.get("dangerous_tools", []),
-            prerequisite_tools=data.get("prerequisite_tools", []),
-            required_tools=data.get("required_tools", []),
-            check=(data.get("check") if isinstance(data.get("check"), dict) else None),
-            source="auto_harvested", origin="harvest",
-            project_name=project_name,
-            evidence=evidence,
-        ))
-    return lessons
-
-
 # ── v0.35: Pending 消化 ─────────────────────────────────────
 
 def auto_discard_invalid(workspace_path: Path, project_name: str) -> int:
-    """L1 Digest: 扫描 pending，自动 discard 明显无效的 lesson。
-
-    判据: trigger 文件不存在 / rule 过短。
-    """
-    pending = LessonManager.load_pending(workspace_path, project_name)
-    discarded = 0
-    for lesson in pending:
-        if lesson.trigger and "/" in lesson.trigger:
-            if not (Path(workspace_path) / lesson.trigger).exists():
-                LessonManager.discard_lesson(
-                    workspace_path, lesson.id, project_name,
-                )
-                discarded += 1
-                continue
-        if len(lesson.rule) < 15:
-            LessonManager.discard_lesson(
-                workspace_path, lesson.id, project_name,
-            )
-            discarded += 1
-    return discarded
+    """Preserve legacy content; explicit management owns discard."""
+    return 0
 
 
 def auto_verify_high_confidence(workspace_path: Path, project_name: str) -> int:
-    """L2 Digest: 自动 verify 高置信度 pending lesson。
-
-    规则（不依赖 LLM）：至少三个不同项目留下过明确验证记录。
-
-    Severity and substring frequency are not truth evidence and therefore never
-    auto-promote a lesson.
-
-    Returns: auto-verified 的 lesson 数量。
-    """
-    from .models import severity_rank
-    verified = 0
-    pending = LessonManager.load_pending(workspace_path, project_name)
-    if not pending:
-        return 0
-
-    for lesson in pending:
-        should_verify = False
-
-        verified_in = {
-            str(item) for item in (getattr(lesson, "verified_in", []) or [])
-            if str(item)
-        }
-        if getattr(lesson, "verified_count", 0) >= 3 and len(verified_in) >= 3:
-            should_verify = True
-
-        if should_verify:
-            try:
-                LessonManager.verify(workspace_path, lesson.id, project_name)
-                verified += 1
-            except Exception:
-                pass
-
-    return verified
+    """Statistics never authorize content or expand applicability."""
+    return 0

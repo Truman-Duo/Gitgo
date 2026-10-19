@@ -1,6 +1,6 @@
 """Bounded evidence for files explicitly published by an Agent completion claim.
 
-This is verification of an already authorized committed write, not a general
+This verifies an authorized committed write or explicitly reviewed snapshot, not a general
 file-reading capability or a decision that a file satisfies the user's goal.
 """
 from hashlib import sha256
@@ -34,22 +34,30 @@ def _witness(process, path):
         if not receipt.get('receipt_id') or receipts.get(receipt['receipt_id']) != receipt:
             continue
         data = message.get('data') or {}
-        raw = data.get('path')
-        if not raw or raw not in receipt.get('files', []):
-            continue
-        try:
-            observed = _confined_path(_root(process), raw, must_exist=False)
-        except (ValueError, OSError):
-            continue
-        if observed == path:
-            return receipt['receipt_id'], str(data.get('after_sha256') or '')
-    return '', ''
+        # Native operations may commit several files atomically (promotion).
+        # All witnesses still come from the real, task-bound tool result and
+        # must be within the canonical receipt's file scope.
+        entries = data.get('files')
+        candidates = [data, *(item for item in (entries if isinstance(entries, list) else [])
+                               if isinstance(item, dict))]
+        for item in candidates:
+            raw = item.get('path')
+            if not raw or raw not in receipt.get('files', []):
+                continue
+            try:
+                observed = _confined_path(_root(process), raw, must_exist=False)
+            except (ValueError, OSError):
+                continue
+            if observed == path:
+                return (receipt['receipt_id'], str(item.get('after_sha256') or ''),
+                        str(item.get('evidence_kind') or 'committed_write'))
+    return '', '', ''
 
 
 def _read(process, raw, remaining):
     root = _root(process)
     path = _confined_path(root, raw, must_exist=True)
-    receipt_id, expected = _witness(process, path)
+    receipt_id, expected, evidence_kind = _witness(process, path)
     if not receipt_id or len(expected) != 64:
         raise ValueError('no current committed write evidence for artifact')
     # Bound before allocation and after reading, including concurrent growth.
@@ -64,7 +72,7 @@ def _read(process, raw, remaining):
         raise ValueError('artifact is not supported text evidence')
     relative = path.relative_to(root).as_posix()
     return {'path': relative, 'sha256': expected, 'receipt_id': receipt_id,
-            'bytes': len(content), 'segments': [
+            'bytes': len(content), 'evidence_kind': evidence_kind, 'segments': [
                 {**part, 'id': f'artifact:{receipt_id}:{part["id"]}'}
                 for part in candidate_segments(text)]}
 

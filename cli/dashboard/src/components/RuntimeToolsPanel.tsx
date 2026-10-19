@@ -1,8 +1,8 @@
-import React, { memo, useCallback, useEffect, useState } from "react";
-import { Box, Text } from "@anthropic/ink";
+import React, { memo, useCallback, useEffect, useRef, useState } from "react";
+import { Box, ScrollBox, Text, type ScrollBoxHandle } from "@anthropic/ink";
 import type { BackendClient } from "../backend/client.js";
 import { customToolArchive, customToolList, customToolRestore } from "../backend/tools.js";
-import { useManagedInput as useInput } from "../input/runtime.js";
+import { useManagedInput as useInput, useScrollInput } from "../input/runtime.js";
 import { resolveRuntimeToolsKey } from "../input/overlays/runtimeTools.js";
 import { chordLabel } from "../input/bindings.js";
 import { colors, truncate, usePanelSize, useSelectionStyle } from "../theme/index.js";
@@ -10,11 +10,13 @@ import { colors, truncate, usePanelSize, useSelectionStyle } from "../theme/inde
 type Props = { client: BackendClient; project: string; cols: number; onDismiss: () => void; interactive?: boolean };
 
 export const RuntimeToolsPanel = memo(function RuntimeToolsPanel({ client, project, onDismiss, interactive = true }: Props) {
+  const scrollRef = useRef<ScrollBoxHandle>(null);
+  useScrollInput(scrollRef, interactive);
   const [items, setItems] = useState<any[]>([]);
   const [selected, setSelected] = useState(0);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
-  const { w } = usePanelSize({ minWidth: 44 });
+  const { w } = usePanelSize({ minWidth: 20, widthOffset: 4 });
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -46,10 +48,11 @@ export const RuntimeToolsPanel = memo(function RuntimeToolsPanel({ client, proje
     }
   }, {isActive: interactive});
 
-  const selection = useSelectionStyle("focused", "block");
+  const selection = useSelectionStyle(interactive ? "focused" : "non-focused", "block");
   return (
-    <Box flexDirection="column" padding={1} width={w}>
+    <Box flexDirection="column" paddingX={1} paddingTop={1} width={w} flexGrow={1} minHeight={0}>
       <Box marginBottom={1}><Text bold>Saved tools — {project}</Text></Box>
+      <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1} minHeight={0}>
       {loading ? <Text dimColor>Loading tools...</Text> : null}
       {!loading && items.length === 0 ? <Text dimColor>No saved custom tools.</Text> : null}
       {items.map((item, index) => {
@@ -68,8 +71,8 @@ export const RuntimeToolsPanel = memo(function RuntimeToolsPanel({ client, proje
           </Box>
         );
       })}
+      </ScrollBox>
       {status ? <Box marginTop={1}><Text color={colors.named.gray}>{status}</Text></Box> : null}
-      <Box flexGrow={1} />
       <Text dimColor>{chordLabel("upDown")} select    {chordLabel("enter")} archive/restore    {chordLabel("escape")} back</Text>
     </Box>
   );

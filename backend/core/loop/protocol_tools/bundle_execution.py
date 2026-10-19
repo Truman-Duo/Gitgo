@@ -1,5 +1,7 @@
 """bundle execution protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
 import json
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
@@ -132,7 +134,7 @@ def install(ctx):
                     acceptance_criteria=criteria,
                     allowed_tools=[
                         "context_open", "context_search", "artifact_read",
-                        "calculate", "decision_evidence",
+                        "workbench", "decision_evidence",
                     ],
                     required_for_parent_completion=bool(
                         args.get("required_for_parent_completion", True)
@@ -187,9 +189,7 @@ def install(ctx):
     tools["delegate_task_bundle"] = AgentTool(
         name="delegate_task_bundle",
         description=(
-            "Build one deterministic dossier, shard a large task, and start all "
-            "bounded B contracts in one call. Host handles enumeration, copying, "
-            "budget checks and dispatch; A remains responsible for semantic review."
+            load_prompt('tools/delegate_task_bundle')
         ),
         parameters={
             "type": "object",

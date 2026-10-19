@@ -38,6 +38,65 @@ def get_state_ref(self: ObjectsPort, namespace: str, key: str) -> str | None:
     return str(row[0]) if row is not None else None
 
 
+
+def commit_state_revision(self: ObjectsPort, namespace: str, key: str,
+                          value_ref: str, *, expected_ref: str | None,
+                          revision_key: str) -> bool:
+    """Atomically retain an immutable revision and advance its expected head.
+
+    False means another writer changed the head. Neither reference is written
+    in that case. Both refs are ordinary storage_kv GC roots.
+    """
+    self._ensure_open()
+    if not namespace or not key or not revision_key or key == revision_key:
+        raise ValueError("distinct head and revision keys are required")
+    self.read_blob(value_ref)  # Do not publish a missing CAS object.
+    self._reserve_authoritative_write(len(namespace) + len(key) + len(revision_key) + 2 * len(value_ref))
+    with self._state_lock:
+        self._state.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._state.execute(
+                "SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?",
+                (namespace, key)).fetchone()
+            current = str(row[0]) if row else None
+            if current != expected_ref:
+                self._state.execute("ROLLBACK")
+                return False
+            prior = self._state.execute(
+                "SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?",
+                (namespace, revision_key)).fetchone()
+            if prior is not None and str(prior[0]) != value_ref:
+                raise ValueError("immutable revision key already exists")
+            now = _utc_now()
+            self._state.execute(
+                "INSERT OR IGNORE INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)",
+                (namespace, revision_key, value_ref, now))
+            self._state.execute(
+                "INSERT INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(namespace,key) DO UPDATE SET value_ref=excluded.value_ref,updated_at=excluded.updated_at",
+                (namespace, key, value_ref, now))
+            self._state.execute("COMMIT")
+        except BaseException:
+            if self._state.in_transaction:
+                self._state.execute("ROLLBACK")
+            raise
+    return True
+
+
+def list_state_refs(self: ObjectsPort, namespace: str, *, prefix: str,
+                    after: str = "", limit: int = 50) -> list[dict]:
+    """Bounded literal-prefix scan; keys can be used as continuation cursors."""
+    self._ensure_open()
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    with self._state_lock:
+        rows = self._state.execute(
+            "SELECT key,value_ref FROM storage_kv WHERE namespace=? "
+            "AND substr(key,1,?)=? AND key>? ORDER BY key LIMIT ?",
+            (namespace, len(prefix), prefix, after, limit)).fetchall()
+    return [{"key": str(row[0]), "value_ref": str(row[1])} for row in rows]
+
+
 def _write_blob_file(
     self, data: bytes, *, media_type: str = "application/octet-stream"
 ) -> dict:
@@ -61,7 +120,16 @@ def _write_blob_file(
                     handle.write(data)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary, target)
+                try:
+                    os.replace(temporary, target)
+                except PermissionError:
+                    # Separate project runtimes have separate in-process CAS
+                    # locks. Windows can refuse replace when another writer
+                    # has just published/opened this same immutable object.
+                    # Accept only exact bytes, never an arbitrary permission
+                    # error, partial file, or conflicting content.
+                    if not target.is_file() or target.read_bytes() != data:
+                        raise
                 with self._health_lock:
                     if self._cas_bytes_hint is not None:
                         self._cas_bytes_hint += len(data)
@@ -234,6 +302,7 @@ def read_tool_result(
     max_chars: int = 24_000,
     json_pointer: str = "",
     query: str = "",
+    owner_process_id: str = "",
 ) -> dict:
     """Read a bounded page from an addressable tool result.
 
@@ -249,6 +318,13 @@ def read_tool_result(
                FROM tool_result_objects WHERE locator=?""",
             (str(locator),),
         ).fetchone()
+    if owner_process_id:
+        with self._state_lock:
+            owned = self._state.execute(
+                "SELECT 1 FROM tool_result_owners WHERE locator=? AND process_id=? LIMIT 1",
+                (str(locator), str(owner_process_id))).fetchone()
+        if owned is None:
+            raise KeyError("tool result not owned by this process")
     if row is None:
         raise KeyError(f"tool result not found: {locator}")
     content = self.read_blob(str(row["content_ref"])).decode("utf-8")

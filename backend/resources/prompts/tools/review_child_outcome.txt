@@ -1,0 +1,1 @@
+Record A's structured review of a terminal owned B outcome. Approval is required before any required delegated outcome can satisfy the supervisor completion gate. The Host automatically links the child's qualifying receipts; do not copy internal receipt IDs.

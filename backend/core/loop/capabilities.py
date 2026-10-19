@@ -91,7 +91,7 @@ class CapabilityProfiles:
         "contract_get_changed_symbols", "lesson_search", "lesson_list",
         "privacy_scan", "read_file", "list_files", "search_text", "document_open",
         "web_search", "web_fetch",
-        "calculate", "decision_evidence", "capability_status",
+        "workbench", "lesson_checker", "decision_evidence", "capability_status",
         "acknowledge_governance_signal",
         "code_dossier",
     ) + _CONTEXT

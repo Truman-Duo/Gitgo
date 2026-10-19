@@ -1,7 +1,7 @@
 // src/components/MemoryPanel.tsx — /runtime memory: list/snapshot/restore tool memories
-import React, { memo, useState, useEffect, useCallback } from "react";
-import { Box, Text } from "@anthropic/ink";
-import { useManagedInput as useInput } from "../input/runtime.js";
+import React, { memo, useState, useEffect, useCallback, useRef } from "react";
+import { Box, ScrollBox, Text, type ScrollBoxHandle } from "@anthropic/ink";
+import { useManagedInput as useInput, useScrollInput } from "../input/runtime.js";
 import type { BackendClient } from "../backend/client.js";
 import { memoryList, memorySnapshot, memoryRestore } from "../backend/tools.js";
 import { resolveMemoryKey } from "../input/overlays/memory.js";
@@ -20,6 +20,8 @@ type Props = {
 };
 
 export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismiss, interactive = true }: Props) {
+  const scrollRef = useRef<ScrollBoxHandle>(null);
+  useScrollInput(scrollRef, interactive);
   const [snaps, setSnaps] = useState<Snapshot[]>([]);
   const [sel, setSel] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -68,7 +70,7 @@ export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismis
     }
   }, {isActive: interactive});
 
-  const { w } = usePanelSize({ minWidth: 40 });
+  const { w } = usePanelSize({ minWidth: 20, widthOffset: 4 });
 
   if (confirm) {
     return (
@@ -81,13 +83,14 @@ export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismis
   if (loading) return <Box padding={1}><Text dimColor>Loading snapshots...</Text></Box>;
 
   return (
-    <Box flexDirection="column" padding={1} width={w}>
+    <Box flexDirection="column" paddingX={1} paddingTop={1} width={w} flexGrow={1} minHeight={0}>
       <Box marginBottom={1}>
         <Text bold>Memory Snapshots: {project}</Text>
         <Text dimColor>    {snaps.length} snapshots</Text>
       </Box>
       {status ? <Text dimColor>{status}</Text> : null}
 
+      <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1} minHeight={0}>
       {status && snaps.length===0 ? <Text dimColor>{status}</Text> : snaps.length === 0 ? (
         <Text dimColor>No snapshots yet. Press S to create one.</Text>
       ) : (
@@ -103,7 +106,8 @@ export const MemoryPanel = memo(function MemoryPanel({ client, project, onDismis
         })
       )}
 
-      <Box marginTop={1}>
+      </ScrollBox>
+      <Box>
         <Text dimColor>{chordLabel("letterS")}  snapshot    {chordLabel("letterR")}  restore selected    {chordLabel("upDown")} select    {chordLabel("escape")} back</Text>
       </Box>
     </Box>

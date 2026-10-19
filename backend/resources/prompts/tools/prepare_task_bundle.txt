@@ -1,0 +1,1 @@
+Ask the Host to size a code task and deterministically suggest stable file shards. Use before manually classifying or copying large file lists.

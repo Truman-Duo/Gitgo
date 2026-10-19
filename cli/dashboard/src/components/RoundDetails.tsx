@@ -28,7 +28,7 @@ function EventDetail({ detailRef, client, project }: {
       .catch((err: unknown) => { if (alive) setError(String(err)); });
     return () => { alive = false; };
   }, [expanded, body, detailRef, client, project]);
-  return <Box flexDirection="column" paddingLeft={2}>
+  return <Box flexDirection="column">
     <Box onClick={() => setExpanded(value => !value)}>
       <Text dimColor>{expanded ? "▾ Hide detail" : "▸ Open detail"}</Text>
     </Box>
@@ -38,15 +38,15 @@ function EventDetail({ detailRef, client, project }: {
   </Box>;
 }
 
-export function RoundDetails({ message, client, project, verbose, width, includeDescendants = false }: {
+export function RoundDetails({ message, client, project, verbose, width, includeDescendants = false, readTrace = true }: {
   message: ChatMessage; client?: BackendClient; project?: string;
-  verbose: boolean; width: number; includeDescendants?: boolean;
+  verbose: boolean; width: number; includeDescendants?: boolean; readTrace?: boolean;
 }) {
   const [trace, setTrace] = useState<{ events: TraceRecord[]; truncated: boolean } | null>(null);
   const [error, setError] = useState("");
-  const canRead = Boolean(client && project && message.trace_id);
+  const canRead = Boolean(readTrace && client && project && message.trace_id);
   useEffect(() => {
-    if (!client || !project || !message.trace_id) return;
+    if (!readTrace || !client || !project || !message.trace_id) return;
     let alive = true;
     setTrace(null);
     setError("");
@@ -78,7 +78,7 @@ export function RoundDetails({ message, client, project, verbose, width, include
       if (alive) setTrace({ events: events.slice(0, maximumEvents), truncated });
     })().catch((err: unknown) => { if (alive) setError(String(err)); });
     return () => { alive = false; };
-  }, [client, project, message.trace_id, message.process_id, includeDescendants]);
+  }, [client, project, message.trace_id, message.process_id, includeDescendants, readTrace]);
 
   const fallbackActivity: StreamActivity[] = message.activity?.length
     ? message.activity
@@ -97,16 +97,16 @@ export function RoundDetails({ message, client, project, verbose, width, include
     timestamp: message.timestamp,
   }) : {...fallback, providerUsage: message.provider_usage};
 
-  if (!canRead || error) return <Box flexDirection="column" paddingLeft={2}>
+  if (!canRead || error) return <Box flexDirection="column">
     {error ? <Text color={colors.danger}>[TRACE_READ_FAILED] {error}</Text> : null}
-    <TurnTimeline {...fallback} verbose={verbose} width={width}/>
+    <TurnTimeline {...fallback} verbose={verbose} width={width} preview/>
     {fallbackActivity.length === 0
       ? <Text dimColor>No saved trajectory is available.</Text> : null}
   </Box>;
 
-  return <Box flexDirection="column" paddingLeft={2}>
+  return <Box flexDirection="column">
     {!trace && !error ? <Text dimColor>Loading trajectory…</Text> : null}
-    <TurnTimeline {...model} verbose={verbose} width={width}
+    <TurnTimeline {...model} verbose={verbose} width={width} preview
       renderDetail={(detailRef, key) => <EventDetail key={key}
         detailRef={detailRef} client={client!} project={project!}/>}/>
     {trace && trace.events.length === 0

@@ -11,9 +11,9 @@ const row = (overrides: Record<string, unknown> = {}) => ({
 } as any);
 
 describe("project runtime category", () => {
-  test("distinguishes a new project from a finished project", () => {
-    expect(projectRuntimeCategory(row())).toBe("new");
-    expect(projectRuntimeCategory(row({ finishedProcessCount: 1 }))).toBe("finished");
+  test("groups idle, finished and waiting projects together", () => {
+    expect(projectRuntimeCategory(row())).toBe("pending");
+    expect(projectRuntimeCategory(row({ finishedProcessCount: 1 }))).toBe("pending");
   });
 
   test("never disguises an unavailable projection as new", () => {

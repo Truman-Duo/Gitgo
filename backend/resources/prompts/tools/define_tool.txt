@@ -1,0 +1,1 @@
+Define one task-scoped composite tool from tools already authorized in this capability. It cannot add authority or execute arbitrary Python.

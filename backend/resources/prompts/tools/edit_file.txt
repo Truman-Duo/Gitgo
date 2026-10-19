@@ -1,0 +1,1 @@
+Replace a small exact unique string in an existing workspace file atomically. First read the file, then use its expected_sha256. Keep old_string to the smallest stable unique anchor; for multiple distant changes, make bounded calls and reread after each successful write. Do not resend the whole file as old_string.

@@ -50,22 +50,27 @@ def _text_diff(path: str, before: str, after: str) -> str:
 
 def read_file(args: dict) -> dict:
     workspace = _workspace(args)
-    path = _confined_path(workspace, args.get("path", ""), must_exist=True,
-                          allowed_roots=_allowed_roots(args))
+    try:
+        path = _confined_path(workspace, args.get("path", ""), must_exist=True,
+                              allowed_roots=_allowed_roots(args))
+    except FileNotFoundError:
+        return _read_failure("FILE_NOT_FOUND", str(args.get("path", "")))
     if path.is_dir():
-        return {"error": "IS_DIRECTORY", "path": _rel(workspace, path)}
+        return _read_failure("IS_DIRECTORY", _rel(workspace, path))
     offset = max(0, int(args.get("offset", 0) or 0))
     limit = max(1, min(int(args.get("limit", 2000) or 2000), 5000))
     try:
         raw = path.read_bytes()
+    except FileNotFoundError:
+        return _read_failure("FILE_NOT_FOUND", _rel(workspace, path))
     except OSError as exc:
-        return {"error": "READ_ERROR", "detail": str(exc), "path": _rel(workspace, path)}
+        return _read_failure("READ_ERROR", _rel(workspace, path), detail=str(exc))
     if b"\x00" in raw[:8192]:
-        return {"error": "BINARY_FILE", "path": _rel(workspace, path)}
+        return _read_failure("BINARY_FILE", _rel(workspace, path))
     text = raw.decode("utf-8-sig", errors="replace")
     lines = text.splitlines()
     selected = lines[offset:offset + limit]
-    return {
+    result = {
         "path": _rel(workspace, path),
         "content": "\n".join(selected),
         "offset": offset,
@@ -76,6 +81,27 @@ def read_file(args: dict) -> dict:
         "sha256": hashlib.sha256(raw).hexdigest(),
         "size": len(raw),
     }
+    if args.get("bind_dependency") is True:
+        try:
+            relative = path.resolve().relative_to(workspace.resolve()).as_posix()
+        except ValueError:
+            return _read_failure("VALIDATION_INPUT_CHANGED", str(path), detail="Only workspace inputs can be pinned for promotion")
+        result["input_dependency"] = {"path": relative, "sha256": result["sha256"]}
+    from backend.core.knowledge.prewrite import read_advisories
+    try:
+        result["lesson_advisories"] = read_advisories(workspace, path, raw.decode("utf-8", errors="replace"),
+                                                     args, read_range=(offset, len(selected)))
+    except Exception as exc:
+        result["warnings"] = [{"code": "LESSON_RECALL_UNAVAILABLE",
+                               "message": f"File read succeeded; lesson recall unavailable: {exc}"}]
+    return result
+
+
+def _read_failure(code: str, path: str, *, detail: str = "") -> dict:
+    """Expected target failures are tool results, not runner failures."""
+    from backend.core.errors import error_payload
+    return {**error_payload(code, details={"path": path, **({"detail": detail} if detail else {})}),
+            "path": path, "effect_state": "not_committed", "execution_state": "completed"}
 
 
 def list_files(args: dict) -> dict:
@@ -102,6 +128,31 @@ def search_text(args: dict) -> dict:
 
 
 def edit_file(args: dict) -> dict:
+    from .file_mutation import commit_file_mutation
+    candidate = project_file_mutation("edit_file", args)
+    if isinstance(candidate, dict):
+        return {**candidate, "effect_state": "not_committed", "execution_state": "not_started"}
+    return commit_file_mutation(candidate, args)
+
+
+def write_file(args: dict) -> dict:
+    from .file_mutation import commit_file_mutation
+    candidate = project_file_mutation("write_file", args)
+    if isinstance(candidate, dict):
+        return {**candidate, "effect_state": "not_committed", "execution_state": "not_started"}
+    return commit_file_mutation(candidate, args)
+
+
+def project_file_mutation(operation: str, args: dict):
+    """Build a complete candidate without changing target files or directories."""
+    if operation == "edit_file":
+        return _project_edit(args)
+    if operation == "write_file":
+        return _project_write(args)
+    raise ValueError("unsupported file mutation")
+
+
+def _project_edit(args: dict):
     workspace = _workspace(args)
     path = _confined_path(workspace, args.get("path", ""), must_exist=True,
                           allowed_roots=_allowed_roots(args))
@@ -160,20 +211,12 @@ def edit_file(args: dict) -> dict:
             "occurrences": count,
         }
     updated = content.replace(old, new, -1 if replace_all else 1)
-    _atomic_write(path, updated.encode("utf-8"))
-    updated_raw = path.read_bytes()
-    relative = _rel(workspace, path)
-    return {
-        "path": relative,
-        "replacements": count if replace_all else 1,
-        "before_sha256": current_hash,
-        "after_sha256": hashlib.sha256(updated_raw).hexdigest(),
-        "size": len(updated_raw),
-        "diff": _text_diff(relative, content, updated),
-    }
+    from .file_mutation import FileMutation
+    return FileMutation("edit_file", workspace, path, current_hash, content, updated,
+                        count if replace_all else 1)
 
 
-def write_file(args: dict) -> dict:
+def _project_write(args: dict):
     workspace = _workspace(args)
     path = _confined_path(workspace, args.get("path", ""), must_exist=False,
                           allowed_roots=_allowed_roots(args))
@@ -248,17 +291,8 @@ def write_file(args: dict) -> dict:
                 "expected_sha256": expected,
                 "actual_sha256": before_hash,
             }
-    _atomic_write(path, content.encode("utf-8"))
-    after = path.read_bytes()
-    relative = _rel(workspace, path)
-    return {
-        "path": relative,
-        "action": "updated" if existed else "created",
-        "before_sha256": before_hash,
-        "after_sha256": hashlib.sha256(after).hexdigest(),
-        "size": len(after),
-        "diff": _text_diff(relative, before_content, content),
-    }
+    from .file_mutation import FileMutation
+    return FileMutation("write_file", workspace, path, before_hash, before_content, content)
 
 
 def delete_file(args: dict) -> dict:
@@ -438,69 +472,8 @@ def exec_command(args: dict) -> dict:
 
 
 def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
-    """Make managed/embedded Python behave like a normal project interpreter.
-
-    The Windows embeddable distribution uses ``pythonXY._pth`` and therefore
-    starts with ``safe_path=True``: neither a script's directory nor the current
-    working directory is importable.  Agents used to burn many model turns
-    diagnosing ``ModuleNotFoundError`` for a sibling test module.  The Host
-    knows the workspace cwd exactly, so it supplies that deterministic runtime
-    fact while preserving argv semantics and avoiding a shell.
-    """
-    launcher = str(argv[0]).casefold()
-    remaining = [str(item) for item in argv[1:]]
-    if (
-        launcher == "py"
-        and remaining
-        and re.fullmatch(r"-\d+(?:\.\d+)?", remaining[0])
-    ):
-        remaining = remaining[1:]
-
-    interpreter_flags: list[str] = []
-    while remaining:
-        item = remaining[0]
-        if item == "-X" and len(remaining) >= 2:
-            interpreter_flags.extend(remaining[:2])
-            remaining = remaining[2:]
-            continue
-        if item in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u"}:
-            interpreter_flags.append(item)
-            remaining = remaining[1:]
-            continue
-        break
-
-    from backend.core.child_process import python_command
-
-    if not remaining:
-        return python_command(interpreter_flags)
-
-    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r});"
-    mode = remaining[0]
-    if mode == "-c" and len(remaining) >= 2:
-        return python_command([
-            *interpreter_flags, "-c", bootstrap + remaining[1], *remaining[2:],
-        ])
-    if mode == "-m" and len(remaining) >= 2:
-        module = remaining[1]
-        module_args = remaining[2:]
-        code = (
-            bootstrap
-            + "import runpy;"
-            + f"sys.argv={[module, *module_args]!r};"
-            + f"runpy.run_module({module!r},run_name='__main__',alter_sys=True)"
-        )
-        return python_command([*interpreter_flags, "-c", code])
-    if not mode.startswith("-"):
-        script = str((cwd / mode).resolve(strict=False)) if not Path(mode).is_absolute() else mode
-        script_args = remaining[1:]
-        code = (
-            bootstrap
-            + "import runpy;"
-            + f"sys.argv={[script, *script_args]!r};"
-            + f"runpy.run_path({script!r},run_name='__main__')"
-        )
-        return python_command([*interpreter_flags, "-c", code])
-    return python_command([*interpreter_flags, *remaining])
+    from backend.core.child_process import workspace_python_command
+    return workspace_python_command(argv, cwd)
 
 
 def shell_script(args: dict) -> dict:

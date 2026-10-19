@@ -1,4 +1,6 @@
 """Compile the live prompt and retain legacy prompt entry points."""
+
+from backend.core.prompt_templates import render_prompt
 import json
 from .models import AgentProcess
 from .session import AgentSession
@@ -62,16 +64,11 @@ def _inject_tool_prompt(session: "AgentSession",
     available = [t for t in tool_names if t in allowed]
 
     prompt = (
-        f"{TOOL_PROMPT_MARKER}\n"
-        f"可用工具: {', '.join(available) if available else '无'}\n\n"
-        "你可以使用 Function Calling 格式调用工具。"
-        "如果不支持 Function Calling，请使用以下 XML 格式：\n"
-        "<tool_call>\n"
-        "  <name>工具名</name>\n"
-        "  <args>{\"key\": \"value\"}</args>\n"
-        "</tool_call>\n\n"
-        "工具结果将以普通文本追加到对话中。\n"
-        "当任务完成时，回复 TASK_COMPLETE 并给出最终结果。"
+        render_prompt(
+            'legacy/tool_calling',
+            TOOL_PROMPT_MARKER=format(TOOL_PROMPT_MARKER, ''),
+            available_tools=format(', '.join(available) if available else '无', ''),
+        )
     )
 
     prompt = _build_system_message_for_llm(process, prompt)

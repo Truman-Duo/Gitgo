@@ -602,7 +602,7 @@ def test_dynamic_role_and_capabilities_are_task_pinned_not_stable_rom():
     stable_names = {item["name"] for item in stable["prompt_sections"]}
     task_names = {item["name"] for item in task["prompt_sections"]}
     assert stable_names == {
-        "Behavior and delivery standard", "User collaboration protocol",
+        "Behavior and delivery standard", "User collaboration protocol", "Source authority",
     }
     assert {"Base identity", "Role and authority", "Capabilities"} <= task_names
 

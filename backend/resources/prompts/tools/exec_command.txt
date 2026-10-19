@@ -1,0 +1,6 @@
+Run one argv-based build, test, inspection or local development command inside the workspace. Network tools, nested shells, governed git writes and external absolute paths are denied.
+Pass the executable and each argument as separate argv entries. This tool does not evaluate shell pipelines, redirects, variable expansion or shell quoting. Paths with spaces belong in one argument without shell quote characters. Use cwd within the allowed workspace instead of chaining a directory change.
+
+Prefer mounted native file tools for ordinary file operations. Preserve stderr, exit status and truncation evidence; a nonzero status or timeout requires interpretation of the actual operation, not automatic rerun. This executor provides policy checks and process control, not a complete OS sandbox.
+
+For Git inspection, establish the requested checkout and diff scope and preserve unrelated changes. Mutating Git subcommands remain subject to the tool's governed-workflow restriction. Do not evade a denial by changing interpreters or executables. Stash entries are shared across worktrees; do not assume the top entry is yours. Destructive cleanup, history changes, commits and publication must stay within the user's authorization and the existing policy path.

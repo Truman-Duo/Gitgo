@@ -383,7 +383,7 @@ def test_supervisor_bundle_shortcut_starts_deterministic_children(
         assert child.status == ProcessStatus.COMPLETED
         assert item["handoff_ref"] in child.task_description
         assert set(child.tool_registry.list_all()) == {
-            "artifact_read", "calculate", "context_open", "context_search",
+            "artifact_read", "workbench", "context_open", "context_search",
             "decision_evidence",
         }
     waited = tools["wait_agents"].execute({

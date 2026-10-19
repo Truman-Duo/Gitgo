@@ -98,7 +98,8 @@ class ToolPipeline:
             return self._error_result(
                 tool_name, execution_id, call_index, start,
                 "tool execution cancelled before start",
-                diagnostics={"nature": "system", "code": "TOOL_CANCELLED"},
+                diagnostics={"nature": "system", "code": "TOOL_CANCELLED",
+                             "effect_state": "not_committed", "execution_state": "not_started"},
             )
 
         from backend.core.loop.operation_policy import (
@@ -111,6 +112,18 @@ class ToolPipeline:
                 tool_name, execution_id, call_index, start,
                 "tool is denied by its execution contract",
                 diagnostics={"nature": "governance", "code": "TOOL_DENIED"},
+            )
+        if (not operation_policy.requires_user
+                and getattr(tool, "isolated", False)
+                and getattr(tool, "runner_name", "") in {"edit_file", "write_file"}):
+            # A real scoped override can exist even for an ordinarily allowed
+            # editor (for example after a lesson diagnostic). Use the existing
+            # broker, never a model-supplied acknowledgement or private flag.
+            from .permission_broker import matching_grant
+            public_raw = dict(raw_args or {})
+            explicit_user_grant = matching_grant(
+                ctx.process, tool_name, public_raw,
+                per_invocation=bool(getattr(tool, "approval_per_invocation", False)),
             )
         if operation_policy.requires_user and resume_state is None:
             approvals = ctx.artifacts.get("approvals", set())
@@ -281,7 +294,7 @@ class ToolPipeline:
                         ctx.process, contract_override=expected_contract))):
                 return self._error_result(tool_name, execution_id, call_index, start,
                     'Current requirement evidence must be reviewed before this effect; no effect started and no grant consumed.',
-                    diagnostics={'nature': 'governance', 'code': 'ALIGNMENT_REVIEW_REQUIRED'})
+                    diagnostics={'nature': 'governance', 'code': 'ALIGNMENT_REVIEW_REQUIRED', 'effect_state': 'not_committed', 'execution_state': 'not_started'})
         spec = getattr(tool, "composite_spec", None) or {}
         if getattr(ctx.process, "read_context_snapshot", None) and (not spec or spec.get("execution_mode") in {"authored_pure_python", "authored_privileged_python"}):
             from backend.core.loop.engineering_workflow import EngineeringWorkflow
@@ -291,11 +304,15 @@ class ToolPipeline:
                     guard = workflow.guard(tool_name, getattr(tool.effect, "value", tool.effect), dict(args or {}))
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 workflow.notice("WORKFLOW_RECOVERY_REQUIRED", f"工程前置检查不可用：{exc}；操作尚未开始。")
-                guard = {"allowed": False, "reason": "engineering prerequisite check unavailable"}
+                guard = {"allowed": False, "code": "ENGINEERING_WORKFLOW_RECOVERY_REQUIRED",
+                         "reason": "engineering prerequisite check unavailable",
+                         "next_actions": [{"action": "engineering_workflow", "operation": "status"}]}
             if not guard.get("allowed", True):
                 return self._error_result(
                     tool_name, execution_id, call_index, start, guard["reason"],
-                    diagnostics={"nature": "governance", "code": "ENGINEERING_PREREQUISITE_REQUIRED"},
+                    diagnostics={"nature": "governance", "code": guard.get("code") or "ENGINEERING_PREREQUISITE_REQUIRED",
+                                 "effect_state": "not_committed", "execution_state": "not_started",
+                                 "next_actions": list(guard.get("next_actions") or [])},
                 )
         if explicit_user_grant is not None:
             consumed = matching_grant(
@@ -352,9 +369,27 @@ class ToolPipeline:
             return self._error_result(
                 tool_name, execution_id, call_index, start,
                 gate_result.error or "blocked by gate",
+                diagnostics={"nature": "governance", "code": gate_result.error or "TOOL_BLOCKED",
+                             "effect_state": "not_committed", "execution_state": "not_started"},
             )
 
         # Step 4: execute
+        if (getattr(tool, "isolated", False)
+                and getattr(tool, "runner_name", "") in {"read_file", "edit_file", "write_file"}):
+            # Native file services own projection/check/commit inside the
+            # runner. Model private fields were stripped before preparation.
+            from backend.core.storage import get_storage
+            storage = ctx.storage or get_storage(ctx.workspace_path)
+            snapshot, _ = ctx.process.read_context_snapshot()
+            args["_lesson_context"] = {
+                "project_name": str(snapshot.get("project_name") or ""),
+                "state_home": str(storage.paths.state_home),
+                "explicit_user_grant": explicit_user_grant is not None,
+                "task_id": str(ctx.process.active_task_id or ctx.process.process_id),
+                "process_id": ctx.process.process_id,"session_id":ctx.session.session_id,
+                "feedback_in_provider_input": __import__("backend.core.knowledge.feedback",fromlist=["exposed_ids"]).exposed_ids(ctx.process),
+            }
+            args["_mutation_lock_root"] = str(storage.paths.state_home / "mutation-locks")
         ctx.event_bus.emit(
             __import__("backend.core.loop.event_bus", fromlist=["ToolEvent"]).ToolEvent(
                 "ToolExecuteStarted", execution_id, tool_name, call_index,
@@ -464,7 +499,8 @@ class ToolPipeline:
             )
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
-                diagnostics={"nature": "system", "code": "TOOL_CANCELLED"},
+                diagnostics={"nature": "system", "code": "TOOL_CANCELLED",
+                             "effect_state": effect_state, "execution_state": "unknown"},
             )
             result.receipt.update({
                 "effect": getattr(tool.effect, "value", str(tool.effect)),
@@ -474,9 +510,10 @@ class ToolPipeline:
             })
             return result
         except Exception as exc:
+            effect_state = ("ambiguous" if is_effectful_mutation(tool.effect) else "not_committed")
             self._write_invocation_state(
                 ctx, tool, tool_name, execution_id, call_index,
-                state="failed", effect_state="ambiguous",
+                state="failed", effect_state=effect_state,
                 path=invocation_path,
             )
             # v0.45: classify error for CRASH vs BUSINESS distinction
@@ -490,12 +527,14 @@ class ToolPipeline:
                     "nature": classified.nature.value,
                     "code": classified.code,
                     "source": classified.source.value,
+                    "effect_state": effect_state,
+                    "execution_state": "unknown",
                 },
             )
             result.receipt.update({
                 "effect": getattr(tool.effect, "value", str(tool.effect)),
                 "cancellation": getattr(tool.cancellation, "value", str(tool.cancellation)),
-                "effect_state": "ambiguous",
+                "effect_state": effect_state,
                 "invocation_path": invocation_path,
             })
             return result
@@ -559,9 +598,13 @@ class ToolPipeline:
                     "nature": "system" if rollback_required else "business",
                     "code": code,
                     "rollback_required": rollback_required,
+                    "effect_state": effect_state,
+                    "execution_state": result_data.get("execution_state", "unknown"),
+                    "next_actions": list(result_data.get("next_actions") or []),
                     **({"error_info": error_info} if isinstance(error_info, dict) else {}),
                 },
             )
+            error_info = result.diagnostics.get("error_info")
             result.data = result_data
             # Business failures are successful tool executions with an
             # unsuccessful domain result.  Preserve the bounded stdout/stderr,
@@ -682,13 +725,19 @@ class ToolPipeline:
     @staticmethod
     def _publish_tool_notices(ctx, tool_name, execution_id, call_index, result_data):
         """Warnings are successful-result facts, never authority grants."""
-        if not isinstance(result_data, dict) or not isinstance(result_data.get("warnings"), list):
+        if not isinstance(result_data, dict):
             return
+        from backend.core.errors import notice_guidance
         from .event_bus import ToolEvent
-        for warning in result_data["warnings"][:16]:
+        warnings = list(result_data.get("warnings") or []) if isinstance(result_data.get("warnings"), list) else []
+        for key in ("knowledge_capture_warning","lesson_recall_warning"):
+            capture=result_data.get(key)
+            if isinstance(capture,dict):warnings.append(capture)
+        for warning in warnings[:16]:
             if not isinstance(warning, dict) or not warning.get("message"):
                 continue
-            notice = {"code": str(warning.get("code") or "TOOL_WARNING")[:80],
+            warning.update(notice_guidance(str(warning.get("code") or "")))
+            notice = {**notice_guidance(str(warning.get("code") or "")), "code": str(warning.get("code") or "TOOL_WARNING")[:80],
                       "message": str(warning["message"])[:1200], "tool_name": tool_name,
                       "execution_id": execution_id, "call_index": call_index,
                       "task_id": str(getattr(ctx.process, "active_task_id", "") or getattr(ctx.process, "process_id", ""))}
@@ -709,6 +758,19 @@ class ToolPipeline:
         """
         if not isinstance(result_data, dict):
             return
+        feedback = result_data.get("lesson_feedback")
+        if isinstance(feedback, dict):
+            receipt["candidate_sha256"] = result_data.get("candidate_sha256")
+            receipt["before_sha256"] = result_data.get("before_sha256")
+            receipt["after_sha256"] = result_data.get("after_sha256")
+            receipt["lesson_checks"] = [{key: item.get(key) for key in
+                ("lesson_id", "lesson_version", "code", "registered_check")}
+                for item in feedback.get("diagnostics", [])]
+            receipt["lesson_user_override"] = feedback.get("user_override", False)
+            receipt["lesson_feedback_id"] = feedback.get("feedback_id", "")
+            receipt["lesson_lookup"] = feedback.get("lookup", {})
+            receipt["lesson_advisory_state"] = feedback.get("advisory_state", "unknown")
+            receipt["lesson_mandatory_check_state"] = feedback.get("mandatory_check_state", "unknown")
         if tool_name in {"search_text", "list_files"}:
             receipt.update(search_engine=result_data.get("engine"), search_complete=result_data.get("complete"),
                            search_partial=result_data.get("partial"),
@@ -720,7 +782,11 @@ class ToolPipeline:
             receipt["command_digest"] = command_digest(arguments or {})
             receipt["command_exit_code"] = result_data.get("exit_code")
             receipt["command_completed"] = type(result_data.get("exit_code")) is int and not result_data.get("error")
+        if tool_name == "read_file" and isinstance(result_data.get("input_dependency"), dict):
+            receipt["input_dependency"] = dict(result_data["input_dependency"])
         if tool_name == "run_test":
+            from .validation_evidence import version_summary
+            receipt["validation_version"] = version_summary(result_data.get("validation_version"))
             receipt["test_id"] = str(result_data.get("test_id") or "")
             receipt["test_target"] = str(result_data.get("target") or "")
             receipt["test_passed"] = result_data.get("passed") is True
@@ -941,8 +1007,21 @@ class ToolPipeline:
     def _error_result(self, tool_name, execution_id, call_index, start, error,
                        diagnostics: dict | None = None):
         duration = (time.time() - start) * 1000
-        diagnostics = diagnostics or {}
+        diagnostics = dict(diagnostics or {})
+        from backend.core.errors import diagnostic_entry
+        entry = diagnostic_entry(str(diagnostics.get("code") or ""))
         error_info = diagnostics.get("error_info")
+        if entry is not None and entry["kind"] == "error":
+            if isinstance(error_info, dict):
+                # Producer-supplied occurrences, actions and state remain authoritative.
+                error_info = {**error_info, "guidance_ref": entry["guidance_ref"]}
+            else:
+                error_info = {**entry, "message": str(error),
+                    "occurrence_id": f"err_{uuid.uuid4().hex}",
+                    "effect_state": diagnostics.get("effect_state", "unknown"),
+                    "execution_state": diagnostics.get("execution_state", "unknown"),
+                    "next_actions": list(diagnostics.get("next_actions") or [])}
+            diagnostics["error_info"] = error_info
         if isinstance(error_info, dict):
             formatted = json.dumps({
                 "error": str(diagnostics.get("code") or error),
@@ -969,6 +1048,7 @@ class ToolPipeline:
                 "tool_name": tool_name,
                 "succeeded": False,
                 "error_code": diagnostics.get("code", "TOOL_ERROR"),
+                **({"error_catalog_id": error_info.get("catalog_id"), "error_occurrence_id": error_info.get("occurrence_id")} if isinstance(error_info, dict) else {}),
             },
         )
 
@@ -1048,6 +1128,13 @@ def _maybe_truncate(tool_name: str, result_data: dict | None,
     if result_data is None:
         return f"[工具 {tool_name} 完成，无输出]", False, None, {}
 
+    if tool_name == "run_test":
+        from .validation_evidence import version_summary
+        result_data = dict(result_data)
+        if "validation_version" in result_data:
+            result_data["validation_version"] = version_summary(result_data["validation_version"])
+        elif isinstance(result_data.get("result"), dict) and "validation_version" in result_data["result"]:
+            result_data["result"] = {**result_data["result"], "validation_version": version_summary(result_data["result"]["validation_version"])}
     output = json.dumps(result_data, ensure_ascii=False, indent=2)
     if len(output) <= MAX_OUTPUT_CHARS:
         return f"[工具 {tool_name} 结果]\n{output}", False, None, {}

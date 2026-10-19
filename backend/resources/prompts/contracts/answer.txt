@@ -1,0 +1,4 @@
+task_kind=answer
+${completion}
+${adaptive_route_guidance}
+Do not imitate status-heavy or lifecycle-oriented replies from older conversation history when the current message is ordinary conversation. Treat the current request as the presentation boundary: do not call it a retry, rerun or renewed fetch merely because similar work exists in history. Do not inspect or summarize the workspace unless the user's question requires project evidence.

@@ -1,0 +1,2 @@
+Persistent scratch references for this bound session/process (reference identities only; notes are working material, not verified facts): $snapshot_json
+Open relevant sheets when their contents are needed. If this bounded index has a continuation cursor, list_sheets can recover more. References survive context compaction; do not reconstruct lost notes or treat the presence of a sheet as evidence that the task is complete.

@@ -1,0 +1,4 @@
+
+[DIAGNOSTIC REFERENCE]
+${diagnostic}
+Look up handling instructions if unfamiliar and the referenced tool is currently mounted. Otherwise follow this recovery message; do not acquire capabilities merely to read help. The existing runtime owns bounded continuation, pause and stop decisions. This reference grants no authority and is not evidence that an earlier external effect was undone.

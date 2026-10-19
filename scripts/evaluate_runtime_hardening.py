@@ -4,6 +4,11 @@ Only exact test decisions are answered. No installed provider/state changes,
 automatic authority grants, secret output, or claims of visual acceptance.
 """
 from __future__ import annotations
+
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
 import argparse
 import copy
 from datetime import datetime
@@ -58,7 +63,7 @@ def prepare(home, original, llm, project):
     env = os.environ.copy()
     for key in ("GITGO_LLM_BASE_URL", "GITGO_LLM_API_KEY", "GITGO_LLM_MODEL", "GITGO_LLM_PROTOCOL"):
         env.pop(key, None)
-    env.update(GITGO_CONFIG_PATH=str(home / "config.json"), GITGO_STATE_HOME=str(home / "state"),
+    env.update(GITGO_CONFIG_PATH=str(home / "config.json"), GITGO_STATE_HOME=str(test_state_home(home / "workspace")),
                GITGO_LLM_CONFIG_PATH=str(home / "llm.json"), GITGO_LLM_SECRET_PATH=str(home / "secrets.json"),
                PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     return env
@@ -96,7 +101,7 @@ def run_case(name, home, cfg, llm, project):
         for _ in range(6):
             status = invoke("runtime.status", {"project": project})
             pending = next((p["pending_decision"] for p in status.get("processes", {}).values() if p.get("pending_decision")), None)
-            evidence = read_evidence(home / "state", (pending or {}).get("task_id", ""), response.get("response", ""))
+            evidence = read_evidence(test_state_home(home / "workspace"), (pending or {}).get("task_id", ""), response.get("response", ""))
             record["turns"].append({"response": response, "pending": pending, "evidence": evidence})
             (home / "result.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
             if not pending: break
@@ -109,7 +114,7 @@ def run_case(name, home, cfg, llm, project):
                 record['stop_command_result'] = invoke('runtime.stop', {'project': project, 'process_id': pending['process_id']})
                 stopped = invoke('runtime.status', {'project': project})
                 record['stopped_process_status'] = stopped['processes'][pending['process_id']]['status']
-                record['after_stop_evidence'] = read_evidence(home / 'state', pending['task_id'])
+                record['after_stop_evidence'] = read_evidence(test_state_home(home / 'workspace'), pending['task_id'])
                 assert record['stopped_process_status'].lower() == 'cancelled', stopped
                 assert any(r and r.get('test_id') == 'environment:vendor_sdk' and r.get('test_passed') is False
                     for p in record['after_stop_evidence']['processes'] for r in p['receipts']), 'Missing original failed-test evidence'
@@ -193,7 +198,7 @@ def main():
     selected = next(p for p in llm["providers"] if "deepseek" in p.get("model_id", "").lower() and p.get("api_key"))
     llm = {**llm, "providers": [copy.deepcopy(selected)], "active_provider": selected["id"], "failover_enabled": False, "failover_order": []}
     source = digest_production()
-    root = ROOT / ".gitgo" / "runtime-hardening" / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8])
+    root = development_root(ROOT) / "runtime-hardening" / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8])
     root.mkdir(parents=True)
     print(json.dumps({"run": str(root), "model": selected["model_id"]}), flush=True)
     summaries = [run_case(name, root / name, cfg, llm, args.project) for name in args.cases.split(",")]

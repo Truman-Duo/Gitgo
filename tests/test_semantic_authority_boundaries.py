@@ -193,7 +193,7 @@ def test_critical_substring_frequency_cannot_auto_verify_lesson(tmp_path_factory
     assert auto_verify_high_confidence(tmp_path_factory, "project") == 0
 
 
-def test_three_independent_verifications_can_auto_promote_lesson(tmp_path_factory):
+def test_legacy_project_names_cannot_impersonate_independent_verifications(tmp_path_factory):
     from backend.core.knowledge.harvest import auto_verify_high_confidence
     from backend.core.knowledge.manager import LessonManager
     from backend.core.knowledge.models import Lesson
@@ -206,4 +206,4 @@ def test_three_independent_verifications_can_auto_promote_lesson(tmp_path_factor
         verified_count=3,
         verified_in=["project-a", "project-b", "project-c"],
     ))
-    assert auto_verify_high_confidence(tmp_path_factory, "project") == 1
+    assert auto_verify_high_confidence(tmp_path_factory, "project") == 0

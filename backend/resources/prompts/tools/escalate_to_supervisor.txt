@@ -1,0 +1,1 @@
+Escalate a semantic boundary, dependency, blocking, or stale-intent issue to the governing A through the Host. Supply evidence and a proposed action. Set requires_user_decision only when A may need to ask the user; B never messages a sibling or changes another task directly.

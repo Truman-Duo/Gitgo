@@ -237,8 +237,9 @@ const HANDLERS: Record<string, (ctx: CommandContext, args: string[]) => Promise<
     const name = resolveProject(ctx);
     if (!name) return noProject();
     const id = args[0];
-    if (!id) return { resultText: "/runtime lesson verify <id>" };
-    await lessonVerify(ctx.client, name, id);
+    const version = args[1];
+    if (!id || !version) return { resultText: "Review and verify in /runtime lesson, or use /runtime lesson verify <id> <content-version>" };
+    await lessonVerify(ctx.client, name, id, version);
     return { resultText: `Verified ${id.slice(0, 12)}` };
   },
 

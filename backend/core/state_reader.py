@@ -73,7 +73,8 @@ class StateReader:
             lessons = LessonManager.load_pending(ws, project_name)
         else:
             lessons = LessonManager.load_instance(ws, project_name) if project_name else []
-        return [l.to_dict() for l in lessons]
+        from backend.core.knowledge.review import can_consume
+        return [l.to_dict() for l in lessons if can_consume(l)]
 
     @staticmethod
     def get_integrity_warnings(project_name: str, limit: int = 20) -> list[dict]:

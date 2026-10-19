@@ -159,10 +159,61 @@ class LessonManager:
     def load_abstract(
         cls, workspace_path: Path, tech_stack: str = "",
     ) -> list[Lesson]:
-        return cls._load(
+        lessons = cls._load(
             workspace_path, scope="abstract",
             tech_stack=tech_stack or None,
         )
+        from backend.core.storage.bindings import get_shared_knowledge_storage
+        shared = get_shared_knowledge_storage(cls._runtime(workspace_path).paths.state_home)
+        if shared is not None:
+            lessons += [Lesson.from_dict(item) for item in shared.load_lesson_records(
+                scope="abstract", tech_stack=tech_stack or None,
+            )]
+        return lessons
+
+    @classmethod
+    def share_abstract(cls, workspace_path: Path, lesson_id: str, *,
+                       trigger: str, rule: str, tech_stack: str) -> Lesson:
+        """Explicitly publish reviewed text, not an automatic copy of private history.
+
+        Sharing never exports evidence file paths, executable checkers or tool
+        constraints. Local promotion remains local for compatibility.
+        """
+        runtime = cls._runtime(workspace_path)
+        found = runtime.get_lesson_record(lesson_id)
+        if found is None or found[0] != "abstract":
+            raise ValueError("only a locally abstracted lesson can be shared")
+        if not trigger.strip() or not rule.strip() or not tech_stack.strip():
+            raise ValueError("reviewed trigger, rule and applicability tech_stack are required")
+        from backend.core.storage.bindings import get_shared_knowledge_storage
+        shared = get_shared_knowledge_storage(runtime.paths.state_home, create=True)
+        identity = hashlib.sha256(f"{runtime.paths.project_id}:{lesson_id}".encode()).hexdigest()[:24]
+        lesson = Lesson(
+            id="shared_" + identity, trigger=trigger.strip(), rule=rule.strip(),
+            tech_stack=tech_stack.strip(), abstract=True, source="shared", origin="explicit_share",
+            category=str(found[1].get("category") or ""), severity=str(found[1].get("severity") or "medium"),
+            created_at=datetime.now().isoformat(),
+            evidence={"schema_version": 1, "scope": "user_shared",
+                      "source_project_id": runtime.paths.project_id, "source_lesson_id": lesson_id,
+                      "source_record_digest": hashlib.sha256(json.dumps(found[1], sort_keys=True).encode()).hexdigest()},
+        )
+        from .review import mark_reviewed
+        mark_reviewed(lesson, kind="explicit_share", reference=lesson_id)
+        shared.upsert_lesson_record(lesson.to_dict(), scope="abstract",
+                                   content_hash=lesson_content_hash(lesson.trigger, lesson.rule))
+        return lesson
+
+    @classmethod
+    def revoke_shared(cls, workspace_path: Path, lesson_id: str) -> bool:
+        from backend.core.storage.bindings import get_shared_knowledge_storage
+        runtime = cls._runtime(workspace_path)
+        shared = get_shared_knowledge_storage(runtime.paths.state_home)
+        if shared is None:
+            return False
+        found = shared.get_lesson_record(lesson_id)
+        if found is None or (found[1].get("evidence") or {}).get("source_project_id") != runtime.paths.project_id:
+            return False
+        return shared.delete_lesson_record(lesson_id, scopes=("abstract",))
 
     @classmethod
     def load_instance(
@@ -190,6 +241,11 @@ class LessonManager:
         if not lesson.created_at:
             lesson.created_at = datetime.now().isoformat()
         scope = "abstract" if lesson.abstract else "instance"
+        # This internal authoring API is not exposed to model-generated harvest.
+        # Legacy imports deliberately bypass it and acquire no review by source name.
+        if lesson.source == "manual":
+            from .review import mark_reviewed
+            mark_reviewed(lesson, kind="author_supplied", reference=lesson.id)
         cls._migrate_legacy(workspace_path)
         runtime = cls._runtime(workspace_path)
         runtime.upsert_lesson_record(
@@ -217,10 +273,21 @@ class LessonManager:
     @classmethod
     def verify(
         cls, workspace_path: Path, lesson_id: str, project_name: str = "",
+        *, user_confirmation: bool = False, expected_version: str = "",
     ) -> Lesson | None:
         cls._migrate_legacy(workspace_path)
         runtime = cls._runtime(workspace_path)
         found = runtime.get_lesson_record(lesson_id)
+        if found is None:
+            from backend.core.storage.bindings import get_shared_knowledge_storage
+            shared = get_shared_knowledge_storage(runtime.paths.state_home)
+            if shared is not None:
+                found = shared.get_lesson_record(lesson_id)
+                if found is not None:
+                    return Lesson.from_dict(shared.record_lesson_verification(
+                        lesson_id, runtime.paths.project_id, project_name,
+                        user_confirmation=user_confirmation, expected_version=expected_version,
+                    ))
         if found is None:
             return None
         scope, raw = found
@@ -228,24 +295,11 @@ class LessonManager:
         if scope in {"pending", "instance"} and project_name:
             if lesson.project_name != project_name:
                 return None
-        if scope == "pending":
-            lesson.verified_at = datetime.now().isoformat()
-            lesson.verified_count = 1
-            lesson.source = "auto_harvested"
-            runtime.upsert_lesson_record(
-                lesson.to_dict(), scope="instance",
-                content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
-            )
-            return lesson
-        if scope in {"instance", "abstract"}:
-            lesson.verified_count += 1
-            lesson.verified_at = datetime.now().isoformat()
-            lesson.verified_in = (lesson.verified_in or []) + [project_name]
-            runtime.upsert_lesson_record(
-                lesson.to_dict(), scope=scope,
-                content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
-            )
-            return lesson
+        if scope in {"pending", "instance", "abstract"}:
+            return Lesson.from_dict(runtime.record_lesson_verification(
+                lesson_id, runtime.paths.project_id, project_name,
+                user_confirmation=user_confirmation, expected_version=expected_version,
+            ))
         return None
 
     @classmethod
@@ -259,7 +313,8 @@ class LessonManager:
         if found is None or found[0] != "instance":
             return None
         lesson = Lesson.from_dict(found[1])
-        if lesson.project_name != project_name:
+        from .review import can_consume
+        if lesson.project_name != project_name or not can_consume(lesson):
             return None
         lesson.abstract = True
         lesson.tech_stack = tech_stack
@@ -273,14 +328,17 @@ class LessonManager:
     @classmethod
     def search(
         cls, workspace_path: Path, query: str,
-        project_name: str = "", tech_stack: str = "",
+        project_name: str = "", tech_stack: str = "", *, include_unreviewed: bool = False,
     ) -> list[Lesson]:
         results: list[Lesson] = []
         seen: set[str] = set()
         needle = query.lower()
 
         def add_matches(lessons: list[Lesson]) -> None:
+            from .review import can_consume
             for lesson in lessons:
+                if not include_unreviewed and not can_consume(lesson):
+                    continue
                 text = json.dumps(lesson.to_dict(), ensure_ascii=False).lower()
                 identity = lesson.id or text
                 if needle in text and identity not in seen:
@@ -330,15 +388,16 @@ class LessonManager:
         cls._migrate_legacy(workspace_path)
         runtime = cls._runtime(workspace_path)
         found = runtime.get_lesson_record(lesson.id)
-        if found is None or found[0] not in {"instance", "pending"}:
+        if found is None:
+            from backend.core.storage.bindings import get_shared_knowledge_storage
+            shared = get_shared_knowledge_storage(runtime.paths.state_home)
+            if shared is not None and lesson.recent_retrievals:
+                shared.record_lesson_retrieval(lesson.id, lesson.recent_retrievals[-1])
             return
-        current = Lesson.from_dict(found[1])
-        if current.project_name != project_name:
+        if found[0] != "abstract" and found[1].get("project_name") != project_name:
             return
-        runtime.upsert_lesson_record(
-            lesson.to_dict(), scope=found[0],
-            content_hash=lesson_content_hash(lesson.trigger, lesson.rule),
-        )
+        if lesson.recent_retrievals:
+            runtime.record_lesson_retrieval(lesson.id, lesson.recent_retrievals[-1])
 
     @classmethod
     def pending_count(cls, workspace_path: Path, project_name: str) -> int:

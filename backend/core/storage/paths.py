@@ -226,6 +226,22 @@ def resolve_storage_paths(
     )
 
 
+def resolve_shared_knowledge_paths(state_home: str | Path) -> StoragePaths:
+    """A user knowledge realm; never discover or scan other project stores."""
+    home = Path(state_home).expanduser().resolve()
+    root = home / "shared" / "knowledge"
+    validate_storage_location(root)
+    root.mkdir(parents=True, exist_ok=True)
+    cas = root / "cas"
+    cas.mkdir(exist_ok=True)
+    return StoragePaths(
+        workspace=root, project_id=str(uuid.uuid5(uuid.NAMESPACE_URL, "gitgo:user-knowledge")),
+        state_home=home, project_root=root, state_db=root / "state.sqlite3",
+        observability_db=root / "observability.sqlite3", cas_dir=cas,
+        health_file=root / "storage-health.json",
+    )
+
+
 def resolve_existing_storage_paths(workspace: str | Path) -> StoragePaths | None:
     """Resolve an existing project's store without creating or probing it.
 

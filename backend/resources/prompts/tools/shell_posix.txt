@@ -1,0 +1,1 @@
+The PowerShell execution profile is currently unavailable on this platform; Bash must pass its executable-identity checks.

@@ -24,6 +24,7 @@ from functools import partial
 from pathlib import Path
 
 from backend.core.config import Config, ProjectConfig
+from backend.core.prompt_templates import load_prompt
 from backend.core.sync_session import SyncSession, SessionStage
 from backend.core.daemon.watcher import WorkspaceWatcher
 from backend.core.daemon.poller import TrialPoller
@@ -140,6 +141,52 @@ def _publish_governance_snapshot(
     return fresh
 
 
+def _start_queued_knowledge_harvest(daemon_ctx, *, event_queue, workspace_path, project_name,
+                                     provider_factory=_background_llm_provider) -> bool:
+    """Closed-task facts are already durable; no parallel scheduler ledger."""
+    if daemon_ctx.get("knowledge_harvest_inflight"):
+        return False
+    from backend.core.history import HistoryManager
+    from backend.core.knowledge.harvest import get_unprocessed_signals
+    with HistoryManager.workspace_scope(workspace_path):
+        closed = [item for item in get_unprocessed_signals(project_name)
+                  if item.get("signal_type") == "task_closed"
+                  and not item.get("harvest_retry_count") and item.get("task_id")]
+    if not closed:
+        return False
+    provider = provider_factory(daemon_ctx)
+    return _start_background_harvest(daemon_ctx, event_queue=event_queue, provider=provider,
+        workspace_path=workspace_path, project_name=project_name, signal_type="task_closed",
+        task_id=str(closed[0]["task_id"]))
+
+
+def _observe_task_closure(event, process, *, workspace_path, project_name) -> bool:
+    """One completed user request is a sampling boundary, not a knowledge verdict."""
+    if process is None or process.parent_id or process.cancel_requested:
+        return False
+    status = str((event.get("outcome") or {}).get("status") or "")
+    if status not in {"completed", "failed"}:
+        return False
+    task_id = str(event.get("task_id") or "")
+    if not task_id or task_id != process.active_task_id:
+        return False
+    from backend.core.history import HistoryManager
+    from backend.core.knowledge.harvest import get_unprocessed_signals, capture_signal
+    with HistoryManager.workspace_scope(workspace_path):
+        observations = [item for item in get_unprocessed_signals(project_name)
+                        if item.get("task_id") == task_id
+                        and item.get("signal_type") in {"execution_failure", "execution_followup", "completion_recovery", "workbench_material"}]
+        if not observations:
+            return False  # greetings and ordinary successful answers cost no harvest call
+        context, version = process.read_context_snapshot()
+        from backend.core.knowledge.evidence_context import task_context_snapshot
+        capture_signal("task_closed", {"task_id": task_id, "outcome_status": status,
+            "task_request": process.task_description[:2000],
+            "task_context": task_context_snapshot(context)},
+            project_name, source_event_id=f"{task_id}:{process.process_id}:{version}:{process.steps_used}")
+    return True
+
+
 def _start_background_harvest(
     daemon_ctx: dict,
     *,
@@ -149,6 +196,7 @@ def _start_background_harvest(
     project_name: str,
     signal_type: str,
     thread_factory=threading.Thread,
+    task_id: str = "",
 ) -> bool:
     """Lease and execute one harvest without blocking the daemon command loop.
 
@@ -162,10 +210,22 @@ def _start_background_harvest(
 
     from backend.core.knowledge.harvest import (
         complete_harvest, fail_harvest, harvest_llm_summary,
-        lease_harvest_signals, mark_harvest_triggered,
+        lease_harvest_signals, lease_harvest_signal_ids, get_unprocessed_signals,
+        mark_harvest_triggered, stage_harvest_proposal,
     )
 
-    batch = lease_harvest_signals(project_name)
+    from backend.core.history import HistoryManager
+    with HistoryManager.workspace_scope(workspace_path):
+        if task_id:
+            available = [item for item in get_unprocessed_signals(project_name)
+                         if item.get("task_id") == task_id]
+            # Include the actual closure in the bounded evidence batch.
+            closures = [item for item in available if item.get("signal_type") == "task_closed"]
+            rest = [item for item in available if item.get("signal_type") != "task_closed"]
+            selected = rest[-29:] + closures[-1:]
+            batch = lease_harvest_signal_ids(project_name, [item["signal_id"] for item in selected])
+        else:
+            batch = lease_harvest_signals(project_name)
     if not batch:
         return False
 
@@ -174,38 +234,40 @@ def _start_background_harvest(
     mark_harvest_triggered(project_name)
 
     def _worker() -> None:
+        with HistoryManager.workspace_scope(workspace_path):
+            _run_worker()
+
+    def _run_worker() -> None:
         signal_ids = [item["signal_id"] for item in batch]
         event = {
             "event": "knowledge_harvest_result",
             "harvest_id": harvest_id,
             "time": datetime.now(timezone.utc).isoformat(),
             "signal_type": signal_type,
+            "summary": {},
         }
         try:
-            from backend.core.knowledge.lesson import LessonManager as _LM
-
             lessons = harvest_llm_summary(
                 batch,
                 provider,
                 workspace_path,
                 project_name,
                 raise_on_error=True,
+                summary_report=event["summary"],
                 on_provider_notice=lambda notice: event_queue.put({
                     **notice, "harvest_id": harvest_id, "origin": "background_harvest",
                     "time": datetime.now(timezone.utc).isoformat(),
                 }),
             )
-            workspace = Path(workspace_path)
-            for lesson in lessons:
-                _LM.save_pending(workspace, lesson)
-            complete_harvest(
-                project_name,
-                signal_ids,
-                [lesson.id for lesson in lessons],
-            )
-            event.update({"status": "success", "count": len(lessons)})
+            if lessons:
+                proposal = stage_harvest_proposal(project_name, signal_ids, lessons,
+                                                  summary_report=event["summary"])
+                event.update(status="awaiting_confirmation", count=len(lessons), proposal=proposal)
+            else:
+                complete_harvest(project_name, signal_ids, [], summary_report=event["summary"])
+                event.update(status="no_knowledge", count=0)
         except Exception as exc:
-            fail_harvest(project_name, signal_ids, str(exc))
+            fail_harvest(project_name, signal_ids, str(exc), summary_report=event["summary"])
             event.update({
                 "status": "failed",
                 "reason": "harvest_failed",
@@ -499,6 +561,8 @@ def run_daemon(
                     "test_id": {"type": "string"},
                     "target": {"type": "string"},
                     "seeds": {"type": "array", "items": {"type": "integer"}},
+                    "input_files": {"type": "array", "items": {"type": "string"},
+                        "description": "Optional explicit local validation inputs, including source/config/data dependencies; target is always included. Omit for bounded business-workspace coverage."},
                     "timeout": {"type": "integer"},
                 },
                 "required": ["test_id", "target"],
@@ -591,7 +655,7 @@ def run_daemon(
         ),
         "contract_get_impact": AgentTool(
             name="contract_get_impact",
-            description="查询文件的影响面：哪些文件依赖它（dependents），哪些函数调用了它（callers）。修改文件前评估爆炸半径时使用。",
+            description=load_prompt('tools/contract_get_impact'),
             parameters={
                 "type": "object",
                 "properties": {
@@ -606,7 +670,7 @@ def run_daemon(
         ),
         "contract_get_changed_symbols": AgentTool(
             name="contract_get_changed_symbols",
-            description="对比文件两个版本的 AST，返回变更的函数/类名列表。用于精确判断代码变更的符号级影响。",
+            description=load_prompt('tools/contract_get_changed_symbols'),
             parameters={
                 "type": "object",
                 "properties": {
@@ -1104,17 +1168,19 @@ def run_daemon(
             elif event_type == "knowledge_harvest_result":
                 if daemon_ctx.get("knowledge_harvest_inflight") == ev.get("harvest_id"):
                     daemon_ctx.pop("knowledge_harvest_inflight", None)
-                if ev.get("status") == "success":
+                if ev.get("status") in {"awaiting_confirmation", "no_knowledge"}:
                     _publish_governance_snapshot(
                         session, project, daemon_ctx, apm,
                         policy_results=daemon_ctx.get("last_policy_results"),
                     )
                     _emit({
-                        "event": "lessons_harvested",
+                        "event": "lesson_harvest_proposed" if ev.get("status") == "awaiting_confirmation" else "lesson_harvest_completed",
+                        "proposal": ev.get("proposal"),
                         "harvest_id": ev.get("harvest_id"),
                         "time": ev.get("time"),
                         "count": int(ev.get("count", 0)),
                         "signal_type": ev.get("signal_type", ""),
+                        "summary": ev.get("summary", {}),
                     })
                 else:
                     _emit({
@@ -1123,7 +1189,15 @@ def run_daemon(
                         "reason": ev.get("reason", "harvest_failed"),
                         "error": ev.get("error", "Knowledge harvest failed."),
                         "retryable": bool(ev.get("retryable", True)),
+                        "summary": ev.get("summary", {}),
                     })
+
+                try:
+                    _start_queued_knowledge_harvest(daemon_ctx, event_queue=evq,
+                        workspace_path=str(session.workspace_path), project_name=project.name)
+                except Exception as exc:
+                    _emit({"event": "lesson_harvest_failed", "reason": "queued_harvest_failed",
+                           "error_type": type(exc).__name__, "retryable": True})
 
             elif event_type == "trial_check":
                 _emit({"event": "operation_started", "op": "trial_check"})
@@ -1170,6 +1244,14 @@ def run_daemon(
                 _emit_v2(ev)  # priority="normal" — 微批
             elif event_type == "agent_complete":
                 _emit_v2(ev, priority="immediate")  # 修复：之前无分支→静默丢弃
+                try:
+                    _observe_task_closure(ev, apm.get(str(ev.get("process_id") or "")),
+                        workspace_path=str(session.workspace_path), project_name=project.name)
+                    _start_queued_knowledge_harvest(daemon_ctx, event_queue=evq,
+                        workspace_path=str(session.workspace_path), project_name=project.name)
+                except Exception as exc:
+                    _emit({"event": "lesson_harvest_failed", "reason": "task_closure_harvest_failed",
+                           "error_type": type(exc).__name__, "retryable": True})
                 # Session is durable across tasks (4A). Process checkpoints are
                 # retained until an explicit retention policy reaps them.
 

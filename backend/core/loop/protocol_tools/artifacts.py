@@ -1,5 +1,7 @@
 """artifacts protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.models import ProcessStatus
 
@@ -22,8 +24,16 @@ def install(ctx):
         child = _owned_child(process_id)
         if child is None:
             raise PermissionError("artifact process must be an owned child task")
-        if child.status != ProcessStatus.COMPLETED:
-            raise ValueError("child result is not complete")
+        if child.status != ProcessStatus.COMPLETED or (
+            child.process_id in manager._threads and not child.lifecycle_finalized
+        ):
+            from backend.core.errors import error_payload
+            return {"available": False, **error_payload(
+                "CHILD_ARTIFACT_NOT_READY",
+                details={"process_id": child.process_id, "status": child.status.value,
+                         "lifecycle_finalized": child.lifecycle_finalized},
+                next_actions=[{"action": "list_agents", "effect": "Inspect the owned execution before choosing wait, failure review or continuation."}],
+            )}
         if child.worktree.get("isolated"):
             return manager.read_sealed_artifact(
                 process,
@@ -53,9 +63,7 @@ def install(ctx):
     tools["read_child_artifact"] = AgentTool(
         name="read_child_artifact",
         description=(
-            "Read a file produced by an owned completed subprocess before review. "
-            "The Host uses its immutable sealed result in isolated Git worktrees and "
-            "the current bounded workspace artifact in shared non-Git projects."
+            load_prompt('tools/read_child_artifact')
         ),
         parameters={
             "type": "object",

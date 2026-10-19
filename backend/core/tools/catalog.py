@@ -8,6 +8,9 @@ arguments or manufacture a stronger tool contract.
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+
+from backend.core.prompt_templates import load_prompt, render_prompt
 
 from backend.core.loop.agent_tool import (
     AgentTool,
@@ -35,8 +38,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "read_file": AgentTool(
             name="read_file",
             description=(
-                "Read a workspace text file by line window. Returns a SHA-256 version "
-                "token; pass it to edit_file/write_file to prevent stale overwrites."
+                load_prompt('tools/read_file')
             ),
             parameters={
                 "type": "object",
@@ -44,6 +46,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "minimum": 0},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+                    "bind_dependency": {"type": "boolean", "description": "Pin this whole file as an important input to the task result; sealed-result promotion requires its version to remain applicable. Ordinary reads need no pin."},
                 },
                 "required": ["path"],
             },
@@ -57,10 +60,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         ),
         "list_files": AgentTool(
             name="list_files",
-            description=("Find workspace files using ripgrep globs and bounded, sorted pages. "
-                         "Default scope respects local ignore files and excludes hidden/generated files. "
-                         "Use include_hidden/respect_ignore explicitly to change that scope. "
-                         "Warnings and partial coverage are never proof a file does not exist."),
+            description=(load_prompt('tools/list_files')),
             parameters={
                 "type": "object",
                 "properties": {
@@ -86,14 +86,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "search_text": AgentTool(
             name="search_text",
             description=(
-                "Search workspace text with ripgrep. Return file/line content, matching "
-                "files, or per-file matching-line counts using output_mode. Prefer literal=true "
-                "for ordinary text. Sorted offset pages and context_lines support follow-up reads. "
-                "Default scope excludes hidden/generated/binary and files over 2MB, and respects "
-                "local ignore files. Explicit include globs can override ignore rules; exclude "
-                "globs and Host-generated-directory exclusions take precedence. "
-                "Inspect engine/complete/partial/warnings before concluding no match. "
-                "Unavailable ripgrep only permits a limited, visible literal fallback."
+                load_prompt('tools/search_text')
             ),
             parameters={
                 "type": "object",
@@ -126,8 +119,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "document_open": AgentTool(
             name="document_open",
             description=(
-                "Extract a bounded text page from a workspace document. Supports "
-                "txt/md, PDF, Word, PowerPoint and Excel through one stable interface."
+                load_prompt('tools/document_open')
             ),
             parameters={
                 "type": "object",
@@ -180,10 +172,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "web_search": AgentTool(
             name="web_search",
             description=(
-                "Search the public web through the active provider's native search "
-                "capability, with the configured SearXNG transport as fallback. This is "
-                "an anonymous public read and does not need a permission request. Use "
-                "web_fetch on selected result URLs when source text is needed."
+                load_prompt('tools/web_search')
             ),
             parameters={"type": "object", "properties": {
                 "query": {"type": "string"},
@@ -203,9 +192,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "web_fetch": AgentTool(
             name="web_fetch",
             description=(
-                "Retrieve one anonymous public HTTP(S) page selected from search results. "
-                "The Host blocks credentials, local/private addresses, unsafe redirects, "
-                "binary content and oversized responses. No permission request is needed."
+                load_prompt('tools/web_fetch')
             ),
             parameters={
                 "type": "object",
@@ -226,15 +213,12 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "edit_file": AgentTool(
             name="edit_file",
             description=(
-                "Replace a small exact unique string in an existing workspace file "
-                "atomically. First read the file, then use its expected_sha256. Keep "
-                "old_string to the smallest stable unique anchor; for multiple distant "
-                "changes, make bounded calls and reread after each successful write. "
-                "Do not resend the whole file as old_string."
+                load_prompt('tools/edit_file')
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "lesson_feedback_id": {"type": "string", "description": "Use the feedback_id returned by a before-write advisory when choosing to resubmit the same candidate. This does not grant authority or certify understanding."},
                     "path": {"type": "string", "description": "Workspace-relative path of an existing UTF-8 text file."},
                     "old_string": {"type": "string", "description": "Smallest current unique text anchor to replace."},
                     "new_string": {"type": "string", "description": "Replacement text for that exact anchor."},
@@ -255,14 +239,12 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "write_file": AgentTool(
             name="write_file",
             description=(
-                "Write a complete workspace file atomically. For a new path, omit "
-                "create_only (it defaults to true). For an existing path, first call "
-                "read_file, then set create_only=false and pass that current "
-                "expected_sha256. Never delete an existing file merely to overwrite it."
+                load_prompt('tools/write_file')
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "lesson_feedback_id": {"type": "string", "description": "Use the feedback_id returned by a before-write advisory when choosing to resubmit the same candidate. This does not grant authority or certify understanding."},
                     "path": {"type": "string", "description": "Workspace-relative output path."},
                     "content": {"type": "string", "description": "Complete UTF-8 file content."},
                     "create_only": {"type": "boolean", "default": True, "description": "Keep true for creation. Set false only for a CAS replacement of an existing file."},
@@ -282,10 +264,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "delete_file": AgentTool(
             name="delete_file",
             description=(
-                "Recoverably delete one workspace file after reading its current SHA-256. "
-                "The Host moves it into project-local .gitgo/trash, returns a restore "
-                "reference and emits a deletion diff. Directories and .gitgo internals "
-                "cannot be deleted through this tool."
+                load_prompt('tools/delete_file')
             ),
             parameters={
                 "type": "object",
@@ -307,11 +286,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "apply_patch": AgentTool(
             name="apply_patch",
             description=(
-                "Apply a bounded standard unified diff inside the workspace. Each file "
-                "must have --- a/path and +++ b/path headers followed by valid "
-                "@@ -old_start,old_count +new_start,new_count @@ hunks. The complete "
-                "patch is preflight-checked before any file is changed. Prefer "
-                "edit_file for a small exact replacement."
+                load_prompt('tools/apply_patch')
             ),
             parameters={
                 "type": "object",
@@ -331,9 +306,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "exec_command": AgentTool(
             name="exec_command",
             description=(
-                "Run one argv-based build, test, inspection or local development command "
-                "inside the workspace. Network tools, nested shells, governed git writes "
-                "and external absolute paths are denied."
+                load_prompt('tools/exec_command')
             ),
             parameters={
                 "type": "object",
@@ -358,13 +331,13 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "shell_script": AgentTool(
             name="shell_script",
             description=(
-                "Run one script inside the workspace. Choose shell=bash or powershell; "
-                "auto uses PowerShell on Windows and Bash elsewhere. Match that shell's syntax; "
-                "the Host never translates scripts. Use when argv-based exec_command "
-                "cannot express the required pipes, redirections or shell control flow. "
-                "This is a sensitive capability: include the user-visible purpose; Host "
-                "automatically pauses for approval of these exact arguments before every "
-                "invocation. Never use it merely for command convenience."
+                render_prompt(
+                    'tools/shell_script',
+                    auto_shell='powershell' if sys.platform == 'win32' else 'bash',
+                    platform_guidance=load_prompt(
+                        'tools/shell_powershell' if sys.platform == 'win32' else 'tools/shell_posix',
+                    ),
+                )
             ),
             parameters={
                 "type": "object",

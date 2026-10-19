@@ -1,0 +1,2 @@
+
+The Host has accepted a self_execute contract and the explicit lease is active. Perform the delivery with the leased tools; do not request the lease again or claim that a pre-lease tool list describes the current capability surface. 
