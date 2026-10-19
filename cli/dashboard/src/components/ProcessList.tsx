@@ -1,6 +1,7 @@
 // src/components/ProcessList.tsx — project subprocess flat list
-import React, { memo, useMemo, useEffect } from "react";
-import { Box, Text } from "@anthropic/ink";
+import React, { memo, useMemo, useEffect, useRef, useLayoutEffect } from "react";
+import { Box, Text, ScrollBox } from "@anthropic/ink";
+import type {DOMElement, ScrollBoxHandle} from "@anthropic/ink";
 import type { LoopData, ProcessInfo } from "../hooks/useLoopData.js";
 import { usePanelSize, statusDot, indent as indentFn, useSelectionStyle, processStatusToDot, truncate, displayWidth } from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
@@ -81,7 +82,9 @@ export function visibleBProcesses(processes: Record<string, ProcessInfo>): Topol
 export const ProcessList = memo(function ProcessList({
   project, loopData, cols: _cols, selIdx, idsRef, onStatusUpdate,
 }: Props) {
-  const { w } = usePanelSize({ minWidth: 60 });
+  const { w, h } = usePanelSize({ minWidth: 60, widthOffset: 2 });
+  const scrollRef = useRef<ScrollBoxHandle>(null);
+  const selectedRow = useRef<DOMElement>(null);
   const { processes, recoveryAvailable, storage } = loopData;
 
   const flatList = useMemo(() => {
@@ -89,6 +92,9 @@ export const ProcessList = memo(function ProcessList({
     // every worker/reviewer state across tasks and exclude all A supervisors.
     return visibleBProcesses(processes);
   }, [processes]);
+  useLayoutEffect(() => {
+    if (selectedRow.current) scrollRef.current?.scrollIntoView(selectedRow.current);
+  }, [selIdx, w, h, flatList[selIdx]?.process_id]);
 
   const runningCount = flatList.filter((p) => p.status === "running").length;
   const waitingCount = flatList.filter((p) => ["waiting", "awaiting_user", "recovering", "resume_available"].includes(p.status)).length;
@@ -131,7 +137,7 @@ export const ProcessList = memo(function ProcessList({
     const fixed = `${ind}● ${agentLabel(p)}  ${steps}  ring:${p.ring_level}${dependency}${cycle}${children}${decision}${worktree}`;
     const pathWidth = Math.max(0, w - displayWidth(fixed) - 2);
     return (
-      <Box key={p.process_id} flexDirection="row">
+      <Box key={p.process_id} ref={isSelected ? selectedRow : undefined} flexDirection="row">
         <Text backgroundColor={rowSel.bg} color={rowSel.fg} bold={rowSel.bold}>
           <Text dimColor>{ind}</Text>
           <Text color={dot.color}>● </Text>
@@ -153,7 +159,7 @@ export const ProcessList = memo(function ProcessList({
   };
 
   return (
-    <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
+    <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1} minHeight={0}>
       {/* Header */}
       <Box flexDirection="row" gap={8}>
         <Text bold>Subprocesses</Text>
@@ -162,7 +168,7 @@ export const ProcessList = memo(function ProcessList({
       </Box>
 
       {/* Project-wide B list: every status, across every task */}
-      <Box flexDirection="column" flexGrow={1}>
+      <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>
         {recoveryAvailable.length > 0 ? (
           <Box marginBottom={1}>
             <Text dimColor>
@@ -184,7 +190,7 @@ export const ProcessList = memo(function ProcessList({
             </>
           </>
         )}
-      </Box>
+      </ScrollBox>
 
       {/* Footer */}
       <Box marginTop={1}>

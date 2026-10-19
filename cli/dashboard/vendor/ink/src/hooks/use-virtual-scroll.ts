@@ -8,6 +8,7 @@ import {
 } from 'react'
 import type { ScrollBoxHandle } from '../components/ScrollBox.js'
 import type { DOMElement } from '../core/dom.js'
+import { reflowOffset } from '../core/reflow-offset.js'
 
 export type VirtualWindow = {
   start: number
@@ -35,7 +36,7 @@ type Options = {
 }
 
 type CachedSize = { layoutKey: string | number; rows: number }
-type LayoutAnchor = { key: string; offset: number; layoutKey: string | number }
+type LayoutAnchor = { key: string; offset: number; rows: number; layoutKey: string | number }
 
 function lowerBoundEnd(offsets: readonly number[], value: number): number {
   // First item whose end offset is strictly greater than value.
@@ -163,7 +164,7 @@ export function useVirtualScroll({
       }
       const key = itemKeys[anchorIndex]
       if (key) pendingLayoutAnchorRef.current = {
-        key, offset: Math.max(0, viewport.top - before), layoutKey,
+        key, offset: Math.max(0, viewport.top - before), rows: previousSizes[anchorIndex] ?? 1, layoutKey,
       }
     }
     lastLayoutKeyRef.current = layoutKey
@@ -187,7 +188,7 @@ export function useVirtualScroll({
     const anchorIndex = itemKeys.indexOf(pendingAnchor.key)
     if (anchorIndex >= 0) {
       effectiveTop = sizes.slice(0, anchorIndex).reduce((sum, rows) => sum + rows, 0)
-        + pendingAnchor.offset
+        + reflowOffset(pendingAnchor.offset, pendingAnchor.rows, sizes[anchorIndex] ?? 1)
     }
   }
   const window = virtualized
@@ -267,7 +268,8 @@ export function useVirtualScroll({
         const resolvedTop = itemKeys.slice(0, anchorIndex).reduce((sum, key, index) => {
           const cached = sizesRef.current.get(key)
           return sum + (cached?.layoutKey === layoutKey ? cached.rows : estimate(key, index))
-        }, 0) + pendingAnchor.offset
+        }, 0) + reflowOffset(pendingAnchor.offset, pendingAnchor.rows,
+          sizesRef.current.get(pendingAnchor.key)?.rows ?? sizes[anchorIndex] ?? 1)
         pendingLayoutAnchorRef.current = null
         handle.scrollTo(resolvedTop)
       }

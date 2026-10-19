@@ -82,12 +82,12 @@ export type DOMElement = {
   // imperative scrollTo(N) which bakes in a number that's stale by the
   // time the throttled render fires, the element ref defers the position
   // read to paint time. One-shot.
-  scrollAnchor?: { el: DOMElement; offset: number }
+  scrollAnchor?: { el: DOMElement; offset: number; align?: 'nearest' }
   // A terminal resize reflows wrapped text.  Preserve the first visible
   // semantic child instead of preserving a stale numeric row or snapping to
   // the bottom.  Ink captures this before Yoga receives the new viewport and
   // consumes it in the first layout at the new size.
-  resizeScrollAnchor?: { el: DOMElement; offset: number }
+  resizeScrollAnchor?: { el: DOMElement; offset: number; rows: number }
   // Only set on ink-root. The document owns focus — any node can
   // reach it by walking parentNode, like browser getRootNode().
   focusManager?: FocusManager

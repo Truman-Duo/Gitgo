@@ -28,3 +28,15 @@ test("ellipsis consumes the same fixed slot and edge navigation does not wrap", 
   expect(right.right).toBe(false);
   expect(left.slotWidth).toBe(right.slotWidth);
 });
+
+test('very narrow headers retain the selected tab within their cell budget', () => {
+  const items = Array.from({length: 8}, (_, index) => ({id: String(index), label: `tab-${index}`}));
+  for (const width of [1, 6, 7, 10, 14, 20]) {
+    for (let selected = 0; selected < items.length; selected++) {
+      const result = fitHeaderWindow(items, selected, width);
+      expect(result.start).toBeLessThanOrEqual(selected); expect(result.end).toBeGreaterThan(selected);
+      const slots = result.end - result.start + Number(result.left) + Number(result.right);
+      expect(slots * result.slotWidth).toBeLessThanOrEqual(width);
+    }
+  }
+});

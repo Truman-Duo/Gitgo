@@ -1,10 +1,11 @@
-import React, {memo, useMemo, useRef, useState} from "react";
+import React, {memo, useMemo, useRef, useState, useEffect} from "react";
 import {Box, ScrollBox, Text} from "@anthropic/ink";
 import type {ScrollBoxHandle} from "@anthropic/ink";
 import type {ProcessInfo} from "../hooks/useLoopData.js";
 import {chordLabel, matchChord} from "../input/bindings.js";
 import {useManagedInput as useInput, useScrollInput} from "../input/runtime.js";
-import {colors, useSelectionStyle} from "../theme/index.js";
+import {colors, usePanelSize} from "../theme/index.js";
+import {HorizontalHeaderStrip} from "./HorizontalHeaderStrip.js";
 
 type Props = {
   project: string;
@@ -13,23 +14,19 @@ type Props = {
   interactive?: boolean;
 };
 
-const ProcessTab = memo(function ProcessTab({
-  label, selected,
-}: {label: string; selected: boolean}) {
-  const style = useSelectionStyle(selected ? "focused" : "non-focused", "block");
-  return <Text {...style}>{label + "  "}</Text>;
-});
-
 export const RuntimeContextPanel = memo(function RuntimeContextPanel({
   project, processes, onDismiss, interactive = true,
 }: Props) {
   const [index, setIndex] = useState(0);
+  const {w} = usePanelSize({widthOffset: 2});
   const scrollRef = useRef<ScrollBoxHandle>(null);
   useScrollInput(scrollRef, interactive);
   const rows = useMemo(() => Object.values(processes).sort((left, right) =>
     (left.actor_kind === "supervisor" ? -1 : right.actor_kind === "supervisor" ? 1 : 0)
       || left.created_at.localeCompare(right.created_at)), [processes]);
-  const selected = rows[Math.min(index, Math.max(0, rows.length - 1))];
+  const activeIndex = Math.min(index, Math.max(0, rows.length - 1));
+  const selected = rows[activeIndex];
+  useEffect(() => { scrollRef.current?.scrollTo(0); }, [selected?.process_id]);
 
   useInput((input, key) => {
     if (matchChord("escape", input, key)) {
@@ -85,11 +82,10 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
   return <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
     <Text bold>Context Usage — {project}</Text>
     <Box flexDirection="row" marginTop={1}>
-      {rows.map((process, rowIndex) => <ProcessTab
-        key={process.process_id}
-        selected={rowIndex === index}
-        label={process.actor_kind === "supervisor" ? "Main process" : process.display_name || "Subprocess"}
-      />)}
+      <HorizontalHeaderStrip width={w} selected={activeIndex} items={rows.map(process => ({
+        id: process.process_id,
+        label: process.actor_kind === "supervisor" ? "Main process" : process.display_name || "Subprocess",
+      }))}/>
     </Box>
     <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>
     {!selected ? <Text dimColor>No durable process context yet.</Text> :

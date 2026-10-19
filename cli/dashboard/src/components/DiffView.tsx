@@ -211,7 +211,7 @@ function UnifiedFile({ file, avail }: { file: FileDiff; avail: number }) {
 
 export const DiffView = memo(function DiffView({ files, width }: { files: FileDiff[]; width?: number }) {
   const { w: terminalWidth } = usePanelSize({ minWidth: 30 });
-  const panelWidth = Math.max(30, Math.min(terminalWidth, width ?? terminalWidth));
+  const panelWidth = Math.max(1, Math.min(terminalWidth, width ?? terminalWidth));
   const avail = diffAvail(panelWidth);
   return (
     <Box flexDirection="column" marginTop={1}

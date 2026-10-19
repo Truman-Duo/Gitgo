@@ -39,8 +39,8 @@ export const AgentDetail = memo(function AgentDetail({
   pendingDecision, decisionSelection = 0, decisionComposing = false, decisionSubmitting = false,
 }: Props) {
   const { w: terminalWidth } = usePanelSize({ minWidth: 50 });
-  const width = Math.max(50, Math.min(terminalWidth, cols));
-  const contentWidth = width - 4;
+  const width = Math.max(1, Math.min(terminalWidth, cols));
+  const contentWidth = Math.max(1, width - 4);
   const scrollRef = useRef<ScrollBoxHandle>(null);
   useScrollInput(scrollRef);
 
