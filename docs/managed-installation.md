@@ -1,69 +1,35 @@
-# 明确选择的管理安装与运行锁
+# 管理安装
 
-关联 [安全自动更新与回滚 #21](https://github.com/Truman-Duo/Gitgo/issues/21)。此文描述功能分支新增的管理安装/启动层，不表示现有公开预览包已经支持自动更新。Windows 的独立安装格式和验证边界见 [Windows 管理更新](windows-managed-update.md)。
+关联 [Issue 21](https://github.com/Truman-Duo/Gitgo/issues/21)。这是明确选择的新安装模式；普通旧安装和已发布预览包不会自动获得更新能力。
 
-## 范围
+## 适用范围
 
-默认安装行为不变。新构建的 Unix 包可以显式选择 `--managed`，但必须有通过实际冻结 Host 核对的 `update-data-contract.json` 与完整 build inventory，并支持 managed bootstrap API 6。构建时需要选择 `--update-evidence`。旧包（含此前实验 API 1/2/3/4/5）、缺少契约的包、未知或已有非空安装目录不被接管。Windows 使用另行明确选择的 API 7/schema 6，不复用 Unix 或 legacy Inno 安装登记。
+| 平台 | 安装格式 | 更新方式 |
+|---|---|---|
+| Windows x64、本地 NTFS | API 7 / schema 6 | 确认退出、完整清理后交接 |
+| Linux x86_64 / aarch64 | API 6 / schema 5 | 确认退出、完整清理后交接 |
+| macOS ARM64 | API 6 / schema 5 | 确认后等待电脑重启；跨重启升级/回滚尚待验收 |
 
-`/update` 在初始安装已固定发行公钥和渠道地址时，可明确触发手动检查、确认下载并静态校验；缺少发行策略时显示未配置，不联网。API 6 区分 Linux 的完整清理后即时交接与 macOS 的手动重启后交接。macOS 不通过修改清理报告获得即时更新；Windows API 7 在已拥有的 Job 成员归零且租约释放后使用同一事务引擎。此前 API 5 的验收仍是历史记录，不能继承为新格式通过。详见[手动更新准备与交接](update-preparation.md)及 Windows 验证记录。
+管理安装要求完整构建清单和经实际冻结 Host 核对的数据兼容证据。缺少证据的旧包、旧实验格式、已有非空目录均不接管。默认不带正式发行公钥或渠道地址；缺少策略时不联网。
 
-## 布局与唯一权威
+## Unix 安装
 
-```text
-installation/
-  gitgo                           # 本地生成、固定位置的启动脚本
-  bootstrap/gitgo-host/           # 独立冻结启动/恢复程序及组件
-  control/registration.json       # schema 5，simulation=false，bootstrap_api=6
-  control/ledger.json             # 复用原事务引擎的唯一持久记录
-  control/operation.lock
-  control/runtime.lock
-  control/preparation.lock        # 固定 inode 的检查/下载锁
-  control/preparation/            # 私有签名缓存、已校验包与会话请求；不从此执行
-  active/                         # 实际 Dashboard、Host、脚本和组件
-  transactions/                   # 已记录候选/旧版/失败版本
-```
-
-模拟模式与管理模式 schema 5 不能互相接管；不是修改一个布尔值就转换安装。此前未公开的 schema 2/3/4 管理实验安装也不自动迁移或接管，应使用全新隔离目录演练。两种模式复用同一事务状态机、文件检查、锁、持久化和恢复，不再建立一套平行 ledger。
-
-管理登记固定安装 ID、根与控制目录设备/inode、两把锁身份、保护路径，以及 bootstrap 完整文件树和本地生成启动脚本摘要。更换锁 inode、修改稳定程序/脚本或手工开启未支持的开关会被拒绝。初始安装只复制进入新的私有目录；完整包与实际 frozen runtime 的版本、目标、数据证据及 API 都要匹配。
-
-API 6 的 macOS 持久身份使用内核 `fgetattrlist(ATTR_VOL_INFO | ATTR_VOL_UUID)` 从同一个实际打开的文件描述符读取完整、非零磁盘卷 UUID，结合该 FD 的 inode；不使用会随重启重新分配的 `st_dev`。根目录、控制目录、事务目录、所有锁、bootstrap、准备目录及下载 receipt 使用同一身份规则。UUID 不可读时失败关闭，不回退到临时设备号，不从登记或环境猜测 UUID。Linux 保持设备号/inode 规则；同一进程内防止路径/FD 替换和跨文件系统重命名的 `st_dev` 比较保持不变。
-
-## 启动与子进程
-
-稳定启动程序先检查持久记录，未完成事务必须恢复后才能启动 `active/gitgo`。运行期间持有共享安装锁；恢复或切换需要独占锁，运行中的实例令操作返回 busy，不强杀项目进程。
-
-安装使用锁以已验证的真实文件描述符传给拥有的 Unix supervisor 和它的 worker；启动进程关闭自己的描述符后，仍在使用程序的子进程继续持有内核锁。Native Host、daemon、工具运行器和 Python 子角色在普通应用初始化前，也从实际可执行文件的物理位置核对管理安装、重新取得共享锁。调用方的环境根目录或数字不能替代登记和真实描述符。
-
-现有 daemon、工具运行、搜索与文档转换子进程保留安装租约；进程范围仍采用原有 owned Unix supervisor。macOS owned-session-only 的清理不完整事实保持不变，不能因此进行即时程序替换；API 6 的替换必须等待真实内核启动标识改变。
-
-直接打开 `active/gitgo` 或其 Node companion 时，Dashboard 也在 launch-session/profile 初始化前请求固定 bootstrap 的租约。bootstrap 持有真实共享锁，以有界 nonce/版本报告确认，直到前端 stdin 管道关闭；租约异常退出时前端停止。`--version` 是不初始化用户资料的只读例外。该早期入口不接受环境变量作为管理安装凭据。
-
-候选数据探针是窄例外：只在 CHECK_NEW 状态且继承了与登记 inode 一致、能够证明独占的真实安装锁描述符时进入。否则包括手工设置环境变量的探针都被拒绝。普通应用、聊天和任意 Python 角色不能利用该例外运行未提交的新版本。
-
-## 数据保护
-
-安装入口只读取有界的现有配置中登记的本地 workspace/release/trial 路径，兼容实际 RepoNode 格式与旧扁平/单项目格式；不加载/迁移配置、不读取 Provider 密钥或初始化凭据。远程 SSH/SMB 路径不冒充本机路径，已声明的本机 SSH key 路径只登记保护而不读取内容。配置、秘密父目录、runtime state 与登记项目均保护，程序目录和 command 目录不得与它们重叠。超过 128 项目或 256 个保护路径时明确拒绝，而不是截断保护列表。
-
-运行时同样要求当前配置/state 与项目位于程序目录之外。项目服务不允许在管理安装目录内部或其祖先范围创建/登记项目，以免后续程序替换误伤项目资料。
-
-## 明确选择的使用方式
-
-仅对本功能分支新构建的完整 Unix 包，在全新的、规范绝对路径及独立 command 目录中演练：
+构建时明确选择 `--update-evidence`；需要更新源时另传 `--update-release-policy <publisher-policy-file>`。从新的完整包执行：
 
 ```text
 ./install.sh --managed --no-path-update --install-root /absolute/new-installation --bin-dir /absolute/separate-bin
 ```
 
-管理模式不改 shell profile/PATH，要求 `--no-path-update`。已有同名命令或安装文件会拒绝，不覆盖旧安装、不删除项目或资料。新目录可能在失败时留下未登记诊断内容，后续不会自动接管。不要用日常安装目录做首次演练。
+安装根和独立命令目录必须是新的、规范绝对路径。此模式不修改 shell profile/PATH，不覆盖已有同名命令。项目、配置、密钥和状态库放在程序目录之外。Windows 安装命令见 [Windows 管理更新](windows-managed-update.md)。
 
-这一阶段尚没有管理模式卸载入口。包内原卸载脚本针对 legacy 所有权格式，不应作为管理安装的卸载方案。测试安装生命周期与清理由隔离测试目录负责，不能将旧脚本绕过检查使用。
+## 使用与恢复
 
-## 验证与未完成项
+通过安装器生成的固定入口启动；不要直接改写安装登记、锁文件或 bootstrap。启动器检查未完成事务，恢复完成后才启动当前程序。其他实例仍占用运行租约时更新返回 busy，不强制结束它们。准备操作繁忙时可继续普通启动，但本次会话不提供更新交接。
 
-`tests/test_managed_installation.py` 覆盖新登记、模式隔离、已有目标/命令拒绝、bootstrap/锁变化、项目和配置保护、候选探针租约、共享 FD 跨拥有子进程存活，以及未完成记录恢复。部分 fixture 的 bootstrap probe 为 mock，不能当作实际产品验收。
+更新及回滚共用一个安装记录。回滚仅恢复最近一次成功更新保留的上一版程序，不恢复数据库或配置，不降低渠道防重放序号。操作和限制见 [手动更新](update-preparation.md)、[恢复与失败处理](update-transactions.md)。
 
-可显式提供 `GITGO_MANAGED_TEST_STAGE` 指向新构建的 managed-capable staging，运行实际冻结安装与启动测试。未提供工件时明确跳过。测试只使用新建的私有目录、保护哨兵和隔离资料，不安装到日常目录，不调用付费模型。
+## 已知限制
 
-确认/退出交接已接入固定 bootstrap，准备锁忙时普通启动仍可继续，只是不提供本次会话的更新交接。Linux ARM64 双版本、真实编译 UI 交接及历史 API 4 的一次虚拟机突然断电恢复证据见上述准备文档。各目标仍须按确切候选核对实际平台、正式签名发行配置和正式终端验收。Windows ACL/运行锁适配使用独立 API 7；macOS 即时清理和物理掉电证明没有由本轮实现。不能据此启用正式发行更新；已有[模拟恢复与真实整包准备验证](update-transactions.md)不能代替它们。
+尚无管理模式卸载、旧安装自动迁移或在线信任根轮换。不要使用 legacy 卸载器删除管理安装。失败安装可能保留诊断内容，不能直接当成空目录重新接管。
+
+支持范围内已有源码及真实包自动化；可见终端交互、生产发行源与 macOS 跨重启验收分别跟踪。平台证据见 [Windows](windows-managed-update.md) 和 [Linux](linux-managed-update.md)。模拟测试不能代替真实包验证，也不能证明物理掉电耐久性或恶意同用户进程隔离。

@@ -2,7 +2,8 @@
 
 Control uses two explicitly inherited anonymous pipe handles, never stdout or
 the model's stdin. No process census, taskkill, breakaway or PID-based killing.
-The parent retains the only Job handle; closing it terminates owned members.
+The parent and optional lease guardian retain Job handles. Explicit Job
+termination and zero-member observation precede release of those handles.
 """
 import json
 import os

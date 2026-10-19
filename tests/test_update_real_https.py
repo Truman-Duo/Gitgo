@@ -14,6 +14,9 @@ import ssl
 import threading
 import time
 import traceback
+import urllib.request
+
+import httpx._utils
 
 import pytest
 from cryptography import x509
@@ -70,6 +73,10 @@ def real_tls(tmp_path_factory, monkeypatch):
                      "all_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"):
         monkeypatch.delenv(key_name, raising=False)
     monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    # HTTPX imports getproxies by value. On Windows its default also reads
+    # Internet Settings after env proxies are cleared. Isolate that fallback
+    # at the consumer, retaining env-based proxies for the real CONNECT tests.
+    monkeypatch.setattr(httpx._utils, "getproxies", urllib.request.getproxies_environment)
     records = []
 
     class Handler(BaseHTTPRequestHandler):
