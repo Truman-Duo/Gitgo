@@ -46,6 +46,7 @@ class LineagePort(Protocol):
     preview_session_undo: Callable
 
 class CheckpointsPort(Protocol):
+    policy: StoragePolicy
     _encoded_object: Callable
     _ensure_open: Callable
     _read_json_blob: Any
@@ -54,7 +55,6 @@ class CheckpointsPort(Protocol):
     _state: sqlite3.Connection
     _state_lock: Any
     _write_blob_file: Callable
-    is_process_deleted: Callable
     paths: StoragePaths
 
 class UsagePort(Protocol):
@@ -174,6 +174,7 @@ class CasMaintenancePort(Protocol):
     _state_lock: Any
     paths: StoragePaths
     policy: StoragePolicy
+    read_blob: Callable
 
 class HealthPort(Protocol):
     _cas_bytes_hint: Any

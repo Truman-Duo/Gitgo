@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import time
+from ..transactions import authoritative_transaction
 from .ports import RetirementPort
 from ..support import _utc_now
 
@@ -64,8 +65,7 @@ def delete_process_session(self: RetirementPort, process_id: str) -> None:
     self._ensure_open()
     self._reserve_authoritative_write(4096)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             row = self._state.execute(
                 "SELECT session_id, task_id FROM session_processes WHERE process_id=?",
                 (process_id,),
@@ -101,10 +101,6 @@ def delete_process_session(self: RetirementPort, process_id: str) -> None:
                 if other is None:
                     self._state.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
                     self._state.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
 
 
 def is_process_deleted(self: RetirementPort, process_id: str) -> bool:
@@ -128,8 +124,7 @@ def purge_b_session(self: RetirementPort, session_id: str, plan_id: str) -> None
         raise ValueError("B deletion requires exclusive storage maintenance")
     self._reserve_authoritative_write(16384)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             rows = self._state.execute("SELECT * FROM session_processes WHERE session_id=?", (session_id,)).fetchall()
             if not rows:
                 raise ValueError("PROCESS_NOT_FOUND")
@@ -158,10 +153,6 @@ def purge_b_session(self: RetirementPort, session_id: str, plan_id: str) -> None
             self._state.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
             self._state.execute("UPDATE tasks SET session_id=NULL, contract_ref=NULL, outcome_ref=NULL, status='deleted' WHERE session_id=?", (session_id,))
             self._state.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     with self._observability_lock:
         for tid in tasks:
             self._observability.execute("DELETE FROM trace_events WHERE trace_id=?", (tid,))

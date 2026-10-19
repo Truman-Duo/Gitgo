@@ -1,5 +1,6 @@
 """bundle preparation protocol tools."""
 from __future__ import annotations
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 import json
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.code_dossier import suggest_task_shards
@@ -34,6 +35,7 @@ def install(ctx):
 
 
     tools["prepare_task_bundle"] = AgentTool(
+        execution_contract=data_broker("host.runtime.prepare_task_bundle"),
         name="prepare_task_bundle",
         description=(
             "Ask the Host to size a code task and deterministically suggest stable "

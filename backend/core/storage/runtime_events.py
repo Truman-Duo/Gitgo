@@ -5,16 +5,20 @@ consumer cursors. State and CAS remain the source for security decisions.
 """
 from __future__ import annotations
 
+from .transactions import authoritative_transaction
+from .fact_record import INSERT_FACT_SQL, RuntimeFactRecord
+
 
 def insert_fact(connection, *, event_id, kind, project_id, session_id, task_id,
                 process_id, stream_id, sequence, payload_ref, occurred_at,
                 causation_id=""):
-    connection.execute("""INSERT INTO runtime_outbox(
-        event_id,schema_version,kind,project_id,session_id,task_id,process_id,stream_id,
-        stream_sequence,producer,correlation_id,causation_id,payload_ref,occurred_at)
-        VALUES(?,1,?,?,?,?,?,?,?,'StateRepository',?,?,?,?)""",
-        (event_id, kind, project_id, session_id, task_id, process_id, stream_id,
-         sequence, task_id or process_id, causation_id, payload_ref, occurred_at))
+    record = RuntimeFactRecord(
+        event_id, kind, project_id, session_id, task_id, process_id, stream_id,
+        sequence, task_id or process_id, causation_id, payload_ref, occurred_at,
+    )
+    connection.execute(INSERT_FACT_SQL, record.parameters)
+    return record
+
 
 
 def read_facts(runtime, consumer_id, *, limit=100):
@@ -32,32 +36,50 @@ def read_facts(runtime, consumer_id, *, limit=100):
              "payload": runtime._read_json_blob(str(row["payload_ref"]))} for row in rows]
 
 
+def _retired_fact_references(connection, limit):
+    # A checkpoint publishes its fact and complete ownership in one transaction.
+    # A runtime_fact reference without that fact is therefore conservative
+    # retained ownership, not permission to reconstruct or replay the fact.
+    # Select again inside the writer transaction before removing any root.
+    return connection.execute("""SELECT r.rowid FROM object_refs r
+        WHERE r.owner_type='runtime_fact' AND NOT EXISTS(
+            SELECT 1 FROM runtime_outbox e WHERE e.kind='checkpoint_committed'
+              AND r.owner_id=e.process_id || ':' || e.stream_sequence)
+        ORDER BY r.rowid LIMIT ?""", (limit,)).fetchall()
+
+
 def maintain_facts(runtime, *, retain_per_stream=256, limit=500):
-    """Bound acknowledged history; new consumers start with a state snapshot."""
+    """Retire acknowledged facts and a bounded number of ownership rows.
+
+    Remaining references stay durable CAS roots after the fact retires, across
+    failures and restarts. Later passes finish those rows without replaying a
+    fact or granting any new effect. Row counts do not prove physical SQL bounds.
+    """
     runtime._ensure_open()
+    row_limit = max(1, min(500, int(limit)))
+    eligible_sql = """SELECT e.event_id FROM runtime_outbox e WHERE
+          EXISTS(SELECT 1 FROM deleted_processes d WHERE d.process_id=e.process_id)
+          OR (e.stream_sequence <= COALESCE((SELECT MIN(c.last_sequence) FROM runtime_consumers c
+              WHERE c.stream_id=e.stream_id),0)
+            AND e.stream_sequence < (SELECT MAX(t.stream_sequence) FROM runtime_outbox t
+                WHERE t.stream_id=e.stream_id)-?)
+        ORDER BY e.event_id LIMIT ?"""
+    parameters = (max(32, int(retain_per_stream)), row_limit)
     with runtime._state_lock:
-        rows = runtime._state.execute("""SELECT e.event_id,e.process_id,e.kind,e.stream_sequence
-            FROM runtime_outbox e WHERE
-              EXISTS(SELECT 1 FROM deleted_processes d WHERE d.process_id=e.process_id)
-              OR (e.stream_sequence <= COALESCE((SELECT MIN(c.last_sequence) FROM runtime_consumers c
-                  WHERE c.stream_id=e.stream_id),0)
-                AND e.stream_sequence < (SELECT MAX(t.stream_sequence) FROM runtime_outbox t
-                    WHERE t.stream_id=e.stream_id)-?)
-            LIMIT ?""", (max(32, int(retain_per_stream)), max(1, min(500, int(limit))))).fetchall()
-        if not rows:
+        rows = runtime._state.execute(eligible_sql, parameters).fetchall()
+        orphaned = _retired_fact_references(runtime._state, row_limit)
+        if not rows and not orphaned:
             return 0
-        runtime._reserve_authoritative_write(512 + len(rows) * 64)
-        runtime._state.execute("BEGIN IMMEDIATE")
-        try:
+        runtime._reserve_authoritative_write(512 + 256 * row_limit)
+        with authoritative_transaction(runtime._state):
+            # Retention eligibility may change while another connection owns
+            # the writer slot; consume current committed state under this lock.
+            rows = runtime._state.execute(eligible_sql, parameters).fetchall()
             for row in rows:
                 runtime._state.execute("DELETE FROM runtime_outbox WHERE event_id=?", (row["event_id"],))
-                if row["kind"] == "checkpoint_committed":
-                    runtime._state.execute("DELETE FROM object_refs WHERE owner_type='runtime_fact' AND owner_id=?",
-                        (f"{row['process_id']}:{row['stream_sequence']}",))
-            runtime._state.execute("COMMIT")
-        except BaseException:
-            runtime._state.execute("ROLLBACK")
-            raise
+            orphaned = _retired_fact_references(runtime._state, row_limit)
+            for row in orphaned:
+                runtime._state.execute("DELETE FROM object_refs WHERE rowid=?", (row[0],))
         return len(rows)
 
 
@@ -74,8 +96,7 @@ def acknowledge_batch(runtime, consumer_id, events):
     runtime._ensure_open()
     with runtime._state_lock:
         runtime._reserve_authoritative_write(256 + len(events) * 32)
-        runtime._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(runtime._state):
             for event in events:
                 row = runtime._state.execute("SELECT stream_id,stream_sequence FROM runtime_outbox WHERE event_id=?",
                     (str(event["event_id"]),)).fetchone()
@@ -93,10 +114,6 @@ def acknowledge_batch(runtime, consumer_id, events):
                     VALUES(?,?,?) ON CONFLICT(consumer_id,stream_id) DO UPDATE
                     SET last_sequence=MAX(runtime_consumers.last_sequence,excluded.last_sequence)""",
                     (consumer_id, row["stream_id"], row["stream_sequence"]))
-            runtime._state.execute("COMMIT")
-        except BaseException:
-            runtime._state.execute("ROLLBACK")
-            raise
 
 
 def delete_process_facts(connection, process_id):

@@ -1,5 +1,6 @@
 """artifacts protocol tools."""
 from __future__ import annotations
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.models import ProcessStatus
 
@@ -51,6 +52,7 @@ def install(ctx):
 
 
     tools["read_child_artifact"] = AgentTool(
+        execution_contract=data_broker("host.runtime.read_child_artifact"),
         name="read_child_artifact",
         description=(
             "Read a file produced by an owned completed subprocess before review. "

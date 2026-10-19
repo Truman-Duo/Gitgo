@@ -1,5 +1,6 @@
 """requirements and decisions protocol tools."""
 from __future__ import annotations
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ApprovalMode, ToolEffect
 from backend.core.loop.code_dossier import build_code_dossier
 from backend.core.loop.decision_support import collect_decision_evidence, safe_calculate
@@ -21,6 +22,7 @@ def install(ctx):
 
 
     tools["engineering_workflow"] = AgentTool(
+        execution_contract=data_broker("host.runtime.engineering_workflow"),
         name="engineering_workflow",
         description=(
             "Manage Host-enforced engineering practices, not prompt-only skills. "
@@ -99,6 +101,7 @@ def install(ctx):
             }
 
         tools["code_dossier"] = AgentTool(
+            execution_contract=data_broker("host.runtime.code_dossier"),
             name="code_dossier",
             description=(
                 "Build a deterministic, content-addressed code dossier containing "
@@ -127,6 +130,7 @@ def install(ctx):
 
 
     tools["calculate"] = AgentTool(
+        execution_contract=HOST_COMPUTE,
         name="calculate",
         description=(
             "Deterministically evaluate bounded arithmetic or numeric comparisons; "
@@ -147,6 +151,7 @@ def install(ctx):
 
 
     tools["decision_evidence"] = AgentTool(
+        execution_contract=data_broker("host.runtime.decision_evidence"),
         name="decision_evidence",
         description=(
             "Ask the Host to aggregate completion, child, test, governance, or budget "
@@ -189,6 +194,7 @@ def install(ctx):
 
 
     tools["capability_status"] = AgentTool(
+        execution_contract=data_broker("host.runtime.capability_status"),
         name="capability_status",
         description=(
             "Read the Host's current model, provider protocol and capability/fallback "
@@ -319,6 +325,7 @@ def install(ctx):
 
 
     tools["configure_capability"] = AgentTool(
+        execution_contract=data_broker("host.runtime.configure_capability"),
         name="configure_capability",
         description=(
             "Apply a Host capability strategy only after the user has explicitly chosen "
@@ -413,6 +420,7 @@ def install(ctx):
 
 
     tools["acknowledge_governance_signal"] = AgentTool(
+        execution_contract=data_broker("host.runtime.acknowledge_governance_signal"),
         name="acknowledge_governance_signal",
         description=(
             "Acknowledge one active rejection signal after semantically addressing it. "
@@ -438,6 +446,7 @@ def install(ctx):
 
     if process.actor_kind in {"supervisor", "worker", "reviewer"}:
         tools["request_user_decision"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_user_decision"),
             name="request_user_decision",
             description=(
                 "Ask one material user-owned unknown needed for the CURRENT requested outcome. "
@@ -500,6 +509,7 @@ def install(ctx):
         )
         from backend.core.loop.permission_broker import create_permission_request
         tools["request_permission"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_permission"),
             name="request_permission",
             description=(
                 "Request authority only when a structured Host error explicitly prescribes "
@@ -565,6 +575,7 @@ def install(ctx):
             return {"accepted": True, **result}
 
         tools["publish_interface_update"] = AgentTool(
+            execution_contract=data_broker("host.runtime.publish_interface_update"),
             name="publish_interface_update",
             description=(
                 "Inspect this B's declared output interfaces and publish any changed "
@@ -624,6 +635,7 @@ def install(ctx):
             return {"accepted": True, **event}
 
         tools["escalate_to_supervisor"] = AgentTool(
+            execution_contract=data_broker("host.runtime.escalate_to_supervisor"),
             name="escalate_to_supervisor",
             description=(
                 "Escalate a semantic boundary, dependency, blocking, or stale-intent issue "

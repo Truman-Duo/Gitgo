@@ -156,7 +156,7 @@ class ToolBatchRuntime:
             policy = decide_tool_operation(tool, public_args)
             if policy.requires_user and matching_grant(
                 self.process, tool.name, public_args,
-                per_invocation=bool(getattr(tool, "approval_per_invocation", False)),
+                per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool,
             ) is None:
                 return call_index, tool, public_args
         return None

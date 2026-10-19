@@ -97,6 +97,10 @@ def main():
         # This process has never imported sqlite3, so it holds no DLL lock.
         with download("windows") as archive:
             target.write_bytes(archive.read("sqlite3.dll"))
+        # The VFS build consumes the same pinned release header; no hidden
+        # compiler download or version-only runtime substitution is allowed.
+        with download("linux") as archive:
+            (scratch / "sqlite3.h").write_bytes(archive.read("sqlite-amalgamation-3530400/sqlite3.h"))
     elif sys.platform in ("linux", "darwin"):
         with download("linux") as archive:
             source = scratch / "sqlite3.c"

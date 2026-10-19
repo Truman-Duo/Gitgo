@@ -1,3 +1,4 @@
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
 from pathlib import Path
 
 import pytest
@@ -48,7 +49,7 @@ def test_authored_parameter_shorthand_is_normalized_for_provider_contract(tmp_pa
         "properties": {"path": {"type": "string"}},
     }
     tool = AgentTool(
-        name="legacy_saved", description="legacy", parameters={"path": {"type": "string"}},
+        execution_contract=data_broker("test.fixture"), name="legacy_saved", description="legacy", parameters={"path": {"type": "string"}},
         execute=lambda args: args,
     )
     assert tool.to_openai_function()["function"]["parameters"]["type"] == "object"
@@ -59,7 +60,7 @@ def test_tool_parameter_schema_rejects_required_names_without_properties():
         normalize_tool_parameters({"type": "object", "required": ["path"]})
 
 
-def test_custom_tool_versions_survive_source_changes_and_archive(tmp_path_factory: Path):
+def test_custom_tool_versions_survive_source_changes_and_archive(tmp_path_factory: Path, runner_transport_only):
     tmp_path = tmp_path_factory
     source_path = tmp_path / "count_values.py"
     source_path.write_text(
@@ -86,7 +87,7 @@ def test_custom_tool_versions_survive_source_changes_and_archive(tmp_path_factor
         )
         runtime_spec = {**loaded["spec"], "source_ref": loaded["source_ref"]}
         tool = AgentTool(
-            name="count_values", description="Count values",
+            execution_contract=NATIVE_PROCESS, name="count_values", description="Count values",
             parameters=runtime_spec["parameters"], execute=lambda _args: {},
             read_only=True, effect=ToolEffect.READ,
             cancellation=CancellationMode.ISOLATED_PROCESS,
