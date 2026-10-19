@@ -20,7 +20,7 @@ export function isChatScene(scene: Scene): boolean {
   return scene === "workspace" || scene === "agent_detail";
 }
 
-export type OverlayType = "interruptConfirm" | "help" | "context" | "runtimeContext" | "whichkey" | "dialogSelect" | "quitConfirm" | "createForm" | "configPanel" | "binPanel" | "publishPanel" | "exportPanel" | "statsOverview" | "statsPanel" | "btwPanel" | "compactPanel" | "undoPanel" | "lessonsPanel" | "governancePanel" | "memoryPanel" | "trialPanel" | "formalPanel" | "runtimeToolsPanel" | "runtimeMenu";
+export type OverlayType = "interruptConfirm" | "help" | "context" | "runtimeContext" | "whichkey" | "dialogSelect" | "quitConfirm" | "createForm" | "configPanel" | "binPanel" | "publishPanel" | "exportPanel" | "statsOverview" | "statsPanel" | "btwPanel" | "compactPanel" | "undoPanel" | "lessonsPanel" | "governancePanel" | "memoryPanel" | "trialPanel" | "formalPanel" | "runtimeToolsPanel" | "runtimeMenu" | "updatePanel";
 
 export type OverlayEntry = {
   type: OverlayType;

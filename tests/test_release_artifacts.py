@@ -85,6 +85,23 @@ def test_archive_cannot_include_its_own_output(tmp_path_factory):
     assert not (stage / 'archives').exists()
 
 
+def test_managed_windows_layout_is_explicit_and_cannot_adopt_legacy_uninstaller(tmp_path_factory):
+    root = tmp_path_factory.resolve()
+    stage = staging(root)
+    expected = render_manifest(root / 'packaging/product.json', 'windows', 'x86_64', managed_windows=True)
+    assert expected['installation_mode'] == 'managed-windows-v1'
+    assert expected['layout']['installer'] == 'install-managed.ps1'
+    assert 'uninstaller' not in expected['layout'] and expected['uninstall']['supported'] is False
+    (stage / 'product.json').write_text(json.dumps(expected))
+    with pytest.raises(ValueError): package(root, stage, root / 'archives')
+    with pytest.raises(FileNotFoundError): package(root, stage, root / 'archives', managed_windows=True)
+    (stage / 'install-managed.ps1').write_bytes(b'synthetic-installer')
+    (stage / 'update-data-contract.json').write_bytes(b'synthetic-evidence')
+    assert package(root, stage, root / 'archives', managed_windows=True)['version'] == __version__
+    with pytest.raises(ValueError):
+        render_manifest(root / 'packaging/product.json', 'macos', 'arm64', managed_windows=True)
+
+
 @pytest.mark.parametrize('kind', ['metadata', 'missing-host', 'missing-node', 'redirected', 'traversal'])
 def test_archive_keeps_platform_metadata_payload_and_scope_checks(tmp_path_factory, kind):
     root = tmp_path_factory.resolve()

@@ -1,9 +1,21 @@
 import { describe, expect, test } from "bun:test";
+import {EventEmitter} from "node:events";
 import {
   buildNativeTaskCall, nativeHostCommand, NativeHostClient, stringifyProtocolJson,
 } from "./client.js";
 
 describe("native task routing", () => {
+  for (const [code, signal] of [[0, null], [1, null], [null, "SIGTERM"]] as const) {
+    test(`update shutdown requires a clean Host exit: ${code}/${signal}`, async () => {
+      const client: any = new NativeHostClient("unused", "unused");
+      const proc: any = new EventEmitter();
+      proc.exitCode = null; proc.signalCode = null;
+      proc.stdin = {end: () => setTimeout(() => proc.emit("exit", code, signal), 1)};
+      client.proc = proc;
+      if (code === 0) await client.close(true);
+      else await expect(client.close(true)).rejects.toThrow("Host did not exit cleanly");
+    });
+  }
   test("correlated Host ACK adjusts the transport deadline and UTF8 chunks stay intact", async () => {
     const client: any = new NativeHostClient("unused", "unused");
     let sent: any;

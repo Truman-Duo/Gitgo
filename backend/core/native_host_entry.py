@@ -93,10 +93,85 @@ def _run_credential_cleanup_role(argv: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     role = _role_arguments(values)
+    from backend.core.update.installation import installed_runtime
+    from backend.core.update.validation import UpdateError
+    try:
+        with installed_runtime(role[0] if role else None):
+            return _main(values)
+    except (UpdateError, OSError):
+        from backend.core.protocol_io import dump_protocol_json
+        print(dump_protocol_json({"protocol_version": 1, "type": "host_rejected",
+            "code": "UPDATE_INSTALLATION_BLOCKED", "message": "Managed installation could not safely admit this operation"}), flush=True)
+        return 2
+
+
+def _main(values: list[str]) -> int:
+    role = _role_arguments(values)
     if role is None:
         from backend.core.native_host import main as native_host_main
         return int(native_host_main() or 0)
     name, role_argv = role
+    if name == "windows-scope":
+        from backend.core.windows_process_scope import main as windows_scope_main
+        return windows_scope_main(role_argv)
+    if name == "windows-job-lease":
+        from backend.core.windows_process_scope import lease_guardian
+        return lease_guardian(role_argv)
+    if name == "managed-install":
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--root", required=True)
+        parser.add_argument("--bin-dir", required=True)
+        parser.add_argument("--protected-path", action="append", default=[])
+        args = parser.parse_args(role_argv)
+        from backend.core.update.installation import install_from_frozen_package
+        from backend.core.protocol_io import dump_protocol_json
+        print(dump_protocol_json(install_from_frozen_package(args.root, args.bin_dir, args.protected_path)), flush=True)
+        return 0
+    if name in {"managed-launch", "managed-recover"}:
+        from backend.core.update.installation import bootstrap_main
+        return bootstrap_main(name, role_argv)
+    if name == "managed-front-lease":
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--nonce", required=True)
+        args = parser.parse_args(role_argv)
+        from backend.core.update.installation import frontend_lease
+        return frontend_lease(args.nonce)
+    if name == "managed-capabilities":
+        import os
+        from backend.core.update.installation import _ownership_supported
+        if not _ownership_supported():
+            from backend.core.update.validation import reject
+            reject("UPDATE_TRANSACTION_PLATFORM", "Managed installation ownership adapter is unavailable")
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--nonce", required=True)
+        args = parser.parse_args(role_argv)
+        from backend.core.update.runtime_contract import data_probe
+        from backend.core.update.health import MANAGED_API_VERSION
+        from backend.core.protocol_io import dump_protocol_json
+        print(dump_protocol_json({"schema_version": 1, "managed_api": MANAGED_API_VERSION, "runtime": data_probe(args.nonce)}), flush=True)
+        return 0
+    if name == "update-recover-simulation":
+        # No NativeHost, providers, project daemon or user config is initialized.
+        # The helper reopens only explicitly registered simulation authority.
+        from backend.core.update.recovery_helper import helper_main
+        return helper_main(role_argv)
+    if name == "update-startup-probe":
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--nonce", required=True)
+        args = parser.parse_args(role_argv)
+        from backend.core.update.startup_probe import startup_probe
+        from backend.core.protocol_io import dump_protocol_json
+        print(dump_protocol_json(startup_probe(args.nonce)), flush=True)
+        return 0
+    if name == "update-data-probe":
+        # Before NativeHost, ConfigManager or any user's data store is opened.
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--nonce", required=True)
+        args = parser.parse_args(role_argv)
+        from backend.core.update.runtime_contract import data_probe
+        from backend.core.protocol_io import dump_protocol_json
+        print(dump_protocol_json(data_probe(args.nonce)), flush=True)
+        return 0
     if name == DAEMON_ROLE:
         return _run_daemon_role(role_argv)
     if name == TOOL_RUNNER_ROLE:
@@ -108,7 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     if name == CREDENTIAL_CLEANUP_ROLE:
         return _run_credential_cleanup_role(role_argv)
     if name == "unix-scope":
-        if len(role_argv) != 1 or not role_argv[0].isdigit():
+        descriptors = role_argv[:-1] if role_argv and role_argv[-1] == "--macos-forkless" else role_argv
+        if not 1 <= len(descriptors) <= 17 or any(not value.isdigit() for value in descriptors):
             raise SystemExit("unix-scope requires one owned control descriptor")
         from backend.core.unix_process_scope import main as scope_main
         return scope_main(role_argv)

@@ -28,10 +28,20 @@ import {
 import { detectTerminals } from "./backend/tools.js";
 import { registerLaunchSession } from "./backend/launchSession.js";
 import packageInfo from "../package.json";
+import {managedRoot, acquireManagedAdmission} from "./backend/managedAdmission.js";
 
 if (process.argv.includes("--version")) {
   process.stdout.write(`Gitgo ${packageInfo.version}\n`);
   process.exit(0);
+}
+
+// Before launch-session/profile/terminal reads or writes. This also covers a
+// direct active binary and the Node companion, not only the public wrapper.
+const managed = managedRoot(process.execPath, import.meta.url);
+let releaseManagedAdmission: (() => void) | undefined;
+if (managed) {
+  try { releaseManagedAdmission = await acquireManagedAdmission(managed, packageInfo.version); }
+  catch { process.stderr.write("Managed installation could not safely start. Use the installed public command or recover the installation.\n"); process.exit(1); }
 }
 
 const acknowledgeHandoff = acceptTerminalHandoff();
@@ -173,6 +183,7 @@ async function main() {
       version: process.versions.bun || process.versions.node, compiled: COMPILED,
       stdinTTY: !!process.stdin.isTTY, stdoutTTY: !!process.stdout.isTTY,
       node: probeRuntime("node", process.env.GITGO_NODE || "node")}, null, 2));
+    releaseManagedAdmission?.();
     return;
   }
   ensureWindowsUtf8Console();
@@ -215,8 +226,8 @@ async function main() {
     if (shutdownPromise) return shutdownPromise;
     renderer?.unmount();
     renderer?.cleanup();
-    shutdownPromise = Promise.resolve(client.close())
-      .catch(() => undefined)
+    shutdownPromise = Promise.resolve(client instanceof NativeHostClient ? client.close(exitCode === 75) : client.close())
+      .catch(() => { if (exitCode === 75) process.exit(1); })
       .then(() => { process.exit(exitCode); });
     return shutdownPromise;
   };
@@ -248,6 +259,7 @@ async function main() {
         startupTerminalSetup={!useMock && (!terminals || !terminals.configured)}
         startupNotice={startupNotice}
         onTerminalSetupComplete={completeTerminalSetup}
+        onUpdateExit={managed && !useMock ? () => shutdown(75) : undefined}
       /></InputProvider>
     </ScreenWrapper>,
     { exitOnCtrlC: false }
