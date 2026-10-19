@@ -97,6 +97,173 @@ def test_shared_lease_is_retained_until_job_is_empty(tmp_path_factory):
     with win.lock_file(lock): pass
 
 
+@pytest.mark.parametrize("leased", [False, True])
+@pytest.mark.parametrize("failure_at", ["write", "flush", "close"])
+def test_post_launch_pipe_failure_cleans_payload_and_guardian(
+        tmp_path_factory, monkeypatch, leased, failure_at):
+    from contextlib import nullcontext
+    from backend.core import windows_job
+    from backend.core.installation_lease import retain_descriptor
+    from backend.core.update import windows_storage as win
+
+    private = tmp_path_factory.resolve() / "private"
+    win.create_private_directory(private)
+    lock = private / "runtime.lock"
+    os.close(win.open_file(lock, write=True, create=True))
+    ready, late = private / "ready", private / "late"
+    code = ("import time;from pathlib import Path;"
+        f"Path({str(ready)!r}).write_text('started');time.sleep(1);"
+        f"Path({str(late)!r}).write_text('escaped');time.sleep(30)")
+    processes = []
+    popen, fdopen = subprocess.Popen, os.fdopen
+
+    def track(*args, **kwargs):
+        proc = popen(*args, **kwargs); processes.append(proc); return proc
+
+    class InterruptedControl:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): return self
+        def fail(self, stage):
+            if stage != failure_at: return
+            end = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < end: time.sleep(.01)
+            assert ready.exists(), "Fault must occur after the real payload starts"
+            raise OSError("Injected post-launch " + stage)
+        def write(self, raw):
+            result = self.stream.write(raw)
+            self.stream.flush(); self.fail("write"); return result
+        def flush(self):
+            self.stream.flush(); self.fail("flush")
+        def __exit__(self, *args):
+            self.stream.close()
+            if args[0] is None: self.fail("close")
+
+    def interrupted_open(descriptor, mode="r", *args, **kwargs):
+        stream = fdopen(descriptor, mode, *args, **kwargs)
+        return InterruptedControl(stream) if mode == "wb" else stream
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", track)
+            patch.setattr(os, "fdopen", interrupted_open)
+            with win.lock_file(lock, shared=True) as fd:
+                with retain_descriptor(fd) if leased else nullcontext():
+                    with pytest.raises(OSError, match="Injected post-launch"):
+                        spawn_managed([sys.executable, "-B", "-c", code],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert len(processes) == (2 if leased else 1)
+        scope = processes[0]._gitgo_windows_scope
+        assert scope.finished and scope not in windows_job._pending_scopes
+        assert processes[0]._gitgo_cleanup["complete"] is True
+        assert all(proc.poll() is not None for proc in processes)
+        with win.lock_file(lock): pass
+        time.sleep(1.2)
+        assert not late.exists()
+    finally:
+        for proc in processes:
+            if hasattr(proc, "_gitgo_windows_scope"): proc._gitgo_windows_scope.finish(cancel=True)
+            proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize("failure_at", ["TerminateJobObject", "QueryInformationJobObject", "CloseHandle"])
+def test_unknown_cleanup_keeps_ownership_blocks_launch_and_can_retry(monkeypatch, failure_at):
+    from backend.core import windows_job
+    proc = spawn_managed([sys.executable, "-B", "-c", "import time;time.sleep(30)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    scope = proc._gitgo_windows_scope
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(scope.api, failure_at, lambda *args: 0)
+            scope.finish(cancel=True)
+            assert not scope.finished and scope in windows_job._pending_scopes
+            assert proc._gitgo_cleanup["complete"] is False
+            # No new process creation, even when the failed native call repeats.
+            def forbidden(*args, **kwargs): pytest.fail("Started behind unresolved cleanup")
+            patch.setattr(subprocess, "Popen", forbidden)
+            with pytest.raises(OSError, match="cleanup remains unverified"):
+                spawn_managed([sys.executable, "-c", "print('must not run')"])
+        windows_job.retry_pending_cleanup()
+        assert scope.finished and scope not in windows_job._pending_scopes
+        assert proc._gitgo_cleanup["complete"] is True
+        assert proc.poll() is not None
+    finally:
+        scope.finish(cancel=True)
+        proc.wait(timeout=10)
+
+
+def test_guardian_readiness_failure_is_owned_and_reaped(tmp_path_factory, monkeypatch):
+    from backend.core import windows_job
+    from backend.core.installation_lease import retain_descriptor
+    from backend.core.update import windows_storage as win
+    private = tmp_path_factory.resolve() / "private"
+    win.create_private_directory(private)
+    lock = private / "runtime.lock"
+    os.close(win.open_file(lock, write=True, create=True))
+    processes = []
+    popen, read = subprocess.Popen, os.read
+    def track(*args, **kwargs):
+        proc = popen(*args, **kwargs); processes.append(proc); return proc
+    def fail_ready(fd, size):
+        if size == 1: raise OSError("Injected guardian readiness failure")
+        return read(fd, size)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", track)
+            patch.setattr(os, "read", fail_ready)
+            with win.lock_file(lock, shared=True) as fd, retain_descriptor(fd):
+                with pytest.raises(OSError, match="guardian readiness failure"):
+                    spawn_managed([sys.executable, "-c", "raise RuntimeError('must not run')"])
+        assert len(processes) == 2 and all(proc.poll() is not None for proc in processes)
+        assert processes[0]._gitgo_windows_scope.finished
+        with win.lock_file(lock): pass
+    finally:
+        for proc in processes:
+            if hasattr(proc, "_gitgo_windows_scope"): proc._gitgo_windows_scope.finish(cancel=True)
+            proc.wait(timeout=10)
+
+
+def test_invalid_command_report_still_cleans_descendants_and_stays_failed(tmp_path_factory, monkeypatch):
+    from backend.core import windows_job
+    marker = tmp_path_factory.resolve() / "late"
+    child = f"import time;from pathlib import Path;time.sleep(1);Path({str(marker)!r}).write_text('escaped')"
+    code = f"import subprocess,sys;subprocess.Popen([sys.executable,'-c',{child!r}])"
+    proc = spawn_managed([sys.executable, "-B", "-c", code], stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    scope = proc._gitgo_windows_scope
+    try:
+        proc.wait(timeout=10)
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "read", lambda *args: b"invalid\n")
+            scope.finish()
+        assert scope.finished
+        assert proc._gitgo_cleanup == {"complete": False, "mode": "windows-owned-job",
+            "issues": ["job_report_invalid"]}
+        windows_job.retry_pending_cleanup()
+        assert proc._gitgo_cleanup["complete"] is False
+        time.sleep(1.2)
+        assert not marker.exists()
+    finally:
+        scope.finish(cancel=True)
+
+
+def test_launch_error_reports_unverified_cleanup_in_message(monkeypatch):
+    from backend.core import windows_job
+    api = windows_job._api()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(windows_job, "_api", lambda: api)
+            patch.setattr(api, "AssignProcessToJobObject", lambda *args: 0)
+            patch.setattr(api, "TerminateJobObject", lambda *args: 0)
+            with pytest.raises(OSError, match="launch failed.*cleanup remains unverified") as failure:
+                spawn_managed([sys.executable, "-c", "raise RuntimeError('must not run')"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            assert isinstance(failure.value.__cause__, OSError)
+            assert len(windows_job._pending_scopes) == 1
+    finally:
+        windows_job.retry_pending_cleanup()
+    assert not windows_job._pending_scopes
+
+
 def test_parent_crash_guardian_cleans_before_releasing_inherited_lease(tmp_path_factory):
     from backend.core.update import windows_storage as win
     from backend.core.update.validation import UpdateError

@@ -10,6 +10,8 @@ import time
 
 U32, HANDLE = C.c_uint32, C.c_void_p
 _spawn_lock = threading.Lock()
+_pending_lock = threading.Lock()
+_pending_scopes = set()  # Own unresolved native resources, not installation state.
 
 
 def _api():
@@ -57,14 +59,15 @@ class JobScope:
         self.finished = False
         self.proc = None
         self.guardian = None
+        self.command_exit = None
+        self.report_issues = []
 
     def finish(self, *, cancel=False):
         with self.lock:
             if self.finished: return
-            self.finished = True
-            complete, issues, code = False, [], None
+            complete, issues = False, list(self.report_issues)
             try:
-                if not cancel:
+                if not cancel and self.command_exit is None and not self.report_issues:
                     os.set_blocking(self.report, False)
                     raw = bytearray(); end = time.monotonic() + 2
                     while b"\n" not in raw and time.monotonic() < end:
@@ -76,7 +79,11 @@ class JobScope:
                     value = json.loads(raw)
                     if set(value) != {"command_exit"} or type(value["command_exit"]) is not int:
                         raise ValueError("Job report is invalid")
-                    code = value["command_exit"]
+                    self.command_exit = value["command_exit"]
+            except (OSError, ValueError, TypeError):
+                self.report_issues = ["job_report_invalid"]
+                issues.extend(self.report_issues)
+            try:
                 _check(self.api.TerminateJobObject(self.job, 137))
                 end = time.monotonic() + 5
                 while time.monotonic() < end:
@@ -85,19 +92,47 @@ class JobScope:
                     if report.active == 0: complete = True; break
                     time.sleep(.01)
                 if not complete: issues.append("job_members_remaining")
-                if self.guardian is not None:
+                # Also reap a trusted trampoline whose Job assignment failed.
+                # It has not received argv and cannot have launched a payload.
+                if self.proc is not None:
+                    if self.proc.poll() is None: self.proc.terminate()
+                    self.proc.wait(timeout=10)
+                if complete and self.guardian is not None:
                     if self.guardian.wait(timeout=8) != 0:
-                        complete = False; issues.append("lease_guardian_failed")
+                        issues.append("lease_guardian_failed")
             except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
                 complete = False
                 issues.append("job_cleanup_unverified")
-            finally:
-                # Even an unverified/failed scope kills its OWN Job only.
-                self.api.TerminateJobObject(self.job, 137)
-                self.api.CloseHandle(self.job); os.close(self.report)
-                self.proc._gitgo_cleanup = {"complete": complete, "mode": "windows-owned-job", "issues": issues}
-                if cancel: self.proc.returncode = -15
-                elif code is not None: self.proc.returncode = code
+            if complete:
+                try:
+                    if self.report >= 0:
+                        os.close(self.report); self.report = -1
+                    _check(self.api.CloseHandle(self.job))
+                    self.finished = True
+                except OSError:
+                    complete = False; issues.append("job_handle_close_failed")
+            # Keep ownership and permit a bounded cleanup retry on unknown
+            # termination/membership. Closing a handle is not a zero-member
+            # proof when an outside-Job guardian still owns another handle.
+            with _pending_lock:
+                if self.finished: _pending_scopes.discard(self)
+                else: _pending_scopes.add(self)
+            if self.proc is not None:
+                self.proc._gitgo_cleanup = {"complete": complete and not issues,
+                    "mode": "windows-owned-job", "issues": issues}
+                if cancel and self.proc.poll() is not None: self.proc.returncode = -15
+                elif self.command_exit is not None: self.proc.returncode = self.command_exit
+
+
+def retry_pending_cleanup():
+    """Do not accumulate new commands behind unverified owned process trees."""
+    with _pending_lock:
+        pending = tuple(_pending_scopes)
+    for scope in pending:
+        scope.finish(cancel=True)
+    with _pending_lock:
+        if _pending_scopes:
+            raise OSError("Windows owned Job cleanup remains unverified; no command was started")
 
 
 def spawn(argv, **options):
@@ -121,12 +156,15 @@ def spawn(argv, **options):
     retained = runtime_descriptors()
     if len(retained) > 16: raise ValueError("Too many retained Windows lease descriptors")
     lease_handles = [msvcrt.get_osfhandle(fd) for fd in retained]
+    retry_pending_cleanup()
     api = _api()
     job = _check(api.CreateJobObjectW(None, None))
     incoming = send = report = outgoing = -1
     proc = None
+    scope = JobScope(api, job, -1)
     try:
         incoming, send = os.pipe(); report, outgoing = os.pipe()
+        scope.report, report = report, -1
         limits = ExtendedLimits(); limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no breakaway.
         _check(api.SetInformationJobObject(job, 9, C.byref(limits), C.sizeof(limits)))
         handles = [msvcrt.get_osfhandle(fd) for fd in (incoming, outgoing)]
@@ -138,7 +176,10 @@ def spawn(argv, **options):
         with _spawn_lock:
             for fd in (incoming, outgoing): os.set_inheritable(fd, True)
             for handle in lease_handles: os.set_handle_inheritable(handle, True)
-            try: proc = subprocess.Popen(command, close_fds=True, startupinfo=startup, **options)
+            try:
+                proc = subprocess.Popen(command, close_fds=True, startupinfo=startup, **options)
+                scope.proc = proc
+                proc._gitgo_windows_scope = scope
             finally:
                 for fd in (incoming, outgoing): os.set_inheritable(fd, False)
                 for handle in lease_handles: os.set_handle_inheritable(handle, False)
@@ -147,21 +188,20 @@ def spawn(argv, **options):
         _check(api.AssignProcessToJobObject(job, HANDLE(int(proc._handle))))
         os.close(incoming); incoming = -1
         os.close(outgoing); outgoing = -1
-        scope = JobScope(api, job, report); scope.proc = proc
         if retained:
-            scope.guardian = _lease_guardian(api, job, lease_handles)
-        proc._gitgo_windows_scope = scope
+            _lease_guardian(scope, lease_handles)
         proc._gitgo_cleanup = {"complete": False, "mode": "windows-owned-job", "issues": ["cleanup_not_observed"]}
         proc.args = argv
         control_fd, send = send, -1  # Transfer once, even if write/close raises.
         with os.fdopen(control_fd, "wb") as control: control.write(raw); control.flush()
-        report = -1  # Scope owns this descriptor only after successful admission.
         return proc
-    except BaseException:
-        api.CloseHandle(job)
-        if proc is not None:
-            if proc.poll() is None: proc.terminate()
-            proc.wait(timeout=10)
+    except BaseException as error:
+        scope.finish(cancel=True)
+        if not scope.finished:
+            if isinstance(error, Exception):
+                raise OSError("Windows command launch failed and owned Job cleanup remains unverified; "
+                    "resources retained and new launches blocked") from error
+            error.add_note("Windows owned Job cleanup is unverified; resources retained and new launches blocked")
         raise
     finally:
         for fd in (incoming, send, outgoing, report):
@@ -170,7 +210,7 @@ def spawn(argv, **options):
                 except OSError: pass
 
 
-def _lease_guardian(api, job, leases):
+def _lease_guardian(scope, leases):
     """Outside the payload Job: retain sharing leases until membership is zero.
 
     If this parent dies, the inherited parent HANDLE is signaled. The guardian
@@ -178,6 +218,7 @@ def _lease_guardian(api, job, leases):
     A nested guardian may belong to an outer Job; that Job's outer guardian
     retains the enclosing lease through its complete cleanup.
     """
+    api, job = scope.api, scope.job
     parent = HANDLE()
     _check(api.DuplicateHandle(api.GetCurrentProcess(), api.GetCurrentProcess(), api.GetCurrentProcess(),
                                C.byref(parent), 0x100000, False, 0))
@@ -195,9 +236,11 @@ def _lease_guardian(api, job, leases):
         startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": handles}
         with _spawn_lock:
             for handle in handles: os.set_handle_inheritable(handle, True)
-            try: guardian = subprocess.Popen(command, startupinfo=startup, close_fds=True,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=0x08000000)  # No console Ctrl-C before zero-member proof.
+            try:
+                guardian = subprocess.Popen(command, startupinfo=startup, close_fds=True,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000)  # No console Ctrl-C before zero-member proof.
+                scope.guardian = guardian  # Own it even if readiness fails.
             finally:
                 for handle in handles: os.set_handle_inheritable(handle, False)
         os.close(ack); ack = -1
