@@ -4,9 +4,9 @@ Gitgo 是面向真实项目开发的终端 Agent harness，将模型、工具、
 
 模型负责理解、规划和发起操作；工具提供文件、搜索、命令等能力；运行时、授权与存储组件负责执行、权限和证据。正式界面使用 Bun、React 和 Ink，通过 Native Host 连接项目运行服务。
 
-当前源码为 **1.0.0-alpha.3**，整合知识、提示词、工作台、原生沙箱基础设施、管理更新与历史缩放改进。本轮发布 **Windows x64 预览版**；macOS 普通启动与 Linux 受保护 Git 尚未具备，不能视为跨平台完整沙箱。源码、冻结包与人工终端的验证范围分别记录，见 [Alpha 3 范围](docs/ALPHA_3.md)。
+当前源码为 **1.0.0-alpha.3 发布候选**，整合知识、提示词、工作台、原生沙箱基础设施、管理更新与历史缩放改进。Windows、macOS 与 Linux 正在修复和验收，尚未完成公开发布；不能视为跨平台完整沙箱。源码、冻结包与人工终端的验证范围分别记录，见 [Alpha 3 范围](docs/ALPHA_3.md)。
 
-[下载 Alpha 3](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) · [安装](docs/INSTALL.md) · [配置](docs/CONFIGURATION.md) · [版本](docs/VERSION.md) · [贡献](CONTRIBUTING.md)
+[下载已发布版本](https://github.com/Truman-Duo/Gitgo/releases) · [安装](docs/INSTALL.md) · [配置](docs/CONFIGURATION.md) · [版本](docs/VERSION.md) · [贡献](CONTRIBUTING.md)
 
 ## Gitgo 提供哪些优势
 

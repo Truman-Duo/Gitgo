@@ -365,7 +365,13 @@ def physical_installation(executable: Path) -> tuple[Path, str] | None:
         reject("UPDATE_CONTROL_INVALID", "Runtime executable is not absolute")
     # A command symlink must not bypass admission. Derive the physical target's
     # fixed layout, rather than trusting either an environment root or argv[0].
-    executable = executable.resolve(strict=True)
+    try:
+        executable = executable.resolve(strict=True)
+    except PermissionError as exc:
+        if os.name != "nt" or exc.winerror != 5:
+            raise
+        from .windows_storage import physical_executable
+        executable = physical_executable(executable)
     if executable.name != _host_name(): return None
     if executable.parent.name == "gitgo-host" and executable.parent.parent.name == "bootstrap":
         return executable.parents[2], "bootstrap"

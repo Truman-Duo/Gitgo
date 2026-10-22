@@ -29,6 +29,29 @@ def supported():
     return os.name == "nt" and sys.platform == "win32" and hasattr(C, "WinDLL")
 
 
+def physical_executable(path):
+    """Resolve the actual opened image without querying DOS drive mappings.
+
+    AppContainer may read an image but cannot query the mount manager used by
+    Path.resolve's DOS-name lookup. NT normalized names retain junction/link
+    resolution; a lexical path or environment assertion is never substituted.
+    This is identity discovery, not managed-installation ownership admission.
+    """
+    if not isinstance(path, Path) or not path.is_absolute():
+        reject("UPDATE_CONTROL_INVALID", "Runtime image must be absolute")
+    handle = api()["CreateFileW"](str(path), 0x80, 7, None, 3, 0, None)
+    if handle == C.c_void_p(-1).value:
+        raise C.WinError(C.get_last_error())
+    try:
+        name = C.create_unicode_buffer(32768)
+        length = api()["GetFinalPathNameByHandleW"](handle, name, len(name), 2)
+        if not 0 < length < len(name) or not name.value.startswith("\\Device\\"):
+            reject("UPDATE_CONTROL_INVALID", "Physical runtime image name is unavailable")
+        return Path("\\\\?\\GLOBALROOT" + name.value)
+    finally:
+        api()["CloseHandle"](handle)
+
+
 @lru_cache(maxsize=1)
 def api():
     if not supported(): reject("UPDATE_TRANSACTION_PLATFORM", "Actual Windows APIs are required")

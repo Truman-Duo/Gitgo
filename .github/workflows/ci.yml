@@ -205,6 +205,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -B scripts/check_terminal_continuity.py --host "$env:RUNNER_TEMP/unpacked/internal/gitgo-host/gitgo-host.exe" --dashboard "$env:RUNNER_TEMP/unpacked/gitgo.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Actual final ZIP native boundaries
+        run: |
+          $env:GITGO_SANDBOX_TEST_HOST = "$env:RUNNER_TEMP/unpacked/internal/gitgo-host/gitgo-host.exe"
+          python -B -m pytest tests/test_native_sandbox.py tests/test_windows_sandbox_minimum.py -k packaged -q --tb=short
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-final-zip
@@ -226,24 +231,21 @@ jobs:
           python3 -I - <<'PY'
           import json, os
           jobs = json.loads(os.environ['RESULTS'])
-          # Alpha3 is explicitly a Windows-only preview (docs/ALPHA_3.md).
-          # Keep unsupported-platform failures visible; do not mark them green.
-          diagnostics = ['native-linux', 'unix-packages', 'managed-update-linux']
-          summary = ['## Alpha3 Windows preview gate', '',
-                     'Linux/macOS remain unsupported release targets. Diagnostic results:']
-          for name in diagnostics:
+          required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
+                      'windows-package', 'managed-update-windows', 'unix-packages',
+                      'managed-update-linux']
+          summary = ['## Alpha3 platform gate', '', 'All release targets must pass:']
+          for name in [*required, 'native', 'native-linux']:
               summary.append('- ' + name + ': ' + jobs[name]['result'])
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
               stream.write('\n'.join(summary) + '\n')
-          required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
-                      'windows-package', 'managed-update-windows']
           failed = [name for name in required if jobs[name]['result'] != 'success']
           native_required = jobs['contract']['outputs'].get('native_required') == 'true'
           expected_native = 'success' if native_required else 'skipped'
-          if jobs['native']['result'] != expected_native:
-              failed.append('native')
+          for name in ['native', 'native-linux']:
+              if jobs[name]['result'] != expected_native:
+                  failed.append(name)
           if failed:
-              raise SystemExit('Required Windows preview CI did not succeed: ' + ', '.join(failed))
-          print('Windows preview CI passed for the recorded candidate tree; see diagnostic platform results.')
-          print('Human design/terminal review remains separate; no cross-platform release claim.')
+              raise SystemExit('Required platform CI did not succeed: ' + ', '.join(failed))
+          print('Platform CI passed for the recorded candidate tree. Owner trial approval is still required before publication.')
           PY

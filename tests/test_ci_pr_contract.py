@@ -79,14 +79,13 @@ class ContractTests(unittest.TestCase):
             self.assertFalse(contract.native_required(Path(temp), Path(temp)))
 
 
-class WindowsPreviewGateTests(unittest.TestCase):
+class PlatformGateTests(unittest.TestCase):
     def run_gate(self, changes=None):
         required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
-                    'windows-package', 'managed-update-windows', 'native']
+                    'windows-package', 'managed-update-windows', 'native',
+                    'native-linux', 'unix-packages', 'managed-update-linux']
         jobs = {name: {'result': 'success'} for name in required}
         jobs['contract']['outputs'] = {'native_required': 'true'}
-        for name in ['native-linux', 'unix-packages', 'managed-update-linux']:
-            jobs[name] = {'result': 'failure'}
         for name, result in (changes or {}).items():
             jobs[name]['result'] = result
         workflow = (Path(__file__).parents[1] / '.github/workflows/ci.yml').read_text(encoding='utf-8')
@@ -97,15 +96,17 @@ class WindowsPreviewGateTests(unittest.TestCase):
                 text=True, env=dict(os.environ, RESULTS=json.dumps(jobs), GITHUB_STEP_SUMMARY=str(summary)))
             return result, summary.read_text(encoding='utf-8')
 
-    def test_diagnostic_failures_are_visible_without_claiming_platform_support(self):
+    def test_success_records_every_platform_before_owner_trial(self):
         result, summary = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('unsupported release targets', summary)
-        self.assertIn('unix-packages: failure', summary)
+        self.assertIn('All release targets must pass', summary)
+        self.assertIn('unix-packages: success', summary)
+        self.assertIn('Owner trial approval', result.stdout)
 
-    def test_every_windows_requirement_fails_closed(self):
+    def test_every_platform_requirement_fails_closed(self):
         for name in ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
-                     'windows-package', 'managed-update-windows', 'native']:
+                     'windows-package', 'managed-update-windows', 'native',
+                     'native-linux', 'unix-packages', 'managed-update-linux']:
             for status in ['failure', 'cancelled', 'skipped']:
                 with self.subTest(name=name, status=status):
                     result, _ = self.run_gate({name: status})

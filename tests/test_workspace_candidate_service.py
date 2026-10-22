@@ -358,7 +358,14 @@ def test_real_native_command_with_deep_state_location(tmp_path_factory, workspac
     # TEMP beyond MAX_PATH and blocked nested Windows CreateProcess.
     from backend.core.storage import close_owned_storage
     ws = tmp_path_factory
-    state = ws.parent / ("deep-state-" + "s" * 45) / ("t" * 30)
+    # Keep the positive case deep but inside the published startup bound.
+    # A fixed suffix made this exceed the bound on runners whose private TEMP
+    # has a longer prefix. Excessive paths have a separate refusal regression.
+    state_parent = ws.parent / ("deep-state-" + "s" * 12)
+    remaining = 120 - len(str(state_parent)) - 1
+    assert remaining >= 1, "Runner TEMP is too long for the supported deep-path positive fixture"
+    state = state_parent / ("t" * remaining)
+    assert len(str(state)) == 120
     close_owned_storage()
     monkeypatch.setenv("GITGO_STATE_HOME", str(state))
     try:
