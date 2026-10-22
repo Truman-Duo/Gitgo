@@ -119,12 +119,8 @@ def _find_next_number(
     """
     local_n = -1
     if workspace_path:
-        counter_file = Path(workspace_path) / ".gitgo" / "next_number"
-        if counter_file.exists():
-            try:
-                local_n = int(counter_file.read_text().strip())
-            except (ValueError, OSError):
-                local_n = -1
+        from backend.core.sync_session.state import peek_formal_number
+        local_n = peek_formal_number(workspace_path) - 1
 
     if git_runner is None:
         if not backup_path:

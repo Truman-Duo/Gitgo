@@ -13,12 +13,11 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
+from .file_operations import metadata_mutation_error
 
 
 _IGNORED_DIRS = {
@@ -57,6 +56,13 @@ def read_file(args: dict) -> dict:
     offset = max(0, int(args.get("offset", 0) or 0))
     limit = max(1, min(int(args.get("limit", 2000) or 2000), 5000))
     try:
+        # Reading the workspace itself is a directory request. Validate that
+        # acquired root directly: opening its parent is unnecessary and may
+        # be correctly denied by the native sandbox's workspace-only access.
+        if path == workspace:
+            from backend.core.sandbox_read import ReadRoot
+            with ReadRoot(workspace):
+                return _read_failure("IS_DIRECTORY", label)
         from backend.core.sandbox_read_plan import open_planned_read
         with open_planned_read(root, relative) as opened:
             raw = opened.read_bytes()
@@ -153,11 +159,16 @@ def project_file_mutation(operation: str, args: dict):
         return _project_edit(args)
     if operation == "write_file":
         return _project_write(args)
+    if operation == "delete_file":
+        return _project_delete(args)
     raise ValueError("unsupported file mutation")
 
 
 def _project_edit(args: dict):
     workspace = _workspace(args)
+    denied = metadata_mutation_error(workspace, args.get("path", ""))
+    if denied:
+        return denied
     path = _confined_path(workspace, args.get("path", ""), must_exist=True,
                           allowed_roots=_allowed_roots(args))
     old = str(args.get("old_string", ""))
@@ -222,6 +233,9 @@ def _project_edit(args: dict):
 
 def _project_write(args: dict):
     workspace = _workspace(args)
+    denied = metadata_mutation_error(workspace, args.get("path", ""))
+    if denied:
+        return denied
     path = _confined_path(workspace, args.get("path", ""), must_exist=False,
                           allowed_roots=_allowed_roots(args))
     content = str(args.get("content", ""))
@@ -300,107 +314,55 @@ def _project_write(args: dict):
 
 
 def delete_file(args: dict) -> dict:
-    """Recoverably remove one version-pinned workspace file.
+    """Commit a version-pinned deletion through the shared file service."""
+    from .file_mutation import commit_file_mutation
+    candidate = project_file_mutation("delete_file", args)
+    if isinstance(candidate, dict):
+        return {**candidate, "effect_state": "not_committed", "execution_state": "not_started"}
+    return commit_file_mutation(candidate, args)
 
-    Deletion is deliberately a first-class operation instead of a shell
-    convention.  The file is moved under ``.gitgo/trash`` so a later undo or
-    explicit restore can recover it, while the user-visible workspace no
-    longer contains the artifact.
-    """
+
+def _project_delete(args: dict):
+    """Freeze the deletion input; projection never creates trash or locks."""
     workspace = _workspace(args)
-    path = _confined_path(workspace, args.get("path", ""), must_exist=True)
+    denied = metadata_mutation_error(workspace, args.get("path", ""))
+    if denied:
+        return denied
+    path = _confined_path(workspace, args.get("path", ""), must_exist=False)
     relative = _rel(workspace, path)
     relative_path = Path(relative)
-    if not relative_path.parts or relative_path.parts[0].casefold() == ".gitgo":
+    if not relative_path.parts:
         return {"error": "PROTECTED_PATH", "path": relative}
     if path.is_dir():
         return {"error": "IS_DIRECTORY", "path": relative}
-    raw = path.read_bytes()
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {"error": "FILE_NOT_FOUND", "path": relative}
+    except OSError as exc:
+        return {"error": "READ_ERROR", "path": relative, "detail": str(exc)}
     current_hash = hashlib.sha256(raw).hexdigest()
     expected = str(args.get("expected_sha256", "")).strip()
     if not expected:
-        return {
-            "error": "EXPECTED_HASH_REQUIRED", "path": relative,
-            "actual_sha256": current_hash,
-        }
+        return {"error": "EXPECTED_HASH_REQUIRED", "path": relative, "actual_sha256": current_hash}
     if expected != current_hash:
-        return {
-            "error": "FILE_CHANGED", "path": relative,
-            "expected_sha256": expected, "actual_sha256": current_hash,
-        }
-    trash_id = f"{time.time_ns()}-{current_hash[:12]}"
-    trash_path = workspace / ".gitgo" / "trash" / "files" / trash_id / relative_path
-    trash_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(path), str(trash_path))
-    before_text = raw.decode("utf-8", errors="replace")
-    return {
-        "path": relative,
-        "action": "deleted",
-        "recoverable": True,
-        "trash_ref": _rel(workspace, trash_path),
-        "before_sha256": current_hash,
-        "size": len(raw),
-        "diff": _text_diff(relative, before_text, ""),
-    }
+        return {"error": "FILE_CHANGED", "path": relative,
+                "expected_sha256": expected, "actual_sha256": current_hash}
+    from .file_mutation import FileMutation
+    return FileMutation("delete_file", workspace, path, current_hash,
+                        raw.decode("utf-8", errors="replace"), "")
 
 
 def apply_patch(args: dict) -> dict:
-    workspace = _workspace(args)
+    from .patch_projection import project_patch
+    from .file_mutation_batch import commit_file_batch
+    candidate = project_patch(args)
+    if isinstance(candidate, dict):
+        return candidate
+    result = commit_file_batch(candidate, args)
     patch = str(args.get("patch", ""))
-    if not patch.strip():
-        return {"error": "EMPTY_PATCH"}
-    touched = _patch_paths(patch)
-    if not touched:
-        return {"error": "INVALID_PATCH", "detail": "no file headers found"}
-    for rel in touched:
-        _confined_path(workspace, rel, must_exist=False,
-                       allowed_roots=_allowed_roots(args))
-    command = ["git", "apply", "--whitespace=nowarn"]
-    try:
-        check = subprocess.run(
-            command + ["--check", "-"], cwd=str(workspace), input=patch,
-            capture_output=True, text=True, timeout=30,
-            creationflags=_hidden_window_flags(),
-        )
-        if check.returncode != 0:
-            from backend.core.errors import error_payload
-            diagnostic = check.stderr[:4000]
-            return {
-                **error_payload(
-                    "PATCH_CHECK_FAILED",
-                    message=(
-                        "The unified diff failed preflight validation; no file was changed. "
-                        + diagnostic
-                    ),
-                    details={"files": touched, "stderr": diagnostic},
-                    next_actions=[
-                        {
-                            "action": "repair_unified_diff",
-                            "effect": "Every fragment needs ---/+++ file headers and a valid @@ -old,+new @@ hunk header.",
-                        },
-                        {
-                            "action": "edit_file",
-                            "effect": "For a small change, reread the file and use bounded exact-string edits instead of resending a large patch.",
-                        },
-                    ],
-                ),
-                "files": touched,
-            }
-        applied = subprocess.run(
-            command + ["-"], cwd=str(workspace), input=patch,
-            capture_output=True, text=True, timeout=30,
-            creationflags=_hidden_window_flags(),
-        )
-        if applied.returncode != 0:
-            return {"error": "PATCH_APPLY_FAILED", "detail": applied.stderr[:4000], "files": touched}
-    except FileNotFoundError:
-        return {"error": "GIT_NOT_FOUND"}
-    except subprocess.TimeoutExpired:
-        return {"error": "PATCH_TIMEOUT"}
-    return {
-        "files": touched, "count": len(touched), "applied": True,
-        "diff": patch[:100_000] + ("\n[diff truncated by Host]\n" if len(patch) > 100_000 else ""),
-    }
+    result["diff"] = patch[:100_000] + ("\n[diff truncated by Host]\n" if len(patch) > 100_000 else "")
+    return result
 
 
 def exec_command(args: dict) -> dict:
@@ -744,20 +706,6 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _patch_paths(patch: str) -> list[str]:
-    paths = []
-    for marker, raw in re.findall(r"^(---|\+\+\+)\s+([^\t\r\n]+)", patch, re.M):
-        value = raw.strip()
-        if value == "/dev/null":
-            continue
-        if value.startswith(("a/", "b/")):
-            value = value[2:]
-        value = value.replace("\\", "/")
-        if value not in paths:
-            paths.append(value)
-    return paths
-
-
 def _command_denial(argv: list[str], workspace: Path) -> str:
     executable = Path(argv[0]).name.lower()
     if executable.endswith(".exe"):
@@ -784,21 +732,7 @@ def _command_denial(argv: list[str], workspace: Path) -> str:
     return ""
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, str(path))
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+from backend.core.filesystem import atomic_replace_bytes as _atomic_write
 
 
 def _kill_tree(proc: subprocess.Popen, job_handle=None) -> None:

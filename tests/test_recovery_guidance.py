@@ -98,19 +98,22 @@ def test_preflight_block_help_real_evidence_then_single_effect(tmp_path_factory)
     assert not allowed.is_error and len(calls) == 1
 
 
-def test_known_business_error_preserves_effect_and_exact_producer_actions(tmp_path_factory):
+@pytest.mark.parametrize("broker,effect", [("files.workspace.guidance_fixture", "partial"), ("test.guidance_fixture", "ambiguous")])
+def test_known_business_error_preserves_effect_and_exact_producer_actions(tmp_path_factory, broker, effect):
     p = process(tmp_path_factory); p.tool_registry = ToolRegistry(["probe"])
     payload = error_payload("FILE_CHANGED", state_changed=True, occurrence_id="original",
         next_actions=[{"action": "inspect_this_exact_target"}])
     payload.update(effect_state="partial", execution_state="started", detail="concurrent writer")
-    tool = AgentTool(execution_contract=data_broker("test.guidance_fixture"), name="probe", description="probe", parameters={"type": "object"}, execute=lambda _: payload,
+    tool = AgentTool(execution_contract=data_broker(broker), name="probe", description="probe", parameters={"type": "object"}, execute=lambda _: payload,
         effect=ToolEffect.WORKSPACE_WRITE)
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     result = ToolPipeline().execute({"name": "probe", "args": {}}, tool, ctx, "probe")
     info = result.diagnostics["error_info"]
     assert info["occurrence_id"] == "original" and info["state_changed"] is True
     assert info["next_actions"] == [{"action": "inspect_this_exact_target"}]
-    assert result.receipt["effect_state"] == "partial"
+    # Exact recovery instructions survive both contracts; only the named file
+    # service is responsible for a verified formal mutation effect.
+    assert result.receipt["effect_state"] == effect
     assert "guidance_ref" in result.formatted and "concurrent writer" in result.formatted
 
 

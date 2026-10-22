@@ -13,7 +13,7 @@ from backend.core.loop.tools import ToolRegistry
 from backend.core.loop.budget import TaskTreeBudget, TaskBudgetExceeded
 from backend.core.loop.budget_runtime import reserve_provider_call
 from backend.core.loop.llm import StreamCancelledError
-from backend.core.loop.test_manifest import run_registered_test
+from tests.registered_test_fixture import run_registered_test
 from backend.core.loop.worktree import AgentWorktreeManager, WorktreeError
 from backend.core.daemon.task_observations import TaskObservations
 from backend.core.storage import StorageRuntime
@@ -372,8 +372,9 @@ def test_incomplete_child_artifact_is_business_feedback_and_does_not_rollback_ba
     from backend.core.loop.execution_context import ExecutionContext
     ctx=ExecutionContext(process=root,session=root.session,workspace_path=str(tmp_path_factory))
     called=[]
+    from backend.core.loop.execution_contract import HOST_COMPUTE
     follow=AgentTool(name='inspect_other',description='read',parameters={'type':'object'},
-        execute=lambda args:called.append('read') or {'observed':True},read_only=True,effect=ToolEffect.READ)
+        execute=lambda args:called.append('read') or {'observed':True},read_only=True,effect=ToolEffect.READ,execution_contract=HOST_COMPUTE)
     catalog={'read_child_artifact':tools['read_child_artifact'],'inspect_other':follow}
     ctx.artifacts={'tool_catalog':catalog}
     execution=ToolExecution(execution_id='child-readiness',ctx=ctx,tool_calls=[

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import atexit
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import sys
@@ -20,6 +20,7 @@ from .runtime import StorageRuntime
 
 
 _MAX_OWNED_RUNTIMES = 16
+_OPEN_WAIT_SECONDS = 30.0
 _lock = threading.RLock()
 _pid = os.getpid()
 _bound: weakref.WeakValueDictionary[str, StorageRuntime] = weakref.WeakValueDictionary()
@@ -31,6 +32,9 @@ class _Entry:
     creating: bool = True
     retiring: bool = False
     closer: object | None = None
+    creator: int = field(default_factory=threading.get_ident)
+    ready: threading.Event = field(default_factory=threading.Event)
+    failure: BaseException | None = None
 
 
 _owned: OrderedDict[str, _Entry] = OrderedDict()
@@ -114,30 +118,65 @@ def unbind_storage(workspace: str | Path, runtime: StorageRuntime) -> None:
             _bound.pop(key, None)
 
 
+def peek_storage(workspace: str | Path) -> StorageRuntime | None:
+    """Read an already-owned/injected facade without creating a replacement."""
+    key = _key(workspace)
+    while True:
+        pending = None
+        with _lock:
+            if key in _bindings:
+                raise StorageBlocked("STORAGE_BINDING_BUSY")
+            entry = _owned.get(key)
+            if entry is not None:
+                if entry.creating:
+                    if entry.creator == threading.get_ident():
+                        raise StorageBlocked("STORAGE_BINDING_BUSY")
+                    pending = entry
+                elif entry.retiring:
+                    raise StorageBlocked("STORAGE_BINDING_RETIRING")
+                elif _available(entry.runtime):
+                    return entry.runtime
+                else:
+                    raise StorageBlocked("STORAGE_BINDING_UNAVAILABLE")
+            else:
+                runtime = _bound.get(key)
+                if runtime is not None and not _available(runtime):
+                    raise StorageBlocked("STORAGE_BINDING_UNAVAILABLE")
+                return runtime
+        if not pending.ready.wait(_OPEN_WAIT_SECONDS):
+            raise StorageBlocked("STORAGE_BINDING_BUSY")
+        if pending.failure is not None:
+            raise pending.failure
+
+
 def get_storage(workspace: str | Path) -> StorageRuntime:
     """Get the canonical project facade from the shared bounded ownership pool."""
     return _get_owned(_key(workspace), lambda: StorageRuntime(Path(workspace).resolve()))
 
 
 def _get_owned(key: str, factory) -> StorageRuntime:
-    """Get a usable facade, reserving bounded capacity before construction."""
+    """Share one bounded open attempt; never publish a partial facade."""
     _require_process()
     entry = None
     try:
         while True:
+            pending = None
             with _lock:
                 if key in _bindings:
                     raise StorageBlocked("STORAGE_BINDING_BUSY")
                 cached = _owned.get(key)
                 if cached is not None:
                     if cached.creating:
-                        raise StorageBlocked("STORAGE_BINDING_BUSY")
-                    if cached.retiring:
+                        if cached.creator == threading.get_ident():
+                            raise StorageBlocked("STORAGE_BINDING_BUSY")
+                        pending = cached
+                    elif cached.retiring:
                         raise StorageBlocked("STORAGE_BINDING_RETIRING")
-                    if _available(cached.runtime):
+                    elif _available(cached.runtime):
                         _owned.move_to_end(key)
                         return cached.runtime
-                    victim = (key, cached)
+                    else:
+                        victim = (key, cached)
                 else:
                     injected = _bound.get(key)
                     if injected is not None:
@@ -150,6 +189,16 @@ def _get_owned(key: str, factory) -> StorageRuntime:
                         entry = _Entry()
                         _owned[key] = entry
                         break
+            if pending is not None:
+                # Status projections and task admission can open the same
+                # project concurrently. Wait outside the pool mutex for that
+                # exact attempt, rather than failing a valid cold start or
+                # constructing a second owner. Retirement remains fail-closed.
+                if not pending.ready.wait(_OPEN_WAIT_SECONDS):
+                    raise StorageBlocked("STORAGE_BINDING_BUSY")
+                if pending.failure is not None:
+                    raise pending.failure
+                continue
             # A failed eviction does not mint a replacement or free capacity.
             _retire(*victim)
         entry.runtime = factory()
@@ -158,19 +207,21 @@ def _get_owned(key: str, factory) -> StorageRuntime:
             if entry.retiring:
                 raise StorageBlocked("STORAGE_BINDING_RETIRING")
             return entry.runtime
-    except BaseException:
+    except BaseException as error:
         if entry is None:
             raise
         with _lock:
+            entry.failure = error
             if entry.runtime is None:
-                # Construction retains its existing Runtime cleanup contract;
-                # no successfully returned facade was handed to this slot.
                 if _owned.get(key) is entry:
                     del _owned[key]
             else:
                 entry.creating = False
                 entry.retiring = True
         raise
+    finally:
+        if entry is not None:
+            entry.ready.set()
 
 
 def release_storage(workspace: str | Path) -> None:

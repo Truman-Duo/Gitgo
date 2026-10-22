@@ -1,6 +1,7 @@
 """Feedback identity and request exposure facts; never model understanding."""
 from __future__ import annotations
 import hashlib,json
+from backend.core.tools.file_operations import FILE_MUTATION_TOOLS
 
 
 def identity(candidate, context, diagnostics):
@@ -34,16 +35,18 @@ def observe_provider_input(process, messages):
     known=set(exposed_ids(process))
     candidates=[]
     for message in process.session.messages:
-        if (message.get("role")!="tool" or message.get("provider_visible") is False
-                or message.get("_tool_name") not in {"edit_file","write_file"}):continue
+        if message.get("role")!="tool" or message.get("provider_visible") is False:continue
         data=message.get("data")
         receipt=message.get("receipt")
         if not isinstance(data,dict) or not isinstance(receipt,dict):continue
+        if (receipt.get("tool_name") != message.get("_tool_name")
+                or receipt.get("task_id") != task or receipt.get("process_id") != process.process_id):continue
+        if message.get("_tool_name") not in FILE_MUTATION_TOOLS and receipt.get("file_service_result") is not True:continue
         feedback=data.get("lesson_feedback")
         if not isinstance(feedback,dict):continue
         identifier=feedback.get("feedback_id")
         if (not identifier or identifier in known or receipt.get("lesson_feedback_id")!=identifier
-                or receipt.get("effect")!="workspace_write"):continue
+                or (receipt.get("effect")!="workspace_write" and receipt.get("file_service_result") is not True)):continue
         candidates.append((message,identifier))
     if not candidates:return
     texts=list(strings(messages))

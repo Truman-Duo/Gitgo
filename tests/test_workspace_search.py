@@ -402,3 +402,22 @@ def test_search_stdin_is_private_eof_without_null_device(tmp_path_factory, monke
         b'\n', lambda raw: rows.append(raw.strip()) or True, time.monotonic() + 10)
     assert outcome.exit_code == 0 and not outcome.stopped, outcome
     assert rows == [b'private-eof']
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_denied_engine_probe_uses_existing_honest_unavailable_path(tmp_path_factory, monkeypatch, configured):
+    root=tmp_path_factory
+    (root/"input.txt").write_text("sample")
+    engine=root/"denied"/("rg.exe" if os.name=="nt" else "rg")
+    original=Path.is_file
+    def denied(path):
+        if path == engine: raise PermissionError("sandbox denies engine metadata")
+        return original(path)
+    monkeypatch.setattr(Path,"is_file",denied)
+    monkeypatch.setenv("PATH",str(engine.parent))
+    if configured:monkeypatch.setenv("GITGO_RIPGREP_PATH",str(engine))
+    else:monkeypatch.delenv("GITGO_RIPGREP_PATH",raising=False)
+    assert adapter.resolve_ripgrep() is None
+    result=list_files({"_workspace":str(root)})
+    assert any(w["code"]=="RIPGREP_UNAVAILABLE" for w in result["warnings"])
+    assert result["engine"]=="python"

@@ -2,7 +2,6 @@
 import json
 import hashlib
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -15,17 +14,22 @@ from .models import Lesson
 from .manager import LessonManager
 
 
-def harvest_lessons(workspace_path: Path, project_name: str, tech_stack: str = "") -> list[Lesson]:
+def harvest_lessons(workspace_path: Path, project_name: str, tech_stack: str = "", *, discovery_report=None) -> list[Lesson]:
     """Legacy discovery records observations, never saves or promotes lessons."""
     with HistoryManager.workspace_scope(str(workspace_path)):
-        _harvest_from_git_log(workspace_path, project_name, tech_stack)
-        _harvest_from_claude_md(workspace_path, project_name, tech_stack)
-        _harvest_from_scan_history(project_name, tech_stack)
-        _harvest_from_governance_signals(workspace_path, project_name, tech_stack)
+        report = {
+            "git_log": _harvest_from_git_log(workspace_path, project_name, tech_stack),
+            "document": _harvest_from_claude_md(workspace_path, project_name, tech_stack),
+            "scan_history": _harvest_from_scan_history(project_name, tech_stack),
+            "governance": _harvest_from_governance_signals(workspace_path, project_name, tech_stack),
+        }
+    if discovery_report is not None:
+        discovery_report.update(report)
     return []
 
 
 def _observe_history(project_name: str, operations=None) -> list[Lesson]:
+    inspected = 0
     for entry in HistoryManager.load()[-50:]:
         if entry.project_name != project_name:
             continue
@@ -33,12 +37,13 @@ def _observe_history(project_name: str, operations=None) -> list[Lesson]:
             continue
         if operations is not None and entry.operation not in operations:
             continue
+        inspected += 1
         raw = {"operation": entry.operation, "status": entry.status,
                "timestamp": entry.timestamp, "detail": entry.detail}
         identity = hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
         capture_signal("history_observation", {"source_record": raw, "information_kind": "unclassified"},
                        project_name, source_event_id=identity)
-    return []
+    return {"state": "completed", "has_observation": bool(inspected), "inspected_records": inspected}
 
 
 def _harvest_from_governance_signals(workspace_path, project_name, tech_stack=""):
@@ -49,30 +54,43 @@ def _harvest_from_scan_history(project_name, tech_stack=""):
     return _observe_history(project_name, {"scan", "sync"})
 
 
+def _discovery_unavailable(source, project_name, exc):
+    # No arbitrary stderr, command text or credentials enter knowledge sources.
+    detail = {"source": source, "error_type": type(exc).__name__}
+    capture_signal("discovery_unavailable", detail, project_name,
+                   source_event_id=source + ":" + type(exc).__name__)
+    return {"state": "unavailable", "has_observation": False, **detail}
+
+
 def _harvest_from_git_log(workspace_path, project_name, tech_stack=""):
+    from backend.core.loop.worktree import AgentWorktreeManager, WorktreeError
     try:
-        result = subprocess.run(["git", "log", "-5", "--format=%H %s", "--name-status"],
-            cwd=str(workspace_path), capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError) as exc:
-        capture_signal("discovery_unavailable", {"source": "git_log", "error_type": type(exc).__name__},
-                       project_name, source_event_id="git_log:" + type(exc).__name__)
-        return []
-    if result.returncode == 0 and result.stdout.strip():
-        raw = result.stdout[:8000]
-        capture_signal("vcs_observation", {"changes": raw, "truncated": len(result.stdout) > 8000},
+        result = AgentWorktreeManager._run(Path(workspace_path),
+            ["git", "log", "-5", "--format=%H %s", "--name-status"],
+            timeout_seconds=10)
+    except (OSError, WorktreeError) as exc:
+        return _discovery_unavailable("git_log", project_name, exc)
+    text = result.stdout.decode("utf8", errors="replace")
+    if text.strip():
+        raw = text[:8000]
+        capture_signal("vcs_observation", {"changes": raw, "truncated": len(text) > 8000},
             project_name, source_event_id=hashlib.sha256(raw.encode()).hexdigest())
-    return []
+    return {"state": "completed", "has_observation": bool(text.strip()), "truncated": len(text) > 8000}
 
 
 def _harvest_from_claude_md(workspace_path, project_name, tech_stack=""):
-    path = Path(workspace_path) / "CLAUDE.md"
-    if not path.is_file():
-        return []
-    content = path.read_text(encoding="utf-8", errors="replace")
+    from backend.core.sandbox_read import ReadRoot, ReadBoundaryError
+    try:
+        with ReadRoot(Path(workspace_path).absolute()) as root, root.open("CLAUDE.md") as opened:
+            content = opened.read_bytes().decode("utf8", errors="replace")
+    except FileNotFoundError:
+        return {"state": "absent", "has_observation": False}
+    except (OSError, ReadBoundaryError) as exc:
+        return _discovery_unavailable("CLAUDE.md", project_name, exc)
     capture_signal("document_observation", {"path": "CLAUDE.md", "content": content[:8000],
         "truncated": len(content) > 8000, "source_authority": "project_document"},
         project_name, source_event_id=hashlib.sha256(content.encode()).hexdigest())
-    return []
+    return {"state": "completed", "has_observation": True, "truncated": len(content) > 8000}
 
 
 # ── v0.35: 信号捕获 + 调度 + LLM 总结 ──────────────────────

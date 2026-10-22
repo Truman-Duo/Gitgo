@@ -86,15 +86,16 @@ class AgentWorktreeManager:
     def __init__(self, workspace: str | Path, storage) -> None:
         self.workspace = Path(workspace).resolve()
         self.storage = storage
-        root = self._git_text(self.workspace, "rev-parse", "--show-toplevel")
-        self.repo_root = Path(root).resolve()
-        if self.repo_root != self.workspace:
-            # Tool paths and repository identity are rooted at the submitted
-            # workspace.  Silently widening to an ancestor would broaden the
-            # Agent's authority and file scan scope.
+        # Establish the submitted root without executing repository-configured
+        # programs during daemon assembly. Protected Git validates the actual
+        # metadata on every operation. An unsupported backend/config must fail
+        # the requested isolated task, not make startup fall back to shared mode.
+        marker = self.workspace / ".git"
+        if not (marker.is_dir() or marker.is_file()):
             raise WorktreeError(
                 f"workspace must be the Git repository root: {self.workspace}"
             )
+        self.repo_root = self.workspace
         # Keep linked checkouts outside both the user repository and the long
         # per-project SQLite/CAS path.  Git for Windows still encounters tools
         # and hooks that assume MAX_PATH, so opaque directory names are a
@@ -107,23 +108,21 @@ class AgentWorktreeManager:
         ).resolve()
         self.worktrees_root.mkdir(parents=True, exist_ok=True)
 
-    # Only runtime-owned artifacts, not the entire .gitgo namespace. User
-    # settings/knowledge files remain ordinary business files and are scanned.
-    _RUNTIME_PATHS = (
-        ".gitgo/test_manifest.json", ".gitgo/dependency_graph.v2.json",
-        ".gitgo/dependency_feedback.json", ".gitgo/dependency_observations.jsonl",
-        ".gitgo/context_objects", ".gitgo/tool_invocations",
-    )
+    # Product-managed metadata is never a business delta. Its selected
+    # observations travel through the canonical metadata channels below;
+    # new internal file kinds must not accidentally enter a sealed result.
+    _RUNTIME_PATHS = (".gitgo",)
 
     @classmethod
     def _business_paths(cls) -> list[str]:
-        return [".", *(f":(top,exclude,literal){path}" for path in cls._RUNTIME_PATHS)]
+        return [".", ":(top,exclude,icase,literal).gitgo",
+                ":(exclude,icase,glob)**/.gitgo/**",
+                ":(exclude,icase,glob)**/.git/**"]
 
     @classmethod
     def _is_runtime_path(cls, relative: str) -> bool:
-        relative = relative.replace(chr(92), "/")
-        return any(relative == path or relative.startswith(path + "/")
-                   for path in cls._RUNTIME_PATHS)
+        from backend.core.tools.file_operations import protected_metadata_part
+        return any(protected_metadata_part(part) for part in relative.replace(chr(92), "/").split("/"))
 
     def _apply_business_commit(self, target: Path, commit: str) -> None:
         # Project the business delta even for an older sealed commit that
@@ -159,41 +158,23 @@ class AgentWorktreeManager:
         check: bool = True,
         timeout_seconds: float = 120,
     ) -> subprocess.CompletedProcess:
-        command = list(args)
-        if command and command[0] == "git":
-            # A daemon child must never inherit the JSON control pipe or wait
-            # for Git Credential Manager/editor interaction.  Apart from
-            # potentially consuming protocol input, inherited handles can
-            # keep a nested Windows process alive after its owning task was
-            # cancelled.  Resolve Git before launch so executable discovery
-            # is not delegated to a grandchild process.
-            command[0] = shutil.which("git") or "git"
-            command[1:1] = ["-c", "core.longpaths=true"]
-        environment = {
-            **os.environ,
-            "GIT_TERMINAL_PROMPT": "0",
-            "GCM_INTERACTIVE": "Never",
-            "GIT_EDITOR": "true",
-            "GIT_PAGER": "cat",
-        }
-        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        input_options = (
-            {"input": input_bytes}
-            if input_bytes is not None
-            else {"stdin": subprocess.DEVNULL}
-        )
+        from .git_execution import GitBoundaryError, protected_git
         try:
-            result = subprocess.run(
-                command,
-                cwd=cwd,
-                capture_output=True,
-                timeout=timeout_seconds,
-                check=False,
-                close_fds=True,
-                creationflags=creationflags,
-                env=environment,
-                **input_options,
-            )
+            with protected_git(cwd, args) as (command, environment):
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                result = subprocess.run(command, cwd=cwd, capture_output=True,
+                    timeout=timeout_seconds, check=False, close_fds=True,
+                    creationflags=creationflags, env=environment,
+                    **({"input": input_bytes} if input_bytes is not None
+                       else {"stdin": subprocess.DEVNULL}))
+        except GitBoundaryError as exc:
+            from backend.core.errors import error_payload
+            failure = WorktreeError(str(exc))
+            failure.diagnostic = error_payload(exc.code, message=str(exc), details={
+                "scope": "this_git_command", "command_started": False,
+                "task_effects": "not_inferred", "unrestricted_fallback": False,
+            })
+            raise failure from exc
         except (OSError, subprocess.TimeoutExpired) as exc:
             command_label = " ".join(str(item) for item in args[:5])
             raise WorktreeError(
@@ -288,7 +269,11 @@ class AgentWorktreeManager:
             self._git_input(path, pathspec, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul")
         # A worker may have staged files itself, or an older result may have
         # carried runtime paths. Unstage those paths without deleting evidence.
-        self._git_text(path, "reset", "--quiet", "HEAD", "--", *self._RUNTIME_PATHS)
+        staged_names = self._git_bytes(path, "diff", "--cached", "--name-only", "-z")
+        metadata = [name.decode("utf8", errors="surrogateescape") for name in staged_names.split(b"\0")
+                    if name and self._is_runtime_path(name.decode("utf8", errors="surrogateescape"))]
+        if metadata:
+            self._git_text(path, "reset", "--quiet", "HEAD", "--", *metadata)
         staged = self._git_bytes(
             path, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff",
         )
@@ -597,7 +582,8 @@ class AgentWorktreeManager:
         lease.result_commit = result
         changed_range = f"{parent}..{result}" if result != parent else ""
         lease.changed_files = (
-            self._git_text(path, "diff", "--name-only", changed_range, "--").splitlines()
+            [name.decode("utf-8", errors="surrogateescape") for name in self._git_bytes(
+                path, "diff", "--no-renames", "--name-only", "-z", changed_range, "--").split(b"\0") if name]
             if changed_range else []
         )
         self._merge_runtime_outputs(path, lease)
@@ -643,7 +629,9 @@ class AgentWorktreeManager:
             raise WorktreeError("sealed artifact offset is beyond the file")
         span = max(1000, min(int(max_chars or 24000), 100000))
         end = min(len(content), start + span)
-        return {
+        return {"representation": "git_blob", "sha256_basis": "git_blob_bytes",
+                "working_tree_bytes_verified": False,
+                "materialization_note": "Git checkout attributes/settings may change working-file bytes; promotion file_results bind the actual checked candidate bytes.",
             "path": relative,
             "sha256": digest,
             "content": content[start:end],
@@ -661,10 +649,12 @@ class AgentWorktreeManager:
         promotion_id: str,
         artifact_paths: Iterable[str] = (),
         input_dependencies: Iterable[dict] = (),
+        file_service_args: dict | None = None,
     ) -> dict:
         from .promotion import promote
         return promote(self, snapshot_commit=snapshot_commit, ordered_commits=ordered_commits,
-                       promotion_id=promotion_id, artifact_paths=artifact_paths, input_dependencies=input_dependencies)
+                       promotion_id=promotion_id, artifact_paths=artifact_paths, input_dependencies=input_dependencies,
+                       file_service_args=file_service_args)
 
     def verify(self, lease: WorktreeLease) -> dict:
         path = Path(lease.path).resolve()

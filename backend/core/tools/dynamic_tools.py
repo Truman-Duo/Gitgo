@@ -28,11 +28,25 @@ _SAFE_CALLS = {
 }
 
 
+
+def validate_custom_tool_name(name):
+    """Reuse canonical catalogs; custom assets cannot impersonate built-ins."""
+    if not _NAME_RE.fullmatch(name):
+        raise ValueError("tool name must match ^[a-z][a-z0-9_]{2,63}$")
+    from backend.core.loop.capabilities import CapabilityProfiles
+    from backend.core.loop.task_contract import COMPLETION_PROTOCOL_TOOLS
+    from backend.core.tools.runner import handler_bindings
+    reserved = {name for profile in CapabilityProfiles.ids() for name in CapabilityProfiles.get(profile).tool_names}
+    reserved.update(COMPLETION_PROTOCOL_TOOLS)
+    reserved.update(handler_bindings())
+    if name in reserved:
+        raise ValueError("tool name already exists as a built-in interface: " + name)
+
+
 def validate_authored_definition(raw: dict, workspace: str, *, host_calls: bool = False) -> dict:
     """Compile one pure, task-scoped Python shortcut without adding authority."""
     name = str(raw.get("name", "")).strip()
-    if not _NAME_RE.fullmatch(name):
-        raise ValueError("tool name must match ^[a-z][a-z0-9_]{2,63}$")
+    validate_custom_tool_name(name)
     description = str(raw.get("description", "")).strip()
     if not description:
         raise ValueError("tool description is required")
@@ -116,13 +130,14 @@ def validate_privileged_authored_definition(raw: dict, workspace: str) -> dict:
     every registration and every invocation is explicitly approved.
     """
     name = str(raw.get("name", "")).strip()
-    if not _NAME_RE.fullmatch(name):
-        raise ValueError("tool name must match ^[a-z][a-z0-9_]{2,63}$")
+    validate_custom_tool_name(name)
     description = str(raw.get("description", "")).strip()
     purpose = str(raw.get("purpose", "")).strip()
     if not description or not purpose:
         raise ValueError("description and purpose are required")
     parameters = normalize_tool_parameters(raw.get("parameters"))
+    if {"candidate_ref", "lesson_feedback_id"}.intersection(parameters.get("properties", {})):
+        raise ValueError("candidate_ref and lesson_feedback_id are reserved native continuation parameters")
     root = Path(workspace).resolve()
     source_path = (root / str(raw.get("source_path", ""))).resolve()
     try:
@@ -232,8 +247,7 @@ def execute_authored_privileged_python(args: dict) -> dict:
 
 def validate_definition(raw: dict, available_tools: dict) -> dict:
     name = str(raw.get("name", "")).strip()
-    if not _NAME_RE.fullmatch(name):
-        raise ValueError("tool name must match ^[a-z][a-z0-9_]{2,63}$")
+    validate_custom_tool_name(name)
     if name in available_tools:
         raise ValueError(f"tool name already exists: {name}")
     description = str(raw.get("description", "")).strip()

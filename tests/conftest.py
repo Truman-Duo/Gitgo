@@ -144,3 +144,8 @@ def runner_transport_only(monkeypatch):
         proc.close_sandbox = close_fixture
         return proc
     monkeypatch.setattr("backend.core.sandbox.sandbox_popen", launch)
+
+    # This opt-in protocol fixture also avoids touching real runtime ACLs for
+    # temporary native producer views. Real OS tests do not use this fixture.
+    monkeypatch.setattr("backend.core.sandbox_access.WorkspaceAccess.prepare", lambda self: self)
+    monkeypatch.setattr("backend.core.sandbox_access.WorkspaceAccess.close", lambda self: None)

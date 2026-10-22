@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import errno
 import os
-import subprocess
-import sys
 import tempfile
 import re
 import threading
@@ -251,12 +249,16 @@ class TestManifest:
         return not failures, failures
 
 
-def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
-    """Run one pytest target under one or more deterministic seeds."""
+def run_registered_test(workspace_path: str | Path, args: dict, *, execute, before_record=None) -> dict:
+    """Record results from an explicit trusted executor, never choose a fallback."""
+    from backend.core.errors import error_payload
     workspace = Path(workspace_path).resolve()
     test_id = str(args.get("test_id", "")).strip()
     target = str(args.get("target", "")).strip()
-    seeds = [int(seed) for seed in (args.get("seeds", [42]) or [42])]
+    seeds = args.get("seeds", [42]) or [42]
+    if not isinstance(seeds, list) or not 1 <= len(seeds) <= 20 or any(type(seed) is not int for seed in seeds):
+        return {"error": "seeds must contain between 1 and 20 integer values"}
+    seeds = list(dict.fromkeys(seeds))
     timeout = max(1, min(int(args.get("timeout", 120)), 900))
     if not test_id:
         return {"error": "test_id is required"}
@@ -276,33 +278,23 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
     if declared is not None:
         if not isinstance(declared, list) or not all(isinstance(p, str) and p for p in declared):
             return {"error": "input_files must be an explicit list of workspace files"}
-        declared = list(dict.fromkeys([*declared, target_path_text]))
+        declared = list(dict.fromkeys([*declared, target_path.relative_to(workspace).as_posix()]))
     validation = workspace_version(workspace, input_files=declared)
-    import time
-    results: list[SeedResult] = []
-    for seed in seeds:
-        from backend.core.tools.execution_profile import safe_environment
-        env = safe_environment()
-        env["GITGO_TEST_SEED"] = str(seed)
-        started = time.monotonic()
-        try:
-            from backend.core.child_process import workspace_python_command
-            completed = subprocess.run(
-                workspace_python_command(["python", "-m", "pytest", target, "-q"], workspace),
-                cwd=str(workspace), env=env, capture_output=True, text=True,
-                timeout=timeout, shell=False,
-            )
-            output = (completed.stdout or "") + (completed.stderr or "")
-            exit_code = completed.returncode
-        except subprocess.TimeoutExpired as exc:
-            output = ((exc.stdout or "") + (exc.stderr or ""))
-            exit_code = 124
-        results.append(SeedResult(
-            seed=seed,
-            exit_code=exit_code,
-            duration_ms=(time.monotonic() - started) * 1000,
-            output_tail=output[-4000:],
-        ))
+    suffix = "::" + target.split("::", 1)[1] if "::" in target else ""
+    public = {"test_id": test_id, "target": target_path.relative_to(workspace).as_posix() + suffix,
+              "seeds": seeds, "timeout": timeout}
+    executed = execute(workspace, public, validation)
+    if not isinstance(executed, dict) or executed.get("error"):
+        return executed if isinstance(executed, dict) else error_payload("TEST_PROTOCOL_INVALID")
+    rows = executed.get("seed_results")
+    import math
+    if (not isinstance(rows, list) or len(rows) != len(seeds) or any(
+            not isinstance(row, dict) or row.get("seed") != seed or type(row.get("exit_code")) is not int
+            or not isinstance(row.get("duration_ms"), (int, float)) or not math.isfinite(row["duration_ms"])
+            or row["duration_ms"] < 0 or not isinstance(row.get("output_tail"), str)
+            for seed, row in zip(seeds, rows))):
+        return error_payload("TEST_PROTOCOL_INVALID")
+    results = [SeedResult(row["seed"], row["exit_code"], row["duration_ms"], row["output_tail"][-4000:]) for row in rows]
 
     after = workspace_version(workspace, input_files=declared)
     if validation != after:
@@ -318,6 +310,8 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
         last_run_at=datetime.now().isoformat(),
         validation_version=validation,
     )
+    if before_record is not None:
+        before_record()
     manifest = TestManifest.load(workspace)
     manifest.register(record)
     return {

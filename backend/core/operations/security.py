@@ -87,7 +87,7 @@ def _get_push_diff(
         else "4b825dc642cb6eb9a060e54bf8d69288fbee4904..HEAD"
     )
     result = git_runner.run(
-        ["diff", "--unified=0", "--no-ext-diff", revision, "--"],
+        ["diff", "--unified=0", "--no-ext-diff", "--no-textconv", revision, "--"],
         timeout=60,
     )
     return result.stdout if result.returncode == 0 else None

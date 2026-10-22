@@ -216,7 +216,8 @@ def test_current_tool_denial_wins_over_previously_issued_exact_grant(tmp_path_fa
     process = AgentProcessManager().fork(parent_id=None, role="worker", tool_registry=ToolRegistry(["audit_tool"]),
         max_steps=8, ring_level=RingLevel.RING_3, workspace_path=str(root), task_id="audit-task", actor_kind="worker", task_kind="action")
     calls = []
-    tool = AgentTool(name="audit_tool", description="test capability", parameters={"type":"object","properties":{}},
+    from backend.core.loop.execution_contract import HOST_COMPUTE
+    tool = AgentTool(name="audit_tool", execution_contract=HOST_COMPUTE, description="test capability", parameters={"type":"object","properties":{}},
         execute=lambda args: calls.append(args) or {"ok":True}, effect=ToolEffect.READ,
         approval=ApprovalMode.ASK, approval_per_invocation=True)
     create_permission_request(process, {"purpose":"exercise audit fixture", "tool_name":"audit_tool", "arguments":{}},

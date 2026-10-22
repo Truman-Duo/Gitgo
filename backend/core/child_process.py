@@ -99,11 +99,14 @@ def workspace_python_command(argv: list[str], cwd: Path) -> list[str]:
     if not remaining:
         return python_command(interpreter_flags)
 
-    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r});"
+    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r})\n"
     mode = remaining[0]
     if mode == "-c" and len(remaining) >= 2:
         return python_command([
-            *interpreter_flags, "-c", bootstrap + remaining[1], *remaining[2:],
+            # Compile the original program separately: compound statements and
+            # __future__ imports retain Python -c semantics after path setup.
+            *interpreter_flags, "-c", bootstrap + "exec(compile(" + repr(remaining[1])
+            + ", '<string>', 'exec', dont_inherit=True))", *remaining[2:],
         ])
     if mode == "-m" and len(remaining) >= 2:
         module = remaining[1]

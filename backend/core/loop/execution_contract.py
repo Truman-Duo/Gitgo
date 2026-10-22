@@ -27,10 +27,10 @@ class ExecutionContract:
     def __post_init__(self):
         if not isinstance(self.kind, ExecutionType) or type(self.version) is not int or self.version != 1:
             raise ValueError("Unknown execution contract type/version")
-        if self.file_action not in {"", "read_existing_file"}:
+        if self.file_action not in {"", "read_existing_file", "produce_workspace"}:
             raise ValueError("Unknown file action")
         if self.file_action and self.kind != ExecutionType.NATIVE_PROCESS:
-            raise ValueError("File reads require the native helper")
+            raise ValueError("File actions require the native helper")
         if self.kind in {ExecutionType.DATA_BROKER, ExecutionType.EXTERNAL_SERVICE}:
             if not isinstance(self.broker, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{2,95}", self.broker):
                 raise ValueError("A named Host broker is required")
@@ -47,6 +47,7 @@ def data_broker(name: str) -> ExecutionContract:
 
 HOST_COMPUTE = ExecutionContract(ExecutionType.HOST_COMPUTE)
 NATIVE_PROCESS = ExecutionContract(ExecutionType.NATIVE_PROCESS)
+NATIVE_WORKSPACE_PRODUCER = ExecutionContract(ExecutionType.NATIVE_PROCESS, file_action="produce_workspace")
 NATIVE_FILE_READ = ExecutionContract(ExecutionType.NATIVE_PROCESS, file_action="read_existing_file")
 
 
@@ -94,7 +95,9 @@ class NativeInvocation:
         workspace = args.get('_workspace') or args.get('workspace_path')
         if not workspace:
             raise ValueError("Host execution workspace is required")
+        from backend.core.sandbox import child_environment_paths
         policy = SandboxPolicy(Path(str(workspace)), cpu_seconds=max(1, min(int(timeout), 1800)))
+        child_environment_paths(policy.workspace)
         return cls(handler, cls.encode(args), timeout, policy, tuple(owner), registration)
 
     def check(self, handler, args, timeout):

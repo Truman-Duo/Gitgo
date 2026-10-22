@@ -18,21 +18,8 @@ from tests.test_native_sandbox import isolated_python, native_box, owned_windows
 
 @pytest.fixture(scope="module")
 def source_runtime(isolated_python):
-    source=Path(__file__).resolve().parents[1]/"backend"
-    shutil.copytree(source,isolated_python/"backend",ignore=shutil.ignore_patterns("__pycache__","*.pyc"))
-    # Copy only the imports required by the real public backend/runner. A
-    # shared user package directory is never granted to the AppContainer.
-    for name in ("httpx","httpcore","anyio","idna","sniffio","certifi",
-                 "typing_extensions","h11","yaml","_yaml"):
-        spec=importlib.util.find_spec(name)
-        if spec is None:
-            continue
-        if spec.submodule_search_locations:
-            shutil.copytree(next(iter(spec.submodule_search_locations)),isolated_python/name,
-                ignore=shutil.ignore_patterns("__pycache__","*.pyc"))
-        elif spec.origin:
-            shutil.copy2(spec.origin,isolated_python/Path(spec.origin).name)
-    return isolated_python
+    from tests.native_source_runtime import populate_source_runtime
+    return populate_source_runtime(isolated_python)
 
 
 def test_read_then_checked_write_with_external_private_state(source_runtime,native_box):
@@ -112,3 +99,62 @@ def source_native_runner(source_runtime, monkeypatch):
     monkeypatch.setattr("backend.core.loop.process_tool_runner.tool_runner_command",lambda:command)
     monkeypatch.setattr("backend.core.loop.process_tool_runner.owned_child_cwd",lambda _:source_runtime)
     return lambda workspace: owned_windows_access(workspace,[source_runtime])
+
+
+def test_scoped_preparation_runs_real_native_children_with_disjoint_workspaces(source_runtime, tmp_path_factory):
+    first=tmp_path_factory/"first"; second=tmp_path_factory/"second"; private=tmp_path_factory/"private"
+    for path in (first,second,private): path.mkdir()
+    (first/"input.txt").write_text("first-data")
+    (second/"input.txt").write_text("second-data")
+    (private/"secret.txt").write_text("SYNTHETIC-PRIVATE")
+    driver=textwrap.dedent(f"""
+        from pathlib import Path
+        import json,subprocess,sys
+        from backend.core.sandbox import sandbox_popen,sandbox_environment,SandboxPolicy
+        from backend.core.sandbox_access import WorkspaceAccess
+        from backend.core.process_control import terminate_tree
+        import os
+        first,second,private=map(Path,{[str(first),str(second),str(private)]!r})
+        runtime=Path({str(source_runtime)!r})
+        one=WorkspaceAccess(first,[runtime],private/'first-access.json')
+        two=WorkspaceAccess(second,[runtime],private/'second-access.json')
+        def probe(workspace,code):
+            proc=sandbox_popen([sys.executable,'-I','-X','utf8','-c',code],SandboxPolicy(workspace),
+                cwd=str(workspace),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                text=True,encoding='utf8',env=sandbox_environment(os.environ))
+            try:
+                out,err=proc.communicate(timeout=15)
+                result={{'code':proc.returncode,'stdout':out,'stderr':err}}
+                assert proc.close_sandbox()['complete']
+                return result
+            finally:
+                terminate_tree(proc,getattr(proc,'_gitgo_job_handle',None))
+                for stream in (proc.stdin,proc.stdout,proc.stderr):
+                    if stream:stream.close()
+        try:
+            one.prepare();two.prepare()
+            inside=probe(first,"from pathlib import Path;Path('output.txt').write_text('ok');print(Path('input.txt').read_text())")
+            assert inside['code']==0 and inside['stdout'].strip()=='first-data',inside
+            denied=[]
+            for target in (second/'input.txt',private/'secret.txt',private/'first-access.json'):
+                result=probe(first,"from pathlib import Path;print(Path("+repr(str(target))+").read_text())")
+                assert result['code']!=0 and 'PermissionError' in result['stderr'],result
+                assert 'second-data' not in result['stdout'] and 'SYNTHETIC-PRIVATE' not in result['stdout']
+                denied.append(result['code'])
+            writing_runtime=probe(first,"from pathlib import Path;Path("+repr(str(runtime/'forbidden.txt'))+").write_text('escaped')")
+            assert writing_runtime['code']!=0 and 'PermissionError' in writing_runtime['stderr'],writing_runtime
+            one.close()
+            peer=probe(second,"from pathlib import Path;print(Path('input.txt').read_text())")
+            assert peer['code']==0 and peer['stdout'].strip()=='second-data',peer
+            print(json.dumps({{'inside':inside['code'],'denied':denied,'runtime_write_denied':True,'peer_survived_cleanup':True}}))
+        finally:
+            one.close();two.close()
+    """)
+    result=subprocess.run([str(source_runtime/'python.exe'),'-B','-I','-X','utf8','-c',driver],
+        cwd=source_runtime,capture_output=True,text=True,encoding='utf8',timeout=90)
+    assert result.returncode==0,result.stdout+'\n'+result.stderr
+    assert json.loads(result.stdout)['peer_survived_cleanup'] is True
+    assert (first/'output.txt').read_text()=='ok'
+    assert not (source_runtime/'forbidden.txt').exists()
+    for path in private.glob('*-access.json'):
+        assert json.loads(path.read_text())['phase']=='revoked'

@@ -1,7 +1,8 @@
 import zipfile
 from backend.core.tools.document_tools import document_open
 from backend.core.tools.document_limits import verified_antiword, bounded_join, DocumentLimit
-from backend.core.tools.registrations import file_write
+from backend.core.tools.file_compat import file_write
+import hashlib
 from backend.core.tools.execution_profile import safe_environment
 import pytest
 
@@ -28,7 +29,8 @@ def test_join_stops_unbounded_generator():
 def test_legacy_append_retains_previous_content(tmp_path_factory):
     path = tmp_path_factory / "log.txt"
     path.write_text("first\n", encoding="utf-8")
-    result = file_write({"path": str(path), "content": "second\n", "mode": "a"})
+    result = file_write({"_workspace": str(tmp_path_factory), "path": str(path), "content": "second\n", "mode": "a",
+                         "expected_sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     assert "error" not in result and path.read_text(encoding="utf-8") == "first\nsecond\n"
 
 

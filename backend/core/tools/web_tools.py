@@ -279,6 +279,7 @@ def _searxng_search(args: dict) -> dict:
                 "engines": engine,
             },
             timeout=30,
+            trust_env=False,
             follow_redirects=True,
             headers={"User-Agent": "Gitgo/1.0"},
         )
@@ -355,12 +356,11 @@ def _searxng_search(args: dict) -> dict:
 
 
 def _provider_hosted_search(args: dict) -> dict:
-    """Execute vendor-hosted search behind Gitgo's approval boundary.
+    """Execute hosted search through the same public-read policy as fetch.
 
-    Provider server tools normally execute inside a model request and cannot be
-    intercepted after tool selection. Gitgo therefore exposes one client-side
-    SearchBroker function, suspends it for approval, then performs this bounded
-    provider request after the grant. SearXNG remains an explicit fallback.
+    Only this bounded query request receives the configured provider identity;
+    arbitrary native programs receive neither its credentials nor network rights.
+    SearXNG remains an explicit configured fallback.
     """
     query = str(args.get("query") or "").strip()
     if not query:
@@ -524,7 +524,7 @@ def provider_search_transport(configured) -> str:
     if _is_deepseek_official(configured):
         return "deepseek_messages"
     caps = configured.runtime_capabilities()
-    if configured.protocol in {"openai_responses", "anthropic_messages", "auto"} and caps.hosted_web_search:
+    if configured.protocol in {"openai_responses", "anthropic_messages", "auto"} and caps.get("hosted_web_search", False):
         return "provider_native"
     return "unavailable"
 
@@ -577,6 +577,7 @@ def _deepseek_hosted_search(configured, query: str, args: dict) -> dict:
             }],
         },
         timeout=40,
+        trust_env=False,
         follow_redirects=False,
     )
     response.raise_for_status()

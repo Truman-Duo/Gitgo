@@ -192,3 +192,13 @@ def test_exposed_feedback_is_not_inherited_by_a_new_task(tmp_path_factory):
     retry=execute(p,tools,ctx,{**args,'lesson_feedback_id':result.data['lesson_feedback']['feedback_id']},1)
     assert retry.is_error and retry.data['error']=='LESSON_FEEDBACK_REQUIRED'
     assert retry.data['lesson_feedback']['continuation_state']=='reference_not_exposed'
+
+
+@pytest.mark.parametrize("change",["task_id","process_id","tool_name"])
+def test_feedback_exposure_requires_matching_runtime_receipt_owner(tmp_path_factory,change):
+    p,tools,ctx=setup(tmp_path_factory)
+    result=execute(p,tools,ctx,{'path':'cache.py','content':'safe'})
+    receipt={**result.receipt,change:'unrelated-owner'}
+    p.session.append_tool_result(result.formatted,tool_name='write_file',tool_call_id='mismatch',data=result.data,receipt=receipt)
+    observe_provider_input(p,[{'role':'tool','content':result.formatted}])
+    assert not any(e.get('event')=='lesson_feedback_provider_input' for e in p.session.host_ledger)

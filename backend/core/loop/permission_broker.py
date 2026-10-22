@@ -49,11 +49,30 @@ def _runtime_implementation_digest() -> str:
     """Invalidate built-in approvals when source or frozen handler code changes."""
     digest = hashlib.sha256()
     modules = [f"backend.core.tools.{name}" for name in
-               ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner")]
+               ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner",
+                "file_operations", "file_mutation", "file_mutation_batch", "file_compat",
+                "patch_projection", "document_tools", "document_service", "workspace_projection", "web_tools")]
+    modules += ["backend.core.loop.agent_tool", "backend.core.loop.tool_wrappers", "backend.core.loop.tool_pipeline", "backend.core.loop.permission_broker",
+                "backend.core.loop.authored_runtime", "backend.core.loop.protocol_tools.dynamic_and_completion",
+                "backend.core.loop.dynamic_mount", "backend.core.loop.service_runtime", "backend.core.loop.authoring_runtime",
+                "backend.core.loop.registered_test_runtime", "backend.core.loop.test_manifest", "backend.core.loop.validation_evidence",
+                "backend.core.tools.registered_test", "backend.core.tools.sandbox_pytest", "backend.core.loop.candidate_workspace",
+                "backend.core.loop.workspace_candidate_runtime", "backend.core.loop.document_candidate_runtime", "backend.core.loop.file_candidate_runtime",
+                "backend.core.loop.promotion", "backend.core.loop.promotion_candidate", "backend.core.loop.worktree",
+                "backend.core.loop.manager", "backend.core.loop.git_execution",
+                "backend.core.loop.protocol_tools.child_review", "backend.core.knowledge.prewrite",
+                "backend.adapters.bounded_local_reader", "backend.core.dependency_graph", "backend.core.authorship", "backend.core.filesystem", "backend.core.contract", "backend.core.storage.metadata_files", "backend.core.storage.runtime", "backend.core.storage.repositories.objects", "backend.core.storage.paths", "backend.core.storage.scope",
+                "backend.core.loop.code_dossier", "backend.core.tools.contract_service", "backend.core.tools.governance_service", "backend.core.tools.memory_service",
+                "backend.core.tools.memory_restore_service", "backend.core.identity.memory_archive", "backend.core.identity.snapshot", "backend.core.sync_session.state",
+                "backend.core.sync_session.persist", "backend.core.sync_session.commit",
+                "backend.adapters.local_git_runner", "backend.core.operations.git",
+                "backend.core.knowledge.feedback", "backend.core.knowledge.harvest",
+                "backend.core.tools.knowledge_service", "backend.core.sandbox_access", "backend.core.windows_access"]
     modules += ["backend.core.sandbox_read", "backend.core.sandbox_read_windows",
                 "backend.core.sandbox_read_plan", "backend.core.loop.read_approval",
                 "backend.core.loop.execution_contract", "backend.core.loop.process_tool_runner",
-                "backend.core.sandbox", "backend.core.sandbox_windows", "backend.core.sandbox_linux"]
+                "backend.core.sandbox", "backend.core.sandbox_windows", "backend.core.sandbox_linux",
+                "backend.core.child_process", "backend.core.native_host_entry", "backend.core.git_transfer"]
     for module_name in modules:
         spec = importlib.util.find_spec(module_name)
         if spec is None or spec.loader is None:

@@ -21,14 +21,25 @@ class ContractDriftCheck(PolicyCheck):
 
     def check(self, session: SyncSession,
               _project: ProjectConfig) -> list[dict]:
-        from backend.core.contract import ContractManager, detect_drift
+        from backend.core.contract import ContractManager, ContractStateUnavailable, detect_drift
 
-        contract = self._contract or ContractManager.load(
-            Path(session.workspace_path))
+        try:
+            contract = self._contract or ContractManager.load(Path(session.workspace_path))
+        except ContractStateUnavailable:
+            return [{"rule": "contract_state_unavailable", "code": "CONTRACT_STATE_UNAVAILABLE",
+                     "message": "Project contract could not be read; drift was not evaluated.",
+                     "level": "error", "evaluation_state": "not_evaluated",
+                     "target_tools": ["formalize", "push", "sync"]}]
         if not contract:
             return []
         changed = [e.rel_path for e in session.entries if e.status != "same"]
-        alerts = detect_drift(Path(session.workspace_path), changed, contract)
+        try:
+            alerts = detect_drift(Path(session.workspace_path), changed, contract)
+        except ContractStateUnavailable:
+            return [{"rule": "contract_source_unavailable", "code": "CONTRACT_STATE_UNAVAILABLE",
+                     "message": "Contract source observation failed; drift was not evaluated.",
+                     "level": "error", "evaluation_state": "not_evaluated",
+                     "target_tools": ["formalize", "push", "sync"]}]
         if alerts:
             results = []
             for d in alerts:

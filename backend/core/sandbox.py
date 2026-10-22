@@ -166,10 +166,25 @@ def prepare_child_environment(workspace: str) -> None:
     home = (root / ".gitgo" / "sandbox" / "home").resolve(strict=False)
     if not home.is_relative_to(root):
         raise SandboxDenied("SANDBOX_POLICY_INVALID", "Sandbox home escapes the workspace.")
-    folders = {"USERPROFILE": home, "HOME": home, "APPDATA": home / "Roaming",
-               "LOCALAPPDATA": home / "Local", "TEMP": home / "Temp",
-               "TMP": home / "Temp", "TMPDIR": home / "Temp"}
+    folders = child_environment_paths(root)
     for folder in set(folders.values()):
         folder.mkdir(parents=True, exist_ok=True)
     os.environ.update({key: str(value) for key, value in folders.items()})
     os.environ["PSModuleAnalysisCachePath"] = str(home / "Local" / "ModuleAnalysisCache")
+
+
+def child_environment_paths(root: Path) -> dict[str, Path]:
+    """Bound Windows process environment paths before any native launch.
+
+    Python accepts long filesystem paths, but Windows nested process startup
+    can hang when private user/temp paths exceed MAX_PATH. Do not rely on the
+    interpreter's long-path awareness for these operating-system inputs.
+    """
+    home = root / ".gitgo" / "sandbox" / "home"
+    folders = {"USERPROFILE": home, "HOME": home, "APPDATA": home / "Roaming",
+               "LOCALAPPDATA": home / "Local", "TEMP": home / "Temp",
+               "TMP": home / "Temp", "TMPDIR": home / "Temp"}
+    if os.name == "nt" and max(len(str(path)) for path in [*folders.values(), home / "Local" / "ModuleAnalysisCache"]) >= 260:
+        raise SandboxDenied("SANDBOX_POLICY_INVALID",
+            "Private sandbox user/temp paths exceed the supported Windows startup limit; use a shorter runtime-state location.")
+    return folders

@@ -12,7 +12,7 @@ import sys
 
 from backend.core.prompt_templates import load_prompt, render_prompt
 
-from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, data_broker
+from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, NATIVE_WORKSPACE_PRODUCER, data_broker
 
 from backend.core.loop.agent_tool import (
     AgentTool,
@@ -23,6 +23,9 @@ from backend.core.loop.agent_tool import (
 
 
 def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
+    from .document_service import document_create
+    from . import workspace_tools as governance_handlers
+    from .web_tools import web_search, web_fetch
     workspace = str(Path(workspace_path).resolve())
 
     def inject_workspace(args: dict) -> dict:
@@ -45,7 +48,19 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "execution_contract": data_broker("files.workspace." + name),
                 "cancellation": CancellationMode.NON_INTERRUPTIBLE,
                 "execute": execute}
-    return {
+    tools = {
+        "run_test": AgentTool(
+            name="run_test", description=load_prompt("tools/run_test"),
+            execution_contract=data_broker("tests.workspace.run"),
+            parameters={"type": "object", "properties": {
+                "test_id": {"type": "string"}, "target": {"type": "string"},
+                "seeds": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "integer"}},
+                "input_files": {"type": "array", "items": {"type": "string"},
+                    "description": "Explicit local source/config/data dependencies; target is always included. Omit for bounded business-workspace coverage."},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": 900}}, "required": ["test_id", "target"]},
+            execute=_unreachable, read_only=False, effect=ToolEffect.PROCESS,
+            cancellation=CancellationMode.COOPERATIVE,
+            resources=["process:pytest", "filesystem:.gitgo/test_manifest.json"], timeout=900),
         "read_file": AgentTool(
             name="read_file",
             description=(
@@ -152,15 +167,11 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         ),
         "document_create": AgentTool(
             name="document_create",
-            description=(
-                "Create a text/Markdown, Word, PowerPoint, Excel or PDF artifact "
-                "inside the task workspace. Use content for text-oriented output, "
-                "slides for PPTX and sheets for XLSX. Existing files require an "
-                "explicit overwrite flag plus the current SHA-256."
-            ),
+            description=load_prompt('tools/document_create'),
             parameters={
                 "type": "object",
                 "properties": {
+                    "lesson_feedback_id": {"type": "string"},
                     "path": {"type": "string"},
                     "title": {"type": "string"},
                     "content": {"type": "string"},
@@ -170,15 +181,17 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "expected_sha256": {"type": "string"},
                 },
                 "required": ["path"],
+                "additionalProperties": False,
             },
-            execute=_unreachable,
+            execute=document_create,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="document_create",
             idempotent=False,
             timeout=120,
-            **common,
+            **{**common, "isolated": False, "execution_contract": data_broker("files.workspace.document_create"),
+               "cancellation": CancellationMode.NON_INTERRUPTIBLE},
         ),
         "web_search": AgentTool(
             name="web_search",
@@ -190,7 +203,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "max_results": {"type": "integer", "minimum": 1, "maximum": 20},
                 "language": {"type": "string"},
             }, "required": ["query"]},
-            execute=_unreachable,
+            execute=web_search,
             read_only=True,
             effect=ToolEffect.EXTERNAL_READ,
             approval=ApprovalMode.ALLOW,
@@ -198,7 +211,9 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             runner_name="web_search",
             idempotent=True,
             timeout=45,
-            **common,
+            **{**common, "isolated": False,
+               "execution_contract": data_broker("network.public.search"),
+               "cancellation": CancellationMode.NON_INTERRUPTIBLE},
         ),
         "web_fetch": AgentTool(
             name="web_fetch",
@@ -211,7 +226,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "required": ["url"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
+            execute=web_fetch,
             read_only=True,
             effect=ToolEffect.EXTERNAL_READ,
             approval=ApprovalMode.ALLOW,
@@ -219,7 +234,9 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             runner_name="web_fetch",
             idempotent=True,
             timeout=45,
-            **common,
+            **{**common, "isolated": False,
+               "execution_contract": data_broker("network.public.fetch"),
+               "cancellation": CancellationMode.NON_INTERRUPTIBLE},
         ),
         "edit_file": AgentTool(
             name="edit_file",
@@ -278,19 +295,19 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             parameters={
                 "type": "object",
                 "properties": {
+                    "lesson_feedback_id": {"type": "string", "description": "Reference the received before-action advisory when resubmitting this exact deletion; this is not approval."},
                     "path": {"type": "string"},
                     "expected_sha256": {"type": "string"},
                 },
                 "required": ["path", "expected_sha256"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="delete_file",
             idempotent=False,
-            **common,
+            **file_service("delete_file"),
         ),
         "apply_patch": AgentTool(
             name="apply_patch",
@@ -299,18 +316,17 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             ),
             parameters={
                 "type": "object",
-                "properties": {"patch": {"type": "string", "description": "A complete git-compatible unified diff, including file headers for every fragment."}},
+                "properties": {"lesson_feedback_id": {"type": "string", "description": "Reference the received advisory for this entire unchanged patch candidate. This is not approval."}, "patch": {"type": "string", "description": "A complete git-compatible unified diff, including file headers for every fragment."}},
                 "required": ["patch"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="apply_patch",
             idempotent=False,
             timeout=60,
-            **common,
+            **file_service("apply_patch"),
         ),
         "exec_command": AgentTool(
             name="exec_command",
@@ -320,11 +336,14 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             parameters={
                 "type": "object",
                 "properties": {
+                    "candidate_ref": {"type": "string", "description": "Resume this exact frozen execution output without running the command again."},
+                    "lesson_feedback_id": {"type": "string", "description": "Received advice for the unchanged complete output candidate; not approval."},
                     "argv": {"type": "array", "items": {"type": "string"}},
                     "cwd": {"type": "string"},
                     "timeout": {"type": "integer"},
                 },
                 "required": ["argv"],
+                "additionalProperties": False,
             },
             execute=_unreachable,
             read_only=False,
@@ -335,7 +354,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             timeout=1800,
             timeout_argument="timeout",
             timeout_default=120,
-            **common,
+            **{**common, "execution_contract": NATIVE_WORKSPACE_PRODUCER},
         ),
         "shell_script": AgentTool(
             name="shell_script",
@@ -351,6 +370,8 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             parameters={
                 "type": "object",
                 "properties": {
+                    "candidate_ref": {"type": "string", "description": "Resume this exact frozen execution output without running the command again."},
+                    "lesson_feedback_id": {"type": "string", "description": "Received advice for the unchanged complete output candidate; not approval."},
                     "script": {"type": "string"},
                     "shell": {"type": "string", "enum": ["bash", "powershell", "auto"], "default": "auto"},
                     "purpose": {"type": "string"},
@@ -358,6 +379,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 1800},
                 },
                 "required": ["script", "purpose"],
+                "additionalProperties": False,
             },
             execute=_unreachable,
             read_only=False,
@@ -370,7 +392,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             timeout=1800,
             timeout_argument="timeout",
             timeout_default=120,
-            **common,
+            **{**common, "execution_contract": NATIVE_WORKSPACE_PRODUCER},
         ),
         "dependency_feedback": AgentTool(
             name="dependency_feedback",
@@ -401,16 +423,20 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             name="rebuild_dependency_graph",
             description="Rebuild the multi-signal dependency graph and return coverage counts.",
             parameters={"type": "object", "properties": {}, "required": []},
-            execute=_unreachable,
+            execute=governance_handlers.rebuild_dependency_graph,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:.gitgo/dependency_graph.v2.json"],
             runner_name="rebuild_dependency_graph",
             idempotent=True,
             timeout=120,
-            **common,
+            **{**common, "isolated": False, "execution_contract": data_broker("governance.rebuild_dependency_graph"), "cancellation": CancellationMode.NON_INTERRUPTIBLE},
         ),
     }
+
+    from .file_compat import build_legacy_file_tools
+    tools.update(build_legacy_file_tools(tools))
+    return tools
 
 
 def _unreachable(args: dict) -> dict:

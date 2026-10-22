@@ -40,6 +40,17 @@ from backend.core.tools.workspace_tools import (
 )
 
 
+
+def _author_call(tool, process, workspace, args):
+    from backend.core.storage import get_storage
+    import uuid
+    ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(workspace),
+        cancellation=process.cancellation_event, storage=get_storage(workspace))
+    result = ToolPipeline().execute({"name": tool.name, "args": args}, tool, ctx, "author-" + uuid.uuid4().hex)
+    assert result.data is not None, result.formatted
+    return result.data
+
+
 def test_multisignal_graph_handles_typescript_and_path_references(tmp_path_factory: Path):
     tmp_path = tmp_path_factory
     (tmp_path / "src").mkdir()
@@ -611,7 +622,7 @@ def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Pa
     tools = executor_module._build_internal_tools(
         process, base_tools, str(tmp_path_factory), object(), None,
     )
-    created = tools["author_tool"].execute({
+    created = _author_call(tools["author_tool"], process, tmp_path_factory, {
         "name": "count_words", "description": "Count supplied words",
         "source_path": "word_count.py",
         "parameters": {"type": "object", "properties": {
@@ -631,7 +642,7 @@ def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Pa
     (tmp_path_factory / "unsafe.py").write_text(
         "import os\ndef run(args):\n    return {'cwd': os.getcwd()}\n", encoding="utf-8",
     )
-    denied = tools["author_tool"].execute({
+    denied = _author_call(tools["author_tool"], process, tmp_path_factory, {
         "name": "escape_host", "description": "unsafe",
         "source_path": "unsafe.py", "parameters": {"type": "object"},
         "tests": [{"input": {}, "expected": {}}],
@@ -682,7 +693,7 @@ def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
         process, build_workspace_tools(tmp_path_factory),
         str(tmp_path_factory), object(), None,
     )
-    blocked = tools["author_tool"].execute(payload)
+    blocked = _author_call(tools["author_tool"], process, tmp_path_factory, payload)
     assert blocked["error"] == "CUSTOM_TOOL_PRIVILEGED_APPROVAL_REQUIRED", blocked
     assert blocked["error_info"]["catalog_id"] == "GITGO-E3309"
 
@@ -692,7 +703,7 @@ def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
     }, tools, str(tmp_path_factory))
     assert grant_from_decision(process, pending, "allow_once")
     process.pending_decision = None
-    created = tools["author_tool"].execute(payload)
+    created = _author_call(tools["author_tool"], process, tmp_path_factory, payload)
     assert created["registered"] is True
     dynamic = process.dynamic_tools["approved_sqrt"]
     assert dynamic.approval == ApprovalMode.ASK
@@ -723,7 +734,7 @@ def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
         dynamic, ctx, "privileged", 1,
     )
     assert not approved.is_error
-    assert approved.data == {"root": 4.0}
+    assert approved.data["tool_output"] == {"root": 4.0}
 
 
 def test_permission_tool_resolves_authored_tools_mounted_after_construction(
@@ -770,7 +781,7 @@ def test_permission_tool_resolves_authored_tools_mounted_after_construction(
     })
     assert grant_from_decision(process, registration, "allow_once")
     process.pending_decision = None
-    assert tools["author_tool"].execute(payload)["registered"] is True
+    assert _author_call(tools["author_tool"], process, tmp_path_factory, payload)["registered"] is True
 
     invocation = {"value": "live"}
     pending = tools["request_permission"].execute({

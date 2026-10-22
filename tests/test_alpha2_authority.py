@@ -2,7 +2,7 @@
 from dataclasses import replace
 import pytest
 
-from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+from backend.core.loop.execution_contract import NATIVE_WORKSPACE_PRODUCER, NATIVE_PROCESS, data_broker
 from backend.core.loop.dynamic_mount import mounted_tool
 from backend.core.loop.composite_runtime import tool_fingerprint
 from backend.core.loop.tool_pipeline import ToolPipeline
@@ -14,7 +14,7 @@ from tests.test_authored_host_bridge import definition
     ('host_pipeline', data_broker('host.composite')),
     ('authored_host_python', data_broker('host.composite')),
     ('authored_pure_python', NATIVE_PROCESS),
-    ('authored_privileged_python', NATIVE_PROCESS),
+    ('authored_privileged_python', NATIVE_WORKSPACE_PRODUCER),
 ])
 def test_mount_and_recovery_share_explicit_contract(mode, contract):
     tool = mounted_tool({'name': 'fixture', 'execution_mode': mode})
@@ -58,7 +58,12 @@ def test_invalid_bridge_frame_never_invokes_host_leaf(tmp_path_factory, monkeypa
     tool = mounted_tool(spec)
     process.tool_registry.add_scoped(tool.name)
     pipeline = ToolPipeline()
-    monkeypatch.setattr(pipeline, '_execute_isolated', lambda *a, **kw: frame)
+    def native(*a, **kw):
+        kw['runtime_metadata'].update(launch_state='started',exit_code=0,cleanup={'complete':True,'mode':'fixture'})
+        return frame
+    monkeypatch.setattr(pipeline, '_execute_isolated', native)
+    monkeypatch.setattr('backend.core.sandbox_access.WorkspaceAccess.prepare',lambda self:self)
+    monkeypatch.setattr('backend.core.sandbox_access.WorkspaceAccess.close',lambda self:None)
     result = pipeline.execute({'id': 'bridge', 'name': tool.name, 'args': {}}, tool, ctx, 'execution')
     assert result.is_error and result.data['error'] == 'AUTHORED_HOST_PROTOCOL_FAILED'
     assert not calls
@@ -72,6 +77,8 @@ def test_bridge_native_denial_diagnostics_reach_pipeline(tmp_path_factory, monke
     process.tool_registry.add_scoped(tool.name)
     monkeypatch.setattr(ProcessToolRunner, 'run', lambda *a, **kw: SubprocessResult(
         success=False, error='native launch denied', stderr='bounded diagnostic', exit_code=23))
+    monkeypatch.setattr('backend.core.sandbox_access.WorkspaceAccess.prepare',lambda self:self)
+    monkeypatch.setattr('backend.core.sandbox_access.WorkspaceAccess.close',lambda self:None)
     result = ToolPipeline().execute({'name': tool.name, 'args': {}}, tool, ctx, 'execution')
     assert result.is_error and not calls
     assert result.diagnostics['runner']['exit_code'] == 23
@@ -112,8 +119,16 @@ def test_bridge_unconfirmed_cleanup_blocks_host_call(tmp_path_factory, monkeypat
     process.tool_registry.add_scoped(tool.name)
     monkeypatch.setattr(ProcessToolRunner, 'run', lambda *a, **kw: SubprocessResult(success=True,
         data={'bridge_version': 1, 'state': 'needs_host_call', 'call_index': 0,
-              'tool_name': 'read_prefix', 'arguments': {}}, cleanup=cleanup))
+              'tool_name': 'read_prefix', 'arguments': {}}, cleanup=cleanup,started=True,launch_state='started',exit_code=0))
+    monkeypatch.setattr('backend.core.sandbox_access.WorkspaceAccess.prepare',lambda self:self)
+    monkeypatch.setattr('backend.core.sandbox_access.WorkspaceAccess.close',lambda self:None)
     result = ToolPipeline().execute({'name': tool.name, 'args': {}}, tool, ctx, 'execution')
     assert result.is_error and not calls
-    assert result.data['error'] == 'PROCESS_CLEANUP_INCOMPLETE'
+    assert result.data['error'] == 'SANDBOX_CLEANUP_PENDING'
     assert result.receipt['runtime_cleanup']['complete'] is False
+
+    assert process.recovery['resume_forbidden']
+    # Protocol fault only: no OS process or ACL was created by these mocks.
+    from backend.core.loop.read_approval import _RETAINED_ADMISSIONS
+    for owner in _RETAINED_ADMISSIONS.pop((process.process_id,'execution',0),[]):
+        owner.close()

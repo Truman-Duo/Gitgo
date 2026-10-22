@@ -76,7 +76,7 @@ def test_rejected_optional_observations_do_not_starve_authoritative_state(tmp_pa
         assert storage.get_state_ref('diagnostic', 'authoritative') == ref
 
 
-def test_runtime_artifacts_stay_local_even_when_staged_but_user_metadata_promotes(tmp_path_factory):
+def test_runtime_artifacts_stay_local_even_when_staged_but_business_rules_promote(tmp_path_factory):
     from .test_agent_dag_worktree import _git
     repo,storage,manager,root,child=_sealed_worker(tmp_path_factory)
     # Use a new execution to exercise runtime files staged by an Agent itself.
@@ -84,20 +84,21 @@ def test_runtime_artifacts_stay_local_even_when_staged_but_user_metadata_promote
     path=Path(manager.materialize_process_worktree(sibling))
     try:
         for name in ['tool_invocations/probe.json', 'context_objects/refs/probe.json',
-                     'dependency_graph.v2.json']:
+                     'dependency_graph.v2.json', 'project_rules.md']:
             target=path/'.gitgo'/name;target.parent.mkdir(parents=True,exist_ok=True)
             target.write_text('{}',encoding='utf-8')
-        business=path/'.gitgo/project_rules.md';business.write_text('user project rules',encoding='utf-8')
+        business=path/'project_rules.md';business.write_text('user project rules',encoding='utf-8')
         _git(path,'add','-A')
         sibling.status=ProcessStatus.COMPLETED
         manager.seal_process_worktree(sibling)
-        assert sibling.worktree['changed_files']==['.gitgo/project_rules.md']
+        assert sibling.worktree['changed_files']==['project_rules.md']
         assert (path/'.gitgo/tool_invocations/probe.json').is_file()
         root.child_reviews[sibling.process_id]={'verdict':'approved'}
         result=manager.promote_process_results(root,[sibling.process_id])
         assert result['promoted'] is True
-        assert (repo/'.gitgo/project_rules.md').read_text(encoding='utf-8')=='user project rules'
+        assert (repo/'project_rules.md').read_text(encoding='utf-8')=='user project rules'
         assert not (repo/'.gitgo/tool_invocations/probe.json').exists()
+        assert not (repo/'.gitgo/project_rules.md').exists()
     finally:
         manager.dispose_process_worktree(sibling)
         manager.dispose_process_worktree(child)

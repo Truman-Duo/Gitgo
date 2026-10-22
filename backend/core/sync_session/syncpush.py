@@ -149,85 +149,79 @@ class SyncPushMixin:
         if success:
             fc.synced = True
 
-            from backend.core.history import HistoryManager as _HM
-            _HM.add_operation(
-                self.project.name, "governance_synced", "success",
-                {"commit": f"[{fc.prefix}-{fc.number}]"},
-                correlation_id=self._correlation_id,
-            )
-
-            # ── Dependency Graph Update ──
-            try:
-                from backend.core.contract import build_dep_graph
-                build_dep_graph(Path(self.workspace_path))
-            except Exception:
-                pass
-
-            # ── Memory Snapshot + Skeleton ──
-            if self.backup_path:
-                try:
-                    from backend.core.identity.snapshot import snapshot_tool_memories
-                    result = snapshot_tool_memories(
-                        self.workspace_path, self.backup_path, self.project,
-                    )
-                    _HM.add_operation(
-                        self.project.name, "governance_memory_snapshot", "success",
-                        {"sources": result.get("snapped", [])},
-                        correlation_id=self._correlation_id,
-                    )
-                    from backend.core.identity.guard import _save_directory_skeleton
-                    _save_directory_skeleton(self.workspace_path)
-                    # 自动更新项目合约（记录本次 sync 确认的 feature）
-                    from backend.core.contract import ContractManager
-                    msg_first_line = fc.message.split("\n")[0] if fc.message else ""
-                    feature_name = msg_first_line[:60] if msg_first_line else "sync"
-                    ContractManager.update_feature(
-                        self.workspace_path, self.project.name,
-                        feature_name=feature_name,
-                        location="",
-                    )
-                    _HM.add_operation(
-                        self.project.name, "governance_contract_updated", "success",
-                        {"feature": feature_name},
-                        correlation_id=self._correlation_id,
-                    )
-                    # 自动收割教训（反复修改→成功的模式）
-                    from backend.core.knowledge.lesson import harvest_lessons
-                    ts = self.project.commit_format.get("prefix", "")
-                    harvested = harvest_lessons(self.workspace_path, self.project.name,
-                                               tech_stack=ts)
-                    if harvested:
-                        _HM.add_operation(
-                            self.project.name, "governance_lesson", "success",
-                            {"harvested_count": len(harvested)},
-                            correlation_id=self._correlation_id,
-                        )
-                except OSError:
-                    pass
-
-            commit_hash = ""
-            try:
-                ch = self.ws_git_runner.rev_parse("HEAD", timeout=15)
-                if ch:
-                    commit_hash = ch
-                    self.project.sync_base = ch
-                    ConfigManager.save(self.config)
-            except OSError:
-                pass
-
-            from backend.core.history import HistoryManager
-            HistoryManager.add_entry(
-                project_name=self.project.name,
-                file_count=len(selected),
-                commit_hash=commit_hash,
-                commit_message=fc.message,
-                workspace=str(self.workspace_path),
-                backup=str(self.backup_path) if self.backup_path else "",
-                correlation_id=self._correlation_id,
-            )
             self._last_op = {"op": "sync", "status": "success",
                              "timestamp": datetime.now().isoformat()}
-            self.save_session()
+            self._last_sync_result = {"effect_state": "committed", "warnings": []}
+
+            def observe(name, operation):
+                try:
+                    return operation()
+                except Exception as exc:
+                    # File/Git effects already happened. Preserve their fact;
+                    # a failed observer is never permission to replay sync.
+                    warning = {"operation": name,
+                               "code": getattr(exc, "code", "SYNC_OBSERVATION_UNAVAILABLE"),
+                               "error_type": type(exc).__name__}
+                    self._last_sync_result["warnings"].append(warning)
+                    self.on_log(f"Sync committed; {name} unavailable ({warning['code']}); inspect before retrying.")
+                    return None
+
+            # Publish the primary fact before any optional downstream work.
+            observe("session_persistence", self.save_session)
+            from backend.core.history import HistoryManager as _HM
+            observe("sync_history", lambda: _HM.add_operation(
+                self.project.name, "governance_synced", "success",
+                {"commit": f"[{fc.prefix}-{fc.number}]"},
+                correlation_id=self._correlation_id))
+
+            from backend.core.contract import build_dep_graph, ContractManager
+            observe("dependency_graph", lambda: build_dep_graph(Path(self.workspace_path)))
+            if self.backup_path:
+                from backend.core.identity.snapshot import snapshot_tool_memories
+                try:
+                    result = snapshot_tool_memories(self.workspace_path, self.backup_path, self.project)
+                except Exception as exc:
+                    result = {"error": getattr(exc, "code", "MEMORY_ARCHIVE_UNAVAILABLE"),
+                              "effect_state": "ambiguous", "error_type": type(exc).__name__}
+                self._last_memory_snapshot_result = result
+                if result.get("error"):
+                    self._last_sync_result["warnings"].append({"operation": "memory_snapshot", "code": result["error"]})
+                    self.on_log(f"Sync committed; memory snapshot unavailable ({result['error']}).")
+                observe("snapshot_history", lambda: _HM.add_operation(
+                    self.project.name, "governance_memory_snapshot",
+                    "failed" if result.get("error") else "skipped" if result.get("status") == "no_sources" else "success",
+                    {"sources": result.get("snapped", []),
+                     **{key: result[key] for key in ("error", "effect_state", "execution_state", "warnings") if key in result}},
+                    correlation_id=self._correlation_id))
+                from backend.core.identity.guard import _save_directory_skeleton
+                observe("directory_skeleton", lambda: _save_directory_skeleton(self.workspace_path))
+                feature_name = (fc.message.split("\n")[0][:60] if fc.message else "sync")
+
+                def update_contract():
+                    ContractManager.update_feature(self.workspace_path, self.project.name,
+                                                   feature_name=feature_name, location="")
+                    _HM.add_operation(self.project.name, "governance_contract_updated", "success",
+                                      {"feature": feature_name}, correlation_id=self._correlation_id)
+                observe("contract_update", update_contract)
+
+                def harvest():
+                    from backend.core.knowledge.lesson import harvest_lessons
+                    harvested = harvest_lessons(self.workspace_path, self.project.name,
+                                               tech_stack=self.project.commit_format.get("prefix", ""))
+                    if harvested:
+                        _HM.add_operation(self.project.name, "governance_lesson", "success",
+                                          {"harvested_count": len(harvested)}, correlation_id=self._correlation_id)
+                observe("lesson_harvest", harvest)
+
+            commit_hash = observe("workspace_head", lambda: self.ws_git_runner.rev_parse("HEAD", timeout=15)) or ""
+            if commit_hash:
+                self.project.sync_base = commit_hash
+                observe("sync_base_configuration", lambda: ConfigManager.save(self.config))
+            observe("sync_summary_history", lambda: _HM.add_entry(
+                project_name=self.project.name, file_count=len(selected), commit_hash=commit_hash,
+                commit_message=fc.message, workspace=str(self.workspace_path),
+                backup=str(self.backup_path) if self.backup_path else "",
+                correlation_id=self._correlation_id))
             self.on_log("同步成功！")
         else:
             self.stage = SessionStage.FAILED

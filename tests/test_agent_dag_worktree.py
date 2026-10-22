@@ -749,3 +749,53 @@ def test_wait_helper_checks_terminal_result_instead_of_assuming_timeout_is_succe
         process = _process(manager,task_id="unstarted")
         with pytest.raises(AssertionError):
             _await_worktree_workers(manager,[process.process_id],timeout=0)
+
+
+@pytest.mark.parametrize("failure_stage", ["prepare", "retire", "none"])
+def test_child_sandbox_access_is_ready_before_model_and_retired_before_terminal(
+    tmp_path_factory, monkeypatch, worktree_case, failure_stage,
+):
+    from backend.core.loop import executor as executor_module
+    repo = _repo(tmp_path_factory)
+    storage, manager = worktree_case(repo, tmp_path_factory / "state")
+    calls, events = [], []
+    class Access:
+        def prepare(self, lease):
+            calls.append("prepare")
+            if failure_stage == "prepare": raise OSError("access preparation unavailable")
+        def release(self, process_id):
+            calls.append("retire")
+            if failure_stage == "retire": raise OSError("access retirement unknown")
+    manager.worktree_manager.sandbox_access = Access()
+    supervisor = manager.fork(parent_id=None, role="supervisor",
+        tool_registry=ToolRegistry(CapabilityProfiles.resolve_tools("supervisor.control")),
+        max_steps=8, ring_level=RingLevel.RING_0, workspace_path=str(repo),
+        task_id="access-lifecycle", task_kind="supervisor", actor_kind="supervisor",
+        capability_profile_id="supervisor.control")
+    def fake_agent_step(*, process, workspace_path, **_):
+        assert calls == ["prepare"]
+        calls.append("model")
+        Path(workspace_path,"app.txt").write_text("bounded output\n")
+        process.status = ProcessStatus.COMPLETED
+        process.result = {"status":"completed", "process_id":process.process_id,
+                          "response":"done", "metadata":{}}
+        return process.result
+    monkeypatch.setattr(executor_module,"agent_step",fake_agent_step)
+    class Dispatcher: _executors = {}
+    tools=executor_module._build_internal_tools(supervisor,{},str(repo),object(),Dispatcher(),on_stream_event=events.append)
+    delegated=tools["delegate_task"].execute({"task_description":"Change app.txt",
+        "capability_profile_id":"development.workspace", "task_kind":"action",
+        "target_files":["app.txt"],"acceptance_criteria":["file updated"],"max_steps":3})
+    child=manager.get(delegated["process_id"])
+    _await_worktree_workers(manager,[child.process_id])
+    terminal=[e for e in events if e.get("event")=="agent_terminal"][-1]
+    if failure_stage == "none":
+        assert child.status == ProcessStatus.COMPLETED
+        assert terminal["status"] == "completed"
+        assert calls.index("retire") > calls.index("model")
+    else:
+        assert child.status == ProcessStatus.FAILED
+        assert terminal["status"] == "failed" and terminal["outcome"]["status"] == "failed"
+        if failure_stage == "prepare": assert "model" not in calls
+        assert (repo/"app.txt").read_text() == "base\n"
+    manager.dispose_process_worktree(child,keep_ref=False)

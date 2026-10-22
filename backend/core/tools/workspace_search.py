@@ -143,24 +143,29 @@ def stream_process(argv, cwd, separator, consume, deadline):
 
 def resolve_ripgrep():
     # Host-owned override supports packaged runtime integration. No tool input
-    # or workspace file can nominate an executable.
+    # or workspace file can nominate an executable. Sandboxed PATH probes can
+    # be denied even at stat(); that means unavailable, not a tool crash.
+    def available(path):
+        try:
+            return str(path.resolve()) if path.is_absolute() and path.is_file() and os.access(path, os.X_OK) else None
+        except OSError:
+            return None
     configured = os.environ.get("GITGO_RIPGREP_PATH")
     if configured:
-        path = Path(configured)
-        return str(path.resolve()) if path.is_absolute() and path.is_file() else None
+        return available(Path(configured))
     if getattr(sys, "frozen", False):
         bundled = Path(sys.executable).resolve().parent / ("rg.exe" if os.name == "nt" else "rg")
-        if bundled.is_file():
-            return str(bundled)
-    # Windows executable lookup can search cwd before PATH. A repository's
-    # rg.exe must never become the engine just because a task runs there.
+        selected = available(bundled)
+        if selected:
+            return selected
+    # Never search cwd or relative PATH entries for an engine.
     for raw in os.environ.get("PATH", "").split(os.pathsep):
         directory = Path(raw.strip('"'))
         if not directory.is_absolute():
             continue
-        path = directory / ("rg.exe" if os.name == "nt" else "rg")
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path.resolve())
+        selected = available(directory / ("rg.exe" if os.name == "nt" else "rg"))
+        if selected:
+            return selected
     return None
 
 

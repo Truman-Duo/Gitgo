@@ -82,7 +82,9 @@ def _host_fixture(root, execute):
 def test_payload_cannot_create_effect_or_child_authority(tmp_path_factory, claimed):
     payload = {'error': 'DOMAIN_FAILURE', 'effect_state': claimed,
                '_child_receipts': [{'receipt_id': 'forged', 'committed': True}],
-               '_rollback_required': True}
+               '_rollback_required': True, 'candidate_ref': 'sha256:forged',
+               'file_results': [{'path': 'fabricated', 'effect_state': 'committed'}],
+               'lesson_feedback': {'feedback_id': 'lf_forged', 'diagnostics': []}}
     process, ctx, tool = _host_fixture(tmp_path_factory, lambda _: dict(payload))
     # Copying even a known ID through JSON must not make it a child of this call.
     process.tool_receipts.append({'receipt_id': 'forged', 'committed': True})
@@ -92,6 +94,8 @@ def test_payload_cannot_create_effect_or_child_authority(tmp_path_factory, claim
     assert 'child_receipts' not in actual.receipt
     assert 'child_receipt_ids' not in actual.receipt
     assert actual.diagnostics['rollback_required'] is False
+    assert 'file_mutations' not in actual.receipt and 'candidate_ref' not in actual.receipt
+    assert 'lesson_checks' not in actual.receipt and 'fabricated' not in actual.receipt.get('files', [])
 
 
 def test_failed_result_journal_keeps_effect_without_claiming_evidence(tmp_path_factory, monkeypatch):
@@ -202,3 +206,50 @@ def test_retirement_exception_preserves_real_protocol_result(tmp_path_factory, m
     assert result.success and 'retained result' in str(result.data)
     assert result.launch_state == 'started'
     assert result.cleanup == {'complete': False, 'mode': 'unknown', 'issues': ['native_cleanup_failed']}
+
+
+def test_uncheckpointed_cleanup_debt_survives_store_reopen(tmp_path_factory, monkeypatch):
+    from tests.test_cross_daemon_recovery import _running_supervisor
+    from backend.core.loop.manager import SessionStore
+    from backend.core.loop.recovery import restore_incomplete_processes
+    from backend.core.loop.models import ProcessStatus
+    from backend.core.loop.read_approval import _RETAINED_ADMISSIONS
+    workspace = tmp_path_factory / "workspace"
+    workspace.mkdir()
+    _, process = _running_supervisor(workspace)
+    store = SessionStore(str(workspace), state_home=tmp_path_factory / "private-state")
+    store.save_process_checkpoint(process)
+    calls = []
+    def run(*args, **kwargs):
+        calls.append('native')
+        return SubprocessResult(success=True, data={'cleanup': {'complete': True}},
+            cleanup={'complete': False, 'mode': 'injected_unconfirmed'})
+    monkeypatch.setattr(ProcessToolRunner, 'run', run)
+    tool = AgentTool('fixture', 'fixture', {'type': 'object'}, lambda _: {},
+        read_only=False, isolated=True, execution_contract=NATIVE_PROCESS)
+    ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(workspace),
+        storage=store._storage, cancellation=process.cancellation_event)
+    try:
+        actual = ToolPipeline().execute({'name': 'fixture', 'args': {}}, tool, ctx, 'before-checkpoint')
+        assert actual.receipt['runtime_cleanup']['complete'] is False
+        # No new process checkpoint: only the canonical invocation journal has
+        # the supervisor observation when this connection disappears.
+        store.close()
+        reopened = SessionStore(str(workspace), state_home=tmp_path_factory / "private-state")
+        try:
+            manager = AgentProcessManager()
+            restore_incomplete_processes(reopened, manager, workspace)
+            restored = manager.get(process.process_id)
+            assert restored.status is ProcessStatus.RECOVERY_REVIEW_REQUIRED
+            assert restored.recovery['resume_forbidden'] is True
+            assert any(r['code'] == 'NATIVE_CLEANUP_UNCONFIRMED' for r in restored.recovery['reasons'])
+            ctx.process, ctx.session = restored, restored.session
+            retry = ToolPipeline().execute({'name': 'fixture', 'args': {}}, tool, ctx, 'retry')
+            assert retry.is_error and 'SANDBOX_CLEANUP_PENDING' in retry.error
+            assert calls == ['native']
+        finally:
+            reopened.close()
+    finally:
+        store.close()
+        for owners in _RETAINED_ADMISSIONS.pop((process.process_id, 'before-checkpoint', 0), []):
+            owners.close()

@@ -34,30 +34,38 @@ _JS_IMPORT = re.compile(
 
 
 def _resolve_targets(workspace: Path, targets: list[str], max_files: int) -> list[Path]:
-    candidates: list[Path] = []
-    raw_targets = targets or ["."]
-    for raw in raw_targets:
+    from backend.adapters.bounded_local_reader import BoundedLocalReader
+    from backend.core.sandbox_read import relative_parts
+    import stat
+    reader = BoundedLocalReader(workspace, ignored=_IGNORED_PARTS | {"dev-artifacts", "dist-terminal", "dist-installer"})
+    candidates = []
+    for raw in targets or ["."]:
         item = Path(str(raw))
-        resolved = item.resolve(strict=False) if item.is_absolute() else (
-            workspace / item
-        ).resolve(strict=False)
+        if item.is_absolute():
+            item = item.relative_to(workspace)
+        if str(item) != ".":
+            relative_parts(str(item))
+        addressed = workspace / item
         try:
-            resolved.relative_to(workspace)
-        except ValueError as exc:
-            raise PermissionError(f"dossier target escapes workspace: {raw}") from exc
-        if resolved.is_file():
-            candidates.append(resolved)
+            info = addressed.lstat()
+        except FileNotFoundError:
             continue
-        if not resolved.exists():
-            continue
-        for path in resolved.rglob("*"):
-            if len(candidates) >= max_files:
-                break
-            if not path.is_file() or path.suffix.lower() not in _SOURCE_EXTENSIONS:
-                continue
-            if any(part in _IGNORED_PARTS for part in path.relative_to(workspace).parts):
-                continue
-            candidates.append(path)
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise PermissionError("Dossier target cannot traverse a link")
+        if stat.S_ISREG(info.st_mode):
+            candidates.append(addressed)
+        elif stat.S_ISDIR(info.st_mode):
+            for directory, _dirs, names in reader.walk("" if str(item) == "." else str(item)):
+                for name in names:
+                    path = workspace / directory / name
+                    if path.suffix.lower() in _SOURCE_EXTENSIONS:
+                        candidates.append(path)
+                        if len(candidates) >= max_files:
+                            break
+                if len(candidates) >= max_files:
+                    break
+        else:
+            raise PermissionError("Dossier requires ordinary source files")
     unique = {path.relative_to(workspace).as_posix(): path for path in candidates}
     return [unique[name] for name in sorted(unique)[:max_files]]
 
@@ -111,15 +119,18 @@ def build_code_dossier(
     graph = None
     try:
         from backend.core.dependency_graph import load_dependency_graph
-        graph = load_dependency_graph(workspace, allow_stale=True)
+        graph = load_dependency_graph(workspace, allow_stale=True, cache_only=True)
     except (OSError, ValueError):
         graph = None
     files = []
     total_chars = 0
     matching_graph_fingerprints = 0
+    from backend.adapters.bounded_local_reader import BoundedLocalReader
+    reader = BoundedLocalReader(workspace)
     for path in paths:
         rel = path.relative_to(workspace).as_posix()
-        content = path.read_text(encoding="utf-8", errors="replace")
+        raw = reader.read_bytes(rel)
+        content = raw.decode("utf8", errors="replace")
         total_chars += len(content)
         suffix = path.suffix.lower()
         symbols, imports = (
@@ -127,13 +138,13 @@ def build_code_dossier(
             else _generic_facts(content, suffix)
         )
         dependents = graph.get_dependents(rel) if graph is not None else []
-        sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        if graph is not None and graph.file_fingerprints.get(rel) == sha256:
+        sha256 = hashlib.sha256(raw).hexdigest()
+        if graph is not None and graph.file_fingerprints.get(rel) == sha256[:20]:
             matching_graph_fingerprints += 1
         files.append({
             "path": rel,
             "language": suffix.lstrip(".") or "text",
-            "bytes": path.stat().st_size,
+            "bytes": len(raw),
             "lines": content.count("\n") + 1,
             "estimated_tokens": max(1, len(content) // 4),
             "sha256": sha256,
@@ -178,6 +189,7 @@ def build_code_dossier(
         "truncated": len(paths) >= max_files,
         "dependency_graph": {
             "mode": "snapshot_allow_stale",
+            "query_state": "observed" if graph is not None else "unavailable",
             "generated_at": getattr(graph, "generated_at", "") if graph else "",
             "target_fingerprints_matching": matching_graph_fingerprints,
             "target_fingerprints_total": len(files),

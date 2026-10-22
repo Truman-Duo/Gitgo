@@ -49,7 +49,6 @@ from backend.core.daemon.dispatch import _handle_command
 from backend.core.policy import PolicyEngine, build_policy_message
 from backend.core.loop.manager import AgentProcessManager
 from backend.core.loop.agent_tool import AgentTool, ToolEffect, CancellationMode
-from backend.core.loop.test_manifest import run_registered_test
 from backend.core.loop.tool_wrappers import (
     contract_detect_drift,
     contract_get_impact,
@@ -61,8 +60,6 @@ from backend.core.loop.tool_wrappers import (
     lesson_promote,
     lesson_list,
     privacy_scan,
-    memory_snapshot,
-    memory_restore,
 )
 from backend.core.dispatch import ToolDispatcher
 from backend.core.tools.catalog import build_workspace_tools
@@ -333,12 +330,12 @@ def run_daemon(
 
     atexit.register(lambda: _release_pid_file(project))
 
-    session = SyncSession(project, cfg)
+    workspace_path = Path(project.workspace_path or Path.cwd()).resolve()
 
     # Refuse catastrophic repository roots before any broad initial scan.  A
     # non-git directory is only a warning during the staged migration, but a
     # home/volume root is never an acceptable Agent workspace.
-    scope = assess_repository_scope(session.workspace_path)
+    scope = assess_repository_scope(workspace_path)
     if not scope.allowed:
         _emit_v2({
             "event": "repository_scope_blocked",
@@ -361,7 +358,10 @@ def run_daemon(
     # fall back to JSONL when initialization or migration fails: that would
     # recreate two competing sources of truth.
     try:
-        storage_runtime = StorageRuntime(session.workspace_path)
+        storage_runtime = StorageRuntime(workspace_path)
+        from backend.core.history import HistoryManager
+        HistoryManager.set_workspace(str(workspace_path), storage=storage_runtime)
+        session = SyncSession(project, cfg)
         from backend.core.loop.manager import SessionStore
         session_store = SessionStore(
             str(session.workspace_path), storage=storage_runtime,
@@ -428,6 +428,9 @@ def run_daemon(
             "reason": str(exc),
         }, priority="immediate")
     from backend.core.application.process_presentation import ProcessPresentation
+    if worktree_manager is not None:
+        from backend.core.sandbox_access import WorktreeAccessService
+        worktree_manager.sandbox_access = WorktreeAccessService(worktree_manager)
     apm = AgentProcessManager(worktree_manager=worktree_manager,
                               presentation=ProcessPresentation(storage_runtime))
     # Runtime services share the same authoritative project storage.  Binding
@@ -467,6 +470,8 @@ def run_daemon(
     _WRITE_TOOLS = {"formalize", "write", "edit", "push", "sync",
                     "bash", "delete", "rm", "mv", "cp", "mkdir"}
 
+    from backend.core.tools.governance_service import build_formalize_tool
+
     tool_executors = {
         "scan": AgentTool(
             execution_contract=data_broker("host.daemon.scan"),
@@ -484,19 +489,7 @@ def run_daemon(
             execute=partial(_exec_status, daemon_ctx, session, project),
             read_only=True,
         ),
-        "formalize": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="formalize",
-            description="基于选中的工作区文件创建正式的结构化提交（formal commit）。需要 indices 和 message 参数。",
-            parameters={"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}}, "message": {"type": "string"}}, "required": ["message"]},
-            execute=partial(_exec_formalize, daemon_ctx, session, project),
-            read_only=False,
-            resources=["filesystem:*"],
-            effect=ToolEffect.WORKSPACE_WRITE,
-            isolated=True,
-            cancellation=CancellationMode.ISOLATED_PROCESS,
-            runner_name="formalize",
-        ),
+        "formalize": build_formalize_tool(session),
         "recall_grep": AgentTool(
             execution_contract=data_broker("host.daemon.recall_grep"),
             name="recall_grep",
@@ -560,143 +553,29 @@ def run_daemon(
             execute=partial(_exec_decompose_task, daemon_ctx, session, project),
             read_only=True,
         ),
-        "run_test": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="run_test",
-            description=(
-                "Run one registered pytest file/node under deterministic seeds and "
-                "atomically update .gitgo/test_manifest.json."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "test_id": {"type": "string"},
-                    "target": {"type": "string"},
-                    "seeds": {"type": "array", "items": {"type": "integer"}},
-                    "input_files": {"type": "array", "items": {"type": "string"},
-                        "description": "Optional explicit local validation inputs, including source/config/data dependencies; target is always included. Omit for bounded business-workspace coverage."},
-                    "timeout": {"type": "integer"},
-                },
-                "required": ["test_id", "target"],
-            },
-            execute=partial(run_registered_test, session.workspace_path),
-            read_only=False,
-            effect=ToolEffect.PROCESS,
-            cancellation=CancellationMode.ISOLATED_PROCESS,
-            resources=["process:pytest", "filesystem:.gitgo/test_manifest.json"],
-            timeout=900,
-        ),
+
     })
 
     # Bind the canonical development tool set to this daemon workspace.  These
     # names are additive; legacy daemon/governance tools keep their contracts.
     tool_executors.update(build_workspace_tools(session.workspace_path))
 
+    from backend.core.daemon.policy_helpers import bind_project_tool_context
     def _bind_private_workspace(tool: AgentTool) -> None:
-        previous = tool.prepare_args
+        bind_project_tool_context(tool, session.workspace_path, project.name)
 
-        def prepare(args: dict) -> dict:
-            prepared = previous(args) if previous else dict(args or {})
-            prepared = dict(prepared)
-            prepared["_workspace"] = str(session.workspace_path)
-            properties = tool.parameters.get("properties", {})
-            if "workspace_path" in properties:
-                prepared["workspace_path"] = str(session.workspace_path)
-            if "project_name" in properties:
-                # Project identity is host-owned runtime context.  Leaving an
-                # optional model argument blank silently redirected knowledge
-                # tools away from the active project's instance/pending store.
-                prepared["project_name"] = project.name
-            return prepared
-
-        tool.prepare_args = prepare
-
-    isolated_existing = {
-        "contract_detect_drift", "contract_get_impact",
-        "contract_get_changed_symbols", "lesson_harvest",
-        "privacy_scan", "memory_snapshot", "memory_restore", "run_test",
+    workspace_bound_existing = {
+        "contract_detect_drift", "contract_get_impact", "contract_get_changed_symbols",
+        "lesson_harvest", "privacy_scan", "memory_snapshot", "memory_restore", "run_test",
     }
-    for name in isolated_existing:
-        tool = tool_executors.get(name)
-        if tool is None:
-            continue
-        tool.isolated = True
-        tool.runner_name = name
-        tool.cancellation = CancellationMode.ISOLATED_PROCESS
-        _bind_private_workspace(tool)
 
-    # Formalize is stateful, so the child receives a serializable configuration
-    # and the daemon refreshes its in-memory view from the child's atomic state.
-    from backend.core.config import _serialize_config
-    formalize_tool = tool_executors["formalize"]
-
-    def _prepare_formalize(args: dict) -> dict:
-        prepared = dict(args or {})
-        prepared["_workspace"] = str(session.workspace_path)
-        prepared["_project_name"] = project.name
-        prepared["_config"] = _serialize_config(cfg)
-        return prepared
-
-    def _refresh_formalize(result: dict) -> dict:
-        restored = SyncSession.load_session(project, cfg)
-        if restored is not None:
-            session.formal_commits = restored.formal_commits
-            session.stage = restored.stage
-        return result
-
-    formalize_tool.prepare_args = _prepare_formalize
-    formalize_tool.finalize_result = _refresh_formalize
+    from backend.core.tools.knowledge_service import build_lesson_harvest_tool
+    from backend.core.tools.memory_service import build_memory_tools
+    from backend.core.tools.contract_service import build_contract_tools
 
     # ── v0.45: 差异化后端工具 ──
     tool_executors.update({
-        "contract_detect_drift": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="contract_detect_drift",
-            description="检测本轮文件变更与项目合约的偏差。返回告警列表（feature_deleted, signature_changed 等）。当需要验证变更是否符合合约时使用。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "changed_files": {"type": "array", "items": {"type": "string"}, "description": "变更文件列表"},
-                    "contract_path": {"type": "string", "description": "contract.yaml 路径，可选"},
-                },
-                "required": ["workspace_path"],
-            },
-            execute=contract_detect_drift,
-            read_only=True,
-        ),
-        "contract_get_impact": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="contract_get_impact",
-            description=load_prompt('tools/contract_get_impact'),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "file_path": {"type": "string", "description": "目标文件路径（相对于 workspace）"},
-                    "func_name": {"type": "string", "description": "可选，指定函数名以精确查询调用者"},
-                },
-                "required": ["workspace_path", "file_path"],
-            },
-            execute=contract_get_impact,
-            read_only=True,
-        ),
-        "contract_get_changed_symbols": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="contract_get_changed_symbols",
-            description=load_prompt('tools/contract_get_changed_symbols'),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "文件路径"},
-                    "old_content": {"type": "string", "description": "旧版本内容，可选"},
-                    "new_content": {"type": "string", "description": "新版本内容，可选"},
-                },
-                "required": ["file_path"],
-            },
-            execute=contract_get_changed_symbols,
-            read_only=True,
-        ),
+        **build_contract_tools(session.workspace_path),
         "lesson_search": AgentTool(
             execution_contract=data_broker("knowledge.lesson_search"),
             name="lesson_search",
@@ -748,74 +627,8 @@ def run_daemon(
             read_only=False,
             resources=["filesystem:*"],
         ),
-        "lesson_harvest": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="lesson_harvest",
-            description="从 git log、CLAUDE.md、scan history、governance signals 四个数据源收割新经验教训。操作较重（扫描 4 源），需要 Ring 0 权限。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "project_name": {"type": "string", "description": "项目名称"},
-                    "tech_stack": {"type": "string", "description": "技术栈标签，可选"},
-                },
-                "required": ["workspace_path", "project_name"],
-            },
-            execute=lesson_harvest,
-            read_only=False,
-            timeout=120.0,
-            resources=["filesystem:*"],
-        ),
-        "privacy_scan": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="privacy_scan",
-            description="扫描变更文件的隐私风险（敏感信息泄露、AI 痕迹、密钥硬编码等）。push 前或代码审查时使用。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "file_list": {"type": "array", "items": {"type": "string"}, "description": "要扫描的文件列表"},
-                    "level": {"type": "integer", "description": "扫描级别 1-3，默认 2"},
-                    "deep_scan": {"type": "boolean", "description": "是否深度扫描，默认 false"},
-                },
-                "required": ["workspace_path"],
-            },
-            execute=privacy_scan,
-            read_only=True,
-        ),
-        "memory_snapshot": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="memory_snapshot",
-            description="将工作区工具记忆（CLAUDE.md 等）快照到 backup 目录，并列出所有可用快照。用于备份当前记忆状态。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "backup_path": {"type": "string", "description": "备份目标路径"},
-                },
-                "required": ["workspace_path", "backup_path"],
-            },
-            execute=memory_snapshot,
-            read_only=False,
-            resources=["filesystem:*"],
-        ),
-        "memory_restore": AgentTool(
-            execution_contract=NATIVE_PROCESS,
-            name="memory_restore",
-            description="从 backup 目录的快照恢复工具记忆到工作区。snapshot_timestamp 为空时使用最新快照。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "backup_path": {"type": "string", "description": "备份源路径"},
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "snapshot_timestamp": {"type": "string", "description": "快照时间戳，可选，默认最新"},
-                },
-                "required": ["backup_path", "workspace_path"],
-            },
-            execute=memory_restore,
-            read_only=False,
-            resources=["filesystem:*"],
-        ),
+        "lesson_harvest": build_lesson_harvest_tool(session.workspace_path, project.name),
+        **build_memory_tools(session),
         "lesson_promote": AgentTool(
             execution_contract=data_broker("knowledge.lesson_promote"),
             name="lesson_promote",
@@ -851,15 +664,12 @@ def run_daemon(
         ),
     })
 
-    # The governance definitions above replace earlier dictionary entries, so
-    # apply the isolated execution contract after the complete registry exists.
-    for name in isolated_existing:
+    # Bind current project facts after every definition is assembled. Native
+    # handlers and supervised services retain their own execution declaration.
+    for name in workspace_bound_existing:
         tool = tool_executors.get(name)
         if tool is None:
             continue
-        tool.isolated = True
-        tool.runner_name = name
-        tool.cancellation = CancellationMode.ISOLATED_PROCESS
         _bind_private_workspace(tool)
 
     # Knowledge metadata belongs to the canonical state service, never to a

@@ -40,19 +40,42 @@ def get_state_ref(self: ObjectsPort, namespace: str, key: str) -> str | None:
 
 
 
+def release_state_ref(self: ObjectsPort, namespace: str, key: str, *, expected_ref: str) -> bool:
+    """Release only the caller's exact GC root; never a replacement owner."""
+    self._ensure_open()
+    if not namespace or not key or not expected_ref:
+        raise ValueError("namespace, key and expected_ref are required")
+    self._reserve_authoritative_write(len(namespace) + len(key) + len(expected_ref))
+    with self._state_lock:
+        cursor = self._state.execute(
+            "DELETE FROM storage_kv WHERE namespace=? AND key=? AND value_ref=?",
+            (namespace, key, expected_ref))
+        return cursor.rowcount == 1
+
+
+def compare_state_ref(self: ObjectsPort, namespace: str, key: str,
+                      value_ref: str, *, expected_ref: str | None) -> bool:
+    """Advance one expected head without retaining every historic snapshot."""
+    return _publish_state_head(self, namespace, key, value_ref,
+                               expected_ref=expected_ref)
+
+
 def commit_state_revision(self: ObjectsPort, namespace: str, key: str,
                           value_ref: str, *, expected_ref: str | None,
                           revision_key: str) -> bool:
-    """Atomically retain an immutable revision and advance its expected head.
-
-    False means another writer changed the head. Neither reference is written
-    in that case. Both refs are ordinary storage_kv GC roots.
-    """
-    self._ensure_open()
-    if not namespace or not key or not revision_key or key == revision_key:
+    """Retain an immutable revision and advance its expected head atomically."""
+    if not revision_key or key == revision_key:
         raise ValueError("distinct head and revision keys are required")
-    self.read_blob(value_ref)  # Do not publish a missing CAS object.
-    self._reserve_authoritative_write(len(namespace) + len(key) + len(revision_key) + 2 * len(value_ref))
+    return _publish_state_head(self, namespace, key, value_ref,
+                               expected_ref=expected_ref, revision_key=revision_key)
+
+
+def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revision_key=None):
+    self._ensure_open()
+    if not namespace or not key:
+        raise ValueError("namespace and key are required")
+    self.read_blob(value_ref)
+    self._reserve_authoritative_write(len(namespace) + len(key) + len(revision_key or "") + 2 * len(value_ref))
     with self._state_lock:
         with authoritative_transaction(self._state):
             row = self._state.execute(
@@ -61,15 +84,16 @@ def commit_state_revision(self: ObjectsPort, namespace: str, key: str,
             current = str(row[0]) if row else None
             if current != expected_ref:
                 return False
-            prior = self._state.execute(
-                "SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?",
-                (namespace, revision_key)).fetchone()
-            if prior is not None and str(prior[0]) != value_ref:
-                raise ValueError("immutable revision key already exists")
             now = _utc_now()
-            self._state.execute(
-                "INSERT OR IGNORE INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)",
-                (namespace, revision_key, value_ref, now))
+            if revision_key is not None:
+                prior = self._state.execute(
+                    "SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?",
+                    (namespace, revision_key)).fetchone()
+                if prior is not None and str(prior[0]) != value_ref:
+                    raise ValueError("immutable revision key already exists")
+                self._state.execute(
+                    "INSERT OR IGNORE INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)",
+                    (namespace, revision_key, value_ref, now))
             self._state.execute(
                 "INSERT INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?) "
                 "ON CONFLICT(namespace,key) DO UPDATE SET value_ref=excluded.value_ref,updated_at=excluded.updated_at",

@@ -43,6 +43,14 @@ class SecurityTree:
     Reparse points are refused, never followed. This is configuration recovery,
     not a backup of file contents or of an actively changing project.
     """
+    security_information = FULL_SECURITY
+    read_access = 0x01020089
+    ancestor_access = 0x010200A0
+
+    @staticmethod
+    def privilege_context():
+        return security_privileges()
+
     def __init__(self, roots, *, writable=True):
         if os.name != 'nt':
             raise OSError('Windows security descriptors are required')
@@ -87,15 +95,15 @@ class SecurityTree:
             [W.HANDLE, C.c_void_p, W.DWORD, C.POINTER(W.DWORD), W.BOOL, W.BOOL,
              C.POINTER(C.c_void_p)], W.BOOL)
         self.writable = writable
-        self.access = 0x01020089 | (0x40000 | 0x80000 if writable else 0)  # READ_DATA/LIST_DIRECTORY, READ_CONTROL, WRITE_DAC/OWNER
+        self.access = self.read_access | (0x40000 | 0x80000 if writable else 0)  # READ_DATA/LIST_DIRECTORY, READ_CONTROL, WRITE_DAC/OWNER
         try:
-            with security_privileges():
+            with self.privilege_context():
                 for root in roots:
                     path = Path(root)
                     for ancestor in reversed(path.parents):
                         key = str(ancestor)
                         if key not in self.ancestors:
-                            handle = self._open(ancestor, 0x010200A0)  # TRAVERSE (execute-sharing) + READ_ATTRIBUTES
+                            handle = self._open(ancestor, self.ancestor_access)  # TRAVERSE (execute-sharing) + READ_ATTRIBUTES
                             self.ancestors[key] = handle
                             self._information(handle)
                     self._visit(path)
@@ -154,7 +162,7 @@ class SecurityTree:
         # kernel, not that synthesized view. Query every security component,
         # including MIC, audit, resource attributes and access filters.
         needed = W.DWORD()
-        status = self.query_security(handle, FULL_SECURITY, None, 0, C.byref(needed))
+        status = self.query_security(handle, self.security_information, None, 0, C.byref(needed))
         if status != -1073741789:  # STATUS_BUFFER_TOO_SMALL
             if status:
                 raise C.WinError(self.status_to_error(status))
@@ -163,7 +171,7 @@ class SecurityTree:
             if not 20 <= needed.value <= MAX_DESCRIPTOR_BYTES:
                 raise ValueError('Windows descriptor exceeds recovery bounds')
             buffer = C.create_string_buffer(needed.value)
-            status = self.query_security(handle, FULL_SECURITY, buffer, len(buffer), C.byref(needed))
+            status = self.query_security(handle, self.security_information, buffer, len(buffer), C.byref(needed))
             if status == -1073741789:
                 continue
             if status:
@@ -353,12 +361,14 @@ def canonical_security(value):
 
 
 @contextmanager
-def management_lock():
+def management_lock(*, wait_ms=0):
     """Serialize cooperating Windows ACL operators across processes/sessions.
 
     This lock is not an ACL freeze or a running Host lease. External permission
     editors are detected by descriptor conflict checks, not blocked by it.
     """
+    if type(wait_ms) is not int or not 0 <= wait_ms <= 30000:
+        raise ValueError('ACL management wait must be between 0 and 30000 ms')
     if os.name != 'nt':
         raise OSError('Windows ACL management is required')
     kernel = C.WinDLL('kernel32', use_last_error=True)
@@ -371,7 +381,7 @@ def management_lock():
     SecurityTree.check(handle)
     acquired = False
     try:
-        status = wait(handle, 0)
+        status = wait(handle, wait_ms)
         if status == 0x80:  # WAIT_ABANDONED grants ownership, but recovery is explicit.
             acquired = True
             raise SecurityConflict('Previous ACL operator terminated; inspect recovery records before retry')

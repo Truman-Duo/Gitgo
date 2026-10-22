@@ -21,6 +21,24 @@ MAX_PINS = 64
 _RETAINED_ADMISSIONS = {}
 
 
+def runtime_cleanup_report(cleanup):
+    """Normalize supervisor metadata, never tool-returned cleanup claims."""
+    if not isinstance(cleanup, dict):
+        return None
+    issues = cleanup.get("issues", [])
+    if not isinstance(issues, list):
+        issues = ["cleanup_report_invalid"]
+    return {"complete": cleanup.get("complete") is True and not issues,
+            "mode": str(cleanup.get("mode") or "unknown")[:80],
+            "issues": [str(issue)[:120] for issue in issues[:16]]}
+
+
+def native_cleanup_pending(process):
+    """One recovery authority for native calls, including service-owned producers."""
+    return any(isinstance(reason, dict) and reason.get("code") == "NATIVE_CLEANUP_UNCONFIRMED"
+               for reason in (process.recovery or {}).get("reasons", []))
+
+
 def requires_read_binding(tool):
     from .execution_contract import ExecutionContract
     contract = getattr(tool, 'execution_contract', None)

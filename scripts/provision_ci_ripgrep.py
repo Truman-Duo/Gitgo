@@ -13,6 +13,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.ci_downloads import fetch_verified
+from scripts.development_paths import development_root
 
 VERSION = '15.2.0'
 ARCHIVES = {
@@ -74,7 +75,7 @@ def main():
                         entries.append((member.name, handle.read()))
             notices = archive_notices(entries)
     # No extractall or caller-selected destination; only one verified binary.
-    directory = Path(__file__).resolve().parents[1] / '.gitgo/ci-ripgrep'
+    directory = development_root(Path(__file__).resolve().parents[1]) / 'ci-ripgrep'
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / binary_name
     target.write_bytes(binary)

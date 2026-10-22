@@ -1012,7 +1012,11 @@ class ApplicationServices:
         cfg, proj = _project(project)
         session = SyncSession(proj, cfg)
         workspace = Path(session.workspace_path)
-        contract = ContractManager.load(workspace)
+        from backend.core.contract import ContractStateUnavailable
+        try:
+            contract = ContractManager.load(workspace)
+        except ContractStateUnavailable as exc:
+            raise OperationError(exc.code, str(exc), details={"query_state": "failed"}) from exc
         if contract is None:
             return {"contract": None}
         result = {"project": contract.project, "updated": contract.updated,
@@ -1167,7 +1171,7 @@ class ApplicationServices:
         if not session.backup_path:
             raise OperationError("NO_BACKUP_CONFIGURED", "No backup is configured")
         result = snapshot_tool_memories(session.workspace_path, session.backup_path, proj)
-        return {"snapped": result.get("snapped", []), "timestamp": result.get("timestamp", "")}
+        return result  # Preserve no_sources/partial/unknown outcomes and retention warnings.
 
     def memory_list(self, project: str) -> list[dict]:
         from backend.core.identity.snapshot import list_memory_snapshots
@@ -1176,7 +1180,7 @@ class ApplicationServices:
         session = SyncSession(proj, cfg)
         if not session.backup_path:
             raise OperationError("NO_BACKUP_CONFIGURED", "No backup is configured")
-        return list_memory_snapshots(session.backup_path)
+        return list_memory_snapshots(session.backup_path, session.workspace_path)
 
     def memory_restore(self, project: str, ts: str | None = None) -> dict:
         from backend.core.identity.snapshot import restore_tool_memories
@@ -1186,7 +1190,7 @@ class ApplicationServices:
         if not session.backup_path:
             raise OperationError("NO_BACKUP_CONFIGURED", "No backup is configured")
         return restore_tool_memories(session.backup_path, session.workspace_path,
-                                     snapshot_timestamp=ts)
+                                     snapshot_timestamp=ts, project_name=proj.name)
 
     @staticmethod
     def _sync_session(project: str, *, scan: bool = False, trial: bool = False):

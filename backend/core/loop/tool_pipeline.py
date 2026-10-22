@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from backend.core.loop.gate import RingGate
+from backend.core.tools.file_operations import FILE_MUTATION_TOOLS
 from backend.core.loop.operation_policy import (
     is_effectful_mutation, is_observation_effect,
 )
@@ -137,16 +138,14 @@ class ToolPipeline:
             registered_digest = tool_contract_digest(tool)
             runtime_metadata["registration"] = registered_digest
             runtime_metadata["owner"] = (ctx.process.process_id, ctx.process.active_task_id or ctx.process.process_id)
-            if execution_contract.kind.value == "native_process" and any(
-                reason.get("code") == "NATIVE_CLEANUP_UNCONFIRMED"
-                for reason in (ctx.process.recovery or {}).get("reasons", [])
-                if isinstance(reason, dict)
-            ):
+            from .read_approval import native_cleanup_pending
+            if execution_contract.kind.value == "native_process" and native_cleanup_pending(ctx.process):
                 raise ValueError("SANDBOX_CLEANUP_PENDING: prior native resources require inspection")
         except (AttributeError, ValueError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
-                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID",
+                             "effect_state": "not_committed", "execution_state": "not_started"},
             )
             result.receipt["effect_state"] = "not_committed"
             return result
@@ -163,7 +162,8 @@ class ToolPipeline:
                 diagnostics={"nature": "governance", "code": "TOOL_DENIED"},
             )
         if (not operation_policy.requires_user
-                and tool_name in {"edit_file", "write_file"}):
+                and (tool_name in FILE_MUTATION_TOOLS or
+                     (execution_contract.kind.value == "data_broker" and execution_contract.broker.startswith("files.workspace.")))):
             # A real scoped override can exist even for an ordinarily allowed
             # editor (for example after a lesson diagnostic). Use the existing
             # broker, never a model-supplied acknowledgement or private flag.
@@ -309,7 +309,7 @@ class ToolPipeline:
                 diagnostics={
                     "nature": "business",
                     "code": "INVALID_TOOL_ARGUMENTS",
-                    "source": "llm",
+                    "source": "llm", "effect_state": "not_committed", "execution_state": "not_started",
                 },
             )
 
@@ -368,7 +368,8 @@ class ToolPipeline:
         except (AttributeError, ValueError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
-                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID",
+                             "effect_state": "not_committed", "execution_state": "not_started"},
             )
             result.receipt["effect_state"] = "not_committed"
             return result
@@ -431,7 +432,8 @@ class ToolPipeline:
         except (AttributeError, ValueError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
-                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID",
+                             "effect_state": "not_committed", "execution_state": "not_started"},
             )
             result.receipt["effect_state"] = "not_committed"
             return result
@@ -443,7 +445,8 @@ class ToolPipeline:
                 tool_name, execution_id, call_index, start, "tool execution cancelled before admission",
                 diagnostics={"nature": "system", "code": "TOOL_CANCELLED"},
             )
-        if tool_name in {"read_file", "edit_file", "write_file"}:
+        if (tool_name == "read_file" or tool_name in FILE_MUTATION_TOOLS or execution_contract.file_action == "produce_workspace"
+                or (execution_contract.kind.value == "data_broker" and execution_contract.broker.startswith("files.workspace."))):
             args["_workspace"] = str(ctx.workspace_path)
             # Business services receive trusted project facts; model private
             # fields were stripped before preparation.
@@ -453,7 +456,7 @@ class ToolPipeline:
             args["_lesson_context"] = {
                 "project_name": str(snapshot.get("project_name") or ""),
                 "state_home": str(storage.paths.state_home),
-                "explicit_user_grant": explicit_user_grant is not None,
+                "explicit_user_grant": explicit_user_grant is not None and execution_contract.file_action != "produce_workspace",
                 "task_id": str(ctx.process.active_task_id or ctx.process.process_id),
                 "process_id": ctx.process.process_id,"session_id":ctx.session.session_id,
                 "feedback_in_provider_input": __import__("backend.core.knowledge.feedback",fromlist=["exposed_ids"]).exposed_ids(ctx.process),
@@ -473,7 +476,7 @@ class ToolPipeline:
         from .execution_contract import NativeInvocation, native_timeout
         native_invocation = None
         try:
-            if execution_contract.kind.value == "native_process" and not tool.composite_spec:
+            if execution_contract.kind.value == "native_process" and not tool.composite_spec and execution_contract.file_action != "produce_workspace":
                 native_invocation = NativeInvocation.compile(tool.runner_name or tool_name,
                     {**args, "_workspace": str(ctx.workspace_path)}, native_timeout(tool, args),
                     owner=runtime_metadata["owner"], registration=registered_digest)
@@ -487,7 +490,8 @@ class ToolPipeline:
         except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, f"grant admission failed: {exc}",
-                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID"},
+                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID",
+                             "effect_state": "not_committed", "execution_state": "not_started"},
             )
             result.receipt["effect_state"] = "not_committed"
             return result
@@ -533,6 +537,7 @@ class ToolPipeline:
                 })
                 return result
         runner_diagnostics = {}
+        untrusted_program_result = False
         try:
             # prepare hooks and mutable registry objects cannot substitute a new
             # callable/authority after the initial admission check.
@@ -577,24 +582,37 @@ class ToolPipeline:
                             from .authored_runtime import run
                             result_data = run(self, tool, args, ctx, execution_id, call_index, continuation_key, dynamic_spec,
                                 timeout=effective_timeout, diagnostics=runner_diagnostics, runtime_metadata=runtime_metadata)
+                        elif dynamic_spec.get("execution_mode") == "authored_privileged_python":
+                            from .workspace_candidate_runtime import WorkspaceCandidateRuntime
+                            runtime = WorkspaceCandidateRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
+                            result_data = runtime.execute("authored_privileged_python", args, effective_timeout,
+                                diagnostics=runner_diagnostics, runtime_metadata=runtime_metadata,
+                                trusted_arguments={"_dynamic_spec": dynamic_spec}, result_kind="authored")
                         else:
-                            result_data = self._execute_isolated(
-                                (
-                                    "authored_privileged_python"
-                                    if dynamic_spec.get("execution_mode") == "authored_privileged_python"
-                                    else "authored_python"
-                                ),
-                                {**args, "_workspace": str(ctx.workspace_path), "_dynamic_spec": dynamic_spec},
-                                effective_timeout,
-                                cancellation_event=ctx.cancellation,
-                                diagnostics=runner_diagnostics,
-                                runtime_metadata=runtime_metadata,
-                            )
+                            # A pure transform needs no formal filesystem ACL.
+                            # Its legacy data shape stays unchanged; supervision
+                            # facts come from this bound private invocation.
+                            from .workspace_candidate_runtime import WorkspaceCandidateRuntime
+                            runtime = WorkspaceCandidateRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
+                            try:
+                                record = runtime.preview("authored_python", args, effective_timeout,
+                                    trusted_arguments={"_dynamic_spec": dynamic_spec}, copy_inputs=False, diagnostics=runner_diagnostics)
+                                result_data = record["result"]
+                                untrusted_program_result = True
+                            finally:
+                                for key in ("launch_state", "exit_code", "cleanup", "execution_basis"):
+                                    if key in runtime.last_render:
+                                        runtime_metadata[key] = runtime.last_render[key]
                 else:
                     result_data = self._execute_composite_plan(
                         tool, args, ctx, execution_id, call_index, continuation_key, runtime_metadata=runtime_metadata,
                     )
             # Host registration selects native execution independently of business effect.
+            elif execution_contract.file_action == "produce_workspace":
+                from .workspace_candidate_runtime import WorkspaceCandidateRuntime
+                runtime = WorkspaceCandidateRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
+                result_data = runtime.execute(tool.runner_name or tool_name, args, effective_timeout,
+                    diagnostics=runner_diagnostics, runtime_metadata=runtime_metadata)
             elif execution_contract.kind.value == "native_process":
                 result_data = self._execute_isolated(
                     getattr(tool, "runner_name", "") or tool_name,
@@ -605,6 +623,50 @@ class ToolPipeline:
                     diagnostics=runner_diagnostics,
                     runtime_metadata=runtime_metadata,
                 )
+            elif execution_contract.kind.value == "data_broker" and execution_contract.broker.startswith("files.workspace."):
+                from backend.core.tools.file_mutation import file_service_scope
+                from .file_candidate_runtime import FileCandidateRuntime
+                runtime = FileCandidateRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
+                if tool_name == "document_create":
+                    from .document_candidate_runtime import DocumentCandidateRuntime
+                    runtime = DocumentCandidateRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
+                try:
+                    with file_service_scope(lambda: ctx.is_cancelled() or getattr(ctx.process, "cancel_requested", False), runtime):
+                        result_data = tool.execute(args)
+                finally:
+                    if runtime is not None and isinstance(runtime.last_render.get("cleanup"), dict):
+                        # Share lifecycle debt with existing admission/recovery.
+                        # Producer launch/effects stay nested: it did not write
+                        # the formal target, and cache reuse launches nothing.
+                        runtime_metadata["cleanup"] = runtime.last_render["cleanup"]
+            elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "tests.workspace.run":
+                from .registered_test_runtime import RegisteredTestRuntime
+                runtime = RegisteredTestRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool, timeout=effective_timeout)
+                try:
+                    result_data = runtime.run(args)
+                finally:
+                    if isinstance(runtime.last_render.get("cleanup"), dict):
+                        runtime_metadata["cleanup"] = runtime.last_render["cleanup"]
+                    runtime_metadata["native_producers"] = runtime.producers
+                    if runtime.phase in {"preflight", "execute"}:
+                        runtime_metadata["effect_state"] = "not_committed"
+                    elif runtime.phase == "recorded":
+                        runtime_metadata["effect_state"] = "committed"
+            elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "host.runtime.author_tool":
+                from .authoring_runtime import AuthoringRuntime
+                from .service_runtime import tool_service_scope
+                runtime = AuthoringRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool, timeout=effective_timeout)
+                try:
+                    with tool_service_scope(lambda: ctx.is_cancelled() or getattr(ctx.process, "cancel_requested", False), runtime):
+                        result_data = tool.execute(args)
+                finally:
+                    if isinstance(runtime.last_render.get("cleanup"), dict):
+                        runtime_metadata["cleanup"] = runtime.last_render["cleanup"]
+                    if runtime.phase in {"preflight", "tests"}:
+                        runtime_metadata["effect_state"] = "not_committed"
+                if runtime.producers and isinstance(result_data, dict):
+                    result_data["registration_producers"] = runtime.producers
+                    runtime_metadata["native_producers"] = [{"role": "registration_self_test", **item} for item in runtime.producers]
             else:
                 result_data = tool.execute(args)
             if tool.finalize_result is not None:
@@ -634,7 +696,9 @@ class ToolPipeline:
             })
             return self._attach_runtime_cleanup(self._attach_runner_diagnostics(result, runner_diagnostics), runtime_metadata, ctx)
         except Exception as exc:
-            effect_state = ("ambiguous" if is_effectful_mutation(tool.effect) else "not_committed")
+            effect_state = runtime_metadata.get("effect_state")
+            if effect_state not in {"not_committed", "committed", "partial", "ambiguous"}:
+                effect_state = "ambiguous" if is_effectful_mutation(tool.effect) else "not_committed"
             self._write_invocation_state(
                 ctx, tool, tool_name, execution_id, call_index,
                 state="failed", effect_state=effect_state,
@@ -678,8 +742,11 @@ class ToolPipeline:
                 business_error = "COMMAND_EXIT_NONZERO"
             if not business_error and result_data.get("passed") is False:
                 business_error = "TEST_FAILED"
-        if (execution_contract.kind.value == "data_broker" and isinstance(result_data, dict)
-                and result_data.get("effect_state") in {"not_committed", "committed", "partial", "ambiguous"}):
+        if business_error and untrusted_program_result:
+            business_error = "CUSTOM_TOOL_EXECUTION_FAILED"
+        if ((execution_contract.file_action == "produce_workspace" or
+                (execution_contract.kind.value == "data_broker" and (execution_contract.broker.startswith("files.workspace.") or execution_contract.broker in {"governance.formalize", "identity.memory_snapshot"})))
+                and isinstance(result_data, dict) and result_data.get("effect_state") in {"not_committed", "committed", "partial", "ambiguous"}):
             runtime_metadata["effect_state"] = result_data["effect_state"]
         if business_error:
             effect_value = getattr(tool.effect, "value", str(tool.effect))
@@ -698,7 +765,9 @@ class ToolPipeline:
                 detail = f"exit_code={result_data.get('exit_code')}"
             message = code if not detail else f"{code}: {detail}"
             rollback_required = runtime_metadata.get("rollback_required") is True
-            error_info = result_data.get("error_info")
+            from backend.core.errors import error_payload
+            error_info = (error_payload(
+                "CUSTOM_TOOL_EXECUTION_FAILED")["error_info"] if untrusted_program_result else result_data.get("error_info"))
             if code == "COMMAND_EXIT_NONZERO" and not isinstance(error_info, dict):
                 from backend.core.errors import error_payload
                 command_error = error_payload(
@@ -727,8 +796,8 @@ class ToolPipeline:
                     "code": code,
                     "rollback_required": rollback_required,
                     "effect_state": effect_state,
-                    "execution_state": result_data.get("execution_state", "unknown"),
-                    "next_actions": list(result_data.get("next_actions") or []),
+                    "execution_state": "completed" if untrusted_program_result else result_data.get("execution_state", "unknown"),
+                    "next_actions": [] if untrusted_program_result else list(result_data.get("next_actions") or []),
                     **({"error_info": error_info} if isinstance(error_info, dict) else {}),
                 },
             )
@@ -774,7 +843,7 @@ class ToolPipeline:
                 "invocation_path": invocation_path,
                 "task_id": str(getattr(ctx.process, "active_task_id", "") or getattr(ctx.process, "process_id", "")),
             })
-            self._attach_result_facts(result.receipt, tool_name, result_data, args)
+            self._attach_result_facts(result.receipt, tool_name, result_data, args, execution_contract=execution_contract, bound_definition=tool.composite_spec)
             if isinstance(error_info, dict):
                 result.receipt.update({
                     "error_catalog_id": str(error_info.get("catalog_id") or ""),
@@ -806,7 +875,7 @@ class ToolPipeline:
             getattr(ctx.process, "active_task_id", "")
             or getattr(ctx.process, "process_id", "")
         )
-        self._attach_result_facts(receipt, tool_name, result_data, args)
+        self._attach_result_facts(receipt, tool_name, result_data, args, execution_contract=execution_contract, bound_definition=tool.composite_spec)
         if spill:
             receipt["tool_result_locator"] = spill["locator"]
             receipt["tool_result_digest"] = spill["digest"]
@@ -881,7 +950,11 @@ class ToolPipeline:
     @classmethod
     def _attach_runtime_cleanup(cls, result, runtime_metadata, ctx):
         """Keep supervisor facts separate from handler data and effect success."""
+        result.receipt["process_id"] = ctx.process.process_id
         cls._attach_child_lineage(result.receipt, result.data, runtime_metadata)
+        if runtime_metadata.get("native_producers"):
+            from copy import deepcopy
+            result.receipt["native_producers"] = deepcopy(runtime_metadata["native_producers"])
         result.receipt["business_state"] = "failed" if result.is_error else "awaiting_user" if result.suspended else "succeeded"
         if "launch_state" in runtime_metadata and is_effectful_mutation(result.receipt.get("effect", "read")):
             effect = cls._observed_effect(result.receipt["effect"], runtime_metadata, succeeded=not result.is_error)
@@ -907,15 +980,10 @@ class ToolPipeline:
         if "launch_state" in runtime_metadata:
             result.receipt["launch_state"] = runtime_metadata["launch_state"]
             result.receipt["runtime_exit_code"] = runtime_metadata.get("exit_code")
-        cleanup = runtime_metadata.get("cleanup")
-        if not isinstance(cleanup, dict):
+        from .read_approval import runtime_cleanup_report
+        report = runtime_cleanup_report(runtime_metadata.get("cleanup"))
+        if report is None:
             return result
-        issues = cleanup.get("issues", [])
-        if not isinstance(issues, list):
-            issues = ["cleanup_report_invalid"]
-        report = {"complete": cleanup.get("complete") is True and not issues,
-                  "mode": str(cleanup.get("mode") or "unknown")[:80],
-                  "issues": [str(issue)[:120] for issue in issues[:16]]}
         result.receipt["runtime_cleanup"] = report
         result.diagnostics["runtime_cleanup"] = report
         if not report["complete"]:
@@ -951,6 +1019,7 @@ class ToolPipeline:
     @staticmethod
     def _attach_result_facts(
         receipt: dict, tool_name: str, result_data: dict | None, arguments: dict | None = None,
+        *, execution_contract=None, bound_definition=None,
     ) -> None:
         """Project narrow Host-observed facts into a durable receipt.
 
@@ -961,7 +1030,26 @@ class ToolPipeline:
         """
         if not isinstance(result_data, dict):
             return
-        feedback = result_data.get("lesson_feedback")
+        from .execution_contract import ExecutionType
+        trusted_files = (getattr(execution_contract, "file_action", "") == "produce_workspace" or
+                         (getattr(execution_contract, "kind", None) == ExecutionType.DATA_BROKER
+                          and execution_contract.broker.startswith("files.workspace.")))
+        if trusted_files:
+            receipt["file_service_result"] = True
+            # Bounded native evidence survives nested calls and permission
+            # checkpoints. Arbitrary program JSON is never projected here.
+            if isinstance(result_data.get("knowledge_excerpts"), list):
+                from backend.core.knowledge.excerpts import MAX_EXCERPTS, MAX_EXCERPT_CHARS, text_hash
+                from copy import deepcopy
+                fields = ("excerpt_id", "path", "start_line", "end_line", "text", "sha256",
+                          "observed_file_sha256", "unique_at_capture", "origin")
+                receipt["knowledge_excerpts"] = [
+                    {k: deepcopy(item[k]) for k in fields if k in item}
+                    for item in (result_data.get("knowledge_excerpts") or [])[:MAX_EXCERPTS]
+                    if isinstance(item, dict) and item.get("origin") == "native_file_diff"
+                    and isinstance(item.get("text"), str) and len(item["text"]) <= MAX_EXCERPT_CHARS
+                    and item.get("sha256") == text_hash(item["text"])]
+        feedback = result_data.get("lesson_feedback") if trusted_files else None
         if isinstance(feedback, dict):
             receipt["candidate_sha256"] = result_data.get("candidate_sha256")
             receipt["before_sha256"] = result_data.get("before_sha256")
@@ -974,20 +1062,44 @@ class ToolPipeline:
             receipt["lesson_lookup"] = feedback.get("lookup", {})
             receipt["lesson_advisory_state"] = feedback.get("advisory_state", "unknown")
             receipt["lesson_mandatory_check_state"] = feedback.get("mandatory_check_state", "unknown")
-        if tool_name in {"search_text", "list_files"}:
+        for key in ("candidate_ref", "candidate_source", "candidate_render", "candidate_view"):
+            if trusted_files and key in result_data:
+                receipt[key] = result_data[key]
+        if trusted_files and isinstance(result_data.get("file_results"), list):
+            receipt["file_mutations"] = [{k: row[k] for k in
+                ("path", "operation", "before_sha256", "candidate_sha256", "after_sha256",
+                 "effect_state", "execution_state", "error", "trash_ref", "recoverable", "recovery_state", "recovery_ref", "recovery_kind") if k in row}
+                for row in result_data["file_results"][:128] if isinstance(row, dict)]
+        if tool_name in {"search_text", "list_files"} and bound_definition is None:
             receipt.update(search_engine=result_data.get("engine"), search_complete=result_data.get("complete"),
                            search_partial=result_data.get("partial"),
                            search_warning_codes=[str(w.get("code")) for w in result_data.get("warnings", []) if isinstance(w, dict)])
-        if receipt.get("effect") == "workspace_write":
-            receipt["files"] = sorted(path.replace("\\", "/") for path in ToolPipeline._result_files(result_data))
-        if tool_name == "exec_command":
+        if getattr(execution_contract, "broker", "") == "governance.formalize" and bound_definition is None:
+            for key in ("governance_state_ref", "git_commit_created", "source_indices", "commit"):
+                if key in result_data:
+                    receipt[key] = result_data[key]
+        if receipt.get("effect") == "workspace_write" or trusted_files:
+            receipt["files"] = sorted(path.replace("\\", "/") for path in ToolPipeline._result_files(result_data, include_mutations=trusted_files))
+        if getattr(execution_contract, "file_action", "") == "produce_workspace":
+            for key in ("producer_completed", "producer_exit_code", "producer_observation", "input_applicability", "output_publication"):
+                if key in result_data:
+                    receipt[key] = result_data[key]
+            render = result_data.get("candidate_render") or {}
+            for source, target in (("launch_state", "producer_launch_state"), ("exit_code", "producer_runtime_exit_code")):
+                if source in render:
+                    receipt[target] = render[source]
+        if tool_name == "exec_command" and bound_definition is None:
             from .engineering_workflow import command_digest
             receipt["command_digest"] = command_digest(arguments or {})
             receipt["command_exit_code"] = result_data.get("exit_code")
-            receipt["command_completed"] = type(result_data.get("exit_code")) is int and not result_data.get("error")
-        if tool_name == "read_file" and isinstance(result_data.get("input_dependency"), dict):
+            receipt["command_completed"] = (
+                result_data.get("producer_completed") is True and result_data.get("input_applicability") == "current"
+                and result_data.get("output_publication") in {"committed", "not_required"}
+                if getattr(execution_contract, "file_action", "") == "produce_workspace" else
+                type(result_data.get("exit_code")) is int and not result_data.get("error"))
+        if tool_name == "read_file" and bound_definition is None and isinstance(result_data.get("input_dependency"), dict):
             receipt["input_dependency"] = dict(result_data["input_dependency"])
-        if tool_name == "run_test":
+        if tool_name == "run_test" and bound_definition is None:
             from .validation_evidence import version_summary
             receipt["validation_version"] = version_summary(result_data.get("validation_version"))
             receipt["test_id"] = str(result_data.get("test_id") or "")
@@ -1002,21 +1114,17 @@ class ToolPipeline:
                 for item in list(result_data.get("seed_results") or [])
                 if isinstance(item, dict)
             ]
-        elif tool_name == "define_tool" and result_data.get("defined") is True:
+        elif tool_name == "define_tool" and bound_definition is None and result_data.get("defined") is True:
             receipt["dynamic_tool_name"] = str(result_data.get("name") or "")
             receipt["definition_digest"] = str(result_data.get("digest") or "")
             receipt["definition_version"] = int(result_data.get("version") or 1)
             receipt["definition_steps"] = [
                 str(item) for item in list(result_data.get("steps") or [])
             ]
-        elif result_data.get("definition_digest"):
+        elif isinstance(bound_definition, dict) and bound_definition.get("digest"):
             receipt["dynamic_tool_name"] = str(tool_name)
-            receipt["definition_digest"] = str(
-                result_data.get("definition_digest") or ""
-            )
-            receipt["definition_version"] = int(
-                result_data.get("definition_version") or 1
-            )
+            receipt["definition_digest"] = str(bound_definition["digest"])
+            receipt["definition_version"] = int(bound_definition.get("version") or 1)
 
     def error_result(
         self,
@@ -1064,7 +1172,7 @@ class ToolPipeline:
         ]
 
     @staticmethod
-    def _result_files(result: dict) -> set[str]:
+    def _result_files(result: dict, *, include_mutations=False) -> set[str]:
         files: set[str] = set()
         for key in ("path", "file"):
             if isinstance(result.get(key), str):
@@ -1075,6 +1183,10 @@ class ToolPipeline:
                     files.add(item)
                 elif isinstance(item, dict) and isinstance(item.get("path"), str):
                     files.add(item["path"])
+        if include_mutations:
+            for row in result.get("file_results", []):
+                if isinstance(row, dict) and isinstance(row.get("path"), str):
+                    files.add(row["path"])
         return files
 
     def _execute_isolated(self, tool_name: str, args: dict,
@@ -1234,6 +1346,10 @@ class ToolPipeline:
                 "started_at": float(previous.get("started_at", now) or now),
                 "updated_at": now,
             }
+            from .read_approval import runtime_cleanup_report
+            cleanup = runtime_cleanup_report((evidence or {}).get("cleanup"))
+            if cleanup is not None:
+                payload["runtime_cleanup"] = cleanup
             tmp = target.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(str(tmp), str(target))
@@ -1295,6 +1411,7 @@ class ToolPipeline:
                 "tool_name": tool_name,
                 "succeeded": False,
                 "error_code": diagnostics.get("code", "TOOL_ERROR"),
+                **{key: diagnostics[key] for key in ("effect_state", "execution_state") if key in diagnostics},
                 **({"error_catalog_id": error_info.get("catalog_id"), "error_occurrence_id": error_info.get("occurrence_id")} if isinstance(error_info, dict) else {}),
             },
         )
@@ -1322,10 +1439,18 @@ class ToolPipeline:
 def _validate_args(args: dict, schema: dict) -> None:
     """用 JSON Schema 做运行时类型验证。
 
-    只验证 required 字段存在 + 类型匹配。不做 full JSON Schema 验证（保持轻量）。
+    验证必需字段、顶层类型及显式禁止的额外公开字段；不是完整 JSON Schema 验证器。
+    Host 注入的私有字段在模型入口已被拒绝，不能被当作模型额外参数。
     """
     required = schema.get("required", [])
     properties = schema.get("properties", {})
+    if schema.get("additionalProperties") is False:
+        import re
+        patterns = schema.get("patternProperties", {})
+        unknown = [str(key) for key in args if not str(key).startswith("_") and key not in properties
+                   and not any(re.search(pattern, str(key)) for pattern in patterns)]
+        if unknown:
+            raise ValueError("Unsupported public arguments: " + ", ".join(sorted(unknown)))
 
     for field_name in required:
         if field_name not in args:

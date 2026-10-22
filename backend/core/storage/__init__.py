@@ -20,6 +20,7 @@ from .bindings import (
     bind_storage,
     close_owned_storage,
     get_storage,
+    peek_storage,
     release_storage,
     unbind_storage,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "bind_storage",
     "close_owned_storage",
     "get_storage",
+    "peek_storage",
     "release_storage",
     "unbind_storage",
     "assess_repository_scope",

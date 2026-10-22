@@ -265,7 +265,11 @@ class WindowsSandboxProcess(subprocess.Popen):
         initialized = False
         job = None
         try:
-            sid = api.profile_sid(self._sandbox_policy.profile_name)
+            # Access preparation owns profile creation/retirement. Recreating
+            # an already prepared profile on every launch can hit a deleted
+            # registry key (ERROR_KEY_DELETED), before any child even starts.
+            # Derive the same deterministic SID; this grants no ACLs/capabilities.
+            sid = api.preview_profile_sid(self._sandbox_policy.profile_name)
             job = api.create_job(None, None)  # not inheritable
             api.check(job)
             limits = ExtendedLimits()

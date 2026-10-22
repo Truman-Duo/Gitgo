@@ -118,6 +118,16 @@ def smoke(executable: Path) -> None:
     if not executable.is_file():
         raise FileNotFoundError(executable)
     validate_search_bundle(executable)
+    # Protocol startup alone does not load every registered tool. Exercise the
+    # same implementation identity used by actual admissions/approvals, rather
+    # than relaxing a missing-module failure inside the authority boundary.
+    probe = subprocess.run([str(executable), INTERNAL_ROLE_FLAG, "python", "-I", "-c",
+        "from backend.core.loop.permission_broker import _runtime_implementation_digest;"
+        "print(_runtime_implementation_digest())"],
+        capture_output=True, text=True, encoding="utf8", errors="replace", timeout=30)
+    digest = probe.stdout.strip()
+    if probe.returncode or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise RuntimeError("Packaged tool implementation identity is unavailable: " + probe.stderr[-2000:])
 
     with tempfile.TemporaryDirectory(prefix="gitgo-packaged-smoke-") as raw:
         root = Path(raw)

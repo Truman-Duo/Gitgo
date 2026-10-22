@@ -17,16 +17,19 @@ from backend.core.daemon.emit import _emit
 
 def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[str] | None:
     """每轮结束时在 workspace 做 git commit 快照。"""
-    import subprocess
+    from backend.core.loop.worktree import AgentWorktreeManager, WorktreeError
 
-    ws = str(session.workspace_path)
+    ws = Path(session.workspace_path)
     changed = [e.rel_path for e in session.entries if e.status != "same"]
 
     try:
-        creationflags = 0x08000000 if sys.platform == "win32" else 0
-        subprocess.run(["git", "add", "-A"], cwd=ws,
-                       capture_output=True, text=True,
-                       creationflags=creationflags, timeout=30)
+        AgentWorktreeManager._run(ws, ["git", "add", "-A"], timeout_seconds=30)
+        staged = AgentWorktreeManager._run(ws, ["git", "diff", "--cached", "--quiet"],
+                                         check=False, timeout_seconds=30)
+        if staged.returncode == 0:
+            return []
+        if staged.returncode != 1:
+            raise WorktreeError(staged.stderr.decode("utf-8", errors="replace"))
 
         msg = f"gitgo: round snapshot [{datetime.now().strftime('%H:%M:%S')}]\n\n"
         msg += f"变更文件: {len(changed)}\n"
@@ -35,9 +38,9 @@ def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[st
             if len(changed) > 20:
                 msg += f"\n  ... 还有 {len(changed) - 20} 个文件"
 
-        result = subprocess.run(["git", "commit", "-m", msg], cwd=ws,
-                                capture_output=True, text=True,
-                                creationflags=creationflags, timeout=30)
+        result = AgentWorktreeManager._run(ws,
+            ["git", "-c", "user.name=Gitgo Snapshot", "-c", "user.email=snapshot@local.gitgo.invalid",
+             "commit", "-m", msg], timeout_seconds=30)
 
         if result.returncode == 0:
             from backend.core.history import HistoryManager
@@ -50,8 +53,11 @@ def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[st
             _emit({"event": "workspace_snapshot", "files": len(changed)})
             return changed
         return []  # no changes to commit
-    except (subprocess.SubprocessError, OSError) as e:
-        _emit({"event": "snapshot_error", "error": str(e)})
+    except (WorktreeError, OSError) as e:
+        event = {"event": "snapshot_error", "error": str(e), "effect_state": "not_inferred"}
+        if getattr(e, "diagnostic", None) is not None:
+            event["diagnostic"] = e.diagnostic
+        _emit(event)
         return None
 
 
@@ -112,3 +118,18 @@ def _resolve_llm_config(workspace: str) -> tuple | None:
             pass
 
     return None
+
+
+def bind_project_tool_context(tool, workspace, project_name):
+    """Bind facts after registry assembly without rewriting execution authority."""
+    previous = tool.prepare_args
+    def prepare(args):
+        prepared = dict(previous(args) if previous else args or {})
+        prepared["_workspace"] = str(workspace)
+        properties = tool.parameters.get("properties", {})
+        if "workspace_path" in properties:
+            prepared["workspace_path"] = str(workspace)
+        if "project_name" in properties:
+            prepared["project_name"] = project_name
+        return prepared
+    tool.prepare_args = prepare

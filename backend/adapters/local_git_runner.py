@@ -41,6 +41,23 @@ class LocalGitRunner(GitRunner):
         text: bool = True,
         encoding: str = "utf-8",
     ) -> CompletedProcess:
+        # Windows local reads/writes use the same pinned-config boundary as Agent
+        # worktree plumbing. A raw fallback could execute hooks, filters, textconv,
+        # fsmonitor or signature programs inside the trusted process boundary.
+        from backend.core.loop.git_execution import CONTENT_READ_COMMANDS, GitBoundaryError
+        if os.name == "nt" and args:
+            if args[0] not in {"init", "--help", "--version"} and not os.path.lexists(self._repo / ".git"):
+                message = "Selected directory is not a Git repository"
+                return CompletedProcess(self._build_cmd(*args), 128,
+                                        "" if text else b"", message if text else message.encode())
+            try:
+                return ProtectedLocalGitRunner(self._repo).run(args, capture_output, timeout, text, encoding)
+            except GitBoundaryError as exc:
+                if args[0] in CONTENT_READ_COMMANDS:
+                    raise
+                message = str(exc)
+                return CompletedProcess(self._build_cmd(*args), 126, "" if text else b"",
+                                        message if text else message.encode("utf8"))
         cmd = self._build_cmd(*args)
         try:
             kwargs = dict(
@@ -102,7 +119,7 @@ class LocalGitRunner(GitRunner):
         args: Optional[Sequence[str]] = None,
         timeout: float = 15.0,
     ) -> str:
-        cmd_args = ["diff"]
+        cmd_args = ["diff", "--no-ext-diff", "--no-textconv"]
         if args:
             cmd_args.extend(args)
         r = self.run(cmd_args, timeout=timeout)
@@ -118,3 +135,22 @@ class LocalGitRunner(GitRunner):
     def cherry_pick(self, commit_hash: str, timeout: float = 30.0) -> tuple[bool, str]:
         r = self.run(["cherry-pick", commit_hash], timeout=timeout)
         return r.returncode == 0, r.stderr
+
+
+class ProtectedLocalGitRunner(LocalGitRunner):
+    """Trusted local plumbing using the existing fixed-configuration boundary."""
+    def run(self, args, capture_output=True, timeout=None, text=True, encoding="utf-8"):
+        from backend.core.loop.git_execution import protected_git, protected_git_config
+        boundary = protected_git_config if args and args[0] in {"init", "remote", "--help", "--version"} else protected_git
+        with boundary(self._repo, ["git", *args]) as (command, environment):
+            options = {"cwd": self._repo, "env": environment, "capture_output": capture_output,
+                       "timeout": timeout or 120, "text": text, "stdin": subprocess.DEVNULL,
+                       "close_fds": True, "creationflags": subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0}
+            if text:
+                options["encoding"] = encoding
+            try:
+                result = subprocess.run(command, **options)
+            except subprocess.TimeoutExpired:
+                message = "Protected Git operation timed out; no raw command was retried"
+                return CompletedProcess(command, -1, "" if text else b"", message if text else message.encode())
+        return CompletedProcess(command, result.returncode, result.stdout, result.stderr)

@@ -1,5 +1,6 @@
 from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
 from pathlib import Path
+import os
 
 import pytest
 
@@ -67,7 +68,7 @@ def test_custom_tool_versions_survive_source_changes_and_archive(tmp_path_factor
         "def run(args):\n    return {'count': len(args['values'])}\n",
         encoding="utf-8",
     )
-    storage = StorageRuntime(tmp_path, state_home=tmp_path / "state")
+    storage = StorageRuntime(tmp_path, state_home=Path(os.environ["GITGO_STATE_HOME"]))
     try:
         first = _definition(tmp_path)
         source = str(first.pop("_source"))
@@ -136,7 +137,7 @@ def test_custom_tool_source_is_privacy_scanned_before_cas(tmp_path_factory: Path
         ),
         encoding="utf-8",
     )
-    storage = StorageRuntime(tmp_path, state_home=tmp_path / "state")
+    storage = StorageRuntime(tmp_path, state_home=Path(os.environ["GITGO_STATE_HOME"]))
     try:
         spec = validate_authored_definition({
             "name": "unsafe_token",

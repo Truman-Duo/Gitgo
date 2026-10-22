@@ -13,7 +13,7 @@ test("failed round keeps its error and reads cleanup evidence through the existi
   const stderr = new PassThrough();
   let output = "";
   const calls: any[] = [];
-  stdout.on("data", chunk => { output += chunk.toString(); });
+  stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
   const client = {callTool: async (name: string, args: any) => {
     calls.push({name, args});
     return {events: [
@@ -27,7 +27,7 @@ test("failed round keeps its error and reads cleanup evidence through the existi
     role: "assistant", content: "[Error: cancelled]", timestamp: "now", kind: "error",
     status: "cancelled", trace_id: "trace", process_id: "p",
   }} contentWidth={96} project="fixture" client={client} expanded/></Box>,
-  {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
+  {stdin, stdout, stderr: stderr as unknown as NodeJS.WriteStream, patchConsole: false, exitOnCtrlC: false});
   try {
     await new Promise(resolve => setTimeout(resolve, 50));
     const plain = stripAnsi(output);

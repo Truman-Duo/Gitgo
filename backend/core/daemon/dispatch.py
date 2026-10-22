@@ -269,7 +269,7 @@ def _cmd_formalize(cmd, session, project, daemon_ctx, emit):
     session.step_load_commits()
     if indices is not None:
         session.selected_workspace = set(indices)
-    fc = session.step_create_formal_commit(message=message)
+    fc = session.step_create_formal_commit(selected_indices=None if indices is None else set(indices), message=message)
     if fc:
         emit({"event": "command_result", "cmd": "formalize",
               "result": {"commit": f"[{fc.prefix}-{fc.number}]",

@@ -1,6 +1,7 @@
 """Mailbox, progress and audit bookkeeping; no semantic decisions."""
 from .models import AgentProcess
 from .session import AgentSession
+from backend.core.tools.file_operations import canonical_file_operation
 
 def _apply_pending_instructions(
     process: AgentProcess,
@@ -93,6 +94,34 @@ def capture_lesson_outcome(process, result, workspace_path, *, rolled_back=False
     not repeat an already executed file operation.
     """
     receipt = result.receipt or {}
+    # The scheduler's receipt lineage, never tool-returned _child_receipts,
+    # carries already completed file effects through a wrapper's suspension.
+    # Reuse the same observer/source-event key; do not harvest or execute twice.
+    from .tool_pipeline import ToolResult
+    pending = list(reversed(receipt.get("child_receipts") or []))
+    seen = set()
+    for _ in range(256):
+        if not pending:
+            break
+        child = pending.pop()
+        if not isinstance(child, dict):
+            continue
+        identity = str(child.get("receipt_id") or "")
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        pending.extend(reversed(child.get("child_receipts") or []))
+        if child.get("file_service_result") is not True:
+            continue
+        leaf = {k: v for k, v in child.items() if k != "child_receipts"}
+        capture_lesson_outcome(process, ToolResult(id=identity, tool_name=str(child.get("tool_name") or ""),
+            receipt=leaf, data={"knowledge_excerpts": child.get("knowledge_excerpts") or []},
+            is_error=child.get("succeeded") is False, error=str(child.get("error_code") or "")),
+            workspace_path, rolled_back=rolled_back, on_event=on_event)
+    if pending:
+        from .engineering_workflow import EngineeringWorkflow
+        EngineeringWorkflow(process, on_event).notice("KNOWLEDGE_CAPTURE_FAILED",
+            "Nested evidence observation exceeded its bound; retained receipts require inspection.")
     if result.suspended:
         return
     context, _ = process.read_context_snapshot()
@@ -124,7 +153,7 @@ def capture_lesson_outcome(process, result, workspace_path, *, rolled_back=False
                     "process_id": process.process_id,
                     "failure_relations": relations,
                     "knowledge_excerpts": data.get("knowledge_excerpts", [])
-                        if result.tool_name in {"edit_file", "write_file"} and receipt.get("effect_state") == "committed" else [],
+                        if (receipt.get("file_service_result") is True or canonical_file_operation(result.tool_name) in {"edit_file", "write_file", "apply_patch", "document_create", "promote_agent_changes", "exec_command", "shell_script"}) and receipt.get("effect_state") == "committed" else [],
 
                     "task_id": task_id, "tool_name": result.tool_name,
                     "observation": {key: str(value)[:1500 if key == "diff" else 1000]

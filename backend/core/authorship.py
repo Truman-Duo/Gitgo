@@ -412,10 +412,20 @@ def scan_files_privacy(
     """扫描变更文件列表的隐私风险。返回所有告警。"""
     from pathlib import Path
     ws = Path(workspace_path)
-    adapter = file_adapter or LocalFileAdapter(ws)
+    if file_adapter is None or type(file_adapter) is LocalFileAdapter:
+        from backend.adapters.bounded_local_reader import BoundedLocalReader
+        adapter = BoundedLocalReader(ws, max_file_bytes=16*1024*1024,
+                                     ignored={".git", ".gitgo", "node_modules", ".venv", "dev-artifacts"})
+    else:
+        adapter = file_adapter
     all_alerts = []
 
     fingerprints = collect_private_fingerprints(ws, file_adapter=adapter)
+    if getattr(adapter, "failures", []):
+        all_alerts.append({"level": "error", "rule": "privacy_fingerprint_scan_incomplete",
+                           "message": "Some private-artifact fingerprints could not be observed"})
+    if len(file_list) > 512:
+        raise PermissionError("Privacy scan file list exceeds its bound")
     for rel_path in file_list:
         if not adapter.exists(rel_path):
             continue

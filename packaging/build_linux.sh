@@ -95,6 +95,8 @@ HOST_BUILD="$ROOT/build/terminal-host-linux-$ARCH"
 "$PYTHON_BIN" -B -m PyInstaller \
   --noconfirm --clean --onedir \
   --name gitgo-host \
+  --paths "$ROOT" --collect-submodules backend \
+  --hidden-import backend.core.tools.registrations \
   --add-data "$ROOT/backend/resources/prompts:backend/resources/prompts" \
   --distpath "$STAGE/internal" \
   --workpath "$HOST_BUILD" \

@@ -72,6 +72,7 @@ def test_packaged_pipeline_minimum_boundary(native_box, mode):
         ''')
         driver = textwrap.dedent(f'''
             import json, threading, time
+            from backend.core.loop.candidate_workspace import candidate_workspace_root
             from dataclasses import asdict, replace
             from pathlib import Path
             from backend.core.host_profile_lease import HostProfileLease
@@ -109,38 +110,51 @@ def test_packaged_pipeline_minimum_boundary(native_box, mode):
             process.pending_decision = None
             cancellation_seen = []
             stop = threading.Event()
-            def cancel_when_running():
+            producer_seen = []
+            def observe_private_execution():
                 deadline = time.monotonic() + 25
                 while not stop.is_set() and time.monotonic() < deadline:
-                    if (workspace / 'probe-ready').exists():
-                        cancellation_seen.append(True)
-                        process.cancellation_event.set()
+                    private_root = candidate_workspace_root(ctx.storage.paths)
+                    markers = list(private_root.glob('w-*/probe-ready'))
+                    if markers:
+                        assert not (workspace / 'allowed.txt').exists()
+                        producer_seen.append(True)
+                        if {mode!r} == 'cancel':
+                            cancellation_seen.append(True)
+                            process.cancellation_event.set()
                         return
                     stop.wait(.01)
-            monitor = threading.Thread(target=cancel_when_running, daemon=True) if {mode!r} == 'cancel' else None
+            monitor = threading.Thread(target=observe_private_execution, daemon=True)
             try:
                 with HostProfileLease(state):
                     if monitor: monitor.start()
                     result = pipeline.execute(call, tool, ctx, 'approved', 0)
                 assert grant['remaining_uses'] == 0, grant
                 receipt = result.receipt
-                assert receipt['launch_state'] == 'started', asdict(result)
-                assert len(receipt['execution_basis']) == 64, receipt
+                render = receipt.get('candidate_render', {{}})
+                assert render.get('launch_state') == 'started', asdict(result)
+                assert len(render['execution_basis']) == 64, receipt
+                assert render['access_retired'] is True, receipt
                 assert receipt['evidence_state'] == 'committed', receipt
                 assert receipt['runtime_cleanup'] == {{'complete': True, 'mode': 'windows-job', 'issues': []}}, receipt
+                assert producer_seen, asdict(result)
                 assert result.is_error == ({mode!r} != 'normal'), asdict(result)
                 journal = json.loads(Path(receipt['invocation_path']).read_text(encoding='utf8'))
                 assert journal['process_id'] == process.process_id, journal
                 if {mode!r} == 'normal':
                     assert result.data['success'] and result.data['exit_code'] == 0, asdict(result)
+                    assert receipt['output_publication'] == 'committed', receipt
+                    assert receipt['effect_state'] == 'committed', receipt
                     observed = json.loads(result.data['stdout'])
                     assert observed['denied'] == ['r', 'w', 'network'], observed
                     retry = pipeline.execute(call, tool, ctx, 'spent-grant', 0)
                     assert retry.is_error and 'launch_state' not in retry.receipt, asdict(retry)
                 elif {mode!r} == 'cancel':
                     assert cancellation_seen and 'cancel' in result.error.lower(), asdict(result)
+                    assert receipt['effect_state'] == 'not_committed', receipt
                 else:
                     assert 'timeout' in result.error.lower() or 'timed out' in result.error.lower(), asdict(result)
+                    assert receipt['effect_state'] == 'not_committed', receipt
                 print(json.dumps({{'result': asdict(result), 'journal': journal,
                     'remaining_uses': grant['remaining_uses'], 'mode': {mode!r}}}, default=str))
             finally:
@@ -154,8 +168,12 @@ def test_packaged_pipeline_minimum_boundary(native_box, mode):
         assert result.returncode == 0, result.stdout + '\n' + result.stderr
         report = json.loads(result.stdout)
         assert report['mode'] == mode and report['remaining_uses'] == 0
-        assert (workspace / 'allowed.txt').read_text() == 'allowed'
-        assert (workspace / 'child-ready').read_text() == 'ready'
+        if mode == 'normal':
+            assert (workspace / 'allowed.txt').read_text() == 'allowed'
+            assert (workspace / 'child-ready').read_text() == 'ready'
+        else:
+            assert not (workspace / 'allowed.txt').exists()
+            assert not (workspace / 'child-ready').exists()
         assert private.read_text(encoding='utf8') == 'synthetic-host-secret'
         listener.settimeout(.1)
         with pytest.raises(socket.timeout):

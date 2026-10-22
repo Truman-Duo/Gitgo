@@ -18,9 +18,14 @@ _ALL_CHECKS: dict[str, type[PolicyCheck]] = {
 def load_checks(project_name: str,
                 workspace_path: Path) -> list[PolicyCheck]:
     """从 contract.yaml 加载策略。未配置时返回全部默认策略。"""
-    from backend.core.contract import ContractManager
+    from backend.core.contract import ContractManager, ContractStateUnavailable
 
-    contract = ContractManager.load(workspace_path)
+    try:
+        contract = ContractManager.load(workspace_path)
+    except ContractStateUnavailable:
+        # Keep all defaults, including the applicable contract check which
+        # reports the failed observation. Never infer a clean contract.
+        contract = None
     enabled_names = set(_ALL_CHECKS.keys())
 
     if contract:

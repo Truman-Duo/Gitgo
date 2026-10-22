@@ -400,8 +400,11 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
         target.relative_to(Path(workspace_path).resolve())
         if not target.is_file():
             raise ValueError("artifact path is not a workspace file")
-        content = target.read_text(encoding="utf-8", errors="replace")
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        from backend.core.sandbox_read_plan import open_planned_read
+        with open_planned_read(Path(workspace_path).resolve(), target.relative_to(Path(workspace_path).resolve()).as_posix()) as opened:
+            raw = opened.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        content = raw.decode("utf-8", errors="replace")
         expected = str(args.get("sha256", ""))
         if expected and expected != digest:
             raise ValueError("artifact digest mismatch")

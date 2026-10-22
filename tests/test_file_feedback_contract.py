@@ -1,5 +1,13 @@
 """Expected file results survive isolation without weakening crash/effect boundaries."""
 from pathlib import Path
+import json
+import os
+import subprocess
+from types import SimpleNamespace
+
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+from tests.test_alpha3_native_source import source_runtime
+from tests.test_native_sandbox import isolated_python, native_box
 
 import pytest
 
@@ -22,19 +30,54 @@ def context(root, names):
     return ExecutionContext(process=p, session=p.session, workspace_path=str(root))
 
 
-def test_missing_read_survives_real_runner_and_does_not_rollback_next_read(tmp_path_factory):
-    root = tmp_path_factory
+def native_read_batch(source_runtime, root, calls):
+    """Use the complete Pipeline and actual AppContainer with owned runtime ACLs."""
+    driver = f"""
+import json
+from dataclasses import asdict
+from backend.core.loop.models import AgentProcess, RingLevel
+from backend.core.loop.session import AgentSession
+from backend.core.loop.tools import ToolRegistry
+from backend.core.loop.execution_context import ExecutionContext
+from backend.core.loop.tool_execution import ToolExecution
+from backend.core.tools.catalog import build_workspace_tools
+from backend.core.storage import close_owned_storage
+root = {str(root)!r}
+p = AgentProcess('file-feedback', 'worker', RingLevel.RING_3, active_task_id='task',
+    worktree_path=root, session=AgentSession(), tool_registry=ToolRegistry(['read_file']))
+ctx = ExecutionContext(p, p.session, root)
+tools = build_workspace_tools(root)
+ctx.artifacts['tool_catalog'] = tools
+execution = ToolExecution(execution_id='read-recovery', ctx=ctx, tool_calls={calls!r})
+try:
+    execution.begin()
+    results = execution.execute_batch(tools)
+    print(json.dumps({{'results': [asdict(r) for r in results], 'rolled_back': execution._rolled_back}}))
+finally:
+    close_owned_storage()
+"""
+    environment = dict(os.environ, GITGO_STATE_HOME=str(root.parent / 'private-state'),
+        GITGO_CONFIG_PATH=str(root.parent / 'config.json'), GITGO_LLM_CONFIG_PATH=str(root.parent / 'llm.json'))
+    run = subprocess.run([str(source_runtime / 'python.exe'), '-B', '-I', '-X', 'utf8', '-c', driver],
+        cwd=source_runtime, env=environment, capture_output=True, text=True, encoding='utf8', timeout=45)
+    assert run.returncode == 0, run.stdout + run.stderr
+    report = json.loads(run.stdout)
+    results = [SimpleNamespace(**item) for item in report['results']]
+    for result in results:
+        assert result.receipt['launch_state'] == 'started', json.dumps(vars(result), ensure_ascii=False)
+        assert result.receipt['runtime_cleanup']['complete'] is True, result
+    return results, report['rolled_back']
+
+
+@pytest.mark.parametrize("fresh_host", range(3))
+def test_missing_read_survives_real_runner_and_does_not_rollback_next_read(source_runtime, native_box, fresh_host):
+    root, _, _ = native_box
     (root / "actual.txt").write_text("current evidence", encoding="utf-8")
-    tools = build_workspace_tools(root)
-    ctx = context(root, ["read_file"])
-    ctx.artifacts["tool_catalog"] = tools
-    execution = ToolExecution(execution_id="read-recovery", ctx=ctx, tool_calls=[
+    results, rolled_back = native_read_batch(source_runtime, root, [
         {"name": "read_file", "args": {"path": "absent.txt"}},
         {"name": "read_file", "args": {"path": "actual.txt"}},
     ])
-    execution.begin()
-    results = execution.execute_batch(tools)
-    assert len(results) == 2 and not execution._rolled_back
+    assert len(results) == 2 and not rolled_back
     missing, actual = results
     assert missing.is_error and missing.diagnostics["nature"] == "business"
     assert missing.diagnostics["code"] == "FILE_NOT_FOUND"
@@ -48,11 +91,11 @@ def test_missing_read_survives_real_runner_and_does_not_rollback_next_read(tmp_p
 
 
 @pytest.mark.parametrize("target,code", [(".", "IS_DIRECTORY"), ("binary.dat", "BINARY_FILE")])
-def test_expected_read_target_types_are_business_results_after_isolation(tmp_path_factory, target, code):
-    (tmp_path_factory / "binary.dat").write_bytes(b"binary\x00data")
-    tools = build_workspace_tools(tmp_path_factory)
-    ctx = context(tmp_path_factory, ["read_file"])
-    result = ToolPipeline().execute({"name": "read_file", "args": {"path": target}}, tools["read_file"], ctx, "target")
+def test_expected_read_target_types_are_business_results_after_isolation(source_runtime, native_box, target, code):
+    root, _, _ = native_box
+    (root / "binary.dat").write_bytes(b"binary\x00data")
+    results, _ = native_read_batch(source_runtime, root, [{"name": "read_file", "args": {"path": target}}])
+    result = results[0]
     assert result.is_error and result.diagnostics["code"] == code
     assert result.diagnostics["nature"] == "business"
     assert result.receipt["effect_state"] == "not_committed"
@@ -62,12 +105,9 @@ def test_expected_read_target_types_are_business_results_after_isolation(tmp_pat
 def test_read_failure_diagnostic_preserves_io_cause_and_confinement(tmp_path_factory, monkeypatch):
     target = tmp_path_factory / "locked.txt"
     target.write_text("original", encoding="utf-8")
-    original = Path.read_bytes
-    def denied(path):
-        if path == target:
-            raise OSError("test reader unavailable")
-        return original(path)
-    monkeypatch.setattr(Path, "read_bytes", denied)
+    def denied(*args):
+        raise OSError("test reader unavailable")
+    monkeypatch.setattr("backend.core.sandbox_read_plan.open_planned_read", denied)
     result = read_file({"_workspace": str(tmp_path_factory), "path": "locked.txt"})
     assert result["error"] == "READ_ERROR"
     assert result["error_info"]["details"]["detail"] == "test reader unavailable"
@@ -84,7 +124,7 @@ def test_typed_timeout_keeps_effect_uncertainty_without_auto_replay(tmp_path_fac
         if effect == ToolEffect.WORKSPACE_WRITE:
             (tmp_path_factory / "partial.txt").write_text("effect before timeout", encoding="utf-8")
         raise TimeoutError("arbitrary message with no timeout keyword")
-    tool = AgentTool(name="probe", description="probe", parameters={"type": "object"}, execute=timeout, effect=effect)
+    tool = AgentTool(name="probe", description="probe", parameters={"type": "object"}, execute=timeout, effect=effect, execution_contract=data_broker("test.fixture"))
     ctx = context(tmp_path_factory, ["probe"])
     result = ToolPipeline().execute({"name": "probe", "args": {}}, tool, ctx, "timeout")
     assert result.is_error and result.diagnostics["code"] == "TOOL_TIMEOUT"
@@ -107,7 +147,7 @@ def test_cancelled_mutation_preserves_partial_effect_in_diagnostic_and_receipt(t
         (tmp_path_factory / "partial.txt").write_text("retained", encoding="utf-8")
         raise ToolExecutionCancelled("cancelled after possible effect")
     tool = AgentTool(name="probe", description="probe", parameters={"type": "object"}, execute=cancel,
-        effect=ToolEffect.WORKSPACE_WRITE)
+        effect=ToolEffect.WORKSPACE_WRITE, execution_contract=data_broker("test.fixture"))
     ctx = context(tmp_path_factory, ["probe"])
     result = ToolPipeline().execute({"name": "probe", "args": {}}, tool, ctx, "cancelled")
     assert result.diagnostics["code"] == "TOOL_CANCELLED"
@@ -121,7 +161,7 @@ def test_isolated_runner_timeout_flag_reaches_the_same_typed_diagnostic(tmp_path
     monkeypatch.setattr(ProcessToolRunner, "run", lambda self, *args, **kwargs:
         SubprocessResult(success=False, timed_out=True, error="deadline ended"))
     tool = AgentTool(name="probe", description="probe", parameters={"type": "object"}, execute=lambda _: {},
-        effect=ToolEffect.READ, isolated=True, runner_name="probe")
+        effect=ToolEffect.READ, isolated=True, runner_name="probe", execution_contract=NATIVE_PROCESS)
     ctx = context(tmp_path_factory, ["probe"])
     result = ToolPipeline().execute({"name": "probe", "args": {}}, tool, ctx, "isolated-timeout")
     assert result.diagnostics["code"] == "TOOL_TIMEOUT"

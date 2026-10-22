@@ -378,15 +378,11 @@ def test_windows_real_runner_exec_and_privileged_tool(native_box, isolated_pytho
     import hashlib
     from backend.core.loop.process_tool_runner import ProcessToolRunner
     source = isolated_python / "source"
-    if not source.exists():
-        shutil.copytree(Path(__file__).resolve().parents[1] / "backend", source / "backend",
-                        ignore=shutil.ignore_patterns("__pycache__"))
-        shutil.copytree(Path(sys.prefix) / "Lib" / "site-packages",
-                        isolated_python / "packages",
-                        ignore=shutil.ignore_patterns("__pycache__", "*.dist-info"))
+    from tests.native_source_runtime import populate_source_runtime
+    populate_source_runtime(source)
     workspace, policy, spawn = native_box
     bootstrap = (
-        f"import sys;sys.path.extend({[str(source),str(isolated_python / 'packages')]!r});"
+        f"import sys;sys.path.insert(0,{str(source)!r});"
         "from backend.core.tools.runner import main;main()"
     )
     monkeypatch.setattr("backend.core.loop.process_tool_runner.tool_runner_command",
@@ -919,7 +915,7 @@ def test_cancel_between_pipeline_admission_and_spawn_never_executes(tmp_path_fac
     bus = EventBus()
     bus.subscribe('ToolExecuteStarted', lambda _: process.cancellation_event.set())
     tool = AgentTool('command', 'test', {}, lambda _: pytest.fail('Inline execution'),
-                     execution_contract=NATIVE_PROCESS, isolated=True, runner_name='exec_command', effect=ToolEffect.PROCESS,
+                     execution_contract=__import__('backend.core.loop.execution_contract', fromlist=['NATIVE_WORKSPACE_PRODUCER']).NATIVE_WORKSPACE_PRODUCER, isolated=True, runner_name='exec_command', effect=ToolEffect.PROCESS,
                      read_only=False)
     ctx = ExecutionContext(process=process, session=process.session,
         workspace_path=str(tmp_path_factory), event_bus=bus, cancellation=process.cancellation_event)
@@ -1472,8 +1468,10 @@ def _assert_legacy_file_aliases_are_native(runner, workspace):
     secret.write_text("host-private-marker", encoding="utf-8")
     assert secret.read_text() == "host-private-marker"
     target = workspace / "legacy-alias.txt"
+    target.write_text("alias-data", encoding="utf-8")
     result = runner.run("file_write", {"_workspace": str(workspace), "path": str(target), "content": "alias-data"})
-    assert result.success and "error" not in result.data, result
+    assert result.success and result.data["error"] == "FILE_SERVICE_REQUIRED", result
+    assert result.data["effect_state"] == "not_committed"
     assert target.read_text() == "alias-data"
     result = runner.run("file_read", {"_workspace": str(workspace), "path": str(target)})
     assert result.success and result.data.get("content") == "alias-data", result
@@ -1481,7 +1479,8 @@ def _assert_legacy_file_aliases_are_native(runner, workspace):
     assert blocked.data and "error" in blocked.data and "content" not in blocked.data, blocked
     assert "host-private-marker" not in json.dumps(blocked.data)
     result = runner.run("file_delete", {"_workspace": str(workspace), "path": str(target)})
-    assert result.success and "error" not in result.data and not target.exists(), result
+    assert result.success and result.data["error"] == "FILE_SERVICE_REQUIRED", result
+    assert target.read_text() == "alias-data"
     assert secret.read_text() == "host-private-marker"
 
 
@@ -1500,6 +1499,7 @@ def test_packaged_host_legacy_file_aliases_are_native(cross_platform_box):
     secret = workspace.parent / "legacy-packaged-secret.txt"
     secret.write_text("host-private-marker", encoding="utf-8")
     target = workspace / "legacy-packaged-alias.txt"
+    target.write_text("alias-data", encoding="utf-8")
     commands = [
         ("file_write", {"path": str(target), "content": "alias-data"}),
         ("file_read", {"path": str(target)}),
@@ -1517,15 +1517,17 @@ def test_packaged_host_legacy_file_aliases_are_native(cross_platform_box):
                             capture_output=True, text=True, encoding="utf-8", timeout=150)
     assert result.returncode == 0, result.stderr
     written, read, blocked, deleted = json.loads(result.stdout)
-    for payload in (written, read, deleted):
-        assert payload["success"] and "error" not in payload["data"], payload
+    assert read["success"] and "error" not in read["data"], read
+    for payload in (written, deleted):
+        assert payload["success"] and payload["data"]["error"] == "FILE_SERVICE_REQUIRED", payload
+        assert payload["data"]["effect_state"] == "not_committed", payload
     assert read["data"]["content"] == "alias-data", read
     assert blocked["data"] and "error" in blocked["data"] and "content" not in blocked["data"], blocked
     assert "host-private-marker" not in json.dumps(blocked["data"])
-    assert not target.exists() and secret.read_text() == "host-private-marker"
+    assert target.read_text() == "alias-data" and secret.read_text() == "host-private-marker"
 
 
-def test_native_runner_crash_diagnostics_reach_pipeline(cross_platform_box, monkeypatch):
+def test_native_runner_crash_diagnostics_reach_pipeline(cross_platform_box, workspace_native_launcher, monkeypatch):
     from backend.core.loop.execution_context import ExecutionContext
     from backend.core.loop.models import AgentProcess, RingLevel
     from backend.core.loop.session import AgentSession
@@ -1534,8 +1536,8 @@ def test_native_runner_crash_diagnostics_reach_pipeline(cross_platform_box, monk
     from backend.core.tools.catalog import build_workspace_tools
     workspace, _, executable = cross_platform_box
     source = "import sys;sys.stderr.write('native-crash-marker\\n');sys.stderr.flush();sys.exit(23)"
-    monkeypatch.setattr("backend.core.loop.process_tool_runner.tool_runner_command", lambda: [executable, "-I", "-c", source])
-    monkeypatch.setattr("backend.core.loop.process_tool_runner.owned_child_cwd", lambda _: workspace)
+    monkeypatch.setattr("backend.core.loop.process_tool_runner.tool_runner_command", lambda: [str(workspace_native_launcher / "python.exe"), "-I", "-c", source])
+    monkeypatch.setattr("backend.core.loop.process_tool_runner.owned_child_cwd", lambda _: workspace_native_launcher)
     process = AgentProcess(process_id="native-diagnostic", role="worker", ring_level=RingLevel.RING_0,
                            worktree_path=str(workspace), session=AgentSession())
     tool = build_workspace_tools(workspace)["exec_command"]
@@ -1548,7 +1550,7 @@ def test_native_runner_crash_diagnostics_reach_pipeline(cross_platform_box, monk
     assert result.is_error and result.diagnostics["code"] == "SANDBOX_EXECUTION_FAILED"
     assert "native-crash-marker" in result.formatted
     assert result.diagnostics["runner"]["exit_code"] == 23
-    assert result.receipt["effect_state"] == "ambiguous"
+    assert result.receipt["effect_state"] == "not_committed"
 
 
 def _authored_bridge_invocation(workspace):
@@ -1761,3 +1763,5 @@ def test_packaged_host_approval_binding(cross_platform_box, handler):
         capture_output=True, text=True, encoding='utf8', timeout=200)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == 'approval-binding-verified', result
+
+from tests.native_source_runtime import workspace_native_launcher

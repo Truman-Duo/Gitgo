@@ -31,7 +31,7 @@ def _exec_formalize(daemon_ctx, session, project, args: dict) -> dict:
     message = args.get("message")
     if indices is not None:
         session.selected_workspace = set(indices)
-    fc = session.step_create_formal_commit(message=message)
+    fc = session.step_create_formal_commit(selected_indices=None if indices is None else set(indices), message=message)
     if fc:
         return {"commit": f"[{fc.prefix}-{fc.number}]", "message": fc.message}
     return {"error": "FORMALIZE_FAILED"}

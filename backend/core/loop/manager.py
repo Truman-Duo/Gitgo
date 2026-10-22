@@ -603,7 +603,7 @@ class AgentProcessManager:
             return dict(process.worktree)
 
     def promote_process_results(
-        self, supervisor: AgentProcess, process_ids: list[str],
+        self, supervisor: AgentProcess, process_ids: list[str], *, file_service_args: dict | None = None,
     ) -> dict:
         """Promote an approved DAG closure into the user's working repository."""
         if self.worktree_manager is None:
@@ -635,7 +635,15 @@ class AgentProcessManager:
             str((item.worktree or {}).get("own_commit") or "") for item in ordered
         ]
         with self._worktree_lock:
+            snapshot, _ = supervisor.read_context_snapshot()
+            service_args = {"_lesson_context": {"project_name": str(snapshot.get("project_name") or ""),
+                "state_home": str(self.worktree_manager.storage.paths.state_home),
+                "task_id": str(supervisor.active_task_id or supervisor.process_id), "process_id": supervisor.process_id,
+                "session_id": supervisor.session.session_id,
+                "feedback_in_provider_input": __import__("backend.core.knowledge.feedback", fromlist=["exposed_ids"]).exposed_ids(supervisor)},
+                **(file_service_args or {})}
             result = self.worktree_manager.promote(
+                file_service_args=service_args,
                 snapshot_commit=next(iter(snapshots)),
                 ordered_commits=[item for item in commits if item],
                 promotion_id=supervisor.active_task_id or supervisor.process_id,
@@ -664,7 +672,7 @@ class AgentProcessManager:
                         "reason": "no_graph_relevant_changes",
                     }
             except Exception as exc:
-                # Code promotion is already atomic and complete. Keep this
+                # Code promotion has already completed. Keep this
                 # separate, explicit governance health signal instead of
                 # pretending the dependency graph was refreshed.
                 result["dependency_graph"] = {

@@ -67,7 +67,7 @@ def _run_python_role(argv: list[str]) -> int:
     if values[0] == "-c" and len(values) >= 2:
         sys.argv = ["-c", *values[2:]]
         namespace = {"__name__": "__main__", "__package__": None}
-        exec(compile(values[1], "<gitgo-python>", "exec"), namespace, namespace)
+        exec(compile(values[1], "<gitgo-python>", "exec", dont_inherit=True), namespace, namespace)
         return 0
     if values[0] == "-m" and len(values) >= 2:
         sys.argv = [values[1], *values[2:]]

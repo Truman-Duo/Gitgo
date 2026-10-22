@@ -124,7 +124,7 @@ class AgentTool:
     timeout_default: float = 60.0
     isolated: bool = False                # v0.45: True=子进程隔离执行（ProcessToolRunner）
     effect: ToolEffect | str = ToolEffect.READ
-    cancellation: CancellationMode | str = CancellationMode.COOPERATIVE
+    cancellation: CancellationMode | str | None = None
     approval: ApprovalMode | str = ApprovalMode.ALLOW
     # High-risk tools such as an unrestricted shell must be approved for the
     # exact argument digest on every invocation.  They may not inherit the
@@ -156,14 +156,11 @@ class AgentTool:
             self.isolated = True
         if self.isolated:
             self.cancellation = CancellationMode.ISOLATED_PROCESS
-        elif (
-            not self.read_only
-            and self.cancellation == CancellationMode.COOPERATIVE
-            and self.composite_spec is None
-        ):
-            # Existing bound callables cannot be force-stopped safely. Record
-            # the truth until they are migrated behind ProcessToolRunner.
-            self.cancellation = CancellationMode.NON_INTERRUPTIBLE
+        elif self.cancellation is None:
+            # Legacy bound writes have no cancellation guarantee. An explicit
+            # declaration belongs to the registered service and is preserved.
+            self.cancellation = (CancellationMode.COOPERATIVE if self.read_only or self.composite_spec is not None
+                                 else CancellationMode.NON_INTERRUPTIBLE)
         self.effect = ToolEffect(self.effect)
         self.cancellation = CancellationMode(self.cancellation)
         self.approval = ApprovalMode(self.approval)

@@ -511,6 +511,14 @@ class StorageRuntime:
     def get_state_ref(self, namespace: str, key: str) -> str | None:
         return _objects_repository.get_state_ref(self, namespace, key)
 
+    def release_state_ref(self, namespace: str, key: str, *, expected_ref: str) -> bool:
+        return _objects_repository.release_state_ref(self, namespace, key, expected_ref=expected_ref)
+
+    def compare_state_ref(self, namespace: str, key: str, value_ref: str, *,
+                          expected_ref: str | None) -> bool:
+        return _objects_repository.compare_state_ref(
+            self, namespace, key, value_ref, expected_ref=expected_ref)
+
     def commit_state_revision(self, namespace: str, key: str, value_ref: str, *,
                               expected_ref: str | None, revision_key: str) -> bool:
         return _objects_repository.commit_state_revision(

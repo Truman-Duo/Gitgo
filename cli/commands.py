@@ -433,7 +433,15 @@ def _cmd_push(cfg: Config, project_name: str, skip_security: bool = False,
 
     # ── Drift Detection ──
     from backend.core.contract import ContractManager, detect_drift
-    contract = ContractManager.load(session.workspace_path)
+    from backend.core.contract import ContractStateUnavailable
+    try:
+        contract = ContractManager.load(session.workspace_path)
+    except ContractStateUnavailable as exc:
+        if json_output:
+            print(json.dumps({"error": exc.code, "message": str(exc), "query_state": "failed"}))
+        else:
+            print(f"{exc.code}: {exc}")
+        sys.exit(1)
     if contract:
         changed = set()
         for fc in ready:

@@ -64,6 +64,17 @@ class SyncGate(ABC):
 # ── 内置 Gate 实现 ──────────────────────────────────────────
 
 
+class ContractConfigurationGate(SyncGate):
+    """Stop publication when its gate configuration cannot be established."""
+    name = "contract_configuration"
+    order = -1
+    fail_action = "block"
+
+    def check(self, session, project, formal_commit, selected_entries):
+        return GateResult(allowed=False, blocked=True, rule="contract_state_unavailable",
+                          level="error", message="CONTRACT_STATE_UNAVAILABLE: publication gate configuration is unreadable")
+
+
 class ForeignCommitGate(SyncGate):
     """检测 release repo 是否有外来 commit。"""
 
@@ -111,30 +122,25 @@ class ContractDriftGate(SyncGate):
         from backend.core.contract import ContractManager, detect_drift, check_feature_signatures
         from backend.core.history import HistoryManager
 
-        # 尝试复用 drift_cache（PolicyEngine 产出，watcher dirty 时失效）
-        # cache 存储在 daemon_ctx 中，通过 step_sync 调用时传入
+        # Cached alerts are an observation projection, not publication
+        # authority: dirty=False alone binds neither contract nor source bytes.
         cache = getattr(self, '_cache', None)
-        if cache is not None and not cache.get("dirty", True):
-            alerts = cache.get("alerts", [])
-            errors = [a for a in alerts if a.get("level") == "error"]
-            return GateResult(
-                blocked=len(errors) > 0,
-                rule="contract_drift",
-                level="error" if errors else "warning",
-                message=f"{len(alerts)} drift alerts ({len(errors)} errors) [cached]",
-                alerts=alerts,
-            )
-
-        # 缓存不可用 → 现场检测
-        contract = ContractManager.load(session.workspace_path)
+        from backend.core.contract import ContractStateUnavailable
+        try:
+            contract = ContractManager.load(session.workspace_path)
+        except ContractStateUnavailable:
+            return GateResult(allowed=False, blocked=True, rule="contract_state_unavailable",
+                              level="error", message="CONTRACT_STATE_UNAVAILABLE: drift not evaluated")
         if not contract:
             return GateResult()
 
         changed_paths = [e.rel_path for e in selected_entries]
-        drift_alerts = detect_drift(session.workspace_path, changed_paths, contract)
-        dep_alerts = check_feature_signatures(
-            session.workspace_path, changed_paths, contract,
-        )
+        try:
+            drift_alerts = detect_drift(session.workspace_path, changed_paths, contract)
+            dep_alerts = check_feature_signatures(session.workspace_path, changed_paths, contract)
+        except ContractStateUnavailable:
+            return GateResult(allowed=False, blocked=True, rule="contract_source_unavailable",
+                              level="error", message="CONTRACT_STATE_UNAVAILABLE: source observation failed")
         all_alerts = drift_alerts + dep_alerts
 
         # 更新缓存（供后续 Gate 调用复用）
@@ -173,13 +179,15 @@ class PrivacyScanGate(SyncGate):
             return GateResult()
         cfg = getattr(project, 'authorship', {}) or {}
         privacy_cfg = cfg.get("privacy", {})
-        privacy_alerts = scan_files_privacy(
-            str(session.workspace_path),
-            push_files,
-            level=policy.get("content_level", privacy_cfg.get("level", 2)),
-            deep_scan=policy.get("deep_scan", privacy_cfg.get("deep_scan", False)),
-            approved_fingerprints=policy.get("approved_fingerprints", []),
-        )
+        try:
+            privacy_alerts = scan_files_privacy(
+                str(session.workspace_path), push_files,
+                level=policy.get("content_level", privacy_cfg.get("level", 2)),
+                deep_scan=policy.get("deep_scan", privacy_cfg.get("deep_scan", False)),
+                approved_fingerprints=policy.get("approved_fingerprints", []))
+        except (OSError, ValueError):
+            return GateResult(allowed=False, blocked=True, rule="privacy_scan_unavailable", level="error",
+                              message="PRIVACY_OBSERVATION_UNAVAILABLE: publication scan is incomplete")
         if not privacy_alerts:
             return GateResult()
 
@@ -221,15 +229,34 @@ def load_gates(context: str, workspace_path: str) -> list[SyncGate]:
     if not builtins:
         return []
 
-    # 尝试从 contract.yaml 加载配置
-    gates_cfg: dict = {}
+    from backend.core.contract import ContractManager, ContractStateUnavailable
     try:
-        import yaml
-        contract_path = Path(workspace_path) / ".gitgo" / "contract.yaml"
-        raw = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
-        gates_cfg = raw.get("gates", {}).get(context, {})
-    except Exception:
-        pass
+        contract = ContractManager.load(Path(workspace_path))
+        extensions = getattr(contract, "_extension_fields", {})
+        gates = extensions.get("gates", {}) or {}
+        if not isinstance(gates, dict):
+            raise ValueError("gates must be a mapping")
+        gates_cfg = gates.get(context, {}) or {}
+        if not isinstance(gates_cfg, dict):
+            raise ValueError("gate context must be a mapping")
+        for key in ("enabled", "disabled"):
+            value = gates_cfg.get(key, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise ValueError("gate names must be a list of strings")
+        overrides = gates_cfg.get("config", {})
+        if not isinstance(overrides, dict):
+            raise ValueError("gate config must be a mapping")
+        for cfg in overrides.values():
+            if not isinstance(cfg, dict):
+                raise ValueError("gate override must be a mapping")
+            if "order" in cfg and type(cfg["order"]) is not int:
+                raise ValueError("gate order must be an integer")
+            if "fail_action" in cfg and cfg["fail_action"] not in {"block", "warn", "log"}:
+                raise ValueError("gate fail_action is invalid")
+    except (ContractStateUnavailable, ValueError) as exc:
+        # Invalid routing/configuration cannot silently select defaults and
+        # publish. Keep mandatory/default checks and an explicit blocking fact.
+        return [ContractConfigurationGate(), *[cls() for cls in builtins.values()]]
 
     enabled = gates_cfg.get("enabled", list(builtins.keys()))
     disabled = gates_cfg.get("disabled", [])

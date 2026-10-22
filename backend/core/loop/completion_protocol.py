@@ -690,21 +690,40 @@ class HostCompletionEvaluator:
             count = sum(
                 1 for item in candidates
                 if str(item.get("tool_name") or "") == name
-                and item.get("succeeded") is True
-                and item.get("committed") is True
+                and _successful_tool_observation(item)
             )
             minimum = int(requirement.get("min_calls", 1) or 0)
             maximum = requirement.get("max_calls")
             if count < minimum:
                 reasons.append(
-                    f"required tool {name} has {count} committed successful "
+                    f"required tool {name} has {count} confirmed successful "
                     f"call(s); minimum is {minimum}"
                 )
             if maximum is not None and count > int(maximum):
                 reasons.append(
-                    f"required tool {name} has {count} committed successful "
+                    f"required tool {name} has {count} confirmed successful "
                     f"call(s); maximum is {int(maximum)}"
                 )
+
+
+
+def _successful_tool_observation(receipt: dict) -> bool:
+    """Call-count evidence is distinct from a formal mutation requirement.
+
+    Only trusted producer facts admit a non-writing native command. A staged,
+    stale, failed or unpublished result must not satisfy a required call.
+    Actual action/artifact gates still require their own committed effects.
+    """
+    if receipt.get("succeeded") is not True:
+        return False
+    if receipt.get("committed") is True:
+        return True
+    return (receipt.get("file_service_result") is True
+        and receipt.get("producer_completed") is True
+        and type(receipt.get("producer_exit_code")) is int
+        and receipt["producer_exit_code"] == 0
+        and receipt.get("input_applicability") == "current"
+        and receipt.get("output_publication") == "not_required")
 
 
 def _current_task_receipts(process) -> list[dict]:

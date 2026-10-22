@@ -8,6 +8,8 @@ Use decision_evidence with gates or completion focus for current gates and recor
 
 Address each actual missing fact, then submit complete_task or the completion protocol mounted for this actor/task. Reuse successful receipts; do not rerun a write to obtain another success. A required delegated outcome cannot be replaced by pretending the supervisor performed it. Required artifacts must actually exist with the agreed content.
 
+A required tool-call count can be satisfied by a successfully observed read-only command; a formal file commit is a separate fact. Do not create or delete an unrelated file just to satisfy a call-count gate. If a successful observation is reported missing, inspect the current receipt and gate details rather than broadening the user's task.
+
 ## Scope and terminal decisions
 
 A partial-delivery exception uses the runtime's genuine decision path, bound to current gates and contract; it is not a model-selected waiver. Stop truthfully when a non-waivable requirement cannot be met. Look up review or coordination guidance only if that is the actual missing evidence.

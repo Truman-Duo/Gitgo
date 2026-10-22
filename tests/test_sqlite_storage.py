@@ -94,7 +94,8 @@ def test_first_identity_probe_cannot_inherit_native_host_stdin(
 
     def fake_git(*args, **kwargs):
         captured.update(args=args, kwargs=kwargs)
-        return SimpleNamespace(returncode=1, stdout="")
+        # The shared fixed Git primitive returns captured bytes.
+        return SimpleNamespace(returncode=1, stdout=b"")
 
     monkeypatch.setattr("backend.core.storage.paths.subprocess.run", fake_git)
     resolve_storage_paths(workspace, state_home=tmp_path_factory / "host-state")

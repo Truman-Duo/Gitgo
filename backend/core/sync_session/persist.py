@@ -12,12 +12,9 @@ from backend.core.sync_session.models import SessionStage, FormalCommit
 
 class PersistenceMixin:
     def save_session(self) -> Path:
-        """持久化当前 session 状态到 .gitgo/session.json"""
-        import json
+        """Publish a versioned project state; preserve legacy import sources."""
         from backend.models import TrialAction
 
-        session_dir = self.workspace_path / ".gitgo"
-        session_dir.mkdir(exist_ok=True)
         data = {
             "project": self.project.name,
             "updated_at": datetime.now().isoformat(),
@@ -49,21 +46,22 @@ class PersistenceMixin:
             },
             "last_operation": getattr(self, '_last_op', None),
         }
-        path = session_dir / "session.json"
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        from .state import save_state
+        reference, path = save_state(self.workspace_path, data,
+            expected_ref=getattr(self, "_governance_state_ref", None))
+        self._governance_state_ref = reference
+        self._governance_state_present = True
         return path
 
-    @classmethod
-    def load_session(cls, project: ProjectConfig, config: Config):
-        """从 .gitgo/session.json 恢复 session。返回 None 如果文件不存在。"""
-        import json
-
-        path = Path(project.workspace_path or Path.cwd()) / ".gitgo" / "session.json"
-        if not path.exists():
-            return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        session = cls(project, config)
-        session.stage = SessionStage[data.get("stage", "IDLE")]
+    def _restore_saved_session(self):
+        from .state import read_state
+        data, reference = read_state(self.workspace_path)
+        self._governance_state_ref = reference
+        self._governance_state_present = data is not None
+        if data is None:
+            return
+        self.stage = SessionStage[data.get("stage", "IDLE")]
+        self.formal_commits = []
         for fc_data in data.get("formal_commits", []):
             fc = FormalCommit(
                 message=fc_data["message"],
@@ -76,5 +74,10 @@ class PersistenceMixin:
                 source_indices=set(fc_data.get("source_indices", [])),
                 created_at=fc_data.get("created_at", ""),
             )
-            session.formal_commits.append(fc)
-        return session
+            self.formal_commits.append(fc)
+        self._last_op = data.get("last_operation")
+
+    @classmethod
+    def load_session(cls, project: ProjectConfig, config: Config):
+        session = cls(project, config)
+        return session if session._governance_state_present else None

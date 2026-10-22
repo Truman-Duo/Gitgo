@@ -1423,3 +1423,17 @@ def test_answer_context_policy_does_not_prefetch_project_governance():
     assert answer["eager_privileged"] == []
     assert "project_lessons" in answer["lazy"]
     assert "raw_reasoning" in answer["never"]
+
+
+@pytest.mark.parametrize("raw", [b"first\r\nsecond\r\n", b"\xef\xbb\xbfBOM\r\n", b"invalid-\xff\r\n"])
+def test_artifact_digest_matches_raw_bytes_even_with_display_decoding(tmp_path_factory, raw):
+    import hashlib
+    target=tmp_path_factory/"artifact.txt"
+    target.write_bytes(raw)
+    tool=build_context_tools(SimpleNamespace(session=AgentSession()),str(tmp_path_factory))["artifact_read"]
+    expected=hashlib.sha256(raw).hexdigest()
+    result=tool.execute({"path":"artifact.txt","sha256":expected})
+    assert result["sha256"]==expected
+    assert result["content"]==raw.decode("utf8",errors="replace")
+    with pytest.raises(ValueError,match="digest mismatch"):
+        tool.execute({"path":"artifact.txt","sha256":"0"*64})

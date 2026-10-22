@@ -40,7 +40,8 @@ from backend.core.loop.completion_protocol import (
 )
 from backend.core.loop.prompt_compiler import PromptCompiler
 from backend.core.loop.session import AgentSession
-from backend.core.loop.test_manifest import TestManifest, run_registered_test
+from backend.core.loop.test_manifest import TestManifest
+from tests.registered_test_fixture import run_registered_test
 from backend.core.loop.test_manifest import SeedResult, TestRecord
 from backend.core.storage import StorageRuntime
 
@@ -141,7 +142,7 @@ class ChildArtifactReadTests(unittest.TestCase):
         manager = AgentProcessManager()
         with tempfile.TemporaryDirectory() as workspace:
             root = Path(workspace)
-            (root / "result.txt").write_text("SHARED-OK\n", encoding="utf-8")
+            (root / "result.txt").write_bytes(b"SHARED-OK\n")
             with patch("backend.core.history.HistoryManager.add_operation"):
                 supervisor = manager.fork(
                     parent_id=None, role="supervisor", actor_kind="supervisor",
@@ -995,7 +996,7 @@ class HostCompletionTests(unittest.TestCase):
         denied = HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE", [])
         self.assertFalse(denied.allowed)
         self.assertIn(
-            "required tool inspect_note has 0 committed successful call(s); minimum is 1",
+            "required tool inspect_note has 0 confirmed successful call(s); minimum is 1",
             denied.reasons,
         )
         process.tool_receipts.append({

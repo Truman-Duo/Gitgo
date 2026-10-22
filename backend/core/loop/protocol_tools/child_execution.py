@@ -335,6 +335,7 @@ def install(ctx):
                 "capability_profile_id": child.capability_profile_id,
             })
             result = None
+            access_service = getattr(manager.worktree_manager, "sandbox_access", None)
             try:
                 lifecycle_stage = "prepare_worktree"
                 review_target = manager.get(review_target_id) if review_target_id else None
@@ -354,6 +355,10 @@ def install(ctx):
                         child, review_target_id=review_target_id,
                         continue_process_id=continue_process_id if resume_partial else "",
                     )
+                    if access_service is not None:
+                        from backend.core.loop.worktree import WorktreeLease
+                        lifecycle_stage = "prepare_sandbox_access"
+                        access_service.prepare(WorktreeLease.from_dict(child.worktree))
                     emit_child_event({
                         "event": "worktree_leased",
                         "worktree": dict(child.worktree),
@@ -466,6 +471,9 @@ def install(ctx):
                         if current:
                             target.runtime_preferences.setdefault("review_evidence", {})[child.process_id] = reviewed_version
                             target.review_approvals.append(child.process_id)
+                if access_service is not None:
+                    lifecycle_stage = "retire_sandbox_access"
+                    access_service.release(child.process_id)
                 return result
             except Exception as exc:
                 # The child-owned terminal event is the persistence/UI
@@ -488,9 +496,25 @@ def install(ctx):
                         "worktree": dict(child.worktree or {}),
                     },
                 }
+                diagnostic = getattr(exc, "diagnostic", None)
+                if diagnostic is not None:
+                    child.result["metadata"]["diagnostic"] = diagnostic
                 result = child.result
                 return result
             finally:
+                if access_service is not None:
+                    try:
+                        access_service.release(child.process_id)
+                    except Exception as cleanup_exc:
+                        transition(child, ProcessStatus.FAILED)
+                        failure = {"status": "failed", "process_id": child.process_id,
+                            "code": "CHILD_SANDBOX_CLEANUP_FAILED", "error": str(cleanup_exc),
+                            "metadata": {"lifecycle_stage": "retire_sandbox_access",
+                                "automatic_replay_suppressed": True, "worktree": dict(child.worktree)}}
+                        if isinstance(result, dict):
+                            result.clear(); result.update(failure)
+                        child.result = failure
+                        emit_child_event({"event": "worktree_cleanup_failed", "reason": str(cleanup_exc)})
                 if actor_kind == "reviewer" and child.worktree.get("isolated"):
                     try:
                         manager.dispose_process_worktree(child, keep_ref=False)

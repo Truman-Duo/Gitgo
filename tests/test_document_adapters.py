@@ -2,6 +2,7 @@ import pytest
 from pathlib import Path
 
 from backend.core.tools.document_tools import document_create, document_open
+from tests.test_document_candidate_service import document_native_runtime, document_native_launcher, source_runtime, isolated_python
 
 
 def test_office_and_pdf_adapters_use_one_bounded_contract(tmp_path_factory: Path):
@@ -54,7 +55,7 @@ def test_unsupported_document_returns_recoverable_catalog_error(tmp_path_factory
     assert "supported" in result["error_info"]["details"]
 
 
-def test_document_create_round_trips_common_output_formats(tmp_path_factory: Path):
+def test_document_create_round_trips_common_output_formats(tmp_path_factory: Path, document_native_launcher):
     workspace = tmp_path_factory
     cases = {
         "note.md": "# Heading\nDurable markdown",
@@ -65,10 +66,21 @@ def test_document_create_round_trips_common_output_formats(tmp_path_factory: Pat
     }
 
     for path, content in cases.items():
-        created = document_create({
-            "_workspace": str(workspace), "path": path,
-            "title": "Gitgo output", "content": content,
-        })
+        from tests.test_file_feedback_contract import context
+        from backend.core.tools.catalog import build_workspace_tools
+        from backend.core.loop.tool_pipeline import ToolPipeline
+        ctx = context(workspace, ["document_create"])
+        tool = build_workspace_tools(workspace)["document_create"]
+        result = ToolPipeline().execute({"name": "document_create", "args": {
+            "path": path, "title": "Gitgo output", "content": content}}, tool, ctx, path)
+        created = result.data
+        assert not result.is_error, result.formatted
+        if not path.endswith(".md"):
+            assert result.receipt["candidate_render"]["launch_state"] == "started"
+            assert result.receipt["candidate_render"]["cleanup"]["complete"] is True
+            assert result.receipt["candidate_render"]["access_retired"] is True
+            assert result.receipt["runtime_cleanup"]["complete"] is True
+            assert result.receipt["effect_state"] == "committed"
         assert created.get("action") == "created", (path, created)
         assert created["sha256"]
         assert (workspace / path).is_file()

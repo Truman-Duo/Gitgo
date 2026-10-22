@@ -264,3 +264,33 @@ def test_native_success_does_not_verify_payload_effects(tmp_path_factory, monkey
     from pathlib import Path
     retained = json.loads(Path(actual.receipt['invocation_path']).read_text(encoding='utf8'))
     assert retained['state'] == 'completed' and retained['effect_state'] == 'ambiguous'
+
+
+def test_project_context_binding_preserves_service_and_native_declarations(tmp_path_factory):
+    from backend.core.daemon.policy_helpers import bind_project_tool_context
+    from backend.core.tools.catalog import build_workspace_tools
+    catalog=build_workspace_tools(tmp_path_factory)
+    for name in ("run_test", "exec_command", "read_file"):
+        target=catalog[name]
+        original=(target.execution_contract, target.isolated, target.runner_name, target.cancellation)
+        bind_project_tool_context(target,tmp_path_factory,"fixture")
+        assert target.validate_execution_contract()==original[0]
+        assert (target.execution_contract,target.isolated,target.runner_name,target.cancellation)==original
+        assert target.prepare_args({})["_workspace"]==str(tmp_path_factory)
+    assert catalog["run_test"].guarantees_cancellation
+
+
+def test_explicit_cooperative_service_is_not_silently_downgraded():
+    from backend.core.loop.agent_tool import CancellationMode, ToolEffect
+    legacy=tool(data_broker("test.legacy"),read_only=False,effect=ToolEffect.PROCESS)
+    supervised=tool(data_broker("test.supervised"),read_only=False,effect=ToolEffect.PROCESS,cancellation=CancellationMode.COOPERATIVE)
+    assert legacy.cancellation==CancellationMode.NON_INTERRUPTIBLE
+    assert supervised.cancellation==CancellationMode.COOPERATIVE
+
+
+def test_rejected_registration_has_known_pre_execution_wire_state(tmp_path_factory):
+    target=tool(None)
+    result=execute(target,context(tmp_path_factory))
+    assert result.receipt["effect_state"]=="not_committed"
+    assert result.diagnostics["error_info"]["effect_state"]=="not_committed"
+    assert result.diagnostics["error_info"]["execution_state"]=="not_started"

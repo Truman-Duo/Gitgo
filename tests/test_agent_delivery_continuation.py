@@ -39,7 +39,9 @@ def cleanup(manager, storage):
 def record_promotion(root, result):
     receipt = {'receipt_id': 'real-promotion', 'task_id': root.active_task_id,
         'succeeded': True, 'committed': True, 'effect_state': 'committed', 'effect': 'workspace_write'}
-    ToolPipeline._attach_result_facts(receipt, 'promote_agent_changes', result)
+    from backend.core.loop.execution_contract import data_broker
+    ToolPipeline._attach_result_facts(receipt, 'promote_agent_changes', result,
+        execution_contract=data_broker('files.workspace.promote_agent_changes'))
     root.tool_receipts.append(receipt)
     root.session.append_tool_result('Promoted', tool_name='promote_agent_changes', data=result, receipt=receipt)
     return receipt

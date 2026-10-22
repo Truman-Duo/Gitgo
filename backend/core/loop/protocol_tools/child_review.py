@@ -288,7 +288,7 @@ def install(ctx):
         if not process_ids:
             return {"promoted": False, "error": "process_ids is required"}
         try:
-            result = manager.promote_process_results(process, process_ids)
+            result = manager.promote_process_results(process, process_ids, file_service_args=args)
             if on_stream_event is not None:
                 on_stream_event({
                     "event": "worktree_promoted",
@@ -298,6 +298,9 @@ def install(ctx):
                 })
             return result
         except (ValueError, RuntimeError) as exc:
+            diagnostic = getattr(exc, "diagnostic", None)
+            if diagnostic is not None:
+                return {"promoted": False, **diagnostic}
             if str(exc).startswith("VALIDATION_INPUT_CHANGED:"):
                 from backend.core.errors import error_payload
                 return {"promoted": False, "state": "needs_recheck", **error_payload(
@@ -307,7 +310,7 @@ def install(ctx):
 
 
     tools["promote_agent_changes"] = AgentTool(
-        execution_contract=data_broker("host.runtime.promote_agent_changes"),
+        execution_contract=data_broker("files.workspace.promote_agent_changes"),
         name="promote_agent_changes",
         description=(
             load_prompt('tools/promote_agent_changes')
@@ -316,8 +319,10 @@ def install(ctx):
             "type": "object",
             "properties": {
                 "process_ids": {"type": "array", "items": {"type": "string"}},
+                "lesson_feedback_id": {"type": "string"},
             },
             "required": ["process_ids"],
+            "additionalProperties": False,
         },
         execute=promote_agent_changes,
         read_only=False,

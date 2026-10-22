@@ -318,3 +318,12 @@ def test_real_permission_checkpoint_gap_preserves_state_but_revokes_local_pins(r
     assert (state['pending_decision'] is None) == (mode == 'after')
     # The local blocked projection never rewrites either durable outcome.
     assert process.status is ProcessStatus.RECOVERY_REVIEW_REQUIRED
+
+
+@pytest.mark.parametrize('mode',['before','after'])
+def test_compare_state_head_unknown_ack_quarantines_original_writer(runtime,mode):
+    reference=runtime.put_blob(b'{"synthetic":"governance-state"}')
+    with inject(runtime,mode):
+        with pytest.raises(StorageCommitUnknown):
+            runtime.compare_state_ref('test.governance','session',reference,expected_ref=None)
+        assert runtime._state.quarantined

@@ -319,3 +319,85 @@ def test_real_runtime_close_failure_keeps_maintenance_barrier(tmp_path_factory, 
     finally:
         proxy.calls = 3
         bindings.release_storage(workspace)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_parallel_open_shares_exact_attempt_without_blocking_other_keys(pool, monkeypatch, shared):
+    root, made = pool
+    entered, finish, waiting = threading.Event(), threading.Event(), threading.Event()
+    results, errors = [], []
+    def create():
+        entered.set()
+        assert finish.wait(5)
+        runtime = Runtime(root)
+        made.append(runtime)
+        return runtime
+    key = "shared-knowledge:test" if shared else bindings._key(root)
+    def open_one():
+        try: results.append(bindings._get_owned(key, create))
+        except BaseException as error: errors.append(error)
+    first = threading.Thread(target=open_one)
+    first.start()
+    assert entered.wait(5)
+    entry = bindings._owned[key]
+    original_wait = entry.ready.wait
+    def observe_wait(timeout):
+        waiting.set()
+        return original_wait(timeout)
+    monkeypatch.setattr(entry.ready, "wait", observe_wait)
+    second = threading.Thread(target=open_one)
+    second.start()
+    try:
+        assert waiting.wait(5)
+        other = bindings.get_storage(root / "other")
+        assert not other._closed and not results
+    finally:
+        finish.set(); first.join(5); second.join(5)
+    assert not first.is_alive() and not second.is_alive() and not errors
+    assert len(results) == 2 and results[0] is results[1]
+    assert len(made) == 2
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_pending_open_timeout_or_failure_never_mints_another_owner(pool, monkeypatch, fail):
+    root, made = pool
+    entered, finish, waiting = threading.Event(), threading.Event(), threading.Event()
+    errors, attempts = [], []
+    def create(path):
+        attempts.append(path)
+        entered.set()
+        assert finish.wait(5)
+        if fail: raise OSError("open failed")
+        runtime = Runtime(path)
+        made.append(runtime)
+        return runtime
+    monkeypatch.setattr(bindings, "StorageRuntime", create)
+    def open_one():
+        try: bindings.get_storage(root)
+        except BaseException as error: errors.append(error)
+    first = threading.Thread(target=open_one)
+    first.start()
+    assert entered.wait(5)
+    entry = bindings._owned[bindings._key(root)]
+    if not fail:
+        monkeypatch.setattr(bindings, "_OPEN_WAIT_SECONDS", 0.01)
+        try:
+            with pytest.raises(StorageBlocked, match="BUSY"): bindings.get_storage(root)
+            assert len(attempts) == 1 and entry.creating
+        finally:
+            finish.set(); first.join(5)
+        assert not errors and bindings.get_storage(root) is made[0]
+    else:
+        original_wait = entry.ready.wait
+        def observe_wait(timeout):
+            waiting.set()
+            return original_wait(timeout)
+        monkeypatch.setattr(entry.ready, "wait", observe_wait)
+        second = threading.Thread(target=open_one)
+        second.start()
+        try: assert waiting.wait(5)
+        finally:
+            finish.set(); first.join(5); second.join(5)
+        assert len(errors) == 2 and all(isinstance(error, OSError) for error in errors)
+        assert all(str(error) == "open failed" for error in errors)
+        assert len(attempts) == 1 and not bindings._owned

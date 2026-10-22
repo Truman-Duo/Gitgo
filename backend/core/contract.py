@@ -72,6 +72,10 @@ class ProjectContract:
         )
 
 
+class ContractStateUnavailable(RuntimeError):
+    code="CONTRACT_STATE_UNAVAILABLE"
+
+
 class ContractManager:
     """管理项目合约的读写。"""
 
@@ -83,28 +87,51 @@ class ContractManager:
 
     @staticmethod
     def load(workspace_path: Path) -> ProjectContract | None:
-        p = ContractManager.path(workspace_path)
-        if not p.exists():
-            return None
+        from backend.core.storage.metadata_files import read_metadata_bytes
+        import hashlib
         try:
+            raw=read_metadata_bytes(workspace_path,ContractManager.CONTRACT_FILE)
+            if raw is None:return None
             import yaml
-            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            return ProjectContract.from_dict(data)
-        except Exception:
-            return None
+            data=yaml.safe_load(raw.decode("utf8"))
+            if data is None:data={}
+            if not isinstance(data,dict):raise ValueError("Contract must be a mapping")
+            data=dict(data)
+            for name in ("decided_features","tech_stack","architecture_constraints"):
+                if data.get(name) is None:data[name]=[]
+                if not isinstance(data.get(name,[]),list) or len(data.get(name,[]))>512:
+                    raise ValueError("Contract field has an invalid bounded list")
+            if any(not isinstance(row,dict) for row in data.get("decided_features",[])):
+                raise ValueError("Contract features must be mappings")
+            for name in ("project","updated"):
+                if data.get(name) is None:data[name]=""
+            data["decided_features"]=[{**row,**{key:"" for key in ("name","location","signature","introduced","last_modified") if row.get(key) is None}} for row in data["decided_features"]]
+            contract=ProjectContract.from_dict(data)
+            if any(not isinstance(value,str) for value in [contract.project,contract.updated,*contract.tech_stack,*contract.architecture_constraints]):
+                raise ValueError("Contract text fields must be strings")
+            for feature in contract.decided_features:
+                if (any(not isinstance(getattr(feature,key),str) for key in ("name","location","signature","introduced","last_modified"))
+                        or type(feature.confirmed_count) is not int or feature.confirmed_count<0):
+                    raise ValueError("Contract feature fields are invalid")
+            contract._source_sha256=hashlib.sha256(raw).hexdigest()
+            contract._extension_fields={key:value for key,value in data.items() if key not in contract.to_dict()}
+            return contract
+        except Exception as exc:
+            failure = ContractStateUnavailable("Project contract could not be safely read; no absent contract was inferred")
+            if isinstance(locals().get("raw"), bytes):
+                failure.source_sha256 = hashlib.sha256(raw).hexdigest()
+            raise failure from exc
 
     @staticmethod
     def save(workspace_path: Path, contract: ProjectContract) -> Path:
-        p = ContractManager.path(workspace_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        contract.updated = datetime.now().strftime("%Y-%m-%d")
+        from backend.core.storage.metadata_files import write_metadata_bytes
         import yaml
-        p.write_text(
-            yaml.dump(contract.to_dict(), allow_unicode=True, default_flow_style=False,
-                      sort_keys=False),
-            encoding="utf-8",
-        )
-        return p
+        contract.updated=datetime.now().strftime("%Y-%m-%d")
+        body={**getattr(contract,"_extension_fields",{}),**contract.to_dict()}
+        raw=yaml.safe_dump(body,allow_unicode=True,default_flow_style=False,sort_keys=False).encode("utf8")
+        contract._source_sha256=write_metadata_bytes(workspace_path,ContractManager.CONTRACT_FILE,raw,
+            expected_sha256=getattr(contract,"_source_sha256",None))
+        return ContractManager.path(workspace_path)
 
     @staticmethod
     def update_feature(workspace_path: Path, project_name: str,
@@ -114,6 +141,9 @@ class ContractManager:
         contract = ContractManager.load(workspace_path) or ProjectContract(
             project=project_name,
         )
+        if not hasattr(contract, "_source_sha256"):
+            # An observed absence must still be checked at publication.
+            contract._source_sha256 = ""
         contract.project = project_name
 
         for f in contract.decided_features:
@@ -142,6 +172,39 @@ class ContractManager:
 
 # ── 漂移检测 ──────────────────────────────────────────────
 
+class _ContractSourceView:
+    """Bounded per-file observations; no claim of a whole-project snapshot."""
+    def __init__(self, workspace):
+        self.workspace = Path(workspace).absolute()
+        self.cache = {}
+        self.total = 0
+
+    def read(self, relative):
+        from backend.core.sandbox_read import ReadRoot, relative_parts
+        try:
+            parts = relative_parts(relative)
+            if any(part.casefold() in {".git", ".gitgo"} for part in parts):
+                raise PermissionError("Contract source cannot select product/repository metadata")
+            if relative not in self.cache:
+                if len(self.cache) >= 512:
+                    raise ValueError("Contract source count exceeds its bound")
+                with ReadRoot(self.workspace) as root:
+                    try:
+                        with root.open(relative) as opened:
+                            raw = opened.read_bytes(max_bytes=2 * 1024 * 1024)
+                        self.total += len(raw)
+                        if self.total > 16 * 1024 * 1024:
+                            raise ValueError("Contract source bytes exceed their aggregate bound")
+                        self.cache[relative] = raw.decode("utf8", errors="replace")
+                    except FileNotFoundError:
+                        self.cache[relative] = None
+                # Directory locations are not text signatures and are not
+                # silently treated as a missing implementation.
+            return self.cache[relative]
+        except (OSError, ValueError) as exc:
+            raise ContractStateUnavailable("Contract source could not be safely observed") from exc
+
+
 def detect_drift(
     workspace_path: Path,
     changed_files: list[str],
@@ -150,29 +213,31 @@ def detect_drift(
     """检测本轮变更与合约的偏差。返回告警列表。"""
     if contract is None:
         return []
+    if not isinstance(changed_files, list) or len(changed_files) > 512 or any(not isinstance(p, str) for p in changed_files):
+        raise ContractStateUnavailable("A bounded list of changed source paths is required")
+    view = _ContractSourceView(workspace_path)
     alerts = []
 
     # Rule 1: 功能删除检测
     for feat in contract.decided_features:
         if not feat.location:
             continue
-        fpath = workspace_path / feat.location
-        if feat.location in changed_files or not fpath.exists():
-            if not fpath.exists():
+        content = view.read(feat.location)
+        if feat.location in changed_files or content is None:
+            if content is None:
                 alerts.append({
                     "rule": "feature_deleted",
                     "level": "error",
                     "message": (
                         f"Feature '{feat.name}' file '{feat.location}' "
                         f"is missing. Confirmed {feat.confirmed_count}x. "
-                        f"This may be LLM avoiding implementation."
+                        f"This is a missing-file observation; no motive is inferred."
                     ),
                     "feature": feat.name,
                     "location": feat.location,
                     "confirmed_count": feat.confirmed_count,
                 })
             elif feat.signature:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
                 if feat.signature not in content:
                     alerts.append({
                         "rule": "feature_signature_lost",
@@ -188,7 +253,7 @@ def detect_drift(
 
     # Rule 2: 技术栈漂移 — 检测新增未声明 import
     if contract.tech_stack:
-        new_imports = _detect_new_imports(workspace_path, changed_files, contract)
+        new_imports = _detect_new_imports(workspace_path, changed_files, contract, _view=view)
         if new_imports:
             alerts.append({
                 "rule": "tech_stack_drift",
@@ -196,7 +261,7 @@ def detect_drift(
                 "message": (
                     f"New imports detected: {', '.join(new_imports[:5])}. "
                     f"Not in declared tech_stack: {contract.tech_stack}. "
-                    f"This may indicate LLM switching technology."
+                    f"This lexical observation requires review; intent is not inferred."
                 ),
                 "new_imports": new_imports,
             })
@@ -216,7 +281,7 @@ def detect_drift(
             })
             continue
         violations = _check_architecture_constraint(
-            workspace_path, changed_files, constraint,
+            workspace_path, changed_files, constraint, _view=view,
         )
         if violations:
             alerts.append({
@@ -249,19 +314,17 @@ def _detect_new_imports(
     workspace_path: Path,
     changed_files: list[str],
     contract: ProjectContract,
+    *, _view=None,
 ) -> list[str]:
     """扫描变更文件中的新 import，与合约 tech_stack 对比。"""
+    view = _view or _ContractSourceView(workspace_path)
     declared = set(contract.tech_stack)
     found = set()
     for rel_path in changed_files:
         if not rel_path.endswith(".py"):
             continue
-        fpath = workspace_path / rel_path
-        if not fpath.exists():
-            continue
-        try:
-            content = fpath.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        content = view.read(rel_path)
+        if content is None:
             continue
         for m in _PY_IMPORT_RE.finditer(content):
             mod = m.group(1)
@@ -293,9 +356,11 @@ def _check_architecture_constraint(
     workspace_path: Path,
     changed_files: list[str],
     constraint: str,
+    *, _view=None,
 ) -> list[str]:
     """检查架构约束是否被违反。"""
     violations = []
+    view = _view or _ContractSourceView(workspace_path)
 
     # 先查内置规则
     if constraint in _CONSTRAINT_CHECKS:
@@ -303,12 +368,8 @@ def _check_architecture_constraint(
         for rel_path in changed_files:
             if not _match_glob(rel_path, glob_pat):
                 continue
-            fpath = workspace_path / rel_path
-            if not fpath.exists():
-                continue
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+            content = view.read(rel_path)
+            if content is None:
                 continue
             if pattern.search(content):
                 violations.append(rel_path)
@@ -337,17 +398,14 @@ def check_feature_signatures(
     验证其 signature 仍然可以被找到。签名消失 → 依赖断裂告警。
     """
     alerts = []
+    view = _ContractSourceView(workspace_path)
     for feat in contract.decided_features:
         if not feat.location or not feat.signature:
             continue
         if feat.location not in changed_files:
             continue
-        fpath = workspace_path / feat.location
-        if not fpath.exists():
-            continue
-        try:
-            content = fpath.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        content = view.read(feat.location)
+        if content is None:
             continue
         if feat.signature not in content:
             alerts.append({
@@ -391,9 +449,8 @@ def build_dep_graph(workspace_path: Path) -> dict[str, list[str]]:
     for key in graph:
         graph[key] = sorted(set(graph[key]))
     dep_path = workspace_path / ".gitgo" / _DEP_GRAPH_FILE
-    dep_path.parent.mkdir(parents=True, exist_ok=True)
-    import json
-    dep_path.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding="utf-8")
+    from backend.core.dependency_graph import _atomic_json_write
+    _atomic_json_write(dep_path, graph)
     return graph
 
 
@@ -441,7 +498,11 @@ def _parse_ast_symbols(file_path: Path) -> dict:
         return {"defines": [], "calls": []}
 
     try:
-        tree = _ast.parse(file_path.read_text(encoding="utf-8", errors="ignore"))
+        from backend.core.sandbox_read import ReadRoot
+        with ReadRoot(file_path.parent.absolute()) as root:
+            with root.open(file_path.name) as opened:
+                content = opened.read_bytes(max_bytes=2*1024*1024).decode("utf8", errors="replace")
+        tree = _ast.parse(content)
     except (SyntaxError, OSError):
         return {"defines": [], "calls": []}
 
@@ -483,8 +544,9 @@ def build_function_graph(workspace_path: Path) -> dict[str, dict]:
     # Pass 1 collects every definition before any call is resolved.  The old
     # one-pass implementation silently missed callees that happened to be
     # visited later by rglob(), making the graph filesystem-order dependent.
-    for py_file in sorted(workspace_path.rglob("*.py")):
-        if ".git" in py_file.parts or "__pycache__" in py_file.parts:
+    from backend.core.dependency_graph import _source_files
+    for py_file in _source_files(workspace_path):
+        if py_file.suffix != ".py":
             continue
 
         rel = str(py_file.relative_to(workspace_path)).replace("\\", "/")
@@ -527,9 +589,8 @@ def build_function_graph(workspace_path: Path) -> dict[str, dict]:
 
     # 持久化
     cache_path = workspace_path / ".gitgo" / _FUNC_GRAPH_FILE
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(_json.dumps(graph, indent=2, ensure_ascii=False),
-                          encoding="utf-8")
+    from backend.core.dependency_graph import _atomic_json_write
+    _atomic_json_write(cache_path, graph)
     return graph
 
 
@@ -548,7 +609,8 @@ def load_function_graph(workspace_path: Path) -> dict[str, dict]:
         try:
             rich_path = workspace_path / ".gitgo" / "dependency_graph.v2.json"
             if not rich_path.exists() or cache_path.stat().st_mtime_ns >= rich_path.stat().st_mtime_ns:
-                return _json.loads(cache_path.read_text(encoding="utf-8"))
+                from backend.core.dependency_graph import _metadata_json
+                return _metadata_json(workspace_path, _FUNC_GRAPH_FILE)
         except (_json.JSONDecodeError, OSError):
             pass
     return build_function_graph(workspace_path)
@@ -596,7 +658,7 @@ def get_changed_symbols(file_path: Path, old_content: str = "",
         try:
             old = _ast.parse(old_content)
             old_symbols = {n.name for n in _ast.walk(old)
-                          if isinstance(n, (_ast.FunctionDef, _ast.ClassDef))}
+                          if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef))}
         except SyntaxError:
             pass
 
@@ -604,7 +666,7 @@ def get_changed_symbols(file_path: Path, old_content: str = "",
         try:
             new = _ast.parse(new_content)
             new_symbols = {n.name for n in _ast.walk(new)
-                          if isinstance(n, (_ast.FunctionDef, _ast.ClassDef))}
+                          if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef))}
         except SyntaxError:
             pass
 

@@ -5,6 +5,7 @@ param(
     [string]$Ripgrep = "",
     [string]$RipgrepNotices = "",
     [string]$Output = "",
+    [string]$ArtifactOutput = "",
     [string]$InnoSetupCompiler = "",
     [switch]$BuildInstaller
 )
@@ -14,6 +15,8 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $Output) { $Output = Join-Path $root ("dist-terminal\build-" + (Get-Date -Format "yyyyMMdd-HHmmss")) }
 $stage = [System.IO.Path]::GetFullPath($Output)
 $internal = Join-Path $stage "internal"
+if (-not $ArtifactOutput) { $ArtifactOutput = Join-Path $root "dist-installer" }
+$artifactDirectory = [System.IO.Path]::GetFullPath($ArtifactOutput)
 $productPath = Join-Path $PSScriptRoot "product.json"
 $product = Get-Content -LiteralPath $productPath -Raw | ConvertFrom-Json
 if ($product.primary_command -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
@@ -147,6 +150,10 @@ if ($LASTEXITCODE -ne 0) { throw "Windows Host version metadata generation faile
 $pyInstallerArguments = @(
     "--noconfirm", "--clean", "--onedir",
     "--name", "gitgo-host",
+    # Tools are registered/imported dynamically and approval digests cover their
+    # implementations even before first use. Match native acceptance packaging.
+    "--paths", $root, "--collect-submodules", "backend",
+    "--hidden-import", "backend.core.tools.registrations",
     "--distpath", $internal,
     "--workpath", (Join-Path $root "build\terminal-host"),
     "--specpath", (Join-Path $root "build\terminal-host"),
@@ -207,7 +214,7 @@ if ($BuildInstaller) {
     if (-not $InnoSetupCompiler -or -not (Test-Path -LiteralPath $InnoSetupCompiler -PathType Leaf)) {
         throw "Inno Setup compiler not found; pass -InnoSetupCompiler or omit -BuildInstaller"
     }
-    $installerOutput = Join-Path $root "dist-installer"
+    $installerOutput = $artifactDirectory
     New-Item -ItemType Directory -Force -Path $installerOutput | Out-Null
     & $InnoSetupCompiler `
         "/DStageDir=$stage" `
@@ -221,5 +228,5 @@ if ($BuildInstaller) {
     if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
     Write-Host "Windows installer written to $installerOutput"
 }
-& $Python -B (Join-Path $root "scripts\release_artifacts.py") --stage $stage --output (Join-Path $root "dist-installer")
+& $Python -B (Join-Path $root "scripts\release_artifacts.py") --stage $stage --output $artifactDirectory
 if ($LASTEXITCODE -ne 0) { throw "Release artifact packaging failed" }

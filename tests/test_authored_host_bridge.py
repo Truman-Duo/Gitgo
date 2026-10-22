@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 from backend.core.loop.execution_contract import data_broker
 from backend.core.tools.dynamic_tools import validate_host_authored_definition
 from backend.core.tools.authored_bridge import execute_authored_host_python
@@ -21,7 +23,7 @@ def test_invented_code_uses_real_runner_and_same_leaf_approval(tmp_path_factory,
     process, ctx, _, leaf, calls = setup(tmp_path_factory)
     catalog = ctx.artifacts["tool_catalog"]
     spec, source = definition(tmp_path_factory, catalog)
-    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    runtime = StorageRuntime(tmp_path_factory, state_home=Path(os.environ["GITGO_STATE_HOME"]))
     try:
         saved = runtime.save_custom_tool(spec, source)
         saved = runtime.load_custom_tool(spec["name"])
@@ -82,7 +84,9 @@ def test_host_registration_keeps_asset_but_does_not_mount_unavailable_leaves(tmp
     p = AgentProcess('supervisor', 'supervisor', RingLevel.RING_3, actor_kind='supervisor',
         active_task_id='task', session=AgentSession(), worktree_path=str(tmp_path_factory),
         tool_registry=ToolRegistry(['author_tool', 'read_prefix']))
-    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / 'state')
+    import os
+    from pathlib import Path
+    runtime = StorageRuntime(tmp_path_factory, state_home=Path(os.environ['GITGO_STATE_HOME']))
     p.runtime_storage = runtime
     try:
         tool = _build_internal_tools(p, catalog, str(tmp_path_factory))['author_tool']
@@ -91,7 +95,12 @@ def test_host_registration_keeps_asset_but_does_not_mount_unavailable_leaves(tmp
             'tests': [{'input': {}, 'expected': {'done': True}, 'host_results': [
                 {'tool_name': 'read_prefix', 'arguments_digest': arguments_digest({}), 'result': {'value': 'mock'}},
                 {'tool_name': leaf.name, 'arguments_digest': arguments_digest({'value': 'mock'}), 'result': {'ok': True}}]}]}
-        result = tool.execute(payload)
+        from backend.core.loop.execution_context import ExecutionContext
+        context = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory),
+            cancellation=p.cancellation_event, storage=runtime)
+        response = ToolPipeline().execute({"name": tool.name, "args": payload}, tool, context, "registration")
+        assert not response.is_error, response.formatted
+        result = response.data
         assert result['registered'] and result['mounted'] is False
         assert result['blocked_on'] == 'CUSTOM_TOOL_CAPABILITY_REQUIRED'
         assert result['warnings'] and 'error' not in result

@@ -20,7 +20,7 @@ from backend.core.loop.event_bus import EventBus
 from backend.core.loop.executor import _build_internal_tools
 from backend.core.loop.models import ProcessStatus
 from backend.core.loop.permission_broker import create_permission_request, grant_from_decision
-from backend.core.loop.test_manifest import run_registered_test
+from tests.registered_test_fixture import run_registered_test
 from backend.core.loop.tool_pipeline import ToolPipeline
 from backend.core.loop.tools import ToolRegistry
 from backend.core.storage import close_owned_storage

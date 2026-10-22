@@ -1,6 +1,7 @@
 """A pure invented program drives existing capabilities through the Host."""
 import hashlib
 import time
+from backend.core.sandbox import SandboxDenied
 from .composite_runtime import state_for, new_state, call_key
 from .permission_broker import matching_grant, arguments_digest
 from .operation_policy import decide_tool_operation
@@ -21,19 +22,28 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeo
     child_execution = execution_id + "__" + hashlib.sha256(key.encode()).hexdigest()[:16]
     deadline = time.monotonic() + timeout
     def failed(code, detail):
-        runtime_metadata["effect_state"] = "partial" if state["receipts"] else "ambiguous"
+        runtime_metadata["effect_state"] = "partial" if state["receipts"] else "not_committed"
         # Keep committed prefix evidence on protocol/launch failures. It must
         # remain inspectable and must never be replayed as a fresh operation.
         return {"error": code, "detail": detail,
-            "effect_state": "partial" if state["receipts"] else "ambiguous",
+            "effect_state": "partial" if state["receipts"] else "not_committed",
             "_child_receipts": state["receipts"], "files": state["files"]}
     for _ in range(21):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return failed("AUTHORED_HOST_TIMEOUT", "The Host bridge exhausted its invocation time allowance")
-        response = pipeline._execute_isolated("authored_host_python",
-            {**inputs, "_workspace": str(ctx.workspace_path), "_dynamic_spec": spec, "_host_results": journal},
-            remaining, cancellation_event=ctx.cancellation, diagnostics=diagnostics, runtime_metadata=runtime_metadata)
+        from .workspace_candidate_runtime import WorkspaceCandidateRuntime
+        producer = WorkspaceCandidateRuntime(pipeline, ctx, runtime_metadata["registration"], runtime_metadata["owner"], tool)
+        try:
+            frame = producer.preview("authored_host_python", inputs, remaining,
+                trusted_arguments={"_dynamic_spec": spec, "_host_results": journal}, copy_inputs=False, diagnostics=diagnostics)
+            response = frame["result"]
+        except SandboxDenied as exc:
+            return failed(exc.code, str(exc))
+        finally:
+            runtime_metadata.setdefault("native_producers", []).append({"role": "host_bridge", **producer.last_render})
+            if isinstance(producer.last_render.get("cleanup"), dict):
+                runtime_metadata["cleanup"] = producer.last_render["cleanup"]
         cleanup = runtime_metadata.get("cleanup")
         if isinstance(cleanup, dict) and (cleanup.get("complete") is not True or cleanup.get("issues")):
             return failed("PROCESS_CLEANUP_INCOMPLETE", "Bridge cleanup is unconfirmed; no further Host calls may start")

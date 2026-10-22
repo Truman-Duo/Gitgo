@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .applicability import assess_lesson
 from .models import Lesson
+from backend.core.tools.file_operations import checker_covers
 
 
 def _load(workspace: Path, args: dict) -> list[Lesson]:
@@ -80,7 +81,7 @@ def relevant_diagnostics(workspace: Path, path: Path, before: str, after: str,
                     count > 0 and span["start_line"] <= offset + count and span["end_line"] > offset
                     for span in spans):
                 continue
-        if lesson.source == "auto_harvested" and not is_registered(lesson) and excerpts and operation in {"edit_file", "write_file"}:
+        if lesson.source == "auto_harvested" and not is_registered(lesson) and excerpts and operation in {"edit_file", "write_file", "delete_file"}:
             from .excerpts import edit_touches_excerpts
             if not edit_touches_excerpts(before, after, excerpts):
                 continue  # Other paragraphs are not a match merely because the file path is shared.
@@ -90,7 +91,7 @@ def relevant_diagnostics(workspace: Path, path: Path, before: str, after: str,
         registered = (is_registered(lesson)
                       and check.get("authority") == "registered"
                       and check.get("mode") == "violation_pattern"
-                      and operation in lesson.dangerous_tools
+                      and checker_covers(operation, lesson.dangerous_tools)
                       and applicability.get("state") == "current")
         code, level = "LESSON_ADVISORY", "warning"
         if registered:
@@ -139,11 +140,31 @@ def check_candidate(candidate, args: dict) -> dict:
     # checks exist. If it fails, absence of mandatory checks is UNKNOWN.
     try:lessons=_load(candidate.workspace,args)
     except Exception as exc:raise LessonInventoryUnavailable(type(exc).__name__) from exc
-    registered=[l for l in lessons if _is_registered(l,candidate.workspace) and candidate.operation in l.dangerous_tools]
+    registered=[l for l in lessons if _is_registered(l,candidate.workspace) and checker_covers(candidate.operation, l.dangerous_tools)]
     try:
         mandatory=relevant_diagnostics(candidate.workspace,candidate.path,candidate.before,candidate.after,
                                        candidate.operation,registered)
     except Exception as exc:raise MandatoryCheckUnavailable(type(exc).__name__) from exc
+    if not candidate.text_view_available:
+        # A textual trigger cannot prove a binary candidate is out of scope.
+        # Only an explicit path scope can exclude it; no empty-text pass.
+        try:
+            relative = candidate.path.relative_to(candidate.workspace)
+        except ValueError:
+            relative = candidate.path
+        mandatory = []
+        for lesson in registered:
+            paths = (lesson.check or {}).get("paths") or []
+            if paths and not any(relative == Path(p) for p in paths):
+                continue
+            semantic = lesson.to_dict()
+            for key in ("trigger_count", "applied_count", "violated_after_count", "recent_retrievals"):
+                semantic.pop(key, None)
+            mandatory.append({"code": "LESSON_CHECK_UNAVAILABLE", "level": "error", "lesson_id": lesson.id,
+                "lesson_version": hashlib.sha256(json.dumps(semantic, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+                "rule": lesson.rule[:2000], "trigger": lesson.trigger, "path": relative.as_posix(),
+                "applicability": {"state": "unknown", "reason": "binary_check_view_unavailable"},
+                "registered_check": True, "relevance": "unsupported_check_view"})
     # A stale active check must be refreshed/disabled through its actual scope;
     # it cannot silently disappear into ordinary advice.
     for d in mandatory:

@@ -52,13 +52,9 @@ class PolicyEngine:
                      changed_files: list[str] | None = None) -> "PolicyEngine":
         """从 contract.yaml 加载项目级策略配置和 contract 对象。"""
         from backend.core.policy.registry import load_checks
-        from backend.core.contract import ContractManager
-        contract = ContractManager.load(workspace_path)
+        # Checks read contract facts only when applicable to the task. A
+        # malformed action configuration must not prevent conversational admission.
         checks = load_checks(project_name, workspace_path)
-        # Inject contract into checks that accept it
-        for c in checks:
-            if hasattr(c, '_contract') and c._contract is None:
-                c._contract = contract
         return cls(checks=checks, changed_files=changed_files)
 
     def run(self, session: "SyncSession",

@@ -107,6 +107,14 @@ def inspect_post_checkpoint_invocations(
             continue
         effect_state = str(item.get("effect_state") or "ambiguous")
         state = str(item.get("state") or "unknown")
+        cleanup = item.get("runtime_cleanup")
+        if isinstance(cleanup, dict) and cleanup.get("complete") is not True:
+            findings.append({
+                "code": "NATIVE_CLEANUP_UNCONFIRMED", "tool_name": str(item.get("tool_name") or "unknown"),
+                "execution_id": str(item.get("execution_id") or ""), "runtime_cleanup": cleanup,
+                "effect_state": effect_state, "state": state, "journal": str(path),
+                "owner_scope": "process" if owner else "legacy_unscoped", "updated_at": updated_at,
+            })
         if state == "committed" and effect_state == "committed":
             code = "EFFECT_COMMITTED_AFTER_CHECKPOINT"
         else:
@@ -134,18 +142,16 @@ def inspect_worktree_recovery(record: dict | None) -> list[dict]:
         return [{"code": "WORKTREE_NOT_RESUMABLE", "state": state}]
     if not path.is_dir():
         return [{"code": "WORKTREE_PATH_MISSING", "path": str(path)}]
+    from .worktree import AgentWorktreeManager, WorktreeError
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=path,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=15, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        result = AgentWorktreeManager._run(path, ["git", "rev-parse", "HEAD"],
+                                           timeout_seconds=15, check=False)
+    except (OSError, WorktreeError):
         return [{"code": "WORKTREE_GIT_UNAVAILABLE", "path": str(path)}]
     if result.returncode != 0:
         return [{"code": "WORKTREE_INVALID", "path": str(path)}]
     expected = str(record.get("result_commit") or "") if state == "sealed" else ""
-    if expected and result.stdout.strip() != expected:
+    if expected and result.stdout.decode("utf-8", errors="replace").strip() != expected:
         return [{"code": "WORKTREE_HEAD_DRIFT", "path": str(path)}]
     return []
 
@@ -386,7 +392,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             prior_recovery.get("resume_forbidden") or commit_unknown or profile_error
             or provisional_terminal or any(
                 str(item.get("code") or "").startswith("WORKTREE_")
-                or item.get("code") == "INVOCATION_EVIDENCE_UNAVAILABLE"
+                or item.get("code") in {"INVOCATION_EVIDENCE_UNAVAILABLE", "NATIVE_CLEANUP_UNCONFIRMED"}
                 for item in reasons
             )
         )

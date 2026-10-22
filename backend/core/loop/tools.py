@@ -39,9 +39,13 @@ class ToolRegistry:
     def from_contract(cls, workspace_path, tool_names: list[str]
                       ) -> "ToolRegistry":
         """从 contract.yaml 读 ring_0_tools 配置。"""
-        from backend.core.contract import ContractManager
+        from backend.core.contract import ContractManager, ContractStateUnavailable
         from pathlib import Path
-        contract = ContractManager.load(Path(workspace_path))
+        try:
+            contract = ContractManager.load(Path(workspace_path))
+        except ContractStateUnavailable:
+            # Kernel restrictions remain active when optional config is unreadable.
+            contract = None
         ring_0 = None
         if contract:
             raw = contract.to_dict()

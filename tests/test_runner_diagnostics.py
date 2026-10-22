@@ -28,7 +28,7 @@ def test_captured_stderr_survives_each_pipeline_result(tmp_path_factory, monkeyp
     process = AgentProcess(process_id="diagnostic", role="worker", ring_level=RingLevel.RING_0,
                            worktree_path=str(tmp_path_factory), session=AgentSession())
     ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(tmp_path_factory))
-    tool = AgentTool("exec_command", "test", {}, lambda args: pytest.fail("inline execution"),
+    tool = AgentTool("list_files", "read-only transport diagnostics", {}, lambda args: pytest.fail("inline execution"),
                      execution_contract=NATIVE_PROCESS)
     events = []
     ctx.event_bus.subscribe("ToolResultReady", lambda event: events.append(event.data))

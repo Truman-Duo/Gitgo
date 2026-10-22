@@ -203,11 +203,15 @@ def _content_lines(content: str) -> list[str]:
 
 
 def document_create(args: dict) -> dict:
-    """Create a common project artifact through one stable adapter contract.
+    from .document_service import document_create as create
+    return create(args)
 
-    This is a trusted built-in output tool, not arbitrary Python. It shares the
-    normal workspace confinement, approval, receipt, cancellation and worktree
-    paths used by every development tool.
+
+def render_document(args: dict) -> dict:
+    """Internal native producer; Task Runtime supplies a private workspace.
+
+    This handler is not a model-visible tool or a formal file commit service.
+    Third-party format processing stays inside the native process boundary.
     """
     workspace = None
     path = None

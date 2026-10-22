@@ -55,9 +55,8 @@ def create_formal_commit(
     next_n = max(max_n + 1, repo_max)
 
     if workspace_path:
-        counter_file = Path(workspace_path) / ".gitgo" / "next_number"
-        counter_file.parent.mkdir(parents=True, exist_ok=True)
-        counter_file.write_text(str(next_n))
+        from backend.core.sync_session.state import reserve_formal_number
+        next_n = reserve_formal_number(workspace_path, next_n)
 
     msg = message or build_commit_template(
         commits, project,

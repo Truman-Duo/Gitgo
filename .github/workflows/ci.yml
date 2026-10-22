@@ -205,7 +205,7 @@ jobs:
           $compiler = (Get-Command clang.exe -ErrorAction Stop).Source
           & $compiler --version
           $output = Join-Path $env:RUNNER_TEMP 'gitgo-storage-native'
-          python -B scripts/build_storage_native.py --compiler $compiler --output $output --sqlite-header .gitgo/ci-sqlite/sqlite3.h --selftest
+          python -B scripts/build_storage_native.py --compiler $compiler --output $output --sqlite-header dev-artifacts/ci-sqlite/sqlite3.h --selftest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:GITGO_STORAGE_NATIVE_TEST_LIBRARY = Join-Path $output 'gitgo-storage-scope.dll'
           $env:GITGO_STORAGE_CANONICAL_TEST = "1"
