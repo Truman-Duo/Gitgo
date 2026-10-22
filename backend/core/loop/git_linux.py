@@ -86,6 +86,36 @@ class LinuxPins:
         # No credentials/configuration bytes are copied into disk scratch.
         return f'/proc/{os.getpid()}/fd/{self.files[Path(os.path.abspath(path))]}'
 
+    def worktree_views(self, common):
+        # Git prune decides whether registrations are dead by examining each
+        # linked directory. A private /tmp must not turn live Host worktrees
+        # into apparently missing paths and silently prune their registrations.
+        from backend.core.sandbox_read import ReadRoot
+        records = Path(common) / 'worktrees'
+        try:
+            selected = self.directory(records)
+        except FileNotFoundError:
+            return
+        with ExitStack() as opened:
+            readable = os.open(f'/proc/self/fd/{selected}', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            opened.callback(os.close, readable)
+            names = os.listdir(readable)
+            if len(names) > 256:
+                raise GitBoundaryError('GIT_CONFIG_UNSUPPORTED', 'Worktree inventory exceeds its bound')
+            with ReadRoot(records) as root:
+                for name in names:
+                    with root.open(f'{name}/gitdir') as metadata:
+                        raw = metadata.read_bytes(max_bytes=32768).strip()
+                    target = Path(os.fsdecode(raw))
+                    if not target.is_absolute() or target.name != '.git':
+                        raise GitBoundaryError('GIT_CONFIG_UNSUPPORTED', 'Worktree registration has an unsupported target')
+                    try:
+                        self.directory(target.parent)
+                    except FileNotFoundError:
+                        # A genuinely absent directory remains eligible for
+                        # Git's normal expiration policy. Other errors refuse.
+                        continue
+
     def wrap(self, command, *, cwd, writable):
         from backend.core.sandbox_linux import trusted_bwrap
         helper = trusted_bwrap(cwd)

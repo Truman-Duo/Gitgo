@@ -318,6 +318,8 @@ def protected_git(cwd, args):
         command[offset:offset] = [part for k, v in settings for part in ("-c", f"{k}={v}")]
         if os.name != 'nt':
             from .git_linux import writable_git_paths
+            if body[:2] == ['worktree', 'prune']:
+                pins.worktree_views(common)
             command = pins.wrap(command, cwd=cwd, writable=writable_git_paths(cwd, gitdir, common, body))
         yield command, env
 

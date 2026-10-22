@@ -1327,12 +1327,15 @@ def test_linux_socket_policy_survives_descendant_exec(linux_box):
     ('list_files', {'pattern': '*.txt'}),
     ('search_text', {'pattern': 'needle', 'literal': True}),
 ])
-def test_packaged_host_search_preserves_workspace_protocol(cross_platform_box, handler, arguments):
+def test_packaged_host_search_preserves_workspace_protocol(cross_platform_box, handler, arguments, monkeypatch):
     workspace, policy, _ = cross_platform_box
     configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
     if not configured:
         pytest.skip('Source job; packaged search requires an actual built Host')
     host = Path(configured).resolve(strict=True)
+    # Final-package acceptance must select the bundled engine, without the
+    # source CI builder's separately provisioned executable override.
+    monkeypatch.delenv('GITGO_RIPGREP_PATH', raising=False)
     (workspace / 'search.txt').write_text('needle', encoding='utf-8')
     invocation = {'_workspace': str(policy.workspace), **arguments}
     source = (

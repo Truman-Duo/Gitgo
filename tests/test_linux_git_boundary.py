@@ -65,6 +65,22 @@ def test_late_config_and_include_replacements_do_not_enter_git(repository):
         assert not result.stdout.strip() and not marker.exists()
 
 
+def test_pruning_does_not_forget_other_live_worktrees_outside_current_view(repository):
+    repo, base, raw = repository
+    paths = [base / 'first' / 'child', base / 'second' / 'child']
+    for target in paths:
+        target.parent.mkdir()
+        with protected_git(repo, ['git', 'worktree', 'add', '--detach', str(target), 'HEAD']) as (command, env):
+            execute(command, repo, env)
+    with protected_git(repo, ['git', 'worktree', 'remove', '--force', str(paths[0])]) as (command, env):
+        execute(command, repo, env)
+    with protected_git(repo, ['git', 'worktree', 'prune']) as (command, env):
+        execute(command, repo, env)
+    assert os.fsencode(paths[1]) in raw('worktree', 'list', '--porcelain')
+    with protected_git(repo, ['git', 'worktree', 'remove', '--force', str(paths[1])]) as (command, env):
+        execute(command, repo, env)
+
+
 def test_metadata_directory_replacement_cannot_change_selected_repository(repository):
     repo, base, raw = repository
     head = raw('rev-parse', 'HEAD')
