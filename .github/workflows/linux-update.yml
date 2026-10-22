@@ -30,7 +30,9 @@ jobs:
         with:
           bun-version: '1.4.2'
       - name: Native build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y patchelf
+        # Alpha2.1 adds native source tests to the update branch's full suite.
+        # Match the native acceptance prerequisites; never bypass containment.
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap gcc patchelf libseccomp2
       - name: Test and build dependencies
         run: |
           umask 022
@@ -43,7 +45,12 @@ jobs:
       - name: Full Linux source regression
         run: |
           umask 022
-          python -B -m pytest tests -q --tb=short --junitxml=linux-source.xml
+          sudo systemd-run --quiet --wait --pipe --collect --uid="$(id -u)" \
+            --working-directory="$PWD" --setenv="LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
+            --setenv="GITGO_RIPGREP_PATH=$GITGO_RIPGREP_PATH" \
+            --setenv="GITGO_BUN=$GITGO_BUN" --unit=gitgo-update-source -p Delegate=yes \
+            "$(which python)" -B scripts/run_linux_sandbox_scope.py -- \
+            "$(which python)" -B -m pytest tests -q --tb=short --junitxml=linux-source.xml
       - name: Dashboard tests and production build
         working-directory: cli/dashboard
         run: |
