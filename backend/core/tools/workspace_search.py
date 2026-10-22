@@ -37,9 +37,10 @@ class StreamOutcome:
 
 def stream_process(argv, cwd, separator, consume, deadline):
     """Drain both pipes concurrently, with bounded queues and record sizes."""
+    from backend.core.installation_lease import child_options
     proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            creationflags=creation_flags(), start_new_session=os.name != "nt")
+                            creationflags=creation_flags(), start_new_session=os.name != "nt", **child_options())
     # Opening the Windows NUL device can be denied inside AppContainer.
     # Search never reads caller input: a private pipe closed by the parent
     # supplies EOF without device access or inheriting the Host's stdin.

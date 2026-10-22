@@ -8,6 +8,7 @@ import { colors } from "../../theme/index.js";
 import type { ConfigTabProps } from "./types.js";
 import { notifyGeneralConfigChanged } from "../../hooks/useGeneralConfig.js";
 import { applyTextOp } from "../../hooks/useTextInput.js";
+import { productVersion } from "../../backend/update.js";
 
 type SettingId = "verbose" | "language" | "auto_compact" | "agent_routing" | "external_editor" | "web_search_mode" | "web_search_engine" | "web_search_endpoint" | "terminal" | "prompt_profile" | "diff_layout";
 type Settings = {
@@ -70,6 +71,14 @@ export const GeneralTab = memo(function GeneralTab({
   const [terminalWarning, setTerminalWarning] = useState("");
   const [detectingTerminals, setDetectingTerminals] = useState(true);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [version, setVersion] = useState("Loading…");
+  useEffect(() => {
+    let active = true;
+    setVersion("Loading…");
+    productVersion(client).then(value => { if (active) setVersion(value.version); })
+      .catch(() => { if (active) setVersion("Unavailable · reopen General to retry"); });
+    return () => { active = false; };
+  }, [client]);
   const refreshTerminals = useCallback(async () => {
     setDetectingTerminals(true);
     try {
@@ -246,6 +255,7 @@ export const GeneralTab = memo(function GeneralTab({
 
   return (
     <Box flexDirection="column" flexGrow={1}>
+      <Text dimColor>{"Gitgo Version".padEnd(18)}{version} (read-only)</Text>
       {ROWS.map((item, index) => {
         const selected = contentFocused && index === row;
         const isEditing = editing === item.id;

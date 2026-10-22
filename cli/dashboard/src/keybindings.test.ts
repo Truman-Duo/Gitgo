@@ -7,6 +7,18 @@ function names(scene: Parameters<typeof getKeybindings>[0]): string[] {
 }
 
 describe('scene-owned command registry', () => {
+  test('/update belongs only to the project-list homepage, including manual dispatch', async () => {
+    const ctx: any = {client: {callTool: async () => {throw new Error('must not call backend');}},
+      projects: [], sel: 0, activeProject: null, refresh: async () => {}};
+    expect(getCommands('projects').map(item => item.label)).toContain('/update');
+    expect(getCommands('projects', '/upd', 'zh')[0]?.description).toBe('软件更新');
+    expect((await executeCommand('/update', {...ctx, scene: 'projects'})).showPanel?.overlay).toBe('updatePanel');
+    expect((await executeCommand('/update apply', {...ctx, scene: 'projects'})).showPanel).toBeUndefined();
+    for (const scene of ['workspace', 'agent_detail', 'process_list'] as const) {
+      expect(getCommands(scene).map(item => item.label)).not.toContain('/update');
+      expect((await executeCommand('/update', {...ctx, scene})).showPanel).toBeUndefined();
+    }
+  });
   test('ProcessList exposes only its actions and scene help', () => {
     expect(getCommands('process_list').map(item => item.label).sort()).toEqual([
       '/archive', '/create', '/help', '/rename',

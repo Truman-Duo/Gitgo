@@ -18,6 +18,45 @@ function terminalStreams() {
   return {stdin, stdout, stderr};
 }
 
+describe("General product identity", () => {
+  for (const failed of [false, true]) test(`Host version is read-only (${failed ? "unavailable" : "available"})`, async () => {
+    const calls: any[] = [];
+    const streams = terminalStreams(); let output = "";
+    streams.stdout.on("data", (data: Buffer) => {output += data.toString();});
+    const client: BackendClient = {ready: true, close() {}, async callTool(operation, args = {}) {
+      calls.push({operation, args});
+      if (operation === "product.version") {
+        if (failed) throw new Error("private-transport-error");
+        return {product_id: "gitgo-terminal", version: "9.0.0-test.3"};
+      }
+      if (operation === "config.get") return {version: "fake-editable-version", verbose: false};
+      if (operation === "config.terminals") return {options: [], warnings: []};
+      return {ok: true};
+    }};
+    function Fixture() {
+      const input = useTextInput();
+      return <InputProvider><GeneralTab client={client} project="" cmdInput={input}
+        onFooter={() => {}} report={() => {}} contentFocused
+        shell={{back() {}, goToTab() {}, tabPrev() {}, tabNext() {}, leaveContent() {}}}/></InputProvider>;
+    }
+    const root = renderSync(<Fixture/>, {...streams, patchConsole: false, exitOnCtrlC: false});
+    try {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(output).toContain("Gitgo Version");
+      expect(output).toContain(failed ? "Unavailable" : "9.0.0-test.3");
+      expect(output).not.toContain("fake-editable-version");
+      expect(output).not.toContain("private-transport-error");
+      // Version does not occupy an editable navigation row. Enter still
+      // edits Verbose; it never creates a config.version write.
+      streams.stdin.write("\r"); await new Promise(resolve => setTimeout(resolve, 40));
+      streams.stdin.write("\r"); await new Promise(resolve => setTimeout(resolve, 40));
+      expect(calls.filter(v => v.operation === "config.set")).toEqual([
+        {operation: "config.set", args: {key: "verbose", value: false}},
+      ]);
+    } finally {root.unmount(); root.cleanup(); streams.stdin.destroy(); streams.stdout.destroy(); streams.stderr.destroy();}
+  });
+});
+
 describe("General network configuration", () => {
   test("saves an engine choice and an endpoint through the shared input router", async () => {
     const calls: Array<{operation: string; args: Record<string, unknown>}> = [];

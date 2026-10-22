@@ -50,12 +50,13 @@ type Props = {
   startupTerminalSetup?: boolean;
   startupNotice?: string;
   onTerminalSetupComplete?: () => Promise<{completed: boolean; message: string}>;
+  onUpdateExit?: () => Promise<void>;
 };
 
 const appStore = createReducerStore<AppState, AppAction>(reducer, initialAppState());
 
 export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalSetup = false,
-  startupNotice = "", onTerminalSetupComplete }: Props) {
+  startupNotice = "", onTerminalSetupComplete, onUpdateExit }: Props) {
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
@@ -617,6 +618,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     sendChat: (text: string) => submitInput(text),
     verbose: generalConfig.verbose,
     onSettingSaved,
+    onUpdateExit,
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");

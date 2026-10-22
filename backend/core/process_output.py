@@ -52,6 +52,9 @@ def collect_output(proc, *, timeout, limit, terminate, input=None,
     deadline = time.monotonic() + timeout
     try:
         while proc.poll() is None or any(thread.is_alive() for thread in threads):
+            if proc.poll() is not None and getattr(proc, "_gitgo_windows_scope", None) is not None:
+                from backend.core.process_control import finish_scope
+                finish_scope(proc)
             if cancel_event is not None and cancel_event.is_set():
                 raise ProcessCancelled("process cancelled")
             if overflow.is_set():

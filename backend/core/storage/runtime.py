@@ -80,6 +80,36 @@ def _protected_checkpoint_catalogue():
         return catalogue(db)
 
 
+def validate_in_memory_migrations() -> None:
+    """Validate this runtime's SQL definitions without any user's storage.
+
+    Connection creation stays inside the storage facade. No path resolution,
+    ConfigManager, LRU writer, WAL or migration of a live database is involved.
+    """
+    validate_sqlite_runtime()
+    for migrations in (STATE_MIGRATIONS, OBSERVABILITY_MIGRATIONS):
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute("PRAGMA temp_store=MEMORY")
+            deadline = time.monotonic() + 5
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            def memory_only(action, first, second, _database, _trigger):
+                if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+                    return sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_PRAGMA and first.lower() != "quick_check":
+                    return sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_FUNCTION and str(second).lower() in ("load_extension", "readfile", "writefile"):
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+            connection.set_authorizer(memory_only)
+            for item in migrations:
+                connection.executescript(item.sql)
+            if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise StorageCorruptionDetected(":memory:", "Migration health check failed")
+        finally:
+            connection.close()
+
+
 def open_usability_source(project_root: str | Path) -> sqlite3.Connection:
     """Open committed traces read-only without a writer runtime or migrations.
 
