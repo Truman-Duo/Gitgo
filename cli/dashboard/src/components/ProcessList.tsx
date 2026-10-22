@@ -253,31 +253,31 @@ export const ProcessList = memo(function ProcessList({
                 </Text>
               ) : null}
               <Box ref={active ? selectedRow : undefined} flexDirection="row">
-              <Text
-                backgroundColor={style.bg}
-                color={style.fg}
-                bold={style.bold}
-              >
-                <Text color={dot.color}>● </Text>
-                {padEndWidth(
-                  truncate(title, nameWidth - 2),
-                  nameWidth - 2,
-                )}{" "}
-                {padEndWidth(
-                  truncate(process.status.replace(/_/g, " "), statusWidth),
-                  statusWidth,
-                )}{" "}
-                {process.cyclic
-                  ? "Cycle / blocked chain"
-                  : deps.length
-                    ? `← ${deps
-                        .slice(0, 2)
-                        .map((id) => id.slice(0, 6))
-                        .join(
-                          ", ",
-                        )}${deps.length > 2 ? ` +${deps.length - 2}` : ""}`
-                    : "—"}
-              </Text>
+                <Text
+                  backgroundColor={style.bg}
+                  color={style.fg}
+                  bold={style.bold}
+                >
+                  <Text color={dot.color}>● </Text>
+                  {padEndWidth(
+                    truncate(title, nameWidth - 2),
+                    nameWidth - 2,
+                  )}{" "}
+                  {padEndWidth(
+                    truncate(process.status.replace(/_/g, " "), statusWidth),
+                    statusWidth,
+                  )}{" "}
+                  {process.cyclic
+                    ? "Cycle / blocked chain"
+                    : deps.length
+                      ? `← ${deps
+                          .slice(0, 2)
+                          .map((id) => id.slice(0, 6))
+                          .join(
+                            ", ",
+                          )}${deps.length > 2 ? ` +${deps.length - 2}` : ""}`
+                      : "—"}
+                </Text>
               </Box>
             </React.Fragment>
           );

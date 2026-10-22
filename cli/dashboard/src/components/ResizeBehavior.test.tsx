@@ -143,15 +143,17 @@ test('subprocess selection scrolls into view without displacing the footer', asy
   function Fixture({selected}: {selected: number}) {
     const {columns, rows} = useTerminalSize();
     return <Box height={rows} width="100%" flexDirection="column">
-      <ProcessList project="fixture" loopData={loopData} cols={columns} selIdx={selected}/>
+      <InputProvider>
+        <ProcessList project="fixture" loopData={loopData} cols={columns} selIdx={selected}/>
+      </InputProvider>
     </Box>;
   }
   const root = renderSync(<Fixture selected={0}/>, tty);
   try {
     await settle(); root.rerender(<Fixture selected={34}/>); await settle();
-    selectedRowIsVisible(tty, 'WORKER-34');
+    selectedRowIsVisible(tty, 'id-34');
     tty.stdout.columns = 36; tty.stdout.rows = 14; tty.stdout.emit('resize'); await settle();
-    selectedRowIsVisible(tty, 'WORKER-34');
+    selectedRowIsVisible(tty, 'id-34');
     expect(text((instances.get(tty.stdout) as any).rootNode)).toContain('detail');
   } finally { dispose(root, tty); }
 });

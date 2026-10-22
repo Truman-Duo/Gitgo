@@ -5,12 +5,12 @@ param(
     [string]$Ripgrep = "",
     [string]$RipgrepNotices = "",
     [string]$Output = "",
+    [string]$ArtifactOutput = "",
     [string]$InnoSetupCompiler = "",
     [switch]$BuildInstaller,
     [switch]$UpdateEvidence,
     [switch]$ManagedUpdate,
-    [string]$UpdateReleasePolicy = "",
-    [string]$ArtifactOutput = ""
+    [string]$UpdateReleasePolicy = ""
 )
 
 $ErrorActionPreference = "Stop"
