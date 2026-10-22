@@ -8,6 +8,8 @@
 
 首次启动选择检测到的终端并保存，然后在 `/config` 添加 Provider。Windows 凭据按当前用户加密保存。之后修改终端在下次启动生效，历史仍使用相同项目数据。
 
+Alpha 2.1 为实验性预发布，执行前需要满足[原生沙箱配置](NATIVE_SANDBOX.md)；缺少隔离或操作员前提时会明确拒绝。完整限制见 [Alpha 2.1](ALPHA_2_1.md)。
+
 ## 源码启动
 
 在仓库根目录运行：
@@ -26,4 +28,4 @@ run_dashboard_native.bat
 
 ## 平台范围
 
-本次完整原生交互验收在 Windows Git Bash 完成，不表示所有 Windows 终端尺寸、旧系统或 macOS/Linux 均已通过。其他平台和沙箱适配见 [已知限制](KNOWN_ISSUES.md)。
+旧 Alpha 2 完整原生交互验收在 Windows Git Bash 完成。Alpha 2.1 沙箱本期使用 PowerShell，普通安装与最终可见终端未完成本期验收；旧终端结果不能替代当前包验证。其他平台和沙箱适配见 [已知限制](KNOWN_ISSUES.md)。

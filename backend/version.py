@@ -1,3 +1,3 @@
 """Product version shared by Python entry points."""
 
-__version__ = "1.0.0-alpha.2"
+__version__ = "1.0.0-alpha.2.1"

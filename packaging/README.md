@@ -18,11 +18,11 @@ powershell -ExecutionPolicy Bypass -File packaging/release_windows.ps1 -BuildIns
 
 分别进行验证、验证后生成 staging、验证后生成 staging 和安装器。流程包括工作树/提交格式、运行时安全、被跟踪内容扫描、后端/前端测试、构建及冻结后端 smoke。既有扫描未覆盖全部隐私引用，发布候选仍需人工核对。
 
-脚本不会推送、安装、重写 Git 历史或下载构建工具。`-AllowDirty` 只用于本地演练，不能作为正式发布证明。输出目录和 EXE 不进入源码提交。构建输出目录必须为空，每次默认生成新目录，避免旧文件混入。
+脚本不会推送、安装、重写 Git 历史或下载构建工具。`-AllowDirty` 只用于本地演练，不能作为正式发布证明。输出目录和 EXE 不进入源码提交。构建输出目录必须为空，每次默认生成新目录，避免旧文件混入。可用 `-Output` 指定 staging、`-ArtifactOutput` 指定 ZIP 与校验文件目录；开发者应使用 `dev-artifacts/` 等开发目录。
 
 流程先核对产品、Dashboard 和 Host 版本，再运行冻结 Host/daemon/工具及历史连续性检查；最后生成带版本的完整 ZIP、SHA256 文件与包内 build-manifest.json。清单记录构建 commit/tree、工作树是否有修改和逐文件摘要；真实 API 与人工终端验收另行记录。ZIP 不会覆盖同名旧包。
 
-构建用 pytest 可由 `-TestPackages` 提供，默认检查本地 `.gitgo/dev-test-deps`；PyInstaller 使用独立构建依赖，不要求安装进产品运行环境。缺少依赖时明确失败。安装器使用相同产品版本及 Windows 文件版本，需要已安装 Inno Setup。
+构建用 pytest 可由 `-TestPackages` 提供，默认检查开发目录 `dev-artifacts/test-packages`；PyInstaller 使用独立构建依赖，不要求安装进产品运行环境。缺少依赖时明确失败。安装器使用相同产品版本及 Windows 文件版本，需要已安装 Inno Setup。
 
 ## macOS package and installer
 

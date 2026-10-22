@@ -1,5 +1,13 @@
 # Gitgo 版本
 
+## Alpha 2.1 当前候选（2026-10-22）
+
+产品、Dashboard 与 Native Host：`1.0.0-alpha.2.1`；Windows 文件版本：`1.0.0.3`。独立分支 `release/alpha2.1`，发布标签 `v1.0.0-alpha.2.1`。本期包含已完成的沙箱与知识、提示词、工作台及任务状态整合；`managed-update-v1`、`history-resize-v1` 留给完整 Alpha 3。
+
+新版本包按当前干净提交重新生成，不复用下述旧 Alpha 2 ZIP 的版本和验收结论。实际发布资产、源提交、SHA256 及已知限制见 [Alpha 2.1 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.2.1)。范围与接续要求见 [Alpha 2.1](ALPHA_2_1.md)，测试口径见 [验证](VALIDATION.md)。
+
+下文为 2026-10-11 Alpha 2 历史记录；其中“当前”“尚未发布”均仅指当时版本。
+
 记录日期：2026-10-11。Gitgo 分别记录源码候选、组件版本、通信协议、数据库迁移和发布资产。
 
 ## Alpha 2 源码候选

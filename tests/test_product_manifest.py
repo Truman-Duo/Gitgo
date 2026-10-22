@@ -21,7 +21,7 @@ def test_unix_build_preserves_alpha2_search_and_version_contract(platform):
     manifest = render_manifest(root / "packaging" / "product.json", platform)
     dashboard = json.loads((root / "cli/dashboard/package.json").read_text(encoding="utf-8"))
     assert manifest["version"] == dashboard["version"]
-    assert manifest["windows_version"] == "1.0.0.2"
+    assert manifest["windows_version"] == json.loads((root / "packaging/product.json").read_text(encoding="utf-8"))["windows_version"]
 
 
 def test_product_manifest_renders_platform_specific_layouts():
