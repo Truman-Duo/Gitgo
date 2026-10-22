@@ -37,7 +37,17 @@ def execute_test_seeds(workspace, args, validation=None):
                 # Python's Windows mode-0700 temporary directories do not.
                 (workspace / ".pytest_cache").mkdir(exist_ok=True)
                 capture = ["-p", "backend.core.tools.sandbox_pytest", "--capture=sys", "--log-file=.pytest_cache/gitgo-seed-" + str(seed) + ".log"]
-            completed = subprocess.run(workspace_python_command(["python", "-m", "pytest", target, "-q", "--rootdir=.", "--confcutdir=.", *capture], workspace),
+            arguments = ["python", "-m", "pytest", target, "-q", "--rootdir=.", "--confcutdir=.", *capture]
+            if sys.platform == "win32" and not getattr(sys, "frozen", False):
+                # The invocation-only plugin belongs to this trusted runtime,
+                # not the project or the child's ambient Python search path.
+                # Embedded Python can ignore cwd/PYTHONPATH or name another
+                # checkout in ._pth. Bind the producer's own source explicitly;
+                # preserve project imports through workspace_python_command.
+                bootstrap = ("import runpy,sys;sys.path.insert(0,sys.argv.pop(1));"
+                             "runpy.run_module('pytest',run_name='__main__',alter_sys=True)")
+                arguments = ["python", "-c", bootstrap, str(Path(__file__).resolve().parents[3]), *arguments[3:]]
+            completed = subprocess.run(workspace_python_command(arguments, workspace),
                 cwd=str(workspace), env=env, capture_output=True, text=True, encoding="utf8", errors="replace",
                 timeout=timeout, shell=False)
             output = (completed.stdout or "") + (completed.stderr or "")

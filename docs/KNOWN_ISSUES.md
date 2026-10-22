@@ -1,5 +1,13 @@
 # 已知限制
 
+## 维护者接续候选
+
+`feat/alpha3-integration-v1` 接续 PR #35 的 `36c1ff7`，保留作者的来源历史。维护补丁显式绑定 Windows 注册测试的可信源码适配器，补齐工作台构建依赖及发行哈希，并让构建预检和最终包冒烟实际调用文档验证器。Context 连发导航改为累积状态更新；剪贴板回归使用异步受限子进程及匹配的测试期限。
+
+Linux 更新 worker 使用发行版自带的 bubblewrap AppArmor 配置，并先验证无特权网络命名空间能启动。它不关闭全局 userns 限制、不增加无隔离回退、不授予工具额外能力；实际原生结果以维护分支 CI 为准。历史候选出现过 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`，工具与委托目录存在并不证明内核/配置前提满足。
+
+下列来源记录保留原失败事实；其中已由维护补丁处理的依赖、源码适配器和测试问题，不再作为当前源码缺口。macOS 普通 daemon、Linux 受保护 Git，以及真实业务差异升级/旧数据、正式终端和发行验收仍未完成。源码回归不能代替最终包功能或用户试用。
+
 ## Alpha3 集成候选的已查明限制（2026-10-22）
 
 - macOS 不只是“尚未验收”：继承的安全读取后端没有 Darwin 实现，新工作区的旧会话探测也会先失败，阻断治理初始化和普通 daemon，错误为 `DAEMON_START_FAILED / GOVERNANCE_STATE_UNAVAILABLE`。不以普通文件读取或空状态绕过。

@@ -196,7 +196,8 @@ test('context tabs keep the active process visible when there are many processes
     process_id: `id-${i}`, display_name: `WORKER-${i}`, actor_kind: 'worker',
     created_at: String(i).padStart(3, '0'), model_id: `MODEL-${i}`,
   }]));
-  const events = Array.from({length: 25}, (_, i) => ({afterMs: 100 + i * 10, input: '', key: {rightArrow: true}}));
+  // Key repeats can arrive in one render batch on a busy terminal.
+  const events = Array.from({length: 25}, () => ({afterMs: 100, input: '', key: {rightArrow: true}}));
   const root = renderSync(<Box width="100%" height={20}><InputProvider verificationInput={events}>
     <RuntimeContextPanel project="fixture" processes={processes} onDismiss={() => {}}/>
   </InputProvider></Box>, tty);

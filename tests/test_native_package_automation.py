@@ -82,3 +82,21 @@ def test_build_lock_has_exact_versions_and_real_digest_shape():
     for entry in entries:
         assert re.match(r'[\w.-]+==[^\s;]+', entry)
         assert re.search(r'--hash=sha256:[a-f0-9]{64}', entry)
+
+
+def test_locked_build_covers_declared_portable_runtime_dependencies():
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    locked = {}
+    for line in (ROOT / 'packaging/requirements-build.lock').read_text().splitlines():
+        match = re.match(r'([\w.-]+)==([^\s;]+)', line)
+        if match:
+            locked[canonicalize_name(match[1])] = match[2]
+    for line in (ROOT / 'requirements-portable.txt').read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        requirement = Requirement(line)
+        name = canonicalize_name(requirement.name)
+        assert name in locked, f'Portable runtime dependency missing from build lock: {name}'
+        assert locked[name] in requirement.specifier, f'Locked {name} violates portable runtime requirements'

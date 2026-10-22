@@ -32,7 +32,7 @@ jobs:
       - name: Native build prerequisites
         # Alpha2.1 adds native source tests to the update branch's full suite.
         # Match the native acceptance prerequisites; never bypass containment.
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap gcc patchelf libseccomp2
+        run: bash scripts/prepare_linux_update_ci.sh
       - name: Test and build dependencies
         run: |
           umask 022

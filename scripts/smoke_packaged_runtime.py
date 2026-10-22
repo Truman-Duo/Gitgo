@@ -123,11 +123,13 @@ def smoke(executable: Path) -> None:
     # than relaxing a missing-module failure inside the authority boundary.
     probe = subprocess.run([str(executable), INTERNAL_ROLE_FLAG, "python", "-I", "-c",
         "from backend.core.loop.permission_broker import _runtime_implementation_digest;"
+        "from backend.core.workbench.sheets import _validate;"
+        "_validate({'nbformat':4,'nbformat_minor':5,'metadata':{},'cells':[]});"
         "print(_runtime_implementation_digest())"],
         capture_output=True, text=True, encoding="utf8", errors="replace", timeout=30)
     digest = probe.stdout.strip()
     if probe.returncode or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-        raise RuntimeError("Packaged tool implementation identity is unavailable: " + probe.stderr[-2000:])
+        raise RuntimeError("Packaged tool identity or workbench validation is unavailable: " + probe.stderr[-2000:])
 
     with tempfile.TemporaryDirectory(prefix="gitgo-packaged-smoke-") as raw:
         root = Path(raw)

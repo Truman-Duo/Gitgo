@@ -34,11 +34,12 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
       onDismiss();
       return;
     }
-    if (matchChord("left", input, key) || matchChord("up", input, key)) {
-      setSelectedId(rows[Math.max(0, index - 1)]?.process_id || "");
-    } else if (matchChord("right", input, key) || matchChord("down", input, key)) {
-      setSelectedId(rows[Math.min(rows.length - 1, index + 1)]?.process_id || "");
-    }
+    const direction = matchChord("left", input, key) || matchChord("up", input, key) ? -1
+      : matchChord("right", input, key) || matchChord("down", input, key) ? 1 : 0;
+    if (direction) setSelectedId(previous => {
+      const current = Math.max(0, rows.findIndex(row => row.process_id === previous));
+      return rows[Math.max(0, Math.min(rows.length - 1, current + direction))]?.process_id || "";
+    });
   }, {isActive: interactive});
 
   const sideBySide = w >= 88;
