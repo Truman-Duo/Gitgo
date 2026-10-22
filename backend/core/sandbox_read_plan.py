@@ -47,7 +47,7 @@ class ReadPlan:
         def identity(key):
             raw = value[key]
             if (type(raw) is not list or len(raw) != 3 or raw[0] != sys.platform
-                    or sys.platform not in {'linux', 'win32'}
+                    or sys.platform not in {'linux', 'win32', 'darwin'}
                     or any(type(v) is not int or not 0 <= v < 2**128 for v in raw[1:])):
                 raise ReadBoundaryError('Invalid approved object identity')
             return ObjectIdentity(*raw)

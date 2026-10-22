@@ -28,7 +28,7 @@ from backend.core.tools.catalog import build_workspace_tools
 from backend.core.tools.workspace_tools import read_file
 from backend.core.tools.registrations import file_read
 
-pytestmark = pytest.mark.skipif(sys.platform not in {'linux', 'win32'}, reason='Native read backend required')
+pytestmark = pytest.mark.skipif(sys.platform not in {'linux', 'win32', 'darwin'}, reason='Native read backend required')
 
 
 @pytest.fixture

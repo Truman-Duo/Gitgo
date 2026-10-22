@@ -11,7 +11,7 @@ from backend.core.sandbox_read import ReadBoundaryError, ReadRoot, relative_part
 from backend.core.tools.workspace_tools import read_file
 from backend.core.tools.registrations import file_read
 
-pytestmark = pytest.mark.skipif(sys.platform not in {'linux', 'win32'},
+pytestmark = pytest.mark.skipif(sys.platform not in {'linux', 'win32', 'darwin'},
                                 reason='No production read backend on this platform')
 
 

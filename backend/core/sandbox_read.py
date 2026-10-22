@@ -157,6 +157,11 @@ class ReadRoot:
                 self._handle = self._windows.root(root)
                 self._owners.callback(self._windows.close, self._handle)
                 self.identity = self._windows.identity(self._handle, directory=True)
+            elif sys.platform == 'darwin':
+                from backend.core import sandbox_read_darwin as darwin
+                self._handle = darwin.root(root)
+                self._owners.callback(os.close, self._handle)
+                self.identity = darwin.identity(self._handle)
             else:
                 raise ReadBoundaryError('No stable read backend is available')
         except BaseException:
@@ -198,6 +203,12 @@ class ReadRoot:
                 owners.callback(os.close, fd)
                 if _linux_identity(fd) != identity:
                     raise ReadBoundaryError('Opened descriptor identity changed')
+            elif sys.platform == 'darwin':
+                from backend.core import sandbox_read_darwin as darwin
+                fd, identity = darwin.open_file(self._handle, '/'.join(parts), owners,
+                                               metadata_only=metadata_only)
+                if metadata_only:
+                    return PinnedObject(identity, owners)
             else:
                 import msvcrt
                 parent = self._handle

@@ -27,10 +27,14 @@ def test_non_windows_protected_git_refuses_before_executable_lookup(monkeypatch,
 
 def test_darwin_stable_read_refuses_without_ordinary_file_fallback(monkeypatch, tmp_path_factory):
     from backend.core import sandbox_read
+    from backend.core import sandbox_read_darwin
 
     # Exercise production dispatch with an existing file, not an OS emulation.
     (tmp_path_factory / "ordinary.txt").write_text("must stay unread", encoding="utf-8")
     monkeypatch.setattr(sandbox_read, "sys", SimpleNamespace(platform="darwin"))
+    def missing_kernel(*args):
+        raise sandbox_read.ReadBoundaryError('No stable read backend for this kernel')
+    monkeypatch.setattr(sandbox_read_darwin, 'root', missing_kernel)
     with pytest.raises(sandbox_read.ReadBoundaryError, match="No stable read backend"):
         with sandbox_read.ReadRoot(tmp_path_factory) as root:
             root.open("ordinary.txt")
@@ -38,9 +42,13 @@ def test_darwin_stable_read_refuses_without_ordinary_file_fallback(monkeypatch, 
 
 def test_darwin_new_workspace_governance_refuses_instead_of_empty_state(monkeypatch, tmp_path_factory):
     from backend.core import sandbox_read
+    from backend.core import sandbox_read_darwin
     from backend.core.sync_session.state import GovernanceStateUnavailable, read_state
 
     monkeypatch.setattr(sandbox_read, "sys", SimpleNamespace(platform="darwin"))
+    def missing_kernel(*args):
+        raise sandbox_read.ReadBoundaryError('No stable read backend for this kernel')
+    monkeypatch.setattr(sandbox_read_darwin, 'root', missing_kernel)
     with pytest.raises(GovernanceStateUnavailable) as caught:
         read_state(tmp_path_factory)
     assert caught.value.code == "GOVERNANCE_STATE_UNAVAILABLE"

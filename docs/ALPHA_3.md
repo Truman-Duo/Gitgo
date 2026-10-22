@@ -16,8 +16,8 @@ Linux 原生与更新、Linux/macOS 打包及独立原生验收同为必需门�
 
 ## 已知限制
 
-- macOS 普通 daemon 因缺少 Darwin 安全读取/治理后端而失败，本期不发布 macOS 包。
-- Linux 受保护 Git 工作树、晋升与提交缺少实现，会明确返回 `GIT_BOUNDARY_UNAVAILABLE`，本期不发布 Linux 包。
+- macOS 对象读取后端正在以 macOS 26 的内核 beneath/no-symlink 约束验收。更早内核若不支持该约束会明确拒绝，不能以普通路径读取降级；普通 daemon 和最终包仍须各自验证。此读取后端不等于完整 macOS 工具沙箱。
+- Linux 受保护 Git 工作树、晋升与提交正在补齐安全执行边界；实现和攻击回归未通过前不发布 Linux 包。
 - 正式可见终端验收与真实模型业务验收需要单独证据，协议冒烟和模拟 Provider 不代替人工验收。
 - 沙箱仍有开发任务持久化准入、硬磁盘配额、完整成果验证和其他平台后端等后续工作，见[已知限制](KNOWN_ISSUES.md)。
 
