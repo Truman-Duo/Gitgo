@@ -1,6 +1,7 @@
 // src/components/ProcessList.tsx — project subprocess flat list
-import React, { memo, useMemo, useEffect, useRef } from "react";
-import { Box, ScrollBox, Text, type ScrollBoxHandle } from "@anthropic/ink";
+import React, { memo, useMemo, useEffect, useRef, useLayoutEffect } from "react";
+import { Box, Text, ScrollBox } from "@anthropic/ink";
+import type {DOMElement, ScrollBoxHandle} from "@anthropic/ink";
 import type { LoopData, ProcessInfo } from "../hooks/useLoopData.js";
 import {
   usePanelSize,
@@ -168,9 +169,10 @@ export const ProcessList = memo(function ProcessList({
   idsRef,
   onStatusUpdate,
 }: Props) {
-  const { w } = usePanelSize({ minWidth: 40, widthOffset: 2 });
+  const { w, h } = usePanelSize({ minWidth: 40, widthOffset: 2 });
   const scrollRef = useRef<ScrollBoxHandle>(null);
   useScrollInput(scrollRef);
+  const selectedRow = useRef<DOMElement>(null);
   const { processes, recoveryAvailable, storage } = loopData;
 
   const flatList = useMemo(() => {
@@ -178,6 +180,9 @@ export const ProcessList = memo(function ProcessList({
     // every worker/reviewer state across tasks and exclude all A supervisors.
     return visibleBProcesses(processes);
   }, [processes]);
+  useLayoutEffect(() => {
+    if (selectedRow.current) scrollRef.current?.scrollIntoView(selectedRow.current);
+  }, [selIdx, w, h, flatList[selIdx]?.process_id]);
 
   const runningCount = flatList.filter((p) => p.status === "running").length;
   const waitingCount = flatList.filter((p) =>
@@ -212,9 +217,6 @@ export const ProcessList = memo(function ProcessList({
     process.depends_on?.length
       ? process.depends_on
       : process.dependency_ids.filter((id) => id !== process.parent_id);
-  useEffect(() => {
-    scrollRef.current?.scrollTo(Math.max(0, selIdx - 4));
-  }, [selIdx]);
   return (
     <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
       <Text bold>Subprocesses · {project}</Text>
@@ -250,6 +252,7 @@ export const ProcessList = memo(function ProcessList({
                   Supervisor / task {String(process.owner_group).slice(0, 8)}
                 </Text>
               ) : null}
+              <Box ref={active ? selectedRow : undefined} flexDirection="row">
               <Text
                 backgroundColor={style.bg}
                 color={style.fg}
@@ -275,6 +278,7 @@ export const ProcessList = memo(function ProcessList({
                         )}${deps.length > 2 ? ` +${deps.length - 2}` : ""}`
                     : "—"}
               </Text>
+              </Box>
             </React.Fragment>
           );
         })}

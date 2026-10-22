@@ -23,17 +23,21 @@ export function usePanelSize(opts?: {
   const header = opts?.headerRows ?? 0;
   const footer = opts?.footerRows ?? 0;
 
-  const w = Math.max(minW, (columns ?? 80) - wOff);
-  const h = Math.max(minH, (rows ?? 24) - hOff);
-  const contentH = h - header - footer;
+  // Minimums are useful fallbacks when no terminal size is available. Once
+  // known, the physical viewport is the ceiling, including on short screens.
+  const cols = columns ?? Math.max(80, minW);
+  const terminalRows = rows ?? Math.max(24, minH);
+  const w = Math.max(1, cols - wOff);
+  const h = Math.max(1, terminalRows - hOff);
+  const contentH = Math.max(1, h - header - footer);
 
   return {
-    cols: columns ?? 80,
-    rows: rows ?? 24,
+    cols,
+    rows: terminalRows,
     w,
     h,
     contentH,
     needsVerticalScroll: (contentRows: number) => contentRows > contentH,
-    maxVisibleItems: (contentRows: number) => Math.max(5, contentH),
+    maxVisibleItems: (contentRows: number) => Math.min(Math.max(0, contentRows), contentH),
   };
 }

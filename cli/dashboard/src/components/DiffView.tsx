@@ -217,7 +217,7 @@ export const DiffView = memo(function DiffView({ files, width, layout, maxRows }
 }) {
   const savedLayout = useContext(DiffLayoutContext);
   const { w: terminalWidth } = usePanelSize({ minWidth: 30 });
-  const panelWidth = Math.max(30, Math.min(terminalWidth, width ?? terminalWidth));
+  const panelWidth = Math.max(1, Math.min(terminalWidth, width ?? terminalWidth));
   const avail = diffAvail(panelWidth);
   let remaining = maxRows === undefined ? Infinity : Math.max(1, Math.floor(maxRows));
   let omitted = false;

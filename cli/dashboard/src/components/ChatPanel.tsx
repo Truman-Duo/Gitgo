@@ -48,8 +48,8 @@ export const ChatPanel = memo(function ChatPanel({
   inputActive = true,
 }: Props) {
   const { w: terminalWidth } = usePanelSize({ minWidth: 30 });
-  const width = Math.max(30, Math.min(terminalWidth, cols));
-  const contentWidth = width - 4;
+  const width = Math.max(1, Math.min(terminalWidth, cols));
+  const contentWidth = Math.max(1, width - 4);
   const scrollRef = useRef<ScrollBoxHandle>(null);
   useScrollInput(scrollRef, inputActive);
 

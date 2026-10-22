@@ -553,7 +553,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       cmdCursor: cmdInput.cursor,
       textValue: textInput.value,
       textCursor: textInput.cursor,
-      textVisualWidth: Math.max(20, Math.max(60, termCols || 80) - 4),
+      textVisualWidth: Math.max(1, (termCols || 80) - 4),
       projectsLength: projects.length,
       projectNames: projects.map((p: any) => p.name),
       sel,
@@ -580,7 +580,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   }, { isActive: overlayStack.length === 0 });
 
   // ── Render ───────────────────────────────────────────────
-  const w = Math.max(60, termCols || 80);
+  const w = Math.max(1, termCols || 80);
   const h = termRows || 24;
 
   // Effective footer: overlay override → auto-hide for non-footer overlays → default
