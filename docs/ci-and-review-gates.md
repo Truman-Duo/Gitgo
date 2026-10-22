@@ -8,6 +8,7 @@
 - 功能分支必须包含本次观察到的上游。目标主线继续推进时，由 strict required-status 规则阻止过时组合合入；作者同步并更新正文后重新验证。CI 保存实际测试的 merge commit/tree、head/base 和 run/attempt，旧绿灯不是新候选证据。
 - tracked-file 隐私边界、Windows 完整 Python suite、锁定 Bun 依赖的 dashboard suite 和 production build。基础源码验收不冒充跨平台覆盖；另有 macOS/Linux 包和原生凭据测试。
 - Bun/Node 三平台 runtime matrix、Windows 最终 ZIP 与 frozen 连续性、macOS ARM64/Linux x86_64 原生 build 和独立 worker 的最终包验收均进入 CI gate；完整来源、依赖固定和人工验收边界见 [原生包自动化](native-package-automation.md)。
+- 管理更新另调用 Windows x64 与 Linux x86_64/ARM64 的双版本真实包验收，并纳入同一 CI gate；任一失败或取消都会阻断。复用测试仅上传结果报告，临时更新包不作为正式 Release。Windows 源码测试使用用户 profile 下的规范私有临时目录，不通过修改共享 scratch 盘 ACL 绕过安装权限检查。
 - 候选或目标上游包含原生 sandbox 后，必须保留真实验收入口，启用 Windows/Linux 的源码与实际 frozen Host 验收，Windows 先跑精确 ACL 恢复检查。未引入 sandbox 的主线跳过此项，gate 明确判断这是预期跳过，不将其宣称为沙箱通过。原生实现进入主线后，不能删掉 backend/验收入口让检查消失。
 
 scripts/provision_ci_sqlite.py 与 provision_ci_ripgrep.py 单独复用 PR #25 的固定下载/校验辅助脚本（参考候选 1a2da14fc6e9879a7ead6fd471f53b409659ddcc，贡献者 jgeted），仅在可丢弃的 hosted CI 中准备依赖，不表示接受该 PR 的生产隔离实现。SQLite 3.53.4 官方归档使用固定 SHA3-256；ripgrep 15.2.0 官方发行归档使用固定 SHA-256；原有 SQLite 安全校验保留，不设环境绕过。依赖升级应单独审查并更新版本和证据。

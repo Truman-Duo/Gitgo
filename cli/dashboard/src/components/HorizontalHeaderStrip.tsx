@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "@anthropic/ink";
-import { colors, displayWidth } from "../theme/index.js";
+import { colors, displayWidth, truncate } from "../theme/index.js";
 
 export type HeaderStripItem = { id: string; label: string };
 
@@ -15,8 +15,13 @@ export function fitHeaderWindow(items: HeaderStripItem[], selected: number, widt
   // Every visible label and every overflow marker occupies one equal header
   // slot.  This preserves the established edge/inter-tab rhythm instead of
   // letting a five-character ellipsis collapse spacing at narrow widths.
-  const slotWidth = Math.max(5, ...items.map(item => displayWidth(item.label) + 2));
-  const slots = Math.max(1, Math.floor(Math.max(slotWidth, width) / slotWidth));
+  const slotWidth = Math.min(Math.max(1, width), Math.max(5, ...items.map(item => displayWidth(item.label) + 2)));
+  const slots = Math.max(1, Math.floor(Math.max(1, width) / slotWidth));
+  if (slots < 3 && items.length > slots) {
+    // Keep the selected tab visible before spending scarce cells on markers.
+    return {start: active, end: active + 1, left: slots > 1 && active > 0,
+      right: slots > 1 && active === 0, slotWidth};
+  }
   if (items.length <= slots) {
     return { start: 0, end: items.length, left: false, right: false, slotWidth };
   }
@@ -59,7 +64,8 @@ export function HorizontalHeaderStrip({ items, selected, width, contentFocused =
       const fg = active ? colors.selection.block.fg : colors.tab.detail.fg;
       return <Box key={item.id} flexGrow={1} flexBasis={window.slotWidth} justifyContent="center">
         <Text color={fg} backgroundColor={bg} bold={active && !contentFocused} dimColor={!active}>
-          {` ${item.label} `}
+          {window.slotWidth < 3 ? truncate(item.label, window.slotWidth)
+            : ` ${truncate(item.label, window.slotWidth - 2)} `}
         </Text>
       </Box>;
     })}

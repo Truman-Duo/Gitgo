@@ -112,9 +112,10 @@ def document_open(args: dict) -> dict:
             from backend.core.process_control import creation_flags, attach_kill_job, terminate_tree, close_job
             from backend.core.process_output import collect_output, OutputLimit
             from backend.core.tools.execution_profile import safe_environment
+            from backend.core.installation_lease import child_options
             completed = subprocess.Popen([str(antiword), str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                env=safe_environment(), creationflags=creation_flags(), start_new_session=os.name != "nt")
+                env=safe_environment(), creationflags=creation_flags(), start_new_session=os.name != "nt", **child_options())
             job = attach_kill_job(completed)
             try:
                 stdout, stderr, _ = collect_output(completed, timeout=60, limit=MAX_TEXT_CHARS,

@@ -17,6 +17,8 @@ export type ScrollBoxHandle = {
    * SAME Yoga pass that computes scrollHeight. Deterministic. One-shot.
    */
   scrollToElement: (el: DOMElement, offset?: number) => void;
+  /** Reveal a selected row with the smallest necessary scroll, using fresh Yoga layout. */
+  scrollIntoView: (el: DOMElement) => void;
   scrollToBottom: () => void;
   getScrollTop: () => number;
   getPendingDelta: () => number;
@@ -145,6 +147,14 @@ function ScrollBox({ children, ref, stickyScroll, ...style }: PropsWithChildren<
         box.stickyScroll = false;
         box.pendingScrollDelta = undefined;
         box.scrollAnchor = { el, offset };
+        scrollMutated(box);
+      },
+      scrollIntoView(el: DOMElement) {
+        const box = domRef.current;
+        if (!box) return;
+        box.stickyScroll = false;
+        box.resizeScrollAnchor = undefined;
+        box.scrollAnchor = {el, offset: 0, align: 'nearest'};
         scrollMutated(box);
       },
       scrollBy(dy: number) {

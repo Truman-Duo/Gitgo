@@ -217,6 +217,8 @@ def test_frozen_runtime_prefers_its_bundled_engine_over_path(tmp_path_factory, m
     root = tmp_path_factory
     engine = root / ("rg.exe" if os.name == "nt" else "rg")
     engine.write_bytes(b"bundled engine identity")
+    # A packaged POSIX engine must be executable to qualify for selection.
+    engine.chmod(0o700)
     monkeypatch.delenv("GITGO_RIPGREP_PATH", raising=False)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(root / "gitgo-host.exe"))

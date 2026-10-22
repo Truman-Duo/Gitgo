@@ -15,6 +15,12 @@ PR CI 构建的是 GitHub 测试合并 commit，不应把它混同贡献分支 h
 ## 当前支持声明
 
 自动候选目标为 macOS 15 ARM64 和 Ubuntu 24.04 x86_64（glibc 2.39 基线）。
+这是构建/验收目标列表，不是当前 daemon 的全平台可用声明。Alpha3 组合已在真实
+macOS 构建后冒烟中观察到 `DAEMON_START_FAILED / GOVERNANCE_STATE_UNAVAILABLE`：
+继承的稳定文件读取没有 Darwin 后端，连新工作区的治理会话初始化也被拒绝。
+Linux 受保护工作树/晋升/正式 Git 后端同样尚未实现；独立更新/存储/进程清理仍需验证。
+仅由构建锁安装依赖时还存在工作台 `nbformat` 闭包缺失，源码失败已证实，冻结包
+工作台风险尚未独立实测。来源、操作范围和后续责任见 [Alpha3 复审交接](ALPHA_3_REVIEW_HANDOFF.md)。
 本机脚本中的 macOS Intel/Linux ARM 是实验能力，**没有声明已支持或已验收**。
 不承诺旧 macOS、旧 glibc、musl 发行版。每个新架构须增加独立原生 build/accept matrix，
 不能只改文件名，也不能用跨编译结果替代原生执行。runner 标签固定但系统镜像会由

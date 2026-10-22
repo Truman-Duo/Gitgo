@@ -1,8 +1,9 @@
 // src/components/Overview.tsx — compact project list
 // Uses string padding for column alignment — no inner Box wrappers so
 // backgroundColor on Text elements drives correct Ink dirty/blit behavior.
-import React, { memo } from "react";
-import { Box, Text } from "@anthropic/ink";
+import React, { memo, useLayoutEffect, useRef } from "react";
+import { Box, Text, ScrollBox } from "@anthropic/ink";
+import type {DOMElement, ScrollBoxHandle} from "@anthropic/ink";
 import type { ProjectRow } from "../hooks/useGitgoData.js";
 import { colors, usePanelSize, truncate, padEndWidth, useSelectionStyle } from "../theme/index.js";
 import { projectRuntimeCategory } from "../projectRuntimeState.js";
@@ -10,7 +11,13 @@ import { projectRuntimeCategory } from "../projectRuntimeState.js";
 type Props = { projects: ProjectRow[]; sel: number; mode: "NORMAL" | "COMMAND"; cols: number; listActive: boolean; language?: "en" | "zh" };
 
 export const Overview = memo(function Overview({ projects, sel, mode, cols: _cols, listActive, language = "en" }: Props) {
-  const { w } = usePanelSize({ minWidth: 60 });
+  const { w: terminalWidth, h } = usePanelSize({ minWidth: 60 });
+  const w = Math.max(1, Math.min(terminalWidth, _cols) - 2);
+  const scrollRef = useRef<ScrollBoxHandle>(null);
+  const selectedRow = useRef<DOMElement>(null);
+  useLayoutEffect(() => {
+    if (selectedRow.current) scrollRef.current?.scrollIntoView(selectedRow.current);
+  }, [sel, w, h, projects[sel]?.name]);
   const procW = 7;
   const fixedW = procW;
   const flexW = w - fixedW;
@@ -29,7 +36,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
   ];
 
   return (
-    <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1}>
+    <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1} minHeight={0}>
       <Box flexDirection="row" justifyContent="space-between">
         <Text dimColor>{language === "zh" ? "项目" : "Projects"}</Text>
       </Box>
@@ -47,6 +54,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
         </Box>
       ) : null}
 
+      <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>
       {groups.map((group) => {
         if (group.items.length === 0) return null;
         return (
@@ -70,7 +78,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
               const pathStr = truncate(pathBase, pathW);
 
               return (
-                <Box key={p.name} flexDirection="row" backgroundColor={highlightBg}>
+                <Box key={p.name} ref={isSelected ? selectedRow : undefined} flexDirection="row" backgroundColor={highlightBg}>
                   <Text
                     color={nameStyle.fg}
                     bold={nameStyle.bold}
@@ -86,6 +94,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
           </React.Fragment>
         );
       })}
+      </ScrollBox>
     </Box>
   );
 });

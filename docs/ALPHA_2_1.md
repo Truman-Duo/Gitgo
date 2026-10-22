@@ -34,3 +34,5 @@
 产品 SemVer、Windows 文件版本与数据库迁移各有职责。Windows `1.0.0.3` 是本期文件版本序列，后续发布必须提高该数值，不能根据 Alpha 3 名称重新使用相同或更低的文件版本。完整 Alpha 3 的具体产品版本、安装兼容及发布验收由后续集成确定。
 
 [版本](VERSION.md) · [测试结果](VALIDATION.md) · [已知限制](KNOWN_ISSUES.md)
+
+后续两条功能分支的源码融合记录见 [Alpha3 集成候选](ALPHA_3_INTEGRATION.md)；该记录不改变上述 Alpha2.1 已发布包的范围或验收结果。

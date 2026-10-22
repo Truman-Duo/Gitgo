@@ -12,7 +12,7 @@ export const DIFF_FRAME_OVERHEAD = 3;
 
 /** Available content width inside the diff frame at a given panel width. */
 export function diffAvail(panelWidth: number): number {
-  return Math.max(30, panelWidth - DIFF_FRAME_OVERHEAD);
+  return Math.max(1, panelWidth - DIFF_FRAME_OVERHEAD);
 }
 
 /** Right-aligned line number (no trailing space). */
@@ -22,7 +22,7 @@ export function diffLineNo(lineNo: number | null, digits: number): string {
 
 /** Single-column (unified) content width: [old][gap][new][gap][cell]. */
 export function unifiedColWidth(avail: number, digits: number): number {
-  return Math.max(10, avail - 2 * digits - 3);
+  return Math.max(1, avail - 2 * digits - 3);
 }
 
 /** Per-side content width for side-by-side: [num][gap][cell][gap][│][gap][num][gap][cell]. */

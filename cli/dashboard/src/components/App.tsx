@@ -50,12 +50,13 @@ type Props = {
   startupTerminalSetup?: boolean;
   startupNotice?: string;
   onTerminalSetupComplete?: () => Promise<{completed: boolean; message: string}>;
+  onUpdateExit?: () => Promise<void>;
 };
 
 const appStore = createReducerStore<AppState, AppAction>(reducer, initialAppState());
 
 export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalSetup = false,
-  startupNotice = "", onTerminalSetupComplete }: Props) {
+  startupNotice = "", onTerminalSetupComplete, onUpdateExit }: Props) {
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
@@ -552,7 +553,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       cmdCursor: cmdInput.cursor,
       textValue: textInput.value,
       textCursor: textInput.cursor,
-      textVisualWidth: Math.max(20, Math.max(60, termCols || 80) - 4),
+      textVisualWidth: Math.max(1, (termCols || 80) - 4),
       projectsLength: projects.length,
       projectNames: projects.map((p: any) => p.name),
       sel,
@@ -579,7 +580,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   }, { isActive: overlayStack.length === 0 });
 
   // ── Render ───────────────────────────────────────────────
-  const w = Math.max(60, termCols || 80);
+  const w = Math.max(1, termCols || 80);
   const h = termRows || 24;
 
   // Effective footer: overlay override → auto-hide for non-footer overlays → default
@@ -617,6 +618,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     sendChat: (text: string) => submitInput(text),
     verbose: generalConfig.verbose,
     onSettingSaved,
+    onUpdateExit,
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");

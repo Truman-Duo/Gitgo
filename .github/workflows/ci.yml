@@ -100,7 +100,8 @@ jobs:
           @'
           import os
           from pathlib import Path
-          root = Path(os.environ['RUNNER_TEMP']).resolve(strict=True) / 'gitgo-tests'
+          # Managed NTFS tests reject the shared scratch drive's writable ACL.
+          root = (Path(os.environ['USERPROFILE']) / 'AppData/Local/Temp').resolve(strict=True) / 'gitgo-tests'
           root.mkdir(exist_ok=True)
           root = root.resolve(strict=True)
           with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
@@ -177,7 +178,7 @@ jobs:
           @'
           import os
           from pathlib import Path
-          root = Path(os.environ['RUNNER_TEMP']).resolve(strict=True) / 'gitgo-tests'
+          root = (Path(os.environ['USERPROFILE']) / 'AppData/Local/Temp').resolve(strict=True) / 'gitgo-tests'
           root.mkdir(exist_ok=True)
           root = root.resolve(strict=True)
           with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
@@ -227,6 +228,12 @@ jobs:
   unix-packages:
     uses: ./.github/workflows/linux-package.yml
 
+  managed-update-windows:
+    uses: ./.github/workflows/windows-update.yml
+
+  managed-update-linux:
+    uses: ./.github/workflows/linux-update.yml
+
   windows-package:
     name: Windows final ZIP and frozen continuity
     runs-on: windows-2022
@@ -267,7 +274,7 @@ jobs:
 
   gate:
     name: CI gate
-    needs: [contract, privacy, python-windows, dashboard, native, runtime, unix-packages, windows-package]
+    needs: [contract, privacy, python-windows, dashboard, native, runtime, unix-packages, windows-package, managed-update-windows, managed-update-linux]
     if: always()
     runs-on: ubuntu-22.04
     timeout-minutes: 2
@@ -279,7 +286,7 @@ jobs:
           python3 -I - <<'PY'
           import json, os
           jobs = json.loads(os.environ['RESULTS'])
-          required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime', 'unix-packages', 'windows-package']
+          required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime', 'unix-packages', 'windows-package', 'managed-update-windows', 'managed-update-linux']
           failed = [name for name in required if jobs[name]['result'] != 'success']
           native_required = jobs['contract']['outputs'].get('native_required') == 'true'
           expected_native = 'success' if native_required else 'skipped'

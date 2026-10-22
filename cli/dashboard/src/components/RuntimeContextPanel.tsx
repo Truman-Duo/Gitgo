@@ -1,4 +1,4 @@
-import React, {memo, useMemo, useRef, useState} from "react";
+import React, {memo, useMemo, useRef, useState, useEffect} from "react";
 import {Box, ScrollBox, Text} from "@anthropic/ink";
 import type {ScrollBoxHandle} from "@anthropic/ink";
 import type {ProcessInfo} from "../hooks/useLoopData.js";
@@ -27,6 +27,7 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
       || left.created_at.localeCompare(right.created_at)), [processes]);
   const index = Math.max(0, rows.findIndex(row => row.process_id === selectedId));
   const selected = rows[index];
+  useEffect(() => { scrollRef.current?.scrollTo(0); }, [selected?.process_id]);
 
   useInput((input, key) => {
     if (matchChord("escape", input, key)) {

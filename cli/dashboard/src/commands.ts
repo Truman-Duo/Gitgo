@@ -152,6 +152,9 @@ const HANDLERS: Record<string, (ctx: CommandContext, args: string[]) => Promise<
 
   // Projects scene
   "projects.create": async () => ({ resultText: "", showCreate: true }),
+  "projects.update": async (_ctx, args) => args.length
+    ? {resultText: "/update — software update status; no arguments supported"}
+    : {resultText: "", showPanel: {overlay: "updatePanel"}},
   "projects.archive": async (ctx) => {
     const name = resolveProject(ctx);
     if (!name) return noProject();

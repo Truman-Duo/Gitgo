@@ -474,7 +474,8 @@ export default class Ink {
         };
         const anchor = content ? findVisible(content, 0) : undefined;
         if (anchor) {
-          node.resizeScrollAnchor = {el: anchor.el, offset: scrollTop - anchor.top};
+          node.resizeScrollAnchor = {el: anchor.el, offset: scrollTop - anchor.top,
+            rows: anchor.el.yogaNode?.getComputedHeight() ?? 1};
           node.pendingScrollDelta = undefined;
         }
       }

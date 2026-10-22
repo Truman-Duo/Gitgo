@@ -19,6 +19,7 @@ import { PublishPanel } from "./PublishPanel.js";
 import { CreateProjectPanel } from "./CreateProjectPanel.js";
 import { StatsPanel } from "./StatsPanel.js";
 import { StatsOverview } from "./StatsOverview.js";
+import { UpdatePanel } from "./UpdatePanel.js";
 import { BtwPanel } from "./BtwPanel.js";
 import { CompactPanel } from "./CompactPanel.js";
 import { InterruptPanel } from "./InterruptPanel.js";
@@ -63,6 +64,7 @@ export interface OverlayCtx {
   sendChat: (text: string) => void;
   verbose: boolean;
   onSettingSaved?: (key: string) => Promise<string | void>;
+  onUpdateExit?: () => Promise<void>;
 }
 
 function enterCommandMode(
@@ -213,6 +215,9 @@ export function renderOverlay(
     }
     case "statsOverview":
       return <StatsOverview client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} onInspect={project => ctx.dispatch({type: "push_overlay", overlay: "statsPanel", props: {project}})} />;
+    case "updatePanel":
+      return ctx.scene === "projects"
+        ? <UpdatePanel client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} onUpdateExit={ctx.onUpdateExit} /> : null;
     case "btwPanel":
       return <BtwPanel client={ctx.client}
         project={String(overlay.props?.project || ctx.activeProject || "")}

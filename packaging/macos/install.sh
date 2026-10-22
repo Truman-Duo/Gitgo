@@ -4,6 +4,7 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_ROOT="${GITGO_MACOS_INSTALL_ROOT:-$HOME/Library/Application Support/Gitgo/app}"
 BIN_DIR="${GITGO_MACOS_BIN_DIR:-$HOME/.local/bin}"
 UPDATE_PATH=1
+MANAGED=0
 START_MARKER="# >>> Gitgo managed PATH >>>"
 END_MARKER="# <<< Gitgo managed PATH <<<"
 BASH_PROFILE=.bash_profile
@@ -12,7 +13,8 @@ while [ "$#" -gt 0 ]; do
     --install-root) INSTALL_ROOT="$2"; shift 2 ;;
     --bin-dir) BIN_DIR="$2"; shift 2 ;;
     --no-path-update) UPDATE_PATH=0; shift ;;
-    -h|--help) echo 'Usage: install.sh [--install-root DIR] [--bin-dir DIR] [--no-path-update]'; exit 0 ;;
+    --managed) MANAGED=1; shift ;;
+    -h|--help) echo 'Usage: install.sh [--install-root DIR] [--bin-dir DIR] [--no-path-update] [--managed]'; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -27,5 +29,9 @@ while alias="$(/usr/bin/plutil -extract "command_aliases.$index" raw -o - "$SCRI
 done
 [ "$PLATFORM" = macos ] && [ "$ARCHITECTURE" = "$(uname -m)" ] || { echo 'Package platform/architecture mismatch' >&2; exit 1; }
 [ -x "$SCRIPT_DIR/internal/gitgo-host/gitgo-host" ] || { echo 'Native Host missing' >&2; exit 1; }
+if [ "$MANAGED" -eq 1 ]; then
+  [ "$UPDATE_PATH" -eq 0 ] || { echo 'Managed installation requires --no-path-update; add the chosen bin directory to PATH explicitly' >&2; exit 1; }
+  exec "$SCRIPT_DIR/internal/gitgo-host/gitgo-host" --gitgo-internal-role managed-install --root "$INSTALL_ROOT" --bin-dir "$BIN_DIR"
+fi
 source "$SCRIPT_DIR/installer-common.sh"
 install_transaction

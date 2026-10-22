@@ -67,6 +67,7 @@ def _project(project_name: str):
     cfg = ConfigManager.load()
     for project in cfg.projects:
         if project.name == project_name:
+            _external_workspace(getattr(project, "workspace_path", ""))
             return cfg, project
     raise OperationError("PROJECT_NOT_FOUND", f"Project '{project_name}' was not found")
 
@@ -134,6 +135,14 @@ def _review_harvest_candidates(candidates: list[dict], reviews: list[dict]) -> l
     return accepted
 
 
+def _external_workspace(path):
+    from backend.core.update.installation import assert_external_resource
+    from backend.core.update.validation import UpdateError
+    try: assert_external_resource(Path(path or ""))
+    except UpdateError:
+        raise OperationError("UNSAFE_WORKSPACE_PATH", "Project workspace must stay outside the managed software installation") from None
+
+
 def _public_provider(provider: dict) -> dict:
     result = {k: v for k, v in provider.items() if k not in {"api_key", "secret_ref"}}
     key = str(provider.get("api_key", ""))
@@ -163,6 +172,8 @@ class ApplicationServices:
     def __init__(self, *, daemon_online: Callable[[str], bool] | None = None, prepare_deletion=None):
         self._daemon_online = daemon_online or (lambda _name: False)
         self._write_lock = threading.RLock()
+        from backend.core.update.preparation_service import UpdatePreparationService
+        self.updates = UpdatePreparationService()
         from .deletion import DeletionService
         self.deletion = DeletionService(prepare_runtime=prepare_deletion)
         self._operations: dict[str, Callable[..., Any]] = {
@@ -183,6 +194,14 @@ class ApplicationServices:
             "deletion.list": lambda: self.deletion.catalog.list_deletion_plans(),
             "deletion.run": self.deletion.run,
             "config.get": self.config_get,
+            "product.version": self.product_version,
+            "update.status": self.update_status,
+            "update.check": self.update_check,
+            "update.download": self.update_download,
+            "update.cancel": self.update_cancel,
+            "update.request_apply": self.update_request_apply,
+            "update.request_rollback": self.update_request_rollback,
+            "update.cancel_pending": self.update_cancel_pending,
             "config.set": self.config_set,
             "config.terminals": self.config_terminals,
             "config.web_search.test": self.config_web_search_test,
@@ -374,6 +393,7 @@ class ApplicationServices:
                 "workspace_mode must be attach_existing or create_new",
             )
         workspace = Path(raw_workspace).expanduser().resolve(strict=False)
+        _external_workspace(workspace)
         if workspace == Path(workspace.anchor):
             raise OperationError(
                 "UNSAFE_WORKSPACE_PATH", "A filesystem root cannot be used as a project workspace",
@@ -533,6 +553,39 @@ class ApplicationServices:
                         ConfigManager.save(cfg)
                     return {"ok": had_pending, "name": name}
         raise OperationError("PROJECT_NOT_FOUND", f"Project '{name}' was not found")
+
+    def product_version(self) -> dict:
+        # The executing Host is authoritative, not editable user configuration
+        # or a potentially different Dashboard package.
+        from backend.version import __version__
+        return {"product_id": "gitgo-terminal", "version": __version__}
+
+    def _update_call(self, method, *arguments):
+        from backend.core.update.validation import UpdateError
+        try: return method(*arguments)
+        except UpdateError as error: raise OperationError(error.code, str(error)) from None
+        except Exception: raise OperationError("UPDATE_PREPARATION_FAILED", "Update preparation failed; current program unchanged") from None
+
+    def update_status(self, channel: str = "stable") -> dict:
+        return self._update_call(self.updates.status, channel)
+
+    def update_check(self, channel: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.check, channel, operation_id)
+
+    def update_download(self, channel: str, candidate_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.download, channel, candidate_id, operation_id)
+
+    def update_cancel(self, operation_id: str) -> dict:
+        return self._update_call(self.updates.cancel, operation_id)
+
+    def update_request_apply(self, channel: str, candidate_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.request_apply, channel, candidate_id, operation_id)
+
+    def update_request_rollback(self, rollback_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.request_rollback, rollback_id, operation_id)
+
+    def update_cancel_pending(self, request_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.cancel_pending, request_id, operation_id)
 
     def config_get(self, key: str = "") -> dict:
         from backend.core.prompt_profiles import list_profiles
