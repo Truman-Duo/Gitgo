@@ -19,12 +19,17 @@ def main(argv=None):
     import msvcrt
     values = sys.argv[1:] if argv is None else argv
     if values and values[0] == "--lease": return lease_guardian(values[1:])
-    if not 2 <= len(values) <= 18 or any(not value.isdigit() or len(value) > 20 for value in values):
+    if not 3 <= len(values) <= 19 or any(not value.isdigit() or len(value) > 20 for value in values):
         return 2
     incoming = msvcrt.open_osfhandle(int(values[0]), os.O_RDONLY | os.O_BINARY)
     outgoing = msvcrt.open_osfhandle(int(values[1]), os.O_WRONLY | os.O_BINARY)
     os.set_inheritable(incoming, False); os.set_inheritable(outgoing, False)
-    leases = [msvcrt.open_osfhandle(int(value), os.O_RDONLY | os.O_BINARY) for value in values[2:]]
+    payload_stderr = None
+    if int(values[2]):
+        descriptor = msvcrt.open_osfhandle(int(values[2]), os.O_WRONLY | os.O_BINARY)
+        os.set_inheritable(descriptor, False)
+        payload_stderr = os.fdopen(descriptor, "wb", buffering=0)
+    leases = [msvcrt.open_osfhandle(int(value), os.O_RDONLY | os.O_BINARY) for value in values[3:]]
     handles = [msvcrt.get_osfhandle(fd) for fd in leases]
     try:
         with os.fdopen(incoming, "rb") as control:
@@ -37,7 +42,7 @@ def main(argv=None):
         # This point is reachable only after the parent assigned this trusted
         # process to its own no-breakaway Job and then sent the private command.
         startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": handles}
-        proc = subprocess.Popen(command, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+        proc = subprocess.Popen(command, stdin=sys.stdin, stdout=sys.stdout, stderr=payload_stderr or sys.stderr,
             close_fds=True, startupinfo=startup)
         code = proc.wait()
         report_fd, outgoing = outgoing, -1
@@ -46,6 +51,7 @@ def main(argv=None):
             report.flush()
         return 0
     finally:
+        if payload_stderr is not None: payload_stderr.close()
         if outgoing >= 0: os.close(outgoing)
         for fd in leases: os.close(fd)
 

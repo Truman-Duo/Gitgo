@@ -32,6 +32,25 @@ def test_real_worker_exit_status_and_utf8_stdin_are_preserved():
     assert code == 75 and out.strip() == "测试 scope" and not err and not truncated
 
 
+def test_supervisor_diagnostics_do_not_replace_payload_stderr(monkeypatch, capfd):
+    original = subprocess.Popen
+
+    def noisy_supervisor(command, **options):
+        if len(command) > 2 and Path(command[2]).name == "windows_process_scope.py":
+            bootstrap = ("import runpy,sys;sys.stderr.write('supervisor-diagnostic\\n');"
+                         "script=sys.argv.pop(1);runpy.run_path(script,run_name='__main__')")
+            command = [command[0], "-c", bootstrap, *command[2:]]
+        return original(command, **options)
+
+    monkeypatch.setattr(subprocess, "Popen", noisy_supervisor)
+    code, (out, err, truncated) = run(
+        "import sys; print('payload-output'); print('payload-error',file=sys.stderr); raise SystemExit(9)",
+    )
+    assert code == 9 and out.strip() == "payload-output" and not truncated
+    assert err.strip() == "payload-error"
+    assert "supervisor-diagnostic" in capfd.readouterr().err
+
+
 def test_detached_descendant_is_cleaned_without_killing_foreign_process(tmp_path_factory):
     marker = tmp_path_factory.resolve() / "escaped"
     late = f"import time; from pathlib import Path; time.sleep(3); Path({str(marker)!r}).write_text('bad')"
@@ -61,7 +80,7 @@ def test_trampoline_cannot_be_wrapped_or_replaced_before_job_assignment(options)
         spawn_managed([sys.executable, "-c", "raise RuntimeError('must not run')"], **options)
 
 
-@pytest.mark.parametrize("failure_on", [1, 2])
+@pytest.mark.parametrize("failure_on", [1, 2, 3])
 def test_pipe_allocation_failure_releases_job_and_partial_descriptors(monkeypatch, failure_on):
     from backend.core import windows_job
     api = windows_job._api()
@@ -81,7 +100,7 @@ def test_pipe_allocation_failure_releases_job_and_partial_descriptors(monkeypatc
         values = pipe(); descriptors.extend(values); return values
     with monkeypatch.context() as patch:
         patch.setattr(windows_job.os, "pipe", interrupted_pipe)
-        with pytest.raises(OSError): spawn_managed([sys.executable, "-c", "print('must-not-run')"])
+        with pytest.raises(OSError): spawn_managed([sys.executable, "-c", "print('must-not-run')"], stderr=subprocess.PIPE)
     assert len(created) == 1 and closed == created
     for descriptor in descriptors:
         with pytest.raises(OSError): os.fstat(descriptor)

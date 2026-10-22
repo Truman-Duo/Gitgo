@@ -159,22 +159,34 @@ def spawn(argv, **options):
     retry_pending_cleanup()
     api = _api()
     job = _check(api.CreateJobObjectW(None, None))
-    incoming = send = report = outgoing = -1
+    incoming = send = report = outgoing = payload_error = payload_error_writer = -1
+    payload_error_stream = None
     proc = None
     scope = JobScope(api, job, -1)
     try:
         incoming, send = os.pipe(); report, outgoing = os.pipe()
         scope.report, report = report, -1
+        # The trusted supervisor's startup errors belong to the enclosing
+        # runtime diagnostic channel. They must not masquerade as stderr from
+        # the user's command (notably Python path diagnostics in AppContainer).
+        # Preserve them on the parent's stderr; only payload bytes use PIPE.
+        if options.get("stderr") == subprocess.PIPE:
+            payload_error, payload_error_writer = os.pipe()
+            options["stderr"] = sys.stderr
         limits = ExtendedLimits(); limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no breakaway.
         _check(api.SetInformationJobObject(job, 9, C.byref(limits), C.sizeof(limits)))
         handles = [msvcrt.get_osfhandle(fd) for fd in (incoming, outgoing)]
+        error_handle = msvcrt.get_osfhandle(payload_error_writer) if payload_error_writer >= 0 else 0
+        inherited = [*handles, *([error_handle] if error_handle else []), *lease_handles]
+        arguments = [*handles, error_handle, *lease_handles]
         if getattr(sys, "frozen", False):
-            command = [sys.executable, "--gitgo-internal-role", "windows-scope", *(str(h) for h in handles + lease_handles)]
+            command = [sys.executable, "--gitgo-internal-role", "windows-scope", *(str(h) for h in arguments)]
         else:
-            command = [sys.executable, "-B", str(Path(__file__).with_name("windows_process_scope.py")), *(str(h) for h in handles + lease_handles)]
-        startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": handles + lease_handles}
+            command = [sys.executable, "-B", str(Path(__file__).with_name("windows_process_scope.py")), *(str(h) for h in arguments)]
+        startup = subprocess.STARTUPINFO(); startup.lpAttributeList = {"handle_list": inherited}
         with _spawn_lock:
             for fd in (incoming, outgoing): os.set_inheritable(fd, True)
+            if payload_error_writer >= 0: os.set_inheritable(payload_error_writer, True)
             for handle in lease_handles: os.set_handle_inheritable(handle, True)
             try:
                 proc = subprocess.Popen(command, close_fds=True, startupinfo=startup, **options)
@@ -182,12 +194,22 @@ def spawn(argv, **options):
                 proc._gitgo_windows_scope = scope
             finally:
                 for fd in (incoming, outgoing): os.set_inheritable(fd, False)
+                if payload_error_writer >= 0: os.set_inheritable(payload_error_writer, False)
                 for handle in lease_handles: os.set_handle_inheritable(handle, False)
+        if payload_error >= 0:
+            if proc.text_mode:
+                payload_error_stream = os.fdopen(payload_error, "r", encoding=proc.encoding, errors=proc.errors)
+            else:
+                payload_error_stream = os.fdopen(payload_error, "rb")
+            payload_error = -1
+            proc.stderr = payload_error_stream
         # The trusted trampoline has no command yet. Failure here cannot race
         # an untrusted payload escaping the Job before assignment.
         _check(api.AssignProcessToJobObject(job, HANDLE(int(proc._handle))))
         os.close(incoming); incoming = -1
         os.close(outgoing); outgoing = -1
+        if payload_error_writer >= 0:
+            os.close(payload_error_writer); payload_error_writer = -1
         if retained:
             _lease_guardian(scope, lease_handles)
         proc._gitgo_cleanup = {"complete": False, "mode": "windows-owned-job", "issues": ["cleanup_not_observed"]}
@@ -197,6 +219,7 @@ def spawn(argv, **options):
         return proc
     except BaseException as error:
         scope.finish(cancel=True)
+        if payload_error_stream is not None: payload_error_stream.close()
         if not scope.finished:
             if isinstance(error, Exception):
                 raise OSError("Windows command launch failed and owned Job cleanup remains unverified; "
@@ -204,7 +227,7 @@ def spawn(argv, **options):
             error.add_note("Windows owned Job cleanup is unverified; resources retained and new launches blocked")
         raise
     finally:
-        for fd in (incoming, send, outgoing, report):
+        for fd in (incoming, send, outgoing, report, payload_error, payload_error_writer):
             if fd >= 0:
                 try: os.close(fd)
                 except OSError: pass
