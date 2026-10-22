@@ -1,10 +1,15 @@
 # Gitgo 版本
 
-## Alpha 2.1 当前候选（2026-10-22）
+## Alpha 2.1 已发布预览（2026-10-22）
 
-产品、Dashboard 与 Native Host：`1.0.0-alpha.2.1`；Windows 文件版本：`1.0.0.3`。独立分支 `release/alpha2.1`，发布标签 `v1.0.0-alpha.2.1`。本期包含已完成的沙箱与知识、提示词、工作台及任务状态整合；`managed-update-v1`、`history-resize-v1` 留给完整 Alpha 3。
+产品、Dashboard 与 Native Host：`1.0.0-alpha.2.1`；Windows 文件版本：`1.0.0.3`。独立分支 `release/alpha2.1`，发布标签 `v1.0.0-alpha.2.1`。本期包含沙箱与知识、提示词、工作台及任务状态整合；`managed-update-v1`、`history-resize-v1` 留给完整 Alpha 3。
 
-新版本包按当前干净提交重新生成，不复用下述旧 Alpha 2 ZIP 的版本和验收结论。实际发布资产、源提交、SHA256 及已知限制见 [Alpha 2.1 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.2.1)。范围与接续要求见 [Alpha 2.1](ALPHA_2_1.md)，测试口径见 [验证](VALIDATION.md)。
+- 构建源提交：`55d6800067830fae7e963418d1a306f5c71759ca`，工作树干净；发行后的文档记录不改变该标签或包内容。
+- ZIP：`gitgo-1.0.0-alpha.2.1-win-x64-55d68000.zip`，包内 387 项清单核对通过。
+- SHA256：`4b1874b4a5014026a86d005a9e1dbfe38146defdf242bb7bf503d58e88ff00cb`；资产上传后重新下载核对字节，通过。
+- 发布：[Alpha 2.1 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.2.1)，包含 ZIP、校验文件与验证摘要；没有 Installer，不覆盖此前 Terminal Preview。
+
+普通安装、特权存储、Linux/macOS 实际运行和最终可见终端仍未完成本期验收。范围与接续要求见 [Alpha 2.1](ALPHA_2_1.md)，测试口径见 [验证](VALIDATION.md)。
 
 下文为 2026-10-11 Alpha 2 历史记录；其中“当前”“尚未发布”均仅指当时版本。
 
