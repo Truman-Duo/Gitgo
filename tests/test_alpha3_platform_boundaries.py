@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_non_windows_protected_git_refuses_before_executable_lookup(monkeypatch, tmp_path_factory):
+def test_unknown_protected_git_refuses_before_executable_lookup(monkeypatch, tmp_path_factory):
     from backend.core.loop import git_execution
 
     def unexpected(*args, **kwargs):
@@ -16,6 +16,7 @@ def test_non_windows_protected_git_refuses_before_executable_lookup(monkeypatch,
 
     # Replace only this module's dispatch reference, never global os.name.
     monkeypatch.setattr(git_execution, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(git_execution, "sys", SimpleNamespace(platform='unsupported'))
     monkeypatch.setattr(git_execution, "_executable", unexpected)
     monkeypatch.setattr(git_execution, "_invoke", unexpected)
     with pytest.raises(git_execution.GitBoundaryError) as caught:

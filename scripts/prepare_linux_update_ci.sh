@@ -7,7 +7,8 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_ENVIRONMENT:-}" != github-hoste
 fi
 
 sudo apt-get update
-sudo apt-get install -y bubblewrap gcc patchelf libseccomp2 apparmor-profiles
+sudo apt-get install -y bubblewrap gcc patchelf libseccomp2 apparmor-profiles meson ninja-build pkg-config libcap-dev
+python3 -B scripts/provision_ci_bwrap.py
 
 # Ubuntu 24.04 can permit userns creation but deny namespace-local capabilities.
 # Load the distribution's bwrap setup/child-restriction profile, preserving its

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -45,7 +46,7 @@ class LocalGitRunner(GitRunner):
         # worktree plumbing. A raw fallback could execute hooks, filters, textconv,
         # fsmonitor or signature programs inside the trusted process boundary.
         from backend.core.loop.git_execution import CONTENT_READ_COMMANDS, GitBoundaryError
-        if os.name == "nt" and args:
+        if (os.name == "nt" or sys.platform == 'linux') and args:
             if args[0] not in {"init", "--help", "--version"} and not os.path.lexists(self._repo / ".git"):
                 message = "Selected directory is not a Git repository"
                 return CompletedProcess(self._build_cmd(*args), 128,
@@ -148,6 +149,8 @@ class ProtectedLocalGitRunner(LocalGitRunner):
                        "close_fds": True, "creationflags": subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0}
             if text:
                 options["encoding"] = encoding
+            if os.name == 'posix' and hasattr(command, 'pass_fds'):
+                options['pass_fds'] = command.pass_fds
             try:
                 result = subprocess.run(command, **options)
             except subprocess.TimeoutExpired:

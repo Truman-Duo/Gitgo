@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 
@@ -67,6 +68,7 @@ def _invoke(command, *, cwd, env, input_bytes=None, timeout=120):
     return subprocess.run(command, cwd=cwd, env=env, capture_output=True,
         check=False, timeout=timeout, close_fds=True,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        **({"pass_fds": command.pass_fds} if os.name == 'posix' and hasattr(command, 'pass_fds') else {}),
         **({"input": input_bytes} if input_bytes is not None
            else {"stdin": subprocess.DEVNULL}))
 
@@ -108,7 +110,8 @@ def _read_config(git, path, *, cwd, env, pins, seen=None, depth=0, forbidden_roo
         raise GitBoundaryError("GIT_CONFIG_UNSUPPORTED", "repository include graph exceeds its bound")
     pins.file(path)
     seen.add(path)
-    result = _invoke([git, "config", "--file", str(path), "--no-includes",
+    parser_path = pins.parser_path(path) if hasattr(pins, 'parser_path') else str(path)
+    result = _invoke([git, "config", "--file", parser_path, "--no-includes",
                        "--null", "--list"], cwd=cwd, env=env, timeout=15)
     if result.returncode:
         raise GitBoundaryError("GIT_CONFIG_UNSUPPORTED", "cannot parse the pinned configuration")
@@ -226,14 +229,18 @@ def protected_git(cwd, args):
     executable Git extensions, not arbitrary filesystem races or semantic review.
     """
     body = _arguments(args)
-    if os.name != "nt":
-        raise GitBoundaryError("GIT_BOUNDARY_UNAVAILABLE", "protected trusted Git currently requires Windows; no unrestricted fallback")
+    if os.name != "nt" and sys.platform != 'linux':
+        raise GitBoundaryError("GIT_BOUNDARY_UNAVAILABLE", "protected trusted Git backend is unavailable; no unrestricted fallback")
     cwd = Path(cwd).absolute()
     git = _executable(cwd)
     with ExitStack() as owners:
-        pins = _WindowsPins(owners)
-        gitdir, common = _metadata(cwd, pins)
         scratch = Path(owners.enter_context(tempfile.TemporaryDirectory(prefix="gitgo-git-")))
+        if os.name == 'nt':
+            pins = _WindowsPins(owners)
+        else:
+            from .git_linux import LinuxPins
+            pins = LinuxPins(owners, scratch)
+        gitdir, common = _metadata(cwd, pins)
         if scratch.is_relative_to(cwd) or scratch.is_relative_to(common):
             raise GitBoundaryError("GIT_BOUNDARY_UNAVAILABLE", "private scratch must be outside the execution and repository metadata trees")
         env = _environment()
@@ -242,7 +249,17 @@ def protected_git(cwd, args):
         # First pin the repository include graph, then capture effective
         # operator preferences/driver names. No raw credentials are persisted.
         local = _read_config(git, common / "config", cwd=scratch, env=env, pins=pins)
-        if any(k == "extensions.worktreeconfig" for k, _ in local):
+        if any(k == "extensions.worktreeconfig" for k, _ in local) and hasattr(pins, 'parser_path'):
+            # Every potentially active include branch is already in `local`.
+            # Do not decide whether to capture per-worktree config by reading
+            # mutable host names again. This narrow backend requires that file
+            # whenever the extension is declared, even in an inactive branch.
+            try:
+                local.extend(_read_config(git, gitdir / 'config.worktree', cwd=scratch, env=env, pins=pins))
+            except FileNotFoundError as error:
+                raise GitBoundaryError('GIT_CONFIG_UNSUPPORTED',
+                    'Declared worktree configuration requires an existing snapshot; missing names cannot be protected') from error
+        elif any(k == "extensions.worktreeconfig" for k, _ in local):
             extension = _invoke([git, "config", "--file", str(common / "config"),
                 "--includes", "--type=bool", "--get", "extensions.worktreeconfig"],
                 cwd=cwd, env=env, timeout=15)
@@ -299,6 +316,9 @@ def protected_git(cwd, args):
         while offset < len(command) and command[offset] == "-c":
             offset += 2
         command[offset:offset] = [part for k, v in settings for part in ("-c", f"{k}={v}")]
+        if os.name != 'nt':
+            from .git_linux import writable_git_paths
+            command = pins.wrap(command, cwd=cwd, writable=writable_git_paths(cwd, gitdir, common, body))
         yield command, env
 
 
@@ -315,12 +335,17 @@ def protected_git_config(cwd, args):
         body[1] in {"add", "remove", "set-url", "get-url"} and
         re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}", body[2]) and
         len(body) == (4 if body[1] in {"add", "set-url"} else 3))
-    if not args or args[0] != "git" or not valid or os.name != "nt":
+    if not args or args[0] != "git" or not valid or (os.name != "nt" and sys.platform != 'linux'):
         raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "Unsupported managed Git configuration operation")
     cwd = Path(cwd).absolute()
     git, env = _executable(cwd), _environment()
     with ExitStack() as owners:
-        pins = _WindowsPins(owners)
+        scratch = Path(owners.enter_context(tempfile.TemporaryDirectory(prefix='gitgo-git-config-')))
+        if os.name == 'nt':
+            pins = _WindowsPins(owners)
+        else:
+            from .git_linux import LinuxPins
+            pins = LinuxPins(owners, scratch)
         pins.directory(cwd)
         if body[0] not in {"init", "--help", "--version"}:
             gitdir, common = _metadata(cwd, pins, protect_config=False)
@@ -329,4 +354,9 @@ def protected_git_config(cwd, args):
                 with root.open("config") as opened:
                     opened.read_bytes(max_bytes=_MAX_CONFIG)
             env.update(GIT_DIR=str(gitdir), GIT_COMMON_DIR=str(common), GIT_WORK_TREE=str(cwd))
-        yield [git, "--no-pager", "-c", "core.fsmonitor=false", *body], env
+        command = [git, "--no-pager", "-c", "core.fsmonitor=false", *body]
+        if os.name != 'nt':
+            # This narrow builtin intentionally changes configuration. It does
+            # not expose a snapshot as a writable target or execute extensions.
+            command = pins.wrap(command, cwd=cwd, writable=[cwd, *([gitdir, common] if body[0] not in {'init', '--help', '--version'} else [])])
+        yield command, env

@@ -165,6 +165,7 @@ class AgentWorktreeManager:
                 result = subprocess.run(command, cwd=cwd, capture_output=True,
                     timeout=timeout_seconds, check=False, close_fds=True,
                     creationflags=creationflags, env=environment,
+                    **({"pass_fds": command.pass_fds} if os.name == 'posix' and hasattr(command, 'pass_fds') else {}),
                     **({"input": input_bytes} if input_bytes is not None
                        else {"stdin": subprocess.DEVNULL}))
         except GitBoundaryError as exc:

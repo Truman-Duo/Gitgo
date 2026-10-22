@@ -1,8 +1,8 @@
 # Gitgo 版本
 
-## Alpha 3 Windows 预览候选（2026-10-22）
+## Alpha 3 跨平台预览候选（2026-10-23）
 
-产品、Dashboard 与 Native Host：`1.0.0-alpha.3`；Windows 文件版本：`1.0.0.4`。本轮仅发布 Windows x64 ZIP，合入与资产结果以对应 PR、CI 及 [Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 为准。范围、平台限制、基线与回退见 [Alpha 3](ALPHA_3.md)。下列 Alpha 2.1 与 Alpha 2 条目保留各自历史证据，不代表 Alpha 3 当前验收。
+产品、Dashboard 与 Native Host：`1.0.0-alpha.3`；Windows 文件版本：`1.0.0.4`。Windows、macOS 与 Linux 先完成各自原生测试，再提供候选供 owner 实际试用，明确满意后才公开发布。当前不是已发布版本。范围、平台限制、基线与回退见 [Alpha 3](ALPHA_3.md)。下列 Alpha 2.1 与 Alpha 2 条目保留各自历史证据，不代表 Alpha 3 当前验收。
 
 ## Alpha 2.1 已发布预览（2026-10-22）
 

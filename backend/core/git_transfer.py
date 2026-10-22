@@ -160,6 +160,8 @@ def prepare_transfer(git, cwd, body, *, bootstrap, env, local, entries, pins, gi
             _deny("Managed push does not execute checkout updates in a local receiver")
         _reject_programs(graph, protocols={"file"}, command=command, server=True)
         _reject_hooks(target_common, pins, _RECEIVE_HOOKS if command == "push" else ())
+        if command == 'push' and hasattr(pins, 'additional_writable'):
+            pins.additional_writable.extend([target_gitdir, target_common])
         roots.extend((target, target_common))
         if target_common.name.casefold() == ".git":
             roots.append(target_common.parent)
