@@ -1,6 +1,8 @@
 """Real Darwin kernel containment; never a Windows dispatch emulation."""
 import os
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +10,17 @@ from backend.core.sandbox_read import ReadRoot, ReadBoundaryError
 from backend.core import sandbox_read_darwin as native
 
 pytestmark = pytest.mark.skipif(sys.platform != 'darwin', reason='Real Darwin kernel required')
+
+
+def test_system_temp_alias_binds_root_without_allowing_project_links():
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw)
+        (path / 'target').write_bytes(b'system-temp')
+        (path / 'project-link').symlink_to(path, target_is_directory=True)
+        with ReadRoot(path) as acquired, acquired.open('target') as opened:
+            assert opened.read_bytes(max_bytes=64) == b'system-temp'
+        with pytest.raises(OSError):
+            ReadRoot(path / 'project-link')
 
 
 def test_beneath_flag_is_not_silently_ignored(tmp_path_factory, monkeypatch):
