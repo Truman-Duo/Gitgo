@@ -25,7 +25,9 @@ def identity(fd):
 def _flags():
     if platform.system() != 'Darwin' or os.open not in os.supports_dir_fd:
         raise ReadBoundaryError('No stable read backend is available for this Darwin kernel')
-    return os.O_CLOEXEC | os.O_NOFOLLOW | O_NOFOLLOW_ANY | os.O_NONBLOCK
+    # XNU explicitly rejects O_NOFOLLOW_ANY combined with O_NOFOLLOW. The
+    # former already rejects links in every component, including the leaf.
+    return os.O_CLOEXEC | O_NOFOLLOW_ANY | os.O_NONBLOCK
 
 
 def root(path):
