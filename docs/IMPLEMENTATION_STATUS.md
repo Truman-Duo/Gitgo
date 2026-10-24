@@ -1,8 +1,8 @@
 # 当前功能
 
-## Alpha 3 跨平台预览候选
+## Alpha 3 基线
 
-当前产品版本为 `1.0.0-alpha.3`，已组合 Alpha 2.1、管理更新及历史缩放源码，并补齐 Windows 注册测试源码绑定、工作台冻结依赖、Context 连发导航和测试期限。Windows、macOS 与 Linux 均需通过本轮原生验收，并由 owner 实际试用满意后才公开发布。Darwin 对象读取与 Linux 受保护 Git 已接入；最终包与完整业务验收仍待对应候选 CI，不由版本号推断完成。平台限制与发布门槛见 [Alpha 3](ALPHA_3.md)。
+当前产品版本为 `1.0.0-alpha.3`，基线分支 `release/alpha3`。本期整合 Alpha 2.1、管理更新、历史缩放，以及状态一致性、过程关系、用户问题转交、Grill 与终端交互修复。`/runtime`、`/stats`、`/detail`、`/btw`、`/help` 和命令推荐使用统一交互与中英文文案契约；运行状态和权限事实仍来自现有服务，侧讨论默认只读。正式 Windows 终端已获 owner 基线确认；各平台自动验证及发布资产以 [Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 摘要为准。平台边界和发布门槛见 [Alpha 3](ALPHA_3.md)。
 
 以下“接续”“产品版本仍为 Alpha 2.1”及表格为 PR #35 来源候选的历史记录，已修正项目以本段及当前代码为准。
 

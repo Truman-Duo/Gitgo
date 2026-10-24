@@ -36,6 +36,24 @@ def github_policy(public, key_id, platform, architecture, repository="Truman-Duo
     return value
 
 
+
+def staged_policy(stage, public, key_id, platform, architecture, repository, channel):
+    """Sign only packages whose installed trust accepts this publisher and feed."""
+    raw = (stage / "release-trust.json").read_bytes()
+    parsed = parse_release_policy(raw, platform, architecture)
+    value = json.loads(raw)
+    expected = github_policy(public, key_id, platform, architecture, repository)
+    if expected["public_keys"][0] not in value["public_keys"]:
+        raise ValueError("Package trust does not contain the release signing key")
+    if set(value["allowed_hosts"]) != set(expected["allowed_hosts"]):
+        raise ValueError("Package trust does not match the release hosts")
+    for name, declaration in value["channels"].items():
+        if declaration != expected["channels"][name]:
+            raise ValueError("Package trust does not match the release feeds")
+    parsed.channel(channel)
+    return raw, parsed
+
+
 def prepare(stage, archive, private_key, key_id, channel, sequence, repository, release_tag, now=None):
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
     product = json.loads((stage / "product.json").read_bytes())
@@ -46,7 +64,8 @@ def prepare(stage, archive, private_key, key_id, channel, sequence, repository, 
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", release_tag):
         raise ValueError("Expected an explicit release tag")
     public = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    policy = github_policy(public, key_id, product["platform"], product["architecture"], repository)
+    policy, installed_trust = staged_policy(stage, public, key_id, product["platform"],
+        product["architecture"], repository, channel)
     instant = (now or datetime.now(timezone.utc)).replace(microsecond=0)
     stamp = lambda value: value.isoformat().replace("+00:00", "Z")
     with archive.open("rb") as source:
@@ -63,6 +82,7 @@ def prepare(stage, archive, private_key, key_id, channel, sequence, repository, 
     signature = encode({"schema_version": 1, "algorithm": "ed25519", "key_id": key_id,
         "signature": base64.b64encode(private_key.sign(raw)).decode()})
     manifest = ManifestVerifier({key_id: public}).verify(raw, signature)
+    installed_trust.verifier.verify(raw, signature)
     if (channel == "preview") != bool(__import__("backend.core.update.version", fromlist=["Version"]).Version.parse(manifest.version).prerelease):
         raise ValueError("Stable and preview releases must use their respective version class")
     verify_bundle_contract(stage, manifest)
@@ -77,7 +97,7 @@ def prepare(stage, archive, private_key, key_id, channel, sequence, repository, 
                 with package.open(item) as source, expected[item.filename].open("rb") as local:
                     if hashlib.file_digest(source, "sha256").digest() != hashlib.file_digest(local, "sha256").digest():
                         raise ValueError("Archive differs from reviewed stage")
-    return raw, signature, encode(policy)
+    return raw, signature, policy
 
 
 def main():

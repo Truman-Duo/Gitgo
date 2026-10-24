@@ -2,13 +2,20 @@
 
 ## Windows 预览包
 
-从 [GitHub Releases](https://github.com/Truman-Duo/Gitgo/releases) 下载 Windows x64 ZIP 和对应校验文件。校验后完整解压，再运行 `gitgo.exe`；主 EXE 需要包内的内部组件，不能单独复制。
+从 [Alpha 3 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 下载 Windows x64 ZIP 和对应校验文件，核对 SHA256 后完整解压。不要单独复制主 EXE 或覆盖旧安装。Alpha 3 使用独立管理安装；在解压目录打开 PowerShell，指定尚不存在的安装和命令目录，例如：
+
+```powershell
+.\install-managed.ps1 -Root "$env:LOCALAPPDATA\GitgoPreview\install" -BinDir "$env:LOCALAPPDATA\GitgoPreview\commands"
+& "$env:LOCALAPPDATA\GitgoPreview\commands\gitgo.ps1"
+```
+
+安装不修改全局 PATH、注册表或执行策略。命令目录在安装根之外；保留完整解压包，安装后从生成的公共命令启动，不直接启动 `install/active` 内部文件。已有普通安装不会自动接管，保留旧安装和项目数据备份。
 
 已有预览资产与当前源码候选可能不同。Alpha 2 已构建 ZIP 并完成冻结与真实 API 验证，正式终端及发布状态见 [版本](VERSION.md)。
 
 首次启动选择检测到的终端并保存，然后在 `/config` 添加 Provider。Windows 凭据按当前用户加密保存。之后修改终端在下次启动生效，历史仍使用相同项目数据。
 
-Alpha 3 正在进行 Windows、macOS 与 Linux 的原生验收，尚未公开发布；通过后先由 owner 实际试用。执行前需要满足[原生沙箱配置](NATIVE_SANDBOX.md)，缺少隔离或操作员前提时会明确拒绝。建议候选包解压到新的独立目录，保留旧安装及数据备份。具体能力与限制见 [Alpha 3](ALPHA_3.md)。
+执行前需要满足[原生沙箱配置](NATIVE_SANDBOX.md)，缺少隔离或操作员前提时会明确拒绝。Windows 本期使用 PowerShell。`/update` 可分别控制自动检查、自动下载、退出时安装，也可手动检查；安装等待干净退出，不强停活动任务。发行包只配置已发布的预览渠道，尚无稳定版时稳定渠道显示未配置。版本切换不回退用户数据，具体边界见 [Alpha 3](ALPHA_3.md)。
 
 Linux 受保护 Git 需要 root 拥有、普通用户不能修改的 bubblewrap 0.11.1 或更新版本，并支持描述符挂载及无特权用户命名空间。请由操作员通过可信系统管理方式准备；程序不会自行提权安装，也不会退回普通 Git 执行。CI 的临时 worker 使用校验摘要固定的官方源码构建助手，不等于替用户安装。
 
