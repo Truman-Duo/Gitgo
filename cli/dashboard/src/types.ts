@@ -30,6 +30,9 @@ export type ToolState = "pending" | "running" | "completed" | "error" | "unresol
 export type ToolCallCard = {
   tool_name: string;
   tool_call_id?: string;
+  composite_tool?: string;
+  execution_id?: string;
+  step_id?: string;
   target: string;
   allowed: boolean;
   status_label: string;
@@ -69,6 +72,7 @@ export type ProviderUsageSummary = {
 };
 
 export type StreamActivity =
+  | { kind: "draft"; text: string; visibility: "public" | "verbose"; process_id?: string; actor_label?: string }
   | { kind: "reasoning"; text: string; process_id?: string; actor_label?: string }
   | { kind: "progress"; text: string; visibility: "public" | "verbose"; process_id?: string; actor_label?: string }
   | { kind: "tool"; toolIndex: number; detail_ref?: string }
@@ -166,6 +170,10 @@ export type StreamingRow = {
 // Imperative scroll handle exposed by the chat ScrollBox, registered upward
 // (mirrors sendChatRef) so the keymap can drive scroll without React state.
 export type ChatScrollHandle = {
-  scrollBy: (dy: number) => void;
+  /** Return the unconsumed delta so an inline discussion can share scrolling. */
+  scrollBy: (dy: number) => number;
   scrollToBottom: () => void;
 };
+
+/** Presentation only; does not change the tool patch or commit. */
+export type DiffLayout = "split" | "unified";

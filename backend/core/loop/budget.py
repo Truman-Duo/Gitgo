@@ -16,10 +16,11 @@ from dataclasses import dataclass
 class TaskBudgetExceeded(RuntimeError):
     """Raised before a task tree can consume work beyond an admitted limit."""
 
-    def __init__(self, code: str, message: str, *, timed_out: bool = False):
+    def __init__(self, code: str, message: str, *, timed_out: bool = False, details: dict | None = None):
         super().__init__(message)
         self.code = code
         self.timed_out = timed_out
+        self.details = dict(details or {})
 
 
 @dataclass(frozen=True)
@@ -31,11 +32,13 @@ class TaskTreeBudgetLimits:
     initial_seconds: float = 0.0  # zero keeps legacy fixed-deadline semantics
     verification_reserve_ratio: float = 0.15
     default_child_share: float = 0.20
+    root_coordination_calls: int = 2
 
     @classmethod
     def from_mapping(cls, raw: dict | None) -> "TaskTreeBudgetLimits":
         values = raw or {}
         return cls(
+            root_coordination_calls=max(0, min(int(values.get("root_coordination_calls", 2)), 100)),
             max_agents=max(1, min(int(values.get("max_agents", 8)), 64)),
             max_provider_calls=max(
                 1, min(int(values.get("max_provider_calls", 100)), 10_000)
@@ -69,6 +72,7 @@ class TaskTreeBudget:
         self._deadline_version = 0
         self._extensions: list[dict] = []
         self._lock = threading.Lock()
+        self._revision = 0
         self._agents = 0
         self._provider_calls = 0
         self._output_tokens = 0
@@ -116,6 +120,7 @@ class TaskTreeBudget:
         allowance = float(deadline.get("allowance_seconds", limits.max_seconds))
         budget.deadline_monotonic = now + max(0.0, min(limits.max_seconds, allowance) - elapsed)
         budget._deadline_version = int(deadline.get("version", 0))
+        budget._revision = max(0, int(raw.get("revision", 0)))
         budget._agents = max(0, int(used.get("agents", 0) or 0))
         budget._provider_calls = max(0, int(used.get("provider_calls", 0) or 0))
         budget._output_tokens = max(
@@ -162,18 +167,23 @@ class TaskTreeBudget:
         model assertions. Token/call/agent budgets remain independent hard gates.
         """
         with self._lock:
-            now = time.monotonic()
-            if self.limits.initial_seconds and now < self.hard_deadline_monotonic:
-                target = min(self.hard_deadline_monotonic, now + max(0.0, seconds))
-                if target > self.deadline_monotonic:
-                    self.deadline_monotonic = target
-                    self._deadline_version += 1
-                    self._extensions.append({"event": "deadline_extended",
-                        "version": self._deadline_version, "reason": reason,
-                        "remaining_seconds": round(target - now, 1),
-                        "hard_remaining_seconds": round(self.hard_deadline_monotonic - now, 1)})
-            self._check_deadline_locked()
-            return max(0.0, self.deadline_monotonic - now)
+            return self._reserve_time_locked(seconds, reason=reason)
+
+    def _reserve_time_locked(self, seconds: float, *, reason: str) -> float:
+        now = time.monotonic()
+        if self.limits.initial_seconds and now < self.hard_deadline_monotonic:
+            target = min(self.hard_deadline_monotonic, now + max(0.0, seconds))
+            if target > self.deadline_monotonic:
+                self.deadline_monotonic = target
+                self._deadline_version += 1
+                self._revision += 1
+                self._extensions.append({"event": "deadline_extended",
+                    "version": self._deadline_version, "reason": reason,
+                    "remaining_seconds": round(target - now, 1),
+                    "hard_remaining_seconds": round(self.hard_deadline_monotonic - now, 1)})
+        self._check_deadline_locked()
+        return max(0.0, self.deadline_monotonic - now)
+
 
     def drain_extensions(self) -> list[dict]:
         with self._lock:
@@ -194,11 +204,13 @@ class TaskTreeBudget:
                     f"task tree agent limit {self.limits.max_agents} exhausted",
                 )
             self._agents += 1
+            self._revision += 1
 
     def cancel_agent_reservation(self) -> None:
         """Undo an admission slot when construction fails before publication."""
         with self._lock:
             self._agents = max(0, self._agents - 1)
+            self._revision += 1
 
     def register_process(
         self,
@@ -236,6 +248,7 @@ class TaskTreeBudget:
                     "refunded_output_tokens": 0,
                 }
                 self._process_leases[process_id] = lease
+                self._revision += 1
                 return dict(lease)
 
             # The default is a share of this process purpose's pool, rather
@@ -279,7 +292,7 @@ class TaskTreeBudget:
             if requested_calls > available_calls or requested_output > available_output:
                 raise TaskBudgetExceeded(
                     "TASK_TREE_CHILD_ESCROW_UNAVAILABLE",
-                    "requested child allocation exceeds the uncommitted task-tree budget",
+                    f"requested child allocation exceeds the uncommitted task-tree budget; available provider_calls={available_calls}, output_tokens={available_output}; root coordination floor is protected",
                 )
             lease = {
                 "process_id": process_id,
@@ -296,14 +309,30 @@ class TaskTreeBudget:
                 "refunded_output_tokens": 0,
             }
             self._process_leases[process_id] = lease
+            self._revision += 1
             return dict(lease)
+
+    def preflight_children(self, nodes: list[dict], *, parent_id: str) -> None:
+        preview = self.from_snapshot(self.snapshot())
+        for index, node in enumerate(nodes):
+            preview.reserve_agent()
+            preview.register_process(f"preflight:{index}", parent_id=parent_id,
+                actor_kind="worker", max_steps=int(node.get("max_steps", 50) or 50),
+                request=dict(node.get("budget_request") or {}))
 
     def release_process(self, process_id: str, *, status: str = "terminal") -> dict | None:
         with self._lock:
             lease = self._process_leases.get(process_id)
             if lease is None or lease.get("state") != "active":
                 return dict(lease) if lease else None
+            from .lifecycle import TERMINAL
+            if status != "terminal" and status not in TERMINAL:
+                # A question/recovery pause ends a thread, not its execution.
+                # Retain the original escrow, usage and hard ceiling so the
+                # same process can resume without minting a new allocation.
+                return dict(lease)
             lease["state"] = "released"
+            self._revision += 1
             lease["terminal_status"] = str(status)
             lease["refunded_provider_calls"] = max(
                 0, int(lease.get("reserved_provider_calls", 0))
@@ -343,13 +372,15 @@ class TaskTreeBudget:
         return max(
             0,
             self._purpose_ceiling_locked(resource, purpose)
-            - used - self._outstanding_locked(resource, purpose),
+            - used - self._outstanding_locked(resource, purpose)
+            - (min(self.limits.root_coordination_calls, max(0, self._purpose_ceiling_locked(resource, purpose) - 1))
+               if resource == "provider_calls" and purpose == "work"
+               and any(lease.get("kind") == "root" and lease.get("state") == "active"
+                       for lease in self._process_leases.values()) else 0),
         )
 
     def begin_provider_call(self, process_id: str = "") -> int:
-        self.reserve_time(360, reason="provider_phase")
         with self._lock:
-            self._check_deadline_locked()
             if self._provider_calls >= self.limits.max_provider_calls:
                 raise TaskBudgetExceeded(
                     "TASK_TREE_PROVIDER_BUDGET_EXHAUSTED",
@@ -370,8 +401,18 @@ class TaskTreeBudget:
                 raise TaskBudgetExceeded(
                     "TASK_TREE_VERIFICATION_RESERVE_PROTECTED" if purpose == "work" else "TASK_TREE_VERIFICATION_BUDGET_EXHAUSTED",
                     f"task tree {purpose} provider-call allocation exhausted",
+                    details={"waiting_on_escrow": bool(outstanding and self._provider_calls_by_purpose[purpose] + 1 <= ceiling
+                              and lease and lease.get("kind") == "root"),
+                             "blocking_process_ids": [pid for pid, item in self._process_leases.items()
+                                 if item.get("kind") == "child" and item.get("state") == "active"
+                                 and item.get("purpose") == purpose
+                                 and int(item.get("reserved_provider_calls", 0)) > int(item.get("used_provider_calls", 0))]},
                 )
+            # Denied/waiting admission is not a running provider phase and
+            # must not keep extending the soft deadline on every poll.
+            self._reserve_time_locked(360, reason="provider_phase")
             self._provider_calls += 1
+            self._revision += 1
             self._provider_calls_by_purpose[purpose] += 1
             if lease:
                 lease["used_provider_calls"] = int(lease.get("used_provider_calls", 0)) + 1
@@ -437,6 +478,7 @@ class TaskTreeBudget:
                     f"task tree {purpose} output allocation exhausted",
                 )
             self._output_tokens += estimate
+            self._revision += 1
             self._output_tokens_by_purpose[purpose] += estimate
             if lease:
                 lease["used_output_tokens"] = int(lease.get("used_output_tokens", 0)) + estimate
@@ -452,6 +494,7 @@ class TaskTreeBudget:
             self._check_deadline_locked()
             if self._paused_at is None:
                 self._paused_at = time.monotonic()
+                self._revision += 1
 
     def resume_from_user(self) -> None:
         with self._lock:
@@ -462,11 +505,13 @@ class TaskTreeBudget:
             self.deadline_monotonic += paused
             self.hard_deadline_monotonic += paused
             self._paused_at = None
+            self._revision += 1
 
     def record_provider_usage(self, usage: dict) -> None:
         """Record exact provider billing telemetry without double-charging estimates."""
         with self._lock:
             self._reported_input_tokens += int(usage.get("input_tokens", 0) or 0)
+            self._revision += 1
             self._reported_output_tokens += int(usage.get("output_tokens", 0) or 0)
             self._reported_cache_read_tokens += int(
                 usage.get("cache_read_tokens", 0) or 0
@@ -479,6 +524,7 @@ class TaskTreeBudget:
         with self._lock:
             return {
                 "task_id": self.task_id,
+                "revision": self._revision,
                 "limits": {
                     "max_agents": self.limits.max_agents,
                     "max_provider_calls": self.limits.max_provider_calls,
@@ -487,6 +533,7 @@ class TaskTreeBudget:
                     "initial_seconds": self.limits.initial_seconds,
                     "verification_reserve_ratio": self.limits.verification_reserve_ratio,
                     "default_child_share": self.limits.default_child_share,
+                    "root_coordination_calls": self.limits.root_coordination_calls,
                 },
                 "deadline": {"version": self._deadline_version,
                     "allowance_seconds": max(0.0, self.deadline_monotonic - self.started_monotonic - self._paused_seconds)},
@@ -556,6 +603,8 @@ class TaskTreeBudget:
                     "used": self._provider_calls,
                     "maximum": self.limits.max_provider_calls,
                     "verification_reserve": call_reserve,
+                    "root_coordination_floor": self.limits.root_coordination_calls,
+                    "work_available_for_delegation": self._available_for_new_lease_locked("provider_calls", "work"),
                     "active_escrow": active_call_escrow,
                     "remaining_uncommitted": max(
                         0, self.limits.max_provider_calls

@@ -11,6 +11,7 @@ import hashlib
 import re
 
 from backend.core.loop.operation_policy import is_effectful_mutation
+from backend.core.prompt_templates import load_prompt
 
 
 class TaskKind(str, Enum):
@@ -153,6 +154,11 @@ class HostCompletionEvidence:
         if not receipts:
             reasons.append("no successful committed effectful receipt")
         if required:
+            from .validation_evidence import test_receipt_assessment
+            validation_cache = {}
+            passed_test_receipts = [item for item in all_receipts
+                if item.get("tool_name") == "run_test" and item.get("succeeded") is True
+                and item.get("committed") is True and item.get("test_passed") is True and item.get("test_id")]
             current_test_ids = {
                 str(item.get("test_id") or "")
                 for item in all_receipts
@@ -161,13 +167,15 @@ class HostCompletionEvidence:
                 and item.get("committed") is True
                 and item.get("test_passed") is True
                 and item.get("test_id")
+                and test_receipt_assessment(process, item, cache=validation_cache)["state"] == "current"
             }
             missing_current = [
                 item for item in required if item not in current_test_ids
             ]
             if missing_current:
                 failures = tuple(
-                    f"{item}:not_run_by_current_process"
+                    f"{item}:" + ("not_run_by_current_process" if not any(r.get("test_id") == item for r in passed_test_receipts)
+                                   else "validation_needs_recheck")
                     for item in missing_current
                 )
             workspace = str(getattr(process, "worktree_path", ""))
@@ -177,10 +185,18 @@ class HostCompletionEvidence:
                 )
             else:
                 from backend.core.loop.test_manifest import TestManifest
-                _passed, raw_failures = TestManifest.load(workspace).evaluate_required(
-                    list(required)
+                manifest = TestManifest.load(workspace)
+                _passed, raw_failures = manifest.evaluate_required(
+                    list(required), validation_cache=validation_cache
                 )
                 failures += tuple(raw_failures)
+                for test_id in required:
+                    record = manifest.records.get(test_id)
+                    if record and not any(r.get("test_id") == test_id and r.get("test_target") == record.target
+                            and all((r.get("validation_version") or {}).get(k) == (record.validation_version or {}).get(k)
+                                    for k in ("digest", "workspace", "scope", "input_files"))
+                            for r in passed_test_receipts):
+                        failures += (f"{test_id}:test_run_binding_changed",)
             if failures:
                 reasons.append("required tests are not all passing")
         return cls(
@@ -226,13 +242,23 @@ class HostCompletionEvaluator:
             if harness_result.blocked and not extra:
                 extra.append("completion policy plugin blocked delivery")
             gates.extend(extra.gates)
-        return {"ready": not gates, "gate_count": len(gates), "gates": gates}
+        return {"ready": not gates, "gate_count": len(gates), "gates": gates,
+                "assessment_kind": "readiness_probe" if candidate is None else "candidate_evaluation",
+                "candidate_source": ("supplied" if candidate is not None else
+                                     "completion_claim" if claim or review_claim else "placeholder"),
+                "task_id": process.active_task_id or process.process_id}
 
     @classmethod
     def evaluate(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
         from .completion_gates import CompletionReasons
         reasons = CompletionReasons()
         context, _ = process.read_context_snapshot() if getattr(process, 'read_context_snapshot', None) else ({}, 0)
+        from .coordination import pending_source_interface_decisions
+        pending_interfaces = pending_source_interface_decisions(process)
+        if pending_interfaces:
+            with reasons.scope("coordination_decision"):
+                reasons.append("output interface revision awaits supervisor decision: "
+                               + ", ".join(pending_interfaces))
         alignment = context.get('alignment_runtime') or {}
         review_required = True
         from .alignment_routing import uses_on_demand_review
@@ -251,7 +277,7 @@ class HostCompletionEvaluator:
             if (delivery.get('candidate_digest') != answer_digest(candidate)
                     or delivery.get('input_digest') != alignment_input_digest(process)
                     or (review_required and delivery.get('source') == 'host_on_demand')):
-                reasons.append('alignment delivery requires a current semantic check of this candidate and user evidence')
+                reasons.append('alignment delivery requires a current semantic check of this candidate and user evidence', code='ALIGNMENT_REVIEW_REQUIRED')
             if delivery.get('artifact_manifest'):
                 from .delivery_artifacts import verify_manifest
                 claim = process.completion_claim
@@ -261,9 +287,10 @@ class HostCompletionEvaluator:
         try:
             if getattr(process, "read_context_snapshot", None):
                 with process._context_lock:
-                    reasons.extend(EngineeringWorkflow(process).completion_reasons())
+                    for message in EngineeringWorkflow(process).completion_reasons():
+                        reasons.append(message, code="ENGINEERING_PREREQUISITE_REQUIRED")
         except (ValueError, KeyError, TypeError, OSError) as exc:
-            reasons.append(f"engineering workflow recovery requires inspection: {exc}")
+            reasons.append(f"engineering workflow recovery requires inspection: {exc}", code="ENGINEERING_WORKFLOW_RECOVERY_REQUIRED")
         try:
             task_kind = TaskKind(getattr(process, "task_kind", TaskKind.ANSWER.value))
         except ValueError:
@@ -298,12 +325,11 @@ class HostCompletionEvaluator:
             cls._verify_required_tool_calls(process, reasons)
             from backend.core.loop.verification_policy import verification_plan
             plan = verification_plan(process)
-            if plan.requires_independent_review and not getattr(
-                process, "review_approvals", []
-            ):
+            from .validation_evidence import has_current_review
+            if plan.requires_independent_review and not has_current_review(process):
                 with reasons.scope("verification", degradable=True):
                     reasons.append("independent reviewer approval is required "
-                        f"(verification level {plan.level}: {', '.join(plan.reasons)})")
+                        f"(verification level {plan.level}: {', '.join(plan.reasons)})", code="INDEPENDENT_REVIEW_REQUIRED")
         elif task_kind == TaskKind.REVIEW:
             review_claim = getattr(process, "review_claim", None)
             if not isinstance(review_claim, dict):
@@ -385,7 +411,7 @@ class HostCompletionEvaluator:
             review = reviews.get(child_id, {})
             if review.get("verdict") != "approved" or not review.get("summary"):
                 reasons.append(
-                    f"required delegated outcome lacks A structured approval: {child_id}"
+                    f"required delegated outcome lacks A structured approval: {child_id}", code="CHILD_REVIEW_REQUIRED"
                 )
                 continue
             if child.task_kind == TaskKind.ACTION.value:
@@ -396,7 +422,7 @@ class HostCompletionEvaluator:
                     and not worktree.get("promoted")
                 ):
                     reasons.append(
-                        f"approved child changes are not promoted: {child_id}"
+                        f"approved child changes are not promoted: {child_id}", code="CHILD_PROMOTION_REQUIRED"
                     )
                 known_receipts = {
                     str(item.get("receipt_id", ""))
@@ -486,7 +512,8 @@ class HostCompletionEvaluator:
         protocol exit. The Host derives failure from child lifecycle and review
         facts so a model cannot merely claim failure to bypass delivery gates.
         """
-        reasons: list[str] = []
+        from .completion_gates import CompletionReasons
+        reasons = CompletionReasons(default_code="FAILURE_EVIDENCE_INSUFFICIENT")
         if not response.strip():
             reasons.append("failed supervision requires a non-empty final report")
         manager = getattr(process, "_manager", None)
@@ -577,7 +604,7 @@ class HostCompletionEvaluator:
             )
         if required and not failure_observed:
             reasons.append("Host facts do not contain a failed delegated delivery")
-        return HostEvaluation(not reasons, tuple(reasons))
+        return HostEvaluation(not reasons, tuple(reasons), tuple(reasons.gates))
 
     @staticmethod
     def _verify_receipt_references(process, claim: CompletionClaim, reasons: list[str]) -> None:
@@ -640,6 +667,11 @@ class HostCompletionEvaluator:
                     reasons.append("test verification cites a non-passing run_test receipt")
                 elif expected_id and str(receipt.get("test_id") or "") != expected_id:
                     reasons.append("test receipt id does not match verification")
+                else:
+                    from .validation_evidence import test_receipt_assessment
+                    assessment = test_receipt_assessment(process, receipt)
+                    if assessment["state"] != "current":
+                        reasons.append("test verification needs recheck: " + assessment["reason"])
 
     @staticmethod
     def _verify_required_tool_calls(process, reasons: list[str]) -> None:
@@ -668,21 +700,40 @@ class HostCompletionEvaluator:
             count = sum(
                 1 for item in candidates
                 if str(item.get("tool_name") or "") == name
-                and item.get("succeeded") is True
-                and item.get("committed") is True
+                and _successful_tool_observation(item)
             )
             minimum = int(requirement.get("min_calls", 1) or 0)
             maximum = requirement.get("max_calls")
             if count < minimum:
                 reasons.append(
-                    f"required tool {name} has {count} committed successful "
+                    f"required tool {name} has {count} confirmed successful "
                     f"call(s); minimum is {minimum}"
                 )
             if maximum is not None and count > int(maximum):
                 reasons.append(
-                    f"required tool {name} has {count} committed successful "
+                    f"required tool {name} has {count} confirmed successful "
                     f"call(s); maximum is {int(maximum)}"
                 )
+
+
+
+def _successful_tool_observation(receipt: dict) -> bool:
+    """Call-count evidence is distinct from a formal mutation requirement.
+
+    Only trusted producer facts admit a non-writing native command. A staged,
+    stale, failed or unpublished result must not satisfy a required call.
+    Actual action/artifact gates still require their own committed effects.
+    """
+    if receipt.get("succeeded") is not True:
+        return False
+    if receipt.get("committed") is True:
+        return True
+    return (receipt.get("file_service_result") is True
+        and receipt.get("producer_completed") is True
+        and type(receipt.get("producer_exit_code")) is int
+        and receipt["producer_exit_code"] == 0
+        and receipt.get("input_applicability") == "current"
+        and receipt.get("output_publication") == "not_required")
 
 
 def _current_task_receipts(process) -> list[dict]:
@@ -707,16 +758,7 @@ def _current_task_receipts(process) -> list[dict]:
 COMPLETE_TASK_PARAMETERS = {
     "type": "object",
     "properties": {
-        "result": {"type": "string", "maxLength": 2400, "description": (
-            "The actual user-facing final answer or delivery summary. State the result, "
-            "how to use or locate it, the core approach, and only material limitations. "
-            "Keep it concise (normally no more than eight short lines); a single sentence "
-            "that verification passed is enough. Do not enumerate test cases or put search "
-            "attempts, provider/network diagnostics, process IDs, receipts, hashes, "
-            "governance gates, validation procedure, or internal execution narration here "
-            "unless the user explicitly requested an audit. Put verification facts in the "
-            "verification field instead."
-        )},
+        "result": {"type": "string", "maxLength": 2400, "description": load_prompt('tools/completion_result')},
         "verification": {
             "type": "array",
             "items": {"type": "object"},

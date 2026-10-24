@@ -14,73 +14,69 @@ import subprocess
 import sys
 from pathlib import Path
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, NATIVE_WORKSPACE_PRODUCER
+
 
 def register_all(register) -> None:
     """注册所有子进程安全的基础工具。
 
     由 runner._auto_import_registrations() 调用。
-    register 是一个 Callable(name, fn)，将工具加入 runner 的注册表。
+    register 是一个 Callable(name, fn, execution_contract)，将工具加入 runner 的注册表。
     """
-    register("file_read", file_read)
-    register("file_write", file_write)
-    register("file_edit", file_edit)
-    register("file_delete", file_delete)
-    register("file_list", file_list)
-    register("file_search", file_search)
-    register("git_status", git_status)
-    register("git_diff", git_diff)
-    register("git_log", git_log)
-    register("git_branch", git_branch)
-    register("run_command", run_command)
+    register("file_read", file_read, NATIVE_FILE_READ)
+    register("file_write", file_write, NATIVE_PROCESS)
+    register("file_edit", file_edit, NATIVE_PROCESS)
+    register("file_delete", file_delete, NATIVE_PROCESS)
+    register("file_list", file_list, NATIVE_PROCESS)
+    register("file_search", file_search, NATIVE_PROCESS)
+    register("git_status", git_status, NATIVE_PROCESS)
+    register("git_diff", git_diff, NATIVE_PROCESS)
+    register("git_log", git_log, NATIVE_PROCESS)
+    register("git_branch", git_branch, NATIVE_PROCESS)
+    register("run_command", run_command, NATIVE_PROCESS)
 
     # Canonical Agent development tools.  Legacy names above remain available
     # for compatibility, but new capability profiles use these confined,
     # receipt-friendly implementations.
     from backend.core.tools import workspace_tools
-    register("read_file", workspace_tools.read_file)
-    register("list_files", workspace_tools.list_files)
-    register("search_text", workspace_tools.search_text)
-    register("edit_file", workspace_tools.edit_file)
-    register("write_file", workspace_tools.write_file)
-    register("delete_file", workspace_tools.delete_file)
-    register("apply_patch", workspace_tools.apply_patch)
-    register("exec_command", workspace_tools.exec_command)
-    register("shell_script", workspace_tools.shell_script)
-    register("dependency_feedback", workspace_tools.dependency_feedback)
-    register("rebuild_dependency_graph", workspace_tools.rebuild_dependency_graph)
-    from backend.core.tools.document_tools import document_create, document_open
-    register("document_open", document_open)
-    register("document_create", document_create)
-    from backend.core.tools.web_tools import web_fetch, web_search
-    register("web_search", web_search)
-    register("web_fetch", web_fetch)
+    register("read_file", workspace_tools.read_file, NATIVE_FILE_READ)
+    register("list_files", workspace_tools.list_files, NATIVE_PROCESS)
+    register("search_text", workspace_tools.search_text, NATIVE_PROCESS)
+    register("edit_file", file_edit, NATIVE_PROCESS)
+    register("write_file", file_write, NATIVE_PROCESS)
+    register("delete_file", file_delete, NATIVE_PROCESS)
+    register("apply_patch", _patch_requires_service, NATIVE_PROCESS)
+    register("exec_command", workspace_tools.exec_command, NATIVE_WORKSPACE_PRODUCER)
+    register("shell_script", workspace_tools.shell_script, NATIVE_WORKSPACE_PRODUCER)
+    register("dependency_feedback", workspace_tools.dependency_feedback, NATIVE_PROCESS)
+    register("rebuild_dependency_graph", workspace_tools.rebuild_dependency_graph, NATIVE_PROCESS)
+    from backend.core.tools.document_tools import render_document, document_open
+    register("document_open", document_open, NATIVE_PROCESS)
+    register("document_create", _document_requires_service, NATIVE_PROCESS)
+    register("document_render", render_document, NATIVE_PROCESS)
 
     # Existing governance tools are also available to the isolated runner.  The
     # daemon keeps the original public names, so profiles and old transcripts do
     # not break while their execution boundary becomes cancellable.
     from backend.core.loop import tool_wrappers
-    register("contract_detect_drift", tool_wrappers.contract_detect_drift)
-    register("contract_get_impact", tool_wrappers.contract_get_impact)
-    register("contract_get_changed_symbols", tool_wrappers.contract_get_changed_symbols)
-    register("lesson_search", tool_wrappers.lesson_search)
-    register("lesson_discard", tool_wrappers.lesson_discard)
-    register("lesson_verify", tool_wrappers.lesson_verify)
-    register("lesson_harvest", tool_wrappers.lesson_harvest)
-    register("lesson_promote", tool_wrappers.lesson_promote)
-    register("lesson_list", tool_wrappers.lesson_list)
-    register("privacy_scan", tool_wrappers.privacy_scan)
-    register("memory_snapshot", tool_wrappers.memory_snapshot)
-    register("memory_restore", tool_wrappers.memory_restore)
-    register("run_test", _run_test_isolated)
-    register("formalize", _formalize_isolated)
+    register("contract_detect_drift", tool_wrappers.contract_detect_drift, NATIVE_PROCESS)
+    register("contract_get_impact", tool_wrappers.contract_get_impact, NATIVE_PROCESS)
+    register("contract_get_changed_symbols", tool_wrappers.contract_get_changed_symbols, NATIVE_PROCESS)
+    register("lesson_search", tool_wrappers.lesson_search, NATIVE_PROCESS)
+    register("lesson_discard", tool_wrappers.lesson_discard, NATIVE_PROCESS)
+    register("lesson_verify", tool_wrappers.lesson_verify, NATIVE_PROCESS)
+    register("lesson_promote", tool_wrappers.lesson_promote, NATIVE_PROCESS)
+    register("lesson_list", tool_wrappers.lesson_list, NATIVE_PROCESS)
+    register("privacy_scan", tool_wrappers.privacy_scan, NATIVE_PROCESS)
+    register("run_test", _run_test_isolated, NATIVE_PROCESS)
     from backend.core.tools.dynamic_tools import (
         execute_authored_python, execute_authored_privileged_python, execute_composite,
     )
-    register("dynamic_composite", execute_composite)
-    register("authored_python", execute_authored_python)
-    register("authored_privileged_python", execute_authored_privileged_python)
+    register("dynamic_composite", execute_composite, NATIVE_PROCESS)
+    register("authored_python", execute_authored_python, NATIVE_PROCESS)
+    register("authored_privileged_python", execute_authored_privileged_python, NATIVE_WORKSPACE_PRODUCER)
     from backend.core.tools.authored_bridge import execute_authored_host_python
-    register("authored_host_python", execute_authored_host_python)
+    register("authored_host_python", execute_authored_host_python, NATIVE_PROCESS)
 
 
 # ── File Tools ─────────────────────────────────────────────
@@ -95,14 +91,17 @@ def file_read(args: dict) -> dict:
     encoding = args.get("encoding", "utf-8")
     max_lines = args.get("lines")
 
-    p = _resolve_path(path)
-    if not p.exists():
-        return {"error": "FILE_NOT_FOUND", "path": path}
-    if p.is_dir():
-        return {"error": "IS_DIRECTORY", "path": path}
-
+    from backend.core.sandbox_read import ReadBoundaryError
+    from backend.core.tools.workspace_tools import _read_target
     try:
-        content = p.read_text(encoding=encoding)
+        _workspace, p, root, relative = _read_target(args)
+    except ReadBoundaryError as exc:
+        return {"error": "READ_ERROR", "path": path, "detail": str(exc)}
+    try:
+        from backend.core.sandbox_read_plan import open_planned_read
+        with open_planned_read(root, relative) as opened:
+            raw = opened.read_bytes()
+        content = raw.decode(encoding)
         total_lines = content.count("\n") + 1
         if max_lines and max_lines > 0:
             lines = content.splitlines()
@@ -112,105 +111,48 @@ def file_read(args: dict) -> dict:
         return {
             "content": content,
             "path": str(p),
-            "size": p.stat().st_size,
+            "size": len(raw),
             "lines": total_lines,
             "truncated": max_lines is not None and total_lines > max_lines,
         }
+    except FileNotFoundError:
+        return {"error": "FILE_NOT_FOUND", "path": path}
+    except IsADirectoryError:
+        return {"error": "IS_DIRECTORY", "path": path}
     except UnicodeDecodeError:
         return {"error": "BINARY_FILE", "path": path}
     except OSError as e:
         return {"error": "READ_ERROR", "path": path, "detail": str(e)}
 
 
+def _file_service_required(canonical: str) -> dict:
+    # Native children do not own the private lesson inventory, writer locks or
+    # commit authority. Keeping a native registration must not restore a write
+    # path around the trusted catalog's file service.
+    from backend.core.errors import error_payload
+    return {**error_payload("FILE_SERVICE_REQUIRED", next_actions=[{
+        "action": canonical, "effect": "Use the registered file-service tool through ToolPipeline; do not retry via the native runner or expose private state to the sandbox."}]),
+        "effect_state": "not_committed", "execution_state": "not_started"}
+
+
 def file_write(args: dict) -> dict:
-    """写入文件内容。
-
-    args: path (str), content (str), encoding (str, 默认 utf-8),
-          mode (str, "w"=覆盖 "a"=追加, 默认 "w")
-    """
-    path = args.get("path", "")
-    content = args.get("content", "")
-    encoding = args.get("encoding", "utf-8")
-    mode = args.get("mode", "w")
-
-    if not path:
-        return {"error": "MISSING_PATH"}
-    if mode not in ("w", "a"):
-        return {"error": "INVALID_MODE", "mode": mode, "allowed": ["w", "a"]}
-
-    p = _resolve_path(path)
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open(mode, encoding=encoding) as stream:
-            stream.write(content)
-        return {
-            "path": str(p),
-            "size": p.stat().st_size,
-            "action": "created" if mode == "w" else "appended",
-        }
-    except OSError as e:
-        return {"error": "WRITE_ERROR", "path": path, "detail": str(e)}
+    return _file_service_required("write_file")
 
 
 def file_edit(args: dict) -> dict:
-    """编辑文件——查找替换。
-
-    args: path (str), old_string (str), new_string (str),
-          replace_all (bool, 默认 False=只替换首次出现)
-    """
-    path = args.get("path", "")
-    old = args.get("old_string", "")
-    new = args.get("new_string", "")
-    replace_all = args.get("replace_all", False)
-
-    p = _resolve_path(path)
-    if not p.exists():
-        return {"error": "FILE_NOT_FOUND", "path": path}
-
-    try:
-        content = p.read_text(encoding="utf-8")
-    except OSError as e:
-        return {"error": "READ_ERROR", "path": path, "detail": str(e)}
-
-    count = content.count(old)
-    if count == 0:
-        return {"error": "STRING_NOT_FOUND", "path": path, "count": 0}
-
-    if replace_all:
-        new_content = content.replace(old, new)
-        replacements = count
-    else:
-        new_content = content.replace(old, new, 1)
-        replacements = 1
-
-    try:
-        p.write_text(new_content, encoding="utf-8")
-    except OSError as e:
-        return {"error": "WRITE_ERROR", "path": path, "detail": str(e)}
-
-    return {
-        "path": str(p),
-        "replacements": replacements,
-        "total_occurrences": count,
-        "replaced_all": replace_all,
-    }
+    return _file_service_required("edit_file")
 
 
 def file_delete(args: dict) -> dict:
-    """删除文件。
+    return _file_service_required("delete_file")
 
-    args: path (str)
-    """
-    path = args.get("path", "")
-    p = _resolve_path(path)
-    if not p.exists():
-        return {"error": "FILE_NOT_FOUND", "path": path}
-    try:
-        size = p.stat().st_size
-        p.unlink()
-        return {"path": str(p), "action": "deleted", "size": size}
-    except OSError as e:
-        return {"error": "DELETE_ERROR", "path": path, "detail": str(e)}
+
+def _document_requires_service(args: dict) -> dict:
+    return _file_service_required("document_create")
+
+
+def _patch_requires_service(args: dict) -> dict:
+    return _file_service_required("apply_patch")
 
 
 def file_list(args: dict) -> dict:
@@ -439,41 +381,12 @@ def run_command(args: dict) -> dict:
 
 
 def _run_test_isolated(args: dict) -> dict:
-    from backend.core.loop.test_manifest import run_registered_test
+    from backend.core.tools.registered_test import execute_test_seeds
     workspace = args.get("_workspace") or args.get("workspace_path") or str(Path.cwd())
     public_args = {key: value for key, value in args.items() if not key.startswith("_")}
-    return run_registered_test(workspace, public_args)
+    return execute_test_seeds(workspace, public_args)
 
 
-def _formalize_isolated(args: dict) -> dict:
-    """Reconstruct SyncSession from serializable config inside the runner."""
-    from backend.core.config import Config
-    from backend.core.sync_session import SyncSession
-
-    config_data = args.get("_config")
-    project_name = str(args.get("_project_name", ""))
-    if not isinstance(config_data, dict):
-        return {"error": "FORMALIZE_CONFIG_MISSING"}
-    config = Config.from_dict(config_data)
-    project = next((item for item in config.projects if item.name == project_name), None)
-    if project is None:
-        return {"error": "FORMALIZE_PROJECT_NOT_FOUND", "project": project_name}
-    session = SyncSession.load_session(project, config) or SyncSession(project, config)
-    session.step_scan()
-    session.step_load_commits()
-    raw_indices = args.get("indices")
-    indices = None if raw_indices is None else {int(item) for item in raw_indices}
-    result = session.step_create_formal_commit(
-        selected_indices=indices,
-        message=args.get("message"),
-    )
-    if result is None:
-        return {"error": "FORMALIZE_FAILED"}
-    return {
-        "commit": f"[{result.prefix}-{result.number}]",
-        "message": result.message,
-        "session_path": str(session.workspace_path / ".gitgo" / "session.json"),
-    }
 
 
 # ── Helpers ────────────────────────────────────────────────

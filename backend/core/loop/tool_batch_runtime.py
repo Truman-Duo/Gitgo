@@ -61,6 +61,9 @@ class ToolBatchRuntime:
                 referenced_files=ref_files,
             )
             self.process.tool_receipts.append(dict(r.receipt or {}))
+            from .loop_bookkeeping import capture_lesson_outcome
+            capture_lesson_outcome(self.process, r, self.workspace_path,
+                                   rolled_back=rolled_back, on_event=self.emit)
             search_fallback = (r.data or {}).get("provider_fallback") if r.tool_name == "web_search" else None
             if search_fallback:
                 self.emit({"event": "provider_capability_fallback",
@@ -156,7 +159,7 @@ class ToolBatchRuntime:
             policy = decide_tool_operation(tool, public_args)
             if policy.requires_user and matching_grant(
                 self.process, tool.name, public_args,
-                per_invocation=bool(getattr(tool, "approval_per_invocation", False)),
+                per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool,
             ) is None:
                 return call_index, tool, public_args
         return None

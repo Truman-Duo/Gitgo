@@ -1,5 +1,7 @@
 """Provider protocol adaptation and bounded continuation transport."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
 from .turn_guidance import _BASE_CURRENT_TURN_ENVELOPE
 from .provider_protocol import ProviderEvent, ProviderEventType
 
@@ -8,18 +10,14 @@ def _stream_recovery_message(has_text: bool, had_partial_tool: bool) -> str:
     """生成流中断恢复提示消息。"""
     if had_partial_tool:
         return (
-            "前一次回复在流式传输工具调用参数时中断。"
-            "如果需要工具调用请从头发出新的完整工具调用；"
-            "不要依赖中断流中的部分参数。继续当前任务。"
+            load_prompt('recovery/stream_tool')
         )
     if has_text:
         return (
-            "前一次回复在流式传输中中断。"
-            "从上面中断处继续，不要重复已有内容。继续当前任务。"
+            load_prompt('recovery/stream_text')
         )
     return (
-        "前一次回复在流式传输开始前中断。"
-        "继续当前任务并提供正常回复。"
+        load_prompt('recovery/stream_start')
     )
 
 

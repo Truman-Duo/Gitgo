@@ -34,18 +34,14 @@ export function timelineFromTrace(
   const tools: ToolCallCard[] = [];
   const notices: RuntimeNotice[] = [];
   const toolIndex = new Map<string, number>();
-  const pendingText = new Map<string, {text: string; visibility: "public" | "verbose"; actor_label?: string}>();
+  const pendingText = new Map<string, number[]>();
   let providerUsage: ProviderUsageSummary | undefined;
-
   const flushProgress = (processId: string) => {
-    const pending = pendingText.get(processId);
+    for(const index of pendingText.get(processId) || []) {
+      const item=activity[index];
+      if(item?.kind === "draft") activity[index]={...item,kind:"progress",visibility:"public"};
+    }
     pendingText.delete(processId);
-    const text = pending?.text.trim();
-    if (!pending || !text) return;
-    activity.push({
-      kind: "progress", text, visibility: "public",
-      process_id: processId || undefined, actor_label: pending.actor_label,
-    });
   };
 
   for (const event of events) {
@@ -61,13 +57,11 @@ export function timelineFromTrace(
       continue;
     }
     if (event.event === "text_delta") {
-      const previous = pendingText.get(processId);
-      pendingText.set(processId, {
-        text: (previous?.text || "") + String(event.delta || ""),
-        visibility: event.visibility === "public" ? "public" : previous?.visibility || "verbose",
-        actor_label,
-      });
-      continue;
+      const indices=pendingText.get(processId) || [];
+      const last=activity[activity.length-1], delta=String(event.delta || "");
+      if(last?.kind === "draft" && last.process_id === processId) activity[activity.length-1]={...last,text:last.text+delta};
+      else if(delta) {indices.push(activity.length);activity.push({kind:"draft",text:delta,visibility:event.visibility === "public" ? "public":"verbose",process_id:processId,actor_label});}
+      pendingText.set(processId,indices);continue;
     }
     if (event.event === "reasoning_delta") {
       const delta = String(event.delta || "");
@@ -87,7 +81,7 @@ export function timelineFromTrace(
       });
       continue;
     }
-    if (event.event === "provider_request_started" || event.event === "toolcall_start") {
+    if ((event.event === "provider_request_started" && event.phase !== "alignment" && event.answer_continuation !== true) || event.event === "toolcall_start") {
       flushProgress(processId);
     }
     if (event.event === "agent_terminal" || event.event === "agent_complete") {
@@ -147,6 +141,7 @@ export function timelineFromTrace(
       tools.push({
         tool_name: String(event.tool_name || "tool"),
         tool_call_id: `${String(event.execution_id || "")}:${String(event.step_id || "")}`,
+        composite_tool: String(event.composite_tool || ""), execution_id: String(event.execution_id || ""), step_id: String(event.step_id || ""),
         target: `${String(event.composite_tool || "composite")} / ${String(event.step_id || "step")}`,
         allowed: !failed, status_label: failed ? "ERROR" : "OK",
         duration_ms: Number(event.duration_ms || 0), timestamp: String(event.time || ""),
@@ -184,5 +179,5 @@ export function timelineFromTrace(
       };
     }
   }
-  return {activity, tools, notices, providerUsage};
+  return {activity: activity.filter(item => item.kind !== "draft"), tools, notices, providerUsage};
 }

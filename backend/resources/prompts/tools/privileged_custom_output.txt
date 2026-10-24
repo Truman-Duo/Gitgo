@@ -1,0 +1,1 @@
+Native output runs in a private business-file view and is published by the file service. Program data is under tool_output. On before-write feedback, repeat the original inputs with the returned candidate_ref and lesson_feedback_id to reuse frozen output; exact invocation approval still applies. Execution permission does not waive output checks.

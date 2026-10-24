@@ -6,6 +6,11 @@ are never written to this script or its ledger.
 
 from __future__ import annotations
 
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root
+
 from collections import Counter
 import io
 import json
@@ -98,7 +103,7 @@ def main() -> None:
     finally:
         host.close()
 
-    ledger_root = Path(".gitgo/real_api_acceptance")
+    ledger_root = development_root(Path.cwd()) / "real_api_acceptance"
     ledger = ledger_root / "case8_dynamic_tool.jsonl"
     if ledger.exists():
         for run_number in range(2, 100):

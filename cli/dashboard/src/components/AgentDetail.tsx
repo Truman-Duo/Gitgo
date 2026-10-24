@@ -1,3 +1,6 @@
+import {useCopy} from "../ui/PageFrame.js";
+import {label} from "../ui/runtimeLabels.js";
+import {scrollViewport} from "../input/scrollViewport.js";
 // src/components/AgentDetail.tsx — subprocess chat conversation
 import React, { memo, useEffect, useRef, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
@@ -38,16 +41,17 @@ export const AgentDetail = memo(function AgentDetail({
   process, toolEvents, messages, streaming, cols, rows, scrollChatRef, feedbackStatus, verbose = false, client, project,
   pendingDecision, decisionSelection = 0, decisionComposing = false, decisionSubmitting = false,
 }: Props) {
+  const t=useCopy();
   const { w: terminalWidth } = usePanelSize({ minWidth: 50 });
-  const width = Math.max(50, Math.min(terminalWidth, cols));
-  const contentWidth = width - 4;
+  const width = Math.max(1, Math.min(terminalWidth, cols));
+  const contentWidth = Math.max(1, width - 4);
   const scrollRef = useRef<ScrollBoxHandle>(null);
   useScrollInput(scrollRef);
 
   useEffect(() => {
     const handle = scrollRef.current;
     scrollChatRef.current = handle
-      ? { scrollBy: (dy: number) => handle.scrollBy(dy), scrollToBottom: () => handle.scrollToBottom() }
+      ? { scrollBy: (dy: number) => scrollViewport(handle,dy), scrollToBottom: () => handle.scrollToBottom() }
       : null;
     return () => { scrollChatRef.current = null; };
   }, [scrollChatRef]);
@@ -56,37 +60,15 @@ export const AgentDetail = memo(function AgentDetail({
 
   return (
     <Box flexDirection="column" paddingLeft={1} width={width} flexGrow={1}>
-      {/* Header — name + steps only */}
-      <Box flexShrink={0} flexDirection="row">
-        <Text bold>Subprocess — {agentLabel(process)}</Text>
-        <Text dimColor>  {process.steps_used}/{process.max_steps} steps</Text>
-      </Box>
-      {process.recovery ? (
-        <Box flexShrink={0} flexDirection="column">
-          <Text color={process.recovery.resume_forbidden ? colors.danger : colors.warning}>
-            Recovery {process.status}
-            {process.recovery.requires_manual_verification ? " · manual verification required" : " · explicit resume required"}
-          </Text>
-          <Text dimColor>
-            /runtime recovery {process.recovery.resume_forbidden ? "discard" : process.recovery.requires_manual_verification ? "resume_verified" : "resume"} {process.process_id}
-          </Text>
-        </Box>
-      ) : null}
-      {process.worktree ? (
-        <Box flexShrink={0} flexDirection="row">
-          <Text color={process.worktree.isolated ? colors.success : colors.warning}>
-            worktree {process.worktree.isolated ? "isolated" : "shared workspace"}
-          </Text>
-          {process.worktree.path ? <Text dimColor> · {truncate(process.worktree.path, 70)}</Text> : null}
-          {process.worktree.state ? <Text dimColor> · {process.worktree.state}</Text> : null}
-          {process.worktree.promoted ? <Text color={colors.success}> · promoted</Text> : null}
-          {process.worktree.dirty === true ? <Text color={colors.warning}> · dirty</Text> : null}
-        </Box>
-      ) : null}
-      <Box flexShrink={0} flexDirection="row">
-        <Text dimColor>Input is delivered to this subprocess through its safe-boundary mailbox.</Text>
-        {feedbackStatus ? <Text color={colors.accent}>  {feedbackStatus}</Text> : null}
-      </Box>
+      <Box flexShrink={0} minHeight={1}><Text bold wrap="truncate-end">{agentLabel(process)} · {label(process.status,t)}</Text></Box>
+      {process.recovery?<Box flexShrink={0}><Text color={process.recovery.resume_forbidden?colors.danger:colors.warning}>
+        {process.recovery.resume_forbidden?t({en:"Recovery blocked; inspect /detail.",zh:"当前禁止恢复，请在 /detail 查看恢复条件。"})
+          :process.recovery.requires_manual_verification?t({en:"Manual verification required before resuming.",zh:"恢复前需要人工核验。"})
+          :t({en:"Explicit confirmation required before resuming.",zh:"恢复前需要明确确认。"})}
+      </Text></Box>:null}
+      {process.worktree&&process.worktree.state!=="shared_workspace"&&process.worktree.state!=="isolated"
+       ?<Text color={colors.warning}>{t({en:"Worktree: ",zh:"工作树："})}{label(process.worktree.state,t)}</Text>:null}
+      {feedbackStatus?<Box flexShrink={0}><Text color={colors.accent}>{feedbackStatus}</Text></Box>:null}
 
       {/* Chat conversation */}
       <VirtualConversation
@@ -103,7 +85,7 @@ export const AgentDetail = memo(function AgentDetail({
         verbose={verbose}
         empty={(
           <Box paddingTop={1}>
-            <Text dimColor>No conversation recorded</Text>
+            <Text dimColor>{t({en:"No conversation recorded",zh:"暂无对话记录"})}</Text>
           </Box>
         )}
       />
@@ -138,6 +120,7 @@ export const AgentDetailScene = memo(function AgentDetailScene({
   decisionView,
   onContinueAgent,
 }: SceneProps) {
+  const t=useCopy();
   const loop = loopData;
   const conv = loop.agentConversations?.[activeAgentId ?? ""] ?? null;
   const processStream = useProcessStream(activeProject, activeAgentId);
@@ -167,21 +150,21 @@ export const AgentDetailScene = memo(function AgentDetailScene({
         if (pendingDecision) {
           if (decisionBusy.current) return;
           decisionBusy.current = true;
-          setFeedbackStatus("submitting decision…");
+          setFeedbackStatus(t({en:"submitting decision…",zh:"正在提交答复…"}));
           void sendChat(client, activeProject, text.trim(), new Date().toISOString(), pendingDecision, {
             onStream: () => undefined,
             onDone: () => {
-              setFeedbackStatus("decision delivered");
+              setFeedbackStatus(t({en:"decision delivered",zh:"答复已送达"}));
               void loop.refresh();
             },
-            onError: (message) => setFeedbackStatus(`decision failed: ${message}`),
+            onError: (message) => setFeedbackStatus(t({en:`decision failed: ${message}`,zh:`答复提交失败：${message}`})),
           }).finally(() => {
             decisionBusy.current = false;
             onSendSettled();
           });
           return;
         }
-        setFeedbackStatus("sending feedback…");
+        setFeedbackStatus(t({en:"sending feedback…",zh:"正在发送补充…"}));
         const startedAt = new Date().toISOString();
         void sendRuntimeFeedback(client, activeProject, activeAgentId, text.trim(), (event) => {
           const payload = (event?.payload || event) as Record<string, any>;
@@ -191,29 +174,33 @@ export const AgentDetailScene = memo(function AgentDetailScene({
             );
           }
           if (payload?.event === "runtime_ack" && payload?.stage === "admitted" && payload?.process_id) {
-            setFeedbackStatus("continuation admitted");
+            setFeedbackStatus(t({en:"continuation admitted",zh:"后续任务已接收"}));
             onContinueAgent?.(String(payload.process_id));
           }
         })
           .then((result: any) => {
-            setFeedbackStatus("feedback completed");
+            const outcome = result?.outcome;
+            const status = outcome?.status || result?.status || "unknown";
+            setFeedbackStatus(status === "accepted" ? t({en:"feedback queued",zh:"补充已排队"})
+              : status === "completed" ? t({en:"subprocess completed",zh:"子进程已完成"})
+              : t({en:"Subprocess: ",zh:"子进程："})+label(status,t)+(outcome?.error?.message?": "+outcome.error.message:""));
             if (result?.process_id && result.process_id !== activeAgentId) {
               onContinueAgent?.(String(result.process_id));
             }
             void loop.refresh();
           })
-          .catch((error) => setFeedbackStatus(`feedback failed: ${String(error)}`));
+          .catch((error) => setFeedbackStatus(t({en:`feedback failed: ${String(error)}`,zh:`补充发送失败：${String(error)}`})));
       };
     }
     return () => {
       if (sendChatRef) sendChatRef.current = () => {};
     };
-  }, [client, activeProject, activeAgentId, sendChatRef, pendingDecision, loop, onSendSettled, onContinueAgent]);
+  }, [client, activeProject, activeAgentId, sendChatRef, pendingDecision, loop, onSendSettled, onContinueAgent,t]);
 
   if (loop.loading) {
     return (
       <Box paddingLeft={1}>
-        <Text dimColor>Loading agent data...</Text>
+        <Text dimColor>{t({en:"Loading subprocess data…",zh:"正在读取子进程数据…"})}</Text>
       </Box>
     );
   }
@@ -221,8 +208,8 @@ export const AgentDetailScene = memo(function AgentDetailScene({
   if (!process) {
     return (
       <Box paddingLeft={1} flexDirection="column">
-        <Text color={colors.danger}>Agent not found: {activeAgentId}</Text>
-        <Text dimColor>Process may have been killed or completed.</Text>
+        <Text color={colors.danger}>{t({en:"Subprocess not found: ",zh:"未找到子进程："})}{activeAgentId}</Text>
+        <Text dimColor>{t({en:"The process may have been removed or become unavailable.",zh:"该进程可能已被移除或暂时不可用。"})}</Text>
       </Box>
     );
   }

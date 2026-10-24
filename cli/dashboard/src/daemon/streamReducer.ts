@@ -51,18 +51,10 @@ function findToolIndex(state: StreamState, ev: StreamEvent): number | undefined 
 function commitProgress(state: StreamState): StreamState {
   const text = state.text.trim();
   if (!text) return {...state, text: ""};
-  return {
-    ...state,
-    text: "",
-    activity: [...state.activity, {
-      kind: "progress",
-      text,
-      // Provider-visible text that is followed by another tool/model step is
-      // commentary, not the final answer. Keep it in compact mode just like
-      // Codex/Claude Code progress cells; raw reasoning remains verbose-only.
-      visibility: "public",
-    }],
-  };
+  const hasDraft = state.activity.some(item => item.kind === "draft");
+  return {...state, text: "", activity: hasDraft
+    ? state.activity.map(item => item.kind === "draft" ? {...item,kind: "progress" as const,visibility: "public" as const} : item)
+    : [...state.activity,{kind: "progress",text,visibility: "public"}]};
 }
 
 function appendNotice(state: StreamState, ev: StreamEvent): StreamState {
@@ -85,13 +77,14 @@ export function reduceStreamEvent(
   options: ReduceOptions = {},
 ): StreamState {
   switch (ev.event) {
-    case "text_delta":
-      return {
-        ...state,
-        text: state.text + (ev.delta || ""),
-        visibility: ev.visibility || state.visibility,
-        providerStep: ev.step ?? state.providerStep,
-      };
+    case "text_delta": {
+      const activity=state.activity.slice(), last=activity[activity.length-1];
+      const actor=eventActor(ev), delta=ev.delta || "";
+      if(last?.kind === "draft" && last.process_id === ev.process_id && last.actor_label === actor) {
+        activity[activity.length-1]={...last,text:last.text+delta};
+      } else if(delta) activity.push({kind:"draft",text:delta,visibility:ev.visibility || state.visibility,process_id:ev.process_id,actor_label:actor});
+      return {...state,activity,text:state.text+delta,visibility:ev.visibility || state.visibility,providerStep:ev.step ?? state.providerStep};
+    }
 
     case "reasoning_delta":
       {
@@ -258,6 +251,7 @@ export function reduceStreamEvent(
       const card: ToolCallCard = {
         tool_name: ev.tool_name,
         tool_call_id: rawKey,
+        composite_tool: ev.composite_tool, execution_id: ev.execution_id, step_id: ev.step_id,
         target: `${ev.composite_tool} / ${ev.step_id}`,
         result_text: ev.error || `receipt ${ev.receipt?.receipt_id || "recorded"}`,
         blocked_reason: ev.is_error ? (ev.error || "composite step failed") : undefined,

@@ -39,11 +39,16 @@ def bounded_join(chunks, separator="\n"):
     return separator.join(retained)
 
 
-def verified_antiword():
+def verified_antiword(workspace=None):
     candidate = shutil.which("antiword")
     if not candidate:
         raise ValueError("ANTIWORD_UNAVAILABLE: convert to docx or install a verified adapter")
-    candidate = Path(candidate).resolve(strict=True)
+    candidate = Path(candidate)
+    if not candidate.is_absolute():
+        raise ValueError("CONVERTER_IDENTITY_UNVERIFIED: adapter path must be absolute")
+    candidate = candidate.resolve(strict=True)
+    if workspace is not None and candidate.is_relative_to(Path(workspace).resolve(strict=True)):
+        raise ValueError("CONVERTER_IDENTITY_UNVERIFIED: adapter cannot reside in the workspace")
     expected = str(os.environ.get("GITGO_ANTIWORD_SHA256") or "").lower()
     if len(expected) != 64 or hashlib.sha256(candidate.read_bytes()).hexdigest() != expected:
         raise ValueError("CONVERTER_IDENTITY_UNVERIFIED: antiword requires a Host-configured SHA256 of a trusted adapter")

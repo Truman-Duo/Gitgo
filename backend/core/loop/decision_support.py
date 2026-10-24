@@ -7,15 +7,14 @@ user choice through a validated, resumable decision request.
 
 from __future__ import annotations
 
-import ast
 import json
-import math
-import operator
 import uuid
 from datetime import datetime
 from typing import Any
 
 from backend.core.loop.completion_protocol import HostCompletionEvidence
+# Python import compatibility; arithmetic is owned by the workbench.
+from backend.core.workbench.calculation import safe_calculate
 
 
 DECISION_KINDS = {
@@ -24,26 +23,6 @@ DECISION_KINDS = {
 }
 STATEFUL_DECISION_KINDS = {
     "preference", "direction", "verification", "checkpoint",
-}
-
-
-_BINARY = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.FloorDiv: operator.floordiv,
-    ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
-}
-_UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
-_COMPARE = {
-    ast.Eq: operator.eq,
-    ast.NotEq: operator.ne,
-    ast.Lt: operator.lt,
-    ast.LtE: operator.le,
-    ast.Gt: operator.gt,
-    ast.GtE: operator.ge,
 }
 
 
@@ -60,62 +39,13 @@ def _decision_position(process) -> dict:
     }
 
 
-def safe_calculate(expression: str) -> int | float | bool:
-    """Evaluate a bounded arithmetic/comparison expression without ``eval``."""
-    expression = str(expression).strip()
-    if not expression or len(expression) > 500:
-        raise ValueError("expression must contain 1..500 characters")
-    tree = ast.parse(expression, mode="eval")
-
-    def visit(node: ast.AST, depth: int = 0) -> int | float | bool:
-        if depth > 32:
-            raise ValueError("expression is too deeply nested")
-        if isinstance(node, ast.Expression):
-            return visit(node.body, depth + 1)
-        if isinstance(node, ast.Constant):
-            if isinstance(node.value, bool):
-                return node.value
-            if isinstance(node.value, (int, float)) and math.isfinite(float(node.value)):
-                if abs(float(node.value)) > 1e100:
-                    raise ValueError("numeric literal is too large")
-                return node.value
-            raise ValueError("only finite numeric constants are allowed")
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
-            return _bounded(_UNARY[type(node.op)](visit(node.operand, depth + 1)))
-        if isinstance(node, ast.BinOp) and type(node.op) in _BINARY:
-            left = visit(node.left, depth + 1)
-            right = visit(node.right, depth + 1)
-            if isinstance(node.op, ast.Pow) and abs(float(right)) > 100:
-                raise ValueError("power exponent exceeds the safety bound")
-            return _bounded(_BINARY[type(node.op)](left, right))
-        if isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators):
-            left = visit(node.left, depth + 1)
-            for operation, comparator in zip(node.ops, node.comparators):
-                function = _COMPARE.get(type(operation))
-                if function is None:
-                    raise ValueError("unsupported comparison")
-                right = visit(comparator, depth + 1)
-                if not function(left, right):
-                    return False
-                left = right
-            return True
-        raise ValueError(f"unsupported expression element: {type(node).__name__}")
-
-    return visit(tree)
-
-
-def _bounded(value: Any) -> int | float | bool:
-    if isinstance(value, bool):
-        return value
-    if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
-        raise ValueError("calculation produced a non-finite result")
-    if abs(float(value)) > 1e100:
-        raise ValueError("calculation result exceeds the safety bound")
-    return value
-
-
-def collect_decision_evidence(process, focus: str = "all") -> dict:
+def collect_decision_evidence(process, focus: str = "all", *, identifier: str = "") -> dict:
     """Return compact Host-owned facts so the LLM does not manually aggregate them."""
+    if focus == "guidance":
+        from .recovery_guidance import lookup_guidance
+        return lookup_guidance(identifier)
+    if identifier:
+        raise ValueError("identifier is only valid with focus=guidance")
     allowed = {
         "all", "completion", "gates", "children", "tests",
         "governance", "budget", "capabilities", "engineering",
@@ -130,7 +60,12 @@ def collect_decision_evidence(process, focus: str = "all") -> dict:
     }
     if focus in {"all", "completion", "tests"}:
         evidence = HostCompletionEvidence.collect(process)
-        result["completion"] = evidence.to_dict()
+        result["completion"] = {
+            **evidence.to_dict(),
+            "scope": "current_task_action_evidence",
+            "effectful_receipts_required": process.task_kind == "action",
+            "task_id": process.active_task_id or process.process_id,
+        }
     if focus in {"all", "completion", "gates"}:
         from backend.core.loop.completion_protocol import HostCompletionEvaluator
         context, _version = process.read_context_snapshot()
@@ -211,8 +146,6 @@ def create_user_decision(process, args: dict) -> dict:
             f"state_topic is required for {kind}; provide a stable semantic topic "
             "so the newest confirmed answer supersedes stale state"
         )
-    if compact and not raw_options and not args.get("allow_free_form", True):
-        raise ValueError("an open clarification must allow a free-form reply")
     options = []
     labels: set[str] = set()
     recommended_count = 0
@@ -249,7 +182,11 @@ def create_user_decision(process, args: dict) -> dict:
         "question": question,
         "why_user_must_decide": why,
         "options": options,
-        "allow_free_form": bool(args.get("allow_free_form", True)),
+        # Semantic options cannot force a user to endorse an unsuitable answer.
+        # Receiving other text still grants no permission or resolved intent.
+        "allow_free_form": (kind in {"clarification","preference","direction","choice"}
+                            and not any(o.get("action") for o in options))
+                           or bool(args.get("allow_free_form", True)),
         "created_at": datetime.now().isoformat(),
         **_decision_position(process),
         "task_id": process.active_task_id or process.process_id,
@@ -261,6 +198,7 @@ def create_user_decision(process, args: dict) -> dict:
             raise ValueError("a clarification round requires 1..8 questions")
         if len(json.dumps(questions, ensure_ascii=False).encode()) > 32_000:
             raise ValueError("clarification round exceeds 32KB")
+        questions=[dict(item) if isinstance(item,dict) else item for item in questions]
         ids = set()
         for item in questions:
             if not isinstance(item, dict) or not item.get("node_id") or item["node_id"] in ids:
@@ -270,6 +208,8 @@ def create_user_decision(process, args: dict) -> dict:
                 raise ValueError("round questions require question, state_topic and non-permission kind")
             if item.get("kind", "clarification") not in {"clarification", "preference", "direction", "verification", "choice", "checkpoint"} or not item.get("why_user_must_decide"):
                 raise ValueError("round questions require a supported kind and user-decision reason")
+            if item.get("kind","clarification") in {"clarification","preference","direction","choice"}:
+                item["allow_free_form"]=True
             choices = item.get("options") or []
             simple = item.get("kind", "clarification") == "clarification"
             if not isinstance(choices, list) or not (0 <= len(choices) <= 3 if simple else 2 <= len(choices) <= 3):

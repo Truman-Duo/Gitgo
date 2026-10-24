@@ -75,20 +75,18 @@ class CommitMixin:
         # 分配编号
         max_n = number_start
         for fc in self.formal_commits:
-            if fc.number > max_n:
-                max_n = fc.number
+            if fc.number + 1 > max_n:
+                max_n = fc.number + 1
         repo_max = _find_next_number(
             self.project.backup_path, prefix,
-            git_runner=self.bk_git_runner,
+            git_runner=self.bk_git_runner if self.backup_path else None,
             workspace_path=self.workspace_path,
         )
         next_n = max(max_n, repo_max)
 
-        # Update local counter
-        if self.workspace_path:
-            counter_file = Path(self.workspace_path) / ".gitgo" / "next_number"
-            counter_file.parent.mkdir(parents=True, exist_ok=True)
-            counter_file.write_text(str(next_n))
+        from .state import reserve_formal_number
+        next_n = reserve_formal_number(self.workspace_path, next_n)
+        self._formal_number_reservation = next_n
 
         fc = FormalCommit(
             message=message,
@@ -98,21 +96,13 @@ class CommitMixin:
             created_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
         )
         self.formal_commits.append(fc)
-        self.on_log(f"正式 Commit 已创建: [{prefix}-{fc.number}]")
         self._last_op = {"op": "formalize", "status": "success",
                          "timestamp": datetime.now().isoformat()}
-        from backend.core.history import HistoryManager
-        HistoryManager.add_operation(
-            self.project.name, "formalize", "success",
-            {"commit": f"[{prefix}-{fc.number}]",
-             "source_indices": list(selected_indices),
-             "files_changed": [
-                 {"path": e.rel_path, "status": e.status}
-                 for e in self.entries if e.selected
-             ]},
-            correlation_id=self._correlation_id,
-        )
-        self.save_session()
+        self._publish_metadata(f"正式 Commit 已创建: [{prefix}-{fc.number}]", [
+            ("formalize", {"commit": f"[{prefix}-{fc.number}]",
+             "source_indices": sorted(selected_indices),
+             "files_changed": [{"path": e.rel_path, "status": e.status}
+                               for e in self.entries if e.selected]})])
         return fc
 
     def step_toggle_workspace_selection(self, index: int, mode: str = "single") -> set[int]:
@@ -141,16 +131,9 @@ class CommitMixin:
             self.on_log(f"无效的 formal commit 索引: {index}")
             return False
         fc = self.formal_commits.pop(index)
-        self.on_log(f"已删除 formal commit: [{fc.prefix}-{fc.number}]")
         self._last_op = {"op": "delete_formal", "status": "success",
                          "timestamp": datetime.now().isoformat()}
-        from backend.core.history import HistoryManager
-        HistoryManager.add_operation(
-            self.project.name, "delete_formal", "success",
-            {"commit": f"[{fc.prefix}-{fc.number}]"},
-            correlation_id=self._correlation_id,
-        )
-        self.save_session()
+        self._publish_metadata(f"已删除 formal commit: [{fc.prefix}-{fc.number}]", [("delete_formal", {"commit": f"[{fc.prefix}-{fc.number}]"})])
         return True
 
     def step_edit_formal_message(self, index: int, message: str) -> bool:
@@ -162,17 +145,9 @@ class CommitMixin:
             self.on_log(f"Commit message 格式错误: {err}")
             return False
         self.formal_commits[index].message = message
-        self.on_log("Formal commit message 已更新")
         self._last_op = {"op": "edit_message", "status": "success",
                          "timestamp": datetime.now().isoformat()}
-        from backend.core.history import HistoryManager as _HM
-        _HM.add_operation(
-            self.project.name, "governance_edited", "success",
-            {"index": index, "prefix": self.formal_commits[index].prefix,
-             "number": self.formal_commits[index].number},
-            correlation_id=self._correlation_id,
-        )
-        self.save_session()
+        self._publish_metadata("Formal commit message 已更新", [("governance_edited", {"index": index, "prefix": self.formal_commits[index].prefix, "number": self.formal_commits[index].number})])
         return True
 
     def step_edit_formal_number(self, index: int, new_number: int) -> bool:
@@ -191,17 +166,9 @@ class CommitMixin:
         old_number = fc.number
         fc.message = fc.message.replace(old_tag, new_tag, 1)
         fc.number = new_number
-        self.on_log(f"编号已更新: [{fc.prefix}-{fc.number}]")
         self._last_op = {"op": "edit_number", "status": "success",
                          "timestamp": datetime.now().isoformat()}
-        from backend.core.history import HistoryManager as _HM
-        _HM.add_operation(
-            self.project.name, "governance_renumbered", "success",
-            {"index": index, "prefix": fc.prefix,
-             "old_number": old_number, "new_number": new_number},
-            correlation_id=self._correlation_id,
-        )
-        self.save_session()
+        self._publish_metadata(f"编号已更新: [{fc.prefix}-{fc.number}]", [("governance_renumbered", {"index": index, "prefix": fc.prefix, "old_number": old_number, "new_number": new_number})])
         return True
 
     def step_dissolve_formal(self, index: int) -> bool:
@@ -214,22 +181,9 @@ class CommitMixin:
             return False
         self.selected_workspace = set()
         self.formal_commits.pop(index)
-        self.on_log(f"已 Dissolve: [{fc.prefix}-{fc.number}]，Workspace commits 已恢复")
         self._last_op = {"op": "dissolve", "status": "success",
                          "timestamp": datetime.now().isoformat()}
-        from backend.core.history import HistoryManager
-        HistoryManager.add_operation(
-            self.project.name, "dissolve_formal", "success",
-            {"commit": f"[{fc.prefix}-{fc.number}]"},
-            correlation_id=self._correlation_id,
-        )
-        HistoryManager.add_operation(
-            self.project.name, "governance_dissolved", "success",
-            {"commit": f"[{fc.prefix}-{fc.number}]",
-             "source_indices": sorted(fc.source_indices)},
-            correlation_id=self._correlation_id,
-        )
-        self.save_session()
+        self._publish_metadata(f"已 Dissolve: [{fc.prefix}-{fc.number}]，Workspace commits 已恢复", [("dissolve_formal", {"commit": f"[{fc.prefix}-{fc.number}]"}), ("governance_dissolved", {"commit": f"[{fc.prefix}-{fc.number}]", "source_indices": sorted(fc.source_indices)})])
         return True
 
     def step_clear_formal_sources(self, index: int) -> bool:
@@ -242,10 +196,9 @@ class CommitMixin:
             return False
         fc.sources_cleared = True
         fc.source_indices = set()
-        self.on_log(f"已清除 [{fc.prefix}-{fc.number}] 的来源引用")
         self._last_op = {"op": "clear_sources", "status": "success",
                          "timestamp": datetime.now().isoformat()}
-        self.save_session()
+        self._publish_metadata(f"已清除 [{fc.prefix}-{fc.number}] 的来源引用", [])
         return True
 
     def step_add_incoming_formal(self, message: str) -> FormalCommit:
@@ -260,8 +213,34 @@ class CommitMixin:
         )
         fc.is_incoming = True
         self.formal_commits.append(fc)
-        self.on_log(f"Incoming formal commit 已创建: [{fc.prefix}-{fc.number}]")
         self._last_op = {"op": "add_incoming", "status": "success",
                          "timestamp": datetime.now().isoformat()}
-        self.save_session()
+        self._publish_metadata(f"Incoming formal commit 已创建: [{fc.prefix}-{fc.number}]", [])
         return fc
+
+    def _publish_metadata(self, message: str, observations: list) -> None:
+        """Authority first; failures in observers cannot replay the mutation."""
+        self.save_session()
+        self._metadata_audit_warning = None
+        failures = []
+        try:
+            self.on_log(message)
+        except Exception as exc:
+            failures.append({"component": "notification", "error_type": type(exc).__name__})
+        from backend.core.history import HistoryManager
+        for operation, detail in observations:
+            try:
+                HistoryManager.add_operation(self.project.name, operation, "success", detail,
+                                             correlation_id=self._correlation_id)
+            except Exception as exc:
+                failures.append({"component": "history", "error_type": type(exc).__name__})
+        if failures:
+            self._metadata_audit_warning = {
+                "code": "GOVERNANCE_AUDIT_PENDING",
+                "message": "Formal metadata committed; notification/history observation failed. Do not repeat the committed operation.",
+                "failures": failures,
+            }
+            try:
+                self.on_log(self._metadata_audit_warning["message"])
+            except Exception:
+                pass  # The structured warning remains on the committed result.

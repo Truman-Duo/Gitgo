@@ -13,7 +13,7 @@ export function useInputStyle(mode: InputMode): {
   if (mode === "COMMAND") {
     return {
       promptChalk: colors.input.command.prompt,
-      bg: colors.input.command.bg,
+      bg: undefined,
       borderColor: colors.input.command.border,
       badge: colors.input.command.badge,
       resultFg: colors.input.result.fg,

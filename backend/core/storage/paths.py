@@ -103,24 +103,11 @@ def _read_project_id(path: Path) -> str:
 
 def _git_common_dir(workspace: Path) -> Path | None:
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=workspace,
-            # NativeHost is a long-lived JSON-lines process.  Letting Git
-            # inherit that open request pipe can keep Windows' subprocess
-            # reader threads alive after git itself has exited, which blocks
-            # every history/trace read until the Dashboard times out.
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        from backend.core.loop.git_execution import discover_git_metadata, GitBoundaryError
+        result = discover_git_metadata(workspace, "--git-common-dir")
+    except (OSError, subprocess.TimeoutExpired, GitBoundaryError):
         return None
-    value = result.stdout.strip()
+    value = result.stdout.decode("utf-8", errors="replace").strip()
     if result.returncode != 0 or not value:
         return None
     common = Path(value)
@@ -129,7 +116,7 @@ def _git_common_dir(workspace: Path) -> Path | None:
     return common.resolve()
 
 
-def _existing_project_identity(workspace: Path) -> Path | None:
+def _direct_project_identity(workspace: Path, *, include_local: bool = True) -> Path | None:
     """Locate an existing identity lexically without spawning Git.
 
     Read paths are hot (history expansion, status, project overview) and must
@@ -160,8 +147,25 @@ def _existing_project_identity(workspace: Path) -> Path | None:
                 candidates.append(common_dir / "gitgo" / PROJECT_ID_FILE)
         except OSError:
             pass
-    candidates.append(workspace / ".gitgo" / PROJECT_ID_FILE)
+    if include_local:
+        candidates.append(workspace / ".gitgo" / PROJECT_ID_FILE)
     return next((path for path in candidates if path.is_file()), None)
+
+
+def _existing_project_identity(workspace: Path) -> Path | None:
+    """Match creation's Git owner without a process, write, or outer-repo leak."""
+    direct = _direct_project_identity(workspace)
+    if direct is not None:
+        return direct
+    if (workspace / ".git").exists() or (workspace / ".git").is_symlink():
+        return None  # An uninitialized/malformed nearest Git root is a boundary.
+    for ancestor in workspace.parents:
+        entry = ancestor / ".git"
+        if entry.exists() or entry.is_symlink():
+            # A nested ordinary directory belongs to this Git common directory,
+            # not an ancestor's unrelated legacy workspace-local identity.
+            return _direct_project_identity(ancestor, include_local=False)
+    return None
 
 
 def _ensure_project_id(workspace: Path) -> str:
@@ -223,6 +227,22 @@ def resolve_storage_paths(
         observability_db=project_root / "observability.sqlite3",
         cas_dir=cas_dir,
         health_file=project_root / "storage-health.json",
+    )
+
+
+def resolve_shared_knowledge_paths(state_home: str | Path) -> StoragePaths:
+    """A user knowledge realm; never discover or scan other project stores."""
+    home = Path(state_home).expanduser().resolve()
+    root = home / "shared" / "knowledge"
+    validate_storage_location(root)
+    root.mkdir(parents=True, exist_ok=True)
+    cas = root / "cas"
+    cas.mkdir(exist_ok=True)
+    return StoragePaths(
+        workspace=root, project_id=str(uuid.uuid5(uuid.NAMESPACE_URL, "gitgo:user-knowledge")),
+        state_home=home, project_root=root, state_db=root / "state.sqlite3",
+        observability_db=root / "observability.sqlite3", cas_dir=cas,
+        health_file=root / "storage-health.json",
     )
 
 

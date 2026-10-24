@@ -1,4 +1,9 @@
 """Run the production Bun frontend transport against a real Native Host/API."""
+
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
 import copy
 from datetime import datetime
 import hashlib
@@ -20,7 +25,7 @@ if __name__ == "__main__":
     installed = LLMConfigManager._config_path().read_bytes()
     cfg = copy.deepcopy(ConfigManager.load())
     project = next(p for p in cfg.projects if p.name == "2920")
-    home = ROOT / ".gitgo/runtime-hardening" / ("frontend-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8])
+    home = development_root(ROOT) / 'runtime-hardening' / ("frontend-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8])
     home.mkdir(parents=True)
     workspace = home / "workspace"
     workspace.mkdir()
@@ -39,7 +44,7 @@ if __name__ == "__main__":
         for key, value in saved.items():
             if value is None: os.environ.pop(key, None)
             else: os.environ[key] = value
-    env = {**os.environ, "GITGO_CONFIG_PATH": str(home / "config.json"), "GITGO_STATE_HOME": str(home / "state"),
+    env = {**os.environ, "GITGO_CONFIG_PATH": str(home / "config.json"), "GITGO_STATE_HOME": str(test_state_home(workspace)),
         "GITGO_LLM_CONFIG_PATH": str(home / "llm.json"), "GITGO_LLM_SECRET_PATH": str(home / "secrets.json"),
         "GITGO_ACCEPTANCE_PROFILE": str(home), "GITGO_PYTHON": sys.executable, "GITGO_ROOT": str(ROOT), "PYTHONUTF8": "1"}
     for key in ("GITGO_INSTALL_ROOT", "GITGO_HOST_EXECUTABLE", "GITGO_LLM_BASE_URL", "GITGO_LLM_API_KEY", "GITGO_LLM_MODEL", "GITGO_LLM_PROTOCOL"):

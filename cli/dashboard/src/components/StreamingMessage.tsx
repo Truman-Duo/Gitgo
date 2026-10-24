@@ -40,7 +40,7 @@ export function StreamingMessage({ streaming, contentWidth, verbose = false }: P
       <TurnTimeline activity={activity} tools={streaming.tools} notices={streaming.notices}
         verbose={verbose} width={contentWidth} active elapsedMs={elapsedMs}
         providerUsage={streaming.provider_usage}/>
-      {showText && hasText ? (
+      {showText && hasText && !(verbose && activity.some(item => item.kind === "draft")) ? (
         <Box flexDirection="row">
           <Text color={colors.chat.gutter}>● </Text>
           <StreamingMarkdownText content={streaming.text} width={Math.max(10, contentWidth - 2)}/>

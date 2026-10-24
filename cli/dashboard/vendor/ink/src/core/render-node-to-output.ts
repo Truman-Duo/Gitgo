@@ -15,6 +15,7 @@ import {
 import type { Color } from './styles.js'
 import { widestLine } from './widest-line.js'
 import wrapText from './wrap-text.js'
+import { reflowOffset } from './reflow-offset.js'
 
 // Per-frame scratch: set when any node's yoga position/size differs from
 // its cached value, or a child was removed. Read by ink.tsx to decide
@@ -690,7 +691,18 @@ function renderNodeToOutput(
             anchorNode = anchorNode.parentNode
           }
           if (anchorNode === content) {
-            node.scrollTop = anchorTop + semanticAnchor.offset
+            if (!node.resizeScrollAnchor && node.scrollAnchor?.align === 'nearest') {
+              const top = node.scrollTop ?? 0
+              const bottom = anchorTop + (semanticAnchor.el.yogaNode?.getComputedHeight() ?? 1)
+              node.scrollTop = anchorTop < top ? anchorTop
+                : bottom > top + innerHeight ? Math.max(anchorTop, bottom - innerHeight) : top
+            } else {
+              const offset = node.resizeScrollAnchor
+                ? reflowOffset(semanticAnchor.offset, node.resizeScrollAnchor.rows,
+                  semanticAnchor.el.yogaNode?.getComputedHeight() ?? 1)
+                : semanticAnchor.offset
+              node.scrollTop = anchorTop + offset
+            }
             node.pendingScrollDelta = undefined
           }
           node.scrollAnchor = undefined
@@ -1150,7 +1162,13 @@ function renderNodeToOutput(
           // on the assumption that plain-space fill + unchanged children =
           // valid composite, but children CAN reposition (ScrollBox remeasure
           // on re-render → /permissions body blanked on Down arrow, #25436).
-          ownBackgroundColor || node.style.opaque ? undefined : prevScreen,
+          // A growing/shrinking clip exposes cells that were not painted in
+          // the previous frame. Descendant bounds can stay identical while
+          // their cached pixels contain an old sibling border (animated cards).
+          // Repaint this subtree when its clip geometry changes, as ScrollBox
+          // already does; steady-state clipped subtrees retain the blit path.
+          ownBackgroundColor || node.style.opaque || (needsClip && positionChanged)
+            ? undefined : prevScreen,
           boxBackgroundColor,
         )
       }

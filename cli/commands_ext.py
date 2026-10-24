@@ -456,7 +456,7 @@ def _cmd_memory(cfg: Config, project_name: str, action: str,
     )
 
     if action == "list":
-        snapshots = list_memory_snapshots(bp)
+        snapshots = list_memory_snapshots(bp, session.workspace_path)
         if json_output:
             print(json.dumps(snapshots, indent=2, ensure_ascii=False))
         else:
@@ -472,13 +472,20 @@ def _cmd_memory(cfg: Config, project_name: str, action: str,
             session.workspace_path, bp, session.project,
         )
         if json_output:
-            print(json.dumps({"result": "ok", **result}))
+            print(json.dumps({"result": "failed" if result.get("error") else result.get("status", "ok"), **result}))
         else:
-            print(f"[OK] 已快照 {len(result['snapped'])} 个记忆源 → {result['dest']}")
+            if result.get("error"):
+                print(f"[FAIL] {result['error']} · {result.get('effect_state', 'unknown')}")
+            elif result.get("status") == "no_sources":
+                print("没有可快照的工具记忆来源")
+            else:
+                print(f"[OK] 已快照 {len(result['snapped'])} 个记忆源 → {result['dest']}")
+            for warning in result.get("warnings", []):
+                print(f"[WARN] {warning['code']}")
 
     elif action == "restore":
         result = restore_tool_memories(
-            bp, session.workspace_path, snapshot_timestamp=snapshot_ts,
+            bp, session.workspace_path, snapshot_timestamp=snapshot_ts, project_name=session.project.name,
         )
         if json_output:
             print(json.dumps(result))
@@ -497,7 +504,15 @@ def _cmd_contract(cfg: Config, project_name: str,
     session = _init_session(cfg, project_name, json_output=json_output)
 
     from backend.core.contract import ContractManager, detect_drift
-    contract = ContractManager.load(session.workspace_path)
+    from backend.core.contract import ContractStateUnavailable
+    try:
+        contract = ContractManager.load(session.workspace_path)
+    except ContractStateUnavailable as exc:
+        if json_output:
+            print(json.dumps({"error": exc.code, "message": str(exc), "query_state": "failed"}))
+        else:
+            print(f"{exc.code}: {exc}")
+        sys.exit(1)
 
     if contract is None:
         if json_output:

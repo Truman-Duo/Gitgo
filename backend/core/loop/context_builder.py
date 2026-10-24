@@ -188,7 +188,8 @@ def _get_relevant_lessons(workspace_path: str | Path, project_name: str) -> list
         setattr(lesson, "_gitgo_trust_tier", "verified")
     for lesson in pending:
         setattr(lesson, "_gitgo_trust_tier", "pending")
-    lessons = verified + pending
+    from backend.core.knowledge.review import can_consume
+    lessons = [lesson for lesson in verified + pending if can_consume(lesson)]
     return lessons
 
 
@@ -327,8 +328,11 @@ def _phase_brief(project_name: str) -> str:
 def _contract_summary(project_name: str, workspace_path: str | Path,
                       changed_files: list[str]) -> str:
     """从 contract.yaml 读 decided_features，只保留本次变更相关的条目。"""
-    from backend.core.contract import ContractManager
-    contract = ContractManager.load(Path(workspace_path))
+    from backend.core.contract import ContractManager, ContractStateUnavailable
+    try:
+        contract = ContractManager.load(Path(workspace_path))
+    except ContractStateUnavailable:
+        return "CONTRACT_STATE_UNAVAILABLE: project contract facts are unavailable; no absence or successful drift check was inferred."
     if contract is None:
         return ""
 

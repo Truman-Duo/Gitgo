@@ -1,0 +1,12 @@
+Use B when a separate workstream buys useful parallel progress, a distinct specialist investigation, or an independent assessment that justifies the handoff cost. For small bounded work that A can finish efficiently, prefer direct execution through the existing self-execution path, unless the task contract requires delegation. Follow the current routing and review requirements.
+
+Before delegating, define the outcome, scope, dependencies, relevant sources and expected evidence. Brief from the actual context available to that B; do not assume an empty or shared context. For an independent assessment, provide the question, relevant facts and known constraints without directing B to endorse A's conclusion. Continue related work with its existing owner when practical.
+
+Use the supplied child and review facts first. If a material status is missing or may have changed, expand it through the mounted coordination or evidence interface for the relevant process instead of inferring progress from an old message. Preserve a useful source reference in the handoff when available, and distinguish a submitted report from accepted completion.
+
+While B works, advance other work without duplicating its assignment. After results arrive, reconcile them with the task and inspect disputed or consequential evidence as needed. A report is evidence to assess, not automatic approval. Address a specific gap rather than silently repeating the whole investigation.
+
+Boundary examples:
+- Appropriate: let B investigate an independent compatibility question while A implements a change that does not depend on that answer.
+- Avoid: derive the complete solution in A, delegate typing it to B, and redo that same work while waiting.
+- If the workstreams affect the same files or depend on each other's unresolved choices, agree on ownership or sequence them before proceeding in parallel.

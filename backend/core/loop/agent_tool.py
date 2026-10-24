@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
+from backend.core.loop.execution_contract import ExecutionContract, ExecutionType
+
 
 _OBJECT_SCHEMA_KEYS = {
     "$schema", "$id", "$defs", "definitions", "title", "description", "type",
@@ -122,7 +124,7 @@ class AgentTool:
     timeout_default: float = 60.0
     isolated: bool = False                # v0.45: True=子进程隔离执行（ProcessToolRunner）
     effect: ToolEffect | str = ToolEffect.READ
-    cancellation: CancellationMode | str = CancellationMode.COOPERATIVE
+    cancellation: CancellationMode | str | None = None
     approval: ApprovalMode | str = ApprovalMode.ALLOW
     # High-risk tools such as an unrestricted shell must be approved for the
     # exact argument digest on every invocation.  They may not inherit the
@@ -135,30 +137,59 @@ class AgentTool:
     # projection of existing AgentTools; ToolPipeline expands this plan and
     # sends every component through the same permission/receipt/signal path.
     composite_spec: dict | None = None
+    # None is intentionally unregistered authority, never a legacy Host default.
+    execution_contract: ExecutionContract | None = None
     # Host-only preview of a control operation's prospective requirement state.
     # Dynamic definitions cannot supply this hook; it grants no permission.
     alignment_contract: Callable | None = None
 
     def __post_init__(self) -> None:
+        self._bound_executor = self.execute
+        self._bound_execution_contract = self.execution_contract
+        if self.execution_contract is not None and not isinstance(self.execution_contract, ExecutionContract):
+            raise ValueError("Execution authority must be a Host contract object")
         self.parameters = normalize_tool_parameters(self.parameters)
         # Backward-compatible normalization while ``read_only`` is migrated.
         if not self.read_only and self.effect == ToolEffect.READ:
             self.effect = ToolEffect.WORKSPACE_WRITE
+        if self.execution_contract is not None and self.execution_contract.kind == ExecutionType.NATIVE_PROCESS:
+            self.isolated = True
         if self.isolated:
             self.cancellation = CancellationMode.ISOLATED_PROCESS
-        elif (
-            not self.read_only
-            and self.cancellation == CancellationMode.COOPERATIVE
-            and self.composite_spec is None
-        ):
-            # Existing bound callables cannot be force-stopped safely. Record
-            # the truth until they are migrated behind ProcessToolRunner.
-            self.cancellation = CancellationMode.NON_INTERRUPTIBLE
+        elif self.cancellation is None:
+            # Legacy bound writes have no cancellation guarantee. An explicit
+            # declaration belongs to the registered service and is preserved.
+            self.cancellation = (CancellationMode.COOPERATIVE if self.read_only or self.composite_spec is not None
+                                 else CancellationMode.NON_INTERRUPTIBLE)
         self.effect = ToolEffect(self.effect)
         self.cancellation = CancellationMode(self.cancellation)
         self.approval = ApprovalMode(self.approval)
         if self.isolated and not self.runner_name:
             self.runner_name = self.name
+
+    def validate_execution_contract(self) -> ExecutionContract:
+        contract = self.execution_contract
+        if not isinstance(contract, ExecutionContract):
+            raise ValueError("Tool has no Host-declared execution contract")
+        if contract is not self._bound_execution_contract or self.execute is not self._bound_executor:
+            raise ValueError("Registered execution authority or callable changed")
+        if contract.kind == ExecutionType.NATIVE_PROCESS and not self.composite_spec:
+            from backend.core.tools.runner import handler_bindings
+            binding = handler_bindings().get(self.runner_name or self.name)
+            if binding is not None and binding.execution_contract.file_action != contract.file_action:
+                raise ValueError("Host and native handler file actions disagree")
+        mode = (self.composite_spec or {}).get("execution_mode")
+        if mode in {"authored_pure_python", "authored_privileged_python"}:
+            if contract.kind != ExecutionType.NATIVE_PROCESS:
+                raise ValueError("Authored code requires native process authority")
+        elif self.composite_spec is not None:
+            if mode not in {"host_pipeline", "authored_host_python"} or contract != ExecutionContract(ExecutionType.DATA_BROKER, "host.composite"):
+                raise ValueError("Composite execution requires Host pipeline authority")
+        if self.isolated and contract.kind != ExecutionType.NATIVE_PROCESS:
+            raise ValueError("A process cannot run with Host/broker authority")
+        if contract.kind == ExecutionType.EXTERNAL_SERVICE:
+            raise ValueError("Named external service execution is not implemented")
+        return contract
 
     @property
     def guarantees_cancellation(self) -> bool:
@@ -170,6 +201,9 @@ class AgentTool:
 
     def __call__(self, args: dict) -> dict:
         """直接调用 AgentTool 实例 = 执行工具。兼容旧 dict[str, Callable] 接口。"""
+        contract = self.validate_execution_contract()
+        if contract.kind == ExecutionType.NATIVE_PROCESS or self.composite_spec is not None:
+            raise RuntimeError("Process/composite execution requires ToolPipeline")
         return self.execute(args)
 
     def to_openai_function(self) -> dict:

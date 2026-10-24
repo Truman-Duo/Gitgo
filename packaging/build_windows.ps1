@@ -5,8 +5,12 @@ param(
     [string]$Ripgrep = "",
     [string]$RipgrepNotices = "",
     [string]$Output = "",
+    [string]$ArtifactOutput = "",
     [string]$InnoSetupCompiler = "",
-    [switch]$BuildInstaller
+    [switch]$BuildInstaller,
+    [switch]$UpdateEvidence,
+    [switch]$ManagedUpdate,
+    [string]$UpdateReleasePolicy = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,8 +18,13 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $Output) { $Output = Join-Path $root ("dist-terminal\build-" + (Get-Date -Format "yyyyMMdd-HHmmss")) }
 $stage = [System.IO.Path]::GetFullPath($Output)
 $internal = Join-Path $stage "internal"
+if (-not $ArtifactOutput) { $ArtifactOutput = Join-Path $root "dist-installer" }
+$artifactDirectory = [System.IO.Path]::GetFullPath($ArtifactOutput)
 $productPath = Join-Path $PSScriptRoot "product.json"
 $product = Get-Content -LiteralPath $productPath -Raw | ConvertFrom-Json
+if ($ManagedUpdate -and $BuildInstaller) { throw 'Managed updates use a separate fresh installation, not an Inno installer' }
+if ($UpdateReleasePolicy -and -not $ManagedUpdate) { throw 'Public release trust requires -ManagedUpdate' }
+if ($ManagedUpdate) { $UpdateEvidence = $true }
 if ($product.primary_command -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
     throw "Unsafe primary command in product.json: $($product.primary_command)"
 }
@@ -92,6 +101,11 @@ if ($pyInstallerImportExit -ne 0) {
     $useExternalPyInstaller = $true
 }
 
+if ($ManagedUpdate) {
+    if (Test-Path -LiteralPath $stage) { throw 'Managed build requires a NEW private NTFS output directory' }
+    & $Python -B -c "import sys; from pathlib import Path; from backend.core.update.windows_storage import create_private_directory, validate_staging; p=Path(sys.argv[1]); create_private_directory(p); validate_staging(p)" $stage
+    if ($LASTEXITCODE -ne 0) { throw 'Managed build output is not protected by native NTFS ownership' }
+}
 New-Item -ItemType Directory -Force -Path $stage, $internal | Out-Null
 & $Python -B (Join-Path $root "scripts\check_terminal_build_runtime.py") $PyInstallerPackages
 if ($LASTEXITCODE -ne 0) { throw "Selected build runtime is missing core application dependencies" }
@@ -138,16 +152,25 @@ if (-not (Get-ChildItem -LiteralPath $terminalReferences -Filter "git-for-window
     throw "Official terminal provenance references are missing; stage references before packaging"
 }
 $versionFile = Join-Path $root "build\terminal-host\version-info.txt"
+$promptResources = Join-Path $root "backend\resources\prompts"
+if (-not (Test-Path -LiteralPath (Join-Path $promptResources "identity\answer.txt"))) {
+    throw "Bundled Harness prompts are missing; restore resources before packaging"
+}
 & $Python -B (Join-Path $root "scripts\write_windows_version.py") --output $versionFile
 if ($LASTEXITCODE -ne 0) { throw "Windows Host version metadata generation failed" }
 $pyInstallerArguments = @(
     "--noconfirm", "--clean", "--onedir",
     "--name", "gitgo-host",
+    # Tools are registered/imported dynamically and approval digests cover their
+    # implementations even before first use. Match native acceptance packaging.
+    "--paths", $root, "--collect-submodules", "backend",
+    "--hidden-import", "backend.core.tools.registrations",
     "--distpath", $internal,
     "--workpath", (Join-Path $root "build\terminal-host"),
     "--specpath", (Join-Path $root "build\terminal-host"),
     "--version-file", $versionFile,
     "--add-data", "$terminalReferences;backend/resources/terminal_provenance",
+    "--add-data", "$promptResources;backend/resources/prompts",
     (Join-Path $root "backend\core\native_host_entry.py")
 )
 if ($useExternalPyInstaller) {
@@ -157,9 +180,12 @@ if ($useExternalPyInstaller) {
 }
 if ($LASTEXITCODE -ne 0) { throw "Native Host compilation failed" }
 
-& $Python -B (Join-Path $root "scripts\render_product_manifest.py") `
-    --source $productPath --platform windows --architecture x86_64 `
-    --output (Join-Path $stage "product.json")
+$renderArguments = @('--source', $productPath, '--platform', 'windows', '--architecture', 'x86_64', '--output', (Join-Path $stage 'product.json'))
+if ($ManagedUpdate) {
+    $renderArguments += '--managed-windows'
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install_windows_managed.ps1') -Destination (Join-Path $stage 'install-managed.ps1')
+}
+& $Python -B (Join-Path $root 'scripts\render_product_manifest.py') @renderArguments
 if ($LASTEXITCODE -ne 0) { throw "Product manifest rendering failed" }
 
 $packagedHost = Join-Path $internal "gitgo-host\gitgo-host.exe"
@@ -174,6 +200,14 @@ foreach ($executable in @((Join-Path $stage "$($product.primary_command).exe"), 
 & $Python -B (Join-Path $root "scripts\stage_search_engine.py") `
     --binary $Ripgrep --notices $RipgrepNotices --destination (Split-Path -Parent $packagedHost)
 if ($LASTEXITCODE -ne 0) { throw "Bundled search engine staging failed" }
+if ($UpdateEvidence) {
+    & $Python -B (Join-Path $root "scripts\stage_update_contract.py") --stage $stage
+    if ($LASTEXITCODE -ne 0) { throw "Frozen runtime data evidence failed" }
+}
+if ($UpdateReleasePolicy) {
+    & $Python -B (Join-Path $root 'scripts\stage_release_policy.py') --stage $stage --policy $UpdateReleasePolicy
+    if ($LASTEXITCODE -ne 0) { throw 'Publisher public release trust failed its contract gate' }
+}
 & $Python -B (Join-Path $root "scripts\smoke_packaged_runtime.py") --host $packagedHost
 if ($LASTEXITCODE -ne 0) {
     throw "Packaged Host/Daemon/tool-runner smoke test failed"
@@ -202,7 +236,7 @@ if ($BuildInstaller) {
     if (-not $InnoSetupCompiler -or -not (Test-Path -LiteralPath $InnoSetupCompiler -PathType Leaf)) {
         throw "Inno Setup compiler not found; pass -InnoSetupCompiler or omit -BuildInstaller"
     }
-    $installerOutput = Join-Path $root "dist-installer"
+    $installerOutput = $artifactDirectory
     New-Item -ItemType Directory -Force -Path $installerOutput | Out-Null
     & $InnoSetupCompiler `
         "/DStageDir=$stage" `
@@ -216,5 +250,7 @@ if ($BuildInstaller) {
     if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
     Write-Host "Windows installer written to $installerOutput"
 }
-& $Python -B (Join-Path $root "scripts\release_artifacts.py") --stage $stage --output (Join-Path $root "dist-installer")
+$archiveArguments = @('--stage', $stage, '--output', $artifactDirectory)
+if ($ManagedUpdate) { $archiveArguments += '--managed-windows' }
+& $Python -B (Join-Path $root 'scripts\release_artifacts.py') @archiveArguments
 if ($LASTEXITCODE -ne 0) { throw "Release artifact packaging failed" }

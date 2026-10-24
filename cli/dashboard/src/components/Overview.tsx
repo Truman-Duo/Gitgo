@@ -1,17 +1,25 @@
+import {copy,type Copy} from "../ui/pageContract.js";
 // src/components/Overview.tsx — compact project list
 // Uses string padding for column alignment — no inner Box wrappers so
 // backgroundColor on Text elements drives correct Ink dirty/blit behavior.
-import React, { memo } from "react";
-import { Box, Text } from "@anthropic/ink";
+import React, { memo, useLayoutEffect, useRef } from "react";
+import { Box, Text, ScrollBox } from "@anthropic/ink";
+import type {DOMElement, ScrollBoxHandle} from "@anthropic/ink";
 import type { ProjectRow } from "../hooks/useGitgoData.js";
-import { colors, usePanelSize, statusDot, truncate, padEndWidth, useSelectionStyle, projectStatusDot } from "../theme/index.js";
-import type { StatusState } from "../theme/index.js";
+import { colors, usePanelSize, truncate, padEndWidth, useSelectionStyle } from "../theme/index.js";
 import { projectRuntimeCategory } from "../projectRuntimeState.js";
 
 type Props = { projects: ProjectRow[]; sel: number; mode: "NORMAL" | "COMMAND"; cols: number; listActive: boolean; language?: "en" | "zh" };
 
 export const Overview = memo(function Overview({ projects, sel, mode, cols: _cols, listActive, language = "en" }: Props) {
-  const { w } = usePanelSize({ minWidth: 60 });
+  const t=(value:Copy)=>copy(value,language);
+  const { w: terminalWidth, h } = usePanelSize({ minWidth: 60 });
+  const w = Math.max(1, Math.min(terminalWidth, _cols) - 2);
+  const scrollRef = useRef<ScrollBoxHandle>(null);
+  const selectedRow = useRef<DOMElement>(null);
+  useLayoutEffect(() => {
+    if (selectedRow.current) scrollRef.current?.scrollIntoView(selectedRow.current);
+  }, [sel, w, h, projects[sel]?.name]);
   const procW = 7;
   const fixedW = procW;
   const flexW = w - fixedW;
@@ -23,36 +31,28 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
   const running = projects.filter(p => projectRuntimeCategory(p) === "running");
   const pending = projects.filter(p => projectRuntimeCategory(p) === "pending");
   const unavailable = projects.filter(p => projectRuntimeCategory(p) === "unavailable");
-  const finished = projects.filter(p => projectRuntimeCategory(p) === "finished");
-  const newProjects = projects.filter(p => projectRuntimeCategory(p) === "new");
   const groups = [
     { label: language === "zh" ? "运行中" : "Running", items: running, start: 0 },
-    { label: language === "zh" ? "等待中" : "Pending", items: pending, start: running.length },
+    { label: language === "zh" ? "已完成 / 等待" : "Completed / Waiting", items: pending, start: running.length },
     { label: language === "zh" ? "不可用" : "Unavailable", items: unavailable, start: running.length + pending.length },
-    { label: language === "zh" ? "已完成" : "Finished", items: finished, start: running.length + pending.length + unavailable.length },
-    { label: language === "zh" ? "新建" : "New", items: newProjects, start: running.length + pending.length + unavailable.length + finished.length },
   ];
 
   return (
-    <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1}>
-      <Box flexDirection="row" justifyContent="space-between">
-        <Text dimColor>{language === "zh" ? "项目" : "Projects"}</Text>
-      </Box>
-
-      {/* Status is a row-level signal inside Name, not a separate column. */}
+    <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1} minHeight={0}>
       <Box flexDirection="row">
-        <Text bold>{"Name".padEnd(nameW)}</Text>
-        <Text bold dimColor>{"Procs".padEnd(procW)}</Text>
-        <Text bold dimColor>Path</Text>
+        <Text bold>{padEndWidth(truncate(t({en:"Name",zh:"项目名称"}),nameW),nameW)}</Text>
+        <Text bold dimColor>{padEndWidth(t({en:"Procs",zh:"进程"}),procW)}</Text>
+        <Text bold dimColor>{t({en:"Path",zh:"项目位置"})}</Text>
       </Box>
 
       {projects.length === 0 ? (
         <Box flexDirection="column" paddingTop={1}>
-          <Text dimColor>{language === "zh" ? "还没有项目。" : "No projects yet."}</Text>
-          <Text dimColor>{language === "zh" ? "使用 /create 注册工作区，然后按 Enter 打开。" : "Use /create to register a workspace, then Enter to open it."}</Text>
+          <Text dimColor>{t({en:"No projects yet.",zh:"还没有项目。"})}</Text>
+          <Text dimColor>{t({en:"Use /create to register a workspace, then Enter to open it.",zh:"使用 /create 注册工作区，然后按 Enter 打开。"})}</Text>
         </Box>
       ) : null}
 
+      <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>
       {groups.map((group) => {
         if (group.items.length === 0) return null;
         return (
@@ -66,19 +66,17 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
               const highlightBg = isSelected && tableFocused ? colors.selection.row.bg : undefined;
               const nameStyle = useSelectionStyle(isSelected && tableFocused ? "focused" : "non-focused", "row");
 
-              const dot = statusDot(projectStatusDot(p.daemonOnline, p.activeProcessCount));
               const procBadge = p.activeProcessCount > 0 ? String(p.activeProcessCount) : "";
               const procColor = p.activeProcessCount > 0 ? colors.accent : undefined;
               const procStr = (procBadge || "-").padEnd(procW);
 
-              const pathBase = p.workspace.split("/").pop() || p.workspace.split("\\").pop() || p.workspace;
-              const nameTextW = Math.max(1, nameW - 2);
+              const pathBase = p.workspace.split(/[\\/]/).filter(Boolean).pop() || p.workspace;
+              const nameTextW = Math.max(1, nameW);
               const paddedName = padEndWidth(truncate(p.name, nameTextW), nameTextW);
               const pathStr = truncate(pathBase, pathW);
 
               return (
-                <Box key={p.name} flexDirection="row" backgroundColor={highlightBg}>
-                  <Text color={dot.color} backgroundColor={highlightBg}>{dot.char} </Text>
+                <Box key={p.name} ref={isSelected ? selectedRow : undefined} flexDirection="row" backgroundColor={highlightBg}>
                   <Text
                     color={nameStyle.fg}
                     bold={nameStyle.bold}
@@ -94,6 +92,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
           </React.Fragment>
         );
       })}
+      </ScrollBox>
     </Box>
   );
 });

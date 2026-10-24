@@ -66,12 +66,14 @@ class TestSyncSessionTrialMethods:
         session = _make_session(_make_project(git_repo))
         changes = session.step_check_trial()
         assert changes == []
+        assert session.stage is SessionStage.IDLE
 
     def test_step_check_trial_first_time(self, git_repo: Path):
         """首次检查只记录 HEAD，返回空列表"""
         session = _make_session(_make_project(git_repo, trial_path=str(git_repo)))
         changes = session.step_check_trial()
         assert changes == []
+        assert session.stage is SessionStage.IDLE
         # last_known_head 已被记录在 project.trial 上
         assert len(session.project.trial.last_known_head) == 40
 
@@ -81,6 +83,7 @@ class TestSyncSessionTrialMethods:
         session.step_check_trial()  # 第一次 — 记录 HEAD
         changes = session.step_check_trial()  # 第二次 — 无新 commit
         assert changes == []
+        assert session.stage is SessionStage.IDLE
 
     def test_step_triage_invalid_index(self, git_repo: Path):
         """无效索引返回 False"""
@@ -121,3 +124,12 @@ class TestSyncSessionReset:
         session.incoming_changes = [IncomingChange(hash="abc")]
         session.reset()
         assert session.incoming_changes == []
+
+
+def test_trial_check_failure_marks_failed_and_preserves_exception(git_repo,monkeypatch):
+    session=_make_session(_make_project(git_repo,trial_path=str(git_repo)))
+    def fail(_node):raise OSError("adapter unavailable")
+    monkeypatch.setattr("backend.core.sync_session.triage.create_adapters_for_node",fail)
+    with pytest.raises(OSError,match="adapter unavailable"):
+        session.step_check_trial()
+    assert session.stage is SessionStage.FAILED

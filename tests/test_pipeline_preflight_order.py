@@ -1,4 +1,5 @@
 """Malformed/precondition-blocked calls must not spend an exact user grant."""
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
 import pytest
 from backend.core.loop.agent_tool import AgentTool, ToolEffect, ApprovalMode
 from backend.core.loop.models import AgentProcess, RingLevel
@@ -22,10 +23,13 @@ def test_one_use_grant_survives_invalid_arguments_and_missing_prerequisites(tmp_
         {"id": "green", "kind": "check", "test_id": "regression", "passed": True, "depends_on": ["change"]},
     ]})
     calls = []
-    tool = AgentTool(name="shell_script", description="test", parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    tool = AgentTool(execution_contract=data_broker("test.fixture"), name="shell_script", description="test", parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
                      execute=lambda args: calls.append(args) or {"success": True}, read_only=False,
                      effect=ToolEffect.PROCESS, approval=ApprovalMode.ASK, approval_per_invocation=True)
-    args = {"script": "printf approved", "purpose": "preflight acceptance"}
+    args = {"script": "printf approved", "purpose": "preflight acceptance", "path": "app.py"}
+    # Preserve the exact approved schema across retries; prepare a malformed
+    # call first without changing the contract to which approval is bound.
+    tool.prepare_args = lambda values: {k: v for k, v in values.items() if k != "path"}
     create_permission_request(process, {"purpose": "preflight acceptance", "tool_name": tool.name,
                                        "arguments": args}, {tool.name: tool}, str(tmp_path_factory))
     assert grant_from_decision(process, process.pending_decision, "allow_once")
@@ -34,7 +38,7 @@ def test_one_use_grant_survives_invalid_arguments_and_missing_prerequisites(tmp_
     invalid = pipeline.execute({"name": tool.name, "args": args}, tool, ctx, "invalid")
     assert invalid.diagnostics["code"] == "INVALID_TOOL_ARGUMENTS"
     assert matching_grant(process, tool.name, args, per_invocation=True)
-    tool.parameters = {"type": "object"}
+    tool.prepare_args = lambda values: dict(values)
     blocked = pipeline.execute({"name": tool.name, "args": args}, tool, ctx, "blocked")
     assert blocked.diagnostics["code"] == "ENGINEERING_PREREQUISITE_REQUIRED"
     assert matching_grant(process, tool.name, args, per_invocation=True)
@@ -47,7 +51,30 @@ def test_one_use_grant_survives_invalid_arguments_and_missing_prerequisites(tmp_
     assert matching_grant(process, tool.name, args, per_invocation=True) is None
 
 
-def test_search_authority_uses_effective_route_and_overrides_model_arguments(tmp_path_factory):
+
+def test_exact_grant_rechecks_contract_changed_during_preparation(tmp_path_factory):
+    process = AgentProcess(process_id='changed-contract', role='worker', ring_level=RingLevel.RING_3,
+                           active_task_id='task', worktree_path=str(tmp_path_factory), session=AgentSession())
+    process.tool_registry = ToolRegistry(['shell_script'])
+    calls = []
+    tool = AgentTool(execution_contract=data_broker("test.fixture"), name='shell_script', description='test', parameters={'type': 'object'},
+                     execute=lambda args: calls.append(args), read_only=False,
+                     effect=ToolEffect.PROCESS, approval=ApprovalMode.ASK, approval_per_invocation=True,
+                     resources=['process:shell'])
+    args = {'script': 'approved', 'purpose': 'contract revalidation'}
+    create_permission_request(process, {'purpose': args['purpose'], 'tool_name': tool.name,
+                                       'arguments': args}, {tool.name: tool}, str(tmp_path_factory))
+    assert grant_from_decision(process, process.pending_decision, 'allow_once')
+    def changed(values):
+        tool.resources = ['process:changed']
+        return dict(values)
+    tool.prepare_args = changed
+    ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
+    result = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, ctx, 'changed')
+    assert result.is_error and result.diagnostics['code'] == 'SANDBOX_POLICY_INVALID'
+    assert not calls
+    assert process.approval_grants[0]['remaining_uses'] == 1
+def test_search_authority_refuses_private_input_and_uses_effective_route(tmp_path_factory):
     process = AgentProcess(process_id="search", role="worker", ring_level=RingLevel.RING_0,
         provider_id="configured-main", active_task_id="task", session=AgentSession())
     process.runtime_preferences.update(effective_provider_id="actual-backup", web_search_mode="provider")
@@ -55,11 +82,14 @@ def test_search_authority_uses_effective_route_and_overrides_model_arguments(tmp
     captured = []
     tool = AgentTool(name="web_search", description="test", parameters={"type": "object"},
         execute=lambda args: captured.append(args) or {"count": 1}, read_only=True,
-        effect=ToolEffect.EXTERNAL_READ, approval=ApprovalMode.ALLOW)
+        effect=ToolEffect.EXTERNAL_READ, approval=ApprovalMode.ALLOW, execution_contract=data_broker("test.fixture"))
     ctx = ExecutionContext(process=process, session=process.session,
                            workspace_path=str(tmp_path_factory), event_bus=EventBus())
     result = ToolPipeline().execute({"name": "web_search", "args": {
         "query": "ripgrep", "_web_search_provider_id": "model-spoofed"}}, tool, ctx, "search-call")
+    assert result.is_error and result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert not captured
+    result = ToolPipeline().execute({"name": "web_search", "args": {"query": "ripgrep"}}, tool, ctx, "search-clean")
     assert not result.is_error
     assert captured[0]["_web_search_provider_id"] == "actual-backup"
     assert captured[0]["_web_search_mode"] == "provider"
@@ -73,7 +103,7 @@ def test_stale_semantic_boundary_does_not_consume_exact_grant_or_start_effect(tm
     calls = []
     tool = AgentTool(name='shell_script', description='test', parameters={'type': 'object'},
         execute=lambda args: calls.append(args) or {'success': True}, effect=ToolEffect.PROCESS,
-        approval=ApprovalMode.ASK, approval_per_invocation=True)
+        approval=ApprovalMode.ASK, approval_per_invocation=True, execution_contract=data_broker("test.fixture"))
     process.tool_registry = ToolRegistry([tool.name])
     runtime = AlignmentRuntime(process)
     runtime.apply({'status': 'ready', 'questions': [], 'interpretations': []}, runtime.payload('Run the specified script'))
@@ -117,10 +147,10 @@ def test_parent_permission_does_not_approve_sensitive_composite_leaf(tmp_path_fa
     calls = []
     leaf = AgentTool(name="sensitive_leaf", description="sensitive", parameters={"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]},
                      execute=lambda args: calls.append(args) or {"ok": True}, composable=True,
-                     effect=ToolEffect.PROCESS, approval=ApprovalMode.ASK, approval_per_invocation=True)
+                     effect=ToolEffect.PROCESS, approval=ApprovalMode.ASK, approval_per_invocation=True, execution_contract=data_broker("test.fixture"))
     spec = validate_definition({"name": "wrap_sensitive", "description": "wrap", "parameters": {"type": "object", "properties": {}},
         "steps": [{"id": "leaf", "tool": leaf.name, "arguments": {"value": "approved?"}}]}, {leaf.name: leaf})
-    parent = AgentTool(name=spec["name"], description="wrapper", parameters=spec["parameters"], execute=lambda _: {}, effect=spec["effect"], composite_spec=spec)
+    parent = AgentTool(name=spec["name"], description="wrapper", parameters=spec["parameters"], execute=lambda _: {}, effect=spec["effect"], composite_spec=spec, execution_contract=data_broker("host.composite"))
     p = AgentProcess(process_id="nested", role="worker", ring_level=RingLevel.RING_3, active_task_id="task", worktree_path=str(tmp_path_factory), session=AgentSession())
     p.tool_registry = ToolRegistry([leaf.name, parent.name])
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=EventBus(),

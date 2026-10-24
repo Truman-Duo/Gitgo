@@ -5,10 +5,11 @@ import json
 import time
 import uuid
 from typing import Iterable
+from ..transactions import authoritative_transaction
 from ..models import StorageBlocked
 from ..redaction import redact_for_persistence
 from .ports import ObservabilityPort
-from ..support import _utc_now
+from ..support import _MinuteBudget, _utc_now
 
 def append_event(
     self,
@@ -28,19 +29,12 @@ def append_event(
     execution must not fail because verbose telemetry cannot be retained.
     """
     self._ensure_open()
+    self._observability.require_available()
     encoded = summary.encode("utf-8")
     logical = len(encoded) + len(payload_ref or "") + 256
     if logical > self.policy.max_observability_record_bytes:
         raise ValueError("observability event is too large; store the body in CAS")
-    health = self.check_health()
-    estimated_write = self._estimated_sqlite_write(logical)
-    if (
-        health.observability_bytes + estimated_write > self.policy.observability_max_bytes
-        or health.total_bytes + estimated_write > self.policy.total_max_bytes
-        or not self._global_sqlite_budget.reserve(estimated_write)
-        or not self._observability_budget.reserve(logical)
-    ):
-        self._publish_degraded("observability_write_throttled")
+    if not self._reserve_observability_write(logical):
         return False
     now = _utc_now()
     with self._observability_lock:
@@ -74,14 +68,17 @@ def _reserve_observability_write(
     covers the complete SQLite file family and the shared physical-write
     budget; callers must not retry in a hot loop when this returns false.
     """
+    self._observability.require_available()
     health = self.check_health()
     estimated_write = self._estimated_sqlite_write(logical)
     allowed = not (
         health.observability_bytes + estimated_write
         > self.policy.observability_max_bytes
         or health.total_bytes + estimated_write > self.policy.total_max_bytes
-        or not self._global_sqlite_budget.reserve(estimated_write)
-        or not self._observability_budget.reserve(logical)
+        or not _MinuteBudget.reserve_all(
+            (self._global_sqlite_budget, estimated_write),
+            (self._observability_budget, logical),
+        )
     )
     if not allowed and publish_degraded:
         self._publish_degraded("observability_write_throttled")
@@ -151,8 +148,7 @@ def append_trace_record(
     severity = str(safe_record.get("severity") or "info")
     proposed = int(safe_record.get("seq", 0) or 0)
     with self._observability_lock:
-        self._observability.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._observability):
             row = self._observability.execute(
                 "SELECT MAX(sequence) FROM trace_events WHERE trace_id=?",
                 (trace_id,),
@@ -177,10 +173,6 @@ def append_trace_record(
                     int(safe_record.get("monotonic_ns", 0) or 0),
                 ),
             )
-            self._observability.execute("COMMIT")
-        except BaseException:
-            self._observability.execute("ROLLBACK")
-            raise
     return safe_record
 
 
@@ -418,8 +410,7 @@ def import_trace_records(
                 )
 
         with self._observability_lock:
-            self._observability.execute("BEGIN IMMEDIATE")
-            try:
+            with authoritative_transaction(self._observability):
                 for (
                     safe, _encoded_detail, detail_ref, detail_bytes,
                     record_json, _logical,
@@ -440,10 +431,6 @@ def import_trace_records(
                         ),
                     )
                     inserted += max(0, int(row_cursor.rowcount or 0))
-                self._observability.execute("COMMIT")
-            except BaseException:
-                self._observability.execute("ROLLBACK")
-                raise
     return inserted
 
 

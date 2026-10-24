@@ -4,6 +4,11 @@ Does not modify installed configuration, print secrets, or claim visual QA.
 """
 from __future__ import annotations
 
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
+
 import argparse
 import copy
 import json
@@ -101,7 +106,8 @@ def check(project="2920"):
                       "visual_dashboard_verified": False, "completed": True, "rounds_in_persisted_history": True}
             assert result["installed_configuration_unchanged"]
             print(json.dumps(result, ensure_ascii=False))
-            (ROOT / ".gitgo" / "alignment-regression-verified.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            development_root(ROOT).mkdir(parents=True, exist_ok=True)
+            (development_root(ROOT) / "alignment-regression-verified.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         finally:
             client.close()
 

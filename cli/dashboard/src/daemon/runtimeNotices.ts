@@ -18,7 +18,8 @@ function short(value: unknown, maximum = 120): string {
 function noticeKey(event: TraceLifecycleEvent, label: string, detail: string): string {
   const seq = event.seq;
   if (typeof seq === "number" || typeof seq === "string") return `trace:${seq}`;
-  const identity = event.decision_id || event.detail_ref || event.dossier_ref ||
+  const identity = event.proposal_id || asRecord(event.proposal).proposal_id || event.harvest_id
+    || event.decision_id || event.detail_ref || event.dossier_ref ||
     event.context_epoch || event.governance_version || event.step || event.status || detail;
   return [event.event, event.process_id || "host", identity || label].join(":");
 }
@@ -117,6 +118,13 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
         `${Number(ev.count || 0)} pending lesson${Number(ev.count || 0) === 1 ? "" : "s"} · review in /runtime lesson`,
         "success",
       );
+    case "lesson_harvest_proposed":
+      return makeNotice(ev, "Knowledge proposal ready",
+        "Waiting for your review in /runtime lesson", "info");
+    case "lesson_harvest_completed":
+      return null; // No candidate means no review request or conversation clutter.
+    case "lesson_harvest_resolved":
+      return ev.status === "dismissed" ? makeNotice(ev, "Knowledge proposal discarded", "", "info") : null;
     case "lesson_harvest_failed":
       return makeNotice(
         ev,
@@ -147,8 +155,18 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
         short(ev.status || "unknown"),
         ev.status === "completed" ? "success" : "warning",
       );
-    case "agent_complete":
-      return makeNotice(ev, "Main process complete", short(ev.status || ""), "success");
+    case "agent_complete": {
+      const outcome = asRecord(ev.outcome);
+      const status = String(outcome.status || ev.status || "unknown");
+      const actor = ev.actor_kind === "supervisor" ? "Main process"
+        : ev.actor_kind === "worker" || ev.actor_kind === "reviewer" || ev.parent_id ? "Subprocess" : "Process";
+      const label = status === "completed" ? "completed" : status === "failed" ? "failed"
+        : status === "cancelled" ? "cancelled" : status === "timed_out" ? "timed out"
+        : status === "awaiting_user" || status === "waiting" ? "waiting" : status === "degraded" ? "partially delivered" : "ended";
+      return makeNotice(ev, `${actor} ${label}`, short(asRecord(outcome.error).message || status),
+        status === "completed" ? "success" : status === "failed" ? "error"
+        : status === "unknown" || status === "waiting" || status === "awaiting_user" ? "info" : "warning");
+    }
     case "task_bundle_delegated":
       return makeNotice(ev, "Task bundle delegated", `${ev.shard_count ?? "?"} shards · ${short(ev.dossier_ref || "")}`);
     case "agent_dag_admitted": {

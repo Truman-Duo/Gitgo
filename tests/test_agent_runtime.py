@@ -5,6 +5,8 @@ Written with unittest so this critical subset can run without pytest.
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import queue
 import json
 import tempfile
@@ -38,7 +40,8 @@ from backend.core.loop.completion_protocol import (
 )
 from backend.core.loop.prompt_compiler import PromptCompiler
 from backend.core.loop.session import AgentSession
-from backend.core.loop.test_manifest import TestManifest, run_registered_test
+from backend.core.loop.test_manifest import TestManifest
+from tests.registered_test_fixture import run_registered_test
 from backend.core.loop.test_manifest import SeedResult, TestRecord
 from backend.core.storage import StorageRuntime
 
@@ -127,7 +130,7 @@ class LoopStatusProjectionTests(unittest.TestCase):
 
 def _tool(name: str) -> AgentTool:
     return AgentTool(
-        name=name,
+        execution_contract=data_broker("test.fixture"), name=name,
         description=f"test tool {name}",
         parameters={"type": "object", "properties": {}},
         execute=lambda _args: {"ok": True},
@@ -139,7 +142,7 @@ class ChildArtifactReadTests(unittest.TestCase):
         manager = AgentProcessManager()
         with tempfile.TemporaryDirectory() as workspace:
             root = Path(workspace)
-            (root / "result.txt").write_text("SHARED-OK\n", encoding="utf-8")
+            (root / "result.txt").write_bytes(b"SHARED-OK\n")
             with patch("backend.core.history.HistoryManager.add_operation"):
                 supervisor = manager.fork(
                     parent_id=None, role="supervisor", actor_kind="supervisor",
@@ -416,7 +419,7 @@ class PromptAndReasoningStateTests(unittest.TestCase):
         self.assertEqual([s.name for s in sections], [
             "Base identity", "Behavior and delivery standard",
             "Role and authority", "Capabilities",
-            "User collaboration protocol",
+            "Source authority", "User collaboration protocol",
             "Runtime environment", "Interaction contract",
         ])
         self.assertNotIn("high level rule", text)
@@ -924,6 +927,14 @@ class HostCompletionTests(unittest.TestCase):
             )
             self.assertFalse(still_stale.allowed)
             process.tool_receipts[-1]["task_id"] = process.active_task_id
+            self.assertFalse(HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE", []).allowed)
+            from backend.core.loop.validation_evidence import workspace_version
+            from backend.core.loop.test_manifest import TestManifest
+            manifest = TestManifest.load(workspace)
+            manifest.records["unit:core"].validation_version = workspace_version(workspace)
+            manifest.save()
+            process.tool_receipts[-1].update(test_target="tests/test_core.py",
+                validation_version=manifest.records["unit:core"].validation_version)
             self.assertTrue(HostCompletionEvaluator.evaluate(
                 process, "TASK_COMPLETE", [],
             ).allowed)
@@ -985,7 +996,7 @@ class HostCompletionTests(unittest.TestCase):
         denied = HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE", [])
         self.assertFalse(denied.allowed)
         self.assertIn(
-            "required tool inspect_note has 0 committed successful call(s); minimum is 1",
+            "required tool inspect_note has 0 confirmed successful call(s); minimum is 1",
             denied.reasons,
         )
         process.tool_receipts.append({
@@ -1414,7 +1425,10 @@ class AmbiguousReplayTests(unittest.TestCase):
             "backend.core.knowledge.lesson.LessonManager.save_pending",
         ) as saved, patch(
             "backend.core.knowledge.harvest.complete_harvest",
-        ) as completed:
+        ) as completed, patch(
+            "backend.core.knowledge.harvest.stage_harvest_proposal",
+            return_value={"proposal_id": "proposal-1", "proposal_version": "version-1"},
+        ) as staged:
             started = _start_background_harvest(
                 daemon_ctx,
                 event_queue=events,
@@ -1428,14 +1442,14 @@ class AmbiguousReplayTests(unittest.TestCase):
         self.assertTrue(started)
         self.assertTrue(daemon_ctx["knowledge_harvest_inflight"].startswith("harvest_"))
         marked.assert_called_once_with("project")
-        saved.assert_called_once()
-        completed.assert_called_once_with(
-            "project", ["signal-1"], ["lesson-background"],
-        )
+        saved.assert_not_called()
+        completed.assert_not_called()
+        staged.assert_called_once_with("project", ["signal-1"], [lesson], summary_report={})
         result = events.get_nowait()
         self.assertEqual(result["event"], "knowledge_harvest_result")
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "awaiting_confirmation")
         self.assertEqual(result["count"], 1)
+        self.assertEqual(result["proposal"]["proposal_version"], "version-1")
 
     def test_background_harvest_does_not_start_a_second_worker(self):
         daemon_ctx = {"knowledge_harvest_inflight": "harvest-existing"}

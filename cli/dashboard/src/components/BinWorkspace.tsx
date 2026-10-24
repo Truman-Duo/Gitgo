@@ -25,9 +25,14 @@ type Confirmation = {planId: string; message: string};
 const TABS = [
   {id: "targets", label: "Projects and Subprocesses"},
   {id: "plans", label: "Deletion Plans"},
-  {id: "delay", label: "Delete Delay"},
+  {id: "delay", label: "Retention and Delays"},
 ] as const;
-const DELAYS = [0, 10, 60, 1440, 4320];
+const DELAYS = [0, 5, 10, 15, 60, 1440, 4320];
+const DELAY_ROWS = [
+  {field: "project", key: "delete_delay_minutes", label: "Project deletion"},
+  {field: "process", key: "process_delete_delay_minutes", label: "Subprocess deletion"},
+  {field: "missing", key: "unavailable_project_archive_delay_minutes", label: "Missing workspace archive"},
+] as const;
 
 type Props = {
   client: BackendClient;
@@ -49,9 +54,11 @@ export const BinWorkspace = memo(function BinWorkspace({
   const [status, setStatus] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [confirmNo, setConfirmNo] = useState(true);
-  const [delays, setDelays] = useState({project: 10, process: 10});
+  const [delays, setDelays] = useState({project: 10, process: 10, missing: 60});
   const [delayRow, setDelayRow] = useState(0);
   const [editing, setEditing] = useState(false);
+  const [delayDraft, setDelayDraft] = useState(10);
+  const [delaySaving, setDelaySaving] = useState(false);
 
   const refresh = useCallback(async () => {
     const [targets, items] = await Promise.all([
@@ -67,6 +74,7 @@ export const BinWorkspace = memo(function BinWorkspace({
     void configGet(client).then((value: any) => setDelays({
       project: Number(value?.safety?.delete_delay_minutes ?? 10),
       process: Number(value?.safety?.process_delete_delay_minutes ?? 10),
+      missing: Number(value?.safety?.unavailable_project_archive_delay_minutes ?? 60),
     })).catch(error => setStatus(String(error?.message || error)));
   }, [client, refresh]);
 
@@ -189,23 +197,26 @@ export const BinWorkspace = memo(function BinWorkspace({
     }
     if (tab === "delay") {
       if (matchChord("up", input, key) && !editing) setDelayRow(value => Math.max(0, value - 1));
-      else if (matchChord("down", input, key) && !editing) setDelayRow(value => Math.min(1, value + 1));
+      else if (matchChord("down", input, key) && !editing) setDelayRow(value => Math.min(DELAY_ROWS.length - 1, value + 1));
       else if (matchChord("enter", input, key)) {
-        if (!editing) setEditing(true);
+        if (delaySaving) return;
+        if (!editing) { setDelayDraft(delays[DELAY_ROWS[delayRow]!.field]); setEditing(true); }
         else {
-          const name = delayRow === 0 ? "delete_delay_minutes" : "process_delete_delay_minutes";
-          const value = delayRow === 0 ? delays.project : delays.process;
+          const name = DELAY_ROWS[delayRow]!.key;
+          const field = DELAY_ROWS[delayRow]!.field;
+          const value = delayDraft;
+          setDelaySaving(true);
           void configSet(client, "safety." + name, value)
-            .then(() => setStatus("Delete delay saved"))
-            .catch(error => setStatus(String(error?.message || error)));
+            .then(() => { setDelays(current => ({...current, [field]: value})); setStatus("Delay saved"); })
+            .catch(error => setStatus(String(error?.message || error)))
+            .finally(() => setDelaySaving(false));
           setEditing(false);
         }
       } else if (editing && (matchChord("left", input, key) || matchChord("right", input, key))) {
-        const field = delayRow === 0 ? "project" : "process";
-        const current = delays[field];
+        const current = delayDraft;
         const position = Math.max(0, DELAYS.findIndex(value => value >= current));
         const delta = matchChord("left", input, key) ? -1 : 1;
-        setDelays(value => ({...value, [field]: DELAYS[Math.max(0, Math.min(DELAYS.length - 1, position + delta))]}));
+        setDelayDraft(DELAYS[Math.max(0, Math.min(DELAYS.length - 1, position + delta))]!);
       } else if (!editing && (matchChord("left", input, key) || matchChord("right", input, key))) {
         moveTab(matchChord("left", input, key) ? -1 : 1);
       }
@@ -233,10 +244,10 @@ export const BinWorkspace = memo(function BinWorkspace({
     <HorizontalHeaderStrip items={[...TABS]} selected={TABS.findIndex(item => item.id === tab)} width={w}/>
     <Text color={colors.divider.color}>{separator(w)}</Text>
     <Box flexDirection="column" flexGrow={1} paddingTop={1}>
-      {tab === "delay" ? <>{(["Project", "Subprocess"] as const).map((label, rowIndex) =>
-        <Text key={label} {...useSelectionStyle(rowIndex === delayRow ? "focused" : "non-focused", "row")}>
-          {label}   {rowIndex === 0 ? delays.project : delays.process} min{editing && rowIndex === delayRow ? "  editing" : ""}
-        </Text>)}</> : rows.length === 0 ? <Text dimColor>Nothing archived here.</Text>
+      {tab === "delay" ? <>{DELAY_ROWS.map((item, rowIndex) =>
+        <Text key={item.key} {...useSelectionStyle(rowIndex === delayRow ? "focused" : "non-focused", "row")}>
+          {item.label.padEnd(28)} {editing && rowIndex === delayRow ? delayDraft : delays[item.field]} min{editing && rowIndex === delayRow ? "  editing" : ""}
+        </Text>)}<Text dimColor>Missing workspaces: from first failed entry; 0 disables archiving. No files are deleted.</Text></> : rows.length === 0 ? <Text dimColor>Nothing archived here.</Text>
         : rows.slice(visibleStart, visibleStart + 12).map((item: any, offset: number) => {
           const absolute = visibleStart + offset;
           const label = tab === "targets"

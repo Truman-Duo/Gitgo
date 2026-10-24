@@ -1,3 +1,4 @@
+from backend.core.loop.execution_contract import data_broker
 import pytest
 
 from backend.core.loop.agent_tool import AgentTool, ApprovalMode
@@ -15,15 +16,15 @@ from backend.core.tools.dynamic_tools import validate_definition
 
 def setup(root):
     calls = []
-    prefix = AgentTool("read_prefix", "prefix", {}, lambda args: calls.append("prefix") or {"value": "derived"}, composable=True)
+    prefix = AgentTool("read_prefix", "prefix", {}, lambda args: calls.append("prefix") or {"value": "derived"}, composable=True, execution_contract=data_broker("test.fixture"))
     leaf = AgentTool("approved_leaf", "leaf", {"value": {"type": "string"}},
         lambda args: calls.append(args["value"]) or {"ok": True}, composable=True,
-        approval=ApprovalMode.ASK, approval_per_invocation=True)
+        approval=ApprovalMode.ASK, approval_per_invocation=True, execution_contract=data_broker("test.fixture"))
     catalog = {prefix.name: prefix, leaf.name: leaf}
     spec = validate_definition({"name": "read_then_approved", "description": "test", "parameters": {}, "steps": [
         {"id": "prefix", "tool": prefix.name, "arguments": {}},
         {"id": "approved", "tool": leaf.name, "arguments": {"value": "${steps.prefix.value}"}}]}, catalog)
-    outer = AgentTool(spec["name"], "wrapper", {}, lambda args: {}, composite_spec=spec)
+    outer = AgentTool(spec["name"], "wrapper", {}, lambda args: {}, composite_spec=spec, execution_contract=data_broker("host.composite"))
     catalog[outer.name] = outer
     process = AgentProcess("p", "worker", RingLevel.RING_3, session=AgentSession(),
         active_task_id="task", tool_registry=ToolRegistry(list(catalog)), worktree_path=str(root))
@@ -33,8 +34,10 @@ def setup(root):
 
 
 def approve(process, leaf, value="derived"):
-    process.approval_grants.append({"grant_id": "fixture", "task_id": "task", "tool_name": leaf.name,
-        "arguments_digest": arguments_digest({"value": value}), "remaining_uses": 1})
+    from backend.core.loop.permission_broker import create_permission_request, grant_from_decision
+    create_permission_request(process, {"tool_name": leaf.name, "arguments": {"value": value},
+        "purpose": "Approve the exact fixture call"}, {leaf.name: leaf}, process.worktree_path)
+    assert grant_from_decision(process, process.pending_decision, "allow_once")
 
 
 def test_prefix_survives_checkpoint_and_runs_once(tmp_path_factory):
@@ -76,7 +79,7 @@ def test_stale_continuation_cannot_repeat_prefix(tmp_path_factory, change):
 
 def test_ordered_batch_does_not_start_suffix_while_leaf_waits(tmp_path_factory):
     process, ctx, outer, leaf, calls = setup(tmp_path_factory)
-    suffix = AgentTool("later_call", "later", {}, lambda args: calls.append("later") or {})
+    suffix = AgentTool("later_call", "later", {}, lambda args: calls.append("later") or {}, execution_contract=data_broker("test.fixture"))
     catalog = {**ctx.artifacts["tool_catalog"], suffix.name: suffix}
     execution = ToolExecution("execution", ctx, tool_calls=[{"id": "root", "name": outer.name, "args": {}}, {"name": suffix.name, "args": {}}])
     execution.begin()

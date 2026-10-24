@@ -416,3 +416,26 @@ def test_dashboard_profile_requires_user_to_enable_backup_and_preserves_original
     assert [p['id'] for p in public['providers']] == ['invalid-openai-acceptance', 'installed']
     assert 'fixture-private-key' not in (profile / 'provider_secrets.json').read_text()
     assert (original_config.read_bytes(), original_secrets.read_bytes()) == originals
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "anthropic_messages", "auto"])
+@pytest.mark.parametrize("supported", [False, True])
+def test_public_search_projection_consumes_config_capability_dictionary(protocol,supported):
+    from backend.core.llm_config import LLMProvider as ConfiguredProvider
+    from backend.core.tools.web_tools import provider_search_transport
+    configured=ConfiguredProvider(name="fixture",base_url="https://example.invalid",
+        api_key="synthetic",model_id="fixture",protocol=protocol,
+        capabilities={"hosted_web_search":supported})
+    assert provider_search_transport(configured)==("provider_native" if supported else "unavailable")
+
+
+def test_unselected_backup_capability_projection_does_not_crash_primary_construction():
+    providers=[{"id":"primary","name":"primary","base_url":"https://api.deepseek.com",
+        "model_id":"fixture","api_key":"synthetic","protocol":"openai_responses"},
+        {"id":"backup","name":"backup","base_url":"https://example.invalid/v1",
+        "model_id":"fixture-backup","api_key":"synthetic","protocol":"openai_responses",
+        "capabilities":{"hosted_web_search":False}}]
+    runtime=RoutedProvider({"providers":providers,"active_provider":"primary",
+        "failover_enabled":True,"failover_order":["backup"]},registry=BreakerRegistry())
+    assert runtime.current.provider_id=="primary"
+    assert runtime.clients["backup"].hosted_search_transport=="unavailable"

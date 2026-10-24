@@ -5,6 +5,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import type { BackendClient } from "../backend/client.js";
 import type { ChatMessage, PendingDecision, StreamingRow } from "../types.js";
 import { sendChat } from "../chat/sendChat.js";
+import { lessonHarvestList } from "../backend/tools.js";
 
 function stableMessageKey(message: ChatMessage): string {
   return message.message_id || message.id ||
@@ -105,6 +106,14 @@ export function knowledgeHarvestMessage(
   };
 }
 
+export function knowledgeProposalMessage(project: string, proposal: any): ChatMessage {
+  const id = String(proposal.proposal_id);
+  return {message_id: `knowledge-proposal:${project}:${id}`, turn_id: id,
+    role: "system", kind: "knowledge_notice", final: true,
+    content: `Knowledge proposal ready · ${proposal.candidates?.length || 0} candidate(s) awaiting your review. Open /runtime lesson and press P. Nothing has been saved as knowledge.`,
+    timestamp: String(proposal.created_at || new Date().toISOString())};
+}
+
 // Streaming text lives in a separate transient row (never inside `messages`),
 // so the authoritative poll snapshot can wholesale-replace `messages` without
 // clobbering an in-flight token stream. On complete (or error) the transient
@@ -132,15 +141,38 @@ export function useChat(
   }, [seed]);
 
   useEffect(() => {
-    if (!client?.subscribeEvents || !project) return;
-    const unsubscribe = client.subscribeEvents((event) => {
-      if (String(event.project || "") !== project || event.event !== "lessons_harvested") return;
-      const notice = knowledgeHarvestMessage(project, event);
-      setMessages(current => current.some(row => row.message_id === notice.message_id) ? current : [
-        ...current, notice,
-      ]);
+    if (!project) return;
+    let active = true;
+    const resolved = new Set<string>();
+    const addProposal = (proposal: any) => {
+      if (!active || !proposal?.proposal_id || resolved.has(proposal.proposal_id)) return;
+      const notice = knowledgeProposalMessage(project, proposal);
+      setMessages(current => current.some(row => row.message_id === notice.message_id) ? current : [...current, notice]);
+    };
+    const unsubscribe = client.subscribeEvents?.((event) => {
+      if (String(event.project || "") !== project) return;
+      if (event.event === "lesson_harvest_proposed") addProposal(event.proposal);
+      else if (event.event === "lesson_harvest_resolved") {
+        resolved.add(String(event.proposal_id));
+        setMessages(current => current.filter(row => row.message_id !== `knowledge-proposal:${project}:${event.proposal_id}`));
+      } else if (event.event === "lessons_harvested") {
+        const notice = knowledgeHarvestMessage(project, event);
+        setMessages(current => current.some(row => row.message_id === notice.message_id) ? current : [...current, notice]);
+      }
     });
-    return unsubscribe;
+    // Subscribe before hydration; a late snapshot must not restore a resolved notice.
+    void lessonHarvestList(client, project).then((value: any) => {
+      for (const proposal of value?.proposals || []) addProposal(proposal);
+    }).catch(() => {
+      if (!active) return;
+      const id = "knowledge-review-unavailable:" + project;
+      setMessages(current => current.some(row => row.message_id === id) ? current : [...current, {
+        message_id: id, role: "system", kind: "knowledge_notice", final: true,
+        content: "Knowledge review list unavailable. Retry in /runtime lesson.",
+        timestamp: new Date().toISOString(),
+      }]);
+    });
+    return () => { active = false; unsubscribe?.(); };
   }, [client, project]);
 
   // A decision is daemon-owned state, not a transient Dashboard prompt.  When

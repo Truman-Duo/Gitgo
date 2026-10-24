@@ -64,6 +64,7 @@ export type InterruptTarget = { pid?: string; requestId?: string; running: boole
 
 export type InputContext = {
   scene: Scene;
+  agentReturnScene?: "workspace" | "process_list";
   mode: Mode;
   chatInputFocused: boolean;
 
@@ -122,10 +123,9 @@ function effect(e: EffectAction): InputAction {
   return { kind: "effect", effect: e };
 }
 
-// navigate clears both input buffers (matches App.navigate helper)
+// Navigation preserves scoped chat drafts and clears only the command buffer.
 function nav(scene: Scene, patch?: NavigatePatch): InputAction[] {
   return [
-    text("text", { op: "set_value", text: "" }),
     text("cmd", { op: "set_value", text: "" }),
     state({ type: "navigate", scene, patch }),
   ];
@@ -250,7 +250,7 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
       }
       // The ordinary NORMAL editor owns all other keys while composing.
     } else {
-      const count = ctx.decisionOptionLabels.length;
+      const count = ctx.decisionOptionLabels.length + Number(ctx.decisionAllowFreeForm);
       if (matchChord("slash", input, key)) return enterCommand();
       if (matchChord("up", input, key)) {
         return [state({ type: "set_decision_selection", index: (ctx.decisionSelection - 1 + count) % count })];
@@ -270,6 +270,11 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
           return [effect({ type: "report_notice", code: 2004 })];
         }
         const index = Math.min(ctx.decisionSelection, count - 1);
+        if(index===ctx.decisionOptionLabels.length)return [
+          text("text",{op:"set_value",text:""}),
+          state({type:"set_chat_input_focused",focused:true}),
+          state({type:"set_decision_composing",composing:true}),
+        ];
         return [
           state({ type: "set_decision_submitting", submitting: true }),
           effect({
@@ -282,14 +287,14 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
       if (ctx.decisionAllowFreeForm && matchChord("letterA", input, key)) {
         const index = Math.min(ctx.decisionSelection, count - 1);
         return [
-          text("text", { op: "set_value", text: `Choose option ${index + 1}: ${ctx.decisionOptionLabels[index]}; conditions: ` }),
+          text("text", { op: "set_value", text: index < ctx.decisionOptionLabels.length ? `Choose option ${index + 1}: ${ctx.decisionOptionLabels[index]}; conditions: ` : "" }),
           state({ type: "set_chat_input_focused", focused: true }),
           state({ type: "set_decision_composing", composing: true }),
         ];
       }
       if (ctx.decisionAllowFreeForm && matchChord("letterD", input, key)) {
         return [
-          text("text", { op: "set_value", text: "Before choosing, discuss this concern: " }),
+          text("text", { op: "set_value", text: ctx.decisionSelection < ctx.decisionOptionLabels.length ? "Discuss option "+(ctx.decisionSelection+1)+": "+ctx.decisionOptionLabels[ctx.decisionSelection]+"; concern: " : "" }),
           state({ type: "set_chat_input_focused", focused: true }),
           state({ type: "set_decision_composing", composing: true }),
         ];
@@ -342,11 +347,10 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
 
   // P5.6: Left arrow — cursor when typing, back navigation when idle
   if (matchChord("left", input, key)) {
-    if (ctx.chatInputFocused) {
-      if (ctx.textCursor === 0) return [state({ type: "set_chat_input_focused", focused: false })];
+    if (ctx.chatInputFocused || ctx.textValue.length > 0) {
       return [text("text", { op: "move_cursor", delta: -1 })];
     }
-    if (ctx.scene === "agent_detail") return nav("workspace", { activeAgentId: null });
+    if (ctx.scene === "agent_detail") return nav(ctx.agentReturnScene || "workspace", { activeAgentId: null });
     if (ctx.scene === "workspace") return nav("projects");
     return [];
   }

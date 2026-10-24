@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import data_broker
+
 import difflib
 import hashlib
 import json
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
+from backend.core.prompt_templates import load_prompt
 from backend.core.unicode_safety import normalize_unicode_text, normalize_unicode_value
 
 
@@ -156,6 +159,24 @@ class ContextObjectStore:
             digest=digest, media_type=str(payload.get("media_type", "text/plain")),
             content=content, metadata=dict(payload.get("metadata", {})),
         )
+
+    def reference_info(self, ref: str) -> dict:
+        """Describe identity and the matching logical ref's dependency metadata.
+
+        Blob metadata is content-addressed and may have been written under
+        another logical name first. It is not authority for this ref's producer
+        or edges. Historical refs lack a versioned metadata envelope here.
+        """
+        item = self.resolve(ref)
+        current = self._load_refs().get(item.logical_name) or {}
+        digest = str(current.get("digest") or "")
+        matches = digest == item.digest
+        return {"ref": item.ref, "logical_name": item.logical_name,
+                "digest": item.digest, "current_digest": digest,
+                "version_state": "current" if matches else "historical" if digest else "unknown",
+                "dependency_metadata_state": "matching_ref" if matches else "unavailable",
+                "producer": str(current.get("producer") or item.logical_name) if matches else "unknown",
+                "depends_on": dict(current.get("depends_on") or {}) if matches else {}}
 
     def search(self, query: str, *, namespace: str = "", limit: int = 20) -> list[dict]:
         needle = query.casefold().strip()
@@ -379,8 +400,11 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
         target.relative_to(Path(workspace_path).resolve())
         if not target.is_file():
             raise ValueError("artifact path is not a workspace file")
-        content = target.read_text(encoding="utf-8", errors="replace")
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        from backend.core.sandbox_read_plan import open_planned_read
+        with open_planned_read(Path(workspace_path).resolve(), target.relative_to(Path(workspace_path).resolve()).as_posix()) as opened:
+            raw = opened.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        content = raw.decode("utf-8", errors="replace")
         expected = str(args.get("sha256", ""))
         if expected and expected != digest:
             raise ValueError("artifact digest mismatch")
@@ -405,7 +429,8 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
 
     tools = {
         "context_open": AgentTool(
-            name="context_open", description="Resolve and materialize a latest or pinned context ref.",
+            execution_contract=data_broker("host.context.context_open"),
+            name="context_open", description=load_prompt('tools/context_open'),
             parameters={"type": "object", "properties": {
                             "ref": {"type": "string"},
                             "offset": {"type": "integer", "minimum": 0},
@@ -414,21 +439,24 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
             execute=context_open, effect=ToolEffect.READ, idempotent=True,
         ),
         "context_search": AgentTool(
-            name="context_search", description="Search addressable project context objects.",
+            execution_contract=data_broker("host.context.context_search"),
+            name="context_search", description=load_prompt('tools/context_search'),
             parameters={"type": "object", "properties": {
                 "query": {"type": "string"}, "namespace": {"type": "string"},
                 "limit": {"type": "integer"}}, "required": ["query"]},
             execute=context_search, effect=ToolEffect.READ, idempotent=True,
         ),
         "dependency_query": AgentTool(
-            name="dependency_query", description="Query evidence-ranked dependents for a workspace file.",
+            execution_contract=data_broker("host.context.dependency_query"),
+            name="dependency_query", description=load_prompt('tools/dependency_query'),
             parameters={"type": "object", "properties": {
                 "path": {"type": "string"}, "min_confidence": {"type": "number"},
                 "include_dismissed": {"type": "boolean"}}, "required": ["path"]},
             execute=dependency_query, effect=ToolEffect.READ, idempotent=True,
         ),
         "artifact_read": AgentTool(
-            name="artifact_read", description="Read a workspace artifact, optionally pinned by SHA-256.",
+            execution_contract=data_broker("host.context.artifact_read"),
+            name="artifact_read", description=load_prompt('tools/artifact_read'),
             parameters={"type": "object", "properties": {
                 "path": {"type": "string"}, "sha256": {"type": "string"},
                 "offset": {"type": "integer", "minimum": 0},
@@ -457,6 +485,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
                 )
 
         tools["tool_result_open"] = AgentTool(
+            execution_contract=data_broker("host.context.tool_result_open"),
             name="tool_result_open",
             description=(
                 "Open or search a content-addressed oversized tool result. Use the "

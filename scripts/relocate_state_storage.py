@@ -95,6 +95,7 @@ def relocate_preserving(
         raise RuntimeError("Insufficient space for source snapshot, staging copy, and safety reserve")
 
     with StorageLease(source, exclusive=True):
+        StorageRuntime.require_legacy_state_file(source / "state.sqlite3")
         shutil.copytree(
             source, source_snapshot,
             ignore=shutil.ignore_patterns("storage-maintenance.lock"),

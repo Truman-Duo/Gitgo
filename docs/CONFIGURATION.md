@@ -10,6 +10,8 @@ Gitgo 的用户级配置使用 `~/.gitgo/config.json`。Dashboard 保存设置�
 
 Verbose 控制思考、工具等内容的默认展开程度，不改变任务或历史事实。
 
+Diff Layout 选择 `Split`（默认，左右对照）或 `Unified`（逐行增删）。保存后立即更新当前对话中的 diff，重启后保留；窄屏下 Split 自动回退为 Unified。普通模式使用同一个 diff 框展示有界预览，省略内容会明示。
+
 ## Providers
 
 在 `/config → Providers` 配置名称、协议、Base URL、模型及真实容量。凭据单独保存；Windows 使用当前用户 DPAPI 加密，不写入项目文件。

@@ -1,0 +1,2 @@
+
+The Host has accepted a response-only contract. Continue with the answer and do not request mutation authority. 

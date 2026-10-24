@@ -60,6 +60,11 @@ def accept(archive, commit):
         run(sys.executable, '-B', str(ROOT / 'scripts/smoke_packaged_runtime.py'), '--host', str(host))
         run(sys.executable, '-B', str(ROOT / 'scripts/check_terminal_continuity.py'), '--host', str(host))
         from backend.core.child_process import INTERNAL_ROLE_FLAG, PYTHON_ROLE
+        if sys.platform == 'linux':
+            # The installed frozen backend must exercise its own protected Git
+            # implementation, not just pass a source-level namespace probe.
+            run(str(host), INTERNAL_ROLE_FLAG, PYTHON_ROLE,
+                str(ROOT / 'scripts/check_native_git.py'))
         # Create/read/delete with the installed app's own native credential
         # implementation and executable identity, including Keychain ACLs.
         credential_env = dict(env)
@@ -84,6 +89,7 @@ def accept(archive, commit):
                 'passed': ['digest', 'payload inventory', 'clean install', 'owned upgrade',
                            'frozen Host/daemon/search/storage', 'conversation continuity',
                            'frozen owned scope', 'real CI keyring and frozen cleanup', 'keep-config uninstall'],
+                'linux_frozen_protected_git': sys.platform == 'linux',
                 'pending': ['desktop keyring interaction', 'physical IME and visible terminal',
                             'independent maintainer trigger/download'],
                 'macos_detached_process_containment': 'not guaranteed'}

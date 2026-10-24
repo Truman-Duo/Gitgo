@@ -1,18 +1,19 @@
+import {PageFrame,useCopy} from "../ui/PageFrame.js";
+import {pages} from "../ui/pageContract.js";
+import {runtimeTabs} from "./RuntimeShell.js";
+import {PageHeader} from "../ui/PageHeader.js";
 // src/components/RuntimeMenu.tsx — /runtime secondary menu (LLMConfig-style tab header)
-// Tab header: only the active tab gets a background; inactive tabs are transparent.
-// (The dim "detail" background appears only when a tab is expanded internally,
-//  which this menu does not yet have.)
-import React, { memo, useEffect, useState } from "react";
-import { Box, Text } from "@anthropic/ink";
-import { useManagedInput as useInput } from "../input/runtime.js";
+// Root tabs own navigation until Enter moves focus into the selected page.
+import React, { memo, useEffect, useRef, useState } from "react";
+import { Box, ScrollBox, Text, type ScrollBoxHandle } from "@anthropic/ink";
+import { useManagedInput as useInput, useScrollInput } from "../input/runtime.js";
 import { resolveRuntimeMenuKey } from "../input/overlays/runtimeMenu.js";
-import { colors, usePanelSize, separator } from "../theme/index.js";
-import { chordLabel } from "../input/bindings.js";
-import { HorizontalHeaderStrip, clampHeaderIndex } from "./HorizontalHeaderStrip.js";
+import { colors, usePanelSize } from "../theme/index.js";
+import { chordLabel, matchChord } from "../input/bindings.js";
+import { clampHeaderIndex } from "./HorizontalHeaderStrip.js";
 import type { BackendClient } from "../backend/client.js";
 import type { ProcessInfo } from "../hooks/useLoopData.js";
 import { contractShow } from "../backend/tools.js";
-import { RUNTIME_TABS } from "./RuntimeShell.js";
 import { ContractTab } from "./ContractTab.js";
 import { LessonsPanel } from "./LessonsPanel.js";
 import { GovernancePanel } from "./GovernancePanel.js";
@@ -21,10 +22,6 @@ import { RuntimeContextPanel } from "./RuntimeContextPanel.js";
 import { RuntimeToolsPanel } from "./RuntimeToolsPanel.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
 import type { FooterConfig } from "./CommandBar.js";
-
-type RuntimeItem = { id: string; label: string };
-
-const ITEMS: RuntimeItem[] = [...RUNTIME_TABS];
 
 type Props = {
   cols: number;
@@ -42,9 +39,16 @@ export const RuntimeMenu = memo(function RuntimeMenu({
   cols: _cols, rows: _rows, client, project, processes, onSelect, onDismiss,
   cmdInput, onFooter,
 }: Props) {
+  const t=useCopy();
+  const ITEMS=runtimeTabs(t);
   const { w } = usePanelSize({ minWidth: 40, widthOffset: 4 });
   const [selIdx, setSelIdx] = useState(0);
   const [contentFocused, setContentFocused] = useState(false);
+  const scrollRef = useRef<ScrollBoxHandle>(null);
+  const activeId = ITEMS[selIdx]?.id || "lesson";
+  const ownsScroll = ["lesson", "governance", "context", "tools", "memory"].includes(activeId);
+  useScrollInput(scrollRef, contentFocused && !ownsScroll);
+  useEffect(() => { scrollRef.current?.scrollTo(0); }, [activeId]);
   const [contract, setContract] = useState<any>(null);
   const [contractError, setContractError] = useState("");
 
@@ -70,17 +74,21 @@ export const RuntimeMenu = memo(function RuntimeMenu({
     }
   }, {isActive: !contentFocused});
 
+  useInput((input, key) => {
+    if (matchChord("escape", input, key)) { setContentFocused(false); return; }
+    return false;
+  }, {isActive: contentFocused && ITEMS[selIdx]?.id === "contract"});
+
   const leaveContent = () => setContentFocused(false);
-  const activeId = ITEMS[selIdx]?.id || "lesson";
   const content = activeId === "lesson"
     ? <LessonsPanel client={client} project={project} cols={_cols} onDismiss={leaveContent}
         interactive={contentFocused} cmdInput={cmdInput} onFooter={onFooter}/>
     : activeId === "contract"
       ? <Box flexDirection="column" padding={1}>
-          {contractError ? <Text color={colors.danger}>Error: {contractError}</Text>
-            : contract === null ? <Text dimColor>Loading…</Text>
+          {contractError ? <Text color={colors.danger}>{t({en:"Error: ",zh:"错误："})}{contractError}</Text>
+            : contract === null ? <Text dimColor>{t({en:"Loading…",zh:"正在读取…"})}</Text>
             : <ContractTab contract={contract} width={w}/>}
-          <Text dimColor>{contentFocused ? `${chordLabel("escape")} tabs` : `${chordLabel("enter")} open`}</Text>
+          <Text dimColor>{contentFocused ? t({en:"Esc tabs",zh:"Esc 返回页签"}) : t({en:"Enter open",zh:"Enter 打开"})}</Text>
         </Box>
       : activeId === "governance"
         ? <GovernancePanel client={client} project={project} cols={_cols} onDismiss={leaveContent} interactive={contentFocused}/>
@@ -91,14 +99,12 @@ export const RuntimeMenu = memo(function RuntimeMenu({
             : <RuntimeToolsPanel client={client} project={project} cols={_cols} onDismiss={leaveContent} interactive={contentFocused}/>;
 
   return (
-    <Box flexDirection="column" paddingTop={1} paddingLeft={1} flexGrow={1}>
+    <PageFrame page={pages.runtime}>
       {/* Tab header */}
-      <Box flexDirection="column">
-        <HorizontalHeaderStrip items={ITEMS} selected={selIdx} width={w} contentFocused={contentFocused} />
-        <Text color={colors.divider.color}>{separator(w)}</Text>
-      </Box>
+      <PageHeader items={ITEMS} selected={selIdx} width={w} contentFocused={contentFocused}/>
 
-      <Box flexDirection="column" flexGrow={1} paddingTop={1}>{content}</Box>
-    </Box>
+      {ownsScroll ? <Box flexDirection="column" flexGrow={1} minHeight={0}>{content}</Box>
+        : <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>{content}</ScrollBox>}
+    </PageFrame>
   );
 });

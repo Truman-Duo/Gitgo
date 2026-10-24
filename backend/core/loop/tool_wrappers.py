@@ -37,20 +37,39 @@ def contract_detect_drift(args: dict) -> dict:
     """检测本轮变更与合约的偏差。"""
     try:
         workspace = Path(args["workspace_path"])
+        if "_workspace" in args and Path(args["_workspace"]).resolve() != Path(workspace).resolve():
+            return {"error": "GOVERNANCE_WORKSPACE_MISMATCH", "query_state": "failed"}
         changed_files = args.get("changed_files", [])
         contract_path = args.get("contract_path", "")
-        contract = ContractManager.load(Path(contract_path)) if contract_path else None
+        contract_root = Path(contract_path) if contract_path else workspace
+        if contract_path and not contract_root.is_absolute():
+            contract_root = workspace / contract_root
+        if contract_root.name==ContractManager.CONTRACT_FILE and contract_root.parent.name==".gitgo":
+            contract_root=contract_root.parent.parent
+        if contract_root.resolve()!=workspace.resolve():raise ValueError("Contract must belong to the selected workspace")
+        contract = ContractManager.load(workspace)
         result = detect_drift(workspace, changed_files, contract)
-        return {"drifts": result, "count": len(result)}
+        return {"drifts": result, "count": len(result),
+                "contract_state":"present" if contract is not None else "absent",
+                "contract_source_sha256": getattr(contract, "_source_sha256", "") if contract is not None else "",
+                "evaluation_state":"evaluated_selected_scope" if contract is not None else "not_evaluated"}
     except Exception as e:
-        return {"error": str(e)}
+        from backend.core.errors import error_payload
+        return {**error_payload("CONTRACT_STATE_UNAVAILABLE"), "query_state": "failed", "error_type": type(e).__name__,
+                **({"contract_source_sha256": e.source_sha256} if getattr(e, "source_sha256", "") else {})}
 
 
 def contract_get_impact(args: dict) -> dict:
     """查询文件的影响面：哪些文件依赖它，哪些函数调用了它。"""
     try:
         workspace = Path(args["workspace_path"])
+        if "_workspace" in args and Path(args["_workspace"]).resolve() != Path(workspace).resolve():
+            return {"error": "GOVERNANCE_WORKSPACE_MISMATCH", "query_state": "failed"}
         file_path = args["file_path"]
+        from backend.core.sandbox_read import relative_parts
+        parts = relative_parts(file_path)
+        if any(part.casefold() in {".git", ".gitgo"} for part in parts):
+            raise PermissionError("Impact queries require business source paths")
         func_name = args.get("func_name", "")
         from backend.core.dependency_graph import query_dependents
         dependency_edges = query_dependents(workspace, file_path)
@@ -66,19 +85,27 @@ def contract_get_impact(args: dict) -> dict:
             "graph_policy": "recall_first_multi_signal",
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": "DEPENDENCY_OBSERVATION_UNAVAILABLE", "query_state": "failed", "error_type": type(e).__name__}
 
 
 def contract_get_changed_symbols(args: dict) -> dict:
     """对比文件两个版本的 AST，返回变更的函数/类名。"""
     try:
+        import ast
         file_path = Path(args["file_path"])
-        old_content = args.get("old_content", "")
-        new_content = args.get("new_content", "")
+        old_content = args["old_content"]
+        new_content = args["new_content"]
+        if file_path.suffix != ".py":
+            raise ValueError("Only supplied Python source versions are supported")
+        for source in (old_content, new_content):
+            if not isinstance(source, str) or len(source.encode("utf8")) > 256 * 1024:
+                raise ValueError("Each supplied source version must be bounded text")
+            ast.parse(source)
         symbols = get_changed_symbols(file_path, old_content, new_content)
-        return {"symbols": symbols, "count": len(symbols)}
-    except Exception as e:
-        return {"error": str(e)}
+        return {"symbols": symbols, "count": len(symbols), "evaluation_state": "evaluated_name_sets",
+                "scope": "added_or_removed_python_function_and_class_names"}
+    except (KeyError, ValueError, SyntaxError, TypeError, RecursionError) as exc:
+        return {"error": "CONTRACT_COMPARISON_INVALID", "query_state": "failed", "error_type": type(exc).__name__}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -134,11 +161,15 @@ def lesson_harvest(args: dict) -> dict:
         workspace = Path(args["workspace_path"])
         project_name = args["project_name"]
         tech_stack = args.get("tech_stack", "")
-        lessons = harvest_lessons(workspace, project_name, tech_stack)
+        discovery = {}
+        lessons = harvest_lessons(workspace, project_name, tech_stack, discovery_report=discovery)
         return {
             "lessons": [l.to_dict() for l in lessons],
             "count": len(lessons),
             "project_name": project_name,
+            "knowledge_saved": False,
+            "status": "partial" if any(v.get("state") == "unavailable" for v in discovery.values()) else "observations_collected",
+            "discovery": discovery,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -152,13 +183,15 @@ def privacy_scan(args: dict) -> dict:
     """扫描变更文件的隐私风险（敏感信息、AI 痕迹等）。"""
     try:
         workspace = args["workspace_path"]
+        if "_workspace" in args and Path(args["_workspace"]).resolve() != Path(workspace).resolve():
+            return {"error": "GOVERNANCE_WORKSPACE_MISMATCH", "query_state": "failed"}
         file_list = args.get("file_list", [])
         level = args.get("level", 2)
         deep_scan = args.get("deep_scan", False)
         alerts = scan_files_privacy(workspace, file_list, level, deep_scan)
         return {"alerts": alerts, "count": len(alerts)}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": "PRIVACY_OBSERVATION_UNAVAILABLE", "query_state": "failed", "error_type": type(e).__name__}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -221,6 +254,10 @@ def lesson_list(args: dict) -> dict:
         abstract = LessonManager.load_abstract(workspace)
         instances = LessonManager.load_instance(workspace, project_name)
         pending = LessonManager.load_pending(workspace, project_name)
+        from backend.core.knowledge.review import can_consume
+        abstract = [item for item in abstract if can_consume(item)]
+        instances = [item for item in instances if can_consume(item)]
+        pending = [item for item in pending if can_consume(item)]
         return {
             "abstract": [l.to_dict() for l in abstract],
             "instances": [l.to_dict() for l in instances],

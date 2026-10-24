@@ -6,6 +6,7 @@ modules must use this facade instead of opening database connections directly.
 
 from .models import (
     StorageBlocked,
+    StorageCommitUnknown,
     StorageCorruptionDetected,
     StorageReferenceMissing,
     StorageRuntimeUnsupported,
@@ -19,6 +20,7 @@ from .bindings import (
     bind_storage,
     close_owned_storage,
     get_storage,
+    peek_storage,
     release_storage,
     unbind_storage,
 )
@@ -27,6 +29,7 @@ from .scope import RepositoryScope, assess_repository_scope
 __all__ = [
     "RepositoryScope",
     "StorageBlocked",
+    "StorageCommitUnknown",
     "StorageCorruptionDetected",
     "StorageReferenceMissing",
     "StorageRuntimeUnsupported",
@@ -38,6 +41,7 @@ __all__ = [
     "bind_storage",
     "close_owned_storage",
     "get_storage",
+    "peek_storage",
     "release_storage",
     "unbind_storage",
     "assess_repository_scope",

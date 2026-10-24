@@ -320,27 +320,38 @@ class TestChainStateBundle:
 # ═══════════════════════════════════════════════════════════════
 
 
+@pytest.fixture
+def real_code_workspace(tmp_path_factory):
+    # Generated product caches belong to an isolated test project, never the
+    # developer checkout. Keep real source and all dependency evidence intact.
+    import shutil
+    target = tmp_path_factory / "project" / "backend"
+    shutil.copytree(Path(__file__).parent.parent / "backend", target,
+                    ignore=shutil.ignore_patterns(".gitgo", ".git", "__pycache__"))
+    return target
+
+
 class TestChainDependencyGraph:
     """依赖图构建和查询。"""
 
-    def test_build_dep_graph_on_real_code(self):
+    def test_build_dep_graph_on_real_code(self, real_code_workspace):
         """对实际 gitgo 代码构建依赖图——不抛异常。"""
         from backend.core.contract import build_dep_graph, load_dep_graph
         from pathlib import Path
 
-        ws = Path(__file__).parent.parent / "backend"
+        ws = real_code_workspace
         graph = build_dep_graph(ws)
 
         assert isinstance(graph, dict)
         # 实际项目必有 import 关系
         assert len(graph) > 0, f"依赖图不应为空 (workspace={ws})"
 
-    def test_get_dependents(self):
+    def test_get_dependents(self, real_code_workspace):
         """get_dependents 查询。"""
         from backend.core.contract import build_dep_graph, get_dependents
         from pathlib import Path
 
-        ws = Path(__file__).parent.parent / "backend"
+        ws = real_code_workspace
         build_dep_graph(ws)
 
         deps = get_dependents(ws, "backend/core/history.py")

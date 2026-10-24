@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import hashlib
 import json
 import sys
@@ -36,6 +38,17 @@ from backend.core.tools.dynamic_tools import validate_definition
 from backend.core.tools.workspace_tools import (
     delete_file, edit_file, exec_command, list_files, read_file, write_file,
 )
+
+
+
+def _author_call(tool, process, workspace, args):
+    from backend.core.storage import get_storage
+    import uuid
+    ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(workspace),
+        cancellation=process.cancellation_event, storage=get_storage(workspace))
+    result = ToolPipeline().execute({"name": tool.name, "args": args}, tool, ctx, "author-" + uuid.uuid4().hex)
+    assert result.data is not None, result.formatted
+    return result.data
 
 
 def test_multisignal_graph_handles_typescript_and_path_references(tmp_path_factory: Path):
@@ -264,7 +277,7 @@ def test_dynamic_tool_cannot_compose_unapproved_or_noncomposable_tool(tmp_path_f
     assert spec["effect"] == "read"
 
     unsafe = AgentTool(
-        name="unsafe", description="unsafe", parameters={"type": "object"},
+        execution_contract=NATIVE_PROCESS, name="unsafe", description="unsafe", parameters={"type": "object"},
         execute=lambda args: {}, read_only=False, effect=ToolEffect.EXTERNAL,
         isolated=True, runner_name="unsafe",
     )
@@ -276,7 +289,7 @@ def test_dynamic_tool_cannot_compose_unapproved_or_noncomposable_tool(tmp_path_f
         }, {"unsafe": unsafe})
 
 
-def test_dynamic_tool_executes_through_isolated_registry(tmp_path_factory: Path):
+def test_dynamic_tool_executes_through_isolated_registry(tmp_path_factory: Path, runner_transport_only):
     (tmp_path_factory / "note.txt").write_text("composite works", encoding="utf-8")
     spec = validate_definition({
         "name": "read_named_file",
@@ -299,7 +312,7 @@ def test_dynamic_tool_executes_through_isolated_registry(tmp_path_factory: Path)
     assert result.data["steps"]["read_note"]["content"] == "composite works"
 
 
-def test_dynamic_tool_host_plan_reuses_canonical_pipeline_once(tmp_path_factory: Path):
+def test_dynamic_tool_host_plan_reuses_canonical_pipeline_once(tmp_path_factory: Path, runner_transport_only):
     (tmp_path_factory / "note.txt").write_text("TODO host pipeline", encoding="utf-8")
     base_tools = build_workspace_tools(tmp_path_factory)
     spec = validate_definition({
@@ -320,7 +333,7 @@ def test_dynamic_tool_host_plan_reuses_canonical_pipeline_once(tmp_path_factory:
         ],
     }, base_tools)
     dynamic = AgentTool(
-        name=spec["name"], description=spec["description"],
+        execution_contract=data_broker("host.composite"), name=spec["name"], description=spec["description"],
         parameters=spec["parameters"], execute=lambda _args: {},
         effect=spec["effect"], resources=spec["resources"],
         composite_spec=spec,
@@ -361,7 +374,7 @@ def test_dynamic_tool_host_plan_reuses_canonical_pipeline_once(tmp_path_factory:
     assert result.receipt["definition_digest"] == spec["digest"]
 
 
-def test_dynamic_tool_rebinds_private_workspace_to_child_execution(tmp_path_factory: Path):
+def test_dynamic_tool_rebinds_private_workspace_to_child_execution(tmp_path_factory: Path, runner_transport_only):
     root = tmp_path_factory / "root"
     child = tmp_path_factory / "child"
     root.mkdir()
@@ -388,7 +401,7 @@ def test_dynamic_tool_rebinds_private_workspace_to_child_execution(tmp_path_fact
         ],
     }, base_tools)
     dynamic = AgentTool(
-        name=spec["name"], description=spec["description"],
+        execution_contract=data_broker("host.composite"), name=spec["name"], description=spec["description"],
         parameters=spec["parameters"], execute=lambda _args: {},
         effect=spec["effect"], resources=spec["resources"],
         composite_spec=spec,
@@ -415,7 +428,7 @@ def test_dynamic_tool_rebinds_private_workspace_to_child_execution(tmp_path_fact
     assert not (root / "only-child.txt").exists()
 
 
-def test_dynamic_post_write_verification_failure_rolls_back(tmp_path_factory: Path):
+def test_dynamic_post_write_verification_failure_rolls_back(tmp_path_factory: Path, runner_transport_only):
     target = tmp_path_factory / "note.txt"
     target.write_text("before", encoding="utf-8")
     base_tools = build_workspace_tools(tmp_path_factory)
@@ -439,7 +452,7 @@ def test_dynamic_post_write_verification_failure_rolls_back(tmp_path_factory: Pa
         ],
     }, base_tools)
     dynamic = AgentTool(
-        name=spec["name"], description=spec["description"],
+        execution_contract=data_broker("host.composite"), name=spec["name"], description=spec["description"],
         parameters=spec["parameters"], execute=lambda _args: {},
         effect=spec["effect"], resources=spec["resources"],
         composite_spec=spec,
@@ -512,7 +525,7 @@ def test_dynamic_write_snapshot_uses_effect_not_tool_name(tmp_path_factory: Path
         }],
     }, base_tools)
     dynamic = AgentTool(
-        name=spec["name"], description=spec["description"],
+        execution_contract=data_broker("host.composite"), name=spec["name"], description=spec["description"],
         parameters=spec["parameters"], execute=lambda _args: {},
         read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
         resources=spec["resources"], composite_spec=spec,
@@ -589,7 +602,7 @@ def test_define_tool_lifecycle_is_host_compiled_and_task_scoped(tmp_path_factory
     assert not process.tool_registry.has("read_note")
 
 
-def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Path):
+def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Path, runner_transport_only):
     from backend.core.loop import executor as executor_module
 
     source = tmp_path_factory / "word_count.py"
@@ -609,7 +622,7 @@ def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Pa
     tools = executor_module._build_internal_tools(
         process, base_tools, str(tmp_path_factory), object(), None,
     )
-    created = tools["author_tool"].execute({
+    created = _author_call(tools["author_tool"], process, tmp_path_factory, {
         "name": "count_words", "description": "Count supplied words",
         "source_path": "word_count.py",
         "parameters": {"type": "object", "properties": {
@@ -629,7 +642,7 @@ def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Pa
     (tmp_path_factory / "unsafe.py").write_text(
         "import os\ndef run(args):\n    return {'cwd': os.getcwd()}\n", encoding="utf-8",
     )
-    denied = tools["author_tool"].execute({
+    denied = _author_call(tools["author_tool"], process, tmp_path_factory, {
         "name": "escape_host", "description": "unsafe",
         "source_path": "unsafe.py", "parameters": {"type": "object"},
         "tests": [{"input": {}, "expected": {}}],
@@ -641,7 +654,7 @@ def test_author_tool_runs_registration_tests_and_stays_pure(tmp_path_factory: Pa
 
 
 def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
-    tmp_path_factory: Path,
+    tmp_path_factory: Path, runner_transport_only,
 ):
     from backend.core.loop import executor as executor_module
     from backend.core.loop.permission_broker import (
@@ -680,7 +693,7 @@ def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
         process, build_workspace_tools(tmp_path_factory),
         str(tmp_path_factory), object(), None,
     )
-    blocked = tools["author_tool"].execute(payload)
+    blocked = _author_call(tools["author_tool"], process, tmp_path_factory, payload)
     assert blocked["error"] == "CUSTOM_TOOL_PRIVILEGED_APPROVAL_REQUIRED", blocked
     assert blocked["error_info"]["catalog_id"] == "GITGO-E3309"
 
@@ -690,7 +703,7 @@ def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
     }, tools, str(tmp_path_factory))
     assert grant_from_decision(process, pending, "allow_once")
     process.pending_decision = None
-    created = tools["author_tool"].execute(payload)
+    created = _author_call(tools["author_tool"], process, tmp_path_factory, payload)
     assert created["registered"] is True
     dynamic = process.dynamic_tools["approved_sqrt"]
     assert dynamic.approval == ApprovalMode.ASK
@@ -721,11 +734,11 @@ def test_privileged_authored_tool_binds_source_and_requires_exact_user_approval(
         dynamic, ctx, "privileged", 1,
     )
     assert not approved.is_error
-    assert approved.data == {"root": 4.0}
+    assert approved.data["tool_output"] == {"root": 4.0}
 
 
 def test_permission_tool_resolves_authored_tools_mounted_after_construction(
-    tmp_path_factory: Path,
+    tmp_path_factory: Path, runner_transport_only,
 ):
     """The model-facing broker must see the live task-scoped tool surface."""
     from backend.core.loop import executor as executor_module
@@ -768,7 +781,7 @@ def test_permission_tool_resolves_authored_tools_mounted_after_construction(
     })
     assert grant_from_decision(process, registration, "allow_once")
     process.pending_decision = None
-    assert tools["author_tool"].execute(payload)["registered"] is True
+    assert _author_call(tools["author_tool"], process, tmp_path_factory, payload)["registered"] is True
 
     invocation = {"value": "live"}
     pending = tools["request_permission"].execute({
@@ -795,7 +808,7 @@ def test_explicit_user_grant_overrides_ordinary_governance_for_its_scope(
         workspace_path=str(tmp_path_factory), task_id="user-authority",
     )
     tool = AgentTool(
-        name="sensitive", description="approved action",
+        execution_contract=data_broker("test.fixture"), name="sensitive", description="approved action",
         parameters={"type": "object"},
         execute=lambda args: {"done": args["value"]},
         approval=ApprovalMode.ASK, effect=ToolEffect.PROCESS,
@@ -838,7 +851,7 @@ def test_document_open_reads_text_through_unified_adapter(tmp_path_factory: Path
 
 
 def test_process_runner_does_not_depend_on_caller_working_directory(
-    tmp_path_factory: Path, monkeypatch,
+    tmp_path_factory: Path, monkeypatch, runner_transport_only,
 ):
     workspace = tmp_path_factory / "workspace"
     workspace.mkdir()
@@ -879,19 +892,19 @@ def test_shell_is_sensitive_and_available_to_worker_or_explicit_a_lease(tmp_path
     assert "escalate_to_supervisor" not in leased
 
 
-def test_approved_shell_handler_uses_bash_without_shell_true(tmp_path_factory):
+def test_approved_shell_handler_uses_native_shell_without_shell_true(tmp_path_factory, runner_transport_only):
     from backend.core.tools import workspace_tools
-    if workspace_tools._find_bash() is None:
+    if sys.platform != "win32" and workspace_tools._find_bash() is None:
         pytest.skip("Bash is not installed on this host")
     result = ProcessToolRunner(timeout=15).run("shell_script", {
         "_workspace": str(tmp_path_factory),
-        "script": "printf 'gitgo-shell-ok'",
+        "script": "Write-Output 'gitgo-shell-ok'" if sys.platform == "win32" else "printf 'gitgo-shell-ok'",
         "purpose": "exercise the isolated Bash handler",
         "timeout": 10,
     })
     assert result.success is True
     assert result.data["success"] is True
-    assert result.data["stdout"] == "gitgo-shell-ok"
+    assert result.data["stdout"].strip() == "gitgo-shell-ok"
 
 
 def test_supervisor_and_worker_share_question_and_tool_authoring_shortcuts():
@@ -920,31 +933,34 @@ def test_tool_catalog_mutations_are_journaled_as_process_effects(tmp_path_factor
     assert tools["author_tool"].read_only is False
 
 
-def test_process_runner_cancels_command_process_tree():
-    marker = Path(tempfile.gettempdir()) / f"gitgo-cancel-{time.time_ns()}.txt"
+def test_process_runner_cancels_transport_process_tree(tmp_path_factory, runner_transport_only, monkeypatch):
+    marker = tmp_path_factory / "cancel-marker.txt"
     event = threading.Event()
     runner = ProcessToolRunner(timeout=20)
+    # This fixture intentionally disables the native boundary. Exercise its
+    # owned transport scope with an inheriting descendant; native containment
+    # is tested separately using real Job/cgroup boundaries.
+    ready = tmp_path_factory / "transport-descendant-ready"
+    child = (f"import pathlib,time;pathlib.Path({str(ready)!r}).write_text('ran');time.sleep(2);"
+             f"pathlib.Path({str(marker)!r}).write_text('survived')")
+    source = ("import subprocess,sys,time;"
+              f"subprocess.Popen([sys.executable,'-c',{child!r}]);time.sleep(60)")
+    monkeypatch.setattr('backend.core.loop.process_tool_runner.tool_runner_command',
+                        lambda: [sys.executable, '-c', source])
 
     def cancel_soon():
-        time.sleep(0.25)
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
         event.set()
 
     threading.Thread(target=cancel_soon, daemon=True).start()
     result = runner.run(
         "exec_command",
-        {
-            "_workspace": str(Path.cwd()),
-            "argv": [
-                sys.executable, "-c",
-                (
-                    "import pathlib,time; time.sleep(2); "
-                    f"pathlib.Path({str(marker)!r}).write_text('survived')"
-                ),
-            ],
-            "timeout": 15,
-        },
+        {"_workspace": str(tmp_path_factory)},
         cancellation_event=event,
     )
+    assert ready.read_text() == 'ran'
     assert result.success is False
     assert "cancelled" in result.error
     time.sleep(2.2)
@@ -963,7 +979,7 @@ def test_pipeline_executes_before_inspecting_result(tmp_path_factory: Path):
         workspace_path=str(tmp_path), task_id="task",
     )
     tool = AgentTool(
-        name="read", description="read", parameters={"type": "object", "properties": {}},
+        execution_contract=data_broker("test.fixture"), name="read", description="read", parameters={"type": "object", "properties": {}},
         execute=lambda args: {"ok": True}, read_only=True,
     )
     ctx = ExecutionContext(
@@ -987,7 +1003,7 @@ def test_pipeline_treats_nonzero_command_as_failed_action(tmp_path_factory: Path
         workspace_path=str(tmp_path), task_id="task",
     )
     tool = AgentTool(
-        name="command", description="command",
+        execution_contract=data_broker("test.fixture"), name="command", description="command",
         parameters={"type": "object", "properties": {}},
         execute=lambda args: {"success": False, "exit_code": 7},
         read_only=False, effect=ToolEffect.PROCESS,
@@ -1020,7 +1036,7 @@ def test_pipeline_preserves_command_failure_output_for_model(tmp_path_factory: P
         workspace_path=str(tmp_path_factory), task_id="task-diagnostic",
     )
     tool = AgentTool(
-        name="command", description="command",
+        execution_contract=data_broker("test.fixture"), name="command", description="command",
         parameters={"type": "object", "properties": {}},
         execute=lambda args: {
             "success": False,
@@ -1047,8 +1063,9 @@ def test_pipeline_preserves_command_failure_output_for_model(tmp_path_factory: P
     assert result.data["exit_code"] == 2
 
 
+@pytest.mark.parametrize("failure", ["writer_failure", "workspace_state"])
 def test_effectful_tool_fails_closed_when_invocation_journal_is_unavailable(
-    tmp_path_factory: Path, monkeypatch,
+    tmp_path_factory: Path, monkeypatch, failure,
 ):
     called = []
     manager = AgentProcessManager()
@@ -1058,7 +1075,7 @@ def test_effectful_tool_fails_closed_when_invocation_journal_is_unavailable(
         workspace_path=str(tmp_path_factory), task_id="task-journal-fail",
     )
     tool = AgentTool(
-        name="write", description="write",
+        execution_contract=data_broker("test.fixture"), name="write", description="write",
         parameters={"type": "object", "properties": {}},
         execute=lambda args: called.append(args) or {"success": True},
         read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
@@ -1068,7 +1085,11 @@ def test_effectful_tool_fails_closed_when_invocation_journal_is_unavailable(
         workspace_path=str(tmp_path_factory), event_bus=EventBus(),
         cancellation=process.cancellation_event,
     )
-    monkeypatch.setattr(ToolPipeline, "_write_invocation_state", lambda *_a, **_k: None)
+    if failure == "writer_failure":
+        monkeypatch.setattr(ToolPipeline, "_write_invocation_state", lambda *_a, **_k: None)
+    else:
+        # Exercise the real writer and policy with an unsafe Host configuration.
+        monkeypatch.setenv("GITGO_STATE_HOME", str(tmp_path_factory / "unsafe-state"))
 
     result = ToolPipeline().execute(
         {"name": "write", "args": {}}, tool, ctx, "execution", 0,
@@ -1109,6 +1130,9 @@ def test_self_execution_completion_requires_independent_review(tmp_path_factory:
         for reason in blocked.reasons
     )
     process.review_approvals.append("reviewer-1")
+    assert not HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE").allowed
+    from backend.core.loop.validation_evidence import review_target_version
+    process.runtime_preferences["review_evidence"] = {"reviewer-1": review_target_version(process)}
     assert HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE").allowed
 
 

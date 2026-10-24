@@ -1,4 +1,4 @@
-"""Host-side freshness checks for persisted lessons.
+"""State/evidence freshness checks for persisted lessons.
 
 Lessons are durable guidance, not timeless truth.  Automatically harvested
 lessons bind to the files and dependency graph observed when they were made;
@@ -25,9 +25,16 @@ def capture_lesson_evidence(workspace: str | Path, signals: list[dict]) -> dict:
     candidates: set[str] = set()
     for signal in signals:
         trigger = str(signal.get("trigger") or "").strip()
-        detail = signal.get("detail") if isinstance(signal.get("detail"), dict) else {}
-        raw_paths = [trigger, detail.get("file"), detail.get("path")]
-        raw_paths.extend(detail.get("target_files") or [])
+        detail = {**signal, **(signal.get("detail") if isinstance(signal.get("detail"), dict) else {})}
+        raw_paths = [detail.get("file"), detail.get("path")]
+        targets = detail.get("target_files") or []
+        raw_paths.extend(targets if isinstance(targets, list) else [])
+        if trigger:
+            try:
+                if (root / trigger).is_file():
+                    raw_paths.append(trigger)
+            except OSError:
+                pass
         for raw in raw_paths:
             if not isinstance(raw, str) or not raw.strip():
                 continue
@@ -36,12 +43,12 @@ def capture_lesson_evidence(workspace: str | Path, signals: list[dict]) -> dict:
                 relative = path.relative_to(root).as_posix()
             except ValueError:
                 continue
-            if path.is_file():
+            if relative != ".":
                 candidates.add(relative)
     files = {}
     for relative in sorted(candidates):
         try:
-            files[relative] = _sha256(root / relative)
+            files[relative] = _sha256(root / relative) if (root / relative).is_file() else ""
         except OSError:
             continue
     graph_path = root / ".gitgo" / "dependency_graph.v2.json"
@@ -51,7 +58,12 @@ def capture_lesson_evidence(workspace: str | Path, signals: list[dict]) -> dict:
             graph_digest = _sha256(graph_path)
     except OSError:
         pass
+    from .excerpts import capture_excerpts
+    from backend.core.workbench.materials import captured_bindings
+    materials = [binding for signal in signals for binding in captured_bindings(root, signal)]
     return {
+        **({"workbench_materials": materials} if materials else {}),
+        "available_excerpts": [item for signal in signals for item in capture_excerpts(root, signal)],
         "schema_version": 1,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "source_signal_ids": sorted({
@@ -65,6 +77,10 @@ def capture_lesson_evidence(workspace: str | Path, signals: list[dict]) -> dict:
 
 def assess_lesson(lesson, workspace: str | Path) -> dict:
     root = Path(workspace).resolve()
+    from .review import review_status
+    review = review_status(lesson)
+    if review != "accepted":
+        return {"state": "needs_recheck", "reason": "lesson_" + review}
     evidence = getattr(lesson, "evidence", None)
     source = str(getattr(lesson, "source", "manual") or "manual")
     superseded_by = str(getattr(lesson, "superseded_by", "") or "")
@@ -85,7 +101,34 @@ def assess_lesson(lesson, workspace: str | Path) -> dict:
         if source == "auto_harvested":
             return {"state": "needs_recheck", "reason": "legacy_unbound_evidence"}
         return {"state": "current", "reason": "manual_guidance"}
+    if evidence.get("source_attribution") == "unresolved":
+        return {"state": "needs_recheck", "reason": "harvest_sources_unresolved"}
+    if evidence.get("scope") == "user_shared":
+        from backend.core.storage import resolve_existing_storage_paths
+        paths = resolve_existing_storage_paths(root)
+        project_id = paths.project_id if paths is not None else ""
+        confirmed = any(isinstance(item, dict) and item.get("project_id") == project_id
+                        and item.get("kind") == "confirmation"
+                        for item in getattr(lesson, "verifications", []))
+        return {"state": "current" if confirmed else "needs_recheck",
+                "reason": "confirmed_for_project" if confirmed else "shared_applicability_unverified",
+                "tech_stack": lesson.tech_stack}
+    if evidence.get("workbench_materials"):
+        from backend.core.workbench.materials import assess_bindings
+        assessment = assess_bindings(root, evidence["workbench_materials"])
+        if assessment["state"] != "current":
+            return assessment
+    excerpts = evidence.get("workspace_excerpts") or []
+    excerpt_paths = set()
+    if excerpts:
+        from .excerpts import assess_excerpts
+        assessment = assess_excerpts(root, excerpts)
+        if assessment["state"] != "current":
+            return assessment
+        excerpt_paths = {item["path"] for item in excerpts}
     for relative, expected in sorted((evidence.get("workspace_files") or {}).items()):
+        if relative in excerpt_paths:
+            continue  # Explicitly selected excerpts, not an inferred whole-file invariant.
         try:
             path = (root / str(relative)).resolve()
             path.relative_to(root)

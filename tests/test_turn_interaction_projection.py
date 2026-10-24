@@ -124,4 +124,3 @@ def test_discovery_is_bound_to_installed_catalog_and_does_not_grant_authority(tm
     envelope = _build_current_turn_envelope(process, [], discovery)
     assert 'exec_command' in envelope
     assert 'web_fetch' not in envelope
-

@@ -6,6 +6,8 @@ session persistence, ProcessToolRunner, LLM retry classification.
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import json
 import os
 import subprocess
@@ -158,7 +160,7 @@ class TestTransactionRollback:
             return {}
 
         tool = AgentTool(
-            name="write_file", description="write",
+            execution_contract=data_broker("test.fixture"), name="write_file", description="write",
             parameters={
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -181,21 +183,25 @@ class TestTransactionRollback:
 
         assert called is False
         assert execution._rolled_back is False
-        assert results[0].diagnostics == {
+        assert {key: results[0].diagnostics[key] for key in ("nature", "code", "source")} == {
             "nature": "business",
             "code": "INVALID_TOOL_ARGUMENTS",
             "source": "llm",
         }
+        info = results[0].diagnostics["error_info"]
+        assert info["catalog_id"] == "GITGO-E3507"
+        assert info["guidance_ref"]["arguments"] == {"focus": "guidance", "identifier": "GITGO-E3507"}
+        assert info["occurrence_id"].startswith("err_")
 
     def test_write_detection_uses_effect_contract(self):
         from backend.core.loop.tool_execution import ToolExecution
 
         write_tool = AgentTool(
-            name="custom_mutation", description="write", parameters={"type": "object"},
+            execution_contract=data_broker("test.fixture"), name="custom_mutation", description="write", parameters={"type": "object"},
             execute=lambda args: {}, read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
         )
         read_tool = AgentTool(
-            name="misleading_write_name", description="read", parameters={"type": "object"},
+            execution_contract=data_broker("test.fixture"), name="misleading_write_name", description="read", parameters={"type": "object"},
             execute=lambda args: {}, effect=ToolEffect.READ,
         )
         ctx = MagicMock()
@@ -216,7 +222,7 @@ class TestTransactionRollback:
         from backend.core.loop.tool_execution import _resolve_tool_resources
 
         search = AgentTool(
-            name="web_search", description="search", parameters={"type": "object"},
+            execution_contract=data_broker("test.fixture"), name="web_search", description="search", parameters={"type": "object"},
             execute=lambda args: {}, read_only=True,
             effect=ToolEffect.EXTERNAL_READ,
             resources=["network:public-search"],
@@ -227,15 +233,15 @@ class TestTransactionRollback:
         from backend.core.loop.tool_execution import ToolExecution
 
         write_tool = AgentTool(
-            name="write", description="write", parameters={"type": "object"},
+            execution_contract=data_broker("test.fixture"), name="write", description="write", parameters={"type": "object"},
             execute=lambda args: {}, read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
         )
         edit_tool = AgentTool(
-            name="edit", description="edit", parameters={"type": "object"},
+            execution_contract=data_broker("test.fixture"), name="edit", description="edit", parameters={"type": "object"},
             execute=lambda args: {}, read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
         )
         scan_tool = AgentTool(
-            name="scan", description="scan", parameters={"type": "object"},
+            execution_contract=data_broker("test.fixture"), name="scan", description="scan", parameters={"type": "object"},
             execute=lambda args: {}, effect=ToolEffect.READ,
         )
         ctx = MagicMock()
@@ -268,7 +274,7 @@ class TestTransactionRollback:
         ctx.session = None
         ctx.artifacts = {"tool_catalog": {
             "write": AgentTool(
-                name="write", description="write", parameters={"type": "object"},
+                execution_contract=data_broker("test.fixture"), name="write", description="write", parameters={"type": "object"},
                 execute=lambda args: {}, read_only=False,
                 effect=ToolEffect.WORKSPACE_WRITE,
             ),
@@ -749,7 +755,7 @@ class TestAgentToolIsolation:
 
     def test_default_is_not_isolated(self):
         tool = AgentTool(
-            name="test",
+            execution_contract=data_broker("test.fixture"), name="test",
             description="test",
             parameters={"type": "object", "properties": {}, "required": []},
             execute=lambda args: {"ok": True},
@@ -759,7 +765,7 @@ class TestAgentToolIsolation:
 
     def test_isolated_tool_has_flag(self):
         tool = AgentTool(
-            name="isolated_tool",
+            execution_contract=NATIVE_PROCESS, name="isolated_tool",
             description="runs in subprocess",
             parameters={"type": "object", "properties": {}, "required": []},
             execute=lambda args: {"ok": True},

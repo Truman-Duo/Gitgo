@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import json
 from types import SimpleNamespace
 
@@ -383,7 +385,7 @@ def test_supervisor_bundle_shortcut_starts_deterministic_children(
         assert child.status == ProcessStatus.COMPLETED
         assert item["handoff_ref"] in child.task_description
         assert set(child.tool_registry.list_all()) == {
-            "artifact_read", "calculate", "context_open", "context_search",
+            "artifact_read", "workbench", "context_open", "context_search",
             "decision_evidence",
         }
     waited = tools["wait_agents"].execute({
@@ -399,7 +401,7 @@ def test_supervisor_bundle_shortcut_starts_deterministic_children(
 
     def placeholder(name):
         return AgentTool(
-            name=name, description=name,
+            execution_contract=data_broker("test.fixture"), name=name, description=name,
             parameters={"type": "object", "properties": {}},
             execute=lambda _args: {},
         )
@@ -425,7 +427,7 @@ def test_completion_protocol_surface_tracks_current_task_kind():
 
     def placeholder(name):
         return AgentTool(
-            name=name, description=name,
+            execution_contract=data_broker("test.fixture"), name=name, description=name,
             parameters={"type": "object", "properties": {}},
             execute=lambda _args: {},
         )
@@ -465,7 +467,7 @@ def test_bounded_self_execute_contract_hides_delegation_entry_points():
 
     def placeholder(name):
         return AgentTool(
-            name=name, description=name,
+            execution_contract=data_broker("test.fixture"), name=name, description=name,
             parameters={"type": "object", "properties": {}},
             execute=lambda _args: {},
         )

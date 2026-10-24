@@ -53,7 +53,7 @@ def test_external_symlink_cannot_be_release_asset(tmp_path_factory):
 
 def test_required_native_and_runtime_jobs_are_in_gate():
     ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
-    required = {'runtime', 'unix-packages', 'windows-package'}
+    required = {'runtime', 'unix-packages', 'windows-package', 'managed-update-windows', 'managed-update-linux'}
     assert required <= set(ci['jobs']['gate']['needs'])
     check = ci['jobs']['gate']['steps'][0]['run']
     for name in required: assert repr(name) in check
@@ -64,7 +64,7 @@ def test_required_native_and_runtime_jobs_are_in_gate():
     } == {(x['os'], x['target']) for x in native['jobs']['accept']['strategy']['matrix']['include']}
 
 def test_all_external_actions_are_pinned_and_checkout_does_not_persist_credentials():
-    for name in ('ci.yml', 'linux-package.yml', 'dashboard-runtime.yml'):
+    for name in ('ci.yml', 'linux-package.yml', 'dashboard-runtime.yml', 'linux-update.yml', 'windows-update.yml'):
         workflow = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())
         for job in workflow['jobs'].values():
             for step in job.get('steps', []):
@@ -82,3 +82,21 @@ def test_build_lock_has_exact_versions_and_real_digest_shape():
     for entry in entries:
         assert re.match(r'[\w.-]+==[^\s;]+', entry)
         assert re.search(r'--hash=sha256:[a-f0-9]{64}', entry)
+
+
+def test_locked_build_covers_declared_portable_runtime_dependencies():
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    locked = {}
+    for line in (ROOT / 'packaging/requirements-build.lock').read_text().splitlines():
+        match = re.match(r'([\w.-]+)==([^\s;]+)', line)
+        if match:
+            locked[canonicalize_name(match[1])] = match[2]
+    for line in (ROOT / 'requirements-portable.txt').read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        requirement = Requirement(line)
+        name = canonicalize_name(requirement.name)
+        assert name in locked, f'Portable runtime dependency missing from build lock: {name}'
+        assert locked[name] in requirement.specifier, f'Locked {name} violates portable runtime requirements'

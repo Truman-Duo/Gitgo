@@ -43,8 +43,8 @@ export function lessonSearch(client: McpClient, project: string, query: string):
   return client.callTool("gitgo_lesson_search", { project, query });
 }
 
-export function lessonVerify(client: McpClient, project: string, lessonId: string): Promise<any> {
-  return client.callTool("gitgo_lesson_verify", { project, lesson_id: lessonId });
+export function lessonVerify(client: McpClient, project: string, lessonId: string, expectedVersion: string): Promise<any> {
+  return client.callTool("gitgo_lesson_verify", { project, lesson_id: lessonId, expected_version: expectedVersion });
 }
 
 // ── Runtime: Contract ─────────────────────────────────────

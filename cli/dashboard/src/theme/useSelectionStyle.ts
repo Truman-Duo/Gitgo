@@ -25,7 +25,7 @@ export function useSelectionStyle(
     if (variant === "row") {
       return { bg: undefined, fg: undefined, bold: false };
     }
-    return { bg: colors.selection.dim.block.bg, fg: undefined, bold: false };
+    return { bg: colors.selection.dim.block.bg, fg: colors.selection.block.fg, bold: false };
   }
 
   // Focused context

@@ -5,6 +5,11 @@ Runtime verification uses this offline reference; discovering a new installation
 does not silently download code or trust a candidate-supplied manifest.
 """
 from __future__ import annotations
+
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
 import argparse
 import hashlib
 import json
@@ -63,7 +68,7 @@ def stage(tag, arch):
         digest = match[1]
     if asset["browser_download_url"] != expected_url or not 0 < asset["size"] < 256 * 1024 * 1024:
         raise ValueError("Unexpected official asset URL or size")
-    cache = ROOT / ".gitgo/terminal-reference"
+    cache = development_root(ROOT) / 'terminal-reference'
     cache.mkdir(parents=True, exist_ok=True)
     archive = cache / filename
     if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != digest:

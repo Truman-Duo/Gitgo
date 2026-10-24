@@ -37,3 +37,11 @@ describe("BTW multi-agent source projection", () => {
       .toEqual(["a2", "b1"]);
   });
 });
+
+
+test("BTW shows one execution per durable child conversation and retains the current view",()=>{
+ const a=process("a",null,"2026-01-01"),old=process("old","a","2026-01-02"),fresh=process("fresh","a","2026-01-03");
+ old.session_id=fresh.session_id="shared-session";
+ expect(buildBtwSources({a,old,fresh},"fresh").map(p=>p.process_id)).toEqual(["a","fresh"]);
+ expect(buildBtwSources({a,old,fresh},"old").map(p=>p.process_id)).toEqual(["a","old"]);
+});

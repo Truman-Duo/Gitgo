@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,9 +31,12 @@ from .models import (
 from .paths import (
     StoragePaths, resolve_existing_storage_paths, resolve_storage_paths,
     validate_storage_location,
+    resolve_shared_knowledge_paths,
 )
 from .redaction import redact_for_persistence
 from .maintenance import StorageLease
+from .protocol import require_legacy_storage_format
+from .cas_inventory import CasReferenceInventory
 
 
 from .repositories import objects as _objects_repository
@@ -55,6 +59,55 @@ from .support import _encode_page_cursor, _decode_page_cursor, validate_sqlite_r
 
 
 DatabaseName = Literal["state", "observability"]
+
+
+def _protected_checkpoint_catalogue():
+    """Build the fixed trusted catalogue entirely in memory at the facade.
+
+    The selected worker receives immutable schema facts, not a connection or
+    an alternate storage path. Stored project schema cannot qualify itself.
+    """
+    from contextlib import closing
+    from .project_schema import GUARD
+    from .batch_sql import SCHEMA
+    from .batch_inventory import catalogue
+    validate_sqlite_runtime()
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as db:
+        db.execute("PRAGMA temp_store=MEMORY")
+        StorageRuntime._apply_migrations(db, STATE_MIGRATIONS)
+        for sql in (*GUARD, *SCHEMA):
+            db.execute(sql)
+        return catalogue(db)
+
+
+def validate_in_memory_migrations() -> None:
+    """Validate this runtime's SQL definitions without any user's storage.
+
+    Connection creation stays inside the storage facade. No path resolution,
+    ConfigManager, LRU writer, WAL or migration of a live database is involved.
+    """
+    validate_sqlite_runtime()
+    for migrations in (STATE_MIGRATIONS, OBSERVABILITY_MIGRATIONS):
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute("PRAGMA temp_store=MEMORY")
+            deadline = time.monotonic() + 5
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            def memory_only(action, first, second, _database, _trigger):
+                if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+                    return sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_PRAGMA and first.lower() != "quick_check":
+                    return sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_FUNCTION and str(second).lower() in ("load_extension", "readfile", "writefile"):
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+            connection.set_authorizer(memory_only)
+            for item in migrations:
+                connection.executescript(item.sql)
+            if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise StorageCorruptionDetected(":memory:", "Migration health check failed")
+        finally:
+            connection.close()
 
 
 def open_usability_source(project_root: str | Path) -> sqlite3.Connection:
@@ -174,6 +227,22 @@ class StorageRuntime:
     them with locks.  Large bodies live in CAS; SQLite rows contain references.
     """
 
+    @staticmethod
+    def create_protected_project(registry,processes,*,workspace_hint):
+        """Create a new bounded checkpoint store in an installed canonical Host.
+
+        Existing projects, workspace paths and environment configuration do
+        not switch routes implicitly. Unqualified operations refuse explicitly.
+        """
+        from .protected_runtime import ProtectedCheckpoints
+        return ProtectedCheckpoints.create(registry,processes,workspace_hint)
+
+    @staticmethod
+    def open_protected_project(registry,processes,*,project,slot,workspace_hint):
+        """Reopen an exact registered protected project without legacy I/O."""
+        from .protected_runtime import ProtectedCheckpoints
+        return ProtectedCheckpoints.open(registry,processes,project,slot,workspace_hint)
+
     def __init__(
         self,
         workspace: str | Path,
@@ -182,9 +251,15 @@ class StorageRuntime:
         policy: StoragePolicy | None = None,
         health_listener: Callable[[dict], None] | None = None,
         exclusive_maintenance: bool = False,
+        shared_knowledge: bool = False,
     ):
         validate_sqlite_runtime()
-        self.paths = resolve_storage_paths(workspace, state_home=state_home)
+        if shared_knowledge:
+            if state_home is None:
+                raise ValueError("shared knowledge requires an explicit state home")
+            self.paths = resolve_shared_knowledge_paths(state_home)
+        else:
+            self.paths = resolve_storage_paths(workspace, state_home=state_home)
         self.policy = policy or StoragePolicy()
         self._health_listener = health_listener
         self._state_lock = threading.RLock()
@@ -192,6 +267,8 @@ class StorageRuntime:
         self._health_lock = threading.RLock()
         self._cas_lock = threading.RLock()
         self._closed = False
+        self._close_started = False
+        self._closed_databases: set[str] = set()
         self._last_health: StorageHealth | None = None
         self._last_stderr_at = 0.0
         self._cas_bytes_hint: int | None = None
@@ -277,6 +354,7 @@ class StorageRuntime:
         *,
         authoritative: bool,
     ) -> sqlite3.Connection:
+        migrations = tuple(migrations)
         _validate_sqlite_file_shape(path)
         is_new = not path.exists()
         connection = sqlite3.connect(
@@ -288,6 +366,13 @@ class StorageRuntime:
         )
         connection.row_factory = sqlite3.Row
         try:
+            try:
+                require_legacy_storage_format(connection, migrations)
+            except sqlite3.DatabaseError as error:
+                code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+                if code in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+                    raise StorageCorruptionDetected(str(path), str(error)[:500]) from error
+                raise
             if not is_new:
                 integrity_error = _quick_check(connection)
                 if integrity_error:
@@ -348,6 +433,8 @@ class StorageRuntime:
     def _apply_migrations(
         connection: sqlite3.Connection, migrations: Iterable[Migration]
     ) -> None:
+        migrations = tuple(migrations)
+        require_legacy_storage_format(connection, migrations)
         connection.execute(
             """CREATE TABLE IF NOT EXISTS schema_migrations (
                    version INTEGER PRIMARY KEY,
@@ -395,6 +482,22 @@ class StorageRuntime:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("StorageRuntime is closed")
+        if self._close_started:
+            raise StorageBlocked('STORAGE_RUNTIME_CLOSING')
+        self._maintenance_lease.require_active()
+
+    @staticmethod
+    def require_legacy_state_file(path: Path) -> None:
+        """Offline tools must admit the source before copying or resetting it."""
+        validate_sqlite_runtime()
+        connection = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro", uri=True, timeout=.25,
+        )
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            require_legacy_storage_format(connection, STATE_MIGRATIONS)
+        finally:
+            connection.close()
 
     def set_health_listener(self, listener: Callable[[dict], None] | None) -> None:
         """Replace the event sink after the Daemon queue becomes available."""
@@ -423,6 +526,7 @@ class StorageRuntime:
         return max(4096, logical_bytes * self.policy.sqlite_write_amplification_reserve)
 
     def _reserve_authoritative_write(self, logical_bytes: int) -> None:
+        self._state.require_available()
         self._ensure_authoritative_capacity(self._estimated_sqlite_write(logical_bytes))
         if not self._global_sqlite_budget.reserve(
             self._estimated_sqlite_write(logical_bytes)
@@ -436,6 +540,22 @@ class StorageRuntime:
 
     def get_state_ref(self, namespace: str, key: str) -> str | None:
         return _objects_repository.get_state_ref(self, namespace, key)
+
+    def release_state_ref(self, namespace: str, key: str, *, expected_ref: str) -> bool:
+        return _objects_repository.release_state_ref(self, namespace, key, expected_ref=expected_ref)
+
+    def compare_state_ref(self, namespace: str, key: str, value_ref: str, *,
+                          expected_ref: str | None) -> bool:
+        return _objects_repository.compare_state_ref(
+            self, namespace, key, value_ref, expected_ref=expected_ref)
+
+    def commit_state_revision(self, namespace: str, key: str, value_ref: str, *,
+                              expected_ref: str | None, revision_key: str) -> bool:
+        return _objects_repository.commit_state_revision(
+            self, namespace, key, value_ref, expected_ref=expected_ref, revision_key=revision_key)
+
+    def list_state_refs(self, namespace: str, *, prefix: str, after: str = "", limit: int = 50) -> list[dict]:
+        return _objects_repository.list_state_refs(self, namespace, prefix=prefix, after=after, limit=limit)
 
     def _write_blob_file(self, data: bytes, *, media_type: str='application/octet-stream') -> dict:
         'Write one immutable file without opening a SQLite transaction.'
@@ -453,8 +573,8 @@ class StorageRuntime:
         'Write an immutable plaintext CAS object once and return its SHA-256 ref.'
         return _objects_repository.put_blob(self, data, media_type=media_type)
 
-    def read_blob(self, ref: str) -> bytes:
-        return _objects_repository.read_blob(self, ref)
+    def read_blob(self, ref: str, *, repair: bool = True) -> bytes:
+        return _objects_repository.read_blob(self, ref, repair=repair)
 
     def _restore_canonical_blob(self, digest: str) -> bytes | None:
         'Restore only tiny canonical JSON values proven by their digest.'
@@ -464,9 +584,9 @@ class StorageRuntime:
         'Persist one oversized tool result as a content-addressed object.'
         return _objects_repository.put_tool_result(self, content, process_id=process_id, task_id=task_id, tool_name=tool_name, media_type=media_type)
 
-    def read_tool_result(self, locator: str, *, offset: int=0, max_chars: int=24000, json_pointer: str='', query: str='') -> dict:
+    def read_tool_result(self, locator: str, *, offset: int=0, max_chars: int=24000, json_pointer: str='', query: str='', owner_process_id: str='') -> dict:
         'Read a bounded page from an addressable tool result.'
-        return _objects_repository.read_tool_result(self, locator, offset=offset, max_chars=max_chars, json_pointer=json_pointer, query=query)
+        return _objects_repository.read_tool_result(self, locator, offset=offset, max_chars=max_chars, json_pointer=json_pointer, query=query, owner_process_id=owner_process_id)
 
     def save_custom_tool(self, spec: dict, source: str, *, replace: bool=False) -> dict:
         'Persist one project-scoped authored tool as an immutable version.'
@@ -496,8 +616,8 @@ class StorageRuntime:
         'Move the undo cursor to its parent and return the immutable target.'
         return _lineage_repository.commit_session_undo(self, session_id, checkpoint_id)
 
-    def _read_json_blob(self, ref: str) -> object:
-        return json.loads(self.read_blob(ref).decode("utf-8"))
+    def _read_json_blob(self, ref: str, *, repair: bool = True) -> object:
+        return json.loads(self.read_blob(ref, repair=repair).decode("utf-8"))
 
     def save_agent_checkpoint(self, snapshot: dict) -> str:
         'Atomically persist one process/session/task boundary.'
@@ -509,9 +629,9 @@ class StorageRuntime:
             from .lifecycle import check_revision
             return check_revision(self._state, process_id, None)
 
-    def read_task_usage(self, *, limit: int=100, cursor: str='') -> dict:
+    def read_task_usage(self, *, limit: int=100, cursor: str='', day_offset_minutes: int=0) -> dict:
         'Return authoritative root-task usage without reading verbose traces.'
-        return _usage_repository.read_task_usage(self, limit=limit, cursor=cursor)
+        return _usage_repository.read_task_usage(self, limit=limit, cursor=cursor, day_offset_minutes=day_offset_minutes)
 
     def append_session_event(self, process_id: str, event_type: str, data: dict | None=None, *, occurred_at: str | None=None, sequence: int | None=None, event_id: str | None=None) -> int:
         return _sessions_repository.append_session_event(self, process_id, event_type, data, occurred_at=occurred_at, sequence=sequence, event_id=event_id)
@@ -533,9 +653,9 @@ class StorageRuntime:
         'Project one durable provider session into the canonical public chat.'
         return _presentation_repository._public_session_messages(self, session_id)
 
-    def read_latest_conversations(self) -> dict:
+    def read_latest_conversations(self, *, agent_conversations: dict | None = None) -> dict:
         'Return the latest durable root conversation and its Agent tree.'
-        return _presentation_repository.read_latest_conversations(self)
+        return _presentation_repository.read_latest_conversations(self, agent_conversations=agent_conversations)
 
     def read_process_presentation(self, process_id: str) -> dict:
         return _presentation_repository.read_process_presentation(self, process_id)
@@ -648,18 +768,32 @@ class StorageRuntime:
     def get_lesson_record(self, lesson_id: str) -> tuple[str, dict] | None:
         return _knowledge_repository.get_lesson_record(self, lesson_id)
 
+    def configure_lesson_checker(self, change: dict, *, grant_id: str) -> dict:
+        return _knowledge_repository.configure_lesson_checker(self,change,grant_id=grant_id)
+
+    def record_lesson_retrieval(self, lesson_id: str, retrieved_at: str) -> bool:
+        return _knowledge_repository.record_lesson_retrieval(self, lesson_id, retrieved_at)
+
+    def record_lesson_verification(self, lesson_id: str, project_id: str, project_name: str, *, user_confirmation: bool = False, expected_version: str = "") -> dict:
+        return _knowledge_repository.record_lesson_verification(self, lesson_id, project_id, project_name, user_confirmation=user_confirmation, expected_version=expected_version)
+
     def delete_lesson_record(self, lesson_id: str, *, project_name: str | None=None, scopes: tuple[str, ...]=('pending', 'instance')) -> bool:
         return _knowledge_repository.delete_lesson_record(self, lesson_id, project_name=project_name, scopes=scopes)
 
     def lesson_count(self, *, scope: str, project_name: str='') -> int:
         return _knowledge_repository.lesson_count(self, scope=scope, project_name=project_name)
 
-    def save_harvest_signal_records(self, records: list[dict]) -> int:
+    def save_harvest_signal_records(self, records: list[dict], *, create_only: bool = False) -> int:
         'Upsert changed harvest signals into the shared governance bus.'
-        return _knowledge_repository.save_harvest_signal_records(self, records)
+        return _knowledge_repository.save_harvest_signal_records(self, records, create_only=create_only)
 
-    def load_harvest_signal_records(self) -> list[dict]:
-        return _knowledge_repository.load_harvest_signal_records(self)
+    def load_harvest_signal_records(self, *, with_version: bool = False) -> list[dict]:
+        return _knowledge_repository.load_harvest_signal_records(self, with_version=with_version)
+
+    def resolve_harvest_proposal_records(self, project: str, proposal_id: str, *, accepted: bool,
+                                         candidates: list[dict] | None, expected_version: str) -> dict:
+        return _knowledge_repository.resolve_harvest_proposal_records(self, project, proposal_id,
+            accepted=accepted, candidates=candidates, expected_version=expected_version)
 
     def harvest_signal_count(self) -> int:
         return _knowledge_repository.harvest_signal_count(self)
@@ -724,7 +858,7 @@ class StorageRuntime:
     def _nested_cas_digests(value: object) -> set[str]:
         return _cas_maintenance_repository._nested_cas_digests(value)
 
-    def _cas_reference_inventory(self) -> tuple[set[str], set[str], set[str]]:
+    def _cas_reference_inventory(self) -> CasReferenceInventory:
         'Return direct-column, explicit-owner and legacy nested references.'
         return _cas_maintenance_repository._cas_reference_inventory(self)
 
@@ -762,14 +896,29 @@ class StorageRuntime:
         return _health_repository.diagnostics(self)
 
     def close(self) -> None:
+        # Admission and borrowing share the lease mutex. Reject before any
+        # maintenance or connection teardown if an operation is still active.
+        with self._maintenance_lease.shutdown() as admitted:
+            if not admitted:
+                return
+            errors = self._close_storage_resources()
+        # Diagnostic/checkpoint errors do not retain a lease once both writer
+        # handles have definitely closed. Cleanup failures do (and can retry).
+        if errors:
+            raise errors[0]
+
+    def _close_storage_resources(self) -> list[BaseException]:
         if self._closed:
-            return
+            return []
         errors: list[BaseException] = []
         # Shutdown is a natural low-frequency boundary.  A short-lived process
         # records nothing; a long-lived daemon contributes at most one cadence
         # sample and one bounded retention batch before the passive checkpoint.
         try:
-            if not self._integrity_reasons:
+            if (
+                not self._close_started and not self._integrity_reasons
+                and not self._state.quarantined and not self._observability.quarantined
+            ):
                 self.record_storage_metric()
                 self.maintain_observability()
                 self.maintain_cas()
@@ -778,18 +927,28 @@ class StorageRuntime:
                 self._publish_degraded("observability_maintenance_failed")
             except BaseException:
                 pass
+        self._close_started = True
+        close_errors: list[BaseException] = []
         with self._state_lock, self._observability_lock:
             for name, connection in (("state", self._state), ("observability", self._observability)):
+                if name in self._closed_databases:
+                    continue
                 try:
-                    if name not in self._integrity_reasons:
+                    if name not in self._integrity_reasons and not connection.quarantined:
                         connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 except BaseException as exc:
                     errors.append(exc)
                 try:
                     connection.fault_callback = None
                     connection.close()
+                    self._closed_databases.add(name)
                 except BaseException as exc:
-                    errors.append(exc)
+                    close_errors.append(exc)
+        if close_errors:
+            # shutdown() retains the maintenance barrier and blocks borrowing.
+            # Retry only handles whose close has not returned successfully.
+            raise close_errors[0]
+        self._closed = True
         # One final out-of-band snapshot records post-checkpoint file-family
         # sizes.  This is a single shutdown write, not a per-poll metric log.
         try:
@@ -799,20 +958,29 @@ class StorageRuntime:
                 self._write_health_snapshot(health)
         except BaseException as exc:
             errors.append(exc)
-        finally:
-            # Connections have been closed even if the out-of-band diagnostic
-            # snapshot failed.  A second close must never operate on dead
-            # handles or repeat a checkpoint.
-            self._closed = True
-            self._maintenance_lease.close()
-        if errors:
-            raise errors[0]
+        return errors
 
     def __enter__(self) -> "StorageRuntime":
         return self
 
     def claim_command(self, key: str, fingerprint: str, *, process_id: str = "") -> dict:
         return _commands_repository.claim_command(self, key, fingerprint, process_id=process_id)
+
+    def lookup_command(self, key: str, fingerprint: str) -> dict:
+        """Read committed identity only; absence never grants execution."""
+        return _commands_repository.lookup_command(self, key, fingerprint)
+
+    @contextmanager
+    def _committed_state_reader(self):
+        """Own a fresh read-only connection; never run migrations or repair CAS."""
+        self._ensure_open()
+        connection = sqlite3.connect(self.paths.state_db.as_uri() + '?mode=ro',
+                                     uri=True, timeout=1, isolation_level=None)
+        try:
+            connection.execute('PRAGMA query_only=ON')
+            yield connection
+        finally:
+            connection.close()
 
     def complete_command(self, key: str, fingerprint: str, result: dict) -> None:
         _commands_repository.complete_command(self, key, fingerprint, result)

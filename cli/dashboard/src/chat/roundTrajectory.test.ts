@@ -13,6 +13,14 @@ describe("completed-round projection", () => {
     }
     expect(roundLabel({ ...msg, kind: "error", status: "completed" })).toBeNull();
   });
+  test("saved failures expose their trace without claiming completion", () => {
+    for (const status of ["failed", "degraded", "cancelled", "timed_out"]) {
+      expect(roundLabel({ ...msg, kind: "error", status, trace_id: "trace" })).toBe("Failure details");
+      expect(roundLabel({ ...msg, status, trace_id: "trace" })).toBe("Failure details");
+    }
+    expect(roundLabel({ ...msg, role: "user", status: "failed", trace_id: "trace" })).toBeNull();
+    expect(roundLabel({ ...msg, kind: "error", status: "completed", trace_id: "trace" })).toBe("Failure details");
+  });
   test("a B opens its events from the shared tree trace, without A or sibling reasoning", () => {
     const events = ["root", "B", "sibling"].map((process_id, seq) => ({
       seq, process_id, time: "now", event: "reasoning_delta", delta: process_id,

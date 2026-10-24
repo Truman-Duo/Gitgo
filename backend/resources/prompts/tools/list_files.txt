@@ -1,0 +1,1 @@
+Find workspace files using ripgrep globs and bounded, sorted pages. Default scope respects local ignore files and excludes hidden/generated files. Use include_hidden/respect_ignore explicitly to change that scope. Warnings and partial coverage are never proof a file does not exist.

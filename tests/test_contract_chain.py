@@ -368,7 +368,7 @@ class TestContractEdgeCases:
     def test_invalid_yaml_load(self, tmp_ws):
         """损坏的 YAML → 不崩溃。"""
         (tmp_ws / ".gitgo" / "contract.yaml").write_text(": invalid: yaml: [")
-        from backend.core.contract import ContractManager
-        loaded = ContractManager.load(tmp_ws)
-        # 损坏文件 → None
-        assert loaded is None
+        from backend.core.contract import ContractManager, ContractStateUnavailable
+        # Failed observation must remain distinct from an absent contract.
+        with pytest.raises(ContractStateUnavailable):
+            ContractManager.load(tmp_ws)

@@ -1,0 +1,2 @@
+
+The Host has accepted a delegated workflow contract. Follow its routing advice using the exposed delegation path; do not request a self-execution lease merely because direct effectful tools are absent. 

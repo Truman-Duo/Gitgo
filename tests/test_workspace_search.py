@@ -1,3 +1,4 @@
+from dataclasses import replace
 """Search contracts tested against real ripgrep, fallback and the Host pipeline."""
 from pathlib import Path
 import json
@@ -173,7 +174,7 @@ def test_workspace_executable_is_not_implicitly_selected(tmp_path_factory, monke
     assert adapter.resolve_ripgrep() is None
 
 
-def test_isolated_runner_returns_the_same_search_protocol(tmp_path_factory, rg_available):
+def test_isolated_runner_returns_the_same_search_protocol(tmp_path_factory, rg_available, runner_transport_only):
     from backend.core.loop.process_tool_runner import ProcessToolRunner
     (tmp_path_factory / "a.txt").write_text("needle", encoding="utf-8")
     result = ProcessToolRunner().run("search_text", {"_workspace": str(tmp_path_factory), "pattern": "needle", "literal": True})
@@ -194,8 +195,9 @@ def test_fallback_notices_and_coverage_survive_the_tool_pipeline(tmp_path_factor
     p = AgentProcess(process_id="search", role="worker", ring_level=RingLevel.RING_3,
                      active_task_id="task", session=AgentSession(), tool_registry=ToolRegistry(["search_text"]))
     tool = build_workspace_tools(tmp_path_factory)["search_text"]
-    tool.isolated = False
-    tool.execute = search_text
+    # Protocol-only fixture, distinct from production/native authority.
+    from backend.core.loop.execution_contract import data_broker
+    tool = replace(tool, isolated=False, execution_contract=data_broker("test.fixture"), execute=search_text)
     bus, notices = EventBus(), []
     bus.subscribe("ToolNotice", lambda e: notices.append(e.data))
     ctx = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory), event_bus=bus)
@@ -215,6 +217,8 @@ def test_frozen_runtime_prefers_its_bundled_engine_over_path(tmp_path_factory, m
     root = tmp_path_factory
     engine = root / ("rg.exe" if os.name == "nt" else "rg")
     engine.write_bytes(b"bundled engine identity")
+    # A packaged POSIX engine must be executable to qualify for selection.
+    engine.chmod(0o700)
     monkeypatch.delenv("GITGO_RIPGREP_PATH", raising=False)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(root / "gitgo-host.exe"))
@@ -271,7 +275,7 @@ def test_untrusted_engine_json_is_rejected_with_recovery(tmp_path_factory, rg_av
     assert any(w["code"] == "SEARCH_RESULT_INVALID" for w in result["warnings"])
 
 
-def test_agent_loop_sends_fallback_notice_to_public_stream(tmp_path_factory, monkeypatch):
+def test_agent_loop_sends_fallback_notice_to_public_stream(tmp_path_factory, monkeypatch, runner_transport_only):
     from types import SimpleNamespace
     from backend.core.loop.executor import agent_step
     from backend.core.loop.models import RingLevel
@@ -350,7 +354,7 @@ def test_windows_directory_junction_does_not_expand_scope(tmp_path_factory, rg_a
     assert query(root)["matches"] == []
 
 
-def test_external_search_requires_exact_host_permission_and_keeps_absolute_identity(tmp_path_factory, rg_available):
+def test_external_search_requires_exact_host_permission_and_keeps_absolute_identity(tmp_path_factory, rg_available, runner_transport_only):
     from backend.core.loop.event_bus import EventBus
     from backend.core.loop.execution_context import ExecutionContext
     from backend.core.loop.models import AgentProcess, RingLevel
@@ -383,3 +387,39 @@ def test_external_search_requires_exact_host_permission_and_keeps_absolute_ident
     assert not allowed.is_error, allowed.formatted
     assert allowed.data["matches"][0]["file"] == str(target)
     assert allowed.receipt["search_complete"] is True
+
+
+def test_search_stdin_is_private_eof_without_null_device(tmp_path_factory, monkeypatch):
+    # Reproduce the hosted AppContainer device denial even on a Host where
+    # NUL is accessible. The real subprocess must still execute and see EOF.
+    original = os.open
+    def deny_null(path, *args, **kwargs):
+        if os.fspath(path).lower() == os.devnull.lower():
+            raise PermissionError('Sandbox cannot open the null device')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'open', deny_null)
+    rows = []
+    source = "import sys;print('private-eof' if sys.stdin.read()=='' else 'unexpected-input')"
+    outcome = adapter.stream_process([sys.executable, '-c', source], tmp_path_factory,
+        b'\n', lambda raw: rows.append(raw.strip()) or True, time.monotonic() + 10)
+    assert outcome.exit_code == 0 and not outcome.stopped, outcome
+    assert rows == [b'private-eof']
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_denied_engine_probe_uses_existing_honest_unavailable_path(tmp_path_factory, monkeypatch, configured):
+    root=tmp_path_factory
+    (root/"input.txt").write_text("sample")
+    engine=root/"denied"/("rg.exe" if os.name=="nt" else "rg")
+    original=Path.is_file
+    def denied(path):
+        if path == engine: raise PermissionError("sandbox denies engine metadata")
+        return original(path)
+    monkeypatch.setattr(Path,"is_file",denied)
+    monkeypatch.setenv("PATH",str(engine.parent))
+    if configured:monkeypatch.setenv("GITGO_RIPGREP_PATH",str(engine))
+    else:monkeypatch.delenv("GITGO_RIPGREP_PATH",raising=False)
+    assert adapter.resolve_ripgrep() is None
+    result=list_files({"_workspace":str(root)})
+    assert any(w["code"]=="RIPGREP_UNAVAILABLE" for w in result["warnings"])
+    assert result["engine"]=="python"

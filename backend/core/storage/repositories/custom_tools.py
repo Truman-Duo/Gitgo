@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import uuid
+from ..transactions import authoritative_transaction
 from ..models import StorageBlocked
 from .ports import CustomToolsPort
 from ..support import _utc_now
@@ -55,8 +56,7 @@ def save_custom_tool(
     now = _utc_now()
     self._reserve_authoritative_write(4096)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             row = self._state.execute(
                 "SELECT tool_id, state, current_version FROM custom_tools WHERE name=?",
                 (name,),
@@ -102,10 +102,6 @@ def save_custom_tool(
                     digest, now,
                 ),
             )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return {
         "saved": True, "tool_id": tool_id, "name": name,
         "version": version, "digest": digest, "state": "active",
@@ -148,6 +144,10 @@ def list_custom_tools(self: CustomToolsPort, *, include_archived: bool = False) 
             ),
             "effect": str(spec.get("effect") or "read"),
             "resources": list(spec.get("resources") or []),
+            "execution_mode": str(spec.get("execution_mode") or ""),
+            "input_schema": dict(spec.get("parameters") or {}),
+            "output_schema": dict(spec.get("output_schema") or {}),
+            "created_at": str(row["created_at"]),
         })
     return {"tools": tools, "count": len(tools)}
 

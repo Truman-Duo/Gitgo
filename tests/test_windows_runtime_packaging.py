@@ -42,6 +42,22 @@ def test_frozen_children_use_private_host_roles(monkeypatch):
     ]
 
 
+def test_source_child_imports_its_own_worktree_with_embedded_python(tmp_path_factory, monkeypatch):
+    from backend.core.child_process import tool_runner_command
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    root = tmp_path_factory / "checkout with spaces"
+    module = root / "backend" / "core" / "tools"
+    module.mkdir(parents=True)
+    for package in (root / "backend", root / "backend" / "core", module):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (module / "runner.py").write_text("print('selected-worktree')", encoding="utf-8")
+    completed = subprocess.run(tool_runner_command(root), cwd=tmp_path_factory,
+                               capture_output=True, text=True, timeout=15)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "selected-worktree"
+
+
 def test_terminal_product_manifest_has_one_public_command_and_safe_uninstall():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "packaging" / "product.json").read_text(encoding="utf-8"))
@@ -128,3 +144,30 @@ def test_failed_package_install_removes_only_owned_staging_directory(
 
     assert active.is_dir()
     assert list(runtime.glob("packages.staging-*")) == []
+
+
+@pytest.mark.parametrize("program", [
+    "try:\n raise OSError('expected')\nexcept OSError:\n print('compound-ok')",
+    "# leading comment\ndef sample():\n return 'compound-ok'\nprint(sample())",
+    "if True:\n print('compound-ok')",
+    "from __future__ import annotations\nprint('compound-ok')",
+])
+def test_workspace_python_preserves_compound_programs(tmp_path_factory, monkeypatch, program):
+    from backend.core.child_process import workspace_python_command
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    completed = subprocess.run(workspace_python_command(["python", "-c", program], tmp_path_factory),
+                               cwd=tmp_path_factory, capture_output=True, text=True, timeout=15)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "compound-ok"
+
+
+@pytest.mark.parametrize("program, expected", [
+    ("def sample(x: int): pass\nprint(sample.__annotations__['x'] is int)", "True"),
+    ("from __future__ import annotations\ndef sample(x: int): pass\nprint(sample.__annotations__['x'] == 'int')", "True"),
+])
+def test_private_python_role_does_not_inherit_host_future_flags(monkeypatch, capsys, program, expected):
+    from backend.core.native_host_entry import _run_python_role
+    monkeypatch.setattr(sys, "argv", list(sys.argv))
+    assert _run_python_role(["-I", "-c", program]) == 0
+    assert capsys.readouterr().out.strip() == expected

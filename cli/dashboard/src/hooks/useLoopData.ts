@@ -157,6 +157,7 @@ export function useLoopData(
   const [daemonOnline, setDaemonOnline] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const errorProject = useRef<string | null>(null);
   const [mainConversation, setMainConversation] = useState<ChatMessage[] | undefined>(undefined);
   const [agentConversations, setAgentConversations] = useState<Record<string, ChatMessage[]> | undefined>(undefined);
   const [recoveryAvailable, setRecoveryAvailable] = useState<string[]>([]);
@@ -170,6 +171,7 @@ export function useLoopData(
   const eventRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initializationRetryRef = useRef(0);
   const snapshotRequestRef = useRef(0);
+  const snapshotInFlight = useRef<{project: string; queued: boolean} | null>(null);
   const acceptedSnapshotRef = useRef(0);
 
   // 16ms batch window (OpenCode pattern)
@@ -209,6 +211,8 @@ export function useLoopData(
 
   const fetchData = useCallback(async () => {
     if (!client || !project) return;
+    if (snapshotInFlight.current?.project === project) { snapshotInFlight.current.queued = true; return; }
+    const flight = {project, queued: false}; snapshotInFlight.current = flight;
     const requestSequence = ++snapshotRequestRef.current;
     let projectionStillInitializing = false;
     try {
@@ -281,9 +285,17 @@ export function useLoopData(
     } catch (e: any) {
       if (projectRef.current === project && requestSequence >= acceptedSnapshotRef.current) {
         acceptedSnapshotRef.current = requestSequence;
+        errorProject.current = project;
         setError(e.message);
       }
     } finally {
+      if (snapshotInFlight.current === flight) {
+        snapshotInFlight.current = null;
+        if (flight.queued && !projectionStillInitializing && projectRef.current === project) {
+          if (eventRefreshRef.current) clearTimeout(eventRefreshRef.current);
+          eventRefreshRef.current = setTimeout(() => { eventRefreshRef.current = null; void fetchData(); }, 0);
+        }
+      }
       if (!projectionStillInitializing && projectRef.current === project
           && requestSequence >= acceptedSnapshotRef.current) setLoading(false);
     }
@@ -299,7 +311,8 @@ export function useLoopData(
       "decision_resumed", "context_compaction_requested", "context_compaction_completed",
       "context_compaction_failed", "session_rewound", "session_recovery_resumed",
       "session_recovery_discarded", "session_recovery_blocked", "workspace_dirty",
-      "governance_signals", "lessons_harvested", "lesson_harvest_failed", "storage_health",
+      "governance_signals", "lessons_harvested", "lesson_harvest_proposed", "lesson_harvest_completed",
+      "lesson_harvest_resolved", "lesson_harvest_failed", "storage_health",
       "runtime_projection_ready", "runtime_fact", "runtime_projection_failed", "coordination_event",
       "coordination_event_resolved", "coordination_observation_failed",
     ]);
@@ -346,13 +359,14 @@ export function useLoopData(
   }, []);
 
   const current = Boolean(project && loadedProject === project);
+  const scopedError = project && errorProject.current === project ? error : null;
   return {
     processes: current ? processes : {},
     toolEvents: current ? toolEvents : [],
     providers: current ? providers : [],
     daemonOnline: current ? daemonOnline : false,
-    loading: Boolean(project) && (!current || loading),
-    error,
+    loading: Boolean(project) && ((!current && !scopedError) || loading),
+    error: scopedError,
     mainConversation: current ? mainConversation : undefined,
     agentConversations: current ? agentConversations : undefined,
     recoveryAvailable: current ? recoveryAvailable : [],

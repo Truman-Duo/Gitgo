@@ -145,6 +145,11 @@ const HANDLERS: Record<string, (ctx: CommandContext, args: string[]) => Promise<
     await ctx.refreshProcesses?.();
     return {resultText: "Archived from this list; execution and data unchanged"};
   },
+  "process.detail": async(ctx)=>{
+    const project=resolveProject(ctx);if(!project)return noProject();
+    return {resultText:"",showPanel:{overlay:"processDetail",props:{project,
+      processId:ctx.scene==="process_list"?ctx.selectedProcessId||"":ctx.activeProcessId||""}}};
+  },
   // System
   "app.help": async () => ({ resultText: "", showHelp: true }),
   "app.quit": async () => ({ resultText: "", showQuit: true }),
@@ -152,6 +157,9 @@ const HANDLERS: Record<string, (ctx: CommandContext, args: string[]) => Promise<
 
   // Projects scene
   "projects.create": async () => ({ resultText: "", showCreate: true }),
+  "projects.update": async (_ctx, args) => args.length
+    ? {resultText: "/update — software update status; no arguments supported"}
+    : {resultText: "", showPanel: {overlay: "updatePanel"}},
   "projects.archive": async (ctx) => {
     const name = resolveProject(ctx);
     if (!name) return noProject();
@@ -237,8 +245,9 @@ const HANDLERS: Record<string, (ctx: CommandContext, args: string[]) => Promise<
     const name = resolveProject(ctx);
     if (!name) return noProject();
     const id = args[0];
-    if (!id) return { resultText: "/runtime lesson verify <id>" };
-    await lessonVerify(ctx.client, name, id);
+    const version = args[1];
+    if (!id || !version) return { resultText: "Review and verify in /runtime lesson, or use /runtime lesson verify <id> <content-version>" };
+    await lessonVerify(ctx.client, name, id, version);
     return { resultText: `Verified ${id.slice(0, 12)}` };
   },
 

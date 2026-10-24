@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from backend.core.loop.llm import LLMProvider
     from backend.core.dispatch.dispatcher import ToolDispatcher
 
+from backend.core.prompt_profiles import with_prompt_profile
+
+@with_prompt_profile
 def agent_step(
     process: AgentProcess,
     llm_provider: "LLMProvider",
@@ -32,10 +35,15 @@ def agent_step(
     on_stream_event: callable = None,
 ) -> dict:
     """Run the admitted task until delivery, suspension or a bounded failure."""
+    from backend.core.prompt_profiles import current_snapshot
     from .run_admission import admit_agent_run
     admitted = admit_agent_run(process, llm_provider, instruction, dispatcher, workspace_path, on_stream_event)
     if admitted.result is not None:
         return admitted.result
+    profile_id, _, profile_digest = current_snapshot()
+    process.session.host_ledger.append({"event": "prompt_profile_selected",
+        "task_id": process.active_task_id or process.process_id,
+        "process_id": process.process_id, "profile_id": profile_id, "digest": profile_digest})
     services = admitted.services
     session, surface, ctx = process.session, services.surface, services.context
     loop_guard, route, governance = services.guard, services.route, services.governance

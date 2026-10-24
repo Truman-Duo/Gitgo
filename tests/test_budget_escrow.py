@@ -149,3 +149,27 @@ def test_streaming_fragment_accounting_matches_cumulative_ascii_estimate():
         budget.consume_output_fragment(fragment, "root", channel="call-1:text")
     assert budget.snapshot()["used"]["estimated_output_tokens"] == 2
     budget.finish_output_fragments("root", prefix="call-1:")
+
+
+def test_question_pause_retains_original_escrow_and_usage_across_restore():
+    budget = _budget()
+    budget.reserve_agent()
+    original = budget.register_process('child', parent_id='root', actor_kind='worker',
+        max_steps=20, request={'provider_calls': 3, 'output_tokens': 2000})
+    budget.begin_provider_call('child')
+    budget.consume_output_estimate(100, 'child')
+    parked = budget.release_process('child', status='awaiting_user')
+    assert parked['state'] == 'active'
+    assert parked['reserved_provider_calls'] == original['reserved_provider_calls']
+    assert parked['refunded_provider_calls'] == 0
+    restored = TaskTreeBudget.from_snapshot(budget.snapshot())
+    for _ in range(2):
+        restored.begin_provider_call('child')
+    with pytest.raises(TaskBudgetExceeded) as exc:
+        restored.begin_provider_call('child')
+    assert exc.value.code == 'TASK_TREE_CHILD_PROVIDER_ESCROW_EXHAUSTED'
+    released = restored.release_process('child', status='completed')
+    assert released['used_provider_calls'] == 3
+    assert released['refunded_provider_calls'] == 0
+    assert released['refunded_output_tokens'] == 1900
+    assert restored.release_process('child', status='completed') == released

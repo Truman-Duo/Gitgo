@@ -29,6 +29,9 @@ class TurnPreparation:
         try:
             if process.task_budget is not None:
                 process.task_budget.check_deadline()
+            manager = getattr(process, "_manager", None)
+            if manager is not None:
+                manager.wait_for_interface_decision(process)
             self.apply_mailbox()
             if session.context_abort_requested:
                 session.context_abort_requested = False

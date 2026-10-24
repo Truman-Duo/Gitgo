@@ -12,7 +12,7 @@ import {
   type CommandOutcome,
 } from "../commands.js";
 import { noticeToActions } from "../notices.js";
-import { stopProcess } from "../backend/tools.js";
+import { enterProject, stopProcess } from "../backend/tools.js";
 import type { BackendClient } from "../backend/client.js";
 
 function sceneLabel(s: Scene): string {
@@ -128,5 +128,15 @@ export async function stopProcessEffect(pid: string, deps: StopProcessDeps): Pro
     for (const a of noticeToActions(2003, { pid: pid.slice(0, 8) })) deps.dispatch(a);
   } catch (e: any) {
     for (const a of noticeToActions(2002, { reason: e.message })) deps.dispatch(a);
+  }
+}
+
+export async function enterProjectEffect(client: BackendClient, name: string,
+  dispatch: (action: AppAction) => void, isCurrent: () => boolean = () => true): Promise<void> {
+  try {
+    await enterProject(client, name);
+    if (isCurrent()) dispatch({type: "navigate", scene: "workspace", patch: {activeProject: name, activeAgentId: null}});
+  } catch (error: any) {
+    if (isCurrent()) dispatch({type: "set_cmd_result", text: `[Error: ${error?.message || error}]`});
   }
 }

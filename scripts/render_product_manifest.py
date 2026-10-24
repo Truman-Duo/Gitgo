@@ -9,7 +9,7 @@ import re
 import shlex
 
 
-def render_manifest(source: Path, platform: str, architecture: str = "") -> dict:
+def render_manifest(source: Path, platform: str, architecture: str = "", *, managed_windows: bool = False) -> dict:
     manifest = json.loads(source.read_text(encoding="utf-8"))
     layouts = manifest.pop("layouts", {})
     if platform not in layouts:
@@ -21,6 +21,15 @@ def render_manifest(source: Path, platform: str, architecture: str = "") -> dict
     if architecture:
         manifest["architecture"] = architecture
     manifest["layout"] = layouts[platform]
+    if managed_windows:
+        if platform != "windows": raise ValueError("Managed Windows layout requires the Windows target")
+        manifest["installation_mode"] = "managed-windows-v1"
+        manifest["layout"] = {"dashboard": "gitgo.exe", "native_host": "internal/gitgo-host/gitgo-host.exe",
+                              "installer": "install-managed.ps1"}
+        # Never ship/adopt an Inno uninstaller that may delete a user's profile
+        # under this separate managed lifecycle. Managed removal is not offered.
+        manifest["uninstall"] = {"supported": False, "remove_user_config": False,
+            "remove_user_secrets": False, "remove_runtime_state": False, "remove_project_directories": False}
     return manifest
 
 
@@ -47,9 +56,10 @@ def main() -> int:
     parser.add_argument("--architecture", default="")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--shell-output", type=Path)
+    parser.add_argument("--managed-windows", action="store_true")
     args = parser.parse_args()
 
-    rendered = render_manifest(args.source, args.platform, args.architecture)
+    rendered = render_manifest(args.source, args.platform, args.architecture, managed_windows=args.managed_windows)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(rendered, ensure_ascii=False, indent=2) + "\n",

@@ -9,6 +9,8 @@ the same contract grow beyond web search.
 
 from __future__ import annotations
 
+from backend.core.prompt_templates import render_prompt
+
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -174,12 +176,7 @@ def record_provider_changed(
         break
     session.host_ledger.append(event)
     session.append_host_steering(
-        "[HOST PROVIDER CHANGED]\n"
-        f"Current model: {event['model_id']}\n"
-        "Runtime: Gitgo harness\n"
-        "This supersedes older provider/model identity in the conversation. "
-        "Only disclose both facts when the user asks about model identity. "
-        "Do not volunteer unrelated capability or configuration status.",
+        render_prompt('runtime/provider_changed', model_id=format(event['model_id'], '')),
         steering_type="provider_changed",
         version=event["provider_route"],
     )

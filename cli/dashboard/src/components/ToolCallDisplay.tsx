@@ -1,38 +1,68 @@
 // src/components/ToolCallDisplay.tsx — Shared tool call card renderer.
 // Used by ChatPanel and AgentDetail.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { ToolCallCard } from "../types.js";
-import { toolIcon, colors, formatDuration } from "../theme/index.js";
+import { toolPreview } from "../chat/toolPreview.js";
+import { toolIcon, colors, formatDuration, truncate } from "../theme/index.js";
 import { Spinner } from "./Spinner.js";
 import { DiffView } from "./DiffView.js";
 import { parseUnifiedDiff } from "../utils/diff.js";
 
-const DISPATCH_NAMES = ["dispatch_tool", "fork_agent", "delegate_task", "delegate_task_bundle"];
+const DISPATCH_NAMES = [
+  "dispatch_tool",
+  "fork_agent",
+  "delegate_task",
+  "delegate_task_bundle",
+];
 
 function extractPidShort(s: string | undefined): string | null {
   if (!s) return null;
   // Real pids are UUIDs (manager.fork → str(uuid.uuid4())); mock uses proc-XXX / cpl-XXX.
-  const m = s.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:proc|cpl)-\d{3}/i);
+  const m = s.match(
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:proc|cpl)-\d{3}/i,
+  );
   return m ? m[0].slice(0, 8) : null;
 }
 
-export function ToolCallDisplay({ tool, expanded = false, width, displayName, count = 1,
-  suppressDetails = false }: {
-  tool: ToolCallCard; expanded?: boolean; width?: number; displayName?: string;
-  count?: number; suppressDetails?: boolean;
+export function ToolCallDisplay({
+  tool,
+  expanded = false,
+  width,
+  displayName,
+  count = 1,
+  suppressDetails = false,
+  compactPreview = false,
+}: {
+  tool: ToolCallCard;
+  expanded?: boolean;
+  width?: number;
+  displayName?: string;
+  count?: number;
+  suppressDetails?: boolean;
+  compactPreview?: boolean;
 }) {
   const [now, setNow] = useState(Date.now());
   const icon = toolIcon(tool.tool_name);
-  const state = tool.state ?? (tool.is_running ? "running" : tool.allowed ? "completed" : "error");
+  const state =
+    tool.state ??
+    (tool.is_running ? "running" : tool.allowed ? "completed" : "error");
   const isRunning = state === "running" || state === "pending";
   const isError = state === "error";
   const isUnresolved = state === "unresolved";
   const isDone = state === "completed";
   const hasTarget = tool.target && tool.target.length > 0;
   const hasResult = tool.result_text && tool.result_text.length > 0;
-  const diffFiles = isDone && tool.diff ? parseUnifiedDiff(tool.diff) : [];
+  const diffFiles = useMemo(
+    () => (isDone && tool.diff ? parseUnifiedDiff(tool.diff) : []),
+    [isDone, tool.diff],
+  );
+  const preview = useMemo(
+    () => toolPreview(tool, Math.max(12, (width || 80) - 5)),
+    [tool.target, tool.diff, tool.result_text, width],
+  );
+  const showPreview = !expanded && (compactPreview || Boolean(tool.diff));
   const isDispatch = DISPATCH_NAMES.some(
     (d) => tool.tool_name.includes(d) || d.includes(tool.tool_name),
   );
@@ -45,45 +75,119 @@ export function ToolCallDisplay({ tool, expanded = false, width, displayName, co
     return () => clearInterval(timer);
   }, [isRunning]);
   const startedAt = Date.parse(tool.timestamp) || now;
-  const duration = isRunning ? Math.max(0, now - startedAt) : Math.max(0, tool.duration_ms || 0);
+  const duration = isRunning
+    ? Math.max(0, now - startedAt)
+    : Math.max(0, tool.duration_ms || 0);
 
   return (
     <Box flexDirection="column">
-      <Box flexDirection="row" gap={1}
-        backgroundColor={isError ? colors.dangerBg : undefined}>
+      <Box
+        flexDirection="row"
+        gap={1}
+        backgroundColor={isError ? colors.dangerBg : undefined}
+      >
         {tool.actor_label ? <Text dimColor>{tool.actor_label} ·</Text> : null}
         {isRunning ? (
-          <Spinner frames={colors.spinner.triangleFrames} intervalMs={colors.spinner.triangleIntervalMs} color={colors.warning} />
+          <Spinner
+            frames={colors.spinner.triangleFrames}
+            intervalMs={colors.spinner.triangleIntervalMs}
+            color={colors.warning}
+          />
         ) : (
-          <Text color={isError ? colors.danger : isUnresolved ? colors.warning : undefined}
-            dimColor={isDone}>{icon}</Text>
+          <Text
+            color={
+              isError
+                ? colors.danger
+                : isUnresolved
+                  ? colors.warning
+                  : undefined
+            }
+            dimColor={isDone}
+          >
+            {icon}
+          </Text>
         )}
-        <Text dimColor={isDone}>{displayName || tool.tool_name}{count > 1 ? ` (${count})` : ""}</Text>
-        {hasTarget && !suppressDetails ? (
-          <Text dimColor={isDone}>({expanded ? tool.target : tool.target.slice(0, 60)})</Text>
+        <Text dimColor={isDone}>
+          {displayName || tool.tool_name}
+          {count > 1 ? ` (${count})` : ""}
+        </Text>
+        {hasTarget && !suppressDetails && !showPreview ? (
+          <Text dimColor={isDone}>
+            (
+            {truncate(
+              tool.target,
+              Math.max(12, (width || 80) - tool.tool_name.length - 18),
+            )}
+            )
+          </Text>
         ) : null}
-        {forkedPid ? (
-          <Text dimColor={isDone}>→ {forkedPid}</Text>
-        ) : null}
+        {forkedPid ? <Text dimColor={isDone}>→ {forkedPid}</Text> : null}
         <Text dimColor>{formatDuration(duration)}</Text>
       </Box>
       {!suppressDetails && (isError || isUnresolved) && tool.blocked_reason ? (
         <Box flexDirection="row" paddingLeft={2}>
-          <Text color={colors.warning} dimColor>{expanded ? tool.blocked_reason : tool.blocked_reason.slice(0, 80)}</Text>
+          <Text color={colors.warning} dimColor>
+            {expanded ? tool.blocked_reason : tool.blocked_reason.slice(0, 80)}
+          </Text>
         </Box>
       ) : null}
-      {!suppressDetails && hasResult && (expanded || isError) ? (
-        <Box flexDirection="row" paddingLeft={2}>
-          <Text dimColor>{"⎿"} {expanded ? tool.result_text : tool.blocked_reason || tool.compact_summary || "failed"}</Text>
+      {!suppressDetails && showPreview && diffFiles.length === 0 && preview.lines.length ? (
+        <Box
+          flexDirection="column"
+          marginLeft={2}
+          paddingLeft={1}
+          borderStyle="single"
+          borderLeft
+          borderTop={false}
+          borderBottom={false}
+          borderRight={false}
+          borderColor={colors.chat.turnGuide}
+        >
+          {preview.lines.map((line, index) => (
+            <Text
+              key={index}
+              color={colors.chat.reasoningFg}
+            >
+              {line.text}
+            </Text>
+          ))}
+          {preview.more ? <Text dimColor>…</Text> : null}
         </Box>
       ) : null}
-      {!suppressDetails && !expanded && !isError && tool.compact_summary ? (
-        <Box flexDirection="row" paddingLeft={2}>
-          <Text dimColor>{"⎿"} {tool.compact_summary}</Text>
+      {!suppressDetails && showPreview && diffFiles.length > 0 ? (
+        <Box paddingLeft={2}>
+          <DiffView files={diffFiles} width={width ? Math.max(20, width - 2) : undefined} maxRows={6}/>
         </Box>
       ) : null}
-      {!suppressDetails && diffFiles.length > 0 ? (
-        <Box paddingLeft={2}><DiffView files={diffFiles} width={width ? Math.max(20, width - 2) : undefined} /></Box>
+      {!suppressDetails && expanded && (hasResult || diffFiles.length > 0) ? (
+        <Box
+          flexDirection="column"
+          marginLeft={2}
+          paddingLeft={1}
+          borderStyle="single"
+          borderLeft
+          borderTop={false}
+          borderBottom={false}
+          borderRight={false}
+          borderColor={colors.chat.turnGuide}
+        >
+          {hasResult ? <Text dimColor>⎿ {tool.result_text}</Text> : null}
+          {diffFiles.length > 0 ? (
+            <DiffView
+              files={diffFiles}
+              width={width ? Math.max(20, width - 4) : undefined}
+            />
+          ) : null}
+        </Box>
+      ) : null}
+      {!suppressDetails &&
+      !expanded &&
+      !showPreview &&
+      !isError &&
+      tool.compact_summary ? (
+        <Box paddingLeft={2}>
+          <Text dimColor>⎿ {tool.compact_summary}</Text>
+        </Box>
       ) : null}
     </Box>
   );

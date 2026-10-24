@@ -1,0 +1,305 @@
+{
+  "BinWorkspace.tsx": {
+    "source_sha256": "19ba9219ec50c01b1a2d6e59eb1c9483f5cc3f99fceec118fba7f9652109b93a",
+    "owned_literals": [
+      "Cancel",
+      "Confirm deletion",
+      "Delay saved",
+      "Delete",
+      "Deletion Plans",
+      "Missing workspace archive",
+      "Missing workspaces: from first failed entry; 0 disables archiving. No files are deleted.",
+      "Nothing archived here.",
+      "Nothing selected",
+      "Project deletion",
+      "Projects and Subprocesses",
+      "Retention and Delays",
+      "Scheduling deletion…",
+      "Subprocess deletion",
+      "back",
+      "cancel",
+      "change     save",
+      "confirm",
+      "editing",
+      "min",
+      "select",
+      "select     edit",
+      "tabs     select"
+    ]
+  },
+  "ChatPanel.tsx": {
+    "source_sha256": "e3cd6af7a6c958f1b58f12dd7bd665325337a5b74867283f447cd6a0e18c350b",
+    "owned_literals": [
+      "Chat —",
+      "Main process",
+      "Type a task and press Enter. The main process supervises and delegates when needed.",
+      "Use /runtime for governance data; /processlist opens every subprocess in this project."
+    ]
+  },
+  "CompactPanel.tsx": {
+    "source_sha256": "1de6aedda0d474df6bc9889e1a7fa4513248f734cb7d624fe8778b09c2fc5541",
+    "owned_literals": [
+      "Compacting…",
+      "Compaction cancelled; conversation preserved.",
+      "Context compacted",
+      "Context compaction",
+      "Context is already compact; there is not enough foldable history yet.",
+      "Esc close",
+      "Waiting for the current compaction attempt.",
+      "[COMPACTION_REQUEST_FAILED]",
+      "attempt /3",
+      "user-approved reset"
+    ]
+  },
+  "config/GeneralTab.tsx": {
+    "source_sha256": "27116d2976585bb6cd8a19c737c749ee11ba504c293ea96f6a9081321396009c",
+    "owned_literals": [
+      "(read-only)",
+      "Agent Routing",
+      "Auto Compact",
+      "Changes apply on the next launch.",
+      "Diff Layout",
+      "Enter save · Esc cancel",
+      "External Editor",
+      "Fallback Engine",
+      "First launch · choose a terminal and press Enter.",
+      "Language",
+      "Prompt Instance",
+      "R rescan",
+      "SearXNG Fallback",
+      "Terminal",
+      "Verbose",
+      "Web Search",
+      "choose    save    cancel",
+      "select    change    tabs",
+      "tabs    open    back"
+    ]
+  },
+  "config/ProvidersTab.tsx": {
+    "source_sha256": "0352085616627b4e20d8536cda0d6f7f393127aaa6d3a39afc8a1831cbe3ac46",
+    "owned_literals": [
+      "/delete",
+      "/edit",
+      "/local",
+      "/new",
+      "/test",
+      "Automatic Failover:",
+      "Create another provider to select a backup.",
+      "Create local API provider",
+      "Create provider",
+      "Default:",
+      "Delete selected provider",
+      "Edit Provider",
+      "Edit selected provider",
+      "Esc Cancel",
+      "Key:  gsk_your_key_here",
+      "Loading...",
+      "Location, auth, protocol and context: ←/→ · local endpoints must be loopback",
+      "Main Model:",
+      "Model: llama-3.3-70b-versatile",
+      "Name: Groq Llama 3.3",
+      "New Provider",
+      "Next",
+      "Next / save on final field",
+      "No LLM providers configured.",
+      "No providers configured.",
+      "Previous",
+      "Saving failover…",
+      "Test selected provider",
+      "Type /new to create one:",
+      "URL:  https://api.groq.com/openai/v1",
+      "automatic failover",
+      "back",
+      "models",
+      "not required",
+      "off",
+      "on",
+      "unobserved",
+      "· local",
+      "••••••••  leave blank to retain",
+      "← →  · Enter save · Esc cancel",
+      "↑ ↓ select · Enter change · ← → columns",
+      "● none"
+    ]
+  },
+  "config/registry.ts": {
+    "source_sha256": "62ee7d5b90c4d66b9af665e7ffe8751c987ef84c7b5a79d7db7fbaf02f574fbe",
+    "owned_literals": [
+      "General",
+      "Providers"
+    ]
+  },
+  "ConfirmBox.tsx": {
+    "source_sha256": "25dfa425010e0f0536aca7043e5faffa40a8c1c21052a9273dee4e21a51ed183",
+    "owned_literals": [
+      "No",
+      "Yes",
+      "cancel",
+      "confirm",
+      "select"
+    ]
+  },
+  "CreateProjectPanel.tsx": {
+    "source_sha256": "617384b7b455d4c0025c9da44706b31dc9ab1eb012304d6128a671d8c1bac3af",
+    "owned_literals": [
+      "* required",
+      "Create Project",
+      "Name and workspace are required",
+      "cancel"
+    ]
+  },
+  "DialogSelect.tsx": {
+    "source_sha256": "051efae42ef6d5fc3963cba634442f093c0c8ea9a08b32a769f9de8867469b69",
+    "owned_literals": [
+      "No matches",
+      "] Dismiss  Type to filter",
+      "] Select  [",
+      "] dismiss",
+      "more results"
+    ]
+  },
+  "DiffView.tsx": {
+    "source_sha256": "4a4605e89e8c0d1f9b67425183b7528824673be9a375d36fc8061aee3750162d",
+    "owned_literals": [
+      "… additional changes omitted"
+    ]
+  },
+  "EventsTab.tsx": {
+    "source_sha256": "77b73fc6c868df27cd9e0e06968dbdf74214eb55f73322267ed1e16f3cb22a16",
+    "owned_literals": [
+      "No recent events",
+      "Recent Events"
+    ]
+  },
+  "ExportPanel.tsx": {
+    "source_sha256": "8704d42286b6b2a948cd3464753b06b9e701fbbc40c284472bbbb8820e62b8bb",
+    "owned_literals": [
+      "Destination is required",
+      "Export —",
+      "Exporting…",
+      "change     field     next",
+      "done",
+      "error",
+      "exporting"
+    ]
+  },
+  "FormalPanel.tsx": {
+    "source_sha256": "7998bd84aad12e8fb8d969d46056f92f6bac301e6f9e9ae0a072d2e43a6da363",
+    "owned_literals": [
+      "Formal Commits:",
+      "Loading formal commits...",
+      "No formal commits.",
+      "back",
+      "commits",
+      "delete",
+      "dissolve",
+      "edit message via /runtime formal edit &lt;index&gt; &lt;message&gt;",
+      "select"
+    ]
+  },
+  "InterruptPanel.tsx": {
+    "source_sha256": "d08be66cd0de89d9eb7c3459a471f20f7939318701b0a4ec6e4fb9eeebaed813",
+    "owned_literals": [
+      "Interrupt",
+      "Interrupting… waiting for the host acknowledgement",
+      "Stop the current calls; preserve the conversation and completed file changes. No automatic rollback.",
+      "the main process and its active subprocesses",
+      "this subprocess",
+      "←/→ select · Enter confirm · Esc close"
+    ]
+  },
+  "MessageRow.tsx": {
+    "source_sha256": "2604602cebeeb492272d433143033946b24d02abc95c6eceee3736e150d882d9",
+    "owned_literals": [
+      "pending"
+    ]
+  },
+  "overlays.tsx": {
+    "source_sha256": "f6024796c8cb3b7a115fdaa51aa2e9163447af0f52465e2ec0f2505f4afbffb0",
+    "owned_literals": [
+      "Command Palette",
+      "Filter commands...",
+      "Type command...",
+      "Which Key?"
+    ]
+  },
+  "ProjectWorkspace.tsx": {
+    "source_sha256": "b252e9bd3095a4edf9b239832897de56c8ce42ef3549ae7fde8e24e4af2ff56e",
+    "owned_literals": [
+      "Loading loop data..."
+    ]
+  },
+  "QuitPanel.tsx": {
+    "source_sha256": "859fc6425a579cd5228894a50fd9bf19b890cc22e9dcf613a345d10feb71a53a",
+    "owned_literals": [
+      "Cancel",
+      "Quit",
+      "Quit gitgo",
+      "cancel",
+      "confirm",
+      "select"
+    ]
+  },
+  "RoundDetails.tsx": {
+    "source_sha256": "86e7b4d3ce2ec06fcff1b795529501c5261496c0f8b8739b7e13fa75f77c87a2",
+    "owned_literals": [
+      "Loading detail…",
+      "Loading trajectory…",
+      "No events are available for this agent; older traces may have expired.",
+      "No saved trajectory is available.",
+      "Trajectory exceeds 50,000 raw events; open /stats for the remaining trace.",
+      "[TRACE_READ_FAILED]",
+      "▸ Open detail",
+      "▾ Hide detail"
+    ]
+  },
+  "RuntimeNoticeList.tsx": {
+    "source_sha256": "bd59503a2878eca3f9331515c006247f15ff500920b7436f928dff00da74aa60",
+    "owned_literals": [
+      "trace ref available",
+      "trajectory"
+    ]
+  },
+  "TrialPanel.tsx": {
+    "source_sha256": "b9da59837c9109bb522872d5866af114285eba2bfd8c8eb033414524faedde32",
+    "owned_literals": [
+      "Loading incoming changes...",
+      "No incoming changes.",
+      "Trial Incoming:",
+      "accept",
+      "back",
+      "changes",
+      "discard",
+      "promote",
+      "select"
+    ]
+  },
+  "TurnTimeline.tsx": {
+    "source_sha256": "c5acb0049e5c1df9a415bb71085927d045d83683d290b6ea691aa1337dd452a7",
+    "owned_literals": [
+      "Response draft",
+      "Thinking",
+      "Thinking…",
+      "Web fetch",
+      "Web search",
+      "step"
+    ]
+  },
+  "UndoPanel.tsx": {
+    "source_sha256": "dbf9f96461995be0acc00473aba21a00a658b27c05b89a07e87ad9af159a0d39",
+    "owned_literals": [
+      "Remove the latest user turn and its following conversation from active context?",
+      "Rewinding…",
+      "Session rewind",
+      "Turn:",
+      "[SESSION_UNDO_FAILED]",
+      "←/→ choose · Enter confirm · Esc cancel"
+    ]
+  },
+  "usagePresentation.ts": {
+    "source_sha256": "408884bf4cf82e5559b1260f5eb0ff50bdc3f46eb1fe828ec772d7a3844f0392",
+    "owned_literals": [
+      "Model request"
+    ]
+  }
+}

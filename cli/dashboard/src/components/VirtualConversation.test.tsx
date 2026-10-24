@@ -1,7 +1,7 @@
 import React, {createRef} from "react";
 import {expect, test} from "bun:test";
 import {PassThrough} from "node:stream";
-import {Box, renderSync, useTerminalSize} from "@anthropic/ink";
+import {Box, Text, ScrollBox, renderSync, useTerminalSize, useVirtualScroll} from "@anthropic/ink";
 import type {ScrollBoxHandle} from "@anthropic/ink";
 import instances from "../../vendor/ink/src/core/instances.js";
 import type {ChatMessage} from "../types.js";
@@ -11,6 +11,47 @@ function mountedText(node: any): string {
   if (node?.nodeName === "#text") return String(node.nodeValue || "");
   return (node?.childNodes || []).map(mountedText).join("");
 }
+
+test("resize preserves the visible item after scrolling past unmeasured history", async () => {
+  const stdin: any = new PassThrough(); stdin.isTTY = true; stdin.setRawMode = () => stdin;
+  stdin.ref = () => stdin; stdin.unref = () => stdin;
+  const stdout: any = new PassThrough(); stdout.isTTY = true; stdout.columns = 100; stdout.rows = 18;
+  const stderr: any = new PassThrough(); stdout.on("data", () => {}); stderr.on("data", () => {});
+  const scrollRef = createRef<ScrollBoxHandle>();
+  const keys = Array.from({length: 400}, (_, index) => `row-${index}`);
+  let visibleStart = -1;
+  function Fixture() {
+    const {columns} = useTerminalSize();
+    const rows = columns < 80 ? 8 : 4;
+    const virtual = useVirtualScroll({scrollRef, itemKeys: keys, estimateSize: rows, layoutKey: columns});
+    visibleStart = virtual.visibleStart;
+    return <Box height={18} width="100%" flexDirection="column"><ScrollBox ref={scrollRef} flexGrow={1} flexDirection="column">
+      <Box height={virtual.before} flexShrink={0}/>
+      {keys.slice(virtual.start, virtual.end).map(key =>
+        <Box key={key} ref={virtual.itemRef(key)} height={rows} flexShrink={0}><Text>{key}</Text></Box>)}
+      <Box height={virtual.after} flexShrink={0}/>
+    </ScrollBox></Box>;
+  }
+  const root = renderSync(<Fixture/>, {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
+  const settle = () => new Promise(resolve => setTimeout(resolve, 100));
+  try {
+    await settle();
+    scrollRef.current!.scrollTo(800);
+    await settle();
+    expect(visibleStart).toBe(200);
+    stdout.columns = 50;
+    stdout.emit("resize");
+    await settle();
+    expect(visibleStart).toBe(200);
+    expect(scrollRef.current!.isSticky()).toBe(false);
+    stdout.columns = 100;
+    stdout.emit("resize");
+    await settle();
+    expect(visibleStart).toBe(200);
+  } finally {
+    root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();
+  }
+});
 
 test("conversation mounts a moving message window instead of the full history", async () => {
   const stdin: any = new PassThrough(); stdin.isTTY = true; stdin.setRawMode = () => stdin;
@@ -53,7 +94,7 @@ test("conversation mounts a moving message window instead of the full history", 
 test("virtualized width reflow preserves a semantic mid-history anchor", async () => {
   const stdin: any = new PassThrough(); stdin.isTTY = true; stdin.setRawMode = () => stdin;
   stdin.ref = () => stdin; stdin.unref = () => stdin;
-  const stdout: any = new PassThrough(); stdout.isTTY = false; stdout.columns = 100; stdout.rows = 18;
+  const stdout: any = new PassThrough(); stdout.isTTY = true; stdout.columns = 100; stdout.rows = 18;
   const stderr: any = new PassThrough(); stdout.on("data", () => {}); stderr.on("data", () => {});
   const scrollRef = createRef<ScrollBoxHandle>();
   const messages: ChatMessage[] = Array.from({length: 180}, (_, index) => ({
@@ -94,4 +135,32 @@ test("virtualized width reflow preserves a semantic mid-history anchor", async (
   } finally {
     root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();
   }
+});
+
+test("terminal guide closes at the result before trailing knowledge; waiting never closes", async () => {
+  const stdin: any = new PassThrough(); stdin.isTTY = true; stdin.setRawMode = () => stdin;
+  stdin.ref = () => stdin; stdin.unref = () => stdin;
+  const stdout: any = new PassThrough(); stdout.isTTY = true; stdout.columns = 100; stdout.rows = 18;
+  const stderr: any = new PassThrough(); stdout.on("data", () => {}); stderr.on("data", () => {});
+  const scroll = createRef<ScrollBoxHandle>();
+  const messages: ChatMessage[] = [
+    {role: "user", content: "Inspect", timestamp: "now", message_id: "u"},
+    {role: "assistant", content: "Failure explanation", status: "failed", timestamp: "now", message_id: "a"},
+    {role: "system", content: "Knowledge proposal saved", timestamp: "now", message_id: "n"},
+  ];
+  const draw = (rows: ChatMessage[]) => <Box height={18} width={100}><VirtualConversation
+    messages={rows} streaming={null} contentWidth={96} scrollRef={scroll}/></Box>;
+  const root = renderSync(draw(messages), {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
+  const settle = () => new Promise(resolve => setTimeout(resolve, 70));
+  try {
+    await settle();
+    const ink: any = instances.get(stdout);
+    const text = ink.getLastOutput ? ink.getLastOutput() : ink.lastOutput;
+    // Endpoint nodes are real Ink output, independent of stored message roles.
+    const mounted = mountedText(ink.rootNode);
+    expect(mounted).toContain("┗"); expect(mounted).toContain("Knowledge proposal saved");
+    root.rerender(draw([messages[0]!, {...messages[1]!, status: "awaiting_user"}]));
+    await settle();
+    expect(mountedText(ink.rootNode)).not.toContain("┗");
+  } finally {root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();}
 });

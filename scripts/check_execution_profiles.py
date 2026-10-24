@@ -1,4 +1,9 @@
 """Real installed Shell discovery and execution; no configured Bash path."""
+
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root, test_state_home
 from pathlib import Path
 import json
 import os
@@ -11,7 +16,7 @@ from backend.core.tools.execution_profile import powershell_profile
 
 
 def main():
-    root = ROOT / ".gitgo" / "runtime-hardening" / ("shell-" + uuid.uuid4().hex)
+    root = development_root(ROOT) / "runtime-hardening" / ("shell-" + uuid.uuid4().hex)
     root.mkdir(parents=True)
     saved = {k: os.environ.get(k) for k in ("GITGO_BASH_PATH", "GITGO_TEST_SECRET", "BASH_ENV")}
     try:

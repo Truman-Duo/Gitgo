@@ -1,7 +1,12 @@
 """Merge-gate regressions; no project runtime or credentials are required."""
 import importlib.util
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 
 spec = importlib.util.spec_from_file_location("ci_contract", Path(__file__).parents[1] / "scripts/check_pr_contract.py")
@@ -72,6 +77,41 @@ class ContractTests(unittest.TestCase):
     def test_baseline_without_native_backend_does_not_claim_native_acceptance(self):
         with tempfile.TemporaryDirectory() as temp:
             self.assertFalse(contract.native_required(Path(temp), Path(temp)))
+
+
+class PlatformGateTests(unittest.TestCase):
+    def run_gate(self, changes=None):
+        required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
+                    'windows-package', 'managed-update-windows', 'native',
+                    'native-linux', 'unix-packages', 'managed-update-linux']
+        jobs = {name: {'result': 'success'} for name in required}
+        jobs['contract']['outputs'] = {'native_required': 'true'}
+        for name, result in (changes or {}).items():
+            jobs[name]['result'] = result
+        workflow = (Path(__file__).parents[1] / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        script = textwrap.dedent(workflow.rsplit("python3 -I - <<'PY'\n", 1)[1]).rsplit('\nPY', 1)[0]
+        with tempfile.TemporaryDirectory() as temp:
+            summary = Path(temp) / 'summary.md'
+            result = subprocess.run([sys.executable, '-I', '-c', script], capture_output=True,
+                text=True, env=dict(os.environ, RESULTS=json.dumps(jobs), GITHUB_STEP_SUMMARY=str(summary)))
+            return result, summary.read_text(encoding='utf-8')
+
+    def test_success_records_every_platform_before_owner_trial(self):
+        result, summary = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('All release targets must pass', summary)
+        self.assertIn('unix-packages: success', summary)
+        self.assertIn('Owner trial approval', result.stdout)
+
+    def test_every_platform_requirement_fails_closed(self):
+        for name in ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
+                     'windows-package', 'managed-update-windows', 'native',
+                     'native-linux', 'unix-packages', 'managed-update-linux']:
+            for status in ['failure', 'cancelled', 'skipped']:
+                with self.subTest(name=name, status=status):
+                    result, _ = self.run_gate({name: status})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(name, result.stderr)
 
 
 if __name__ == "__main__":

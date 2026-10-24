@@ -1,12 +1,13 @@
-// src/components/DiffView.tsx — side-by-side (split) diff renderer.
+// src/components/DiffView.tsx — shared framed split/unified diff renderer.
 // Falls back to unified view when the panel is too narrow.
 // Column widths, ellipsis truncation, and line-number alignment live in
 // theme/diffLayout.ts so they are shared by every diff renderer.
-import React, { memo } from "react";
+import React, { memo, useContext } from "react";
 import { Ansi, Box, Text } from "@anthropic/ink";
 import type { Color } from "@anthropic/ink";
 import { highlight, supportsLanguage } from "cli-highlight";
-import type { FileDiff, DiffHunk, DiffLine } from "../types.js";
+import {DiffLayoutContext} from "../theme/diffLayoutContext.js";
+import type { FileDiff, DiffHunk, DiffLine, DiffLayout } from "../types.js";
 import {
   colors,
   usePanelSize,
@@ -140,7 +141,7 @@ function SideLine({ lineNo, text, sign, style, digits, colW, language }: {
   );
 }
 
-function SplitFile({ file, avail }: { file: FileDiff; avail: number }) {
+function SplitFile({ file, avail, maxRows }: { file: FileDiff; avail: number; maxRows: number }) {
   const rows: Row[] = file.hunks.flatMap(alignHunk);
   const maxLine = rows.reduce((m, r) => Math.max(m, r.oldLine ?? 0, r.newLine ?? 0), 0);
   const digits = String(maxLine).length;
@@ -150,7 +151,7 @@ function SplitFile({ file, avail }: { file: FileDiff; avail: number }) {
   return (
     <Box flexDirection="column">
       <FileHeader file={file} />
-      {rows.map((r, idx) => {
+      {rows.slice(0, maxRows).map((r, idx) => {
         const oldSign = r.type === "remove" || r.type === "change" ? "-" : " ";
         const newSign = r.type === "add" || r.type === "change" ? "+" : " ";
         return (
@@ -177,10 +178,11 @@ function maxLineDigits(file: FileDiff): number {
   return Math.max(1, String(maxLine).length);
 }
 
-function UnifiedFile({ file, avail }: { file: FileDiff; avail: number }) {
+function UnifiedFile({ file, avail, maxRows }: { file: FileDiff; avail: number; maxRows: number }) {
   const digits = maxLineDigits(file);
   const colW = unifiedColWidth(avail, digits);
   const language = languageForPath(file.file);
+  let rowIndex = 0;
 
   return (
     <Box flexDirection="column">
@@ -194,6 +196,7 @@ function UnifiedFile({ file, avail }: { file: FileDiff; avail: number }) {
           if (l.type === "remove") { oldLine = o++; sign = "-"; }
           else if (l.type === "add") { newLine = n++; sign = "+"; }
           else { oldLine = o++; newLine = n++; sign = " "; }
+          if (rowIndex++ >= maxRows) return null;
           return (
             <Box key={`${hi}-${li}`} flexDirection="row" gap={1}>
               <Box width={digits} flexShrink={0}><Text color={colors.diff.lineNumber}>{diffLineNo(oldLine, digits)}</Text></Box>
@@ -209,20 +212,36 @@ function UnifiedFile({ file, avail }: { file: FileDiff; avail: number }) {
   );
 }
 
-export const DiffView = memo(function DiffView({ files, width }: { files: FileDiff[]; width?: number }) {
+export const DiffView = memo(function DiffView({ files, width, layout, maxRows }: {
+  files: FileDiff[]; width?: number; layout?: DiffLayout; maxRows?: number;
+}) {
+  const savedLayout = useContext(DiffLayoutContext);
   const { w: terminalWidth } = usePanelSize({ minWidth: 30 });
-  const panelWidth = Math.max(30, Math.min(terminalWidth, width ?? terminalWidth));
+  const panelWidth = Math.max(1, Math.min(terminalWidth, width ?? terminalWidth));
   const avail = diffAvail(panelWidth);
+  let remaining = maxRows === undefined ? Infinity : Math.max(1, Math.floor(maxRows));
+  let omitted = false;
+  const visible = files.flatMap(file => {
+    if (remaining <= 0) { omitted = true; return []; }
+    const split = (layout ?? savedLayout) === "split" && file.status === "modified"
+      && canUseSplitDiff(avail, maxLineDigits(file));
+    const rows = split ? file.hunks.flatMap(alignHunk).length
+      : file.hunks.reduce((count, hunk) => count + hunk.lines.length, 0);
+    const limit = Math.min(rows, Math.max(0, remaining - 1));
+    remaining -= 1 + limit; // file header + visible content, not a clipped frame
+    if (limit < rows) omitted = true;
+    return [{file, split, limit}];
+  });
   return (
     <Box flexDirection="column" marginTop={1}
       borderStyle="single" borderColor={colors.diff.frame} paddingLeft={1}>
-      {files.map((f, i) => (
+      {visible.map(({file, split, limit}, i) => (
         <Box key={i} flexDirection="column" marginTop={i === 0 ? 0 : 1}>
-          {f.status === "modified" && canUseSplitDiff(avail, maxLineDigits(f))
-            ? <SplitFile file={f} avail={avail} />
-            : <UnifiedFile file={f} avail={avail} />}
+          {split ? <SplitFile file={file} avail={avail} maxRows={limit}/>
+            : <UnifiedFile file={file} avail={avail} maxRows={limit}/>}
         </Box>
       ))}
+      {omitted ? <Text dimColor>… additional changes omitted</Text> : null}
     </Box>
   );
 });

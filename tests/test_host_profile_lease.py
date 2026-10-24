@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -35,8 +36,19 @@ def test_real_process_lock_blocks_duplicate_and_recovers_after_hard_close(tmp_pa
             pass
         child.kill()
         child.wait(timeout=5)
-        # The stable lock file remains but the OS lock is released on death.
-        with HostProfileLease(path):
+        # LockFileEx documents that OS unlock after process death can lag
+        # the signalled process handle. Do not unlink the stable lock inode
+        # or loosen live-owner exclusion; wait for actual OS release.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                recovered = HostProfileLease(path)
+                break
+            except RuntimeError as error:
+                if 'HOST_PROFILE_IN_USE:' not in str(error) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+        with recovered:
             assert (path / "dashboard-owner.lock").exists()
     finally:
         if child.poll() is None:

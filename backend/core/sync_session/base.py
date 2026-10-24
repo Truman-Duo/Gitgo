@@ -88,6 +88,7 @@ class SyncSessionBase:
 
         # P4-Pre: session 级关联 ID，同一次工作流的所有 history 记录共享
         self._correlation_id: str = str(uuid.uuid4())
+        self._restore_saved_session()
 
     # ── 状态查询 ────────────────────────────────────────────
 

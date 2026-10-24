@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+from backend.core.loop.execution_contract import data_broker
 from backend.core.tools.dynamic_tools import validate_host_authored_definition
 from backend.core.tools.authored_bridge import execute_authored_host_python
 from backend.core.storage import StorageRuntime
@@ -16,16 +19,16 @@ def definition(root, catalog):
     return spec, source
 
 
-def test_invented_code_uses_real_runner_and_same_leaf_approval(tmp_path_factory):
+def test_invented_code_uses_real_runner_and_same_leaf_approval(tmp_path_factory, runner_transport_only):
     process, ctx, _, leaf, calls = setup(tmp_path_factory)
     catalog = ctx.artifacts["tool_catalog"]
     spec, source = definition(tmp_path_factory, catalog)
-    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / "state")
+    runtime = StorageRuntime(tmp_path_factory, state_home=Path(os.environ["GITGO_STATE_HOME"]))
     try:
         saved = runtime.save_custom_tool(spec, source)
         saved = runtime.load_custom_tool(spec["name"])
         spec = {**saved["spec"], "source_ref": saved["source_ref"]}
-        invented = AgentTool("invented_flow", "invented", {}, lambda args: {}, composite_spec=spec)
+        invented = AgentTool("invented_flow", "invented", {}, lambda args: {}, composite_spec=spec, execution_contract=data_broker("host.composite"))
         catalog[invented.name] = invented
         process.tool_registry.add_scoped(invented.name)
         process.runtime_storage = runtime; ctx.storage = runtime
@@ -55,7 +58,7 @@ def test_missing_leaf_is_a_capability_error_before_any_prefix_execution(tmp_path
     process, ctx, _, leaf, calls = setup(tmp_path_factory)
     catalog = ctx.artifacts['tool_catalog']
     spec, _ = definition(tmp_path_factory, catalog)
-    invented = AgentTool('invented_flow', 'invented', {}, lambda args: {}, composite_spec=spec)
+    invented = AgentTool('invented_flow', 'invented', {}, lambda args: {}, composite_spec=spec, execution_contract=data_broker("host.composite"))
     process.tool_registry.add_scoped(invented.name)
     process.tool_registry.remove_scoped(leaf.name)
     for missing_catalog in (False, True):
@@ -70,7 +73,7 @@ def test_missing_leaf_is_a_capability_error_before_any_prefix_execution(tmp_path
         assert not process.runtime_preferences.get('composite_continuations')
 
 
-def test_host_registration_keeps_asset_but_does_not_mount_unavailable_leaves(tmp_path_factory):
+def test_host_registration_keeps_asset_but_does_not_mount_unavailable_leaves(tmp_path_factory, runner_transport_only):
     from backend.core.loop.executor import _build_internal_tools
     from backend.core.loop.models import AgentProcess, RingLevel
     from backend.core.loop.session import AgentSession
@@ -81,7 +84,9 @@ def test_host_registration_keeps_asset_but_does_not_mount_unavailable_leaves(tmp
     p = AgentProcess('supervisor', 'supervisor', RingLevel.RING_3, actor_kind='supervisor',
         active_task_id='task', session=AgentSession(), worktree_path=str(tmp_path_factory),
         tool_registry=ToolRegistry(['author_tool', 'read_prefix']))
-    runtime = StorageRuntime(tmp_path_factory, state_home=tmp_path_factory / 'state')
+    import os
+    from pathlib import Path
+    runtime = StorageRuntime(tmp_path_factory, state_home=Path(os.environ['GITGO_STATE_HOME']))
     p.runtime_storage = runtime
     try:
         tool = _build_internal_tools(p, catalog, str(tmp_path_factory))['author_tool']
@@ -90,7 +95,12 @@ def test_host_registration_keeps_asset_but_does_not_mount_unavailable_leaves(tmp
             'tests': [{'input': {}, 'expected': {'done': True}, 'host_results': [
                 {'tool_name': 'read_prefix', 'arguments_digest': arguments_digest({}), 'result': {'value': 'mock'}},
                 {'tool_name': leaf.name, 'arguments_digest': arguments_digest({'value': 'mock'}), 'result': {'ok': True}}]}]}
-        result = tool.execute(payload)
+        from backend.core.loop.execution_context import ExecutionContext
+        context = ExecutionContext(process=p, session=p.session, workspace_path=str(tmp_path_factory),
+            cancellation=p.cancellation_event, storage=runtime)
+        response = ToolPipeline().execute({"name": tool.name, "args": payload}, tool, context, "registration")
+        assert not response.is_error, response.formatted
+        result = response.data
         assert result['registered'] and result['mounted'] is False
         assert result['blocked_on'] == 'CUSTOM_TOOL_CAPABILITY_REQUIRED'
         assert result['warnings'] and 'error' not in result
@@ -116,7 +126,7 @@ def test_lease_refresh_preserves_compatible_scoped_tools_without_leaf_grants(tmp
         active_task_id='task', session=AgentSession(), worktree_path=str(tmp_path_factory),
         capability_profile_id='supervisor.control', tool_registry=ToolRegistry(CapabilityProfiles.resolve_tools('supervisor.control')))
     spec = {'name': 'saved_bridge', 'execution_mode': 'authored_host_python', 'host_tools': ['read_file', 'shell_script']}
-    p.dynamic_tools['saved_bridge'] = AgentTool('saved_bridge', 'fixture registered bridge', {}, lambda args: {}, composite_spec=spec)
+    p.dynamic_tools['saved_bridge'] = AgentTool('saved_bridge', 'fixture registered bridge', {}, lambda args: {}, composite_spec=spec, execution_contract=data_broker("host.composite"))
     catalog = build_workspace_tools(tmp_path_factory)
     tools = _build_internal_tools(p, catalog, str(tmp_path_factory))
     result = tools['request_self_execute'].execute({'profile_id': 'development.workspace',

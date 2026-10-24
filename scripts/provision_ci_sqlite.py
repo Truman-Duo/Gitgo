@@ -1,6 +1,11 @@
 """Pin a patched SQLite in disposable hosted CI; never relax runtime validation."""
 from __future__ import annotations
 
+import sys as _development_sys
+from pathlib import Path as _DevelopmentPath
+_development_sys.path.insert(0, str(_DevelopmentPath(__file__).resolve().parents[1]))
+from scripts.development_paths import development_root
+
 import argparse
 import hashlib
 import importlib.util
@@ -87,7 +92,7 @@ def main():
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
         raise SystemExit("Only disposable GitHub-hosted CI can provision this runtime")
     root = Path(__file__).resolve().parents[1]
-    scratch = root / ".gitgo" / "ci-sqlite"
+    scratch = development_root(root) / "ci-sqlite"
     scratch.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":
         target = Path(sys.base_prefix) / "DLLs" / "sqlite3.dll"
@@ -97,6 +102,10 @@ def main():
         # This process has never imported sqlite3, so it holds no DLL lock.
         with download("windows") as archive:
             target.write_bytes(archive.read("sqlite3.dll"))
+        # The VFS build consumes the same pinned release header; no hidden
+        # compiler download or version-only runtime substitution is allowed.
+        with download("linux") as archive:
+            (scratch / "sqlite3.h").write_bytes(archive.read("sqlite-amalgamation-3530400/sqlite3.h"))
     elif sys.platform in ("linux", "darwin"):
         with download("linux") as archive:
             source = scratch / "sqlite3.c"

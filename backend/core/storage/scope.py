@@ -22,21 +22,13 @@ class RepositoryScope:
 
 def _discover_git_root(workspace: Path) -> Path | None:
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        from backend.core.loop.git_execution import discover_git_metadata, GitBoundaryError
+        result = discover_git_metadata(workspace, "--show-toplevel")
+    except (OSError, subprocess.TimeoutExpired, GitBoundaryError):
         return None
     if result.returncode != 0:
         return None
-    value = result.stdout.strip()
+    value = result.stdout.decode("utf-8", errors="replace").strip()
     return Path(value).resolve() if value else None
 
 

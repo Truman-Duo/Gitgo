@@ -107,6 +107,7 @@ class DaemonClient:
             # its explicit internal-role multiplexer instead of being treated
             # as a Python interpreter.
             cmd = daemon_command(self.project_name, self._project_root)
+            from backend.core.installation_lease import child_options
 
             self._process = subprocess.Popen(
                 cmd,
@@ -124,6 +125,7 @@ class DaemonClient:
                 errors="strict",
                 bufsize=1,
                 creationflags=creation_flags(),
+                **child_options(),
             )
             # The daemon owns Provider requests and every B/tool descendant.
             # A kill-on-close Job Object makes an abrupt Dashboard/Native Host

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 
 from backend.core.errors import error_payload
@@ -98,7 +98,7 @@ def document_open(args: dict) -> dict:
         elif suffix == ".doc":
             from .document_limits import verified_antiword, check_converter
             try:
-                antiword, expected = verified_antiword()
+                antiword, expected = verified_antiword(workspace)
                 check_converter(antiword, expected)
             except ValueError as exc:
                 return _document_error(
@@ -112,9 +112,10 @@ def document_open(args: dict) -> dict:
             from backend.core.process_control import creation_flags, attach_kill_job, terminate_tree, close_job
             from backend.core.process_output import collect_output, OutputLimit
             from backend.core.tools.execution_profile import safe_environment
-            completed = subprocess.Popen([str(antiword), str(path)], stdout=subprocess.PIPE,
+            from backend.core.installation_lease import child_options
+            completed = subprocess.Popen([str(antiword), str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                env=safe_environment(), creationflags=creation_flags(), start_new_session=os.name != "nt")
+                env=safe_environment(), creationflags=creation_flags(), start_new_session=os.name != "nt", **child_options())
             job = attach_kill_job(completed)
             try:
                 stdout, stderr, _ = collect_output(completed, timeout=60, limit=MAX_TEXT_CHARS,
@@ -203,11 +204,15 @@ def _content_lines(content: str) -> list[str]:
 
 
 def document_create(args: dict) -> dict:
-    """Create a common project artifact through one stable adapter contract.
+    from .document_service import document_create as create
+    return create(args)
 
-    This is a trusted built-in output tool, not arbitrary Python. It shares the
-    normal workspace confinement, approval, receipt, cancellation and worktree
-    paths used by every development tool.
+
+def render_document(args: dict) -> dict:
+    """Internal native producer; Task Runtime supplies a private workspace.
+
+    This handler is not a model-visible tool or a formal file commit service.
+    Third-party format processing stays inside the native process boundary.
     """
     workspace = None
     path = None

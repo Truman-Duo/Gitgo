@@ -1,4 +1,5 @@
 """Context pressure, compaction accounting and explicit destructive fallback consent."""
+from .budget_runtime import reserve_provider_call
 from .lifecycle import transition
 from .models import ProcessStatus
 from .outcome import OutcomeStatus
@@ -32,6 +33,7 @@ class ContextCompaction:
                 cancel_event=process.cancellation_event,
                 budget_process_id=process.process_id,
                 on_provider_notice=_emit_observation,
+                reserve_call=lambda: reserve_provider_call(process, _emit_observation),
             )
         reason = str(context_window.last_compaction_error or "")
         no_op = reason == "not_enough_foldable_history" and not failure_required

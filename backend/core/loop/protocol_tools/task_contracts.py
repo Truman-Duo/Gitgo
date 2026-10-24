@@ -1,5 +1,8 @@
 """task contracts protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
 from backend.core.loop.completion_protocol import CompletionClaim
@@ -68,32 +71,12 @@ def install(ctx):
 
 
     tools["declare_task_contract"] = AgentTool(
+        execution_contract=data_broker("host.runtime.declare_task_contract"),
         name="declare_task_contract",
         alignment_contract=lambda args: preview_contract(process,
             validate_contract_proposal(args, workspace_path or process.worktree_path)),
         description=(
-            "Compile your semantic understanding of a non-trivial user request "
-            "into a Host-validated task contract before effectful or delegated "
-            "work. This is not keyword classification and grants no authority. "
-            "Do not call it for ordinary conversation. Record whether delegation "
-            "or concrete workspace artifacts are genuine requirements; list any "
-            "unresolved product choice so request_user_decision can handle it. "
-            "For bounded single-owner work, choose self_execute. Continue directly "
-            "when the delivery is only a response or uses observation-only tools; "
-            "request_self_execute only before an actual mutating delivery. Delegation "
-            "is valid only for truthful complexity, "
-            "multiple workstreams, explicit handoff/parallelization, or a user's "
-            "manual B request. When the user explicitly asks for a subprocess/B, "
-            "set user_requested_delegation=true and quote the relevant request in "
-            "user_request_evidence; do not infer this flag merely because delegation "
-            "would be convenient. If the wording is ambiguous, put that ambiguity in "
-            "uncertainties and ask the user instead of guessing. "
-            "The result includes a deterministic Budget Card. Treat a B as having "
-            "setup and coordination cost: persisting or testing an answer A already "
-            "derived is still bounded single-owner work, not a separate workstream. "
-            "For continuing/reviewing prior work, select adopt_process_ids from "
-            "list_agents to make those outcomes required for this turn. Unrelated "
-            "new tasks must not inherit old delivery obligations automatically."
+            load_prompt('tools/declare_task_contract')
         ),
         parameters={
             "type": "object",
@@ -238,23 +221,15 @@ def install(ctx):
 
 
     tools["complete_supervision"] = AgentTool(
+        execution_contract=data_broker("host.runtime.complete_supervision"),
         name="complete_supervision",
         description=(
-            "Submit the final A-level synthesis. The Host verifies every "
-            "required B is terminal and explicitly reviewed, then closes the "
-            "supervisor task without a TASK_COMPLETE password. If a required "
-            "delivery failed, review it as changes_required and submit the "
-            "failure report here; status=auto lets the Host derive failure."
+            load_prompt('tools/complete_supervision')
         ),
         parameters={
             "type": "object",
             "properties": {
-                "result": {"type": "string", "description": (
-                    "User-facing outcome: what was delivered and any material limitation. "
-                    "Do not enumerate tests, searches, retries, receipts, hashes, process IDs "
-                    "or governance procedures. Put those facts in verification unless the user "
-                    "explicitly requested a process audit."
-                )},
+                "result": {"type": "string", "description": load_prompt('tools/completion_result')},
                 "verification": {
                     "type": "array", "items": {"type": "object"},
                     "description": (
@@ -346,15 +321,10 @@ def install(ctx):
 
 
     tools["request_self_execute"] = AgentTool(
+        execution_contract=data_broker("host.runtime.request_self_execute"),
         name="request_self_execute",
         description=(
-            "Explicitly request the task-scoped capability lease selected by an "
-            "accepted self_execute contract. Call this when the Host routing result "
-            "says request_self_execute: the current pre-lease surface intentionally "
-            "does not yet contain file mutation, command or test tools. A successful "
-            "lease rebuilds the surface with those tools. Use development.workspace "
-            "for files, commands or tests; governance.operate for governance-only "
-            "state changes. This explicit call is required and never implied by prose."
+            load_prompt('tools/request_self_execute')
         ),
         parameters={
             "type": "object",

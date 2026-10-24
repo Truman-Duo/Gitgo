@@ -41,9 +41,12 @@ class WorktreeLease:
     snapshot_commit: str = ""
     result_commit: str = ""
     own_commit: str = ""
+    resumed_from_process_id: str = ""
+    continuation_commit: str = ""
     upstream_commits: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     runtime_offsets: dict[str, int] = field(default_factory=dict)
+    input_dependencies: list[dict] = field(default_factory=list)
     error: str = ""
     promoted: bool = False
     promoted_at: str = ""
@@ -54,6 +57,16 @@ class WorktreeLease:
     def isolated(self) -> bool:
         return self.state not in {"shared", "disposed"} and bool(self.path)
 
+    @property
+    def has_promotable_result(self) -> bool:
+        # Approval disposes a no-change checkout but keeps its immutable
+        # result ref. That lifecycle cleanup must not invalidate a DAG proof.
+        return bool(self.result_commit) and (
+            self.state == "sealed" or (
+                self.state == "disposed" and self.mode == "write" and not self.own_commit
+            )
+        )
+
     def to_dict(self) -> dict:
         value = asdict(self)
         value["isolated"] = self.isolated
@@ -62,7 +75,9 @@ class WorktreeLease:
     @classmethod
     def from_dict(cls, value: dict) -> "WorktreeLease":
         names = set(cls.__dataclass_fields__)
-        return cls(**{key: item for key, item in value.items() if key in names})
+        fields = {key: item for key, item in value.items() if key in names}
+        fields["input_dependencies"] = list(fields.get("input_dependencies") or [])
+        return cls(**fields)
 
 
 class AgentWorktreeManager:
@@ -71,15 +86,16 @@ class AgentWorktreeManager:
     def __init__(self, workspace: str | Path, storage) -> None:
         self.workspace = Path(workspace).resolve()
         self.storage = storage
-        root = self._git_text(self.workspace, "rev-parse", "--show-toplevel")
-        self.repo_root = Path(root).resolve()
-        if self.repo_root != self.workspace:
-            # Tool paths and repository identity are rooted at the submitted
-            # workspace.  Silently widening to an ancestor would broaden the
-            # Agent's authority and file scan scope.
+        # Establish the submitted root without executing repository-configured
+        # programs during daemon assembly. Protected Git validates the actual
+        # metadata on every operation. An unsupported backend/config must fail
+        # the requested isolated task, not make startup fall back to shared mode.
+        marker = self.workspace / ".git"
+        if not (marker.is_dir() or marker.is_file()):
             raise WorktreeError(
                 f"workspace must be the Git repository root: {self.workspace}"
             )
+        self.repo_root = self.workspace
         # Keep linked checkouts outside both the user repository and the long
         # per-project SQLite/CAS path.  Git for Windows still encounters tools
         # and hooks that assume MAX_PATH, so opaque directory names are a
@@ -91,6 +107,35 @@ class AgentWorktreeManager:
             storage.paths.state_home.parent / "wt" / project_slug
         ).resolve()
         self.worktrees_root.mkdir(parents=True, exist_ok=True)
+
+    # Product-managed metadata is never a business delta. Its selected
+    # observations travel through the canonical metadata channels below;
+    # new internal file kinds must not accidentally enter a sealed result.
+    _RUNTIME_PATHS = (".gitgo",)
+
+    @classmethod
+    def _business_paths(cls) -> list[str]:
+        return [".", ":(top,exclude,icase,literal).gitgo",
+                ":(exclude,icase,glob)**/.gitgo/**",
+                ":(exclude,icase,glob)**/.git/**"]
+
+    @classmethod
+    def _is_runtime_path(cls, relative: str) -> bool:
+        from backend.core.tools.file_operations import protected_metadata_part
+        return any(protected_metadata_part(part) for part in relative.replace(chr(92), "/").split("/"))
+
+    def _apply_business_commit(self, target: Path, commit: str) -> None:
+        # Project the business delta even for an older sealed commit that
+        # contained runtime artifacts. Preserve immutable refs and normal
+        # three-way conflict detection; do not mutate the user's index.
+        if not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)):
+            raise WorktreeError("Agent result commit is invalid")
+        patch = self._git_bytes(
+            target, "diff", "--binary", "--full-index", "--no-ext-diff",
+            f"{commit}^", commit, "--", *self._business_paths(),
+        )
+        if patch:
+            self._git_input(target, patch, "apply", "--3way", "--index", "-")
 
     @staticmethod
     def _safe_id(value: str) -> str:
@@ -113,41 +158,24 @@ class AgentWorktreeManager:
         check: bool = True,
         timeout_seconds: float = 120,
     ) -> subprocess.CompletedProcess:
-        command = list(args)
-        if command and command[0] == "git":
-            # A daemon child must never inherit the JSON control pipe or wait
-            # for Git Credential Manager/editor interaction.  Apart from
-            # potentially consuming protocol input, inherited handles can
-            # keep a nested Windows process alive after its owning task was
-            # cancelled.  Resolve Git before launch so executable discovery
-            # is not delegated to a grandchild process.
-            command[0] = shutil.which("git") or "git"
-            command[1:1] = ["-c", "core.longpaths=true"]
-        environment = {
-            **os.environ,
-            "GIT_TERMINAL_PROMPT": "0",
-            "GCM_INTERACTIVE": "Never",
-            "GIT_EDITOR": "true",
-            "GIT_PAGER": "cat",
-        }
-        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        input_options = (
-            {"input": input_bytes}
-            if input_bytes is not None
-            else {"stdin": subprocess.DEVNULL}
-        )
+        from .git_execution import GitBoundaryError, protected_git
         try:
-            result = subprocess.run(
-                command,
-                cwd=cwd,
-                capture_output=True,
-                timeout=timeout_seconds,
-                check=False,
-                close_fds=True,
-                creationflags=creationflags,
-                env=environment,
-                **input_options,
-            )
+            with protected_git(cwd, args) as (command, environment):
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                result = subprocess.run(command, cwd=cwd, capture_output=True,
+                    timeout=timeout_seconds, check=False, close_fds=True,
+                    creationflags=creationflags, env=environment,
+                    **({"pass_fds": command.pass_fds} if os.name == 'posix' and hasattr(command, 'pass_fds') else {}),
+                    **({"input": input_bytes} if input_bytes is not None
+                       else {"stdin": subprocess.DEVNULL}))
+        except GitBoundaryError as exc:
+            from backend.core.errors import error_payload
+            failure = WorktreeError(str(exc))
+            failure.diagnostic = error_payload(exc.code, message=str(exc), details={
+                "scope": "this_git_command", "command_started": False,
+                "task_effects": "not_inferred", "unrestricted_fallback": False,
+            })
+            raise failure from exc
         except (OSError, subprocess.TimeoutExpired) as exc:
             command_label = " ".join(str(item) for item in args[:5])
             raise WorktreeError(
@@ -215,6 +243,8 @@ class AgentWorktreeManager:
             if not encoded:
                 continue
             relative = encoded.decode("utf-8", errors="surrogateescape")
+            if self._is_runtime_path(relative):
+                continue
             source = (self.repo_root / relative).resolve()
             destination = (target / relative).resolve()
             try:
@@ -228,17 +258,47 @@ class AgentWorktreeManager:
             shutil.copy2(source, destination)
 
     def _commit(self, path: Path, message: str) -> str:
-        self._git_text(path, "add", "-A")
+        # Enumerate Git-visible paths rather than passing excluded children
+        # of an ignored .gitgo directory to `git add` (Git rejects those).
+        visible = self._git_bytes(path, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+        business = dict.fromkeys(
+            name for name in visible.split(b"\0") if name
+            and not self._is_runtime_path(name.decode("utf-8", errors="surrogateescape"))
+        )
+        if business:
+            pathspec = b"\0".join(b":(literal)" + name for name in business) + b"\0"
+            self._git_input(path, pathspec, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul")
+        # A worker may have staged files itself, or an older result may have
+        # carried runtime paths. Unstage those paths without deleting evidence.
+        staged_names = self._git_bytes(path, "diff", "--cached", "--name-only", "-z")
+        metadata = [name.decode("utf8", errors="surrogateescape") for name in staged_names.split(b"\0")
+                    if name and self._is_runtime_path(name.decode("utf8", errors="surrogateescape"))]
+        if metadata:
+            self._git_text(path, "reset", "--quiet", "HEAD", "--", *metadata)
         staged = self._git_bytes(
             path, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff",
         )
         if not staged:
             return self._git_text(path, "rev-parse", "HEAD")
+        try:
+            self._scan_business_patch(staged)
+        except WorktreeError:
+            self._git_text(path, "reset", "--mixed", "HEAD")
+            raise
+        self._git_text(
+            path,
+            "-c", "user.name=Gitgo Agent",
+            "-c", "user.email=agent@local.gitgo.invalid",
+            "commit", "--no-verify", "-m", message,
+        )
+        return self._git_text(path, "rev-parse", "HEAD")
+
+    @staticmethod
+    def _scan_business_patch(patch: bytes) -> None:
         from backend.core.operations.security import scan_diff_for_secrets
 
-        warnings = scan_diff_for_secrets(staged.decode("utf-8", errors="replace"))
+        warnings = scan_diff_for_secrets(patch.decode("utf-8", errors="replace"))
         if warnings:
-            self._git_text(path, "reset", "--mixed", "HEAD")
             rules = sorted({str(item.get("rule_id", "secret")) for item in warnings})
             # Return actionable, non-secret evidence.  Rule-only failures made
             # an A or user guess which of hundreds of snapshot files triggered
@@ -254,13 +314,6 @@ class AgentWorktreeManager:
                 + "; non_secret_findings="
                 + json.dumps(findings, ensure_ascii=False, separators=(",", ":"))
             )
-        self._git_text(
-            path,
-            "-c", "user.name=Gitgo Agent",
-            "-c", "user.email=agent@local.gitgo.invalid",
-            "commit", "--no-verify", "-m", message,
-        )
-        return self._git_text(path, "rev-parse", "HEAD")
 
     def _copy_runtime_inputs(
         self, target: Path, lease: WorktreeLease, context_refs: dict | None = None,
@@ -372,6 +425,7 @@ class AgentWorktreeManager:
         mode: str = "write",
         review_commit: str = "",
         context_refs: dict | None = None,
+        resume_from: WorktreeLease | None = None,
     ) -> WorktreeLease:
         """Create one isolated checkout and materialize declared predecessors."""
         if mode not in {"write", "review"}:
@@ -386,6 +440,7 @@ class AgentWorktreeManager:
             root_workspace=str(self.repo_root),
             mode=mode,
             base_commit="",
+            resumed_from_process_id=resume_from.process_id if resume_from else "",
         )
         # Establish a durable lifecycle row before invoking any child process.
         # If even `git rev-parse` cannot start, recovery/diagnostics still know
@@ -407,7 +462,7 @@ class AgentWorktreeManager:
                 self._add_detached(target, start)
                 if not snapshot_commit:
                     patch = self._git_bytes(
-                        self.repo_root, "diff", "--binary", "--full-index", "HEAD", "--",
+                        self.repo_root, "diff", "--binary", "--full-index", "HEAD", "--", *self._business_paths(),
                     )
                     if patch:
                         self._git_input(
@@ -424,11 +479,13 @@ class AgentWorktreeManager:
                 lease.snapshot_commit = snapshot_commit
                 commits = list(dict.fromkeys(str(item) for item in upstream_commits if item))
                 for commit in commits:
-                    self._git_text(target, "cherry-pick", "--no-commit", commit)
+                    self._apply_business_commit(target, commit)
                 if commits:
                     self._commit(target, f"gitgo materialize upstream for {task_id}")
                 lease.upstream_commits = commits
                 lease.state = "leased"
+                if resume_from is not None:
+                    self._restore_partial_work(lease, resume_from)
             self._copy_runtime_inputs(target, lease, context_refs=context_refs)
             self._persist(lease)
             return lease
@@ -442,6 +499,72 @@ class AgentWorktreeManager:
                 lease.error = f"{lease.error}; cleanup failed: {cleanup_exc}"
                 self._persist(lease)
             raise
+
+    def _restore_partial_work(self, lease: WorktreeLease, previous: WorktreeLease) -> None:
+        """Copy a failed execution's business delta, never its execution authority.
+
+        The previous checkout is frozen behind a private ref after the normal
+        privacy scan. The new checkout keeps its original upstream HEAD; the
+        restored edits remain uncommitted so sealing includes the entire delta.
+        """
+        if (previous.mode != "write" or previous.state != "leased" or previous.promoted
+                or previous.root_workspace != lease.root_workspace
+                or previous.snapshot_commit != lease.snapshot_commit
+                or previous.upstream_commits != lease.upstream_commits):
+            raise WorktreeError("CONTINUATION_BASE_MISMATCH: unpublished work requires the same snapshot and dependencies")
+        source = Path(previous.path).resolve()
+        if source != self._target_path(self._safe_id(previous.process_id)).resolve():
+            raise WorktreeError("CONTINUATION_WORKTREE_INVALID: source is not its managed checkout")
+        if not self.verify(previous).get("valid"):
+            raise WorktreeError("CONTINUATION_WORKTREE_INVALID: retained checkout is unavailable")
+        source_common = self._git_text(source, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        root_common = self._git_text(self.repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if Path(source_common).resolve() != Path(root_common).resolve():
+            raise WorktreeError("CONTINUATION_WORKTREE_INVALID: checkout belongs to another repository")
+        checkpoint = self._commit(source, f"gitgo retain failed execution {previous.process_id}")
+        target = Path(lease.path)
+        base = self._git_text(target, "rev-parse", "HEAD")
+        patch = self._git_bytes(target, "diff", "--binary", "--full-index", "--no-ext-diff",
+                                base, checkpoint, "--", *self._business_paths())
+        self._scan_business_patch(patch)
+        self._git_text(self.repo_root, "update-ref",
+                       self._ref("continuations", self._safe_id(previous.process_id)), checkpoint)
+        previous.continuation_commit = checkpoint
+        self._persist(previous)
+        if patch:
+            self._git_input(target, patch, "apply", "--binary", "--index", "--whitespace=nowarn", "-")
+        lease.resumed_from_process_id = previous.process_id
+        lease.continuation_commit = checkpoint
+
+    def _delivery_files(self, integration: Path, changed: list[str],
+                        artifact_paths: Iterable[str] = ()) -> tuple[list[dict], list[str]]:
+        """Bounded digests from the candidate tree, before the promotion effect.
+
+        Unsupported files stay ordinary promoted files; they cannot silently
+        become text evidence. This metadata is consumed by the existing receipt
+        pipeline and delivery collector, not a second completion authority.
+        """
+        from backend.core.tools.workspace_tools import _confined_path
+        from .delivery_artifacts import MAX_ARTIFACT_BYTES
+        files, notices = [], []
+        candidates = list(dict.fromkeys([*changed, *(str(p) for p in artifact_paths if str(p) != "*")]))
+        for relative in candidates[:128]:
+            try:
+                path = _confined_path(integration, relative, must_exist=True)
+                if not path.is_file() or path.stat().st_size > MAX_ARTIFACT_BYTES:
+                    raise ValueError("not a bounded text artifact")
+                with path.open("rb") as stream:
+                    raw = stream.read(MAX_ARTIFACT_BYTES + 1)
+                if len(raw) > MAX_ARTIFACT_BYTES or b"\0" in raw:
+                    raise ValueError("not a bounded text artifact")
+                raw.decode("utf-8-sig")
+                files.append({"path": relative, "after_sha256": hashlib.sha256(raw).hexdigest(),
+                              "evidence_kind": "committed_write" if relative in changed else "snapshot_verified"})
+            except (ValueError, OSError, UnicodeError) as exc:
+                notices.append(f"{relative}: {exc}")
+        if len(candidates) > 128:
+            notices.append("Promotion artifact metadata limited to 128 files.")
+        return files, notices
 
     def seal(self, lease: WorktreeLease) -> WorktreeLease:
         """Freeze a successful worker result behind an internal immutable ref."""
@@ -460,7 +583,8 @@ class AgentWorktreeManager:
         lease.result_commit = result
         changed_range = f"{parent}..{result}" if result != parent else ""
         lease.changed_files = (
-            self._git_text(path, "diff", "--name-only", changed_range, "--").splitlines()
+            [name.decode("utf-8", errors="surrogateescape") for name in self._git_bytes(
+                path, "diff", "--no-renames", "--name-only", "-z", changed_range, "--").split(b"\0") if name]
             if changed_range else []
         )
         self._merge_runtime_outputs(path, lease)
@@ -506,7 +630,9 @@ class AgentWorktreeManager:
             raise WorktreeError("sealed artifact offset is beyond the file")
         span = max(1000, min(int(max_chars or 24000), 100000))
         end = min(len(content), start + span)
-        return {
+        return {"representation": "git_blob", "sha256_basis": "git_blob_bytes",
+                "working_tree_bytes_verified": False,
+                "materialization_note": "Git checkout attributes/settings may change working-file bytes; promotion file_results bind the actual checked candidate bytes.",
             "path": relative,
             "sha256": digest,
             "content": content[start:end],
@@ -522,65 +648,14 @@ class AgentWorktreeManager:
         snapshot_commit: str,
         ordered_commits: Iterable[str],
         promotion_id: str,
+        artifact_paths: Iterable[str] = (),
+        input_dependencies: Iterable[dict] = (),
+        file_service_args: dict | None = None,
     ) -> dict:
-        """Apply approved DAG deltas to the user workspace without committing."""
-        commits = list(dict.fromkeys(str(item) for item in ordered_commits if item))
-        if not commits:
-            return {"promoted": True, "changed_files": [], "commits": []}
-        # Task ids are user/provider facing and may legitimately contain
-        # separators that are invalid in a directory component.  Worktree
-        # identities are Host-owned opaque values, so hash rather than reject
-        # an otherwise valid task at the final promotion boundary.
-        integration_id = f"promote-{self._ref_id(promotion_id)}"
-        integration = self._target_path(integration_id)
-        self._add_detached(integration, snapshot_commit)
-        promotion_result: dict | None = None
-        try:
-            for commit in commits:
-                self._git_text(integration, "cherry-pick", "--no-commit", commit)
-                self._commit(integration, f"gitgo integrate {promotion_id}")
-            tip = self._git_text(integration, "rev-parse", "HEAD")
-            changed = self._git_text(
-                integration, "diff", "--name-only", f"{snapshot_commit}..{tip}", "--",
-            ).splitlines()
-            if changed:
-                overlap = self._git_text(
-                    self.repo_root, "diff", "--name-only", snapshot_commit, "--", *changed,
-                ).splitlines()
-                if overlap:
-                    raise WorktreeError(
-                        "workspace changed after DAG snapshot on: " + ", ".join(overlap)
-                    )
-            patch = self._git_bytes(
-                integration, "diff", "--binary", "--full-index",
-                f"{snapshot_commit}..{tip}", "--",
-            )
-            if patch:
-                self._git_input(
-                    self.repo_root, patch,
-                    "apply", "--binary", "--whitespace=nowarn", "-",
-                )
-            promotion_result = {
-                "promoted": True,
-                "changed_files": changed,
-                "commits": commits,
-                "snapshot_commit": snapshot_commit,
-                "result_commit": tip,
-            }
-        finally:
-            try:
-                self._remove_path(integration)
-            except WorktreeError as cleanup_exc:
-                # Applying the patch is the promotion commit point.  A leaked
-                # temporary checkout is a visible cleanup fault, not grounds
-                # to falsely report that the already-applied patch failed.
-                if promotion_result is not None:
-                    promotion_result["cleanup_error"] = str(cleanup_exc)
-        return promotion_result or {
-            "promoted": False,
-            "changed_files": [],
-            "commits": commits,
-        }
+        from .promotion import promote
+        return promote(self, snapshot_commit=snapshot_commit, ordered_commits=ordered_commits,
+                       promotion_id=promotion_id, artifact_paths=artifact_paths, input_dependencies=input_dependencies,
+                       file_service_args=file_service_args)
 
     def verify(self, lease: WorktreeLease) -> dict:
         path = Path(lease.path).resolve()
@@ -606,7 +681,7 @@ class AgentWorktreeManager:
         return lease
 
     def mark_promoted(self, lease: WorktreeLease) -> WorktreeLease:
-        if lease.state != "sealed":
+        if not lease.has_promotable_result:
             raise WorktreeError(f"worktree cannot be promoted from state {lease.state}")
         lease.promoted = True
         lease.promoted_at = _utc_now()

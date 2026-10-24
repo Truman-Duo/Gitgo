@@ -105,7 +105,7 @@ class LoopGuard:
                     blocked=True,
                     reason_code="host_completion",
                     gates=gate_status["gates"],
-                    nudge_text="[Host 完成硬门] " + "; ".join(g["message"] for g in gate_status["gates"]),
+                    nudge_text=render_completion_guidance(gate_status["gates"]),
                 )
 
             # TaskGate state must live for the whole execution, not one check.
@@ -389,3 +389,8 @@ def _canonicalize_args(tool_name: str, args: dict) -> str:
             if re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', v):
                 cleaned[k] = "<TIMESTAMP>"
     return json.dumps(cleaned, sort_keys=True, ensure_ascii=False)
+
+
+def render_completion_guidance(gates):
+    from backend.core.prompt_templates import render_prompt
+    return render_prompt("runtime/completion_feedback", gates=json.dumps(gates, ensure_ascii=False))

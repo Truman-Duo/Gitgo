@@ -1,5 +1,8 @@
 """dynamic and completion protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ApprovalMode, CancellationMode, ToolEffect
 from backend.core.loop.completion_protocol import COMPLETE_TASK_PARAMETERS, CompletionClaim
 
@@ -69,6 +72,7 @@ def install(ctx):
                 return {"error": str(exc), "defined": False}
 
             dynamic = AgentTool(
+                execution_contract=data_broker("host.composite"),
                 name=spec["name"],
                 description=spec["description"],
                 parameters=spec["parameters"],
@@ -94,10 +98,10 @@ def install(ctx):
             }
 
         tools["define_tool"] = AgentTool(
+            execution_contract=data_broker("host.runtime.define_tool"),
             name="define_tool",
             description=(
-                "Define one task-scoped composite tool from tools already authorized in "
-                "this capability. It cannot add authority or execute arbitrary Python."
+                load_prompt('tools/define_tool')
             ),
             parameters={
                 "type": "object",
@@ -137,10 +141,15 @@ def install(ctx):
                 validate_authored_definition, validate_privileged_authored_definition, validate_host_authored_definition,
             )
             from backend.core.storage import get_storage
+            from ..service_runtime import service_runtime
+            invocation_runtime = service_runtime()
+            effective_workspace = invocation_runtime.workspace if invocation_runtime is not None else workspace_path
             operation = str(args.get("operation", "register") or "register").lower()
+            if invocation_runtime is not None and operation in {"register", "replace"}:
+                invocation_runtime.phase = "preflight"
             storage = process.bound_storage
             if storage is None:
-                storage = get_storage(workspace_path)
+                storage = get_storage(effective_workspace)
 
             def authored_error(name: str, *, message: str = "", details: dict | None = None,
                                next_actions: list[dict] | None = None, **state) -> dict:
@@ -173,6 +182,10 @@ def install(ctx):
                 spec["source_ref"] = str(saved.get("source_ref") or "")
                 name = str(spec.get("name") or saved.get("name") or "")
                 privileged = spec.get("execution_mode") == "authored_privileged_python"
+                if name in available_tools or name in tools:
+                    return authored_error("CUSTOM_TOOL_EXISTS", message="The custom name conflicts with an installed built-in tool.",
+                        mounted=False, name=name, saved_asset_retained=True,
+                        next_actions=[{"action": "publish_under_a_distinct_name"}])
                 from ..tool_surface import component_blocker
                 blocker = component_blocker(process, spec, {**available_tools, **process.dynamic_tools})
                 if blocker:
@@ -180,7 +193,11 @@ def install(ctx):
                     process.tool_registry.remove_scoped(name)
                     return {**blocker, 'mounted': False, 'name': name, 'saved_asset_retained': True}
                 from ..dynamic_mount import mounted_tool
-                dynamic = mounted_tool(spec)
+                try:
+                    dynamic = mounted_tool(spec)
+                except ValueError as exc:
+                    return authored_error("CUSTOM_TOOL_INVALID", message=str(exc), mounted=False, name=name,
+                        saved_asset_retained=True, next_actions=[{"action": "revise_definition_then_replace"}])
                 process.dynamic_tools[name] = dynamic
                 process.tool_registry.add_scoped(name)
                 return {
@@ -254,6 +271,9 @@ def install(ctx):
                     ]}],
                 )
             name = str(args.get("name") or "")
+            if name in available_tools or name in tools:
+                return authored_error("CUSTOM_TOOL_EXISTS", message="The custom name conflicts with an installed built-in tool.",
+                    registered=False, next_actions=[{"action": "publish_under_a_distinct_name"}])
             catalog = storage.list_custom_tools(include_archived=True)
             persistent = next(
                 (item for item in catalog.get("tools", []) if item.get("name") == name),
@@ -274,9 +294,9 @@ def install(ctx):
             try:
                 privileged = str(args.get("authority_mode") or "pure") == "privileged"
                 spec = (
-                    validate_privileged_authored_definition(compiled, workspace_path)
-                    if privileged else validate_host_authored_definition(compiled, workspace_path, available_tools)
-                    if str(args.get("authority_mode") or "pure") == "host" else validate_authored_definition(compiled, workspace_path)
+                    validate_privileged_authored_definition(compiled, effective_workspace)
+                    if privileged else validate_host_authored_definition(compiled, effective_workspace, available_tools)
+                    if str(args.get("authority_mode") or "pure") == "host" else validate_authored_definition(compiled, effective_workspace)
                 )
             except (ValueError, PermissionError, OSError) as exc:
                 return authored_error(
@@ -309,26 +329,20 @@ def install(ctx):
                         }],
                         registered=False,
                     )
-            # Registration tests run in the cancellable subprocess boundary;
-            # model-authored code never executes in the daemon process.
-            from backend.core.loop.process_tool_runner import ProcessToolRunner
+            # Registration borrows this invocation's runtime; it cannot start
+            # an untracked process through a direct adapter call.
+            from ..service_runtime import service_runtime
+            runtime = service_runtime()
+            if runtime is None or not hasattr(runtime, "registration_test"):
+                return authored_error("CUSTOM_TOOL_INVALID", message="Registration self-tests require the canonical ToolPipeline runtime.", registered=False,
+                    next_actions=[{"action": "retry_through_tool_pipeline"}])
+            from backend.core.sandbox import SandboxDenied
             for index, test in enumerate(spec["tests"], 1):
-                checked = ProcessToolRunner(timeout=spec["timeout"]).run(
-                    "authored_privileged_python" if privileged else "authored_host_python"
-                    if spec["execution_mode"] == "authored_host_python" else "authored_python",
-                    {**dict(test["input"]), "_workspace": workspace_path,
-                     "_dynamic_spec": spec, "_host_results": test.get("host_results") or []},
-                    cancellation_event=process.cancellation_event,
-                )
-                if not checked.success:
-                    return authored_error(
-                        "CUSTOM_TOOL_INVALID",
-                        message="The authored tool registration test crashed or timed out.",
-                        details={"test": index, "diagnostic": checked.error},
-                        next_actions=[{"action": "revise_source_then_retry"}],
-                        test=index, registered=False,
-                    )
-                actual = checked.data or {}
+                try:
+                    actual = runtime.registration_test(spec, test, index)
+                except SandboxDenied as exc:
+                    return {**error_payload(exc.code, message=str(exc)), "registered": False, "test": index,
+                        "effect_state": "not_committed"}
                 if spec["execution_mode"] == "authored_host_python":
                     if actual.get("state") != "completed":
                         return authored_error("CUSTOM_TOOL_INVALID", message="Host-call registration tests need complete mock host_results; no live effects run during registration.", registered=False)
@@ -343,6 +357,7 @@ def install(ctx):
                         test=index, expected=test["expected"], actual=actual,
                         registered=False,
                     )
+            runtime.tests_finished()
             source = str(spec.pop("_source"))
             try:
                 saved = storage.save_custom_tool(
@@ -363,17 +378,10 @@ def install(ctx):
                     "tests_passed": len(spec["tests"])}
 
         tools["author_tool"] = AgentTool(
+            execution_contract=data_broker("host.runtime.author_tool"),
             name="author_tool",
             description=(
-                "Manage project-saved Python shortcuts. Pure mode is statically confined. "
-                "Host mode keeps pure code but supports call_tool(name, arguments) for declared host_tools; "
-                "every leaf uses the canonical Host pipeline and exact permission, and resumes without replaying effects. "
-                "Registration tests supply mock host_results (tool_name,arguments_digest,result); no live effects run. "
-                "Privileged mode may use imports, files, processes or network, but binds the "
-                "source digest and registration contract to explicit user approval, and every "
-                "later invocation requires a new exact approval. register/replace creates an "
-                "immutable tested version; use mounts it for this task; detach keeps the asset; "
-                "delete archives it; restore reactivates it."
+                load_prompt('tools/author_tool')
             ),
             parameters={"type": "object", "properties": {
                 "operation": {"type": "string", "enum": [
@@ -388,11 +396,16 @@ def install(ctx):
                 "purpose": {"type": "string"},
                 "effect": {"type": "string", "enum": ["workspace_write", "process", "external"]},
                 "resources": {"type": "array", "items": {"type": "string"}},
-                "tests": {"type": "array", "items": {"type": "object"}},
+                "tests": {"type": "array", "minItems": 1, "maxItems": 20, "items": {
+                    "type": "object", "properties": {"input": {"type": "object"}, "expected": {},
+                        "host_results": {"type": "array", "items": {"type": "object", "properties": {
+                            "tool_name": {"type": "string"}, "arguments_digest": {"type": "string"}, "result": {}},
+                            "required": ["tool_name", "arguments_digest", "result"]}}}, "required": ["input", "expected"]}},
                 "timeout": {"type": "number"}, "version": {"type": "integer"},
                 "include_archived": {"type": "boolean"},
             }, "required": []},
             execute=author_tool, read_only=False, effect=ToolEffect.PROCESS,
+            cancellation=CancellationMode.COOPERATIVE,
             approval_per_invocation=True,
         )
 
@@ -415,8 +428,9 @@ def install(ctx):
             return {"accepted": True, **process.review_claim}
 
         tools["complete_review"] = AgentTool(
+            execution_contract=data_broker("host.runtime.complete_review"),
             name="complete_review",
-            description="Submit the independent review verdict and evidence to the host gate.",
+            description=load_prompt('tools/complete_review'),
             parameters={
                 "type": "object",
                 "properties": {
@@ -443,10 +457,10 @@ def install(ctx):
 
 
     tools["complete_task"] = AgentTool(
+        execution_contract=data_broker("host.runtime.complete_task"),
         name="complete_task",
         description=(
-            "Submit the action result and verification evidence for deterministic "
-            "host evaluation. This does not self-approve completion."
+            load_prompt('tools/complete_task')
         ),
         parameters=COMPLETE_TASK_PARAMETERS,
         execute=complete_task,

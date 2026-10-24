@@ -31,7 +31,7 @@ jobs:
           - os: ubuntu-24.04
             target: linux-x86_64
             platform: linux
-          - os: macos-15
+          - os: macos-26
             target: macos-arm64
             platform: macos
     runs-on: ${{ matrix.os }}
@@ -48,15 +48,23 @@ jobs:
         with:
           bun-version: '1.4.2'
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y patchelf
+        run: bash scripts/prepare_linux_update_ci.sh
       - run: python -m pip install --require-hashes -r packaging/requirements-build.lock
       - run: python -B scripts/provision_ci_sqlite.py
       - run: python -B scripts/provision_ci_ripgrep.py
       - run: bun install --frozen-lockfile
         working-directory: cli/dashboard
       - run: python -B scripts/verify_release_privacy.py --root .
+      - name: Darwin object reads approvals and governance
+        if: runner.os == 'macOS'
+        run: >-
+          python -B -m pytest tests/test_sandbox_read.py tests/test_sandbox_read_darwin.py
+          tests/test_read_approval.py tests/test_read_execution_plan.py tests/test_governance_chain.py
+          tests/test_alpha3_platform_boundaries.py -q --tb=short
       - name: Native installer, credentials and owned process source regressions
         run: python -B -m pytest tests/test_unix_install_transaction.py tests/test_uninstall_cleanup_order.py tests/test_secret_cleanup_failures.py tests/test_unix_process_scope.py -q
+      - name: CAS format admission and process ordering foundations (not sandbox backend acceptance)
+        run: python -B -m pytest tests/test_cas_lifecycle_ordering.py tests/test_cas_inventory.py tests/test_storage_ownership_handoff.py tests/test_storage_binding_retirement.py tests/test_storage_envelope.py tests/test_storage_host_records.py tests/test_storage_runtime_manifest.py tests/test_storage_slot_records.py tests/test_storage_runtime_records.py tests/test_storage_wal_capacity.py tests/test_checkpoint_limits.py tests/test_checkpoint_work.py tests/test_checkpoint_binding.py tests/test_storage_project_registration.py tests/test_checkpoint_facts.py tests/test_storage_repository_outcomes.py tests/test_checkpoint_planning.py tests/test_runtime_facts.py tests/test_storage_protocol_admission.py -q
       - name: Build complete native archive
         env:
           TARGET_PLATFORM: ${{ matrix.platform }}
@@ -75,7 +83,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: linux-x86_64
-          - os: macos-15
+          - os: macos-26
             target: macos-arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -89,6 +97,8 @@ jobs:
           python-version: '3.14.7'
       - name: Install test harness only (no SQLite/ripgrep build provisioning)
         run: python -m pip install --require-hashes -r packaging/requirements-build.lock
+      - if: runner.os == 'Linux'
+        run: bash scripts/prepare_linux_update_ci.sh
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libsecret-tools
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

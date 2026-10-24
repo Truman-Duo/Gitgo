@@ -30,7 +30,10 @@ def admission_snapshot(process, active_tools, known_tools):
         options.append({'tool': 'request_self_execute',
                         'effect': 'Request a task-scoped capability lease under existing policy.',
                         'leaf_approval_still_required': True})
-    return {'active_tools': sorted(active), 'execution_mode': contract.get('execution_mode', 'undeclared'),
+    return {'scope': 'current_process_current_contract',
+            'inactive_catalog_scope': 'self_execution_capability_profiles_only',
+            'control_protocols_require_task_routing': True,
+            'active_tools': sorted(active), 'execution_mode': contract.get('execution_mode', 'undeclared'),
             'lease_profile': getattr(lease, 'profile_id', '') if lease else '',
             'requestable_profiles': profiles, 'admission_options': options,
             'authority_granted': False}
@@ -52,14 +55,19 @@ def component_blocker(process, spec, catalog):
     profiles = sorted((p for p in profiles if p.allows_self_execution and set(required) <= set(p.tool_names)),
                       key=lambda p: (len(p.tool_names), p.profile_id))
     actions = []
-    if process.actor_kind == 'supervisor' and profiles:
+    if 'calculate' in missing:
+        actions.append({'action': 'revise_tool_definition', 'name': spec.get('name', ''),
+            'reason': 'The legacy calculate leaf is not issued by current profiles. Publish an explicit new definition using the mounted workbench schema; do not request a broader lease or rewrite an approved pending call.',
+            'replacement': {'tool': 'workbench', 'operation': 'calculate',
+                            'expression': 'preserve the original expression binding'}})
+    elif process.actor_kind == 'supervisor' and profiles:
         actions.append({'action': 'request_self_execute', 'arguments': {
             'profile_id': profiles[0].profile_id,
             'reason': 'Execute the declared leaf capabilities of saved tool ' + spec.get('name', ''),
             'intended_actions': ['Invoke ' + spec.get('name', '') + ' through the Host leaf pipeline; wait for exact approval']}})
     else:
         actions.append({'action': 'escalate_to_supervisor', 'required_tools': missing})
-    if spec.get('execution_mode') == 'authored_host_python':
+    if spec.get('execution_mode') == 'authored_host_python' and 'calculate' not in missing:
         actions.append({'action': 'author_tool', 'arguments': {'operation': 'use', 'name': spec.get('name', '')}})
     from backend.core.errors import error_payload
     message = 'Declared leaf capabilities are not active: ' + ', '.join(missing)
@@ -92,10 +100,11 @@ def _select_authorized_tools(
         # must never remove ordinary tools from a later unrelated user turn.
         # Explicit self-execution remains available via a scoped lease.
         delegated_mode = {
-            "context_open", "context_search", "artifact_read", "read_child_artifact", "calculate",
+            "context_open", "context_search", "artifact_read", "read_child_artifact", "workbench",
             "decision_evidence", "declare_task_contract", "prepare_task_bundle", "delegate_task",
             "delegate_task_dag", "delegate_task_bundle", "list_agents", "wait_agents",
             "send_feedback", "cancel_agent", "request_review",
+            "list_coordination_events", "resolve_coordination_event",
             "review_child_outcome", "request_user_decision", "request_permission",
             "acknowledge_governance_signal",
             "define_tool", "author_tool", "engineering_workflow",

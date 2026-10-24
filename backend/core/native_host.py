@@ -76,6 +76,7 @@ class NativeHost:
         self._active_processes: dict[str, tuple[str, str]] = {}
         self._admission_requests: dict[str, tuple[str, str]] = {}
         self._cancelled_requests: set[str] = set()
+        self._update_requests: dict[str, str] = {}
         from backend.core.application.request_memo import RequestMemo
         self._request_memo = RequestMemo()
         self._btw_requests: dict[str, tuple[str, str]] = {}
@@ -159,6 +160,10 @@ class NativeHost:
                 if deletion_tick < 10:
                     continue
                 deletion_tick = 0
+                for change in self.services.maintain_project_lifecycle():
+                    self._emit({"type": "event", "payload": {
+                        "event": "project_lifecycle_changed", **change,
+                    }})
                 with self.services._write_lock:
                     results = self.services.deletion.run_due()
                 for result in results:
@@ -400,12 +405,15 @@ class NativeHost:
                 return fallback
 
         if storage is not None:
-            durable = read_projection(
-                "latest_conversations", storage.read_latest_conversations,
-                dict(empty_conversations),
-            )
             all_b_conversations = read_projection(
                 "project_b_conversations", storage.read_project_b_conversations, {},
+            )
+            from backend.core.storage import StorageRuntime
+            durable = read_projection(
+                "latest_conversations",
+                (lambda: storage.read_latest_conversations(agent_conversations=all_b_conversations))
+                if isinstance(storage, StorageRuntime) else storage.read_latest_conversations,
+                dict(empty_conversations),
             )
             durable["agent_conversations"] = {
                 **all_b_conversations,
@@ -714,7 +722,7 @@ class NativeHost:
         if not project:
             raise OperationError("INVALID_ARGUMENTS", "project is required")
         project_info = next(
-            (item for item in self.services.project_list()
+            (item for item in (self.services.project_list() + self.services.project_list_archived())
              if str(item.get("name", "")) == project),
             None,
         )
@@ -752,12 +760,13 @@ class NativeHost:
         return {"project": project, **result}
 
     def _runtime_usage(
-        self, project: str = "", *, limit: int = 100, cursor: str = "",
+        self, project: str = "", *, limit: int = 100, cursor: str = "", day_offset_minutes: int = 0,
     ) -> dict:
         """Read SQLite task usage without starting project daemons."""
-        from backend.core.storage import get_storage
+        from backend.core.storage import get_storage, StorageBlocked, StorageReferenceMissing, StorageCorruptionDetected
+        from pathlib import Path
 
-        projects = self.services.project_list()
+        projects = self.services.project_list() + self.services.project_list_archived()
         if project:
             projects = [
                 item for item in projects
@@ -774,30 +783,60 @@ class NativeHost:
         }
         project_rows: list[dict] = []
         detail_tasks: list[dict] = []
+        daily: dict[str, dict] = {}
+        undated_tasks = 0
         detail_page: dict = {
             "limit": max(1, min(int(limit), 1000)), "cursor": "",
             "next_cursor": None, "has_more": False,
             "scope": "overview_has_no_task_page",
             "summary_scope": "all_configured_projects",
         }
-        for item in projects:
+        def read_usage(item):
             name = str(item.get("name") or "")
             workspace = str(item.get("workspace") or "")
-            if not name or not workspace:
-                continue
             try:
-                usage = get_storage(workspace).read_task_usage(
-                    limit=limit, cursor=cursor if project else "",
-                )
-                summary = dict(usage.get("summary") or {})
-                for key in aggregate:
-                    aggregate[key] += summary.get(key, 0) or 0
-                project_rows.append({"project": name, **summary})
-                if project:
-                    detail_tasks = list(usage.get("tasks") or [])
-                    detail_page = dict(usage.get("page") or detail_page)
-            except (OSError, ValueError) as exc:
-                project_rows.append({"project": name, "error": str(exc)})
+                from .application.project_lifecycle import workspace_missing
+                if workspace_missing(workspace):
+                    raise ValueError(f"Workspace does not exist: {workspace}")
+                store = get_storage(workspace)
+                identity = str(getattr(getattr(store, "paths", None), "project_id", "") or Path(workspace).resolve())
+                return name, store.read_task_usage(
+                    limit=limit, cursor=cursor if project else "", day_offset_minutes=day_offset_minutes,
+                ), "", identity
+            except (OSError, ValueError, StorageBlocked, StorageReferenceMissing, StorageCorruptionDetected) as exc:
+                return name, {}, str(exc), ""
+
+        # Independent project reads share the existing bounded projection pool.
+        futures = [self._summary_pool.submit(read_usage, item) for item in projects
+                   if item.get("name") and item.get("workspace")]
+        identities = {}
+        for future in futures:
+            name, usage, failure, identity = future.result()
+            if failure:
+                project_rows.append({"project": name, "error": failure})
+                continue
+            if identity in identities:
+                project_rows.append({"project": name, "alias_of": identities[identity]})
+                continue
+            identities[identity] = name
+            summary = dict(usage.get("summary") or {})
+            for key in aggregate:
+                aggregate[key] += summary.get(key, 0) or 0
+            project_rows.append({"project": name, **summary})
+            detail_tasks.extend({"project": name, **item} for item in usage.get("tasks", []))
+            for day in usage.get("daily", []):
+                bucket = daily.setdefault(day["date"], {"date": day["date"]})
+                for key, value in day.items():
+                    if key != "date":
+                        bucket[key] = bucket.get(key, 0) + value
+            undated_tasks += int(usage.get("undated_tasks", 0))
+            if project:
+                detail_page = dict(usage.get("page") or detail_page)
+        if not project:
+            detail_tasks.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("task_id") or "")), reverse=True)
+            detail_tasks = detail_tasks[:max(1, min(int(limit), 1000))]
+            detail_page["scope"] = "recent_root_tasks_across_projects"
+            detail_page["has_more"] = int(aggregate["task_count"]) > len(detail_tasks)
         input_tokens = int(aggregate["input_tokens"])
         aggregate["cache_hit_ratio"] = (
             round(int(aggregate["cache_read_tokens"]) / input_tokens, 4)
@@ -809,6 +848,11 @@ class NativeHost:
             "summary": aggregate,
             "projects": project_rows,
             "tasks": detail_tasks,
+            "daily": [daily[day] for day in sorted(daily)],
+            "day_offset_minutes": day_offset_minutes,
+            "undated_tasks": undated_tasks,
+            "cost_usd": None,
+            "complete": not any(item.get("error") for item in project_rows),
             "page": detail_page,
         }
 
@@ -1034,7 +1078,9 @@ class NativeHost:
             command["process_id"] = process_id
             command["manually_verified"] = bool(arguments.get("manually_verified", False))
             command["verification_note"] = str(arguments.get("verification_note") or "")
-        session_id = self._sessions.get(project) if session_mode == "continue" else None
+        # A decision already identifies its exact process/task. The project cursor
+        # belongs to A and must never be attached to a routed B decision.
+        session_id = self._sessions.get(project) if session_mode == "continue" and action != "decision" else None
         if session_id:
             command["session_id"] = session_id
             command["conversation_process_id"] = self._conversation_processes.get(project, "")
@@ -1138,7 +1184,7 @@ class NativeHost:
                 "agent_elapsed_ms": round(agent_elapsed_ms, 3),
             })
             outcome.setdefault("metadata", {})["timing"] = timing
-            if new_session:
+            if new_session and action != "decision":
                 self._sessions[project] = new_session
                 self._conversation_processes[project] = str(
                     outcome.get("process_id", "")
@@ -1241,10 +1287,10 @@ class NativeHost:
         process_ids = list(dict.fromkeys(
             str(item) for item in list(arguments.get("process_ids") or [])
             if str(item)
-        ))[:8]
+        ))[:64]
         process_id = str(
             arguments.get("process_id")
-            or self._conversation_processes.get(project, "")
+            or ("" if arguments.get("lesson_proposal") else self._conversation_processes.get(project, ""))
         )
         if not process_ids and process_id:
             process_ids = [process_id]
@@ -1259,6 +1305,12 @@ class NativeHost:
                 "history": list(arguments.get("history") or []),
                 "process_id": process_id,
                 "process_ids": process_ids,
+                **({"lesson_proposal": {
+                    "proposal_id": str(arguments["lesson_proposal"].get("proposal_id") or ""),
+                    "proposal_version": str(arguments["lesson_proposal"].get("proposal_version") or ""),
+                    "candidate_index": arguments["lesson_proposal"].get("candidate_index", 0),
+                    **({"draft": arguments["lesson_proposal"]["draft"]} if "draft" in arguments["lesson_proposal"] else {}),
+                }} if isinstance(arguments.get("lesson_proposal"), dict) else {}),
             }, timeout=135)
             return {"project": project, **result}
         finally:
@@ -1298,7 +1350,7 @@ class NativeHost:
                 "INVALID_ARGUMENTS",
                 "runtime.feedback requires project, process_id, and message",
             )
-        client = self._get_daemon(project, start=False)
+        client = self._get_daemon(project, start=True)
         if client is None:
             raise OperationError("RUNTIME_OFFLINE", f"Project '{project}' runtime is offline")
         status = client.send_command({"cmd": "loop_status"})
@@ -1408,6 +1460,10 @@ class NativeHost:
         }, action="resume")
 
     def _cancel(self, target_request_id: str) -> dict:
+        with self._daemon_lock:
+            update_id = self._update_requests.get(target_request_id)
+        if update_id is not None:
+            return self.services.update_cancel(update_id)
         active = self._active_processes.get(target_request_id)
         if active is not None:
             project, process_id = active
@@ -1475,6 +1531,7 @@ class NativeHost:
                 str(arguments.get("project", "")),
                 limit=int(arguments.get("limit", 100) or 100),
                 cursor=str(arguments.get("cursor", "") or ""),
+                day_offset_minutes=max(-840, min(840, int(arguments.get("day_offset_minutes", 0) or 0))),
             )
         if operation == "runtime.chat":
             return self._runtime_chat(request_id, arguments)
@@ -1537,6 +1594,11 @@ class NativeHost:
             return self._provider_change(operation, arguments)
         if operation == "lesson.harvest.resolve":
             result = self.services.invoke(operation, arguments)
+            self._emit({"type": "event", "project": str(arguments.get("project") or ""),
+                "payload": {"event": "lesson_harvest_resolved",
+                    "proposal_id": str(result.get("proposal_id") or ""), "status": result.get("status"),
+                    "count": int(result.get("count", 0) or 0),
+                    "time": datetime.now(timezone.utc).isoformat()}})
             if str(result.get("status") or "") == "accepted" and int(result.get("count", 0) or 0) > 0:
                 project = str(arguments.get("project") or "")
                 self._emit({
@@ -1549,6 +1611,13 @@ class NativeHost:
                     },
                 })
             return result
+        if operation in {"update.check", "update.download", "update.request_apply", "update.request_rollback", "update.cancel_pending"}:
+            update_id = arguments.get("operation_id")
+            if request_id and type(update_id) is str:
+                with self._daemon_lock: self._update_requests[request_id] = update_id
+            try: return self.services.invoke(operation, arguments)
+            finally:
+                with self._daemon_lock: self._update_requests.pop(request_id, None)
         return self.services.invoke(operation, arguments)
 
     def _handle_request(self, request: dict) -> None:
@@ -1609,6 +1678,7 @@ class NativeHost:
         self._maintenance_thread = threading.Thread(target=self._maintenance_loop, daemon=True,
                                                     name="deletion-maintenance")
         self._maintenance_thread.start()
+        self.services.updates.start_automatic()
         try:
             for line in self.stdin:
                 if self._stopping.is_set():
@@ -1645,6 +1715,8 @@ class NativeHost:
         if self._stopping.is_set():
             return
         self._stopping.set()
+        updates = getattr(self.services, "updates", None)
+        if updates is not None: updates.close()
         if self._maintenance_thread is not None:
             self._maintenance_thread.join(timeout=15)
         # Explicitly request cancellation before daemon shutdown. This shortens

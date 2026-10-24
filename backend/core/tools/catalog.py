@@ -8,6 +8,11 @@ arguments or manufacture a stronger tool contract.
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+
+from backend.core.prompt_templates import load_prompt, render_prompt
+
+from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, NATIVE_WORKSPACE_PRODUCER, data_broker
 
 from backend.core.loop.agent_tool import (
     AgentTool,
@@ -18,6 +23,9 @@ from backend.core.loop.agent_tool import (
 
 
 def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
+    from .document_service import document_create
+    from . import workspace_tools as governance_handlers
+    from .web_tools import web_search, web_fetch
     workspace = str(Path(workspace_path).resolve())
 
     def inject_workspace(args: dict) -> dict:
@@ -28,15 +36,35 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
     common = {
         "prepare_args": inject_workspace,
         "isolated": True,
+        "execution_contract": NATIVE_PROCESS,
         "cancellation": CancellationMode.ISOLATED_PROCESS,
         "composable": True,
     }
-    return {
+    def file_service(name):
+        from backend.core.tools import workspace_tools
+        def execute(args):
+            return getattr(workspace_tools, name)(args)
+        return {**common, "isolated": False,
+                "execution_contract": data_broker("files.workspace." + name),
+                "cancellation": CancellationMode.NON_INTERRUPTIBLE,
+                "execute": execute}
+    tools = {
+        "run_test": AgentTool(
+            name="run_test", description=load_prompt("tools/run_test"),
+            execution_contract=data_broker("tests.workspace.run"),
+            parameters={"type": "object", "properties": {
+                "test_id": {"type": "string"}, "target": {"type": "string"},
+                "seeds": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "integer"}},
+                "input_files": {"type": "array", "items": {"type": "string"},
+                    "description": "Explicit local source/config/data dependencies; target is always included. Omit for bounded business-workspace coverage."},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": 900}}, "required": ["test_id", "target"]},
+            execute=_unreachable, read_only=False, effect=ToolEffect.PROCESS,
+            cancellation=CancellationMode.COOPERATIVE,
+            resources=["process:pytest", "filesystem:.gitgo/test_manifest.json"], timeout=900),
         "read_file": AgentTool(
             name="read_file",
             description=(
-                "Read a workspace text file by line window. Returns a SHA-256 version "
-                "token; pass it to edit_file/write_file to prevent stale overwrites."
+                load_prompt('tools/read_file')
             ),
             parameters={
                 "type": "object",
@@ -44,6 +72,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "minimum": 0},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+                    "bind_dependency": {"type": "boolean", "description": "Pin this whole file as an important input to the task result; sealed-result promotion requires its version to remain applicable. Ordinary reads need no pin."},
                 },
                 "required": ["path"],
             },
@@ -53,14 +82,11 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             resources=[],
             runner_name="read_file",
             idempotent=True,
-            **common,
+            **{**common, "execution_contract": NATIVE_FILE_READ},
         ),
         "list_files": AgentTool(
             name="list_files",
-            description=("Find workspace files using ripgrep globs and bounded, sorted pages. "
-                         "Default scope respects local ignore files and excludes hidden/generated files. "
-                         "Use include_hidden/respect_ignore explicitly to change that scope. "
-                         "Warnings and partial coverage are never proof a file does not exist."),
+            description=(load_prompt('tools/list_files')),
             parameters={
                 "type": "object",
                 "properties": {
@@ -86,14 +112,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "search_text": AgentTool(
             name="search_text",
             description=(
-                "Search workspace text with ripgrep. Return file/line content, matching "
-                "files, or per-file matching-line counts using output_mode. Prefer literal=true "
-                "for ordinary text. Sorted offset pages and context_lines support follow-up reads. "
-                "Default scope excludes hidden/generated/binary and files over 2MB, and respects "
-                "local ignore files. Explicit include globs can override ignore rules; exclude "
-                "globs and Host-generated-directory exclusions take precedence. "
-                "Inspect engine/complete/partial/warnings before concluding no match. "
-                "Unavailable ripgrep only permits a limited, visible literal fallback."
+                load_prompt('tools/search_text')
             ),
             parameters={
                 "type": "object",
@@ -126,8 +145,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "document_open": AgentTool(
             name="document_open",
             description=(
-                "Extract a bounded text page from a workspace document. Supports "
-                "txt/md, PDF, Word, PowerPoint and Excel through one stable interface."
+                load_prompt('tools/document_open')
             ),
             parameters={
                 "type": "object",
@@ -149,15 +167,11 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         ),
         "document_create": AgentTool(
             name="document_create",
-            description=(
-                "Create a text/Markdown, Word, PowerPoint, Excel or PDF artifact "
-                "inside the task workspace. Use content for text-oriented output, "
-                "slides for PPTX and sheets for XLSX. Existing files require an "
-                "explicit overwrite flag plus the current SHA-256."
-            ),
+            description=load_prompt('tools/document_create'),
             parameters={
                 "type": "object",
                 "properties": {
+                    "lesson_feedback_id": {"type": "string"},
                     "path": {"type": "string"},
                     "title": {"type": "string"},
                     "content": {"type": "string"},
@@ -167,30 +181,29 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "expected_sha256": {"type": "string"},
                 },
                 "required": ["path"],
+                "additionalProperties": False,
             },
-            execute=_unreachable,
+            execute=document_create,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="document_create",
             idempotent=False,
             timeout=120,
-            **common,
+            **{**common, "isolated": False, "execution_contract": data_broker("files.workspace.document_create"),
+               "cancellation": CancellationMode.NON_INTERRUPTIBLE},
         ),
         "web_search": AgentTool(
             name="web_search",
             description=(
-                "Search the public web through the active provider's native search "
-                "capability, with the configured SearXNG transport as fallback. This is "
-                "an anonymous public read and does not need a permission request. Use "
-                "web_fetch on selected result URLs when source text is needed."
+                load_prompt('tools/web_search')
             ),
             parameters={"type": "object", "properties": {
                 "query": {"type": "string"},
                 "max_results": {"type": "integer", "minimum": 1, "maximum": 20},
                 "language": {"type": "string"},
             }, "required": ["query"]},
-            execute=_unreachable,
+            execute=web_search,
             read_only=True,
             effect=ToolEffect.EXTERNAL_READ,
             approval=ApprovalMode.ALLOW,
@@ -198,14 +211,14 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             runner_name="web_search",
             idempotent=True,
             timeout=45,
-            **common,
+            **{**common, "isolated": False,
+               "execution_contract": data_broker("network.public.search"),
+               "cancellation": CancellationMode.NON_INTERRUPTIBLE},
         ),
         "web_fetch": AgentTool(
             name="web_fetch",
             description=(
-                "Retrieve one anonymous public HTTP(S) page selected from search results. "
-                "The Host blocks credentials, local/private addresses, unsafe redirects, "
-                "binary content and oversized responses. No permission request is needed."
+                load_prompt('tools/web_fetch')
             ),
             parameters={
                 "type": "object",
@@ -213,7 +226,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "required": ["url"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
+            execute=web_fetch,
             read_only=True,
             effect=ToolEffect.EXTERNAL_READ,
             approval=ApprovalMode.ALLOW,
@@ -221,20 +234,19 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             runner_name="web_fetch",
             idempotent=True,
             timeout=45,
-            **common,
+            **{**common, "isolated": False,
+               "execution_contract": data_broker("network.public.fetch"),
+               "cancellation": CancellationMode.NON_INTERRUPTIBLE},
         ),
         "edit_file": AgentTool(
             name="edit_file",
             description=(
-                "Replace a small exact unique string in an existing workspace file "
-                "atomically. First read the file, then use its expected_sha256. Keep "
-                "old_string to the smallest stable unique anchor; for multiple distant "
-                "changes, make bounded calls and reread after each successful write. "
-                "Do not resend the whole file as old_string."
+                load_prompt('tools/edit_file')
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "lesson_feedback_id": {"type": "string", "description": "Use the feedback_id returned by a before-write advisory when choosing to resubmit the same candidate. This does not grant authority or certify understanding."},
                     "path": {"type": "string", "description": "Workspace-relative path of an existing UTF-8 text file."},
                     "old_string": {"type": "string", "description": "Smallest current unique text anchor to replace."},
                     "new_string": {"type": "string", "description": "Replacement text for that exact anchor."},
@@ -244,25 +256,22 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "required": ["path", "old_string", "new_string", "expected_sha256"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="edit_file",
             idempotent=False,
-            **common,
+            **file_service("edit_file"),
         ),
         "write_file": AgentTool(
             name="write_file",
             description=(
-                "Write a complete workspace file atomically. For a new path, omit "
-                "create_only (it defaults to true). For an existing path, first call "
-                "read_file, then set create_only=false and pass that current "
-                "expected_sha256. Never delete an existing file merely to overwrite it."
+                load_prompt('tools/write_file')
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "lesson_feedback_id": {"type": "string", "description": "Use the feedback_id returned by a before-write advisory when choosing to resubmit the same candidate. This does not grant authority or certify understanding."},
                     "path": {"type": "string", "description": "Workspace-relative output path."},
                     "content": {"type": "string", "description": "Complete UTF-8 file content."},
                     "create_only": {"type": "boolean", "default": True, "description": "Keep true for creation. Set false only for a CAS replacement of an existing file."},
@@ -271,78 +280,70 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                 "required": ["path", "content"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="write_file",
             idempotent=False,
-            **common,
+            **file_service("write_file"),
         ),
         "delete_file": AgentTool(
             name="delete_file",
             description=(
-                "Recoverably delete one workspace file after reading its current SHA-256. "
-                "The Host moves it into project-local .gitgo/trash, returns a restore "
-                "reference and emits a deletion diff. Directories and .gitgo internals "
-                "cannot be deleted through this tool."
+                load_prompt('tools/delete_file')
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "lesson_feedback_id": {"type": "string", "description": "Reference the received before-action advisory when resubmitting this exact deletion; this is not approval."},
                     "path": {"type": "string"},
                     "expected_sha256": {"type": "string"},
                 },
                 "required": ["path", "expected_sha256"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="delete_file",
             idempotent=False,
-            **common,
+            **file_service("delete_file"),
         ),
         "apply_patch": AgentTool(
             name="apply_patch",
             description=(
-                "Apply a bounded standard unified diff inside the workspace. Each file "
-                "must have --- a/path and +++ b/path headers followed by valid "
-                "@@ -old_start,old_count +new_start,new_count @@ hunks. The complete "
-                "patch is preflight-checked before any file is changed. Prefer "
-                "edit_file for a small exact replacement."
+                load_prompt('tools/apply_patch')
             ),
             parameters={
                 "type": "object",
-                "properties": {"patch": {"type": "string", "description": "A complete git-compatible unified diff, including file headers for every fragment."}},
+                "properties": {"lesson_feedback_id": {"type": "string", "description": "Reference the received advisory for this entire unchanged patch candidate. This is not approval."}, "patch": {"type": "string", "description": "A complete git-compatible unified diff, including file headers for every fragment."}},
                 "required": ["patch"],
                 "additionalProperties": False,
             },
-            execute=_unreachable,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:*"],
             runner_name="apply_patch",
             idempotent=False,
             timeout=60,
-            **common,
+            **file_service("apply_patch"),
         ),
         "exec_command": AgentTool(
             name="exec_command",
             description=(
-                "Run one argv-based build, test, inspection or local development command "
-                "inside the workspace. Network tools, nested shells, governed git writes "
-                "and external absolute paths are denied."
+                load_prompt('tools/exec_command')
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "candidate_ref": {"type": "string", "description": "Resume this exact frozen execution output without running the command again."},
+                    "lesson_feedback_id": {"type": "string", "description": "Received advice for the unchanged complete output candidate; not approval."},
                     "argv": {"type": "array", "items": {"type": "string"}},
                     "cwd": {"type": "string"},
                     "timeout": {"type": "integer"},
                 },
                 "required": ["argv"],
+                "additionalProperties": False,
             },
             execute=_unreachable,
             read_only=False,
@@ -353,29 +354,32 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             timeout=1800,
             timeout_argument="timeout",
             timeout_default=120,
-            **common,
+            **{**common, "execution_contract": NATIVE_WORKSPACE_PRODUCER},
         ),
         "shell_script": AgentTool(
             name="shell_script",
             description=(
-                "Run one script inside the workspace. Choose shell=bash or powershell; "
-                "auto uses PowerShell on Windows and Bash elsewhere. Match that shell's syntax; "
-                "the Host never translates scripts. Use when argv-based exec_command "
-                "cannot express the required pipes, redirections or shell control flow. "
-                "This is a sensitive capability: include the user-visible purpose; Host "
-                "automatically pauses for approval of these exact arguments before every "
-                "invocation. Never use it merely for command convenience."
+                render_prompt(
+                    'tools/shell_script',
+                    auto_shell='powershell' if sys.platform == 'win32' else 'bash',
+                    platform_guidance=load_prompt(
+                        'tools/shell_powershell' if sys.platform == 'win32' else 'tools/shell_posix',
+                    ),
+                )
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "candidate_ref": {"type": "string", "description": "Resume this exact frozen execution output without running the command again."},
+                    "lesson_feedback_id": {"type": "string", "description": "Received advice for the unchanged complete output candidate; not approval."},
                     "script": {"type": "string"},
-                    "shell": {"type": "string", "enum": ["bash", "powershell", "auto"], "default": "bash"},
+                    "shell": {"type": "string", "enum": ["bash", "powershell", "auto"], "default": "auto"},
                     "purpose": {"type": "string"},
                     "cwd": {"type": "string"},
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 1800},
                 },
                 "required": ["script", "purpose"],
+                "additionalProperties": False,
             },
             execute=_unreachable,
             read_only=False,
@@ -388,7 +392,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             timeout=1800,
             timeout_argument="timeout",
             timeout_default=120,
-            **common,
+            **{**common, "execution_contract": NATIVE_WORKSPACE_PRODUCER},
         ),
         "dependency_feedback": AgentTool(
             name="dependency_feedback",
@@ -419,16 +423,20 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             name="rebuild_dependency_graph",
             description="Rebuild the multi-signal dependency graph and return coverage counts.",
             parameters={"type": "object", "properties": {}, "required": []},
-            execute=_unreachable,
+            execute=governance_handlers.rebuild_dependency_graph,
             read_only=False,
             effect=ToolEffect.WORKSPACE_WRITE,
             resources=["filesystem:.gitgo/dependency_graph.v2.json"],
             runner_name="rebuild_dependency_graph",
             idempotent=True,
             timeout=120,
-            **common,
+            **{**common, "isolated": False, "execution_contract": data_broker("governance.rebuild_dependency_graph"), "cancellation": CancellationMode.NON_INTERRUPTIBLE},
         ),
     }
+
+    from .file_compat import build_legacy_file_tools
+    tools.update(build_legacy_file_tools(tools))
+    return tools
 
 
 def _unreachable(args: dict) -> dict:

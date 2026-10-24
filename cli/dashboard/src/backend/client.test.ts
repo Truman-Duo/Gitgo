@@ -1,9 +1,27 @@
 import { describe, expect, test } from "bun:test";
+import {existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join, resolve, sep} from "node:path";
+import {resolvePythonRuntime} from "./pythonRuntime.js";
+
+
+import {EventEmitter} from "node:events";
 import {
   buildNativeTaskCall, nativeHostCommand, NativeHostClient, stringifyProtocolJson,
 } from "./client.js";
 
 describe("native task routing", () => {
+  for (const [code, signal] of [[0, null], [1, null], [null, "SIGTERM"]] as const) {
+    test(`update shutdown requires a clean Host exit: ${code}/${signal}`, async () => {
+      const client: any = new NativeHostClient("unused", "unused");
+      const proc: any = new EventEmitter();
+      proc.exitCode = null; proc.signalCode = null;
+      proc.stdin = {end: () => setTimeout(() => proc.emit("exit", code, signal), 1)};
+      client.proc = proc;
+      if (code === 0) await client.close(true);
+      else await expect(client.close(true)).rejects.toThrow("Host did not exit cleanly");
+    });
+  }
   test("correlated Host ACK adjusts the transport deadline and UTF8 chunks stay intact", async () => {
     const client: any = new NativeHostClient("unused", "unused");
     let sent: any;
@@ -60,8 +78,34 @@ describe("native task routing", () => {
     expect(nativeHostCommand("python", "C:\\Gitgo\\internal\\gitgo-host.exe")).toEqual({
       command: "C:\\Gitgo\\internal\\gitgo-host.exe", args: [],
     });
-    expect(nativeHostCommand("python", "")).toEqual({
-      command: "python", args: ["-u", "-m", "backend.core.native_host"],
-    });
+    const source = nativeHostCommand("python", "", "C:\\source checkout\\gitgo");
+    expect(source.command).toBe("python");
+    expect(source.args.slice(0, 2)).toEqual(["-u", "-c"]);
+    expect(source.args[2]).toContain("sys.path.insert(0,sys.argv.pop(1))");
+    expect(source.args[3]).toBe("C:\\source checkout\\gitgo");
   });
+});
+
+
+const sourcePython = resolvePythonRuntime();
+const pythonAvailable = existsSync(sourcePython) || Boolean(Bun.which(sourcePython));
+(pythonAvailable ? test : test.skip)("source Host imports the chosen checkout with embedded Python and spaces in its path", () => {
+  const tempParent = resolve(tmpdir());
+  const checkout = mkdtempSync(join(tempParent, "gitgo source host "));
+  try {
+    const module = join(checkout, "backend", "core");
+    mkdirSync(module, {recursive: true});
+    writeFileSync(join(checkout, "backend", "__init__.py"), "");
+    writeFileSync(join(module, "__init__.py"), "");
+    writeFileSync(join(module, "native_host.py"), "print('selected-worktree-host')");
+    const command = nativeHostCommand(sourcePython, "", checkout);
+    const result = Bun.spawnSync([command.command, ...command.args], {cwd: tempParent, timeout: 15000});
+    expect(new TextDecoder().decode(result.stderr)).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(new TextDecoder().decode(result.stdout).trim()).toBe("selected-worktree-host");
+  } finally {
+    // Delete only the freshly created fixture under the resolved temp parent.
+    if (!resolve(checkout).startsWith(tempParent + sep)) throw new Error("Unexpected fixture location");
+    rmSync(checkout, {recursive: true, force: true});
+  }
 });

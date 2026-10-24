@@ -23,6 +23,11 @@ export const colors = {
     red: "#f85149",
     unknown: "#6e7681",
   },
+  usage: {
+    model: "#b59aff",
+    tool: "#a8a8a8",
+    heat: ["#30363d", "#163b24", "#236b36", "#2ea043", "#56d364"],
+  },
   contextUsage: { normal: "#a8a8a8", high: "#e67e22" },
 
   danger: "#f85149",
@@ -110,6 +115,7 @@ export const colors = {
     userFg: "#f0f0f0",
     assistantFg: "#f0f0f0",
     reasoningFg: "#a8a8a8",
+    turnGuide: "#737373", // quieter than reasoning text, still visible on the dark canvas
     gutter: "#6e7681",   // assistant/tool 行首 gutter 标记
     userMarker: "#a8a8a8", // 用户消息行首指针 ❯ 标记
   },
@@ -166,6 +172,7 @@ export const colors = {
   // ── Animation ──────────────────────────────────────────────
   animation: {
     lerp: { frames: 4, intervalMs: 37 },
+    collapse: { durationMs: 180, intervalMs: 16 },
   },
 
   // ── Tool colors ──────────────────────

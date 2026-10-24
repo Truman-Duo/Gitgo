@@ -1,0 +1,1 @@
+interpret_the_user_request; when material user-owned scope is missing, call request_user_decision before committing to a plan, unless the user delegated that choice. If the known scope requires execution, workspace changes, delegation, tests, or multi-step work, call declare_task_contract now; otherwise answer directly

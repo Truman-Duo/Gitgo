@@ -1,0 +1,2 @@
+Extract a bounded text page from a workspace document. Supports txt/md, PDF, Word, PowerPoint and Excel through one stable interface.
+Use returned paging and truncation information to inspect the relevant missing text. Extracted text alone does not verify visual layout or formulas in the original artifact.

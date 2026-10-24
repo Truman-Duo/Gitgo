@@ -4,9 +4,12 @@ import { runtimeNoticeFromEvent } from "../daemon/runtimeNotices.js";
 import type { TraceRecord } from "../traceView.js";
 import { formatDuration } from "../theme/typography.js";
 
-/** A capsule describes a successful/paused round, never masks an error report. */
+/** Saved failures expose the same trace without hiding or relabeling their error. */
 export function roundLabel(message: ChatMessage): string | null {
-  if (message.role !== "assistant" || message.kind === "error") return null;
+  if (message.role !== "assistant") return null;
+  if (message.kind === "error" || ["failed", "degraded", "cancelled", "timed_out"].includes(message.status || "")) {
+    return message.trace_id ? "Failure details" : null;
+  }
   if (message.status === "awaiting_user") return "Awaiting input";
   if (message.status === "completed") return "Completed";
   return null;

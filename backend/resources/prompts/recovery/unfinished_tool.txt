@@ -1,0 +1,1 @@
+ The unfinished function call was discarded and MUST NOT be replayed. Use a substantially smaller payload or split the work into bounded incremental tool calls.

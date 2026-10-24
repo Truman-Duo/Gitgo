@@ -1,0 +1,1 @@
+Search addressable context objects when the relevant reference is unknown. Keep query, namespace and result limit focused; open a returned actual reference only when its content is needed. Results are a bounded matching set, not an exhaustive semantic search or evidence that an unmatched object does not exist. Prefer a relevant reference already supplied.

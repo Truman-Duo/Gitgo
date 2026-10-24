@@ -91,12 +91,17 @@ export function buildNativeTaskCall(args: NativeTaskRequest): {
 }
 
 export function nativeHostCommand(
-  pythonPath: string, hostExecutable = "",
+  pythonPath: string, hostExecutable = "", sourceRoot = process.cwd(),
 ): {command: string; args: string[]} {
   const installed = hostExecutable.trim();
+  // Embedded Python can ignore cwd/PYTHONPATH and keep another checkout in
+  // its ._pth. Bind the same trusted source root as the frontend via argv,
+  // without changing the shared interpreter or the installed Host path.
+  const bootstrap = "import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); "
+    + "runpy.run_module('backend.core.native_host',run_name='__main__')";
   return installed
     ? {command: installed, args: []}
-    : {command: pythonPath, args: ["-u", "-m", "backend.core.native_host"]};
+    : {command: pythonPath, args: ["-u", "-c", bootstrap, sourceRoot]};
 }
 
 export class NativeHostClient implements BackendClient {
@@ -128,7 +133,7 @@ export class NativeHostClient implements BackendClient {
   async start(): Promise<void> {
     if (this.proc) return;
     const installedHost = this.hostExecutable.trim();
-    const {command, args} = nativeHostCommand(this.pythonPath, installedHost);
+    const {command, args} = nativeHostCommand(this.pythonPath, installedHost, this.gitgoDir);
     this.proc = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: installedHost ? dirname(installedHost) : this.gitgoDir,
@@ -315,9 +320,12 @@ export class NativeHostClient implements BackendClient {
     this.pending.clear();
   }
 
-  async close(): Promise<void> {
+  async close(requireCleanExit = false): Promise<void> {
     const proc = this.proc;
-    if (!proc) return;
+    if (!proc) {
+      if (requireCleanExit) throw new Error("Update shutdown has no live Host to confirm");
+      return;
+    }
     // Cancel every paid/runtime request while the native protocol is still
     // writable. Native Host maps each request to its root task or BTW sidecar;
     // daemon shutdown remains the recursive fallback if an acknowledgement is
@@ -339,16 +347,25 @@ export class NativeHostClient implements BackendClient {
     this._ready = false;
     proc.stdin?.end();
     await new Promise<void>((resolve, reject) => {
-      if (proc.exitCode !== null) return resolve();
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        if (requireCleanExit && (proc.exitCode !== 0 || proc.signalCode)) {
+          return reject(new Error("Host did not exit cleanly; update cancelled"));
+        }
+        return resolve();
+      }
+      let forced = false;
       let killedTimer: ReturnType<typeof setTimeout> | undefined;
       const timer = setTimeout(() => {
+        forced = true;
         proc.kill();
         killedTimer = setTimeout(() => reject(new Error("Native host did not exit; terminal handoff was stopped to protect shared state")), 2500);
       }, 5000);
-      proc.once("exit", () => {
+      proc.once("exit", (code, signal) => {
         clearTimeout(timer);
         if (killedTimer) clearTimeout(killedTimer);
-        resolve();
+        if (requireCleanExit && (forced || code !== 0 || signal)) {
+          reject(new Error("Host did not exit cleanly; update cancelled"));
+        } else resolve();
       });
     });
   }

@@ -11,5 +11,8 @@ if len(sys.argv) > 1 and sys.argv[1]:
 from backend.core.native_host import NativeHost
 from backend.core.daemon import run_daemon
 from backend.core.tools.runner import main
+from backend.core.workbench.sheets import _validate
 
-print("Selected build runtime can import Host, Daemon and tool runner")
+# Exercise the lazy validator and its schema resources, not just Host imports.
+_validate({"nbformat": 4, "nbformat_minor": 5, "metadata": {}, "cells": []})
+print("Selected build runtime can import Host, Daemon, tool runner and validate workbench documents")

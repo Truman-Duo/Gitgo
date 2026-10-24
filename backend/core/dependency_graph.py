@@ -30,7 +30,8 @@ OBSERVATION_FILE = "dependency_observations.jsonl"
 
 _IGNORED_PARTS = {
     ".git", ".gitgo", ".venv", "venv", "node_modules", "__pycache__",
-    "build", "dist", "out", "target", ".pytest_cache", ".mypy_cache",
+    "build", "dist", "dev-artifacts", "dist-terminal", "dist-installer",
+    "out", "target", ".pytest_cache", ".mypy_cache",
 }
 _SOURCE_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
@@ -213,16 +214,15 @@ class DependencyGraph:
 def build_dependency_graph(workspace_path: Path) -> DependencyGraph:
     workspace = workspace_path.resolve()
     graph = DependencyGraph(workspace)
+    from backend.adapters.bounded_local_reader import BoundedLocalReader
+    reader = BoundedLocalReader(workspace, ignored=_IGNORED_PARTS)
     files = _source_files(workspace)
     contents: dict[str, str] = {}
-
     for path in files:
         rel = _relative(workspace, path)
-        graph.file_fingerprints[rel] = _fingerprint(path)
-        try:
-            contents[rel] = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            contents[rel] = ""
+        raw = reader.read_bytes(rel)
+        graph.file_fingerprints[rel] = hashlib.sha256(raw).hexdigest()[:20]
+        contents[rel] = raw.decode("utf8", errors="replace")
 
     aliases = _build_path_aliases(contents)
 
@@ -261,12 +261,13 @@ def load_dependency_graph(
     *,
     rebuild: bool = False,
     allow_stale: bool = False,
-) -> DependencyGraph:
+    cache_only: bool = False,
+) -> DependencyGraph | None:
     workspace = workspace_path.resolve()
     path = workspace / ".gitgo" / GRAPH_FILE
     if not rebuild and path.exists():
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = _metadata_json(workspace, GRAPH_FILE)
             if data.get("version") == GRAPH_VERSION:
                 graph = DependencyGraph.from_dict(workspace, data)
                 # Read-side shortcuts such as a bounded code dossier must not
@@ -282,7 +283,7 @@ def load_dependency_graph(
                     return graph
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
-    return build_dependency_graph(workspace)
+    return None if cache_only else build_dependency_graph(workspace)
 
 
 def query_dependents(
@@ -314,6 +315,11 @@ def record_dependency_feedback(
     dependency = _normalise_rel(dependency)
     if not dependent or not dependency or dependent == dependency:
         raise ValueError("feedback requires two distinct workspace-relative files")
+    from backend.core.sandbox_read import relative_parts
+    for name in (dependent, dependency):
+        parts = relative_parts(name)
+        if any(part.casefold() in {".git", ".gitgo"} for part in parts):
+            raise PermissionError("Feedback requires business source files")
     dep_path = workspace / dependent
     target_path = workspace / dependency
     entry = {
@@ -327,12 +333,9 @@ def record_dependency_feedback(
         "dependency_fingerprint": _fingerprint(target_path) if target_path.exists() else "",
     }
     path = workspace / ".gitgo" / FEEDBACK_FILE
-    data = {"version": 1, "entries": []}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
+    from backend.core.storage.metadata_files import read_metadata_bytes
+    previous = read_metadata_bytes(workspace, FEEDBACK_FILE, max_bytes=16*1024*1024)
+    data = json.loads(previous.decode("utf8")) if previous is not None else {"version": 1, "entries": []}
     entries = [
         item for item in data.get("entries", [])
         if not (
@@ -342,9 +345,13 @@ def record_dependency_feedback(
     ]
     entries.append(entry)
     data = {"version": 1, "entries": entries}
-    _atomic_json_write(path, data)
-    build_dependency_graph(workspace)
-    return entry
+    _atomic_json_write(path, data, expected_sha256=hashlib.sha256(previous).hexdigest() if previous is not None else "")
+    try:
+        build_dependency_graph(workspace)
+    except Exception as exc:
+        return {**entry, "effect_state": "committed", "warnings": [{"code": "DEPENDENCY_REFRESH_PENDING",
+                "error_type": type(exc).__name__, "message": "Feedback was saved; graph refresh failed. Do not repeat the write."}]}
+    return {**entry, "effect_state": "committed"}
 
 
 def record_tool_observation(
@@ -364,57 +371,55 @@ def record_tool_observation(
     if not task_id or not normalised:
         return
     path = workspace / ".gitgo" / OBSERVATION_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {
-        "task_id": task_id,
-        "tool_name": tool_name,
-        "files": normalised,
-        "recorded_at": datetime.now().isoformat(),
-        "outcome": outcome,
-    }
-    try:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
-        return
+    entry = {"task_id": task_id, "tool_name": tool_name, "files": normalised,
+             "recorded_at": datetime.now().isoformat(), "outcome": outcome}
+    from backend.core.storage.metadata_files import read_metadata_bytes, write_metadata_bytes
+    previous = read_metadata_bytes(workspace, OBSERVATION_FILE, max_bytes=16*1024*1024)
+    # Bounded retained weak observations; source facts/receipts remain elsewhere.
+    lines = previous.splitlines()[-4999:] if previous else []
+    raw = b"\n".join([*lines, json.dumps(entry, ensure_ascii=False).encode("utf8")]) + b"\n"
+    write_metadata_bytes(workspace, OBSERVATION_FILE, raw,
+                         expected_sha256=hashlib.sha256(previous).hexdigest() if previous is not None else "",
+                         max_bytes=16*1024*1024)
 
 
 def _source_files(workspace: Path) -> list[Path]:
+    from backend.adapters.bounded_local_reader import BoundedLocalReader
+    reader = BoundedLocalReader(workspace, ignored=_IGNORED_PARTS)
     result = []
-    try:
-        candidates = workspace.rglob("*")
-    except OSError:
-        return result
-    for path in candidates:
-        try:
-            if not path.is_file() or path.suffix.lower() not in _SOURCE_EXTENSIONS:
-                continue
-            if any(part.lower() in _IGNORED_PARTS for part in path.relative_to(workspace).parts):
-                continue
-            if path.stat().st_size > _MAX_FILE_BYTES:
-                continue
-            result.append(path)
-        except (OSError, ValueError):
-            continue
+    for directory, _dirs, names in reader.walk():
+        for name in names:
+            rel = Path(directory) / name
+            if rel.suffix.lower() in _SOURCE_EXTENSIONS:
+                result.append(workspace / rel)
+                if len(result) > 4096:
+                    raise PermissionError("Dependency graph exceeds its file bound")
     return sorted(result, key=lambda item: _relative(workspace, item))
 
 
 def _current_fingerprints(workspace: Path) -> dict[str, str]:
-    return {_relative(workspace, path): _fingerprint(path) for path in _source_files(workspace)}
+    from backend.adapters.bounded_local_reader import BoundedLocalReader
+    reader = BoundedLocalReader(workspace, ignored=_IGNORED_PARTS)
+    return {_relative(workspace, path): hashlib.sha256(reader.read_bytes(_relative(workspace, path))).hexdigest()[:20]
+            for path in _source_files(workspace)}
 
 
 def _fingerprint(path: Path) -> str:
+    from backend.core.sandbox_read import ReadRoot
     try:
-        # Content identity is required for feedback validity.  Size/mtime-only
-        # fingerprints can survive generated-file rewrites or timestamp
-        # restoration and would incorrectly keep a dismissed edge suppressed.
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(128 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()[:20]
-    except OSError:
+        with ReadRoot(path.parent.absolute()) as root:
+            with root.open(path.name) as opened:
+                return hashlib.sha256(opened.read_bytes(max_bytes=16*1024*1024)).hexdigest()[:20]
+    except FileNotFoundError:
         return ""
+
+
+def _metadata_json(workspace, filename):
+    from backend.core.storage.metadata_files import read_metadata_bytes
+    raw = read_metadata_bytes(workspace, filename, max_bytes=16*1024*1024)
+    if raw is None:
+        return {}
+    return json.loads(raw.decode("utf8"))
 
 
 def _build_path_aliases(contents: dict[str, str]) -> dict[str, set[str]]:
@@ -582,12 +587,12 @@ def _add_test_edges(graph: DependencyGraph, contents: dict[str, str]) -> None:
 
 def _add_git_cochange_edges(graph: DependencyGraph) -> None:
     try:
-        completed = subprocess.run(
-            ["git", "log", "-120", "--name-only", "--pretty=format:@@"],
-            cwd=str(graph.workspace_path), capture_output=True, text=True,
-            timeout=12,
-        )
-    except (OSError, subprocess.SubprocessError):
+        from backend.adapters.local_git_runner import ProtectedLocalGitRunner
+        completed = ProtectedLocalGitRunner(graph.workspace_path).run(
+            ["log", "-120", "--name-only", "--pretty=format:@@"], timeout=12)
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        # Historical co-change is optional recall evidence; never fall back to
+        # executable repository extensions when the protected path is absent.
         return
     if completed.returncode != 0:
         return
@@ -628,7 +633,9 @@ def _add_observation_edges(graph: DependencyGraph) -> None:
     by_task: dict[str, set[str]] = {}
     failed_tasks: set[str] = set()
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-5000:]
+        from backend.core.storage.metadata_files import read_metadata_bytes
+        raw = read_metadata_bytes(graph.workspace_path, OBSERVATION_FILE, max_bytes=16*1024*1024)
+        lines = raw.decode("utf8").splitlines()[-5000:] if raw is not None else []
     except OSError:
         return
     for line in lines:
@@ -674,7 +681,7 @@ def _apply_feedback(graph: DependencyGraph) -> None:
     if not path.exists():
         return
     try:
-        entries = json.loads(path.read_text(encoding="utf-8")).get("entries", [])
+        entries = _metadata_json(graph.workspace_path, FEEDBACK_FILE).get("entries", [])
     except (OSError, json.JSONDecodeError):
         return
     for item in entries:
@@ -703,11 +710,13 @@ def _save_graph(graph: DependencyGraph) -> None:
     _atomic_json_write(graph.workspace_path / ".gitgo" / GRAPH_FILE, graph.to_dict())
 
 
-def _atomic_json_write(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(str(tmp), str(path))
+def _atomic_json_write(path: Path, data: dict, *, expected_sha256=None) -> None:
+    from backend.core.storage.metadata_files import write_metadata_bytes
+    if path.parent.name != ".gitgo":
+        raise ValueError("Only fixed project metadata is writable here")
+    write_metadata_bytes(path.parent.parent, path.name,
+                         json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf8"),
+                         expected_sha256=expected_sha256, max_bytes=16*1024*1024)
 
 
 def _aux_fingerprints(workspace: Path) -> dict[str, str]:

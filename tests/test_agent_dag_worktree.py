@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager, ExitStack
 import subprocess
+import time
 import sys
 import threading
 from pathlib import Path
@@ -22,6 +24,50 @@ from backend.core.loop.test_manifest import SeedResult, TestManifest, TestRecord
 from backend.core.loop.tools import ToolRegistry
 from backend.core.loop.worktree import AgentWorktreeManager, WorktreeError, WorktreeLease
 from backend.core.storage import StorageRuntime
+
+
+def _await_worktree_workers(manager, process_ids, *, timeout=60):
+    # Real Git checkout/sealing is not a five-second unit operation on a busy
+    # Windows runner. Require the lifecycle barrier, not merely a wait return.
+    deadline = time.monotonic()+timeout
+    observed = manager.wait_many(process_ids,timeout=timeout)
+    assert observed["all_terminal"], {
+        process_id: {key:state[key] for key in ("status","lifecycle_finalized")}
+        for process_id,state in observed["processes"].items()
+    }
+    for process_id in process_ids:
+        thread = manager._threads.get(process_id)
+        if thread is not None:
+            thread.join(max(0,deadline-time.monotonic()))
+            assert not thread.is_alive(), f"worker still owns its runtime: {process_id}"
+
+
+@contextmanager
+def _owned_worktree_case(repo, state_home):
+    storage = StorageRuntime(repo,state_home=state_home)
+    manager = None
+    try:
+        manager = AgentProcessManager(worktree_manager=AgentWorktreeManager(repo,storage))
+        yield storage,manager
+    finally:
+        if manager is not None:
+            # An assertion/timeout must not skip ownership cleanup or close SQLite
+            # beneath a worker that is still materializing/sealing its worktree.
+            for process_id,thread in tuple(manager._threads.items()):
+                if thread.is_alive():
+                    manager.kill(process_id,reason="test_case_teardown")
+            deadline = time.monotonic()+60
+            for thread in tuple(manager._threads.values()):
+                thread.join(max(0,deadline-time.monotonic()))
+            alive = [thread.name for thread in manager._threads.values() if thread.is_alive()]
+            assert not alive, f"test workers did not release storage: {alive}"
+        storage.close()
+
+
+@pytest.fixture
+def worktree_case():
+    with ExitStack() as stack:
+        yield lambda repo,state_home: stack.enter_context(_owned_worktree_case(repo,state_home))
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -304,15 +350,12 @@ def test_dag_edges_and_worktree_metadata_survive_store_reopen(tmp_path_factory: 
 
 
 def test_supervisor_delegate_review_promote_uses_production_worktree(
-    tmp_path_factory: Path, monkeypatch,
+    tmp_path_factory: Path, monkeypatch, worktree_case,
 ):
     from backend.core.loop import executor as executor_module
 
     repo = _repo(tmp_path_factory)
-    storage = StorageRuntime(repo, state_home=tmp_path_factory / "state")
-    manager = AgentProcessManager(
-        worktree_manager=AgentWorktreeManager(repo, storage)
-    )
+    storage, manager = worktree_case(repo, tmp_path_factory / "state")
     supervisor = manager.fork(
         parent_id=None, role="supervisor",
         tool_registry=ToolRegistry(
@@ -354,7 +397,7 @@ def test_supervisor_delegate_review_promote_uses_production_worktree(
         "max_steps": 3,
     })
     child = manager.get(delegated["process_id"])
-    manager.wait(child.process_id, timeout=5)
+    _await_worktree_workers(manager, [child.process_id])
     assert child.status == ProcessStatus.COMPLETED
     assert child.worktree["state"] == "sealed"
     assert (repo / "app.txt").read_text(encoding="utf-8") == "base\n"
@@ -376,19 +419,16 @@ def test_supervisor_delegate_review_promote_uses_production_worktree(
     assert (repo / "app.txt").read_text(encoding="utf-8") == "delegated change\n"
     assert HostCompletionEvaluator.evaluate(supervisor, "done").allowed
     manager.dispose_process_worktree(child)
-    storage.close()
+
 
 
 def test_approved_no_change_action_disposes_checkout_but_keeps_artifact_ref(
-    tmp_path_factory: Path, monkeypatch,
+    tmp_path_factory: Path, monkeypatch, worktree_case,
 ):
     from backend.core.loop import executor as executor_module
 
     repo = _repo(tmp_path_factory)
-    storage = StorageRuntime(repo, state_home=tmp_path_factory / "state")
-    manager = AgentProcessManager(
-        worktree_manager=AgentWorktreeManager(repo, storage)
-    )
+    storage, manager = worktree_case(repo, tmp_path_factory / "state")
     supervisor = manager.fork(
         parent_id=None, role="supervisor",
         tool_registry=ToolRegistry(
@@ -428,7 +468,7 @@ def test_approved_no_change_action_disposes_checkout_but_keeps_artifact_ref(
         "max_steps": 3,
     })
     child = manager.get(delegated["process_id"])
-    manager.wait(child.process_id, timeout=5)
+    _await_worktree_workers(manager, [child.process_id])
     checkout = Path(child.worktree["path"])
     assert child.worktree["state"] == "sealed"
     assert child.worktree["own_commit"] == ""
@@ -447,11 +487,11 @@ def test_approved_no_change_action_disposes_checkout_but_keeps_artifact_ref(
         supervisor, child.process_id, "app.txt",
     )
     assert artifact["content"] == "base\n"
-    storage.close()
+
 
 
 def test_delegate_task_dag_preflights_atomically_then_runs_topological_worktrees(
-    tmp_path_factory: Path, monkeypatch,
+    tmp_path_factory: Path, monkeypatch, worktree_case,
 ):
     from backend.core.loop import executor as executor_module
 
@@ -462,10 +502,7 @@ def test_delegate_task_dag_preflights_atomically_then_runs_topological_worktrees
     )
     _git(repo, "add", "api.py")
     _git(repo, "commit", "-m", "add stable interface")
-    storage = StorageRuntime(repo, state_home=tmp_path_factory / "state")
-    manager = AgentProcessManager(
-        worktree_manager=AgentWorktreeManager(repo, storage)
-    )
+    storage, manager = worktree_case(repo, tmp_path_factory / "state")
     supervisor = manager.fork(
         parent_id=None, role="supervisor",
         tool_registry=ToolRegistry(
@@ -538,7 +575,7 @@ def test_delegate_task_dag_preflights_atomically_then_runs_topological_worktrees
     assert admitted["delegated"] is True
     first = manager.get(admitted["nodes"]["first"])
     second = manager.get(admitted["nodes"]["second"])
-    manager.wait_many([first.process_id, second.process_id], timeout=8)
+    _await_worktree_workers(manager, [first.process_id, second.process_id])
     assert first.status == ProcessStatus.COMPLETED
     assert second.status == ProcessStatus.COMPLETED
     assert second.depends_on == [first.process_id]
@@ -553,7 +590,7 @@ def test_delegate_task_dag_preflights_atomically_then_runs_topological_worktrees
     assert (repo / "second.txt").read_text(encoding="utf-8") == "second\n"
     manager.dispose_process_worktree(first)
     manager.dispose_process_worktree(second)
-    storage.close()
+
 
 
 def test_worktree_round_trips_ignored_test_evidence(tmp_path_factory: Path):
@@ -626,15 +663,12 @@ def test_declared_interface_contract_detects_signature_drift(tmp_path_factory: P
 
 
 def test_child_terminal_event_reports_privacy_seal_failure_not_false_success(
-    tmp_path_factory: Path, monkeypatch,
+    tmp_path_factory: Path, monkeypatch, worktree_case,
 ):
     from backend.core.loop import executor as executor_module
 
     repo = _repo(tmp_path_factory)
-    storage = StorageRuntime(repo, state_home=tmp_path_factory / "state")
-    manager = AgentProcessManager(
-        worktree_manager=AgentWorktreeManager(repo, storage)
-    )
+    storage, manager = worktree_case(repo, tmp_path_factory / "state")
     supervisor = manager.fork(
         parent_id=None, role="supervisor",
         tool_registry=ToolRegistry(
@@ -673,7 +707,7 @@ def test_child_terminal_event_reports_privacy_seal_failure_not_false_success(
         "acceptance_criteria": ["file exists"],
     })
     child = manager.get(delegated["process_id"])
-    manager.wait(child.process_id, timeout=6)
+    _await_worktree_workers(manager, [child.process_id])
     assert child.status == ProcessStatus.FAILED
     assert child.result["code"] == "CHILD_LIFECYCLE_FAILED"
     assert child.worktree["state"] == "privacy_blocked"
@@ -681,4 +715,87 @@ def test_child_terminal_event_reports_privacy_seal_failure_not_false_success(
     assert terminal["status"] == "failed"
     assert terminal["outcome"]["code"] == "CHILD_LIFECYCLE_FAILED"
     manager.dispose_process_worktree(child, keep_ref=False)
-    storage.close()
+
+
+
+
+def test_worktree_case_assertion_failure_joins_workers_before_closing_storage(tmp_path_factory):
+    repo = _repo(tmp_path_factory)
+    started = threading.Event()
+    stopped = threading.Event()
+    with pytest.raises(AssertionError,match="fixture assertion"):
+        with _owned_worktree_case(repo,tmp_path_factory/"state") as (storage,manager):
+            child = _process(manager,parent_id=None,task_id="cleanup-fixture")
+            def work():
+                started.set()
+                assert child.cancellation_event.wait(10)
+                # The fixture must keep the connection live until this worker
+                # confirms it has finished using its owning runtime.
+                assert storage._state.execute("SELECT 1").fetchone()[0] == 1
+                child.status = ProcessStatus.CANCELLED
+                stopped.set()
+                return {"status":"cancelled"}
+            manager.start(child.process_id,work)
+            assert started.wait(10)
+            raise AssertionError("fixture assertion")
+    assert stopped.is_set()
+    assert not any(thread.is_alive() for thread in manager._threads.values())
+    assert storage._closed
+
+
+def test_wait_helper_checks_terminal_result_instead_of_assuming_timeout_is_success(tmp_path_factory):
+    repo = _repo(tmp_path_factory)
+    with _owned_worktree_case(repo,tmp_path_factory/"state") as (_,manager):
+        process = _process(manager,task_id="unstarted")
+        with pytest.raises(AssertionError):
+            _await_worktree_workers(manager,[process.process_id],timeout=0)
+
+
+@pytest.mark.parametrize("failure_stage", ["prepare", "retire", "none"])
+def test_child_sandbox_access_is_ready_before_model_and_retired_before_terminal(
+    tmp_path_factory, monkeypatch, worktree_case, failure_stage,
+):
+    from backend.core.loop import executor as executor_module
+    repo = _repo(tmp_path_factory)
+    storage, manager = worktree_case(repo, tmp_path_factory / "state")
+    calls, events = [], []
+    class Access:
+        def prepare(self, lease):
+            calls.append("prepare")
+            if failure_stage == "prepare": raise OSError("access preparation unavailable")
+        def release(self, process_id):
+            calls.append("retire")
+            if failure_stage == "retire": raise OSError("access retirement unknown")
+    manager.worktree_manager.sandbox_access = Access()
+    supervisor = manager.fork(parent_id=None, role="supervisor",
+        tool_registry=ToolRegistry(CapabilityProfiles.resolve_tools("supervisor.control")),
+        max_steps=8, ring_level=RingLevel.RING_0, workspace_path=str(repo),
+        task_id="access-lifecycle", task_kind="supervisor", actor_kind="supervisor",
+        capability_profile_id="supervisor.control")
+    def fake_agent_step(*, process, workspace_path, **_):
+        assert calls == ["prepare"]
+        calls.append("model")
+        Path(workspace_path,"app.txt").write_text("bounded output\n")
+        process.status = ProcessStatus.COMPLETED
+        process.result = {"status":"completed", "process_id":process.process_id,
+                          "response":"done", "metadata":{}}
+        return process.result
+    monkeypatch.setattr(executor_module,"agent_step",fake_agent_step)
+    class Dispatcher: _executors = {}
+    tools=executor_module._build_internal_tools(supervisor,{},str(repo),object(),Dispatcher(),on_stream_event=events.append)
+    delegated=tools["delegate_task"].execute({"task_description":"Change app.txt",
+        "capability_profile_id":"development.workspace", "task_kind":"action",
+        "target_files":["app.txt"],"acceptance_criteria":["file updated"],"max_steps":3})
+    child=manager.get(delegated["process_id"])
+    _await_worktree_workers(manager,[child.process_id])
+    terminal=[e for e in events if e.get("event")=="agent_terminal"][-1]
+    if failure_stage == "none":
+        assert child.status == ProcessStatus.COMPLETED
+        assert terminal["status"] == "completed"
+        assert calls.index("retire") > calls.index("model")
+    else:
+        assert child.status == ProcessStatus.FAILED
+        assert terminal["status"] == "failed" and terminal["outcome"]["status"] == "failed"
+        if failure_stage == "prepare": assert "model" not in calls
+        assert (repo/"app.txt").read_text() == "base\n"
+    manager.dispose_process_worktree(child,keep_ref=False)

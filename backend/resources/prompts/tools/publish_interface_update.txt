@@ -1,0 +1,1 @@
+Inspect this B's declared output interfaces and publish any changed version through the Host. The Host updates interface documentation, notifies A and affected dependent B Agents, and blocks stale downstream work until A resolves the revision. This never opens peer chat.

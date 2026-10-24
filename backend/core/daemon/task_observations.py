@@ -39,14 +39,11 @@ class TaskObservations:
                 event_process = (
                     self.manager.get(event_process_id) if event_process_id else None
                 ) or self.process
-                previous_finality = event_process.lifecycle_finalized
                 if event.get("event") == "agent_terminal":
+                    store.save_process_checkpoint(event_process, lifecycle_finalized=True)
                     event_process.lifecycle_finalized = True
-                try:
+                else:
                     store.save_process_checkpoint(event_process)
-                except BaseException:
-                    event_process.lifecycle_finalized = previous_finality
-                    raise
                 # Delegation mutates both the child row and A's durable
                 # coordination contract.  Persist both at admission so
                 # a daemon crash before the first Provider response

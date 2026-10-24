@@ -1,0 +1,1 @@
+Read a file produced by an owned completed subprocess before review. The Host uses its immutable sealed result in isolated Git worktrees and the current bounded workspace artifact in shared non-Git projects.

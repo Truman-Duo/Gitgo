@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from tests.knowledge_fixtures import qualified_response
 
 from tests.factory import TestDataFactory
 
@@ -71,7 +72,7 @@ class TestSeed2HarvestChain:
         # Mock LLM
         mock_response = f2.knowledge.mock_llm_response(3)
         mock_llm = type("MockLLM", (), {
-            "chat": lambda self, messages, **kw: __import__("json").dumps(mock_response),
+            "chat": lambda self, messages, **kw: qualified_response(messages, mock_response),
             "call_count": 0,
         })()
 
@@ -146,7 +147,7 @@ class TestSeed2E2E:
 
         mock_response = f2.knowledge.mock_llm_response(3)
         mock_llm = type("MockLLM", (), {
-            "chat": lambda self, messages, **kw: __import__("json").dumps(mock_response),
+            "chat": lambda self, messages, **kw: qualified_response(messages, mock_response),
         })()
 
         harvest_signals = [{**s, "signal_type": s["signal_type"]}
@@ -375,7 +376,8 @@ class TestConcurrentSafety:
 
         # 检索：读 pending（同时）
         r = recall_grep("concurrent", "testproject", workspace=str(tmp_ws))
-        assert r["total_matches"] >= 5
+        assert r["total_matches"] == 0
+        assert LessonManager.pending_count(tmp_ws, "testproject") == 5
 
 
 # ═══════════════════════════════════════════════════════════════

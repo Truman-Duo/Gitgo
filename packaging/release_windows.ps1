@@ -6,6 +6,7 @@ param(
     [string]$Ripgrep = "",
     [string]$RipgrepNotices = "",
     [string]$Output = "",
+    [string]$ArtifactOutput = "",
     [string]$InnoSetupCompiler = "",
     [string]$BaseRef = "origin/master",
     [switch]$VerifyOnly,
@@ -36,7 +37,7 @@ if (-not (Test-Path -LiteralPath $Bun -PathType Leaf)) {
     throw "Bun runtime not found; pass -Bun"
 }
 if (-not $TestPackages) {
-    $testCandidate = Join-Path $root ".gitgo\dev-test-deps"
+    $testCandidate = Join-Path $root "dev-artifacts\test-packages"
     if (Test-Path -LiteralPath (Join-Path $testCandidate "pytest\__init__.py") -PathType Leaf) {
         $TestPackages = $testCandidate
     }
@@ -97,6 +98,7 @@ try {
         if ($Ripgrep) { $arguments += @("-Ripgrep", $Ripgrep) }
         if ($RipgrepNotices) { $arguments += @("-RipgrepNotices", $RipgrepNotices) }
         if ($Output) { $arguments += @("-Output", $Output) }
+        if ($ArtifactOutput) { $arguments += @("-ArtifactOutput", $ArtifactOutput) }
         if ($BuildInstaller) {
             $arguments += "-BuildInstaller"
             if ($InnoSetupCompiler) { $arguments += @("-InnoSetupCompiler", $InnoSetupCompiler) }

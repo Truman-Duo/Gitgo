@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
+from ..transactions import authoritative_transaction
 from ..models import StorageBlocked, StorageReferenceMissing
 from ..redaction import redact_for_persistence
 from .ports import ObjectsPort
@@ -38,11 +39,88 @@ def get_state_ref(self: ObjectsPort, namespace: str, key: str) -> str | None:
     return str(row[0]) if row is not None else None
 
 
+
+def release_state_ref(self: ObjectsPort, namespace: str, key: str, *, expected_ref: str) -> bool:
+    """Release only the caller's exact GC root; never a replacement owner."""
+    self._ensure_open()
+    if not namespace or not key or not expected_ref:
+        raise ValueError("namespace, key and expected_ref are required")
+    self._reserve_authoritative_write(len(namespace) + len(key) + len(expected_ref))
+    with self._state_lock:
+        cursor = self._state.execute(
+            "DELETE FROM storage_kv WHERE namespace=? AND key=? AND value_ref=?",
+            (namespace, key, expected_ref))
+        return cursor.rowcount == 1
+
+
+def compare_state_ref(self: ObjectsPort, namespace: str, key: str,
+                      value_ref: str, *, expected_ref: str | None) -> bool:
+    """Advance one expected head without retaining every historic snapshot."""
+    return _publish_state_head(self, namespace, key, value_ref,
+                               expected_ref=expected_ref)
+
+
+def commit_state_revision(self: ObjectsPort, namespace: str, key: str,
+                          value_ref: str, *, expected_ref: str | None,
+                          revision_key: str) -> bool:
+    """Retain an immutable revision and advance its expected head atomically."""
+    if not revision_key or key == revision_key:
+        raise ValueError("distinct head and revision keys are required")
+    return _publish_state_head(self, namespace, key, value_ref,
+                               expected_ref=expected_ref, revision_key=revision_key)
+
+
+def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revision_key=None):
+    self._ensure_open()
+    if not namespace or not key:
+        raise ValueError("namespace and key are required")
+    self.read_blob(value_ref)
+    self._reserve_authoritative_write(len(namespace) + len(key) + len(revision_key or "") + 2 * len(value_ref))
+    with self._state_lock:
+        with authoritative_transaction(self._state):
+            row = self._state.execute(
+                "SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?",
+                (namespace, key)).fetchone()
+            current = str(row[0]) if row else None
+            if current != expected_ref:
+                return False
+            now = _utc_now()
+            if revision_key is not None:
+                prior = self._state.execute(
+                    "SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?",
+                    (namespace, revision_key)).fetchone()
+                if prior is not None and str(prior[0]) != value_ref:
+                    raise ValueError("immutable revision key already exists")
+                self._state.execute(
+                    "INSERT OR IGNORE INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)",
+                    (namespace, revision_key, value_ref, now))
+            self._state.execute(
+                "INSERT INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(namespace,key) DO UPDATE SET value_ref=excluded.value_ref,updated_at=excluded.updated_at",
+                (namespace, key, value_ref, now))
+    return True
+
+
+def list_state_refs(self: ObjectsPort, namespace: str, *, prefix: str,
+                    after: str = "", limit: int = 50) -> list[dict]:
+    """Bounded literal-prefix scan; keys can be used as continuation cursors."""
+    self._ensure_open()
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    with self._state_lock:
+        rows = self._state.execute(
+            "SELECT key,value_ref FROM storage_kv WHERE namespace=? "
+            "AND substr(key,1,?)=? AND key>? ORDER BY key LIMIT ?",
+            (namespace, len(prefix), prefix, after, limit)).fetchall()
+    return [{"key": str(row[0]), "value_ref": str(row[1])} for row in rows]
+
+
 def _write_blob_file(
     self, data: bytes, *, media_type: str = "application/octet-stream"
 ) -> dict:
     """Write one immutable file without opening a SQLite transaction."""
     self._ensure_open()
+    self._state.require_available()
     if len(data) > self.policy.max_cas_object_bytes:
         raise StorageBlocked("cas_object_too_large")
     digest = hashlib.sha256(data).hexdigest()
@@ -61,7 +139,16 @@ def _write_blob_file(
                     handle.write(data)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary, target)
+                try:
+                    os.replace(temporary, target)
+                except PermissionError:
+                    # Separate project runtimes have separate in-process CAS
+                    # locks. Windows can refuse replace when another writer
+                    # has just published/opened this same immutable object.
+                    # Accept only exact bytes, never an arbitrary permission
+                    # error, partial file, or conflicting content.
+                    if not target.is_file() or target.read_bytes() != data:
+                        raise
                 with self._health_lock:
                     if self._cas_bytes_hint is not None:
                         self._cas_bytes_hint += len(data)
@@ -109,7 +196,7 @@ def put_blob(self: ObjectsPort, data: bytes, *, media_type: str = "application/o
     return str(descriptor["ref"])
 
 
-def read_blob(self: ObjectsPort, ref: str) -> bytes:
+def read_blob(self: ObjectsPort, ref: str, *, repair: bool = True) -> bytes:
     self._ensure_open()
     if not ref.startswith("sha256:"):
         raise ValueError("unsupported object reference")
@@ -118,9 +205,20 @@ def read_blob(self: ObjectsPort, ref: str) -> bytes:
         raise ValueError("invalid SHA-256 object reference")
     path = self.paths.cas_dir / digest[:2] / digest[2:]
     try:
-        return path.read_bytes()
+        if repair:
+            return path.read_bytes()
+        # Checkpoint lifecycle validation cannot create a missing object or
+        # accept corrupt bytes under the old name. Native generation pinning
+        # is a separate future CAS protocol requirement.
+        with path.open("rb") as handle:
+            data = handle.read(self.policy.max_cas_object_bytes + 1)
+        if len(data) > self.policy.max_cas_object_bytes:
+            raise StorageBlocked("cas_object_too_large")
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise StorageBlocked("cas_object_digest_mismatch")
+        return data
     except FileNotFoundError:
-        restored = self._restore_canonical_blob(digest)
+        restored = self._restore_canonical_blob(digest) if repair else None
         if restored is not None:
             return restored
         reason = f"missing:{digest}"
@@ -191,8 +289,7 @@ def put_tool_result(
     now = _utc_now()
     self._reserve_authoritative_write(1024)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._register_object(self._state, descriptor)
             self._state.execute(
                 """INSERT INTO tool_result_objects(
@@ -213,10 +310,6 @@ def put_tool_result(
                    DO NOTHING""",
                 (locator, process_id, task_id, tool_name, now),
             )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return {
         "locator": locator,
         "digest": descriptor["digest"],
@@ -234,6 +327,7 @@ def read_tool_result(
     max_chars: int = 24_000,
     json_pointer: str = "",
     query: str = "",
+    owner_process_id: str = "",
 ) -> dict:
     """Read a bounded page from an addressable tool result.
 
@@ -249,6 +343,13 @@ def read_tool_result(
                FROM tool_result_objects WHERE locator=?""",
             (str(locator),),
         ).fetchone()
+    if owner_process_id:
+        with self._state_lock:
+            owned = self._state.execute(
+                "SELECT 1 FROM tool_result_owners WHERE locator=? AND process_id=? LIMIT 1",
+                (str(locator), str(owner_process_id))).fetchone()
+        if owned is None:
+            raise KeyError("tool result not owned by this process")
     if row is None:
         raise KeyError(f"tool result not found: {locator}")
     content = self.read_blob(str(row["content_ref"])).decode("utf-8")

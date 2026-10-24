@@ -64,7 +64,8 @@ class ToolOutcomeRuntime:
                 error_code='SUPERVISED_DELIVERY_FAILED', error_message=report, outcome_status=OutcomeStatus.FAILED,
                 window_action=window['action'], window_usage_ratio=window['usage_ratio']))
         _inc_nudge_counter(process, 'completion_tool_rejection')
-        session.append_host_steering('; '.join(evaluation.reasons),
+        from .loop_guard import render_completion_guidance
+        session.append_host_steering(render_completion_guidance(evaluation.gates),
             steering_type='completion_tool_rejection', version=str(process.steps_used))
         return DeliveryBoundary(retry=True)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import json
 import threading
 import time
@@ -508,7 +510,7 @@ def test_completion_tool_is_terminal_after_host_evidence_passes(tmp_path_factory
         task_budget_limits={"max_seconds": 10},
     )
     edit = AgentTool(
-        name="edit",
+        execution_contract=data_broker("test.fixture"), name="edit",
         description="Apply one bounded test edit.",
         parameters={"type": "object", "properties": {}, "required": []},
         execute=lambda _args: {"success": True, "file": "bounded.txt"},
@@ -587,7 +589,7 @@ def test_plain_text_after_host_evidence_compiles_terminal_claim(tmp_path_factory
         task_budget_limits={"max_seconds": 10},
     )
     edit = AgentTool(
-        name="edit",
+        execution_contract=data_broker("test.fixture"), name="edit",
         description="Apply one bounded test edit.",
         parameters={"type": "object", "properties": {}, "required": []},
         execute=lambda _args: {"success": True, "file": "bounded.txt"},
@@ -645,3 +647,113 @@ def test_cache_telemetry_distinguishes_cold_start_epoch_and_provider_miss():
         "cold_start", "provider_miss_or_unreported", "context_epoch_reset",
     ]
     assert session.cache_summary()["eligible_input_tokens"] == 100
+
+
+def test_child_decision_resume_binds_its_own_session_even_from_parent_view(tmp_path_factory, monkeypatch):
+    import queue
+    from backend.core.daemon.dispatch import _cmd_task
+    manager, root = _supervisor(tmp_path_factory)
+    child = manager.fork(parent_id=root.process_id, role='worker', actor_kind='worker',
+        tool_registry=ToolRegistry([]), max_steps=6, ring_level=RingLevel.RING_3,
+        workspace_path=str(tmp_path_factory), task_id='child-task', capability_profile_id='text.only')
+    pending = create_user_decision(child, _decision_args('Which language?'))
+    child.status = ProcessStatus.AWAITING_USER
+    calls = []
+    def resolve(apm, store, workspace, process_id, session_id=''):
+        calls.append((process_id, session_id))
+        raise ValueError('TEST_STOP_AFTER_IDENTITY_BOUNDARY')
+    monkeypatch.setattr('backend.core.loop.conversation_continuation.resolve_conversation_process', resolve)
+    emitted = []
+    _cmd_task({'action': 'decision', 'process_id': child.process_id,
+        'decision_id': pending['decision_id'], 'session_id': root.session.session_id,
+        'conversation_process_id': root.process_id, 'instruction': 'Choose option 1: A'},
+        SimpleNamespace(workspace_path=tmp_path_factory), SimpleNamespace(name='project'),
+        {'apm': manager, 'evq': queue.Queue(), 'dispatcher': object()}, emitted.append)
+    assert calls == [(child.process_id, child.session.session_id)]
+    assert emitted[-1]['error'] == 'TEST_STOP_AFTER_IDENTITY_BOUNDARY'
+    assert child.session.host_ledger[-1]['event'] == 'user_decision_received'
+    assert root.session.session_id != child.session.session_id
+
+
+def test_cancelling_parked_child_refunds_retained_escrow_once(tmp_path_factory):
+    manager, root = _supervisor(tmp_path_factory)
+    child = manager.fork(parent_id=root.process_id, role='worker', actor_kind='worker',
+        tool_registry=ToolRegistry([]), max_steps=6, ring_level=RingLevel.RING_3,
+        workspace_path=str(tmp_path_factory), task_id='parked-child', capability_profile_id='text.only')
+    create_user_decision(child, _decision_args('Choose a language'))
+    child.status = ProcessStatus.AWAITING_USER
+    child.lifecycle_finalized = True
+    assert child.task_budget.decision_card(child.process_id)['current_process']['state'] == 'active'
+    manager.kill(child.process_id, reason='synthetic user cancel')
+    lease = child.task_budget.decision_card(child.process_id)['current_process']
+    assert lease['state'] == 'released'
+    assert lease['terminal_status'] == 'cancelled'
+    assert lease['refunded_provider_calls'] > 0
+    manager.kill(child.process_id, reason='duplicate cancel')
+    assert child.task_budget.decision_card(child.process_id)['current_process'] == lease
+
+
+def test_supervisor_decision_projection_reads_real_child_answers_and_keeps_task_scope(tmp_path_factory):
+    from backend.core.loop.question_broker import decision_evidence
+    manager, root = _supervisor(tmp_path_factory)
+    child = manager.fork(parent_id=root.process_id, role='worker', actor_kind='worker',
+        tool_registry=ToolRegistry([]), max_steps=6, ring_level=RingLevel.RING_3,
+        workspace_path=str(tmp_path_factory), task_id='child-task', capability_profile_id='text.only')
+    request = create_user_decision(child, _decision_args('Language?'))
+    before = decision_evidence(child)
+    assert before['items'][0]['answer_state'] == 'not_received'
+    child.session.host_ledger.append({'event': 'user_decision_received', 'task_id': child.active_task_id,
+        'decision_id': request['decision_id'], 'answer': 'Chinese'})
+    child.pending_decision = None
+    projected = decision_evidence(child)
+    assert projected['items'][0]['status'] == 'answered'
+    assert projected['items'][0]['answer_state'] == 'received'
+    assert projected['items'][0]['answer'] == 'Chinese'
+    assert projected['items'][0]['source_process_id'] == child.process_id
+    assert projected['items'][0]['owner_process_id'] == root.process_id
+    assert projected['items'][0]['options'][0]['label'] == 'A'
+    assert not decision_evidence(root)['items']
+    child.active_task_id = 'next-task'
+    assert not decision_evidence(child)['items']
+
+def test_semantic_choices_always_allow_other_text_without_opening_permission_controls(tmp_path_factory):
+    manager,root=_supervisor(tmp_path_factory)
+    args=_decision_args('Which language?')
+    args['allow_free_form']=False
+    request=create_user_decision(root,args)
+    assert request['allow_free_form'] is True
+    assert not any(e.get('event')=='user_decision_received' for e in root.session.host_ledger)
+    root.pending_decision=None
+    args['kind']='permission'
+    request=create_user_decision(root,args)
+    assert request['allow_free_form'] is False
+
+
+def test_readiness_evidence_reports_its_task_and_candidate_scope(tmp_path_factory):
+    from backend.core.loop.decision_support import collect_decision_evidence
+    from backend.core.loop.tool_surface import admission_snapshot
+    _manager,process=_supervisor(tmp_path_factory)
+    process.task_kind="answer"
+    facts=collect_decision_evidence(process,"completion")
+    assert facts["completion"]["factual_ready"] is False
+    assert facts["completion"]["effectful_receipts_required"] is False
+    assert facts["completion"]["scope"]=="current_task_action_evidence"
+    assert facts["outstanding_gates"]["ready"] is True
+    assert facts["outstanding_gates"]["assessment_kind"]=="readiness_probe"
+    assert facts["outstanding_gates"]["candidate_source"]=="placeholder"
+    access=admission_snapshot(process,["declare_task_contract"],["declare_task_contract","delegate_task"])
+    assert access["scope"]=="current_process_current_contract"
+    assert access["inactive_catalog_scope"]=="self_execution_capability_profiles_only"
+    assert access["control_protocols_require_task_routing"] is True
+    assert access["authority_granted"] is False
+
+
+def test_action_receipt_scope_does_not_waive_required_tests_for_answers(tmp_path_factory):
+    from backend.core.loop.decision_support import collect_decision_evidence
+    _manager,process=_supervisor(tmp_path_factory)
+    process.task_kind="answer"
+    process.required_test_ids=["missing-required-test"]
+    facts=collect_decision_evidence(process,"completion")
+    assert facts["completion"]["effectful_receipts_required"] is False
+    assert facts["completion"]["test_failures"]
+    assert facts["outstanding_gates"]["ready"] is False

@@ -1,8 +1,9 @@
 """Sessions repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
 import uuid
+from ..transactions import authoritative_transaction
 from .ports import SessionsPort
-from ..support import _utc_now
+from ..support import _utc_now, state_read_snapshot
 
 def append_session_event(
     self, process_id: str, event_type: str, data: dict | None = None,
@@ -17,8 +18,7 @@ def append_session_event(
     )
     self._reserve_authoritative_write(1024)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._register_object(self._state, descriptor)
             if sequence is None:
                 row = self._state.execute(
@@ -41,7 +41,6 @@ def append_session_event(
                     raise RuntimeError(
                         "session event sequence collision with different content"
                     )
-                self._state.execute("COMMIT")
                 return resolved_sequence
             self._state.execute(
                 """INSERT INTO session_events(
@@ -60,16 +59,12 @@ def append_session_event(
                 task_id=str(identity["task_id"] or "") if identity else "", process_id=process_id,
                 stream_id=f"ledger:{process_id}", sequence=resolved_sequence,
                 payload_ref=descriptor["ref"], occurred_at=occurred_at or _utc_now())
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return resolved_sequence
 
 
 def load_agent_session_state(self: SessionsPort, process_id: str) -> dict | None:
     self._ensure_open()
-    with self._state_lock:
+    with state_read_snapshot(self._state, self._state_lock):
         process_row = self._state.execute(
             """SELECT session_id, checkpoint_event_sequence, runtime_state_ref
                FROM session_processes WHERE process_id=?""",

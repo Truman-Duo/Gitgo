@@ -1,8 +1,11 @@
 """requirements and decisions protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ApprovalMode, ToolEffect
 from backend.core.loop.code_dossier import build_code_dossier
-from backend.core.loop.decision_support import collect_decision_evidence, safe_calculate
+from backend.core.loop.decision_support import collect_decision_evidence
 
 def install(ctx):
     process = ctx.process
@@ -21,35 +24,10 @@ def install(ctx):
 
 
     tools["engineering_workflow"] = AgentTool(
+        execution_contract=data_broker("host.runtime.engineering_workflow"),
         name="engineering_workflow",
         description=(
-            "Manage Host-enforced engineering practices, not prompt-only skills. "
-            "Built-in presets accept profiles plus concrete test_id/target_files, "
-            "questions(id,state_topic,depends_on), glossary_path or agent_document_path; "
-            "check_argv/check_cwd bind non-pytest checks; preparation_files permits "
-            "building evidence harnesses before red without permitting product fixes. "
-            "omit nodes to compile a preset. "
-            "configure accepts a bounded dependency graph with profiles alignment, "
-            "domain_modeling, diagnosis, tdd, architecture, retrospective or agent_documentation. "
-            "Nodes use decision(state_topic), observation(tools), check(test_id,passed), "
-            "change(files), document(path), or report(format). depends_on controls the ready "
-            "frontier; before_mutation enforces prerequisites. status returns outstanding "
-            "evidence; ask routes one ready decision through the existing user broker. "
-            "For requirement alignment, declare questions with request(question,why_user_must_decide,"
-            "kind,options) and depends_on; when maps ancestor IDs to accepted labels. "
-            "ask_frontier presents ONE ready question, then adopts the real answer before selecting another. "
-            "Extend the graph as answers reveal new choices; revise_decision reopens an answer "
-            "and invalidates its dependents. Research factual unknowns with observation nodes; "
-            "only material user-owned decisions become questions. Do not interview greetings "
-            "or ask facts available from tools. record saves a document hash or structured report. Receipts and user answers "
-            "are observed by Host. Receiving free-form text does not resolve a decision. "
-            "resolve_answer(node_id,decision_id,content) records a source-bound interpretation: "
-            "content has disposition confirmed/partial/deferred/delegated, value, an exact "
-            "quote from that user's answer, and remaining for unresolved input. Only confirmed "
-            "or explicitly delegated answers close gates. retrospective derives findings from current task receipts. "
-            "Existing permissions remain mandatory; unavailable checks never become passes. "
-            "propose_amendment(plan,reason) offers a concrete scope change to the user; "
-            "only the matching user decision can weaken an active plan."
+            load_prompt('tools/engineering_workflow')
         ),
         parameters={"type": "object", "properties": {
             "operation": {"type": "string", "enum": ["configure", "status", "ask", "ask_frontier", "revise_decision", "resolve_answer", "record", "retrospective", "propose_amendment"]},
@@ -99,11 +77,10 @@ def install(ctx):
             }
 
         tools["code_dossier"] = AgentTool(
+            execution_contract=data_broker("host.runtime.code_dossier"),
             name="code_dossier",
             description=(
-                "Build a deterministic, content-addressed code dossier containing "
-                "file sizes, symbols, imports, tests and dependency evidence. It makes "
-                "no semantic audit conclusion."
+                load_prompt('tools/code_dossier')
             ),
             parameters={
                 "type": "object",
@@ -122,47 +99,48 @@ def install(ctx):
     from backend.core.loop.decision_support import (
         collect_decision_evidence,
         create_user_decision,
-        safe_calculate,
     )
 
 
-    tools["calculate"] = AgentTool(
-        name="calculate",
-        description=(
-            "Deterministically evaluate bounded arithmetic or numeric comparisons; "
-            "use this instead of doing calculation mentally."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {"expression": {"type": "string"}},
-            "required": ["expression"],
-        },
-        execute=lambda args: {
-            "expression": str(args.get("expression", "")),
-            "result": safe_calculate(str(args.get("expression", ""))),
-        },
-        effect=ToolEffect.READ,
-        idempotent=True,
-    )
+    def lesson_checker(args):
+        from backend.core.knowledge.checker import request_change
+        from backend.core.knowledge.review import content_version
+        from backend.core.storage import get_storage
+        storage=getattr(process,"runtime_storage",None) or get_storage(workspace_path)
+        found=storage.get_lesson_record(str(args.get("lesson_id") or ""))
+        if found is None:return {"error":"LESSON_NOT_FOUND"}
+        if args.get("operation","inspect")=="inspect":
+            return {"lesson":found[1],"content_version":content_version(found[1]),"project_id":storage.paths.project_id,
+                    "supported_check":"literal occurrence in complete edit_file/write_file candidate at exact project-relative paths"}
+        if args.get("operation")!="request":return {"error":"INVALID_CHECKER_OPERATION"}
+        return request_change(process,storage,workspace_path,args)
 
+    tools["lesson_checker"] = AgentTool(execution_contract=data_broker("runtime.lesson_checker"), name="lesson_checker",description=load_prompt('tools/lesson_checker'),
+        parameters={"type":"object","properties":{
+            "operation":{"type":"string","enum":["inspect","request"]},"lesson_id":{"type":"string"},
+            "expected_version":{"type":"string"},"action":{"type":"string","enum":["enable","disable"]},
+            "violation_literal":{"type":"string","maxLength":256},"paths":{"type":"array","items":{"type":"string"},"maxItems":12}},
+            "required":["lesson_id"],"additionalProperties":False},execute=lesson_checker,
+        effect=ToolEffect.READ,read_only=True,idempotent=False)
 
     tools["decision_evidence"] = AgentTool(
+        execution_contract=data_broker("host.runtime.decision_evidence"),
         name="decision_evidence",
         description=(
-            "Ask the Host to aggregate completion, child, test, governance, or budget "
-            "facts before making a semantic decision."
+            load_prompt('tools/decision_evidence')
         ),
         parameters={
             "type": "object",
             "properties": {
                 "focus": {
                     "type": "string",
-                    "enum": ["all", "completion", "gates", "children", "tests", "governance", "budget", "capabilities", "engineering"],
+                    "enum": ["all", "completion", "gates", "children", "tests", "governance", "budget", "capabilities", "engineering", "guidance"],
                 },
+                "identifier": {"type": "string", "maxLength": 120, "description": "For guidance only: a diagnostic catalog ID, symbolic name, or procedure name. Omit for the procedure index."},
             },
         },
         execute=lambda args: collect_decision_evidence(
-            process, str(args.get("focus", "all"))
+            process, str(args.get("focus", "all")), identifier=str(args.get("identifier", ""))
         ),
         effect=ToolEffect.READ,
         idempotent=True,
@@ -189,11 +167,10 @@ def install(ctx):
 
 
     tools["capability_status"] = AgentTool(
+        execution_contract=data_broker("host.runtime.capability_status"),
         name="capability_status",
         description=(
-            "Read the Host's current model, provider protocol and capability/fallback "
-            "status without exposing credentials. Use this before claiming that Gitgo "
-            "or the active provider cannot perform a feature."
+            load_prompt('tools/capability_status')
         ),
         parameters={
             "type": "object",
@@ -319,11 +296,10 @@ def install(ctx):
 
 
     tools["configure_capability"] = AgentTool(
+        execution_contract=data_broker("host.runtime.configure_capability"),
         name="configure_capability",
         description=(
-            "Apply a Host capability strategy only after the user has explicitly chosen "
-            "it. The Host presents an approval card before changing global configuration. "
-            "This never accepts API keys; sensitive provider credentials remain in /config."
+            load_prompt('tools/configure_capability')
         ),
         parameters={
             "type": "object",
@@ -413,11 +389,10 @@ def install(ctx):
 
 
     tools["acknowledge_governance_signal"] = AgentTool(
+        execution_contract=data_broker("host.runtime.acknowledge_governance_signal"),
         name="acknowledge_governance_signal",
         description=(
-            "Acknowledge one active rejection signal after semantically addressing it. "
-            "Use its exact signal_id and cite any successful Host receipt IDs that prove "
-            "the correction; this replaces copying or keyword-matching the instruction."
+            load_prompt('tools/acknowledge_governance_signal')
         ),
         parameters={
             "type": "object",
@@ -438,20 +413,10 @@ def install(ctx):
 
     if process.actor_kind in {"supervisor", "worker", "reviewer"}:
         tools["request_user_decision"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_user_decision"),
             name="request_user_decision",
             description=(
-                "Ask one material user-owned unknown needed for the CURRENT requested outcome. "
-                "Choose the foundational unresolved facet first, then use its answer to reconsider "
-                "the next question; do not bundle independent facets in one question. Supplied "
-                "facts and explicit delegation do not need confirmation. Do not inspect an "
-                "arbitrary workspace merely to invent the user's missing purpose. Inspect tools "
-                "for observable facts; clarification does not require a task contract first. "
-                "Clarification accepts 0-3 short options "
-                "(label,description,recommended) or a free-form question; use engineering_workflow "
-                "for dependent questions and rounds. Other kinds: every option must explain principle, "
-                "immediate and downstream effects, risks, and reversibility. Use 2-3 business "
-                "options; the Host supplies Discuss/Amend separately. Preference, direction, "
-                "verification, and checkpoint questions require a stable state_topic."
+                load_prompt('tools/request_user_decision')
             ),
             parameters={
                 "type": "object",
@@ -500,13 +465,10 @@ def install(ctx):
         )
         from backend.core.loop.permission_broker import create_permission_request
         tools["request_permission"] = AgentTool(
+            execution_contract=data_broker("host.runtime.request_permission"),
             name="request_permission",
             description=(
-                "Request authority only when a structured Host error explicitly prescribes "
-                "this shortcut for an out-of-scope resource or capability expansion. Do not "
-                "call it before an ordinary or public-read tool: invoke that tool once and let "
-                "the Host allow it or suspend it atomically. Describe the intended outcome in "
-                "user terms; the Host binds exact API, target, scope and expiry."
+                load_prompt('tools/request_permission')
             ),
             parameters={
                 "type": "object",
@@ -565,12 +527,10 @@ def install(ctx):
             return {"accepted": True, **result}
 
         tools["publish_interface_update"] = AgentTool(
+            execution_contract=data_broker("host.runtime.publish_interface_update"),
             name="publish_interface_update",
             description=(
-                "Inspect this B's declared output interfaces and publish any changed "
-                "version through the Host. The Host updates interface documentation, "
-                "notifies A and affected dependent B Agents, and blocks stale downstream "
-                "work until A resolves the revision. This never opens peer chat."
+                load_prompt('tools/publish_interface_update')
             ),
             parameters={
                 "type": "object",
@@ -624,12 +584,10 @@ def install(ctx):
             return {"accepted": True, **event}
 
         tools["escalate_to_supervisor"] = AgentTool(
+            execution_contract=data_broker("host.runtime.escalate_to_supervisor"),
             name="escalate_to_supervisor",
             description=(
-                "Escalate a semantic boundary, dependency, blocking, or stale-intent issue "
-                "to the governing A through the Host. Supply evidence and a proposed action. "
-                "Set requires_user_decision only when A may need to ask the user; B never "
-                "messages a sibling or changes another task directly."
+                load_prompt('tools/escalate_to_supervisor')
             ),
             parameters={
                 "type": "object",

@@ -1,0 +1,1 @@
+Submit the final A-level synthesis. The Host verifies every required B is terminal and explicitly reviewed, then closes the supervisor task without a TASK_COMPLETE password. If a required delivery failed, review it as changes_required and submit the failure report here; status=auto lets the Host derive failure.

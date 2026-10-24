@@ -1,6 +1,7 @@
 """Lineage repository; uses the injected writer/transaction boundary."""
 from __future__ import annotations
 import uuid
+from ..transactions import authoritative_transaction
 from .ports import LineagePort
 from ..support import _utc_now
 
@@ -30,8 +31,7 @@ def create_session_lineage_checkpoint(
     context_epoch = int(session.get("context_epoch", 0) or 0)
     self._reserve_authoritative_write(2048)
     with self._state_lock:
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._register_object(self._state, descriptor)
             parent_row = self._state.execute(
                 "SELECT checkpoint_id FROM session_lineage_heads WHERE session_id=?",
@@ -64,10 +64,6 @@ def create_session_lineage_checkpoint(
                        updated_at=excluded.updated_at""",
                 (session_id, checkpoint_id, now),
             )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     return {
         "checkpoint_id": checkpoint_id,
         "parent_checkpoint_id": parent_id,
@@ -143,8 +139,7 @@ def commit_session_undo(self: LineagePort, session_id: str, checkpoint_id: str) 
         snapshot = self._read_json_blob(str(row["snapshot_ref"]))
         now = _utc_now()
         self._reserve_authoritative_write(1024)
-        self._state.execute("BEGIN IMMEDIATE")
-        try:
+        with authoritative_transaction(self._state):
             self._state.execute(
                 "UPDATE session_lineage SET state='rewound' WHERE checkpoint_id=?",
                 (checkpoint_id,),
@@ -153,10 +148,6 @@ def commit_session_undo(self: LineagePort, session_id: str, checkpoint_id: str) 
                 "UPDATE session_lineage_heads SET checkpoint_id=?, updated_at=? WHERE session_id=?",
                 (row["parent_checkpoint_id"], now, session_id),
             )
-            self._state.execute("COMMIT")
-        except BaseException:
-            self._state.execute("ROLLBACK")
-            raise
     if not isinstance(snapshot, dict):
         raise RuntimeError("SESSION_UNDO_SNAPSHOT_INVALID")
     return {**preview, "snapshot": dict(snapshot)}

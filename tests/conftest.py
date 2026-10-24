@@ -44,35 +44,25 @@ def isolate_default_gitgo_state(
     boundaries so a cached runtime cannot outlive the temporary directory.
     """
     close_owned_storage()
-    monkeypatch.setenv(
-        "GITGO_STATE_HOME", str(tmp_path_factory / "default-gitgo-state"),
-    )
-    monkeypatch.setenv(
-        "GITGO_CONFIG_PATH", str(tmp_path_factory / "config" / "config.json"),
-    )
-    monkeypatch.setenv(
-        "GITGO_LLM_CONFIG_PATH", str(tmp_path_factory / "config" / "llm_config.json"),
-    )
-    # Let the secret store follow the isolated provider config, including tests
-    # that override _config_path themselves; never inherit a live secret path.
-    monkeypatch.delenv("GITGO_LLM_SECRET_PATH", raising=False)
-    # Unit tests must never add records to a developer or CI worker's real
-    # DPAPI/Keychain store. Production still selects the native OS backend.
-    monkeypatch.setattr(
-        "backend.core.secret_store.default_secret_protector",
-        lambda: _TestSecretProtector(),
-    )
-    try:
-        yield
-    finally:
-        close_owned_storage()
+    # Runtime evidence must remain outside every tool execution workspace.
+    with tempfile.TemporaryDirectory(prefix="gitgo_host_state_") as state_dir:
+        root = Path(state_dir)
+        monkeypatch.setenv("GITGO_STATE_HOME", str(root / "state"))
+        monkeypatch.setenv("GITGO_CONFIG_PATH", str(root / "config" / "config.json"))
+        monkeypatch.setenv("GITGO_LLM_CONFIG_PATH", str(root / "config" / "llm_config.json"))
+        monkeypatch.delenv("GITGO_LLM_SECRET_PATH", raising=False)
+        monkeypatch.setattr("backend.core.secret_store.default_secret_protector", lambda: _TestSecretProtector())
+        try:
+            yield
+        finally:
+            close_owned_storage()
 
 
 @pytest.fixture
 def tmp_path_factory() -> Iterator[Path]:
     """创建临时目录，测试后自动清理。"""
-    with tempfile.TemporaryDirectory(prefix="gitgo_test_") as d:
-        yield Path(d)
+    with tempfile.TemporaryDirectory(prefix="gt_") as d:
+        yield Path(d).resolve()
 
 
 @pytest.fixture
@@ -135,3 +125,27 @@ def factory():
     """固定种子 factory（CI 确定性测试）。"""
     from tests.factory import TestDataFactory
     return TestDataFactory(seed=42)
+
+
+@pytest.fixture
+def runner_transport_only(monkeypatch):
+    """Test runner/protocol semantics independently of machine ACL provisioning.
+
+    Native containment is separately exercised without this mock in
+    test_native_sandbox.py. This fixture is opt-in, never applied globally.
+    """
+    def launch(argv, policy, **kwargs):
+        from backend.core.process_control import spawn_managed
+        proc = spawn_managed(argv, **kwargs)
+        # Explicit protocol-seam observation, never native containment evidence.
+        def close_fixture():
+            proc._gitgo_cleanup = {"complete": proc.poll() is not None,
+                "mode": "test-transport-only", "issues": [] if proc.poll() is not None else ["fixture_root_alive"]}
+        proc.close_sandbox = close_fixture
+        return proc
+    monkeypatch.setattr("backend.core.sandbox.sandbox_popen", launch)
+
+    # This opt-in protocol fixture also avoids touching real runtime ACLs for
+    # temporary native producer views. Real OS tests do not use this fixture.
+    monkeypatch.setattr("backend.core.sandbox_access.WorkspaceAccess.prepare", lambda self: self)
+    monkeypatch.setattr("backend.core.sandbox_access.WorkspaceAccess.close", lambda self: None)

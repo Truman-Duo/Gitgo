@@ -17,16 +17,19 @@ from backend.core.daemon.emit import _emit
 
 def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[str] | None:
     """每轮结束时在 workspace 做 git commit 快照。"""
-    import subprocess
+    from backend.core.loop.worktree import AgentWorktreeManager, WorktreeError
 
-    ws = str(session.workspace_path)
+    ws = Path(session.workspace_path)
     changed = [e.rel_path for e in session.entries if e.status != "same"]
 
     try:
-        creationflags = 0x08000000 if sys.platform == "win32" else 0
-        subprocess.run(["git", "add", "-A"], cwd=ws,
-                       capture_output=True, text=True,
-                       creationflags=creationflags, timeout=30)
+        AgentWorktreeManager._run(ws, ["git", "add", "-A"], timeout_seconds=30)
+        staged = AgentWorktreeManager._run(ws, ["git", "diff", "--cached", "--quiet"],
+                                         check=False, timeout_seconds=30)
+        if staged.returncode == 0:
+            return []
+        if staged.returncode != 1:
+            raise WorktreeError(staged.stderr.decode("utf-8", errors="replace"))
 
         msg = f"gitgo: round snapshot [{datetime.now().strftime('%H:%M:%S')}]\n\n"
         msg += f"变更文件: {len(changed)}\n"
@@ -35,9 +38,9 @@ def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[st
             if len(changed) > 20:
                 msg += f"\n  ... 还有 {len(changed) - 20} 个文件"
 
-        result = subprocess.run(["git", "commit", "-m", msg], cwd=ws,
-                                capture_output=True, text=True,
-                                creationflags=creationflags, timeout=30)
+        result = AgentWorktreeManager._run(ws,
+            ["git", "-c", "user.name=Gitgo Snapshot", "-c", "user.email=snapshot@local.gitgo.invalid",
+             "commit", "-m", msg], timeout_seconds=30)
 
         if result.returncode == 0:
             from backend.core.history import HistoryManager
@@ -50,47 +53,25 @@ def _snapshot_workspace(session: SyncSession, project: ProjectConfig) -> list[st
             _emit({"event": "workspace_snapshot", "files": len(changed)})
             return changed
         return []  # no changes to commit
-    except (subprocess.SubprocessError, OSError) as e:
-        _emit({"event": "snapshot_error", "error": str(e)})
+    except (WorktreeError, OSError) as e:
+        event = {"event": "snapshot_error", "error": str(e), "effect_state": "not_inferred"}
+        if getattr(e, "diagnostic", None) is not None:
+            event["diagnostic"] = e.diagnostic
+        _emit(event)
         return None
 
 
-def _harvest_from_rejection_chain(
-    project_name: str, rejections: list, session: SyncSession
-) -> None:
-    """从连续 rejection 中提取 pending lesson。"""
-    from backend.core.knowledge.lesson import LessonManager
-    from backend.core.knowledge.models import Lesson
+def _harvest_from_rejection_chain(project_name: str, rejections: list, session: SyncSession) -> None:
+    """Actual task revisions are not frequency-derived knowledge."""
     from backend.core.history import HistoryManager
-
-    recent_3 = rejections[-3:]
-    reasons = []
-    for r in recent_3:
-        d = r.detail if isinstance(r.detail, dict) else {}
-        reasons.append(d.get("reason", ""))
-
-    last_detail = recent_3[-1].detail if isinstance(recent_3[-1].detail, dict) else {}
-    final_rule = last_detail.get("instruction", "")
-
-    lesson = Lesson(
-        tech_stack="",
-        category="process",
-        severity="high",
-        trigger=f"连续 3 次被人否定: {'; '.join(reasons[-2:])}",
-        rule=final_rule or "人连续纠正了多次方向性错误，最终方案需要被记录。",
-    )
-    lesson.id = f"rejection_{project_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-    ws = Path(session.workspace_path)
-    LessonManager.save_pending(ws, lesson)
-
-    HistoryManager.add_operation(
-        project_name, "governance_lesson", "success",
-        {"harvested_count": 1, "lesson_id": lesson.id, "trigger": "rejection_chain"},
-        correlation_id=session._correlation_id,
-    )
-    _emit({"event": "lesson_harvested", "lesson_id": lesson.id,
-           "trigger": "rejection_chain"})
+    from backend.core.knowledge.harvest import capture_signal
+    with HistoryManager.workspace_scope(str(session.workspace_path)):
+        for revision in rejections[-3:]:
+            detail = revision.detail if isinstance(revision.detail, dict) else {}
+            identity = str(getattr(revision, "correlation_id", "") or "") + ":" + str(revision.timestamp)
+            capture_signal("user_task_revision", {"information_kind": "task",
+                "reason": detail.get("reason", ""), "instruction": detail.get("instruction", ""),
+                "source": "user_task_revision"}, project_name, source_event_id=identity)
 
 
 def _runtime_llm_from_config(cfg):
@@ -137,3 +118,18 @@ def _resolve_llm_config(workspace: str) -> tuple | None:
             pass
 
     return None
+
+
+def bind_project_tool_context(tool, workspace, project_name):
+    """Bind facts after registry assembly without rewriting execution authority."""
+    previous = tool.prepare_args
+    def prepare(args):
+        prepared = dict(previous(args) if previous else args or {})
+        prepared["_workspace"] = str(workspace)
+        properties = tool.parameters.get("properties", {})
+        if "workspace_path" in properties:
+            prepared["workspace_path"] = str(workspace)
+        if "project_name" in properties:
+            prepared["project_name"] = project_name
+        return prepared
+    tool.prepare_args = prepare

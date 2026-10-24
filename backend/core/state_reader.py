@@ -1,7 +1,7 @@
 """StateReader — 统一的治理状态查询接口
 
 不引入新文件格式，不替代 HistoryManager 或 ConfigManager。
-所有方法从已有持久化文件读取，封装路径逻辑。
+读取既有项目存储及其兼容资料，封装持久化边界。
 Agent 可直接调用，不需要知道文件路径和格式细节。
 """
 
@@ -18,21 +18,16 @@ class StateReader:
 
     @staticmethod
     def get_formal_commits(project_name: str, workspace_path: str = "") -> list[dict]:
-        """从 session.json + history.json 重建 formal commits 当前状态。
+        """优先读取项目存储中的正式提交状态，包括权威空列表。
 
-        优先从 session.json 读取当前快照；若不存在则从 governance_synced/
-        governance_pushed 等 event 重建。
+        尚无权威状态时可读取有界旧快照；两者均无才由历史事件重建。
+        状态不可读时显式失败，不以历史回退掩盖损坏或丢失。
         """
-        import json
-        ws = Path(workspace_path) if workspace_path else None
-        if ws and (ws / ".gitgo" / "session.json").exists():
-            try:
-                data = json.loads((ws / ".gitgo" / "session.json").read_text(encoding="utf-8"))
-                fcs = data.get("formal_commits", [])
-                if fcs:
-                    return fcs
-            except (json.JSONDecodeError, OSError):
-                pass
+        from backend.core.sync_session.state import read_state
+        if workspace_path:
+            data, _ = read_state(workspace_path)
+            if data is not None:
+                return data.get("formal_commits", [])
 
         # fallback: 从 history events 重建
         entries = HistoryManager.load()
@@ -73,7 +68,8 @@ class StateReader:
             lessons = LessonManager.load_pending(ws, project_name)
         else:
             lessons = LessonManager.load_instance(ws, project_name) if project_name else []
-        return [l.to_dict() for l in lessons]
+        from backend.core.knowledge.review import can_consume
+        return [l.to_dict() for l in lessons if can_consume(l)]
 
     @staticmethod
     def get_integrity_warnings(project_name: str, limit: int = 20) -> list[dict]:
@@ -88,10 +84,10 @@ class StateReader:
         return warnings[-limit:]
 
     @staticmethod
-    def get_memory_snapshots(backup_path: str) -> list[dict]:
-        """列出 .gitgo/memories/ 下的快照。"""
+    def get_memory_snapshots(backup_path: str, workspace_path: str = "") -> list[dict]:
+        """列出配置备份节点的不可变档案及只读旧目录快照。"""
         from backend.core.identity.snapshot import list_memory_snapshots
-        return list_memory_snapshots(Path(backup_path))
+        return list_memory_snapshots(Path(backup_path), workspace_path or None)
 
     @staticmethod
     def get_governance_events(project_name: str, event_type: str = "",

@@ -4,9 +4,9 @@ Gitgo 是面向真实项目开发的终端 Agent harness，将模型、工具、
 
 模型负责理解、规划和发起操作；工具提供文件、搜索、命令等能力；运行时、授权与存储组件负责执行、权限和证据。正式界面使用 Bun、React 和 Ink，通过 Native Host 连接项目运行服务。
 
-当前源码为 **1.0.0-alpha.2**，已生成 Windows x64 完整 ZIP 并验证冻结运行时和真实 API。**正式终端主流程已人工确认，发布状态见版本页；已有下载入口对应此前的预览包。**
+当前基线为 **1.0.0-alpha.3**，整合知识、提示词、工作台、原生沙箱基础设施、管理更新与历史缩放，以及后续状态协作和终端交互修复。Alpha 3 属于预览渠道，与稳定版分开；公开 Windows x64 包以 [Alpha 3 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 的发布资产和验证摘要为准。源码、冻结包与人工终端分别验收，不代表跨平台完整沙箱，见 [Alpha 3 范围](docs/ALPHA_3.md)。
 
-[下载预览版](https://github.com/Truman-Duo/Gitgo/releases/tag/terminal-preview-2026-09-28) · [安装](docs/INSTALL.md) · [配置](docs/CONFIGURATION.md) · [版本](docs/VERSION.md) · [贡献](CONTRIBUTING.md)
+[下载已发布版本](https://github.com/Truman-Duo/Gitgo/releases) · [安装](docs/INSTALL.md) · [配置](docs/CONFIGURATION.md) · [版本](docs/VERSION.md) · [贡献](CONTRIBUTING.md)
 
 ## Gitgo 提供哪些优势
 
@@ -41,7 +41,7 @@ Gitgo 是面向真实项目开发的终端 Agent harness，将模型、工具、
 
 ## 开始使用
 
-1. 从 [Releases](https://github.com/Truman-Duo/Gitgo/releases) 下载 Windows x64 ZIP 和校验文件，核对后完整解压，运行 `gitgo.exe`。主 EXE 依赖包内组件。
+1. 从 [Alpha 3 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 下载 Windows x64 ZIP 和校验文件，核对后完整解压；按[安装说明](docs/INSTALL.md)建立独立管理安装，再运行生成的 `gitgo.ps1`。
 2. 首次启动在 Terminal 行用左右方向键选择检测到的终端，按 Enter 保存。
 3. 打开 `/config → Providers`，填写协议、Base URL、模型和凭据。需要备用路由时开启自动 failover 并设置顺序。
 4. 选择项目，输入任务，例如“调查这个项目的启动流程，给出问题和证据”。模型需要澄清时回答问题卡；涉及受限操作时处理审批。

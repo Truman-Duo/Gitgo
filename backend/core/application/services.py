@@ -67,8 +67,80 @@ def _project(project_name: str):
     cfg = ConfigManager.load()
     for project in cfg.projects:
         if project.name == project_name:
+            _external_workspace(getattr(project, "workspace_path", ""))
             return cfg, project
     raise OperationError("PROJECT_NOT_FOUND", f"Project '{project_name}' was not found")
+
+
+def _review_harvest_candidates(candidates: list[dict], reviews: list[dict]) -> list[dict]:
+    """Validate the entire explicit user review before writing any candidate.
+
+    The same confirmation operation can discard individual suggestions or
+    revise their wording; editing cannot grant executable policy authority.
+    """
+    def invalid():
+        raise OperationError("INVALID_HARVEST_REVIEW",
+            "Review every candidate once using its index and accept/discard; only trigger, rule and qualification may be revised.")
+    if not isinstance(reviews, list) or len(reviews) != len(candidates):
+        invalid()
+    seen, accepted = set(), []
+    for review in reviews:
+        if not isinstance(review, dict) or set(review) - {"index", "action", "trigger", "rule", "qualification"}:
+            invalid()
+        index = review.get("index")
+        if type(index) is not int or index < 0 or index >= len(candidates) or index in seen:
+            invalid()
+        seen.add(index)
+        if not isinstance(review.get("action"), str) or review["action"] not in {"accept", "discard"}:
+            invalid()
+        if review["action"] == "discard":
+            if set(review) & {"trigger", "rule", "qualification"}:
+                invalid()
+            continue
+        raw = dict(candidates[index])
+        changed = False
+        for key, minimum, maximum in (("trigger", 1, 240), ("rule", 20, 2000)):
+            if key not in review:
+                continue
+            value = review[key]
+            if not isinstance(value, str) or not minimum <= len(value.strip()) <= maximum:
+                invalid()
+            raw[key] = value.strip()
+            changed = changed or raw[key] != candidates[index].get(key)
+        if "qualification" in review:
+            from backend.core.knowledge.models import normalize_qualification, QUALIFICATION_KEYS
+            value = review["qualification"]
+            if not isinstance(value, dict) or set(value) - set(QUALIFICATION_KEYS):
+                invalid()
+            try:
+                normalized = normalize_qualification(value)
+            except ValueError:
+                invalid()
+            raw["qualification"] = normalized
+            changed = changed or normalized != candidates[index].get("qualification")
+        if changed:
+            from datetime import datetime, timezone
+            raw["resolution_history"] = [*(raw.get("resolution_history") or []), {
+                "kind": "candidate_user_revision", "at": datetime.now(timezone.utc).isoformat(),
+                "previous_trigger": candidates[index].get("trigger", ""),
+                "previous_rule": candidates[index].get("rule", ""),
+                "previous_qualification": candidates[index].get("qualification"),
+            }]
+            # Tool names inferred from one example must not survive a revised
+            # rule as independent workflow authority.
+            for key in ("dangerous_tools", "prerequisite_tools", "required_tools"):
+                raw[key] = []
+        raw["check"] = None
+        accepted.append(raw)
+    return accepted
+
+
+def _external_workspace(path):
+    from backend.core.update.installation import assert_external_resource
+    from backend.core.update.validation import UpdateError
+    try: assert_external_resource(Path(path or ""))
+    except UpdateError:
+        raise OperationError("UNSAFE_WORKSPACE_PATH", "Project workspace must stay outside the managed software installation") from None
 
 
 def _public_provider(provider: dict) -> dict:
@@ -100,6 +172,8 @@ class ApplicationServices:
     def __init__(self, *, daemon_online: Callable[[str], bool] | None = None, prepare_deletion=None):
         self._daemon_online = daemon_online or (lambda _name: False)
         self._write_lock = threading.RLock()
+        from backend.core.update.preparation_service import UpdatePreparationService
+        self.updates = UpdatePreparationService()
         from .deletion import DeletionService
         self.deletion = DeletionService(prepare_runtime=prepare_deletion)
         self._operations: dict[str, Callable[..., Any]] = {
@@ -107,6 +181,7 @@ class ApplicationServices:
             "project.create": self.project_create,
             "project.list_archived": self.project_list_archived,
             "project.archive": self.project_archive,
+            "project.enter": self.project_enter,
             "project.delete": self.project_delete,
             "project.cancel_delete": self.project_cancel_delete,
             "process.rename": self.process_rename,
@@ -119,6 +194,15 @@ class ApplicationServices:
             "deletion.list": lambda: self.deletion.catalog.list_deletion_plans(),
             "deletion.run": self.deletion.run,
             "config.get": self.config_get,
+            "product.version": self.product_version,
+            "update.status": self.update_status,
+            "update.configure": self.update_configure,
+            "update.check": self.update_check,
+            "update.download": self.update_download,
+            "update.cancel": self.update_cancel,
+            "update.request_apply": self.update_request_apply,
+            "update.request_rollback": self.update_request_rollback,
+            "update.cancel_pending": self.update_cancel_pending,
             "config.set": self.config_set,
             "config.terminals": self.config_terminals,
             "config.web_search.test": self.config_web_search_test,
@@ -127,8 +211,12 @@ class ApplicationServices:
             "lesson.list": self.lesson_list,
             "lesson.search": self.lesson_search,
             "lesson.verify": self.lesson_verify,
+            "lesson.share": self.lesson_share,
+            "lesson.share.revoke": self.lesson_share_revoke,
             "lesson.harvest.preview": self.lesson_harvest_preview,
             "lesson.harvest.resolve": self.lesson_harvest_resolve,
+            "lesson.harvest.list": self.lesson_harvest_list,
+            "lesson.harvest.context": self.lesson_harvest_context,
             "contract.show": self.contract_show,
             "governance.quality": self.governance_quality,
             "governance.patterns": self.governance_patterns,
@@ -306,6 +394,7 @@ class ApplicationServices:
                 "workspace_mode must be attach_existing or create_new",
             )
         workspace = Path(raw_workspace).expanduser().resolve(strict=False)
+        _external_workspace(workspace)
         if workspace == Path(workspace.anchor):
             raise OperationError(
                 "UNSAFE_WORKSPACE_PATH", "A filesystem root cannot be used as a project workspace",
@@ -390,6 +479,48 @@ class ApplicationServices:
                  "pending_hard_delete_at": p.pending_hard_delete_at or ""}
                 for p in cfg.projects if p.archived]
 
+    def project_enter(self, name: str) -> dict:
+        """Validate explicit user entry before mounting any project UI/runtime."""
+        from datetime import datetime, timezone, timedelta
+        from .project_lifecycle import workspace_missing, archive_delay
+        with self._write_lock:
+            cfg = ConfigManager.load()
+            project = next((p for p in cfg.projects if p.name == name), None)
+            if project is None:
+                raise OperationError("PROJECT_NOT_FOUND", f"Project '{name}' was not found")
+            if project.archived:
+                raise OperationError("PROJECT_ARCHIVED", f"Project '{name}' is archived; restore it first")
+            try:
+                missing = workspace_missing(project.workspace_path)
+            except OSError as exc:
+                raise OperationError("WORKSPACE_UNAVAILABLE", f"Cannot access workspace: {project.workspace_path}: {exc}") from exc
+            if missing:
+                entry = project.unavailable_entry
+                if entry.get("workspace") != project.workspace_path or not entry.get("first_failed_at"):
+                    entry = {"workspace": project.workspace_path,
+                             "first_failed_at": datetime.now(timezone.utc).isoformat()}
+                    project.unavailable_entry = entry
+                    ConfigManager.save(cfg)
+                delay = archive_delay(cfg)
+                due = (datetime.fromisoformat(entry["first_failed_at"]) + timedelta(minutes=delay)).isoformat() if delay else None
+                raise OperationError("WORKSPACE_NOT_FOUND",
+                    f"Workspace does not exist: {project.workspace_path}" +
+                    (f". Automatically archives after {delay} minutes if still missing." if delay else ""),
+                    details={"workspace": project.workspace_path, "archive_at": due})
+            if project.unavailable_entry:
+                project.unavailable_entry = {}
+                ConfigManager.save(cfg)
+            return {"ok": True, "name": project.name, "workspace": project.workspace_path}
+
+    def maintain_project_lifecycle(self) -> list[dict]:
+        from .project_lifecycle import maintain_unavailable_projects
+        with self._write_lock:
+            cfg = ConfigManager.load()
+            changes = maintain_unavailable_projects(cfg)
+            if changes:
+                ConfigManager.save(cfg)
+            return changes
+
     def project_archive(self, name: str = "") -> dict:
         with self._write_lock:
             cfg = ConfigManager.load()
@@ -398,7 +529,8 @@ class ApplicationServices:
                 return {"archived_projects": archived, "count": len(archived)}
             for project in cfg.projects:
                 if project.name.lower() == name.lower():
-                    project.archived = not project.archived
+                    from .project_lifecycle import set_archived
+                    set_archived(project, not project.archived)
                     ConfigManager.save(cfg)
                     return {"ok": True, "name": project.name,
                             "state": "archived" if project.archived else "restored"}
@@ -423,12 +555,52 @@ class ApplicationServices:
                     return {"ok": had_pending, "name": name}
         raise OperationError("PROJECT_NOT_FOUND", f"Project '{name}' was not found")
 
+    def product_version(self) -> dict:
+        # The executing Host is authoritative, not editable user configuration
+        # or a potentially different Dashboard package.
+        from backend.version import __version__
+        return {"product_id": "gitgo-terminal", "version": __version__}
+
+    def _update_call(self, method, *arguments):
+        from backend.core.update.validation import UpdateError
+        try: return method(*arguments)
+        except UpdateError as error: raise OperationError(error.code, str(error)) from None
+        except Exception: raise OperationError("UPDATE_PREPARATION_FAILED", "Update preparation failed; current program unchanged") from None
+
+    def update_configure(self, channel: str, automatic_check: bool, automatic_download: bool,
+                         automatic_install: bool, revision: int) -> dict:
+        return self._update_call(self.updates.configure, channel, automatic_check, automatic_download, automatic_install, revision)
+
+    def update_status(self, channel: str | None = None) -> dict:
+        return self._update_call(self.updates.status, channel)
+
+    def update_check(self, channel: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.check, channel, operation_id)
+
+    def update_download(self, channel: str, candidate_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.download, channel, candidate_id, operation_id)
+
+    def update_cancel(self, operation_id: str) -> dict:
+        return self._update_call(self.updates.cancel, operation_id)
+
+    def update_request_apply(self, channel: str, candidate_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.request_apply, channel, candidate_id, operation_id)
+
+    def update_request_rollback(self, rollback_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.request_rollback, rollback_id, operation_id)
+
+    def update_cancel_pending(self, request_id: str, operation_id: str) -> dict:
+        return self._update_call(self.updates.cancel_pending, request_id, operation_id)
+
     def config_get(self, key: str = "") -> dict:
+        from backend.core.prompt_profiles import list_profiles
         cfg = ConfigManager.load()
         if not key:
             return {"safety": cfg.safety, "language": cfg.language,
-                    "verbose": cfg.verbose, "auto_compact": cfg.auto_compact,
+                    "verbose": cfg.verbose, "diff_layout": cfg.diff_layout, "auto_compact": cfg.auto_compact,
                     "agent_routing": cfg.agent_routing,
+                    "prompt_profile": cfg.prompt_profile,
+                    "prompt_profiles": list_profiles(),
                     "theme": cfg.theme, "animation": cfg.animation,
                     "external_editor": cfg.external_editor,
                     "launcher": dict(cfg.launcher or {}),
@@ -456,7 +628,7 @@ class ApplicationServices:
             cfg = ConfigManager.load()
             parts = key.split(".")
             if len(parts) == 2 and parts[0] == "safety":
-                if parts[1] in {"delete_delay_minutes", "process_delete_delay_minutes"}:
+                if parts[1] in {"delete_delay_minutes", "process_delete_delay_minutes", "unavailable_project_archive_delay_minutes"}:
                     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 43200:
                         raise OperationError("INVALID_VALUE", "Delete delay must be an integer between 0 and 43200 minutes")
                 cfg.safety[parts[1]] = value
@@ -468,12 +640,24 @@ class ApplicationServices:
                 value = language
             elif key == "verbose":
                 cfg.verbose = bool(value)
+            elif key == "diff_layout":
+                if value not in ("split", "unified"):
+                    raise OperationError("INVALID_VALUE", "diff_layout must be 'split' or 'unified'")
+                cfg.diff_layout = value
             elif key == "auto_compact":
                 cfg.auto_compact = bool(value)
             elif key == "agent_routing":
                 if value not in ("owner", "fresh"):
                     raise OperationError("INVALID_VALUE", "agent_routing must be 'owner' or 'fresh'")
                 cfg.agent_routing = value
+            elif key == "prompt_profile":
+                from backend.core.prompt_profiles import snapshot
+                from backend.core.prompt_templates import PromptTemplateError
+                try:
+                    snapshot(value)
+                except PromptTemplateError as exc:
+                    raise OperationError("INVALID_PROMPT_PROFILE", str(exc)) from exc
+                cfg.prompt_profile = value
             elif key == "theme":
                 cfg.theme = str(value)
             elif key == "animation":
@@ -679,7 +863,9 @@ class ApplicationServices:
         from backend.core.sync_session import SyncSession
         workspace = Path(SyncSession(proj, cfg).workspace_path)
         def wire(items):
-            return [{**item.to_dict(), "applicability": assess_lesson(item, workspace)}
+            from backend.core.knowledge.review import review_status, content_version
+            return [{**item.to_dict(), "applicability": assess_lesson(item, workspace),
+                     "review_status": review_status(item), "content_version": content_version(item)}
                     for item in items]
         return {"abstract": wire(LessonManager.load_abstract(workspace)),
                 "instances": wire(LessonManager.load_instance(workspace, project)),
@@ -693,14 +879,36 @@ class ApplicationServices:
         workspace = Path(SyncSession(proj, cfg).workspace_path)
         return [{**item.to_dict(), "applicability": assess_lesson(item, workspace)}
                 for item in LessonManager.search(
-                    workspace, query, project_name=project, tech_stack=tech_stack)]
+                    workspace, query, project_name=project, tech_stack=tech_stack, include_unreviewed=True)]
 
-    def lesson_verify(self, project: str, lesson_id: str) -> dict:
+    def lesson_share(self, project: str, lesson_id: str, trigger: str, rule: str, tech_stack: str) -> dict:
+        from backend.core.knowledge.manager import LessonManager
+        cfg, proj = _project(project)
+        from backend.core.sync_session import SyncSession
+        workspace = Path(SyncSession(proj, cfg).workspace_path)
+        lesson = LessonManager.share_abstract(workspace, lesson_id, trigger=trigger,
+                                              rule=rule, tech_stack=tech_stack)
+        return {"shared": True, "lesson": lesson.to_dict()}
+
+    def lesson_share_revoke(self, project: str, lesson_id: str) -> dict:
+        from backend.core.knowledge.manager import LessonManager
+        cfg, proj = _project(project)
+        from backend.core.sync_session import SyncSession
+        workspace = Path(SyncSession(proj, cfg).workspace_path)
+        return {"revoked": LessonManager.revoke_shared(workspace, lesson_id)}
+
+    def lesson_verify(self, project: str, lesson_id: str, expected_version: str = "") -> dict:
         from backend.core.knowledge.lesson import LessonManager
         cfg, proj = _project(project)
         from backend.core.sync_session import SyncSession
         workspace = Path(SyncSession(proj, cfg).workspace_path)
-        result = LessonManager.verify(workspace, lesson_id, project_name=project)
+        if not expected_version:
+            raise OperationError("LESSON_VERSION_REQUIRED", "Confirm the lesson version actually shown to the user")
+        try:
+            result = LessonManager.verify(workspace, lesson_id, project_name=project,
+                user_confirmation=True, expected_version=expected_version)
+        except ValueError as exc:
+            raise OperationError(str(exc), "Review the current lesson before confirming") from exc
         if result is None:
             raise OperationError("LESSON_NOT_FOUND", f"Lesson '{lesson_id}' was not found")
         return {"verified": lesson_id, "verified_count": result.verified_count}
@@ -752,11 +960,13 @@ class ApplicationServices:
                     "The explicit lesson signal could not be leased for analysis.",
                 )
             try:
+                summary_report = {}
                 lessons = harvest_llm_summary(
                     batch, llm, str(workspace), project, raise_on_error=True,
+                    summary_report=summary_report,
                 )
             except Exception as exc:
-                fail_harvest(project, [signal_id], str(exc))
+                fail_harvest(project, [signal_id], str(exc), summary_report=summary_report)
                 raise OperationError("LESSON_HARVEST_FAILED", str(exc)) from exc
             if not lessons:
                 resolve_harvest_proposal(
@@ -768,9 +978,10 @@ class ApplicationServices:
                     "LESSON_NOT_ACTIONABLE",
                     "The observation did not contain a reusable, testable lesson.",
                 )
-            proposal = stage_harvest_proposal(project, [signal_id], lessons)
+            proposal = stage_harvest_proposal(project, [signal_id], lessons, summary_report=summary_report)
         return {
             **proposal,
+            "summary": summary_report,
             "question": "Save these reusable lessons as pending knowledge?",
             "options": [
                 {
@@ -790,6 +1001,8 @@ class ApplicationServices:
 
     def lesson_harvest_resolve(
         self, project: str, proposal_id: str, action: str,
+        candidate_reviews: list[dict] | None = None,
+        expected_version: str = "",
     ) -> dict:
         from backend.core.history import HistoryManager
         from backend.core.knowledge.harvest import (
@@ -803,6 +1016,8 @@ class ApplicationServices:
         clean_action = str(action or "").strip().lower()
         if clean_action not in {"accept", "discard"}:
             raise OperationError("INVALID_HARVEST_ACTION", "action must be accept or discard")
+        if clean_action == "discard" and candidate_reviews is not None:
+            raise OperationError("INVALID_HARVEST_REVIEW", "Discard does not accept candidate revisions")
         with HistoryManager.workspace_scope(str(workspace)):
             proposal = get_harvest_proposal(project, proposal_id)
             if proposal is None:
@@ -810,17 +1025,44 @@ class ApplicationServices:
                     "LESSON_HARVEST_PROPOSAL_NOT_FOUND",
                     "The harvest proposal is missing or was already resolved.",
                 )
-            saved_ids: list[str] = []
-            if clean_action == "accept":
-                for raw in proposal["candidates"]:
-                    lesson = Lesson.from_dict(dict(raw or {}))
-                    LessonManager.save_pending(workspace, lesson)
-                    saved_ids.append(lesson.id)
-            resolved = resolve_harvest_proposal(
-                project, proposal_id,
-                accepted=clean_action == "accept", lesson_ids=saved_ids,
-            )
-        return {**resolved, "count": len(saved_ids)}
+            if not expected_version:
+                raise OperationError("HARVEST_PROPOSAL_VERSION_REQUIRED", "Confirm the version actually shown to the user")
+            if expected_version != proposal["proposal_version"]:
+                raise OperationError("HARVEST_PROPOSAL_CHANGED", "Review the current proposal version before confirming")
+            candidates = None
+            if clean_action == "accept" and candidate_reviews is not None:
+                candidates = _review_harvest_candidates(list(proposal["candidates"]), candidate_reviews)
+            try:
+                resolved = resolve_harvest_proposal(project, proposal_id,
+                    accepted=clean_action == "accept", candidates=candidates,
+                    expected_version=expected_version or proposal["proposal_version"])
+            except ValueError as exc:
+                raise OperationError(str(exc), "Harvest proposal was changed or already resolved") from exc
+        return {**resolved, "count": len(resolved["lesson_ids"])}
+
+    def lesson_harvest_list(self, project: str) -> dict:
+        """Explicit management view; never a model's normal knowledge injection."""
+        from backend.core.history import HistoryManager
+        from backend.core.knowledge.harvest import harvest_status, get_harvest_proposal
+        from backend.core.sync_session import SyncSession
+        cfg, proj = _project(project)
+        workspace = str(SyncSession(proj, cfg).workspace_path)
+        with HistoryManager.workspace_scope(workspace):
+            proposals = [get_harvest_proposal(project, identifier)
+                         for identifier in dict.fromkeys(harvest_status(project)["awaiting_confirmation"])]
+        return {"proposals": [proposal for proposal in proposals if proposal is not None]}
+
+    def lesson_harvest_context(self, project: str, proposal_id: str, expected_version: str,
+                               candidate_index: int = 0) -> dict:
+        from backend.core.history import HistoryManager
+        from backend.core.knowledge.harvest import get_harvest_proposal_context
+        from backend.core.sync_session import SyncSession
+        cfg, proj = _project(project)
+        with HistoryManager.workspace_scope(str(SyncSession(proj, cfg).workspace_path)):
+            try:
+                return get_harvest_proposal_context(project, proposal_id, expected_version, candidate_index)
+            except ValueError as exc:
+                raise OperationError(str(exc), "Refresh the proposal before discussing it") from exc
 
     def contract_show(self, project: str) -> dict:
         from backend.core.contract import ContractManager, detect_drift
@@ -828,7 +1070,11 @@ class ApplicationServices:
         cfg, proj = _project(project)
         session = SyncSession(proj, cfg)
         workspace = Path(session.workspace_path)
-        contract = ContractManager.load(workspace)
+        from backend.core.contract import ContractStateUnavailable
+        try:
+            contract = ContractManager.load(workspace)
+        except ContractStateUnavailable as exc:
+            raise OperationError(exc.code, str(exc), details={"query_state": "failed"}) from exc
         if contract is None:
             return {"contract": None}
         result = {"project": contract.project, "updated": contract.updated,
@@ -983,7 +1229,7 @@ class ApplicationServices:
         if not session.backup_path:
             raise OperationError("NO_BACKUP_CONFIGURED", "No backup is configured")
         result = snapshot_tool_memories(session.workspace_path, session.backup_path, proj)
-        return {"snapped": result.get("snapped", []), "timestamp": result.get("timestamp", "")}
+        return result  # Preserve no_sources/partial/unknown outcomes and retention warnings.
 
     def memory_list(self, project: str) -> list[dict]:
         from backend.core.identity.snapshot import list_memory_snapshots
@@ -992,7 +1238,7 @@ class ApplicationServices:
         session = SyncSession(proj, cfg)
         if not session.backup_path:
             raise OperationError("NO_BACKUP_CONFIGURED", "No backup is configured")
-        return list_memory_snapshots(session.backup_path)
+        return list_memory_snapshots(session.backup_path, session.workspace_path)
 
     def memory_restore(self, project: str, ts: str | None = None) -> dict:
         from backend.core.identity.snapshot import restore_tool_memories
@@ -1002,7 +1248,7 @@ class ApplicationServices:
         if not session.backup_path:
             raise OperationError("NO_BACKUP_CONFIGURED", "No backup is configured")
         return restore_tool_memories(session.backup_path, session.workspace_path,
-                                     snapshot_timestamp=ts)
+                                     snapshot_timestamp=ts, project_name=proj.name)
 
     @staticmethod
     def _sync_session(project: str, *, scan: bool = False, trial: bool = False):

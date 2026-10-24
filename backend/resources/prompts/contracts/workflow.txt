@@ -1,0 +1,4 @@
+task_kind=${task_kind}
+${completion}
+contract=${contract_json}
+Decision order: Host hard rules and shortcuts first; model semantic judgement second; user escalation only for material unresolved preferences. Do not spend model steps manually copying, counting, calculating, or polling facts that a supplied Host tool can return.

@@ -142,6 +142,7 @@ def test_web_search_normalizes_bounded_provider_results(monkeypatch):
             ]}
 
     def get(endpoint, **kwargs):
+        assert kwargs["trust_env"] is False
         captured.update(endpoint=endpoint, **kwargs)
         return Response()
 
@@ -183,6 +184,7 @@ def test_web_search_prefers_host_runtime_endpoint_and_distinguishes_empty(monkey
 
     captured = {}
     def get(endpoint, **kwargs):
+        assert kwargs["trust_env"] is False
         captured["endpoint"] = endpoint
         return Response()
 
@@ -489,6 +491,7 @@ def test_deepseek_chat_provider_uses_official_anthropic_native_search(monkeypatc
         "type": "web_search_20250305", "name": "web_search", "max_uses": 5,
     }]
     assert captured["follow_redirects"] is False
+    assert captured["trust_env"] is False
     assert result == {
         "query": "Los Angeles weather",
         "content": "Los Angeles is clear and 23 C. https://weather.example/la",

@@ -22,6 +22,7 @@ import {
 } from './screen.js'
 import {
   CURSOR_HOME,
+  ERASE_LINE,
   scrollDown as csiScrollDown,
   scrollUp as csiScrollUp,
   RESET_SCROLL_REGION,
@@ -254,7 +255,10 @@ export class LogUpdate {
     const heightDelta =
       Math.max(next.screen.height, 1) - Math.max(prev.screen.height, 1)
     const shrinking = heightDelta < 0
-    const growing = heightDelta > 0
+    // Even a one-row initial frame owns new physical cells. The heightDelta
+    // fallback above prevents cursor adjustment, not full-row initialization.
+    const growing =
+      heightDelta > 0 || (prev.screen.height === 0 && next.screen.height > 0)
 
     // Handle shrinking: clear lines from the bottom
     if (shrinking) {
@@ -559,6 +563,13 @@ function renderFrameSlice(
         return [patches, { dx: -prev.x, dy: rowsToAdvance }]
       })
     }
+    // A fresh renderer (or newly added row) has no authority over the
+    // terminal's existing cells. The sparse paint below skips blank cells,
+    // including interior spaces and entire empty rows, so first establish a
+    // blank physical row instead of leaving the previous process's text there.
+    // Steady-state diffs still repaint only changed cells.
+    moveCursorTo(screen, 0, y)
+    screen.diff.push({ type: 'stdout', content: ERASE_LINE })
     // Reset at start of each line — no cell rendered yet
     lastRenderedStyleId = -1
 

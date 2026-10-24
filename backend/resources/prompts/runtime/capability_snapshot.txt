@@ -1,0 +1,17 @@
+${current_turn}
+
+[HOST AUTHORITATIVE CAPABILITY SNAPSHOT]
+surface_version: ${surface_version}
+task_kind: ${task_kind}
+execution_mode: ${execution_mode}
+surface_phase: ${surface_phase}
+lease: ${lease_profile}
+next_host_action: ${next_action}
+available_tools: ${available}
+installed_but_inactive: ${inactive_capabilities}
+This snapshot is the current Host truth and supersedes earlier conversation claims about tool availability. A listed tool is callable under its normal policy and approval rules; do not claim it is physically unavailable. A missing tool is unavailable in this turn. Installed-but-inactive capabilities may be requested through the listed contract/lease path; their absence now does not establish inability. Discovery grants no authority and protected calls still require normal policy and approval. If next_host_action names an available protocol tool, call it before attempting the protected work.
+${phase_guidance}
+
+[CURRENT INTERACTION FACTS]
+${interaction_json}
+These are records, not a judgement that all necessary questions are known. An answer receipt still needing interpretation is not a confirmed requirement. With no pending_card there is no live question card: proposing options in prose does not create one. Call request_user_decision to actually ask. Reconsider needs after the answer, including any delegation of remaining choices.

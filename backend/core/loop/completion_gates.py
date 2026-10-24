@@ -8,8 +8,9 @@ import json
 
 class CompletionReasons(list):
     """Keep legacy reason text while producers declare the actual gate policy."""
-    def __init__(self):
+    def __init__(self, *, default_code="COMPLETION_EVIDENCE_INSUFFICIENT"):
         super().__init__()
+        self.default_code = default_code
         self.gates = []
         self.kind = "completion_integrity"
         self.degradable = False
@@ -23,10 +24,13 @@ class CompletionReasons(list):
         finally:
             self.kind, self.degradable = previous
 
-    def append(self, message):
+    def append(self, message, *, code=None):
+        from backend.core.errors import catalog_entry
+        entry = catalog_entry(code or self.default_code)
         super().append(message)
         digest = hashlib.sha256(json.dumps([self.kind, message], ensure_ascii=False).encode()).hexdigest()[:20]
         self.gates.append({"gate_id": "gate_" + digest, "kind": self.kind,
+            "code": entry["name"], "catalog_id": entry["catalog_id"], "guidance_ref": entry["guidance_ref"],
             "message": message, "source": "HostCompletionEvaluator", "blocking": True,
             "degradable_by_explicit_user_decision": self.degradable,
             "resolution_options": (["satisfy the missing evidence", "accept a truthful partial delivery or propose a concrete scope amendment"]

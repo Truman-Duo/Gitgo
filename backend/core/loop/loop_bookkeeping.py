@@ -1,6 +1,7 @@
 """Mailbox, progress and audit bookkeeping; no semantic decisions."""
 from .models import AgentProcess
 from .session import AgentSession
+from backend.core.tools.file_operations import canonical_file_operation
 
 def _apply_pending_instructions(
     process: AgentProcess,
@@ -84,6 +85,107 @@ def _capture_completion_recovery(process: AgentProcess, on_event=None) -> None:
 
 def _inc_nudge_counter(process: AgentProcess, nudge_type: str) -> None:
     process._nudge_counters[nudge_type] = process._nudge_counters.get(nudge_type, 0) + 1
+
+
+def capture_lesson_outcome(process, result, workspace_path, *, rolled_back=False, on_event=None):
+    """Observe exact proposal/execution facts; never claim semantic adoption.
+
+    The original receipt remains authoritative. Failure of this observer must
+    not repeat an already executed file operation.
+    """
+    receipt = result.receipt or {}
+    # The scheduler's receipt lineage, never tool-returned _child_receipts,
+    # carries already completed file effects through a wrapper's suspension.
+    # Reuse the same observer/source-event key; do not harvest or execute twice.
+    from .tool_pipeline import ToolResult
+    pending = list(reversed(receipt.get("child_receipts") or []))
+    seen = set()
+    for _ in range(256):
+        if not pending:
+            break
+        child = pending.pop()
+        if not isinstance(child, dict):
+            continue
+        identity = str(child.get("receipt_id") or "")
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        pending.extend(reversed(child.get("child_receipts") or []))
+        if child.get("file_service_result") is not True:
+            continue
+        leaf = {k: v for k, v in child.items() if k != "child_receipts"}
+        capture_lesson_outcome(process, ToolResult(id=identity, tool_name=str(child.get("tool_name") or ""),
+            receipt=leaf, data={"knowledge_excerpts": child.get("knowledge_excerpts") or []},
+            is_error=child.get("succeeded") is False, error=str(child.get("error_code") or "")),
+            workspace_path, rolled_back=rolled_back, on_event=on_event)
+    if pending:
+        from .engineering_workflow import EngineeringWorkflow
+        EngineeringWorkflow(process, on_event).notice("KNOWLEDGE_CAPTURE_FAILED",
+            "Nested evidence observation exceeded its bound; retained receipts require inspection.")
+    if result.suspended:
+        return
+    context, _ = process.read_context_snapshot()
+    project = str(context.get("project_name") or "")
+    if not project:
+        return
+    try:
+        from backend.core.knowledge.harvest import capture_signal, task_failure_relations
+        from backend.core.knowledge.evidence_context import task_context_snapshot
+        from backend.core.history import HistoryManager
+        with HistoryManager.workspace_scope(workspace_path):
+            if not receipt.get("lesson_checks"):
+                task_id = process.active_task_id or process.process_id
+                command_done = receipt.get("command_completed") is True
+                test_done = receipt.get("test_completed") is True
+                failed = (result.is_error or (command_done and receipt.get("command_exit_code") != 0)
+                          or (test_done and receipt.get("test_passed") is False))
+                observable = (command_done or test_done
+                              or receipt.get("effect_state") == "committed")
+                if not failed and not observable:
+                    return
+                task_context = task_context_snapshot(context)
+                relations = [] if failed else task_failure_relations(project, task_id, task_context, receipt)
+                if not failed and not relations:
+                    return
+                data = result.data if isinstance(result.data, dict) else {}
+                capture_signal("execution_failure" if failed else "execution_followup", {
+                    "task_context": task_context,
+                    "process_id": process.process_id,
+                    "failure_relations": relations,
+                    "knowledge_excerpts": data.get("knowledge_excerpts", [])
+                        if (receipt.get("file_service_result") is True or canonical_file_operation(result.tool_name) in {"edit_file", "write_file", "apply_patch", "document_create", "promote_agent_changes", "exec_command", "shell_script"}) and receipt.get("effect_state") == "committed" else [],
+
+                    "task_id": task_id, "tool_name": result.tool_name,
+                    "observation": {key: str(value)[:1500 if key == "diff" else 1000]
+                                    for key, value in {"error": result.error,
+                                    **{key: data[key] for key in ("error", "stdout", "stderr", "diff")
+                                       if key in data}}.items()},
+                    "observation_truncated_fields": [key for key in ("error", "stdout", "stderr", "diff")
+                        if key in data and len(str(data[key])) > (1500 if key == "diff" else 1000)],
+                    "target_files": receipt.get("files", []), "receipt": dict(receipt),
+                    "related_failure_signal_ids": [item["signal_id"] for item in relations if item["same_contract"] is not False],
+                    "is_error": bool(result.is_error), "rolled_back": rolled_back,
+                }, project, source_event_id=str(receipt.get("receipt_id") or result.id))
+                return
+            capture_signal("lesson_feedback", {
+                "task_id": process.active_task_id or process.process_id,
+                "receipt_id": receipt.get("receipt_id"), "tool_name": result.tool_name,
+                "candidate_sha256": receipt.get("candidate_sha256"),
+                "before_sha256": receipt.get("before_sha256"),
+                "after_sha256": receipt.get("after_sha256"),
+                "target_files": receipt.get("files", []),
+                "lesson_checks": receipt["lesson_checks"],
+                "effect_state": receipt.get("effect_state"),
+                "succeeded": receipt.get("succeeded", False),
+                "rolled_back": rolled_back,
+                "user_override": receipt.get("lesson_user_override", False),
+            }, project, source_event_id=str(receipt.get("receipt_id") or result.id))
+    except Exception as exc:
+        from .engineering_workflow import EngineeringWorkflow
+        EngineeringWorkflow(process, on_event).notice(
+            "KNOWLEDGE_CAPTURE_FAILED", "工具结果已保留，但 lesson 结果观察未能保存。",
+            error_type=type(exc).__name__,
+        )
 
 
 def _get_nudge_count(process: AgentProcess, nudge_type: str) -> int:

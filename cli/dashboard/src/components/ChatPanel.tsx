@@ -1,3 +1,4 @@
+import {scrollViewport} from "../input/scrollViewport.js";
 // src/components/ChatPanel.tsx — Scene 2 left pane: message list + tool cards
 import React, { memo, useEffect, useRef } from "react";
 import { Box, Text } from "@anthropic/ink";
@@ -48,8 +49,8 @@ export const ChatPanel = memo(function ChatPanel({
   inputActive = true,
 }: Props) {
   const { w: terminalWidth } = usePanelSize({ minWidth: 30 });
-  const width = Math.max(30, Math.min(terminalWidth, cols));
-  const contentWidth = width - 4;
+  const width = Math.max(1, Math.min(terminalWidth, cols));
+  const contentWidth = Math.max(1, width - 4);
   const scrollRef = useRef<ScrollBoxHandle>(null);
   useScrollInput(scrollRef, inputActive);
 
@@ -57,7 +58,7 @@ export const ChatPanel = memo(function ChatPanel({
     if (!inputActive) return;
     const handle = scrollRef.current;
     scrollChatRef.current = handle
-      ? { scrollBy: (dy: number) => handle.scrollBy(dy), scrollToBottom: () => handle.scrollToBottom() }
+      ? { scrollBy: (dy: number) => scrollViewport(handle,dy), scrollToBottom: () => handle.scrollToBottom() }
       : null;
     return () => { scrollChatRef.current = null; };
   }, [scrollChatRef, inputActive]);

@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from .models import StorageCorruptionDetected, StorageRuntimeUnsupported
@@ -218,6 +219,7 @@ class _StorageCursor(sqlite3.Cursor):
     """Report corruption on execute AND deferred row reads through one boundary."""
 
     def _checked(self, method, *args, **kwargs):
+        self.connection.require_available()
         try:
             return method(*args, **kwargs)
         except sqlite3.DatabaseError as exc:
@@ -250,9 +252,27 @@ class _StorageCursor(sqlite3.Cursor):
 
 class _StorageConnection(sqlite3.Connection):
     fault_callback = None
+    quarantined = False
+
+    def require_available(self):
+        if self.quarantined:
+            from .models import StorageCommitUnknown
+            raise StorageCommitUnknown("connection")
+
+    def quarantine(self):
+        self.quarantined = True
 
     def cursor(self, factory=_StorageCursor):
+        self.require_available()
         return super().cursor(factory)
+
+    def commit(self):
+        self.require_available()
+        return super().commit()
+
+    def rollback(self):
+        self.require_available()
+        return super().rollback()
 
     def execute(self, *args, **kwargs):
         return self.cursor().execute(*args, **kwargs)
@@ -264,6 +284,26 @@ class _StorageConnection(sqlite3.Connection):
         return self.cursor().executescript(*args, **kwargs)
 
 
+@contextmanager
+def state_read_snapshot(connection: sqlite3.Connection, lock):
+    """Pin one logical read to a SQLite snapshot while holding its connection lock.
+
+    The connection lock alone cannot exclude commits from other connections.
+    Nested repository reads join the caller's existing transaction and leave
+    its lifetime untouched. Only the outer owner closes the read transaction;
+    immutable CAS references may be resolved after the rows are collected.
+    """
+    with lock:
+        owns_transaction = not connection.in_transaction
+        if owns_transaction:
+            connection.execute("BEGIN")
+        try:
+            yield
+        finally:
+            if owns_transaction and connection.in_transaction:
+                connection.execute("ROLLBACK")
+
+
 class _MinuteBudget:
     def __init__(self, transactions: int, logical_bytes: int):
         self.transactions = transactions
@@ -273,15 +313,26 @@ class _MinuteBudget:
         self._lock = threading.Lock()
 
     def reserve(self, size: int) -> bool:
-        now = time.monotonic()
-        with self._lock:
-            while self._entries and now - self._entries[0][0] >= 60:
-                _timestamp, expired = self._entries.popleft()
-                self._bytes -= expired
-            if len(self._entries) >= self.transactions:
-                return False
-            if self._bytes + size > self.logical_bytes:
-                return False
-            self._entries.append((now, size))
-            self._bytes += size
+        return self.reserve_all((self, size))
+
+    @staticmethod
+    def reserve_all(*requests: tuple[_MinuteBudget, int]) -> bool:
+        """Charge all applicable limits, or none, under a stable lock order."""
+        grouped: dict[_MinuteBudget, list[int]] = {}
+        for budget, size in requests:
+            grouped.setdefault(budget, []).append(size)
+        with ExitStack() as locks:
+            for budget in sorted(grouped, key=id):
+                locks.enter_context(budget._lock)
+            now = time.monotonic()
+            for budget, sizes in grouped.items():
+                while budget._entries and now - budget._entries[0][0] >= 60:
+                    _timestamp, expired = budget._entries.popleft()
+                    budget._bytes -= expired
+                if (len(budget._entries) + len(sizes) > budget.transactions
+                        or budget._bytes + sum(sizes) > budget.logical_bytes):
+                    return False
+            for budget, sizes in grouped.items():
+                budget._entries.extend((now, size) for size in sizes)
+                budget._bytes += sum(sizes)
             return True

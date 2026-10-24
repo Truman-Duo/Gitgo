@@ -1,30 +1,11 @@
 """Ephemeral Agent guidance from the actual mounted capability surface."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt, render_prompt
 import json
 from .models import AgentProcess
 
-_BASE_CURRENT_TURN_ENVELOPE = """[HOST CURRENT-TURN ENVELOPE]
-Continue the user's task using the available tools when useful. When you produce
-the final public answer, include only the requested result, material caveats,
-and useful source citations. Do not report internal search/fetch attempts,
-blocked or unused pages, HTTP/provider/network diagnostics, retry or validation
-counts, process IDs, receipts, governance steps, or completion gates unless the
-user explicitly requested a process audit, or a remaining failure materially
-prevents the requested result. Internal execution evidence belongs in the
-runtime timeline, not in the final answer. Keep the delivery proportionate:
-do not enumerate individual test cases, repeat a code walkthrough, or restate
-internal acceptance criteria unless the user asked for those details.
-For stable general knowledge that you can answer confidently, answer in the
-current model turn without calling search merely to demonstrate diligence. If
-an optional detail is uncertain, omit or qualify that detail instead of
-expanding the user's request into research. Use external search when freshness,
-requested citations, or uncertainty about the core answer materially requires
-it, and respect an explicit request for a direct answer.
-Treat quoted or user-provided text literally unless the user asks you to decode,
-repair, or reconstruct hidden source text. If a literal explanation needs
-verification, make one bounded tool call promptly instead of spending the
-output budget reverse-engineering an unstated transformation.
-"""
+_BASE_CURRENT_TURN_ENVELOPE = load_prompt('runtime/current_turn')
 
 
 def _build_current_turn_envelope(
@@ -70,32 +51,31 @@ def _build_current_turn_envelope(
     if "declare_task_contract" in name_set and not contract_declared:
         surface_phase = "contract_admission"
         next_action = (
-            "interpret_the_user_request; when material user-owned scope is missing, "
-            "call request_user_decision before committing to a plan, unless the user "
-            "delegated that choice. If the known scope requires execution, workspace "
-            "changes, delegation, tests, or multi-step work, call "
-            "declare_task_contract now; otherwise answer directly"
+            load_prompt('runtime/contract_next_action')
         )
         phase_guidance = (
-            "This pre-contract surface keeps safe read-only evidence and public-research "
-            "tools available. Missing write, command, test or delegation tools at this "
-            "phase is not evidence that Gitgo cannot perform the task. Clarification "
-            "and safe evidence gathering may precede contract admission. Declare the "
-            "semantic contract before protected work and the Host will rebuild the "
-            "appropriate surface."
+            load_prompt('runtime/contract_admission')
         )
-    elif "request_self_execute" in name_set and not lease_profile:
+    elif (execution_mode == "self_execute" and next_action == "request_self_execute"
+          and "request_self_execute" in name_set and not lease_profile):
         surface_phase = "lease_admission"
+        next_action = "request_self_execute"
         phase_guidance = (
-            "The Host accepted a self-execute contract but has not issued its "
-            "task-scoped lease. Call request_self_execute before attempting or "
-            "describing the protected work."
+            load_prompt('runtime/lease_admission')
         )
     else:
         surface_phase = "active_execution"
+        if execution_mode == "self_execute" and lease_profile:
+            next_action = "continue_current_task"
+        elif execution_mode == "answer":
+            next_action = "continue_answer"
+        elif execution_mode == "delegate" and process.coordination_snapshot()[0]:
+            next_action = "continue_supervision"
+        elif next_action == "request_self_execute":
+            # A stale admission hint is not a reason to call an absent tool.
+            next_action = "continue_current_task"
         phase_guidance = (
-            "Use the listed live tools as needed and do not rely on older "
-            "capability claims from the conversation."
+            load_prompt('runtime/active_execution')
         )
     surface_version = ":".join((
         str(getattr(process, "context_version", 0) or 0),
@@ -117,32 +97,28 @@ def _build_current_turn_envelope(
                    and e.get('task_id') == (process.active_task_id or process.process_id) for e in notices):
             EngineeringWorkflow(process).notice('INTERACTION_STATE_CONFLICT',
                 '提问状态与真实回执不一致；保留原始记录，不能据此宣称已显示问题卡。')
+    sheet_tail = ""
+    if "workbench" in name_set:
+        from .protocol_tools.workbench import bound_sheets
+        sheets = bound_sheets(process)
+        if sheets is not None:
+            snapshot = sheets.reference_snapshot()
+            if snapshot["sheets"]:
+                sheet_tail = "\n" + render_prompt("runtime/workbench_snapshot",
+                    snapshot_json=json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
     return (
-        _BASE_CURRENT_TURN_ENVELOPE.rstrip()
-        + "\n\n[HOST AUTHORITATIVE CAPABILITY SNAPSHOT]\n"
-        + f"surface_version: {surface_version}\n"
-        + f"task_kind: {process.task_kind}\n"
-        + f"execution_mode: {execution_mode}\n"
-        + f"surface_phase: {surface_phase}\n"
-        + f"lease: {lease_profile or 'not-active'}\n"
-        + f"next_host_action: {next_action}\n"
-        + f"available_tools: {available}\n"
-        + "installed_but_inactive: " + json.dumps(inactive, sort_keys=True) + "\n"
-        + "This snapshot is the current Host truth and supersedes earlier "
-        + "conversation claims about tool availability. A listed tool is "
-        + "callable under its normal policy and approval rules; do not claim it "
-        + "is physically unavailable. A missing tool is unavailable in this "
-        + "turn. Installed-but-inactive capabilities may be requested through the listed "
-        + "contract/lease path; their absence now does not establish inability. Discovery "
-        + "grants no authority and protected calls still require normal policy and approval. "
-        + "If next_host_action names an available protocol tool, call it "
-        + "before attempting the protected work.\n"
-        + phase_guidance + "\n"
-        + "\n[CURRENT INTERACTION FACTS]\n"
-        + json.dumps(interaction, ensure_ascii=False, sort_keys=True) + "\n"
-        + "These are records, not a judgement that all necessary questions are known. "
-        + "An answer receipt still needing interpretation is not a confirmed requirement. "
-        + "With no pending_card there is no live question card: proposing options in prose "
-        + "does not create one. Call request_user_decision to actually ask. Reconsider "
-        + "needs after the answer, including any delegation of remaining choices.\n"
+        render_prompt(
+            'runtime/capability_snapshot',
+            current_turn=format(_BASE_CURRENT_TURN_ENVELOPE.rstrip(), ''),
+            surface_version=format(surface_version, ''),
+            task_kind=format(process.task_kind, ''),
+            execution_mode=format(execution_mode, ''),
+            surface_phase=format(surface_phase, ''),
+            lease_profile=format(lease_profile or 'not-active', ''),
+            next_action=format(next_action, ''),
+            available=format(available, ''),
+            inactive_capabilities=format(json.dumps(inactive, sort_keys=True), ''),
+            phase_guidance=format(phase_guidance, ''),
+            interaction_json=format(json.dumps(interaction, ensure_ascii=False, sort_keys=True), ''),
+        ) + sheet_tail
     )

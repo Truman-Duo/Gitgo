@@ -1,0 +1,1 @@
+Search the public web through the active provider's native search capability, with the configured SearXNG transport as fallback. This is an anonymous public read and does not need a permission request. Use web_fetch on selected result URLs when source text is needed.

@@ -1,5 +1,8 @@
 """child review protocol tools."""
 from __future__ import annotations
+
+from backend.core.prompt_templates import load_prompt
+from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 import json
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.models import ProcessStatus
@@ -41,6 +44,7 @@ def install(ctx):
 
 
     tools["list_agents"] = AgentTool(
+        execution_contract=data_broker("host.runtime.list_agents"),
         name="list_agents",
         description="List this supervisor's B Agents and their durable execution states.",
         parameters={"type": "object", "properties": {}, "required": []},
@@ -61,15 +65,18 @@ def install(ctx):
                 }
             else:
                 owned_ids.append(child_id)
+        from backend.core.loop.coordination import supervisor_wait_interruption
         waited = manager.wait_many(
             owned_ids,
             timeout=timeout,
             cancel_event=process.cancellation_event,
             return_when=return_when,
+            interrupt_check=lambda: supervisor_wait_interruption(process, owned_ids),
         ) if manager else {
             "processes": {}, "all_terminal": False,
             "state_version": 0, "state_changed": False,
         }
+        from backend.core.loop.question_broker import decision_evidence
         for child_id, state in waited["processes"].items():
             child = _owned_child(child_id)
             outcome = (
@@ -95,6 +102,7 @@ def install(ctx):
                 "steps_used": outcome.get("steps_used", 0),
                 "tool_calls_executed": outcome.get("tool_calls_executed", 0),
                 "cache_summary": metadata.get("cache_summary"),
+                "user_decisions": decision_evidence(child) if child is not None else None,
             }
         return {
             "agents": results,
@@ -102,12 +110,14 @@ def install(ctx):
             "state_version": waited["state_version"],
             "state_changed": waited["state_changed"],
             "wait_mode": return_when,
+            "interruption": waited.get("interruption"),
         }
 
 
     tools["wait_agents"] = AgentTool(
+        execution_contract=data_broker("host.runtime.wait_agents"),
         name="wait_agents",
-        description="Wait for selected B Agents with a bounded, cancellation-aware timeout.",
+        description=load_prompt('tools/wait_agents'),
         parameters={
             "type": "object",
             "properties": {
@@ -250,12 +260,10 @@ def install(ctx):
 
 
     tools["review_child_outcome"] = AgentTool(
+        execution_contract=data_broker("host.runtime.review_child_outcome"),
         name="review_child_outcome",
         description=(
-            "Record A's structured review of a terminal owned B outcome. "
-            "Approval is required before any required delegated outcome can satisfy "
-            "the supervisor completion gate. The Host automatically links the "
-            "child's qualifying receipts; do not copy internal receipt IDs."
+            load_prompt('tools/review_child_outcome')
         ),
         parameters={
             "type": "object",
@@ -282,7 +290,7 @@ def install(ctx):
         if not process_ids:
             return {"promoted": False, "error": "process_ids is required"}
         try:
-            result = manager.promote_process_results(process, process_ids)
+            result = manager.promote_process_results(process, process_ids, file_service_args=args)
             if on_stream_event is not None:
                 on_stream_event({
                     "event": "worktree_promoted",
@@ -292,22 +300,31 @@ def install(ctx):
                 })
             return result
         except (ValueError, RuntimeError) as exc:
+            diagnostic = getattr(exc, "diagnostic", None)
+            if diagnostic is not None:
+                return {"promoted": False, **diagnostic}
+            if str(exc).startswith("VALIDATION_INPUT_CHANGED:"):
+                from backend.core.errors import error_payload
+                return {"promoted": False, "state": "needs_recheck", **error_payload(
+                    "VALIDATION_INPUT_CHANGED", message=str(exc),
+                    next_actions=[{"action": "read_file", "reason": "Inspect the changed pinned input and revalidate or continue the affected child. Preserve prior promoted effects."}])}
             return {"promoted": False, "error": str(exc)}
 
 
     tools["promote_agent_changes"] = AgentTool(
+        execution_contract=data_broker("files.workspace.promote_agent_changes"),
         name="promote_agent_changes",
         description=(
-            "Promote an A-approved, sealed DAG result into the user working "
-            "repository. The Host includes transitive predecessors, checks the "
-            "task snapshot and blocks overlapping workspace drift."
+            load_prompt('tools/promote_agent_changes')
         ),
         parameters={
             "type": "object",
             "properties": {
                 "process_ids": {"type": "array", "items": {"type": "string"}},
+                "lesson_feedback_id": {"type": "string"},
             },
             "required": ["process_ids"],
+            "additionalProperties": False,
         },
         execute=promote_agent_changes,
         read_only=False,
@@ -339,10 +356,10 @@ def install(ctx):
 
 
     tools["send_feedback"] = AgentTool(
+        execution_contract=data_broker("host.runtime.send_feedback"),
         name="send_feedback",
         description=(
-            "Send corrective or additional instructions to a B Agent mailbox. "
-            "Delivery is applied at the next safe turn boundary."
+            load_prompt('tools/send_feedback')
         ),
         parameters={
             "type": "object",
@@ -366,6 +383,7 @@ def install(ctx):
 
 
     tools["cancel_agent"] = AgentTool(
+        execution_contract=data_broker("host.runtime.cancel_agent"),
         name="cancel_agent",
         description="Request cancellation of one delegated B Agent without faking a terminal state.",
         parameters={
@@ -439,12 +457,10 @@ def install(ctx):
 
 
     tools["request_review"] = AgentTool(
+        execution_contract=data_broker("host.runtime.request_review"),
         name="request_review",
         description=(
-            "Start an independent read-only Reviewer B for a completed B result or "
-            "for this supervisor's Level-2 self-executed work. For bounded self-work, "
-            "submit complete_task first: the Host will request an independent review "
-            "only when the verification tier requires one. Hidden reasoning is not shared."
+            load_prompt('tools/request_review')
         ),
         parameters={
             "type": "object",

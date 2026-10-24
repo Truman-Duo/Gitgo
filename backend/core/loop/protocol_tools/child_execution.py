@@ -61,6 +61,7 @@ def install(ctx):
             )
         previous_contract = None
         continuation = None
+        resume_partial = False
         if continue_process_id:
             from backend.core.loop.task_contract import get_task_contract
             requirements = get_task_contract(process).get("host_requirements") or {}
@@ -71,9 +72,29 @@ def install(ctx):
                 raise ValueError("continue_process_id must identify an owned agent of the same kind; inspect list_agents")
             if supersedes_process_id and supersedes_process_id != continue_process_id:
                 raise ValueError("continuation must supersede the same previous execution")
-            if continuation.worktree.get("isolated") and not continuation.worktree.get("promoted"):
+            previous_contract = process.delegated_contracts.get(continue_process_id) or {}
+            if previous_contract.get("superseded_by"):
+                raise ValueError("CONTINUATION_ALREADY_SUPERSEDED: continue the latest execution of this session")
+            resume_partial = bool(
+                continuation.worktree.get("isolated") and not continuation.worktree.get("promoted")
+                and continuation.worktree.get("state") == "leased"
+                and continuation.status in {ProcessStatus.FAILED, ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED}
+                and actor_kind == "worker" and task_kind == "action"
+                and profile_id == continuation.capability_profile_id == "development.workspace"
+            )
+            if (continuation.worktree.get("path") and continuation.worktree.get("mode") == "write"
+                    and continuation.worktree.get("state") != "shared"
+                    and not continuation.worktree.get("promoted") and not resume_partial):
                 raise ValueError("CONTINUATION_WORKTREE_UNPUBLISHED: review and promote the previous result, or explicitly choose a fresh task; unmerged edits will not be silently discarded")
-            if continuation.worktree.get("isolated") and process.worktree.get("snapshot_commit"):
+            if resume_partial:
+                if (continuation.worktree.get("snapshot_commit") != process.worktree.get("snapshot_commit")
+                        or not Path(continuation.worktree["path"]).is_dir()):
+                    raise ValueError("CONTINUATION_BASE_MISMATCH: retained checkout and original supervisor snapshot must still be available")
+                if not dependency_ids:
+                    dependency_ids = list(continuation.depends_on)
+                if dependency_ids != continuation.depends_on:
+                    raise ValueError("CONTINUATION_BASE_MISMATCH: retained work requires the original dependencies")
+            elif continuation.worktree.get("isolated") and process.worktree.get("snapshot_commit"):
                 raise ValueError("CONTINUATION_SNAPSHOT_PINNED: this DAG still pins its original snapshot; start a new supervisor turn after promotion to continue from the updated workspace")
             supersedes_process_id = continue_process_id
         if supersedes_process_id:
@@ -108,6 +129,11 @@ def install(ctx):
                 ) from exc
             if value and value not in normalised_targets:
                 normalised_targets.append(value)
+        if resume_partial:
+            old_targets = {str(item).replace("\\", "/").removeprefix("./")
+                           for item in previous_contract.get("target_files", [])}
+            if "*" not in normalised_targets and (not old_targets or not old_targets.issubset(normalised_targets)):
+                raise ValueError("CONTINUATION_SCOPE_MISMATCH: include the retained task's target files or choose a fresh task")
         claims = [f"filesystem:{item}" for item in normalised_targets]
         if not claims and profile_id == "development.workspace":
             claims = ["filesystem:*"]
@@ -150,7 +176,7 @@ def install(ctx):
                 "read_file", "search_text", "artifact_read", "dependency_query",
                 "context_open", "context_search", "contract_detect_drift",
                 "contract_get_impact", "contract_get_changed_symbols",
-                "lesson_search", "lesson_list", "calculate", "decision_evidence",
+                "lesson_search", "lesson_list", "workbench", "decision_evidence",
             }
             effective_tools = [
                 name for name in profile_tools if name in bounded_observe
@@ -309,6 +335,7 @@ def install(ctx):
                 "capability_profile_id": child.capability_profile_id,
             })
             result = None
+            access_service = getattr(manager.worktree_manager, "sandbox_access", None)
             try:
                 lifecycle_stage = "prepare_worktree"
                 review_target = manager.get(review_target_id) if review_target_id else None
@@ -326,7 +353,12 @@ def install(ctx):
                 ):
                     execution_workspace = manager.materialize_process_worktree(
                         child, review_target_id=review_target_id,
+                        continue_process_id=continue_process_id if resume_partial else "",
                     )
+                    if access_service is not None:
+                        from backend.core.loop.worktree import WorktreeLease
+                        lifecycle_stage = "prepare_sandbox_access"
+                        access_service.prepare(WorktreeLease.from_dict(child.worktree))
                     emit_child_event({
                         "event": "worktree_leased",
                         "worktree": dict(child.worktree),
@@ -373,6 +405,9 @@ def install(ctx):
                 if child.worktree:
                     child_context_now["worktree"] = dict(child.worktree)
                 child.replace_context_snapshot(child_context_now)
+                from backend.core.loop.validation_evidence import review_target_version, review_is_current
+                reviewed_version = (review_target_version(review_target)
+                                    if actor_kind == "reviewer" and review_target is not None else None)
                 lifecycle_stage = "agent_loop"
                 result = _run_agent_step(
                     process=child,
@@ -428,7 +463,17 @@ def install(ctx):
                         and isinstance(child.review_claim, dict)
                         and child.review_claim.get("verdict") == "approved"
                     ):
-                        target.review_approvals.append(child.process_id)
+                        current = review_is_current(target, reviewed_version)
+                        child.review_claim["target_version"] = reviewed_version
+                        child.review_claim["applicability"] = "current" if current else "needs_recheck"
+                        if isinstance(result, dict):
+                            result["review_applicability"] = child.review_claim["applicability"]
+                        if current:
+                            target.runtime_preferences.setdefault("review_evidence", {})[child.process_id] = reviewed_version
+                            target.review_approvals.append(child.process_id)
+                if access_service is not None:
+                    lifecycle_stage = "retire_sandbox_access"
+                    access_service.release(child.process_id)
                 return result
             except Exception as exc:
                 # The child-owned terminal event is the persistence/UI
@@ -436,6 +481,10 @@ def install(ctx):
                 # emitted, rather than relying on Manager's outer thread
                 # wrapper to change status after a false completed event.
                 transition(child, ProcessStatus.FAILED)
+                if manager.worktree_manager is not None:
+                    retained = manager.worktree_manager.storage.load_worktree_state(child.process_id)
+                    if retained:
+                        child.worktree = dict(retained)
                 child.result = {
                     "status": "failed",
                     "process_id": child.process_id,
@@ -447,9 +496,25 @@ def install(ctx):
                         "worktree": dict(child.worktree or {}),
                     },
                 }
+                diagnostic = getattr(exc, "diagnostic", None)
+                if diagnostic is not None:
+                    child.result["metadata"]["diagnostic"] = diagnostic
                 result = child.result
                 return result
             finally:
+                if access_service is not None:
+                    try:
+                        access_service.release(child.process_id)
+                    except Exception as cleanup_exc:
+                        transition(child, ProcessStatus.FAILED)
+                        failure = {"status": "failed", "process_id": child.process_id,
+                            "code": "CHILD_SANDBOX_CLEANUP_FAILED", "error": str(cleanup_exc),
+                            "metadata": {"lifecycle_stage": "retire_sandbox_access",
+                                "automatic_replay_suppressed": True, "worktree": dict(child.worktree)}}
+                        if isinstance(result, dict):
+                            result.clear(); result.update(failure)
+                        child.result = failure
+                        emit_child_event({"event": "worktree_cleanup_failed", "reason": str(cleanup_exc)})
                 if actor_kind == "reviewer" and child.worktree.get("isolated"):
                     try:
                         manager.dispose_process_worktree(child, keep_ref=False)
@@ -458,11 +523,15 @@ def install(ctx):
                             "event": "worktree_cleanup_failed",
                             "reason": str(cleanup_exc),
                         })
-                emit_child_event({
-                    "event": "agent_terminal",
-                    "status": child.status.value,
-                    "outcome": result or child.result,
-                })
+
+        def publish_terminal():
+            try:
+                emit_child_event({"event": "agent_terminal", "status": child.status.value,
+                                  "outcome": child.result})
+            except Exception as exc:
+                emit_child_event({"event": "storage_health", "storage": {
+                    "level": "blocked", "reasons": ["child_terminal_checkpoint_failed"], "message": str(exc)}})
+                raise
 
         resource_mode = (
             "exclusive"
@@ -488,6 +557,7 @@ def install(ctx):
             run_child,
             resources=claims,
             resource_mode=resource_mode,
+            on_terminal=publish_terminal,
         )
         return child
 

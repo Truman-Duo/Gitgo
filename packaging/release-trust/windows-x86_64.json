@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "product_id": "gitgo-terminal",
+  "platform": "windows",
+  "architecture": "x86_64",
+  "allowed_hosts": [
+    "github.com",
+    "release-assets.githubusercontent.com"
+  ],
+  "public_keys": [
+    {
+      "key_id": "gitgo-release-20261024",
+      "ed25519_base64": "31htnMRUKjDTV3Ux3UuUBa70S1Up9J2Umt7JpyG38Ks="
+    }
+  ],
+  "channels": {
+    "preview": {
+      "manifest_url": "https://github.com/Truman-Duo/Gitgo/releases/download/updates-preview/windows-x86_64.manifest.json",
+      "signature_url": "https://github.com/Truman-Duo/Gitgo/releases/download/updates-preview/windows-x86_64.manifest.sig"
+    }
+  }
+}

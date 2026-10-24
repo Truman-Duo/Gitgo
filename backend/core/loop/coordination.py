@@ -113,6 +113,29 @@ def pending_coordination_events(ledger: list[dict] | None) -> list[dict]:
     ]
 
 
+def supervisor_wait_interruption(supervisor, process_ids: list[str]) -> dict | None:
+    """Return only actual unresolved owner actions relevant to the selected wait.
+
+    Notification is not approval. Rework already requested is left to the worker;
+    resolved events and unrelated siblings must not make a normal wait spin.
+    """
+    selected = set(process_ids)
+    with supervisor._coordination_lock:
+        events = pending_coordination_events(supervisor.session.host_ledger)
+    actionable = [event for event in events
+        if event.get("owner_process_id") == supervisor.process_id
+        and event.get("requires_supervisor_action")
+        and event.get("status") in {"pending", "awaiting_supervisor", "awaiting_user"}
+        and selected.intersection([event.get("source_process_id"),
+                                   *list(event.get("affected_process_ids") or [])])]
+    if not actionable:
+        return None
+    return {"reason": "supervisor_action_required",
+            "event_ids": [event["coordination_event_id"] for event in actionable],
+            "source_process_ids": list(dict.fromkeys(event["source_process_id"] for event in actionable)),
+            "next_actions": ["list_coordination_events", "resolve_coordination_event"]}
+
+
 def coordination_summary(process) -> dict[str, Any]:
     context, _version = process.read_context_snapshot()
     events = list(context.get("coordination_events") or [])
@@ -397,6 +420,25 @@ def observe_interface_changes(
             inputs = list(dict(candidate_context.get("task_contract") or {}).get("input_interfaces") or [])
             if ref in inputs:
                 downstream.append(candidate.process_id)
+        # Capture the candidate through the existing read boundary and immutable
+        # context store. A can inspect this exact proposal before B is sealed;
+        # no outside-workspace read grant or mutable peer file access is issued.
+        from .context_store import ContextObjectStore
+        from backend.core.sandbox_read_plan import open_planned_read
+        candidate = {"process_id": source.process_id, "path": document["file"],
+                     "interface": document, "content": None, "file_sha256": None}
+        try:
+            with open_planned_read(Path(workspace_path).resolve(), document["file"]) as opened:
+                raw = opened.read_bytes(max_bytes=256 * 1024)
+            candidate.update(content=raw.decode("utf-8", errors="replace"),
+                             file_sha256=hashlib.sha256(raw).hexdigest(), state="captured")
+        except (OSError, ValueError):
+            # Missing/oversized/unsafe candidates remain proposals with explicit
+            # incomplete evidence. Never turn this into an outside-scope grant.
+            candidate["state"] = "unavailable"
+        snapshot = ContextObjectStore(owner.worktree_path or workspace_path).put(
+            "coordination/interface-" + uuid.uuid4().hex, candidate,
+            metadata={"authority": "observed_candidate", "producer": "interface_observation"})
         event = publish_coordination_event(
             manager,
             source,
@@ -409,6 +451,7 @@ def observe_interface_changes(
                 },
                 "proposed": document,
                 "compatibility": compatibility,
+                "artifact_ref": snapshot["pinned"],
             },
             affected_process_ids=downstream,
             affected_interfaces=[ref],
@@ -547,3 +590,11 @@ def coordination_block_reason(process) -> str:
     context, _version = process.read_context_snapshot()
     blocks = [str(item) for item in list(context.get("coordination_blocks") or []) if str(item)]
     return ",".join(blocks)
+
+def pending_source_interface_decisions(process) -> list[str]:
+    context, _ = process.read_context_snapshot()
+    return [str(item["coordination_event_id"])
+            for item in context.get("coordination_events", [])
+            if item.get("kind") == "interface_revision_proposed"
+            and item.get("source_process_id") == process.process_id
+            and item.get("status") in {"pending", "awaiting_supervisor", "awaiting_user"}]

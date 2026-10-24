@@ -13,12 +13,11 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
+from .file_operations import metadata_mutation_error
 
 
 _IGNORED_DIRS = {
@@ -49,24 +48,37 @@ def _text_diff(path: str, before: str, after: str) -> str:
 
 
 def read_file(args: dict) -> dict:
-    workspace = _workspace(args)
-    path = _confined_path(workspace, args.get("path", ""), must_exist=True,
-                          allowed_roots=_allowed_roots(args))
-    if path.is_dir():
-        return {"error": "IS_DIRECTORY", "path": _rel(workspace, path)}
+    try:
+        workspace, path, root, relative = _read_target(args)
+    except FileNotFoundError:
+        return _read_failure("FILE_NOT_FOUND", str(args.get("path", "")))
+    label = str(path.relative_to(workspace)).replace("\\", "/") if path.is_relative_to(workspace) else str(path)
     offset = max(0, int(args.get("offset", 0) or 0))
     limit = max(1, min(int(args.get("limit", 2000) or 2000), 5000))
     try:
-        raw = path.read_bytes()
+        # Reading the workspace itself is a directory request. Validate that
+        # acquired root directly: opening its parent is unnecessary and may
+        # be correctly denied by the native sandbox's workspace-only access.
+        if path == workspace:
+            from backend.core.sandbox_read import ReadRoot
+            with ReadRoot(workspace):
+                return _read_failure("IS_DIRECTORY", label)
+        from backend.core.sandbox_read_plan import open_planned_read
+        with open_planned_read(root, relative) as opened:
+            raw = opened.read_bytes()
+    except FileNotFoundError:
+        return _read_failure("FILE_NOT_FOUND", label)
+    except IsADirectoryError:
+        return _read_failure("IS_DIRECTORY", label)
     except OSError as exc:
-        return {"error": "READ_ERROR", "detail": str(exc), "path": _rel(workspace, path)}
+        return _read_failure("READ_ERROR", label, detail=str(exc))
     if b"\x00" in raw[:8192]:
-        return {"error": "BINARY_FILE", "path": _rel(workspace, path)}
+        return _read_failure("BINARY_FILE", label)
     text = raw.decode("utf-8-sig", errors="replace")
     lines = text.splitlines()
     selected = lines[offset:offset + limit]
-    return {
-        "path": _rel(workspace, path),
+    result = {
+        "path": label,
         "content": "\n".join(selected),
         "offset": offset,
         "returned_lines": len(selected),
@@ -76,6 +88,30 @@ def read_file(args: dict) -> dict:
         "sha256": hashlib.sha256(raw).hexdigest(),
         "size": len(raw),
     }
+    if args.get("bind_dependency") is True:
+        try:
+            relative = path.resolve().relative_to(workspace.resolve()).as_posix()
+        except ValueError:
+            return _read_failure("VALIDATION_INPUT_CHANGED", str(path), detail="Only workspace inputs can be pinned for promotion")
+        result["input_dependency"] = {"path": relative, "sha256": result["sha256"]}
+    if "_lesson_read_inventory" in args:
+        inventory = args["_lesson_read_inventory"]
+        result["lesson_recall"] = {key: inventory[key] for key in ("state", "error_type") if key in inventory}
+    from backend.core.knowledge.prewrite import read_advisories
+    try:
+        result["lesson_advisories"] = read_advisories(workspace, path, raw.decode("utf-8", errors="replace"),
+                                                     args, read_range=(offset, len(selected)))
+    except Exception as exc:
+        result["warnings"] = [{"code": "LESSON_RECALL_UNAVAILABLE",
+                               "message": f"File read succeeded; lesson recall unavailable: {exc}"}]
+    return result
+
+
+def _read_failure(code: str, path: str, *, detail: str = "") -> dict:
+    """Expected target failures are tool results, not runner failures."""
+    from backend.core.errors import error_payload
+    return {**error_payload(code, details={"path": path, **({"detail": detail} if detail else {})}),
+            "path": path, "effect_state": "not_committed", "execution_state": "completed"}
 
 
 def list_files(args: dict) -> dict:
@@ -102,7 +138,37 @@ def search_text(args: dict) -> dict:
 
 
 def edit_file(args: dict) -> dict:
+    from .file_mutation import commit_file_mutation
+    candidate = project_file_mutation("edit_file", args)
+    if isinstance(candidate, dict):
+        return {**candidate, "effect_state": "not_committed", "execution_state": "not_started"}
+    return commit_file_mutation(candidate, args)
+
+
+def write_file(args: dict) -> dict:
+    from .file_mutation import commit_file_mutation
+    candidate = project_file_mutation("write_file", args)
+    if isinstance(candidate, dict):
+        return {**candidate, "effect_state": "not_committed", "execution_state": "not_started"}
+    return commit_file_mutation(candidate, args)
+
+
+def project_file_mutation(operation: str, args: dict):
+    """Build a complete candidate without changing target files or directories."""
+    if operation == "edit_file":
+        return _project_edit(args)
+    if operation == "write_file":
+        return _project_write(args)
+    if operation == "delete_file":
+        return _project_delete(args)
+    raise ValueError("unsupported file mutation")
+
+
+def _project_edit(args: dict):
     workspace = _workspace(args)
+    denied = metadata_mutation_error(workspace, args.get("path", ""))
+    if denied:
+        return denied
     path = _confined_path(workspace, args.get("path", ""), must_exist=True,
                           allowed_roots=_allowed_roots(args))
     old = str(args.get("old_string", ""))
@@ -160,21 +226,16 @@ def edit_file(args: dict) -> dict:
             "occurrences": count,
         }
     updated = content.replace(old, new, -1 if replace_all else 1)
-    _atomic_write(path, updated.encode("utf-8"))
-    updated_raw = path.read_bytes()
-    relative = _rel(workspace, path)
-    return {
-        "path": relative,
-        "replacements": count if replace_all else 1,
-        "before_sha256": current_hash,
-        "after_sha256": hashlib.sha256(updated_raw).hexdigest(),
-        "size": len(updated_raw),
-        "diff": _text_diff(relative, content, updated),
-    }
+    from .file_mutation import FileMutation
+    return FileMutation("edit_file", workspace, path, current_hash, content, updated,
+                        count if replace_all else 1)
 
 
-def write_file(args: dict) -> dict:
+def _project_write(args: dict):
     workspace = _workspace(args)
+    denied = metadata_mutation_error(workspace, args.get("path", ""))
+    if denied:
+        return denied
     path = _confined_path(workspace, args.get("path", ""), must_exist=False,
                           allowed_roots=_allowed_roots(args))
     content = str(args.get("content", ""))
@@ -248,121 +309,60 @@ def write_file(args: dict) -> dict:
                 "expected_sha256": expected,
                 "actual_sha256": before_hash,
             }
-    _atomic_write(path, content.encode("utf-8"))
-    after = path.read_bytes()
-    relative = _rel(workspace, path)
-    return {
-        "path": relative,
-        "action": "updated" if existed else "created",
-        "before_sha256": before_hash,
-        "after_sha256": hashlib.sha256(after).hexdigest(),
-        "size": len(after),
-        "diff": _text_diff(relative, before_content, content),
-    }
+    from .file_mutation import FileMutation
+    return FileMutation("write_file", workspace, path, before_hash, before_content, content)
 
 
 def delete_file(args: dict) -> dict:
-    """Recoverably remove one version-pinned workspace file.
+    """Commit a version-pinned deletion through the shared file service."""
+    from .file_mutation import commit_file_mutation
+    candidate = project_file_mutation("delete_file", args)
+    if isinstance(candidate, dict):
+        return {**candidate, "effect_state": "not_committed", "execution_state": "not_started"}
+    return commit_file_mutation(candidate, args)
 
-    Deletion is deliberately a first-class operation instead of a shell
-    convention.  The file is moved under ``.gitgo/trash`` so a later undo or
-    explicit restore can recover it, while the user-visible workspace no
-    longer contains the artifact.
-    """
+
+def _project_delete(args: dict):
+    """Freeze the deletion input; projection never creates trash or locks."""
     workspace = _workspace(args)
-    path = _confined_path(workspace, args.get("path", ""), must_exist=True)
+    denied = metadata_mutation_error(workspace, args.get("path", ""))
+    if denied:
+        return denied
+    path = _confined_path(workspace, args.get("path", ""), must_exist=False)
     relative = _rel(workspace, path)
     relative_path = Path(relative)
-    if not relative_path.parts or relative_path.parts[0].casefold() == ".gitgo":
+    if not relative_path.parts:
         return {"error": "PROTECTED_PATH", "path": relative}
     if path.is_dir():
         return {"error": "IS_DIRECTORY", "path": relative}
-    raw = path.read_bytes()
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {"error": "FILE_NOT_FOUND", "path": relative}
+    except OSError as exc:
+        return {"error": "READ_ERROR", "path": relative, "detail": str(exc)}
     current_hash = hashlib.sha256(raw).hexdigest()
     expected = str(args.get("expected_sha256", "")).strip()
     if not expected:
-        return {
-            "error": "EXPECTED_HASH_REQUIRED", "path": relative,
-            "actual_sha256": current_hash,
-        }
+        return {"error": "EXPECTED_HASH_REQUIRED", "path": relative, "actual_sha256": current_hash}
     if expected != current_hash:
-        return {
-            "error": "FILE_CHANGED", "path": relative,
-            "expected_sha256": expected, "actual_sha256": current_hash,
-        }
-    trash_id = f"{time.time_ns()}-{current_hash[:12]}"
-    trash_path = workspace / ".gitgo" / "trash" / "files" / trash_id / relative_path
-    trash_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(path), str(trash_path))
-    before_text = raw.decode("utf-8", errors="replace")
-    return {
-        "path": relative,
-        "action": "deleted",
-        "recoverable": True,
-        "trash_ref": _rel(workspace, trash_path),
-        "before_sha256": current_hash,
-        "size": len(raw),
-        "diff": _text_diff(relative, before_text, ""),
-    }
+        return {"error": "FILE_CHANGED", "path": relative,
+                "expected_sha256": expected, "actual_sha256": current_hash}
+    from .file_mutation import FileMutation
+    return FileMutation("delete_file", workspace, path, current_hash,
+                        raw.decode("utf-8", errors="replace"), "")
 
 
 def apply_patch(args: dict) -> dict:
-    workspace = _workspace(args)
+    from .patch_projection import project_patch
+    from .file_mutation_batch import commit_file_batch
+    candidate = project_patch(args)
+    if isinstance(candidate, dict):
+        return candidate
+    result = commit_file_batch(candidate, args)
     patch = str(args.get("patch", ""))
-    if not patch.strip():
-        return {"error": "EMPTY_PATCH"}
-    touched = _patch_paths(patch)
-    if not touched:
-        return {"error": "INVALID_PATCH", "detail": "no file headers found"}
-    for rel in touched:
-        _confined_path(workspace, rel, must_exist=False,
-                       allowed_roots=_allowed_roots(args))
-    command = ["git", "apply", "--whitespace=nowarn"]
-    try:
-        check = subprocess.run(
-            command + ["--check", "-"], cwd=str(workspace), input=patch,
-            capture_output=True, text=True, timeout=30,
-            creationflags=_hidden_window_flags(),
-        )
-        if check.returncode != 0:
-            from backend.core.errors import error_payload
-            diagnostic = check.stderr[:4000]
-            return {
-                **error_payload(
-                    "PATCH_CHECK_FAILED",
-                    message=(
-                        "The unified diff failed preflight validation; no file was changed. "
-                        + diagnostic
-                    ),
-                    details={"files": touched, "stderr": diagnostic},
-                    next_actions=[
-                        {
-                            "action": "repair_unified_diff",
-                            "effect": "Every fragment needs ---/+++ file headers and a valid @@ -old,+new @@ hunk header.",
-                        },
-                        {
-                            "action": "edit_file",
-                            "effect": "For a small change, reread the file and use bounded exact-string edits instead of resending a large patch.",
-                        },
-                    ],
-                ),
-                "files": touched,
-            }
-        applied = subprocess.run(
-            command + ["-"], cwd=str(workspace), input=patch,
-            capture_output=True, text=True, timeout=30,
-            creationflags=_hidden_window_flags(),
-        )
-        if applied.returncode != 0:
-            return {"error": "PATCH_APPLY_FAILED", "detail": applied.stderr[:4000], "files": touched}
-    except FileNotFoundError:
-        return {"error": "GIT_NOT_FOUND"}
-    except subprocess.TimeoutExpired:
-        return {"error": "PATCH_TIMEOUT"}
-    return {
-        "files": touched, "count": len(touched), "applied": True,
-        "diff": patch[:100_000] + ("\n[diff truncated by Host]\n" if len(patch) > 100_000 else ""),
-    }
+    result["diff"] = patch[:100_000] + ("\n[diff truncated by Host]\n" if len(patch) > 100_000 else "")
+    return result
 
 
 def exec_command(args: dict) -> dict:
@@ -440,79 +440,18 @@ def exec_command(args: dict) -> dict:
 
 
 def _managed_python_argv(argv: list[str], cwd: Path) -> list[str]:
-    """Make managed/embedded Python behave like a normal project interpreter.
-
-    The Windows embeddable distribution uses ``pythonXY._pth`` and therefore
-    starts with ``safe_path=True``: neither a script's directory nor the current
-    working directory is importable.  Agents used to burn many model turns
-    diagnosing ``ModuleNotFoundError`` for a sibling test module.  The Host
-    knows the workspace cwd exactly, so it supplies that deterministic runtime
-    fact while preserving argv semantics and avoiding a shell.
-    """
-    launcher = str(argv[0]).casefold()
-    remaining = [str(item) for item in argv[1:]]
-    if (
-        launcher == "py"
-        and remaining
-        and re.fullmatch(r"-\d+(?:\.\d+)?", remaining[0])
-    ):
-        remaining = remaining[1:]
-
-    interpreter_flags: list[str] = []
-    while remaining:
-        item = remaining[0]
-        if item == "-X" and len(remaining) >= 2:
-            interpreter_flags.extend(remaining[:2])
-            remaining = remaining[2:]
-            continue
-        if item in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u"}:
-            interpreter_flags.append(item)
-            remaining = remaining[1:]
-            continue
-        break
-
-    from backend.core.child_process import python_command
-
-    if not remaining:
-        return python_command(interpreter_flags)
-
-    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r});"
-    mode = remaining[0]
-    if mode == "-c" and len(remaining) >= 2:
-        return python_command([
-            *interpreter_flags, "-c", bootstrap + remaining[1], *remaining[2:],
-        ])
-    if mode == "-m" and len(remaining) >= 2:
-        module = remaining[1]
-        module_args = remaining[2:]
-        code = (
-            bootstrap
-            + "import runpy;"
-            + f"sys.argv={[module, *module_args]!r};"
-            + f"runpy.run_module({module!r},run_name='__main__',alter_sys=True)"
-        )
-        return python_command([*interpreter_flags, "-c", code])
-    if not mode.startswith("-"):
-        script = str((cwd / mode).resolve(strict=False)) if not Path(mode).is_absolute() else mode
-        script_args = remaining[1:]
-        code = (
-            bootstrap
-            + "import runpy;"
-            + f"sys.argv={[script, *script_args]!r};"
-            + f"runpy.run_path({script!r},run_name='__main__')"
-        )
-        return python_command([*interpreter_flags, "-c", code])
-    return python_command([*interpreter_flags, *remaining])
+    from backend.core.child_process import workspace_python_command
+    return workspace_python_command(argv, cwd)
 
 
 def shell_script(args: dict) -> dict:
-    """Execute one explicitly approved Bash program in the workspace.
+    """Execute one approved native shell program in the workspace.
 
     Approval is enforced by ToolPipeline before this isolated handler starts.
     The runner still confines cwd, strips likely credentials from the inherited
     environment, bounds input/output/time, and owns the spawned process tree.
-    It deliberately does not pretend to be an OS sandbox: the exact script is
-    the unit the user reviewed and approved.
+    ProcessToolRunner applies native OS isolation before loading this handler;
+    the exact script remains the unit the user reviewed and approved.
     """
     from backend.core.process_control import attach_kill_job, close_job, creation_flags, spawn_managed
 
@@ -531,21 +470,48 @@ def shell_script(args: dict) -> dict:
         return {"error": "PURPOSE_REQUIRED"}
     if "\x00" in script or len(script.encode("utf-8")) > 100_000:
         return {"error": "SCRIPT_INVALID", "detail": "script exceeds the 100KB boundary or contains NUL"}
-    shell = str(args.get("shell") or "bash").lower()
+    shell = str(args.get("shell") or "auto").lower()
     if shell == "auto":
         shell = "powershell" if sys.platform == "win32" else "bash"
     if shell not in {"bash", "powershell"}:
         return {"error": "SHELL_PROFILE_INVALID", "detail": "Choose bash, powershell or auto; scripts are never translated"}
-    from backend.core.tools.execution_profile import powershell_profile
-    resolution = powershell_profile() if shell == "powershell" else _resolve_bash()
-    if not resolution.get("path"):
-        return {
-            "error": resolution.get("error", "BASH_UNAVAILABLE"),
-            "detail": resolution.get("detail", "Install a verified Git for Windows Bash"),
-        }
-    bash = Path(resolution["path"])
+    if (sys.platform == "win32" and shell != "powershell") or (sys.platform != "win32" and shell != "bash"):
+        return {"error": "SANDBOX_CAPABILITY_UNSUPPORTED", "detail": "This native sandbox supports PowerShell on Windows and Bash on Linux; select that shell explicitly and use its syntax."}
+    resolution = {}
+    if sys.platform == "win32":
+        # MSYS Bash requires a shared global object namespace, incompatible
+        # with AppContainer. Use a Windows-native engine without weakening it.
+        from backend.core.executable_identity import windows_system_executable
+        engine = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")
+        # Server images may not autoload even the built-in modules in an
+        # AppContainer. Load known system manifests before executing the script.
+        bootstrap = "$env:PSModulePath=$PSHOME+'\\Modules';"
+        for module in ("Microsoft.PowerShell.Utility", "Microsoft.PowerShell.Management"):
+            bootstrap += (f"Import-Module ($PSHOME+'\\Modules\\{module}\\{module}.psd1') "
+                          "-ErrorAction Stop;")
+        # PowerShell's provider location can fall back to the drive root in
+        # AppContainer even when CreateProcess has the correct native cwd.
+        literal_cwd = str(cwd).replace("'", "''")
+        bootstrap += (f"$null=New-PSDrive -Name Gitgo -PSProvider FileSystem "
+                      f"-Root '{literal_cwd}' -ErrorAction Stop;"
+                      "Set-Location -LiteralPath 'Gitgo:\\' -ErrorAction Stop;")
+        command = ("[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+                   "try {" + bootstrap + "} catch { [Console]::Error.WriteLine($_);exit 1 };\n" + script)
+        shell_argv = [str(engine), "-NoLogo", "-NoProfile", "-NonInteractive",
+                      "-Command", command]
+    else:
+        resolution = _resolve_bash()
+        if not resolution.get("path"):
+            return {"error": resolution.get("error", "BASH_UNAVAILABLE"),
+                    "detail": resolution.get("detail", "Install Bash in the sandbox runtime.")}
+        bash = Path(resolution["path"])
+        shell_argv = [str(bash), "--noprofile", "--norc", "-c", script]
     timeout = max(1, min(int(args.get("timeout", 120) or 120), 1800))
     env = _safe_shell_environment()
+    if sys.platform == "win32":
+        # Do not discover modules through the real user's registry/profile or
+        # inherit PowerShell 7 module paths into the Windows PowerShell engine.
+        env["PSModulePath"] = str(engine.parent / "Modules")
     env["GITGO_AGENT_TOOL"] = "1"
     started = None
     job_handle = None
@@ -557,9 +523,7 @@ def shell_script(args: dict) -> dict:
             except (OSError, ValueError) as exc:
                 return {"error": "BASH_IDENTITY_UNVERIFIED", "detail": str(exc)}
         started = spawn_managed(
-            ([str(bash), "--noprofile", "--norc", "-c", script] if shell == "bash" else
-             [str(bash), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-              "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " + script]),
+            shell_argv,
             cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", env=env,
             creationflags=creation_flags(), start_new_session=sys.platform != "win32",
@@ -682,6 +646,33 @@ def _workspace(args: dict) -> Path:
     return workspace
 
 
+def _read_target(args: dict) -> tuple[Path, Path, Path, str]:
+    """Select names only; ReadRoot enforces lookup using the opened objects.
+
+    Do not resolve symlinks here and erase the evidence needed by the kernel.
+    _workspace/_allowed_roots are Host inputs, never model authority. Existing
+    file grants select that one name under its parent, not sibling operations.
+    """
+    from backend.core.sandbox_read import ReadBoundaryError, relative_parts
+    workspace = Path(str(args.get("_workspace") or Path.cwd()))
+    raw = args.get("path", "")
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise ReadBoundaryError("A file path is required")
+    requested = Path(raw)
+    if ".." in requested.parts or (requested.anchor and not requested.is_absolute()):
+        raise ReadBoundaryError("File path escapes the read boundary")
+    path = requested if requested.is_absolute() else workspace / requested
+    roots = [workspace, *(Path(str(item)) for item in args.get("_allowed_roots", []))]
+    for root in roots:
+        if path.is_relative_to(root):
+            if path == root:
+                return workspace, path, root.parent, root.name
+            relative = str(path.relative_to(root))
+            relative_parts(relative)
+            return workspace, path, root, relative
+    raise ReadBoundaryError("File path escapes the approved resource scope")
+
+
 def _allowed_roots(args: dict) -> list[Path]:
     roots = []
     for raw in list(args.get("_allowed_roots") or []):
@@ -715,20 +706,6 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _patch_paths(patch: str) -> list[str]:
-    paths = []
-    for marker, raw in re.findall(r"^(---|\+\+\+)\s+([^\t\r\n]+)", patch, re.M):
-        value = raw.strip()
-        if value == "/dev/null":
-            continue
-        if value.startswith(("a/", "b/")):
-            value = value[2:]
-        value = value.replace("\\", "/")
-        if value not in paths:
-            paths.append(value)
-    return paths
-
-
 def _command_denial(argv: list[str], workspace: Path) -> str:
     executable = Path(argv[0]).name.lower()
     if executable.endswith(".exe"):
@@ -755,21 +732,7 @@ def _command_denial(argv: list[str], workspace: Path) -> str:
     return ""
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, str(path))
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+from backend.core.filesystem import atomic_replace_bytes as _atomic_write
 
 
 def _kill_tree(proc: subprocess.Popen, job_handle=None) -> None:

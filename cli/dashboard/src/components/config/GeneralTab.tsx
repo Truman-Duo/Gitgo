@@ -8,10 +8,12 @@ import { colors } from "../../theme/index.js";
 import type { ConfigTabProps } from "./types.js";
 import { notifyGeneralConfigChanged } from "../../hooks/useGeneralConfig.js";
 import { applyTextOp } from "../../hooks/useTextInput.js";
+import { productVersion } from "../../backend/update.js";
 
-type SettingId = "verbose" | "language" | "auto_compact" | "agent_routing" | "external_editor" | "web_search_mode" | "web_search_engine" | "web_search_endpoint" | "terminal";
+type SettingId = "verbose" | "language" | "auto_compact" | "agent_routing" | "external_editor" | "web_search_mode" | "web_search_engine" | "web_search_endpoint" | "terminal" | "prompt_profile" | "diff_layout";
 type Settings = {
   verbose: boolean;
+  diff_layout: "split" | "unified";
   language: "en" | "zh";
   auto_compact: boolean;
   agent_routing: "owner" | "fresh";
@@ -20,6 +22,7 @@ type Settings = {
   web_search_endpoint: string;
   web_search_engine: "google" | "bing" | "baidu" | "yandex" | "duckduckgo";
   terminal: string;
+  prompt_profile: string;
 };
 
 const ROWS: { id: SettingId; label: string }[] = [
@@ -32,9 +35,12 @@ const ROWS: { id: SettingId; label: string }[] = [
   { id: "web_search_engine", label: "Fallback Engine" },
   { id: "web_search_endpoint", label: "SearXNG Fallback" },
   { id: "terminal", label: "Terminal" },
+  { id: "prompt_profile", label: "Prompt Instance" },
+  { id: "diff_layout", label: "Diff Layout" },
 ];
-const OPTIONS: Record<Exclude<SettingId, "external_editor" | "web_search_endpoint" | "terminal">, readonly (string | number | boolean)[]> = {
+const OPTIONS: Record<Exclude<SettingId, "external_editor" | "web_search_endpoint" | "terminal" | "prompt_profile">, readonly (string | number | boolean)[]> = {
   verbose: [false, true],
+  diff_layout: ["split", "unified"],
   language: ["en", "zh"],
   auto_compact: [false, true],
   agent_routing: ["owner", "fresh"],
@@ -51,10 +57,11 @@ export const GeneralTab = memo(function GeneralTab({
   client, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused, initialSetting, onSettingSaved,
 }: ConfigTabProps) {
   const [settings, setSettings] = useState<Settings>({
-    verbose: false, language: "en", auto_compact: true, agent_routing: "owner",
+    verbose: false, diff_layout: "split", language: "en", auto_compact: true, agent_routing: "owner",
     external_editor: "", web_search_mode: "auto", web_search_endpoint: "",
-    web_search_engine: "duckduckgo", terminal: "auto",
+    web_search_engine: "duckduckgo", terminal: "auto", prompt_profile: "default",
   });
+  const [profiles, setProfiles] = useState<{id: string; label: string}[]>([]);
   const [row, setRow] = useState(Math.max(0, ROWS.findIndex(r => r.id === initialSetting)));
   const [editing, setEditing] = useState<SettingId | null>(initialSetting === "terminal" ? "terminal" : null);
   const [draft, setDraft] = useState<string | number | boolean>("");
@@ -64,6 +71,14 @@ export const GeneralTab = memo(function GeneralTab({
   const [terminalWarning, setTerminalWarning] = useState("");
   const [detectingTerminals, setDetectingTerminals] = useState(true);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [version, setVersion] = useState("Loading…");
+  useEffect(() => {
+    let active = true;
+    setVersion("Loading…");
+    productVersion(client).then(value => { if (active) setVersion(value.version); })
+      .catch(() => { if (active) setVersion("Unavailable · reopen General to retry"); });
+    return () => { active = false; };
+  }, [client]);
   const refreshTerminals = useCallback(async () => {
     setDetectingTerminals(true);
     try {
@@ -99,8 +114,11 @@ export const GeneralTab = memo(function GeneralTab({
     let active = true;
     configGet(client).then((result: any) => {
       if (!active) return;
+      setProfiles(Array.isArray(result?.prompt_profiles) ? result.prompt_profiles : []);
       setSettings({
+        prompt_profile: String(result?.prompt_profile || "default"),
         verbose: Boolean(result?.verbose),
+        diff_layout: result?.diff_layout === "unified" ? "unified" : "split",
         language: result?.language === "zh" ? "zh" : "en",
         auto_compact: result?.auto_compact !== false,
         agent_routing: result?.agent_routing === "fresh" ? "fresh" : "owner",
@@ -149,7 +167,8 @@ export const GeneralTab = memo(function GeneralTab({
         if (id === "web_search_endpoint" || id === "web_search_engine") {
           setSearchHealth("offline");
           setMessage("Saved · configure a SearXNG endpoint to enable search");
-        } else setMessage(id === "terminal" ? "Saved · applies on the next launch" : "Saved");
+        } else setMessage(id === "terminal" ? "Saved · applies on the next launch" :
+                          id === "prompt_profile" ? "Saved · new runs use this instance; active runs keep their snapshot" : "Saved");
       }
       const notice = await onSettingSaved?.(key);
       if (notice) setMessage(notice);
@@ -180,7 +199,9 @@ export const GeneralTab = memo(function GeneralTab({
         else if (input && !key.ctrl && !key.meta) applyTextOp({op: "insert", text: input}, cmdInput);
         return;
       }
-      const options = editing === "terminal" ? terminals.filter(t => t.available).map(t => t.id) : OPTIONS[editing];
+      const options = editing === "terminal" ? terminals.filter(t => t.available).map(t => t.id) :
+                      editing === "prompt_profile" ? profiles.map(p => p.id) : OPTIONS[editing];
+      if (editing === "prompt_profile" && (!settingsLoaded || !options.length)) return;
       if (editing === "terminal" && (!settingsLoaded || detectingTerminals || options.length === 0)) return;
       const index = Math.max(0, options.indexOf(draft));
       if (matchChord("left", input, key)) {
@@ -212,12 +233,14 @@ export const GeneralTab = memo(function GeneralTab({
   const valueLabel = (id: SettingId) => {
     const value = editing === id ? draft : settings[id];
     if (saving === id) return "SAVING";
+    if (id === "prompt_profile") return profiles.find(p => p.id === value)?.label || String(value);
     if (id === "terminal") {
       if (detectingTerminals) return "Detecting installed terminals…";
       const option = terminals.find(t => t.id === value);
       return option ? option.label + (option.available ? "" : " · unavailable") : String(value || "Not selected");
     }
     if (id === "verbose" || id === "auto_compact") return value ? "ON" : "OFF";
+    if (id === "diff_layout") return value === "unified" ? "Unified" : "Split";
     if (id === "language") return value === "zh" ? "中文" : "English";
     if (id === "agent_routing") return value === "fresh" ? "Fresh agent" : "Original owner";
     if (id === "web_search_mode") return value === "auto" ? "Provider → SearXNG" : String(value);
@@ -232,6 +255,7 @@ export const GeneralTab = memo(function GeneralTab({
 
   return (
     <Box flexDirection="column" flexGrow={1}>
+      <Text dimColor>{"Gitgo Version".padEnd(18)}{version} (read-only)</Text>
       {ROWS.map((item, index) => {
         const selected = contentFocused && index === row;
         const isEditing = editing === item.id;

@@ -114,7 +114,7 @@ def test_verify_pending_to_instance():
         assert len(pending) == 1
         lid = pending[0].id
 
-        result = LessonManager.verify(p, lid, project_name="proj")
+        result = LessonManager.verify(p, lid, project_name="proj", user_confirmation=True)
         assert result is not None
         assert result.verified_count == 1
         # pending should be cleared
@@ -162,7 +162,7 @@ def test_search_finds_in_instance():
         _rm(p)
 
 
-def test_search_finds_pending_project_lesson():
+def test_management_search_finds_unreviewed_pending_while_model_search_excludes_it():
     p = _tmp()
     try:
         lesson = Lesson(
@@ -173,9 +173,10 @@ def test_search_finds_pending_project_lesson():
         )
         LessonManager.save_pending(p, lesson)
         results = LessonManager.search(
-            p, "pending-search-probe", project_name="proj",
+            p, "pending-search-probe", project_name="proj", include_unreviewed=True,
         )
         assert [item.id for item in results] == ["pending-search-probe"]
+        assert LessonManager.search(p, "pending-search-probe", project_name="proj") == []
     finally:
         _rm(p)
 
@@ -209,6 +210,8 @@ def test_lesson_trigger_uses_watcher_files_without_release_diff():
             project=SimpleNamespace(name="proj"),
         )
 
+        from tests.knowledge_fixtures import review_fixture
+        review_fixture(lesson)
         results = PolicyEngine(
             lessons=[lesson], changed_files=["source.txt"],
         ).run(session, SimpleNamespace(), task_kind="action")
@@ -242,6 +245,8 @@ def test_ambiguous_checker_does_not_hide_lexical_lesson_match():
             project=SimpleNamespace(name="proj"),
         )
 
+        from tests.knowledge_fixtures import review_fixture
+        review_fixture(lesson)
         results = PolicyEngine(
             lessons=[lesson], changed_files=["source.txt"],
         ).run(session, SimpleNamespace(), task_kind="action")

@@ -1,0 +1,1 @@
+Compare the function/class name sets in two supplied Python source versions. The current implementation reports added or removed names; it does not detect every function-body change or establish complete symbol-level impact. Supply the actual versions for the intended comparison. An empty result does not prove unchanged behavior.

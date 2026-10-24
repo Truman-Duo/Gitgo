@@ -1,5 +1,8 @@
 """Bounded provider progress recovery; never executes partial calls."""
+
+from backend.core.prompt_templates import load_prompt, render_prompt
 from .answer_continuation import remember_answer_fragment
+from .recovery_guidance import diagnostic_hint
 from .delivery_runtime import DeliveryBoundary
 from .lifecycle import transition
 from .models import ProcessStatus
@@ -44,12 +47,7 @@ class ProviderProgress:
             if self.no_progress_recoveries < 1:
                 self.no_progress_recoveries += 1
                 session.append_user(
-                    "[HOST NO-PROGRESS RECOVERY] The prior direct-answer turn "
-                    "spent its output budget without public text or a tool call. "
-                    "Do not repeat or extend the hidden analysis. Treat quoted input "
-                    "literally unless the user explicitly asked for decoding. Either "
-                    "make one bounded evidence call now, or provide the concise public "
-                    "answer immediately.",
+                    load_prompt('recovery/no_progress') + diagnostic_hint('PROVIDER_NO_PROGRESS'),
                     message_type="host_provider_continuation",
                 )
                 _emit_observation({
@@ -104,19 +102,16 @@ class ProviderProgress:
                 outcome_status=OutcomeStatus.FAILED,
             ))
         tool_hint = (
-            " The unfinished function call was discarded and MUST NOT be "
-            "replayed. Use a substantially smaller payload or split the "
-            "work into bounded incremental tool calls."
+            load_prompt('recovery/unfinished_tool')
             if unfinished_names else ""
         )
         remember_answer_fragment(process, accumulated_text)
         session.append_user(
-            "[HOST PROVIDER CONTINUATION] The provider reached "
-            f"{provider_incomplete_reason}. Continue from the saved partial "
-            "reasoning/output without repeating prior analysis. Finish concisely "
-            "within the remaining task budget. If public text was emitted, "
-            "continue from its exact end without restarting: the Host retains "
-            f"and joins those public fragments for delivery.{tool_hint}",
+            render_prompt(
+                'recovery/provider_continuation',
+                provider_incomplete_reason=format(provider_incomplete_reason, ''),
+                tool_hint=format(tool_hint, ''),
+            ) + diagnostic_hint('PROVIDER_RESPONSE_INCOMPLETE'),
             message_type="host_provider_continuation",
         )
         return DeliveryBoundary(retry=True)
@@ -127,9 +122,7 @@ class ProviderProgress:
             str(item.get("name") or "unknown") for item in invalid_tool_calls
         }))
         session.append_user(
-            "[HOST TOOL ARGUMENT ERROR] The provider returned malformed JSON "
-            f"for {names}. No tool was executed. Reissue a smaller valid JSON "
-            "object; do not repeat the same payload.",
+            render_prompt('recovery/tool_arguments', names=format(names, '')) + diagnostic_hint('INVALID_TOOL_ARGUMENT_JSON'),
             message_type="host_tool_argument_error",
         )
         return DeliveryBoundary(retry=True)

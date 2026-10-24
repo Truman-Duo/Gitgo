@@ -10,6 +10,8 @@ The main loop owns the SyncSession and dispatches events to step methods.
 
 from __future__ import annotations
 
+from backend.core.loop.execution_contract import NATIVE_PROCESS, data_broker
+
 import atexit
 import os
 import queue
@@ -24,6 +26,7 @@ from functools import partial
 from pathlib import Path
 
 from backend.core.config import Config, ProjectConfig
+from backend.core.prompt_templates import load_prompt
 from backend.core.sync_session import SyncSession, SessionStage
 from backend.core.daemon.watcher import WorkspaceWatcher
 from backend.core.daemon.poller import TrialPoller
@@ -46,7 +49,6 @@ from backend.core.daemon.dispatch import _handle_command
 from backend.core.policy import PolicyEngine, build_policy_message
 from backend.core.loop.manager import AgentProcessManager
 from backend.core.loop.agent_tool import AgentTool, ToolEffect, CancellationMode
-from backend.core.loop.test_manifest import run_registered_test
 from backend.core.loop.tool_wrappers import (
     contract_detect_drift,
     contract_get_impact,
@@ -58,8 +60,6 @@ from backend.core.loop.tool_wrappers import (
     lesson_promote,
     lesson_list,
     privacy_scan,
-    memory_snapshot,
-    memory_restore,
 )
 from backend.core.dispatch import ToolDispatcher
 from backend.core.tools.catalog import build_workspace_tools
@@ -140,6 +140,52 @@ def _publish_governance_snapshot(
     return fresh
 
 
+def _start_queued_knowledge_harvest(daemon_ctx, *, event_queue, workspace_path, project_name,
+                                     provider_factory=_background_llm_provider) -> bool:
+    """Closed-task facts are already durable; no parallel scheduler ledger."""
+    if daemon_ctx.get("knowledge_harvest_inflight"):
+        return False
+    from backend.core.history import HistoryManager
+    from backend.core.knowledge.harvest import get_unprocessed_signals
+    with HistoryManager.workspace_scope(workspace_path):
+        closed = [item for item in get_unprocessed_signals(project_name)
+                  if item.get("signal_type") == "task_closed"
+                  and not item.get("harvest_retry_count") and item.get("task_id")]
+    if not closed:
+        return False
+    provider = provider_factory(daemon_ctx)
+    return _start_background_harvest(daemon_ctx, event_queue=event_queue, provider=provider,
+        workspace_path=workspace_path, project_name=project_name, signal_type="task_closed",
+        task_id=str(closed[0]["task_id"]))
+
+
+def _observe_task_closure(event, process, *, workspace_path, project_name) -> bool:
+    """One completed user request is a sampling boundary, not a knowledge verdict."""
+    if process is None or process.parent_id or process.cancel_requested:
+        return False
+    status = str((event.get("outcome") or {}).get("status") or "")
+    if status not in {"completed", "failed"}:
+        return False
+    task_id = str(event.get("task_id") or "")
+    if not task_id or task_id != process.active_task_id:
+        return False
+    from backend.core.history import HistoryManager
+    from backend.core.knowledge.harvest import get_unprocessed_signals, capture_signal
+    with HistoryManager.workspace_scope(workspace_path):
+        observations = [item for item in get_unprocessed_signals(project_name)
+                        if item.get("task_id") == task_id
+                        and item.get("signal_type") in {"execution_failure", "execution_followup", "completion_recovery", "workbench_material"}]
+        if not observations:
+            return False  # greetings and ordinary successful answers cost no harvest call
+        context, version = process.read_context_snapshot()
+        from backend.core.knowledge.evidence_context import task_context_snapshot
+        capture_signal("task_closed", {"task_id": task_id, "outcome_status": status,
+            "task_request": process.task_description[:2000],
+            "task_context": task_context_snapshot(context)},
+            project_name, source_event_id=f"{task_id}:{process.process_id}:{version}:{process.steps_used}")
+    return True
+
+
 def _start_background_harvest(
     daemon_ctx: dict,
     *,
@@ -149,6 +195,7 @@ def _start_background_harvest(
     project_name: str,
     signal_type: str,
     thread_factory=threading.Thread,
+    task_id: str = "",
 ) -> bool:
     """Lease and execute one harvest without blocking the daemon command loop.
 
@@ -162,10 +209,22 @@ def _start_background_harvest(
 
     from backend.core.knowledge.harvest import (
         complete_harvest, fail_harvest, harvest_llm_summary,
-        lease_harvest_signals, mark_harvest_triggered,
+        lease_harvest_signals, lease_harvest_signal_ids, get_unprocessed_signals,
+        mark_harvest_triggered, stage_harvest_proposal,
     )
 
-    batch = lease_harvest_signals(project_name)
+    from backend.core.history import HistoryManager
+    with HistoryManager.workspace_scope(workspace_path):
+        if task_id:
+            available = [item for item in get_unprocessed_signals(project_name)
+                         if item.get("task_id") == task_id]
+            # Include the actual closure in the bounded evidence batch.
+            closures = [item for item in available if item.get("signal_type") == "task_closed"]
+            rest = [item for item in available if item.get("signal_type") != "task_closed"]
+            selected = rest[-29:] + closures[-1:]
+            batch = lease_harvest_signal_ids(project_name, [item["signal_id"] for item in selected])
+        else:
+            batch = lease_harvest_signals(project_name)
     if not batch:
         return False
 
@@ -174,38 +233,40 @@ def _start_background_harvest(
     mark_harvest_triggered(project_name)
 
     def _worker() -> None:
+        with HistoryManager.workspace_scope(workspace_path):
+            _run_worker()
+
+    def _run_worker() -> None:
         signal_ids = [item["signal_id"] for item in batch]
         event = {
             "event": "knowledge_harvest_result",
             "harvest_id": harvest_id,
             "time": datetime.now(timezone.utc).isoformat(),
             "signal_type": signal_type,
+            "summary": {},
         }
         try:
-            from backend.core.knowledge.lesson import LessonManager as _LM
-
             lessons = harvest_llm_summary(
                 batch,
                 provider,
                 workspace_path,
                 project_name,
                 raise_on_error=True,
+                summary_report=event["summary"],
                 on_provider_notice=lambda notice: event_queue.put({
                     **notice, "harvest_id": harvest_id, "origin": "background_harvest",
                     "time": datetime.now(timezone.utc).isoformat(),
                 }),
             )
-            workspace = Path(workspace_path)
-            for lesson in lessons:
-                _LM.save_pending(workspace, lesson)
-            complete_harvest(
-                project_name,
-                signal_ids,
-                [lesson.id for lesson in lessons],
-            )
-            event.update({"status": "success", "count": len(lessons)})
+            if lessons:
+                proposal = stage_harvest_proposal(project_name, signal_ids, lessons,
+                                                  summary_report=event["summary"])
+                event.update(status="awaiting_confirmation", count=len(lessons), proposal=proposal)
+            else:
+                complete_harvest(project_name, signal_ids, [], summary_report=event["summary"])
+                event.update(status="no_knowledge", count=0)
         except Exception as exc:
-            fail_harvest(project_name, signal_ids, str(exc))
+            fail_harvest(project_name, signal_ids, str(exc), summary_report=event["summary"])
             event.update({
                 "status": "failed",
                 "reason": "harvest_failed",
@@ -269,12 +330,12 @@ def run_daemon(
 
     atexit.register(lambda: _release_pid_file(project))
 
-    session = SyncSession(project, cfg)
+    workspace_path = Path(project.workspace_path or Path.cwd()).resolve()
 
     # Refuse catastrophic repository roots before any broad initial scan.  A
     # non-git directory is only a warning during the staged migration, but a
     # home/volume root is never an acceptable Agent workspace.
-    scope = assess_repository_scope(session.workspace_path)
+    scope = assess_repository_scope(workspace_path)
     if not scope.allowed:
         _emit_v2({
             "event": "repository_scope_blocked",
@@ -297,7 +358,10 @@ def run_daemon(
     # fall back to JSONL when initialization or migration fails: that would
     # recreate two competing sources of truth.
     try:
-        storage_runtime = StorageRuntime(session.workspace_path)
+        storage_runtime = StorageRuntime(workspace_path)
+        from backend.core.history import HistoryManager
+        HistoryManager.set_workspace(str(workspace_path), storage=storage_runtime)
+        session = SyncSession(project, cfg)
         from backend.core.loop.manager import SessionStore
         session_store = SessionStore(
             str(session.workspace_path), storage=storage_runtime,
@@ -364,6 +428,9 @@ def run_daemon(
             "reason": str(exc),
         }, priority="immediate")
     from backend.core.application.process_presentation import ProcessPresentation
+    if worktree_manager is not None:
+        from backend.core.sandbox_access import WorktreeAccessService
+        worktree_manager.sandbox_access = WorktreeAccessService(worktree_manager)
     apm = AgentProcessManager(worktree_manager=worktree_manager,
                               presentation=ProcessPresentation(storage_runtime))
     # Runtime services share the same authoritative project storage.  Binding
@@ -403,8 +470,11 @@ def run_daemon(
     _WRITE_TOOLS = {"formalize", "write", "edit", "push", "sync",
                     "bash", "delete", "rm", "mv", "cp", "mkdir"}
 
+    from backend.core.tools.governance_service import build_formalize_tool
+
     tool_executors = {
         "scan": AgentTool(
+            execution_contract=data_broker("host.daemon.scan"),
             name="scan",
             description="扫描项目工作区，检测文件变更和 git 状态。当需要了解项目当前状态、检查哪些文件被修改时使用。",
             parameters={"type": "object", "properties": {"files": {"type": "array", "items": {"type": "string"}, "description": "可选，指定要扫描的文件列表"}}, "required": []},
@@ -412,25 +482,16 @@ def run_daemon(
             read_only=True,
         ),
         "status": AgentTool(
+            execution_contract=data_broker("host.daemon.status"),
             name="status",
             description="获取工作区语义化状态摘要（文件变更、合同漂移、治理信号）。",
             parameters={"type": "object", "properties": {"semantic": {"type": "boolean", "description": "是否返回语义化摘要"}}, "required": []},
             execute=partial(_exec_status, daemon_ctx, session, project),
             read_only=True,
         ),
-        "formalize": AgentTool(
-            name="formalize",
-            description="基于选中的工作区文件创建正式的结构化提交（formal commit）。需要 indices 和 message 参数。",
-            parameters={"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}}, "message": {"type": "string"}}, "required": ["message"]},
-            execute=partial(_exec_formalize, daemon_ctx, session, project),
-            read_only=False,
-            resources=["filesystem:*"],
-            effect=ToolEffect.WORKSPACE_WRITE,
-            isolated=True,
-            cancellation=CancellationMode.ISOLATED_PROCESS,
-            runner_name="formalize",
-        ),
+        "formalize": build_formalize_tool(session),
         "recall_grep": AgentTool(
+            execution_contract=data_broker("host.daemon.recall_grep"),
             name="recall_grep",
             description="全文搜索知识库中的历史教训（lessons），按关键词匹配。用于查找相似问题的处理经验。",
             parameters={"type": "object", "properties": {"query": {"type": "string", "description": "搜索关键词"}, "top_k": {"type": "integer"}, "agent_context": {"type": "string"}}, "required": ["query"]},
@@ -438,6 +499,7 @@ def run_daemon(
             read_only=True,
         ),
         "recall_semantic": AgentTool(
+            execution_contract=data_broker("host.daemon.recall_semantic"),
             name="recall_semantic",
             description="语义搜索知识库中的历史教训，按向量相似度匹配。",
             parameters={"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}, "agent_context": {"type": "string"}}, "required": ["query"]},
@@ -445,6 +507,7 @@ def run_daemon(
             read_only=True,
         ),
         "recall_rag": AgentTool(
+            execution_contract=data_broker("host.daemon.recall_rag"),
             name="recall_rag",
             description="RAG（检索增强生成）搜索知识库。",
             parameters={"type": "object", "properties": {"query": {"type": "string"}, "agent_context": {"type": "string"}}, "required": ["query"]},
@@ -455,6 +518,7 @@ def run_daemon(
 
     tool_executors.update({
         "assemble_context": AgentTool(
+            execution_contract=data_broker("host.daemon.assemble_context"),
             name="assemble_context",
             description="汇编上下文：从 policy signals + recall + dependency graph 三层收集相关上下文。需要 task 和 files 参数。",
             parameters={"type": "object", "properties": {"task": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}, "required": ["task"]},
@@ -462,6 +526,7 @@ def run_daemon(
             read_only=True,
         ),
         "assemble_return_context": AgentTool(
+            execution_contract=data_broker("host.daemon.assemble_return_context"),
             name="assemble_return_context",
             description="构建 B Agent 返回给 A Agent 的上下文转录。需要 process_id 参数。",
             parameters={"type": "object", "properties": {"process_id": {"type": "string"}}, "required": ["process_id"]},
@@ -469,6 +534,7 @@ def run_daemon(
             read_only=True,
         ),
         "decompose_task": AgentTool(
+            execution_contract=data_broker("host.daemon.decompose_task"),
             name="decompose_task",
             description=(
                 "将当前复杂任务分析并建议拆分为多个子任务。"
@@ -487,139 +553,31 @@ def run_daemon(
             execute=partial(_exec_decompose_task, daemon_ctx, session, project),
             read_only=True,
         ),
-        "run_test": AgentTool(
-            name="run_test",
-            description=(
-                "Run one registered pytest file/node under deterministic seeds and "
-                "atomically update .gitgo/test_manifest.json."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "test_id": {"type": "string"},
-                    "target": {"type": "string"},
-                    "seeds": {"type": "array", "items": {"type": "integer"}},
-                    "timeout": {"type": "integer"},
-                },
-                "required": ["test_id", "target"],
-            },
-            execute=partial(run_registered_test, session.workspace_path),
-            read_only=False,
-            effect=ToolEffect.PROCESS,
-            cancellation=CancellationMode.ISOLATED_PROCESS,
-            resources=["process:pytest", "filesystem:.gitgo/test_manifest.json"],
-            timeout=900,
-        ),
+
     })
 
     # Bind the canonical development tool set to this daemon workspace.  These
     # names are additive; legacy daemon/governance tools keep their contracts.
     tool_executors.update(build_workspace_tools(session.workspace_path))
 
+    from backend.core.daemon.policy_helpers import bind_project_tool_context
     def _bind_private_workspace(tool: AgentTool) -> None:
-        previous = tool.prepare_args
+        bind_project_tool_context(tool, session.workspace_path, project.name)
 
-        def prepare(args: dict) -> dict:
-            prepared = previous(args) if previous else dict(args or {})
-            prepared = dict(prepared)
-            prepared["_workspace"] = str(session.workspace_path)
-            properties = tool.parameters.get("properties", {})
-            if "workspace_path" in properties:
-                prepared["workspace_path"] = str(session.workspace_path)
-            if "project_name" in properties:
-                # Project identity is host-owned runtime context.  Leaving an
-                # optional model argument blank silently redirected knowledge
-                # tools away from the active project's instance/pending store.
-                prepared["project_name"] = project.name
-            return prepared
-
-        tool.prepare_args = prepare
-
-    isolated_existing = {
-        "contract_detect_drift", "contract_get_impact",
-        "contract_get_changed_symbols", "lesson_search", "lesson_discard",
-        "lesson_verify", "lesson_harvest", "lesson_promote", "lesson_list",
-        "privacy_scan", "memory_snapshot", "memory_restore", "run_test",
+    workspace_bound_existing = {
+        "contract_detect_drift", "contract_get_impact", "contract_get_changed_symbols",
+        "lesson_harvest", "privacy_scan", "memory_snapshot", "memory_restore", "run_test",
     }
-    for name in isolated_existing:
-        tool = tool_executors.get(name)
-        if tool is None:
-            continue
-        tool.isolated = True
-        tool.runner_name = name
-        tool.cancellation = CancellationMode.ISOLATED_PROCESS
-        _bind_private_workspace(tool)
 
-    # Formalize is stateful, so the child receives a serializable configuration
-    # and the daemon refreshes its in-memory view from the child's atomic state.
-    from backend.core.config import _serialize_config
-    formalize_tool = tool_executors["formalize"]
-
-    def _prepare_formalize(args: dict) -> dict:
-        prepared = dict(args or {})
-        prepared["_workspace"] = str(session.workspace_path)
-        prepared["_project_name"] = project.name
-        prepared["_config"] = _serialize_config(cfg)
-        return prepared
-
-    def _refresh_formalize(result: dict) -> dict:
-        restored = SyncSession.load_session(project, cfg)
-        if restored is not None:
-            session.formal_commits = restored.formal_commits
-            session.stage = restored.stage
-        return result
-
-    formalize_tool.prepare_args = _prepare_formalize
-    formalize_tool.finalize_result = _refresh_formalize
+    from backend.core.tools.knowledge_service import build_lesson_harvest_tool
+    from backend.core.tools.memory_service import build_memory_tools
+    from backend.core.tools.contract_service import build_contract_tools
 
     # ── v0.45: 差异化后端工具 ──
     tool_executors.update({
-        "contract_detect_drift": AgentTool(
-            name="contract_detect_drift",
-            description="检测本轮文件变更与项目合约的偏差。返回告警列表（feature_deleted, signature_changed 等）。当需要验证变更是否符合合约时使用。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "changed_files": {"type": "array", "items": {"type": "string"}, "description": "变更文件列表"},
-                    "contract_path": {"type": "string", "description": "contract.yaml 路径，可选"},
-                },
-                "required": ["workspace_path"],
-            },
-            execute=contract_detect_drift,
-            read_only=True,
-        ),
-        "contract_get_impact": AgentTool(
-            name="contract_get_impact",
-            description="查询文件的影响面：哪些文件依赖它（dependents），哪些函数调用了它（callers）。修改文件前评估爆炸半径时使用。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "file_path": {"type": "string", "description": "目标文件路径（相对于 workspace）"},
-                    "func_name": {"type": "string", "description": "可选，指定函数名以精确查询调用者"},
-                },
-                "required": ["workspace_path", "file_path"],
-            },
-            execute=contract_get_impact,
-            read_only=True,
-        ),
-        "contract_get_changed_symbols": AgentTool(
-            name="contract_get_changed_symbols",
-            description="对比文件两个版本的 AST，返回变更的函数/类名列表。用于精确判断代码变更的符号级影响。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "文件路径"},
-                    "old_content": {"type": "string", "description": "旧版本内容，可选"},
-                    "new_content": {"type": "string", "description": "新版本内容，可选"},
-                },
-                "required": ["file_path"],
-            },
-            execute=contract_get_changed_symbols,
-            read_only=True,
-        ),
+        **build_contract_tools(session.workspace_path),
         "lesson_search": AgentTool(
+            execution_contract=data_broker("knowledge.lesson_search"),
             name="lesson_search",
             description="在知识库中搜索历史经验教训（lessons）。同时搜索抽象层和实例层。用于查找相似问题的处理经验、避免重复错误。",
             parameters={
@@ -636,6 +594,7 @@ def run_daemon(
             read_only=True,
         ),
         "lesson_discard": AgentTool(
+            execution_contract=data_broker("knowledge.lesson_discard"),
             name="lesson_discard",
             description="删除一条经验教训（从 pending 或 instance 中移除）。用于清理过时或错误的 lesson。",
             parameters={
@@ -652,6 +611,7 @@ def run_daemon(
             resources=["filesystem:*"],
         ),
         "lesson_verify": AgentTool(
+            execution_contract=data_broker("knowledge.lesson_verify"),
             name="lesson_verify",
             description="确认一条经验教训（从 pending 提升为正式，或增加 verified_count）。需要 Ring 0 权限。",
             parameters={
@@ -667,71 +627,10 @@ def run_daemon(
             read_only=False,
             resources=["filesystem:*"],
         ),
-        "lesson_harvest": AgentTool(
-            name="lesson_harvest",
-            description="从 git log、CLAUDE.md、scan history、governance signals 四个数据源收割新经验教训。操作较重（扫描 4 源），需要 Ring 0 权限。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "project_name": {"type": "string", "description": "项目名称"},
-                    "tech_stack": {"type": "string", "description": "技术栈标签，可选"},
-                },
-                "required": ["workspace_path", "project_name"],
-            },
-            execute=lesson_harvest,
-            read_only=False,
-            timeout=120.0,
-            resources=["filesystem:*"],
-        ),
-        "privacy_scan": AgentTool(
-            name="privacy_scan",
-            description="扫描变更文件的隐私风险（敏感信息泄露、AI 痕迹、密钥硬编码等）。push 前或代码审查时使用。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "file_list": {"type": "array", "items": {"type": "string"}, "description": "要扫描的文件列表"},
-                    "level": {"type": "integer", "description": "扫描级别 1-3，默认 2"},
-                    "deep_scan": {"type": "boolean", "description": "是否深度扫描，默认 false"},
-                },
-                "required": ["workspace_path"],
-            },
-            execute=privacy_scan,
-            read_only=True,
-        ),
-        "memory_snapshot": AgentTool(
-            name="memory_snapshot",
-            description="将工作区工具记忆（CLAUDE.md 等）快照到 backup 目录，并列出所有可用快照。用于备份当前记忆状态。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "backup_path": {"type": "string", "description": "备份目标路径"},
-                },
-                "required": ["workspace_path", "backup_path"],
-            },
-            execute=memory_snapshot,
-            read_only=False,
-            resources=["filesystem:*"],
-        ),
-        "memory_restore": AgentTool(
-            name="memory_restore",
-            description="从 backup 目录的快照恢复工具记忆到工作区。snapshot_timestamp 为空时使用最新快照。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "backup_path": {"type": "string", "description": "备份源路径"},
-                    "workspace_path": {"type": "string", "description": "工作区路径"},
-                    "snapshot_timestamp": {"type": "string", "description": "快照时间戳，可选，默认最新"},
-                },
-                "required": ["backup_path", "workspace_path"],
-            },
-            execute=memory_restore,
-            read_only=False,
-            resources=["filesystem:*"],
-        ),
+        "lesson_harvest": build_lesson_harvest_tool(session.workspace_path, project.name),
+        **build_memory_tools(session),
         "lesson_promote": AgentTool(
+            execution_contract=data_broker("knowledge.lesson_promote"),
             name="lesson_promote",
             description="将一条实例层经验教训提升为抽象层（跨项目复用）。需要 Ring 0 权限。",
             parameters={
@@ -749,6 +648,7 @@ def run_daemon(
             resources=["filesystem:*"],
         ),
         "lesson_list": AgentTool(
+            execution_contract=data_broker("knowledge.lesson_list"),
             name="lesson_list",
             description="列出所有经验教训（抽象层 + 实例层 + 待确认）。用于查看知识库全貌、盘点现有 lessons。",
             parameters={
@@ -764,24 +664,23 @@ def run_daemon(
         ),
     })
 
-    # The governance definitions above replace earlier dictionary entries, so
-    # apply the isolated execution contract after the complete registry exists.
-    for name in isolated_existing:
+    # Bind current project facts after every definition is assembled. Native
+    # handlers and supervised services retain their own execution declaration.
+    for name in workspace_bound_existing:
         tool = tool_executors.get(name)
         if tool is None:
             continue
-        tool.isolated = True
-        tool.runner_name = name
-        tool.cancellation = CancellationMode.ISOLATED_PROCESS
         _bind_private_workspace(tool)
 
+    # Knowledge metadata belongs to the canonical state service, never to a
+    # native helper that would need access to the Host's private database.
+    for name in ("lesson_search", "lesson_discard", "lesson_verify", "lesson_promote", "lesson_list"):
+        _bind_private_workspace(tool_executors[name])
+
     from backend.core.loop.gate import RingGate
-    from backend.adapters.local_git_runner import LocalGitRunner
-    _git_runner = LocalGitRunner(session.workspace_path)
     dispatcher = ToolDispatcher(
         RingGate(), tool_executors,
         history_writer=HistoryManager.add_operation,
-        git_runner=_git_runner,
     )
 
     # Event queue — created before wiring into daemon_ctx
@@ -1104,17 +1003,19 @@ def run_daemon(
             elif event_type == "knowledge_harvest_result":
                 if daemon_ctx.get("knowledge_harvest_inflight") == ev.get("harvest_id"):
                     daemon_ctx.pop("knowledge_harvest_inflight", None)
-                if ev.get("status") == "success":
+                if ev.get("status") in {"awaiting_confirmation", "no_knowledge"}:
                     _publish_governance_snapshot(
                         session, project, daemon_ctx, apm,
                         policy_results=daemon_ctx.get("last_policy_results"),
                     )
                     _emit({
-                        "event": "lessons_harvested",
+                        "event": "lesson_harvest_proposed" if ev.get("status") == "awaiting_confirmation" else "lesson_harvest_completed",
+                        "proposal": ev.get("proposal"),
                         "harvest_id": ev.get("harvest_id"),
                         "time": ev.get("time"),
                         "count": int(ev.get("count", 0)),
                         "signal_type": ev.get("signal_type", ""),
+                        "summary": ev.get("summary", {}),
                     })
                 else:
                     _emit({
@@ -1123,7 +1024,15 @@ def run_daemon(
                         "reason": ev.get("reason", "harvest_failed"),
                         "error": ev.get("error", "Knowledge harvest failed."),
                         "retryable": bool(ev.get("retryable", True)),
+                        "summary": ev.get("summary", {}),
                     })
+
+                try:
+                    _start_queued_knowledge_harvest(daemon_ctx, event_queue=evq,
+                        workspace_path=str(session.workspace_path), project_name=project.name)
+                except Exception as exc:
+                    _emit({"event": "lesson_harvest_failed", "reason": "queued_harvest_failed",
+                           "error_type": type(exc).__name__, "retryable": True})
 
             elif event_type == "trial_check":
                 _emit({"event": "operation_started", "op": "trial_check"})
@@ -1170,6 +1079,14 @@ def run_daemon(
                 _emit_v2(ev)  # priority="normal" — 微批
             elif event_type == "agent_complete":
                 _emit_v2(ev, priority="immediate")  # 修复：之前无分支→静默丢弃
+                try:
+                    _observe_task_closure(ev, apm.get(str(ev.get("process_id") or "")),
+                        workspace_path=str(session.workspace_path), project_name=project.name)
+                    _start_queued_knowledge_harvest(daemon_ctx, event_queue=evq,
+                        workspace_path=str(session.workspace_path), project_name=project.name)
+                except Exception as exc:
+                    _emit({"event": "lesson_harvest_failed", "reason": "task_closure_harvest_failed",
+                           "error_type": type(exc).__name__, "retryable": True})
                 # Session is durable across tasks (4A). Process checkpoints are
                 # retained until an explicit retention policy reaps them.
 

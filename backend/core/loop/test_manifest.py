@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import errno
 import os
-import subprocess
-import sys
 import tempfile
 import re
 import threading
@@ -104,6 +102,7 @@ class TestRecord:
     seeds: list[int] = field(default_factory=list)
     results: list[SeedResult] = field(default_factory=list)
     last_run_at: str = ""
+    validation_version: dict | None = None
 
     @property
     def passed(self) -> bool:
@@ -117,6 +116,7 @@ class TestRecord:
             "results": [r.to_dict() for r in self.results],
             "passed": self.passed,
             "last_run_at": self.last_run_at,
+            "validation_version": self.validation_version,
         }
 
     @classmethod
@@ -132,6 +132,7 @@ class TestRecord:
                 output_tail=str(item.get("output_tail", "")),
             ) for item in raw.get("results", [])],
             last_run_at=str(raw.get("last_run_at", "")),
+            validation_version=raw.get("validation_version"),
         )
 
 
@@ -211,7 +212,8 @@ class TestManifest:
         if not record.test_id.strip():
             raise ValueError("test_id is required")
         previous = self.records.get(record.test_id)
-        if previous is not None and previous.target == record.target:
+        if (previous is not None and previous.target == record.target
+                and previous.validation_version == record.validation_version):
             # Separate invocations for different deterministic seeds must not
             # erase earlier evidence.  Keep the latest result for each seed,
             # preserving first-seen seed order for stable, reviewable output.
@@ -224,10 +226,12 @@ class TestManifest:
                 seeds=merged_seeds,
                 results=[by_seed[seed] for seed in merged_seeds if seed in by_seed],
                 last_run_at=record.last_run_at,
+                validation_version=record.validation_version,
             )
         self.records[record.test_id] = record
 
-    def evaluate_required(self, required_ids: list[str]) -> tuple[bool, list[str]]:
+    def evaluate_required(self, required_ids: list[str], *, validation_cache=None) -> tuple[bool, list[str]]:
+        validation_cache = {} if validation_cache is None else validation_cache
         failures = []
         for test_id in required_ids:
             record = self.records.get(test_id)
@@ -235,15 +239,26 @@ class TestManifest:
                 failures.append(f"{test_id}:not_registered")
             elif not record.passed:
                 failures.append(f"{test_id}:not_passing")
+            else:
+                from .validation_evidence import assess_version
+                assessment = assess_version(record.validation_version, self.workspace, cache=validation_cache)
+                if assessment["state"] != "current":
+                    changed = assessment.get("changed_files") or []
+                    suffix = " [" + ", ".join(changed[:10]) + "]" if changed else ""
+                    failures.append(f"{test_id}:" + assessment["reason"] + suffix)
         return not failures, failures
 
 
-def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
-    """Run one pytest target under one or more deterministic seeds."""
+def run_registered_test(workspace_path: str | Path, args: dict, *, execute, before_record=None) -> dict:
+    """Record results from an explicit trusted executor, never choose a fallback."""
+    from backend.core.errors import error_payload
     workspace = Path(workspace_path).resolve()
     test_id = str(args.get("test_id", "")).strip()
     target = str(args.get("target", "")).strip()
-    seeds = [int(seed) for seed in (args.get("seeds", [42]) or [42])]
+    seeds = args.get("seeds", [42]) or [42]
+    if not isinstance(seeds, list) or not 1 <= len(seeds) <= 20 or any(type(seed) is not int for seed in seeds):
+        return {"error": "seeds must contain between 1 and 20 integer values"}
+    seeds = list(dict.fromkeys(seeds))
     timeout = max(1, min(int(args.get("timeout", 120)), 900))
     if not test_id:
         return {"error": "test_id is required"}
@@ -258,39 +273,45 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
     if not target_path.exists() or not target_path.is_file():
         return {"error": f"test target not found: {target_path_text}"}
 
-    import time
-    results: list[SeedResult] = []
-    for seed in seeds:
-        from backend.core.tools.execution_profile import safe_environment
-        env = safe_environment()
-        env["GITGO_TEST_SEED"] = str(seed)
-        started = time.monotonic()
-        try:
-            from backend.core.child_process import python_command
-            completed = subprocess.run(
-                python_command(["-m", "pytest", target, "-q"]),
-                cwd=str(workspace), env=env, capture_output=True, text=True,
-                timeout=timeout, shell=False,
-            )
-            output = (completed.stdout or "") + (completed.stderr or "")
-            exit_code = completed.returncode
-        except subprocess.TimeoutExpired as exc:
-            output = ((exc.stdout or "") + (exc.stderr or ""))
-            exit_code = 124
-        results.append(SeedResult(
-            seed=seed,
-            exit_code=exit_code,
-            duration_ms=(time.monotonic() - started) * 1000,
-            output_tail=output[-4000:],
-        ))
+    from .validation_evidence import workspace_version, version_summary
+    declared = args.get("input_files")
+    if declared is not None:
+        if not isinstance(declared, list) or not all(isinstance(p, str) and p for p in declared):
+            return {"error": "input_files must be an explicit list of workspace files"}
+        declared = list(dict.fromkeys([*declared, target_path.relative_to(workspace).as_posix()]))
+    validation = workspace_version(workspace, input_files=declared)
+    suffix = "::" + target.split("::", 1)[1] if "::" in target else ""
+    public = {"test_id": test_id, "target": target_path.relative_to(workspace).as_posix() + suffix,
+              "seeds": seeds, "timeout": timeout}
+    executed = execute(workspace, public, validation)
+    if not isinstance(executed, dict) or executed.get("error"):
+        return executed if isinstance(executed, dict) else error_payload("TEST_PROTOCOL_INVALID")
+    rows = executed.get("seed_results")
+    import math
+    if (not isinstance(rows, list) or len(rows) != len(seeds) or any(
+            not isinstance(row, dict) or row.get("seed") != seed or type(row.get("exit_code")) is not int
+            or not isinstance(row.get("duration_ms"), (int, float)) or not math.isfinite(row["duration_ms"])
+            or row["duration_ms"] < 0 or not isinstance(row.get("output_tail"), str)
+            for seed, row in zip(seeds, rows))):
+        return error_payload("TEST_PROTOCOL_INVALID")
+    results = [SeedResult(row["seed"], row["exit_code"], row["duration_ms"], row["output_tail"][-4000:]) for row in rows]
 
+    after = workspace_version(workspace, input_files=declared)
+    if validation != after:
+        validation = {"state": "unavailable", "reason": "validation_inputs_changed_during_test"}
+    # Persist the aggregate identity and coverage, not one repeated file/hash
+    # map per test ID. Revalidation recomputes exactly that declared scope.
+    validation = version_summary(validation)
     record = TestRecord(
         test_id=test_id,
         target=target,
         seeds=seeds,
         results=results,
         last_run_at=datetime.now().isoformat(),
+        validation_version=validation,
     )
+    if before_record is not None:
+        before_record()
     manifest = TestManifest.load(workspace)
     manifest.register(record)
     return {
@@ -300,4 +321,9 @@ def run_registered_test(workspace_path: str | Path, args: dict) -> dict:
         "exit_code": 0 if record.passed else 1,
         "seed_results": [result.to_dict() for result in results],
         "manifest_path": str(manifest.path),
+        "validation_version": validation,
+        "verification_state": "current" if validation.get("state") == "observed" else "needs_recheck",
+        **({"warnings": [{"code": "VALIDATION_INPUT_CHANGED", "message":
+            "The test exit result is recorded, but its validation inputs are unknown or changed. Inspect validation_version and rerun with a valid bounded input_files scope."}]}
+           if validation.get("state") != "observed" else {}),
     }
