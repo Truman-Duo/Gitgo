@@ -1,13 +1,13 @@
 """Host decides whether a semantic assessment has new work to do."""
 from .alignment_evidence import alignment_input_digest, answer_digest
 
-POLICY_VERSION = 5
+POLICY_VERSION = 6
 REVIEW_POLICY = f'on_demand_v{POLICY_VERSION}'
 
 
 def uses_on_demand_review(state):
     """Keep persisted v2 tasks subject to the same boundary guards."""
-    return state.get('review_policy') in {'on_demand_v2', 'on_demand_v3', 'on_demand_v4', REVIEW_POLICY}
+    return state.get('review_policy') in {'on_demand_v2', 'on_demand_v3', 'on_demand_v4', 'on_demand_v5', REVIEW_POLICY}
 
 
 def main_model_initial_question(process, payload):
@@ -55,8 +55,12 @@ def review_reason(process, payload, trigger='admission'):
         return 'actual_answer_dependencies'
     if payload.get('user_updates'):
         return 'user_requirement_update'
-    if payload.get('workflow', {}).get('nodes'):
+    if payload.get('workflow', {}).get('nodes') and payload.get('stage') == 'delivery':
         return 'declared_workflow_dependencies'
+    # Reading evidence is not a new proposal or a delivery attempt. Workflow
+    # revisions still invalidate cached readiness, but do not turn each status
+    # read into a demand for a final answer. Contract/effect/question boundaries
+    # above and the mechanical workflow gates remain independently enforced.
     context, _ = process.read_context_snapshot()
     contract = context.get('task_contract') or {}
     if contract.get('requires_user_decision') or contract.get('uncertainties'):

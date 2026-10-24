@@ -248,3 +248,31 @@ def test_business_projection_preserves_deletion_and_literal_filenames(tmp_path_f
             for name in ['note[1].txt','note with space.txt']:
                 assert (repo/name).read_text(encoding='utf-8')==name
         finally:manager.dispose_process_worktree(child)
+
+def test_read_only_upstream_is_reviewed_evidence_not_a_code_worktree(tmp_path_factory):
+    from backend.core.loop.models import RingLevel
+    from backend.core.loop.tools import ToolRegistry
+    repo=_repo(tmp_path_factory)
+    with StorageRuntime(repo,state_home=tmp_path_factory/"state") as storage:
+        manager=AgentProcessManager(worktree_manager=AgentWorktreeManager(repo,storage))
+        root=_process(manager,task_id="mixed-root")
+        source=manager.fork(parent_id=root.process_id,role="worker",actor_kind="worker",
+            capability_profile_id="governance.observe",task_kind="answer",
+            workspace_path=str(repo),tool_registry=ToolRegistry(["read_file"]),
+            max_steps=4,ring_level=RingLevel.RING_3,task_id="audit")
+        source.status=ProcessStatus.COMPLETED
+        child=_process(manager,parent_id=root.process_id,task_id="code",depends_on=[source.process_id])
+        path=Path(manager.materialize_process_worktree(child))
+        try:
+            (path/"output.txt").write_text("verified code",encoding="utf-8")
+            child.status=ProcessStatus.COMPLETED;manager.seal_process_worktree(child)
+            root.child_reviews[child.process_id]={"verdict":"approved"}
+            with pytest.raises(ValueError,match="lacks supervisor approval"):
+                manager.promote_process_results(root,[child.process_id])
+            root.child_reviews[source.process_id]={"verdict":"approved"}
+            result=manager.promote_process_results(root,[child.process_id])
+            assert result["process_ids"]==[child.process_id]
+            assert result["verified_dependency_ids"]==[source.process_id]
+            assert source.worktree=={}
+            assert (repo/"output.txt").read_text(encoding="utf-8")=="verified code"
+        finally:manager.dispose_process_worktree(child)

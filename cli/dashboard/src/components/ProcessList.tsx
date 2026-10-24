@@ -1,3 +1,5 @@
+import {useCopy} from "../ui/PageFrame.js";
+import {label} from "../ui/runtimeLabels.js";
 // src/components/ProcessList.tsx — project subprocess flat list
 import React, { memo, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import { Box, Text, ScrollBox } from "@anthropic/ink";
@@ -11,7 +13,6 @@ import {
   truncate,
   padEndWidth,
 } from "../theme/index.js";
-import { chordLabel } from "../input/bindings.js";
 import { useScrollInput } from "../input/runtime.js";
 import { agentLabel } from "../daemon/agentLabels.js";
 
@@ -159,6 +160,7 @@ export function visibleBProcesses(
   return result;
 }
 
+const listViewports = new Map<string, {top: number; selected: string; width: number}>();
 // ── ProcessList component ─────────────────────────────────────
 
 export const ProcessList = memo(function ProcessList({
@@ -169,10 +171,13 @@ export const ProcessList = memo(function ProcessList({
   idsRef,
   onStatusUpdate,
 }: Props) {
+  const t=useCopy();
   const { w, h } = usePanelSize({ minWidth: 40, widthOffset: 2 });
   const scrollRef = useRef<ScrollBoxHandle>(null);
   useScrollInput(scrollRef);
   const selectedRow = useRef<DOMElement>(null);
+  const restoreViewport = useRef(true);
+  const currentViewport = useRef({project, selected: "", width: w, top: 0});
   const { processes, recoveryAvailable, storage } = loopData;
 
   const flatList = useMemo(() => {
@@ -181,8 +186,22 @@ export const ProcessList = memo(function ProcessList({
     return visibleBProcesses(processes);
   }, [processes]);
   useLayoutEffect(() => {
-    if (selectedRow.current) scrollRef.current?.scrollIntoView(selectedRow.current);
+    const saved = listViewports.get(project);
+    if (restoreViewport.current && saved?.selected === flatList[selIdx]?.process_id && saved.width === w)
+      scrollRef.current?.scrollTo(saved.top);
+    else if (selectedRow.current) scrollRef.current?.scrollIntoView(selectedRow.current);
+    restoreViewport.current = false;
   }, [selIdx, w, h, flatList[selIdx]?.process_id]);
+  currentViewport.current = {project, selected: flatList[selIdx]?.process_id || "", width: w, top: 0};
+  useLayoutEffect(() => {
+    const handle = scrollRef.current;
+    return () => {
+      const value = currentViewport.current;
+      listViewports.delete(value.project);
+      listViewports.set(value.project, {...value, top: handle?.getScrollTop() || 0});
+      if (listViewports.size > 16) listViewports.delete(listViewports.keys().next().value!);
+    };
+  }, [project]);
 
   const runningCount = flatList.filter((p) => p.status === "running").length;
   const waitingCount = flatList.filter((p) =>
@@ -198,35 +217,31 @@ export const ProcessList = memo(function ProcessList({
     }
   }, [flatList, idsRef]);
 
-  // Report status line to parent
-  useEffect(() => {
-    if (onStatusUpdate) {
-      const wtCount = flatList.filter((p) => p.worktree?.isolated).length;
-      const storagePrefix =
-        storage?.level === "blocked" ? "storage blocked  |  " : "";
-      onStatusUpdate(
-        `${storagePrefix}● ${flatList.length} subprocesses  |  ${wtCount} isolated worktrees  |  ${recoveryAvailable.length} recovery candidates`,
-      );
-    }
-  }, [flatList, recoveryAvailable.length, storage?.level, onStatusUpdate]);
+  useEffect(()=>{
+    if(!onStatusUpdate)return;
+    const pending=flatList.filter(p=>p.status==="awaiting_user").length;
+    const blocked=flatList.filter(p=>["blocked","failed","timed_out","orphaned"].includes(p.status)).length;
+    const parts=[t({en:`${flatList.length} subprocesses`,zh:`${flatList.length} 个子进程`})];
+    if(runningCount)parts.push(t({en:`${runningCount} working`,zh:`${runningCount} 个工作中`}));
+    if(waitingCount-pending)parts.push(t({en:`${waitingCount-pending} waiting`,zh:`${waitingCount-pending} 个等待中`}));
+    if(pending)parts.push(t({en:`${pending} awaiting input`,zh:`${pending} 个待答复`}));
+    if(blocked)parts.push(t({en:`${blocked} blocked / failed`,zh:`${blocked} 个受阻或失败`}));
+    if(storage?.level&&storage.level!=="ok")parts.push(t({en:"Storage: ",zh:"存储："})+label(storage.level,t));
+    if(recoveryAvailable.length)parts.push(t({en:`${recoveryAvailable.length} recovery candidates`,zh:`${recoveryAvailable.length} 项待恢复`}));
+    onStatusUpdate(parts.join(" · "));
+  },[flatList,runningCount,waitingCount,recoveryAvailable.length,storage?.level,onStatusUpdate,t]);
 
-  const selected = flatList[selIdx];
-  const nameWidth = Math.max(18, Math.floor(w * 0.55));
-  const statusWidth = 16;
+  const statusWidth = w<64?8:12;
+  const nameWidth = Math.max(8,Math.min(Math.floor(w*0.55),w-statusWidth-3));
   const dependencies = (process: TopologyNode) =>
     process.depends_on?.length
       ? process.depends_on
       : process.dependency_ids.filter((id) => id !== process.parent_id);
   return (
     <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
-      <Text bold>Subprocesses · {project}</Text>
+      <Text bold>{t({en:"Subprocesses",zh:"子进程"})} · {project}</Text>
       <Text dimColor>
-        {flatList.length} subprocesses · {runningCount} running · {waitingCount}{" "}
-        waiting · tree: ownership · ←: prerequisites
-      </Text>
-      <Text dimColor>
-        {padEndWidth("Process", nameWidth)} {"Status".padEnd(statusWidth)}{" "}
-        Prerequisites
+        {padEndWidth(t({en:"Process",zh:"进程"}),nameWidth)} {padEndWidth(t({en:"Status",zh:"状态"}),statusWidth)} {t({en:"Prerequisites",zh:"前置依赖"})}
       </Text>
       <ScrollBox
         ref={scrollRef}
@@ -234,7 +249,7 @@ export const ProcessList = memo(function ProcessList({
         flexGrow={1}
         minHeight={0}
       >
-        {flatList.length === 0 ? <Text dimColor>No subprocesses.</Text> : null}
+        {flatList.length === 0 ? <Text dimColor>{t({en:"No subprocesses.",zh:"暂无子进程。"})}</Text> : null}
         {flatList.map((process, index) => {
           const dot = statusDot(processStatusToDot(process.status));
           const active = index === selIdx;
@@ -249,7 +264,7 @@ export const ProcessList = memo(function ProcessList({
             <React.Fragment key={process.process_id}>
               {previous?.owner_group !== process.owner_group ? (
                 <Text dimColor>
-                  Supervisor / task {String(process.owner_group).slice(0, 8)}
+                  {t({en:"Main process / task",zh:"主进程 / 任务"})} {String(process.owner_group).slice(0, 8)}
                 </Text>
               ) : null}
               <Box ref={active ? selectedRow : undefined} flexDirection="row">
@@ -264,11 +279,11 @@ export const ProcessList = memo(function ProcessList({
                     nameWidth - 2,
                   )}{" "}
                   {padEndWidth(
-                    truncate(process.status.replace(/_/g, " "), statusWidth),
+                    truncate(label(process.status,t), statusWidth),
                     statusWidth,
                   )}{" "}
                   {process.cyclic
-                    ? "Cycle / blocked chain"
+                    ? t({en:"Cycle / blocked chain",zh:"循环依赖 / 受阻链"})
                     : deps.length
                       ? `← ${deps
                           .slice(0, 2)
@@ -283,39 +298,12 @@ export const ProcessList = memo(function ProcessList({
           );
         })}
       </ScrollBox>
-      {selected ? (
-        <>
-          <Text dimColor wrap="truncate-end">
-            {agentLabel(selected)} · {selected.role} · {selected.steps_used}/
-            {selected.max_steps} steps ·{" "}
-            {selected.model_id || "model unrecorded"}
-          </Text>
-          <Text dimColor wrap="truncate-end">
-            {selected.worktree?.isolated
-              ? "Isolated worktree"
-              : "Shared workspace"}{" "}
-            ·{" "}
-            {selected.worktree?.path ||
-              selected.worktree_path ||
-              "path unrecorded"}
-            {dependencies(selected).length
-              ? ` · Requires: ${dependencies(selected)
-                  .map((id) => processes[id]?.display_name || id.slice(0, 8))
-                  .join(", ")}`
-              : ""}
-          </Text>
-        </>
-      ) : null}
       {recoveryAvailable.length ? (
         <Text color="#d29922">
-          {recoveryAvailable.length} recovery candidates; resume remains
-          explicit.
+          {t({en:`${recoveryAvailable.length} recovery candidates; explicit resume required.`,zh:`${recoveryAvailable.length} 项待恢复，须明确确认后恢复。`})}
         </Text>
       ) : null}
-      <Text dimColor>
-        {chordLabel("upDown")} select · PgUp/PgDn scroll · {chordLabel("enter")}{" "}
-        detail · {chordLabel("tab")} chat · {chordLabel("escape")} back
-      </Text>
+
     </Box>
   );
 });

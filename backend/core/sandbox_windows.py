@@ -264,6 +264,8 @@ class WindowsSandboxProcess(subprocess.Popen):
         attributes = None
         initialized = False
         job = None
+        from contextlib import ExitStack
+        inherited_scope = ExitStack()
         try:
             # Access preparation owns profile creation/retirement. Recreating
             # an already prepared profile on every launch can hit a deleted
@@ -293,7 +295,14 @@ class WindowsSandboxProcess(subprocess.Popen):
             api.check(api.init_attrs(attributes, 3, 0, C.byref(length)))
             initialized = True
             caps = SecurityCapabilities(sid, None, 0, 0)
-            handles = (W.HANDLE * 3)(int(p2cread), int(c2pwrite), int(errwrite))
+            from backend.core.installation_lease import windows_sandbox_lease_handles
+            from backend.core.update.sandbox_admission import LEASE_HANDLES_ENV
+            lease_handles = inherited_scope.enter_context(windows_sandbox_lease_handles())
+            env = {key: value for key, value in (env or {}).items() if key.upper() != LEASE_HANDLES_ENV}
+            if lease_handles:
+                env[LEASE_HANDLES_ENV] = ",".join(str(handle) for handle in lease_handles)
+            inherited = [int(p2cread), int(c2pwrite), int(errwrite), *lease_handles]
+            handles = (W.HANDLE * len(inherited))(*inherited)
             jobs = (W.HANDLE * 1)(job)
             for key, value in ((0x20009, caps), (0x20002, handles), (0x2000D, jobs)):
                 api.check(api.update_attr(attributes, 0, key, C.byref(value), C.sizeof(value), None, None))
@@ -311,9 +320,17 @@ class WindowsSandboxProcess(subprocess.Popen):
             )
             sys.audit("subprocess.Popen", executable, args, cwd, env)
             # JOB_LIST assigns the process before any user code can execute.
-            api.check(api.create_process(executable, command, None, None, True,
-                creationflags | 0x80000 | 0x400, environment, os.fsdecode(cwd),
-                C.byref(startup), C.byref(info)))
+            from backend.core.windows_job import _spawn_lock
+            with _spawn_lock:
+                try:
+                    for handle in lease_handles:
+                        os.set_handle_inheritable(handle, True)
+                    api.check(api.create_process(executable, command, None, None, True,
+                        creationflags | 0x80000 | 0x400, environment, os.fsdecode(cwd),
+                        C.byref(startup), C.byref(info)))
+                finally:
+                    for handle in lease_handles:
+                        os.set_handle_inheritable(handle, False)
             self._child_created = True
             self._handle = Handle(info.process)
             self.pid = info.pid
@@ -322,6 +339,7 @@ class WindowsSandboxProcess(subprocess.Popen):
             job = None
             api.close(info.thread)
         finally:
+            inherited_scope.close()
             self._close_pipe_fds(p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite)
             if initialized:
                 api.delete_attrs(attributes)

@@ -50,3 +50,35 @@ def pending_questions(processes) -> list[dict]:
         int(item.get("decision_sequence") or 0),
         str(item.get("decision_id") or ""),
     ))
+
+
+def decision_evidence(process, *, limit=8):
+    """Bounded read projection of this task's canonical decision ledger.
+
+    A broker question can be published during semantic compilation, without
+    separately executing the original proposed function batch. Tool counts
+    cannot prove that a user question/answer did not exist.
+    """
+    from .decision_timeline import decision_timeline
+    task = process.active_task_id or process.process_id
+    cards = [card for card in decision_timeline(process.session.host_ledger)
+             if card['decision'].get('task_id') == task]
+    items = []
+    for card in cards[-limit:]:
+        request = card['decision']
+        answer = card.get('decision_answer')
+        items.append({
+            'decision_id': request['decision_id'], 'task_id': task,
+            'source_process_id': request.get('source_process_id') or process.process_id,
+            'owner_process_id': request.get('owner_process_id') or root_process(process).process_id,
+            'kind': request.get('kind'), 'status': card['status'],
+            'question': str(request.get('question') or '')[:800],
+            'options': [{'label': str(option.get('label') or '')[:240]}
+                        for option in request.get('options') or []],
+            'answer': answer[:2000] if answer is not None else None,
+            'answer_state': 'received' if answer is not None else 'not_received',
+            'answer_truncated': bool(answer and len(answer) > 2000),
+        })
+    return {'authority': 'canonical_decision_ledger', 'items': items,
+            'total': len(cards), 'partial': len(cards) > limit,
+            'scope': 'current_child_task; receiving a reply is not semantic confirmation or permission'}

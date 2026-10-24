@@ -77,7 +77,7 @@ test("governance summaries retain zero, distinguish missing metrics and explain 
   expect(governanceSections(3, {releases: []})).toEqual([]);
   const feed = governanceSections(2, {items: [{operation: "completion_gate", timestamp: "2026-10-17T00:00:00Z", status: "info", detail: {process_id: "abcdefgh-long-internal-id", reason: "provider_phase"}}]});
   expect(feed[0]!.title).toContain("completion gate");
-  expect(feed[0]!.lines).toContain("Process abcdefgh  ·  Unknown event");
+  expect(feed[0]!.lines).toContain("Process abcdefgh · Unknown event");
 });
 test("context process selection retains identity after polling order changes", async () => {
   const io = streams(); let change!: () => void;
@@ -127,13 +127,18 @@ test("runtime Feed owns its paging keys and preview tools cannot archive before 
     io.stdin.write("\r");await wait();
     expect(calls.some(c=>c.operation==="runtime.tools.archive")).toBe(false);
     io.stdin.write("\r");await wait();
+    expect(calls.some(c=>c.operation==="runtime.tools.archive")).toBe(false);
+    expect(io.output()).toContain("Viewing does not mount");
+    io.stdin.write("\r");await wait();
+    expect(calls.some(c=>c.operation==="runtime.tools.archive")).toBe(false);
+    io.stdin.write("\r");await wait();
     expect(calls).toContainEqual({operation:"runtime.tools.archive",args:{project:"demo",name:"test-tool"}});
   } finally {root.unmount();root.cleanup();io.stdin.destroy();io.stdout.destroy();io.stderr.destroy();}
 });
 
 
 for (const height of [24, 36, 48]) {
-  test(`lesson shortcuts stay at the viewport bottom at ${height} rows`, async () => {
+  test(`lesson action footer stays at the viewport bottom at ${height} rows`, async () => {
     const io = streams(); io.stdout.rows = height;
     function Fixture() {
       const input = useTextInput();
@@ -145,7 +150,7 @@ for (const height of [24, 36, 48]) {
       await wait();
       const lines=io.output().split("\n");
       const header=lines.findLastIndex(line=>line.includes("lesson")&&line.includes("contract")&&line.includes("governance"));
-      const footer=lines.findLastIndex(line=>line.includes("P proposals · S search"));
+      const footer=lines.findLastIndex(line=>line.includes("Tab list/actions"));
       expect(footer-header).toBe(height-2);
     } finally {root.unmount();root.cleanup();io.stdin.destroy();io.stdout.destroy();io.stderr.destroy();}
   });

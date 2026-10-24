@@ -325,6 +325,12 @@ class TaskTreeBudget:
             lease = self._process_leases.get(process_id)
             if lease is None or lease.get("state") != "active":
                 return dict(lease) if lease else None
+            from .lifecycle import TERMINAL
+            if status != "terminal" and status not in TERMINAL:
+                # A question/recovery pause ends a thread, not its execution.
+                # Retain the original escrow, usage and hard ceiling so the
+                # same process can resume without minting a new allocation.
+                return dict(lease)
             lease["state"] = "released"
             self._revision += 1
             lease["terminal_status"] = str(status)

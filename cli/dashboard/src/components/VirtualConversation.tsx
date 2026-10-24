@@ -203,8 +203,18 @@ export function VirtualConversation({
       return next;
     });
 
+  const turnEnds = useMemo(() => {
+    const result = new Map<string, {position: number; status: string}>();
+    entries.forEach((item, position) => {
+      if (item.kind === "message" && !item.message.decision &&
+          ["completed", "failed", "cancelled", "timed_out", "degraded"].includes(item.message.status || "")) {
+        result.set(item.turnKey, {position, status: item.message.status!});
+      }
+    });
+    return result;
+  }, [entries]);
   if (entries.length === 0) {
-    return (
+  return (
       <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>
         {empty}
       </ScrollBox>
@@ -226,7 +236,10 @@ export function VirtualConversation({
         const expanded = expandedKeys.has(entry.key);
         const first =
           index === 0 || entries[index - 1]?.turnKey !== entry.turnKey;
-        const last = entries[index + 1]?.turnKey !== entry.turnKey;
+        const terminal = turnEnds.get(entry.turnKey);
+        const turnStatus = terminal?.status;
+        const last = terminal?.position === index;
+        const afterEnd = terminal !== undefined && index > terminal.position;
         const liveTurn =
           Boolean(streaming) &&
           entry.turnKey ===
@@ -242,13 +255,9 @@ export function VirtualConversation({
           >
             <TurnGuide
               first={first}
-              last={
-                last &&
-                !liveTurn &&
-                entry.kind === "message" &&
-                entry.message.role === "assistant" &&
-                !entry.message.decision
-              }
+              active={!afterEnd || liveTurn}
+              status={turnStatus}
+              last={last && !liveTurn && !(pendingDecision && entry.turnKey === entries[entries.length - 1]?.turnKey)}
             >
               {entry.kind === "message" ? (
                 entry.message.decision ? (

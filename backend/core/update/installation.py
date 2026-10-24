@@ -2,8 +2,8 @@
 
 Provision only a new empty private root from an explicitly supplied verified
 local package. Never adopt legacy installation markers or project directories.
-Automatic updates remain disabled; this is the real installation/lease layer,
-not permission to bypass signature, health or platform acceptance gates.
+The immutable launcher consumes explicit or preference-authorized requests only
+after complete cleanup; signature, health and exclusive leases remain mandatory.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from backend.core.installation_lease import retain_descriptor
 from .checker import CurrentInstallation
 from .contracts import verify_bundle_contract, _metadata
 from .health import probe_managed_host
+from .bootstrap_contract import CURRENT_API, SUPPORTED_APIS
 from .manifest import DataCompatibility
 from .persistence import filesystem_identity, descriptor_identity, validate_device, sync_directory, read_control, open_readonly
 from .staging import _staging_parent
@@ -54,7 +55,7 @@ class ManagedStore(InstallationStore):
     # Windows has a distinct immutable bootstrap contract. Never adopt a
     # POSIX registration or upgrade an old bootstrap's asserted capabilities.
     SCHEMA = 6 if os.name == "nt" else 5
-    BOOTSTRAP_API = 7 if os.name == "nt" else 6
+    BOOTSTRAP_API = CURRENT_API
     SIMULATION = False
     EXTRA_FIELDS = frozenset({"bootstrap", "bootstrap_api", "updates_enabled", "preparation_directory_identity"})
     LOCK_NAMES = (*InstallationStore.LOCK_NAMES, "preparation.lock")
@@ -95,7 +96,7 @@ class ManagedStore(InstallationStore):
                 "preparation_directory_identity": filesystem_identity(preparation)}
 
     def _validate_extra(self, value):
-        if type(value["bootstrap_api"]) is not int or value["bootstrap_api"] != self.BOOTSTRAP_API:
+        if type(value["bootstrap_api"]) is not int or value["bootstrap_api"] not in SUPPORTED_APIS:
             reject("UPDATE_CONTROL_INVALID", "Managed bootstrap API is unavailable")
         if type(value["updates_enabled"]) is not bool or value["updates_enabled"] is not False:
             reject("UPDATE_CONTROL_INVALID", "This managed installation does not support activation yet")
@@ -406,6 +407,12 @@ def installed_runtime(role: str | None):
     if physical is None:
         yield; return
     root, position = physical
+    if os.name == "nt" and position == "active":
+        from .sandbox_admission import inherited_sandbox_runtime
+        with inherited_sandbox_runtime(role) as admitted:
+            if admitted:
+                yield
+                return
     store = open_managed(root)
     if position == "bootstrap":
         if role not in {"managed-launch", "managed-recover", "managed-front-lease", "unix-scope"}:
@@ -499,10 +506,27 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
                     terminate_tree(proc)
                     raise
             # All launcher leases close before the updater obtains exclusivity.
-            if proc.returncode != HANDOFF_EXIT: return int(proc.returncode)
+            exit_code = proc.returncode
+            automatic_handoff = False
+            if exit_code == 0 and nonce is not None and getattr(proc, "_gitgo_cleanup", {}).get("complete") is True:
+                # Ordinary quit can apply a previously verified package when
+                # installation preferences authorize it. Never cancel a task
+                # or convert a crash into automatic replacement.
+                from .preparation_service import UpdatePreparationService
+                from .automatic import queue_on_clean_exit
+                try:
+                    queued = queue_on_clean_exit(UpdatePreparationService(store_loader=lambda: store), nonce)
+                    if queued is not None:
+                        exit_code = HANDOFF_EXIT
+                        automatic_handoff = True
+                except Exception as error:
+                    from .validation import UpdateError
+                    code = error.code if isinstance(error, UpdateError) else "UPDATE_PREPARATION_FAILED"
+                    print("Automatic update deferred: " + code, file=sys.stderr, flush=True)
+            if exit_code != HANDOFF_EXIT: return int(proc.returncode)
             if nonce is None:
                 reject("UPDATE_HANDOFF_STALE", "This launch has no update handoff session")
-            result = consume_request(store, nonce, proc.returncode, getattr(proc, "_gitgo_cleanup", None))
+            result = consume_request(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None))
             if result is None: return 2
             from backend.core.protocol_io import dump_protocol_json
             print(dump_protocol_json({"update_status": result.status, "version": result.version,
@@ -513,6 +537,10 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             recovered = store.recover()
             if recovered.status not in {"idle", "committed", "rolled_back"}:
                 reject("UPDATE_RECOVERY_REQUIRED", "Update must recover before restarting")
+            if automatic_handoff:
+                # An ordinary quit remains a quit. Do not reopen the Dashboard,
+                # replay command arguments, or retry a rejected candidate here.
+                return 0
         # Same terminal, new session; never replay task/approval/smoke arguments.
         arguments = []
     reject("UPDATE_RETAIN_LIMIT", "Too many confirmed restarts in one launcher lifecycle")

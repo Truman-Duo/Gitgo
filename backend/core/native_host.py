@@ -1078,7 +1078,9 @@ class NativeHost:
             command["process_id"] = process_id
             command["manually_verified"] = bool(arguments.get("manually_verified", False))
             command["verification_note"] = str(arguments.get("verification_note") or "")
-        session_id = self._sessions.get(project) if session_mode == "continue" else None
+        # A decision already identifies its exact process/task. The project cursor
+        # belongs to A and must never be attached to a routed B decision.
+        session_id = self._sessions.get(project) if session_mode == "continue" and action != "decision" else None
         if session_id:
             command["session_id"] = session_id
             command["conversation_process_id"] = self._conversation_processes.get(project, "")
@@ -1182,7 +1184,7 @@ class NativeHost:
                 "agent_elapsed_ms": round(agent_elapsed_ms, 3),
             })
             outcome.setdefault("metadata", {})["timing"] = timing
-            if new_session:
+            if new_session and action != "decision":
                 self._sessions[project] = new_session
                 self._conversation_processes[project] = str(
                     outcome.get("process_id", "")
@@ -1285,7 +1287,7 @@ class NativeHost:
         process_ids = list(dict.fromkeys(
             str(item) for item in list(arguments.get("process_ids") or [])
             if str(item)
-        ))[:8]
+        ))[:64]
         process_id = str(
             arguments.get("process_id")
             or ("" if arguments.get("lesson_proposal") else self._conversation_processes.get(project, ""))
@@ -1348,7 +1350,7 @@ class NativeHost:
                 "INVALID_ARGUMENTS",
                 "runtime.feedback requires project, process_id, and message",
             )
-        client = self._get_daemon(project, start=False)
+        client = self._get_daemon(project, start=True)
         if client is None:
             raise OperationError("RUNTIME_OFFLINE", f"Project '{project}' runtime is offline")
         status = client.send_command({"cmd": "loop_status"})
@@ -1676,6 +1678,7 @@ class NativeHost:
         self._maintenance_thread = threading.Thread(target=self._maintenance_loop, daemon=True,
                                                     name="deletion-maintenance")
         self._maintenance_thread.start()
+        self.services.updates.start_automatic()
         try:
             for line in self.stdin:
                 if self._stopping.is_set():

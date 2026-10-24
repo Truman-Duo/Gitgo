@@ -1,3 +1,6 @@
+import {label} from "../ui/runtimeLabels.js";
+import {copy,type Copy} from "../ui/pageContract.js";
+import {LanguageContext} from "../ui/PageFrame.js";
 import {DiffLayoutContext} from "../theme/diffLayoutContext.js";
 // src/components/App.tsx — Three-scene routing with createStore
 import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
@@ -23,7 +26,6 @@ import { AgentDetail, AgentDetailScene } from "./AgentDetail.js";
 import { CommandBar, type FooterConfig } from "./CommandBar.js";
 import { renderOverlay } from "./overlays.js";
 import { InputLayer, ScrollableInputLayer } from "../input/runtime.js";
-import { chordLabel } from "../input/bindings.js";
 import { notifyGeneralConfigChanged, useGeneralConfig } from "../hooks/useGeneralConfig.js";
 import { runningWorkers } from "../daemon/agentLabels.js";
 import { editPromptExternally } from "../utils/externalPromptEditor.js";
@@ -35,11 +37,10 @@ export type StartupSmokeTask = {
   autoAllowOnce?: boolean;
 };
 
-function processRuntimeStatus(process: ProcessInfo | undefined): string {
+function processRuntimeStatus(process: ProcessInfo | undefined, t:(value:Copy)=>string): string {
   if (!process) return "";
   const parts: string[] = [];
-  if (process.context) parts.push(`epoch ${process.context.epoch}`);
-  if (process.worktree) parts.push(process.worktree.isolated ? "wt isolated" : "wt shared");
+  parts.push(label(process.status,t));
   return parts.filter(Boolean).join(" · ");
 }
 
@@ -62,6 +63,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
   const { providers: globalProviders, fetchStatus: fetchGlobalLLM } = useLLMConfig(client);
   const generalConfig = useGeneralConfig(client);
+  const t=useCallback((value:Copy)=>copy(value,generalConfig.language),[generalConfig.language]);
 
   const scene = useStore(appStore, (s) => s.scene);
   const activeProject = useStore(appStore, (s) => s.activeProject);
@@ -85,7 +87,10 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   const dispatch = appStore.dispatch;
 
   // ── Text input hooks ─────────────────────────────────────
-  const textInput = useTextInput("");
+  const draftScope = scene==="agent_detail"
+    ? (activeProject||"")+":B:"+(processes[activeAgentId||""]?.session_id||activeAgentId||"")
+    : scene==="workspace" ? (activeProject||"")+":A" : "navigation";
+  const textInput = useTextInput("",draftScope);
   const cmdInput = useTextInput("");
   const llmCmdInput = useTextInput("");
 
@@ -196,13 +201,13 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         return;
       }
       if (event.event === "config_error") {
-        dispatch({type: "set_cmd_result", text: String(event.message || "Configuration was not applied")});
+        dispatch({type: "set_cmd_result", text: String(event.message || t({en:"Configuration was not applied",zh:"配置未应用"}))});
         return;
       }
       if (event.event !== "deletion_status") return;
-      dispatch({type:"set_cmd_result", text:String(event.message || ("Deletion " + event.state))});
+      dispatch({type:"set_cmd_result", text:String(event.message || t({en:"Deletion "+event.state,zh:"删除状态："+event.state}))});
     });
-  }, [client, dispatch]);
+  }, [client, dispatch, t]);
   useEffect(() => {
     const sample = () => {
       const next: Record<string, number | null> = {};
@@ -258,12 +263,12 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     const root = Object.values(processes)
       .filter((p) => p.parent_id === null)
       .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
-    const parts = [processRuntimeStatus(root)];
+    const parts = [processRuntimeStatus(root,t)];
     if (loopData.storage && loopData.storage.level !== "ok") {
-      parts.push(`storage ${loopData.storage.level}`);
+      parts.push(t({en:"Storage: ",zh:"存储："})+label(loopData.storage.level,t));
     }
     return parts.filter(Boolean).join(" · ");
-  }, [processes, loopData.storage]);
+  }, [processes, loopData.storage, t]);
 
   const mainAgentContextPct = useMemo(() => {
     const root = Object.values(processes)
@@ -281,13 +286,13 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
 
   const activeAgentRuntimeStatus = useMemo(() => {
     const p = activeAgentId ? processes[activeAgentId] : null;
-    return processRuntimeStatus(p || undefined);
-  }, [activeAgentId, processes]);
+    return processRuntimeStatus(p || undefined,t);
+  }, [activeAgentId, processes, t]);
 
   const activeAgentContextPct = useMemo(() => {
     const p = activeAgentId ? processes[activeAgentId] : null;
     return contextPct(p?.estimated_tokens || 0, p?.context?.limit);
-  }, [activeAgentId, processes]);
+  }, [activeAgentId, processes, t]);
   const activeAgentCachePct = activeAgentId ? cacheSamples[activeAgentId] ?? null : null;
 
   const derivedStatus = useMemo(() => {
@@ -297,28 +302,28 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     switch (scene) {
       case "projects": {
         return generalConfig.language === "zh"
-          ? `● ${online} 个运行时在线 · ${total} 个项目  |  ↑↓ 选择 · Enter 打开 · ${chordLabel("slash")} 指令 · /help 帮助`
-          : `● ${online} active runtimes · ${total} projects  |  ↑↓ select · Enter open · ${chordLabel("slash")} commands · /help`;
+          ? `${total} 个项目 · ${online} 个运行时在线`
+          : `${total} projects · ${online} active runtimes`;
       }
       case "workspace": {
         // Status text is rendered by RunningBStrip (single horizontal line).
-        return "";
+        return mainAgentRuntimeStatus;
       }
       case "agent_detail": {
         const waitingQuestions = loopData.pendingQuestions.length;
-        return [activeAgentRuntimeStatus, waitingQuestions ? `${waitingQuestions} question${waitingQuestions === 1 ? "" : "s"} pending` : "", "← A", "type to send feedback", "/ commands"]
+        return [activeAgentRuntimeStatus, waitingQuestions ? t({en:`${waitingQuestions} question${waitingQuestions === 1 ? "" : "s"} pending`,zh:`${waitingQuestions} 个问题待答复`}) : ""]
           .filter(Boolean)
           .join(" · ");
       }
       case "process_list":
         return screenStatusText ||
           (provCount > 0
-            ? `● ${online}/${total} daemons  |  ${provCount} providers`
-            : `● ${online}/${total} daemons online  |  ${total} projects`);
+            ? t({en:`● ${online}/${total} daemons  |  ${provCount} providers`,zh:`● ${online}/${total} 个运行时在线  |  ${provCount} 个服务商`})
+            : t({en:`● ${online}/${total} daemons online  |  ${total} projects`,zh:`● ${online}/${total} 个运行时在线  |  ${total} 个项目`}));
       default:
-        return `● ${online}/${total} daemons online  |  ${total} projects`;
+        return t({en:`● ${online}/${total} daemons online  |  ${total} projects`,zh:`● ${online}/${total} 个运行时在线  |  ${total} 个项目`});
     }
-  }, [scene, projects, providers, screenStatusText, activeAgentRuntimeStatus, generalConfig.language, loopData.pendingQuestions.length]);
+  }, [scene, projects, providers, screenStatusText, activeAgentRuntimeStatus, mainAgentRuntimeStatus, generalConfig.language, loopData.pendingQuestions.length, t]);
 
   const previousDecisionId = useRef("");
   useEffect(() => {
@@ -374,7 +379,6 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   // ── Unified scene navigation ──────────────────────────
   const navigate = useCallback(
     (scene: Scene, patch: Partial<Pick<AppState, "activeProject" | "activeAgentId" | "processListSelIdx">> = {}) => {
-      textInput.setValue("");
       cmdInput.setValue("");
       dispatch({ type: "navigate", scene, patch });
     },
@@ -385,7 +389,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     if (loading || error || !activeProject || scene === "projects") return;
     if (!projects.some(project => project.name === activeProject)) {
       navigate("projects", {activeProject: null, activeAgentId: null});
-      dispatch({type: "set_cmd_result", text: `Project '${activeProject}' left the active list. Open /bin to restore it.`});
+      dispatch({type: "set_cmd_result", text: t({en:`Project '${activeProject}' left the active list. Open /bin to restore it.`,zh:`项目“${activeProject}”已移出活动列表，可在 /bin 恢复。`})});
     }
   }, [projects, loading, error, activeProject, scene, navigate, dispatch]);
 
@@ -535,18 +539,19 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
           void editPromptExternally(textInput.materialize(), generalConfig.externalEditor).then(value => {
             textInput.setExternalValue(value);
             dispatch({type: "set_chat_input_focused", focused: true});
-            setScreenStatusText("Draft imported from external editor");
-          }).catch(error => setScreenStatusText(`Editor failed: ${String(error)}`));
+            setScreenStatusText(t({en:"Draft imported from external editor",zh:"已导入外部编辑器中的草稿"}));
+          }).catch(error => setScreenStatusText(t({en:`Editor failed: ${String(error)}`,zh:`编辑器失败：${String(error)}`})));
         }
         else if (e.type === "report_notice") for (const a of noticeToActions(e.code, e.params)) dispatch(a);
       }
     }
-  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput, client, scene]);
+  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput, client, scene, t]);
 
   // ── Keyboard dispatch (global) ───────────────────────────
   useInput((input: string, key: any) => {
     const ctx: InputContext = {
       scene,
+      agentReturnScene: appStore.getState().agentReturnScene,
       mode,
       chatInputFocused,
       cmdValue: cmdInput.value,
@@ -617,21 +622,25 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     processes: loopData.processes,
     sendChat: (text: string) => submitInput(text),
     verbose: generalConfig.verbose,
+    language: generalConfig.language,
+    onBrowseParent: (delta:number) => chatScrollRef.current?.scrollBy(delta)??delta,
     onSettingSaved,
     onUpdateExit,
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");
-  const runtimeOwnsViewport = ["runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview"].includes(topOverlay?.type || "");
+  const runtimeOwnsViewport = ["processDetail", "help", "runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview", "updatePanel"].includes(topOverlay?.type || "");
   const footerDrawer = inlineOverlay
-    ? <ScrollableInputLayer>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
+    ? topOverlay?.type === "btwPanel"
+      ? <Box maxHeight={Math.max(8,Math.floor(h/2))} minHeight={0} flexDirection="column" flexShrink={0}><InputLayer priority={100}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer></Box>
+      : <ScrollableInputLayer>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
     : null;
 
   return (
-    <DiffLayoutContext.Provider value={generalConfig.diffLayout}>
+    <LanguageContext.Provider value={generalConfig.language}><DiffLayoutContext.Provider value={generalConfig.diffLayout}>
     <Box flexDirection="column" width={w} height={h} flexShrink={0}>
       {error ? (
-        <Box paddingLeft={1}><Text color={colors.danger}>Error: {error}</Text></Box>
+        <Box paddingLeft={1}><Text color={colors.danger}>{t({en:"Error: ",zh:"错误："})}{error}</Text></Box>
       ) : null}
 
       <Box flexGrow={1} flexBasis={0} minHeight={0} overflow="hidden" display={scene === "workspace" && (!topOverlay || inlineOverlay) ? "none" : "flex"}>
@@ -640,7 +649,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
           ? <InputLayer priority={100}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer>
           : <ScrollableInputLayer>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
       ) : loading ? (
-        <Box paddingLeft={1} paddingTop={1}><Text dimColor>Loading projects...</Text></Box>
+        <Box paddingLeft={1} paddingTop={1}><Text dimColor>{t({en:"Loading projects…",zh:"正在读取项目…"})}</Text></Box>
       ) : scene === "process_list" && activeProject ? (
         <ProcessList
           project={activeProject}
@@ -712,7 +721,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         mode={mode}
         textInput={textInput}
         cmdInput={cmdInput}
-        cmdResult={cmdResult || (scene !== "projects" && !topOverlay && loopData.error ? `Runtime status unavailable: ${loopData.error}` : "")}
+        cmdResult={cmdResult || (scene !== "projects" && !topOverlay && loopData.error ? t({en:`Runtime status unavailable: ${loopData.error}`,zh:`运行状态不可用：${loopData.error}`}) : "")}
         statusText={derivedStatus}
         suggestions={suggestions}
         suggestionIdx={suggestionIdx}
@@ -724,9 +733,10 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         contextPct={scene === "workspace" ? mainAgentContextPct : scene === "agent_detail" ? activeAgentContextPct : ""}
         cachePct={scene === "workspace" ? mainAgentCachePct : scene === "agent_detail" ? activeAgentCachePct : null}
         footerDrawer={footerDrawer}
+        editorHidden={topOverlay?.type === "btwPanel"}
         language={generalConfig.language}
       />
     </Box>
-    </DiffLayoutContext.Provider>
+    </DiffLayoutContext.Provider></LanguageContext.Provider>
   );
 }

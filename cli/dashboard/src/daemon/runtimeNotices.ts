@@ -155,8 +155,18 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
         short(ev.status || "unknown"),
         ev.status === "completed" ? "success" : "warning",
       );
-    case "agent_complete":
-      return makeNotice(ev, "Main process complete", short(ev.status || ""), "success");
+    case "agent_complete": {
+      const outcome = asRecord(ev.outcome);
+      const status = String(outcome.status || ev.status || "unknown");
+      const actor = ev.actor_kind === "supervisor" ? "Main process"
+        : ev.actor_kind === "worker" || ev.actor_kind === "reviewer" || ev.parent_id ? "Subprocess" : "Process";
+      const label = status === "completed" ? "completed" : status === "failed" ? "failed"
+        : status === "cancelled" ? "cancelled" : status === "timed_out" ? "timed out"
+        : status === "awaiting_user" || status === "waiting" ? "waiting" : status === "degraded" ? "partially delivered" : "ended";
+      return makeNotice(ev, `${actor} ${label}`, short(asRecord(outcome.error).message || status),
+        status === "completed" ? "success" : status === "failed" ? "error"
+        : status === "unknown" || status === "waiting" || status === "awaiting_user" ? "info" : "warning");
+    }
     case "task_bundle_delegated":
       return makeNotice(ev, "Task bundle delegated", `${ev.shard_count ?? "?"} shards · ${short(ev.dossier_ref || "")}`);
     case "agent_dag_admitted": {

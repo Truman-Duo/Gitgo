@@ -145,6 +145,11 @@ const HANDLERS: Record<string, (ctx: CommandContext, args: string[]) => Promise<
     await ctx.refreshProcesses?.();
     return {resultText: "Archived from this list; execution and data unchanged"};
   },
+  "process.detail": async(ctx)=>{
+    const project=resolveProject(ctx);if(!project)return noProject();
+    return {resultText:"",showPanel:{overlay:"processDetail",props:{project,
+      processId:ctx.scene==="process_list"?ctx.selectedProcessId||"":ctx.activeProcessId||""}}};
+  },
   // System
   "app.help": async () => ({ resultText: "", showHelp: true }),
   "app.quit": async () => ({ resultText: "", showQuit: true }),

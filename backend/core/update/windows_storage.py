@@ -109,7 +109,7 @@ def current_sid():
     finally: api()["CloseHandle"](token)
 
 
-def validate_acl(handle, *, private=True):
+def validate_acl(handle, *, private=True, program=False):
     owner, acl, descriptor = PTR(), PTR(), PTR()
     result = api()["GetSecurityInfo"](handle, 1, 5, C.byref(owner), None, C.byref(acl), None, C.byref(descriptor))
     if result: reject("UPDATE_ACL_INVALID", "Cannot inspect installation access control")
@@ -139,7 +139,11 @@ def validate_acl(handle, *, private=True):
             # group. Resolve that authority ONLY through the actual queried
             # owner SID. A foreign-owned ancestor must not gain this exception.
             if sid == "S-1-3-4" and owner_sid in allowed: continue
-            if sid not in allowed and (private or mask & REPLACE_CHILD):
+            # Signed program payloads may be read/executed by the sandbox.
+            # They remain owner-controlled: reject every mutation right, while
+            # private controls/credentials still reject any foreign access.
+            forbidden = MUTATE if program else REPLACE_CHILD
+            if sid not in allowed and ((private and not program) or mask & forbidden):
                 # Only well-known public group IDs, never account/path names.
                 group = sid if sid in {"S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-3-0", "S-1-3-4"} else "other"
                 reject("UPDATE_ACL_INVALID", "Foreign access permits installation replacement "
@@ -149,7 +153,7 @@ def validate_acl(handle, *, private=True):
 
 
 @contextmanager
-def opened(path, *, write=False, private=True, share=3):
+def opened(path, *, write=False, private=True, program=False, share=3):
     if not isinstance(path, Path) or not path.is_absolute():
         reject("UPDATE_CONTROL_INVALID", "Windows path must be explicit and absolute")
     # OPEN_REPARSE_POINT opens the node itself; validate attributes before use.
@@ -164,7 +168,7 @@ def opened(path, *, write=False, private=True, share=3):
         filesystem = C.create_unicode_buffer(32)
         _check(api()["GetVolumeInformationByHandleW"](handle, None, 0, None, None, None, filesystem, 32))
         if filesystem.value != "NTFS": reject("UPDATE_FILESYSTEM_UNSUPPORTED", "Managed Windows updates require local NTFS")
-        validate_acl(handle, private=private)
+        validate_acl(handle, private=private, program=program)
         yield handle
     finally: api()["CloseHandle"](handle)
 
@@ -212,11 +216,11 @@ def create_private_directory(path):
     with opened(path): pass
 
 
-def open_file(path, *, write=False, create=False, share=3):
+def open_file(path, *, write=False, create=False, share=3, program=False):
     """Return a CRT FD with ownership transfer, no delete sharing or redirects."""
     import msvcrt
     if not create:
-        with opened(path, write=write, share=share) as source:
+        with opened(path, write=write, share=share, program=program) as source:
             # Duplicate the SAME handle, not an independently resolved path.
             duplicate = HANDLE()
             kernel = C.WinDLL("kernel32", use_last_error=True)

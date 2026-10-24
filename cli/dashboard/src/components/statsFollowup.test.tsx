@@ -94,7 +94,7 @@ test("stats loads bounded timing pages and can inspect an older turn without mix
     await wait();
     expect(io.text()).toContain("Turn waterfall");
     expect(io.text()).toContain("partial trace");
-    io.stdin.write("l");
+    io.stdin.write("\t");await wait();io.stdin.write("\r");
     await wait();
     expect(calls).toContainEqual({
       operation: "runtime.trace",
@@ -135,7 +135,7 @@ test("global stats does not show queried zero totals before the query completes"
   );
   try {
     await wait();
-    expect(io.text()).toContain("Loading authoritative usage");
+    expect(io.text()).toContain("Loading recorded usage");
     expect(io.text()).not.toContain("0 tokens");
     resolve({
       summary: { task_count: 0, provider_calls: 0 },

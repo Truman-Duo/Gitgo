@@ -13,6 +13,7 @@ export function AnimatedReveal({
 }) {
   const inner = useRef<DOMElement>(null);
   const measured = useRef(0);
+  const [contentHeight, setContentHeight] = useState(0);
   const initial = useRef(true);
   const current = useRef<number | undefined>(expanded ? undefined : 0);
   const [height, setHeight] = useState<number | undefined>(current.current);
@@ -21,11 +22,16 @@ export function AnimatedReveal({
     setHeight(value);
   };
   useLayoutEffect(() => {
-    if (inner.current)
-      measured.current = Math.max(
-        0,
-        Math.ceil(measureElement(inner.current).height),
-      );
+    if (inner.current) {
+      const next = Math.max(0, Math.ceil(measureElement(inner.current).height));
+      if (next !== measured.current) {
+        const before = measured.current;
+        if (expanded && current.current === undefined && !initial.current && before > 0)
+          update(before);
+        measured.current = next;
+        setContentHeight(next);
+      }
+    }
   });
   useLayoutEffect(() => {
     if (initial.current) {
@@ -52,7 +58,7 @@ export function AnimatedReveal({
         intervalMs: colors.animation.collapse.intervalMs,
       },
     );
-  }, [expanded]);
+  }, [expanded, contentHeight]);
   const present = expanded || height === undefined || height > 0;
   return (
     <Box

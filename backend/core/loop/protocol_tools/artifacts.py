@@ -13,6 +13,12 @@ def install(ctx):
     _owned_child = ctx.owned_child
     def _owned_child(process_id: str):
         target = manager.get(process_id) if manager else None
+        if manager is not None and target is None:
+            child_ids, contracts, _ = process.coordination_snapshot()
+            if process_id in child_ids and process_id in contracts:
+                from backend.core.loop.conversation_continuation import resolve_conversation_process
+                target = resolve_conversation_process(manager, getattr(manager, "session_store", None),
+                    ctx.workspace_path, process_id)
         if manager is None or not manager.owns_child(process, target):
             return None
         return target

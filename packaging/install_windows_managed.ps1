@@ -20,4 +20,4 @@ $nativeArguments = ($installerArguments | ForEach-Object { ConvertTo-GitgoNative
 $installer = Start-Process -FilePath $hostPath -ArgumentList $nativeArguments -NoNewWindow -Wait -PassThru
 try { $installerExit = $installer.ExitCode } finally { $installer.Dispose() }
 if ($installerExit -ne 0) { throw "Managed installation rejected (Host exit $installerExit); existing files and user data retained" }
-Write-Output 'Managed installation registered. Launch the new gitgo.ps1 command from PowerShell. Updates require pinned release trust and explicit confirmation.'
+Write-Output 'Managed installation registered. Launch the new gitgo.ps1 command from PowerShell. Updates require pinned release trust; manage automatic settings or confirm manual actions in /update.'

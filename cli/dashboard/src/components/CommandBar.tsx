@@ -1,3 +1,4 @@
+import {copy,type Copy} from "../ui/pageContract.js";
 // src/components/CommandBar.tsx — v7: FooterConfig injection for overlays.
 // chat scenes (workspace, agent_detail) → NORMAL box for typing, / to command.
 // non-chat scenes (projects, process_list) → no NORMAL box,
@@ -51,6 +52,7 @@ type Props = {
   contextPct?: string;
   cachePct?: number | null;
   footerDrawer?: React.ReactNode;
+  editorHidden?: boolean;
   language?: "en" | "zh";
 };
 
@@ -58,9 +60,10 @@ export const CommandBar = memo(function CommandBar({
   width, mode, textInput, cmdInput, cmdResult,
   statusText, suggestions, suggestionIdx, scene, footerOverride,
   runningB, runningBSelIdx, statusBarFocused, contextPct, cachePct,
-  footerDrawer,
+  footerDrawer, editorHidden = false,
   language = "en",
 }: Props) {
+  const t=(value:Copy)=>copy(value,language);
   const isOverridden = !!(footerOverride && !footerOverride.hidden);
   const overrideKind = isOverridden ? (footerOverride.kind ?? "command") : "command";
 
@@ -86,7 +89,7 @@ export const CommandBar = memo(function CommandBar({
   // Project/process scenes are list-first: the command editor appears only
   // after a leading slash. Chat scenes keep their NORMAL editor visible.
   const projectListIdle = !isOverridden && (scene === "projects" || scene === "process_list") && !activeCmdInput.value.startsWith("/");
-  const showInput = isOverridden || isChatScene(scene) || scene === "projects" || scene === "process_list" || activeCmdInput.value.startsWith("/");
+  const showInput = !editorHidden && (isOverridden || isChatScene(scene) || scene === "projects" || scene === "process_list" || activeCmdInput.value.startsWith("/"));
 
   // Border color animation on mode switch
   const effectiveColor = useColorTransition(
@@ -146,7 +149,7 @@ export const CommandBar = memo(function CommandBar({
               </Ansi>
             )}
             {projectListIdle ? (
-              <Text dimColor>{language === "zh" ? "输入 / 打开指令" : "Type / for commands"}</Text>
+              <Text dimColor>{t({en:"Type / for commands",zh:"输入 / 打开指令"})}</Text>
             ) : isOverridden || effectiveCommand ? (
               <TextInput
                 value={activeCmdInput.value}
@@ -211,7 +214,7 @@ export const CommandBar = memo(function CommandBar({
       {/* Status text */}
       <Box paddingLeft={1} paddingRight={1} marginTop={showInput ? 1 : 0}>
         {!isOverridden && runningB !== undefined ? (
-          <RunningBStrip width={Math.max(1, width - 2)} runningB={runningB} selIdx={runningBSelIdx ?? 0} focused={statusBarFocused ?? false} contextPct={contextPct ?? ""} cachePct={cachePct} />
+          <RunningBStrip statusText={activeStatusText} language={language} width={Math.max(1, width - 2)} runningB={runningB} selIdx={runningBSelIdx ?? 0} focused={statusBarFocused ?? false} contextPct={contextPct ?? ""} cachePct={cachePct} />
         ) : (
           <>
             {contextValue ? <><ContextStatus contextPct={contextValue} cachePct={cachePct} /><Text>  </Text></> : null}

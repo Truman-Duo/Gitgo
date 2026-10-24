@@ -1,3 +1,4 @@
+import {useCopy} from "../ui/PageFrame.js";
 // src/components/GovernancePanel.tsx — /runtime governance: Quality/Patterns/Feed/Releases
 import React, { memo, useState, useEffect, useRef, useCallback } from "react";
 import { Box, ScrollBox, Text, type ScrollBoxHandle } from "@anthropic/ink";
@@ -26,6 +27,7 @@ const TABS = ["Quality", "Patterns", "Feed", "Releases"] as const;
 export const GovernancePanel = memo(function GovernancePanel({
   client, project, initialTab = 0, onDismiss, interactive = true,
 }: Props) {
+  const t=useCopy();
   const scrollRef = useRef<ScrollBoxHandle>(null);
   const generation = useRef(0);
   const [tab, setTab] = useState(initialTab);
@@ -107,24 +109,24 @@ export const GovernancePanel = memo(function GovernancePanel({
 
   const { w } = usePanelSize({ minWidth: 20, widthOffset: 4 });
 
-  const sections = data ? governanceSections(tab, data) : [];
+  const sections = data ? governanceSections(tab, data, t) : [];
 
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} width={w} flexGrow={1}>
       <HorizontalHeaderStrip
-        items={TABS.map(label => ({id: label, label}))}
+        items={TABS.map((label,index) => ({id: label, label:[t({en:"Quality",zh:"质量"}),t({en:"Patterns",zh:"模式"}),t({en:"Feed",zh:"动态"}),t({en:"Releases",zh:"发布"})][index]!}))}
         selected={tab} width={Math.max(10, w - 2)} contentFocused={!interactive}
       />
-      <Text dimColor>{project}  ·  {interactive ? "←/→ tab · ↑/↓ scroll · Esc back" : "Enter to browse"}</Text>
-      {tab === 2 ? <Text dimColor>Page {feedHistory.current.length + 1} · {(data?.items || []).length} events · PgUp newer · PgDn older{feedLoadingOlder ? " · Loading…" : data?.page?.has_more ? "" : " · End of history"}</Text> : null}
+      <Text dimColor>{project}  ·  {interactive ? t({en:"←/→ tab · ↑/↓ scroll · Esc back",zh:"←/→ 页签 · ↑/↓ 滚动 · Esc 返回"}) : t({en:"Enter to browse",zh:"Enter 浏览"})}</Text>
+      {tab === 2 ? <Text dimColor>{t({en:"Page ",zh:"页 "})}{feedHistory.current.length + 1} · {(data?.items || []).length} {t({en:"events · PgUp newer · PgDn older",zh:"条事件 · PgUp 较新 · PgDn 较旧"})}{feedLoadingOlder ? t({en:" · Loading…",zh:" · 正在读取…"}) : data?.page?.has_more ? "" : t({en:" · End of history",zh:" · 已到历史末尾"})}</Text> : null}
       <ScrollBox ref={scrollRef} marginTop={1} flexDirection="column" flexGrow={1}>
-        {err ? <Text color={colors.danger}>Error: {err}</Text>
-          : !data ? <Text dimColor>Loading...</Text>
-          : sections.length === 0 ? <Text dimColor>{tab === 2 ? "No governance activity recorded yet." : "No releases recorded yet."}</Text>
+        {err ? <Text color={colors.danger}>{t({en:"Error: ",zh:"错误："})}{err}</Text>
+          : !data ? <Text dimColor>{t({en:"Loading...",zh:"正在读取…"})}</Text>
+          : sections.length === 0 ? <Text dimColor>{tab === 2 ? t({en:"No governance activity recorded yet.",zh:"尚无治理活动记录。"}) : t({en:"No releases recorded yet.",zh:"尚无发布记录。"})}</Text>
           : sections.map((section, index) => <Box key={index} flexDirection="column" marginBottom={1}>
               <Text bold>{section.title}</Text>
               {section.lines.length ? section.lines.map((line, i) => <Text key={i} wrap="wrap">{line}</Text>)
-                : <Text dimColor>No observations yet.</Text>}
+                : <Text dimColor>{t({en:"No observations yet.",zh:"尚无观察记录。"})}</Text>}
             </Box>)}
       </ScrollBox>
     </Box>

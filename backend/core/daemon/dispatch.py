@@ -718,7 +718,7 @@ def _cmd_trace(cmd, session, project, daemon_ctx, emit):
         emit({"event": "command_result", "cmd": "trace", "error": str(exc)})
 
 
-def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000) -> dict:
+def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000, store=None) -> dict:
     """Build a bounded, read-only view of an A/B session for a BTW sidecar.
 
     The sidecar never receives tool authority and its messages are not appended
@@ -728,7 +728,24 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000) -> dic
     """
     process = apm.get(process_id) if apm is not None and process_id else None
     if process is None:
-        return {"attached": False, "process_id": process_id}
+        # Completed conversations need not be live processes after a daemon
+        # restart. Read the existing atomic checkpoint, without restoring an
+        # executor, granting a lease or registering a second process.
+        state = store.load_process_state(process_id) if store and process_id else None
+        if not state or process_id in store.deleted_process_ids():
+            return {"attached": False, "process_id": process_id}
+        from types import SimpleNamespace
+        raw = state.get("process") or {}
+        runtime = state.get("runtime_state") or {}
+        context = dict(runtime.get("context_snapshot") or {})
+        proxy = SimpleNamespace(process_id=process_id, role=raw.get("role",""),
+            parent_id=raw.get("parent_process_id"),
+            depends_on=[d["depends_on_process_id"] for d in state.get("dependencies",[]) if d.get("depends_on_process_id")],
+            status=SimpleNamespace(value=raw.get("status","")),
+            task_description=(state.get("task",{}).get("contract") or {}).get("task_description",""),
+            session=SimpleNamespace(messages=(state.get("session") or {}).get("messages",[])),
+            read_context_snapshot=lambda: (context,int(raw.get("state_revision",0))))
+        return _btw_parent_snapshot(SimpleNamespace(get=lambda _id:proxy),process_id,max_chars=max_chars)
 
     context, version = process.read_context_snapshot()
     contract = dict(context.get("task_contract") or {})
@@ -763,6 +780,9 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000) -> dic
         "task_description": process.task_description,
         "context_version": version,
         "task_contract": visible_contract,
+        "owner_process_id": getattr(process,"parent_id",None) or "",
+        "depends_on": list(getattr(process,"depends_on",[]) or []),
+        "relationship_policy": dict(context.get("relationship_policy") or {}),
         "conversation": selected,
         "truncated": len(selected) < sum(
             1 for item in messages
@@ -774,33 +794,27 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000) -> dic
     }
 
 
-def _btw_scope_snapshot(apm, process_ids: list[str], *, max_chars: int = 32000) -> dict:
+def _btw_scope_snapshot(apm, process_ids: list[str], *, max_chars: int = 32000, store=None) -> dict:
     """Build one bounded BTW view across a selected A/B group."""
     selected_ids = list(dict.fromkeys(
         str(item) for item in list(process_ids or []) if str(item)
-    ))[:8]
+    ))[:64]
     if not selected_ids:
         return {"attached": False, "source_process_ids": [], "sources": []}
-    per_source = max(3000, int(max_chars) // len(selected_ids))
+    per_source = max(1, int(max_chars) // len(selected_ids))
     sources = [
-        _btw_parent_snapshot(apm, process_id, max_chars=per_source)
+        _btw_parent_snapshot(apm, process_id, max_chars=per_source, store=store)
         for process_id in selected_ids
     ]
     sources = [item for item in sources if item.get("attached")]
     graph = []
     for source in sources:
-        process = apm.get(str(source.get("process_id") or "")) if apm is not None else None
-        if process is None:
-            continue
-        context, _ = process.read_context_snapshot()
-        graph.append({
-            "process_id": process.process_id,
-            "owner_process_id": process.parent_id or "",
-            "depends_on": list(getattr(process, "depends_on", []) or []),
-            "relationship_policy": dict(context.get("relationship_policy") or {}),
-        })
+        graph.append({key:source[key] for key in
+                      ("process_id","owner_process_id","depends_on","relationship_policy")})
     return {
         "attached": bool(sources),
+        "partial": len(set(process_ids)) > len(sources) or any(item.get("truncated") for item in sources),
+        "focus_process_id": selected_ids[0],
         "source_process_ids": [str(item["process_id"]) for item in sources],
         "sources": sources,
         "relationship_graph": graph,
@@ -957,7 +971,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         requested_process_ids = list(cmd.get("process_ids") or [])
         if not requested_process_ids and cmd.get("process_id"):
             requested_process_ids = [str(cmd.get("process_id"))]
-        parent_snapshot = _btw_scope_snapshot(apm, requested_process_ids)
+        parent_snapshot = _btw_scope_snapshot(apm, requested_process_ids, store=(daemon_ctx or {}).get("session_store"))
         if cmd.get("lesson_proposal") is not None:
             ref = cmd["lesson_proposal"]
             try:
@@ -1739,6 +1753,10 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         cmd = {
             **cmd,
             "action": "chat",
+            # The validated pending decision owns the resume identity, including
+            # when the answer arrived through A's view or an older frontend.
+            "session_id": process.session.session_id,
+            "conversation_process_id": process.process_id,
             "task_id": process.active_task_id,
             "task_kind": process.task_kind,
             "actor_kind": process.actor_kind,
@@ -1775,23 +1793,29 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         task_description = cmd.get("task_description", instruction[:200] if instruction else "")
         task_id = cmd.get("task_id", "") or str(uuid.uuid4())
         requested_process_id = cmd.get("process_id", "")
-        process = apm.get(requested_process_id) if requested_process_id else None
-        if process is None and not requested_process_id and cmd.get("conversation_process_id"):
-            prior_id = str(cmd["conversation_process_id"])
-            prior = apm.get(prior_id)
-            if prior is None:
-                from backend.core.loop.recovery import restore_incomplete_processes
-                prior_store = (daemon_ctx or {}).get("session_store")
-                if prior_store is not None:
-                    restore_incomplete_processes(prior_store, apm, session.workspace_path,
-                                                 include_process_ids=[prior_id])
-                    prior = apm.get(prior_id)
-            if prior is None or prior.session.session_id != str(cmd.get("session_id") or ""):
-                from backend.core.errors import error_payload
+        process = None
+        continuation_id = str(requested_process_id or cmd.get("conversation_process_id") or "")
+        if continuation_id:
+            from backend.core.loop.conversation_continuation import resolve_conversation_process
+            try:
+                process = resolve_conversation_process(
+                    apm, (daemon_ctx or {}).get("session_store"), session.workspace_path,
+                    continuation_id, str(cmd.get("session_id") or ""),
+                )
+            except (ValueError, StorageReferenceMissing) as exc:
                 emit({"event": "command_result", "cmd": "task",
-                      **error_payload("CONTINUATION_STATE_UNAVAILABLE")})
+                      "error": str(exc), "code": str(exc).split(":", 1)[0]})
                 return
-            process = prior
+        if cmd.get("fresh_task_budget") and process is not None:
+            # A new user turn is adaptive, as for A: observation starts without
+            # an invented mutation requirement; committed effects promote it.
+            cmd = {**cmd, "parent_id": process.parent_id,
+                   "actor_kind": process.actor_kind, "role": process.role,
+                   "capability_profile_id": process.capability_profile_id,
+                   "task_kind": "answer",
+                   "runtime_preferences": {**dict(cmd.get("runtime_preferences") or {}),
+                       "user_direct_continuation": True,
+                       "predecessor_process_id": process.process_id}}
         context_snapshot = _normalize_context_signals(context_snapshot)
 
         if cmd.get("manual_delegation"):
@@ -2022,6 +2046,12 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             # Fork new agent
             try:
                 capability = _resolve_capability_command(cmd, default_actor="supervisor")
+                if predecessor_process is not None and cmd.get("fresh_task_budget") and predecessor_process.actor_kind != "supervisor":
+                    from backend.core.loop.conversation_continuation import bounded_continuation_tools
+                    capability["registry"] = ToolRegistry(bounded_continuation_tools(
+                        capability["registry"].list_all(),
+                        issued_tools=predecessor_process.tool_registry.list_all()
+                        if predecessor_process.tool_registry is not None else []))
                 ring = RingLevel.RING_0 if capability["actor_kind"] == "supervisor" else RingLevel.RING_3
                 logical_parent_id = cmd.get("parent_id")
                 process = apm.fork(
@@ -2285,6 +2315,8 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             for pending_event in delta_coalescer.flush():
                 _persist_stream_event(pending_event)
             _emit_stream_event({"event": "agent_complete",
+                                "actor_kind": process.actor_kind,
+                                "parent_id": process.parent_id,
                                 "task_id": task_id,
                                 "process_id": process.process_id,
                                 "session_id": process.session.session_id,

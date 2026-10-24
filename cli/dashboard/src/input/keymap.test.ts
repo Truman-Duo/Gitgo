@@ -205,7 +205,6 @@ describe("single in-flight chat", () => {
       { kind: "state", action: { type: "push_overlay", overlay: "interruptConfirm", props: { processId: "child-live", requestId: undefined, project: "gitgo", subtree: false } } },
     ]);
     assert.deepStrictEqual(resolveSceneKey({ ...ctx, chatInputFocused: false }, "", { leftArrow: true }), [
-      { kind: "text", buffer: "text", op: { op: "set_value", text: "" } },
       { kind: "text", buffer: "cmd", op: { op: "set_value", text: "" } },
       { kind: "state", action: { type: "navigate", scene: "workspace", patch: { activeAgentId: null } } },
     ]);
@@ -265,4 +264,31 @@ describe("parameterised command completion", () => {
       kind: "text", buffer: "cmd", op: { op: "set_value", text: "/stats" },
     })));
   });
+});
+
+
+test("B detail returns to its source list; focused arrows remain editor operations", () => {
+  const ctx = context({scene: "agent_detail", chatInputFocused: false, agentReturnScene: "process_list"});
+  const actions = resolveSceneKey(ctx, "", {leftArrow: true});
+  assert.ok(actions.some(a => a.kind === "state" && a.action.type === "navigate" && a.action.scene === "process_list"));
+  assert.equal(resolveSceneKey({...ctx, chatInputFocused: true}, "", {leftArrow: true})
+    .some(a => a.kind === "state" && a.action.type === "navigate"), false);
+});
+
+
+test("left remains cursor editing for a nonempty draft, even at zero or after focus loss",()=>{
+ for(const scene of ["workspace","agent_detail"] as const)for(const focused of [true,false]){
+  const ctx=context({scene,chatInputFocused:focused,textValue:"unfinished draft",textCursor:0});
+  assert.deepStrictEqual(resolveSceneKey(ctx,"",{leftArrow:true}),[
+   {kind:"text",buffer:"text",op:{op:"move_cursor",delta:-1}}]);
+ }
+});
+test("neutral question row composes no selected option and D never confirms a choice",()=>{
+ const ctx=context({scene:"workspace",decisionOptionLabels:["one","two"],decisionAllowFreeForm:true,decisionSelection:2});
+ const opened=resolveSceneKey(ctx,"",{return:true});
+ assert.ok(opened.some(a=>a.kind==="state"&&a.action.type==="set_decision_composing"));
+ assert.ok(!opened.some(a=>a.kind==="effect"));
+ const discuss=resolveSceneKey({...ctx,decisionSelection:0},"d",{});
+ assert.ok(discuss.some(a=>a.kind==="text"&&a.op.op==="set_value"&&a.op.text.startsWith("Discuss option 1")));
+ assert.ok(!discuss.some(a=>a.kind==="effect"));
 });

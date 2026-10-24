@@ -6,7 +6,7 @@
 // from prev — all function references are stable ([] deps). Return value
 // wrapped in useMemo so React.memo on CommandBar actually works.
 
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef, useLayoutEffect } from "react";
 import { stringWidth } from "@anthropic/ink";
 import type { TextOp } from "../input/keymap.js";
 import { PromptPasteStore } from "../input/pasteStore.js";
@@ -106,9 +106,19 @@ export function applyTextOp(op: TextOp, buf: UseTextInputReturn): void {
   }
 }
 
-export function useTextInput(initialValue = ""): UseTextInputReturn {
+export function useTextInput(initialValue = "", scopeKey = "default"): UseTextInputReturn {
   const [state, setState] = useState<State>({ value: initialValue, cursor: 0 });
   const pastes = useRef(new PromptPasteStore());
+  const scope = useRef(scopeKey), latest = useRef(state);
+  latest.current=state;
+  const drafts = useRef(new Map<string,{state:State;pastes:PromptPasteStore}>());
+  useLayoutEffect(()=>{
+    if(scope.current===scopeKey)return;
+    drafts.current.set(scope.current,{state:latest.current,pastes:pastes.current});
+    const next=drafts.current.get(scopeKey);
+    scope.current=scopeKey;pastes.current=next?.pastes??new PromptPasteStore();
+    setState(next?.state??{value:initialValue,cursor:initialValue.length});
+  },[scopeKey,initialValue]);
 
   const boundaries = useCallback((value: string): number[] => {
     const Segmenter = (Intl as any).Segmenter;

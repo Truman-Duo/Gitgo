@@ -41,18 +41,18 @@ test("real lesson component edits only a draft, excludes a candidate and submits
   const root = renderSync(<Fixture/>, {...t, patchConsole: false, exitOnCtrlC: false});
   const send = async (key: string) => {t.stdin.write(key); await settle();};
   try {
-    await settle(); await send("p"); await send("e");
+    await settle(); await send("\r"); await send("\t"); await send("\r");
     draft!.setValue("revised adapter trigger"); await settle(); await send("\t");
     draft!.setValue("Keep the private gateway token under metadata for build 3 only."); await settle(); await send("\r");
     expect(mutations).toHaveLength(0);
-    await send("b"); await settle();
+    await send("\x1b[C"); await send("\x1b[C"); await send("\r"); await settle();
     expect(btw[0].lesson_proposal).toMatchObject({proposal_id: "proposal", proposal_version: "shown-version", candidate_index: 0,
       draft: {trigger: "revised adapter trigger", rule: "Keep the private gateway token under metadata for build 3 only."}});
     expect(t.output()).toContain("Return to review");
     expect(t.output()).not.toContain("Interrupt & apply");
     await send("\u001b"); await settle();
     expect(mutations).toHaveLength(0);
-    await send("\u001b[B"); await send(" "); await send("s");
+    await send("\t"); await send("\u001b[B"); await send(" "); await send("\t"); await send("\x1b[C"); await send("\r");
     expect(mutations).toHaveLength(1);
     expect(mutations[0].expected_version).toBe("shown-version");
     expect(mutations[0].candidate_reviews[0].trigger).toBe("revised adapter trigger");
@@ -98,8 +98,9 @@ test("stale confirmation retains the old draft and never silently confirms a ref
   }
   const root = renderSync(<Fixture/>, {...t, patchConsole: false, exitOnCtrlC: false});
   try {
-    await settle(); t.stdin.write("p"); await settle();
-    t.stdin.write("s"); await settle();
+    await settle(); t.stdin.write("\r"); await settle();
+    t.stdin.write("\t"); await settle();
+    for(let i=0;i<3;i++){t.stdin.write("\x1b[C");await settle();}t.stdin.write("\r");await settle();
     expect(attempts).toHaveLength(1); expect(attempts[0].expected_version).toBe("shown-version");
     expect(t.output()).toContain("HARVEST_PROPOSAL_CHANGED");
     expect(t.output()).toContain("Review knowledge proposal");
@@ -123,7 +124,7 @@ test("closing an in-flight lesson discussion cancels its known sidecar instead o
   }
   const root = renderSync(<Fixture/>, {...t, patchConsole: false, exitOnCtrlC: false});
   try {
-    await settle(); t.stdin.write("p"); await settle(); t.stdin.write("b"); await settle();
+    await settle(); t.stdin.write("\r"); await settle(); t.stdin.write("\t"); await settle(); t.stdin.write("\x1b[C"); await settle(); t.stdin.write("\x1b[C"); await settle(); t.stdin.write("\r"); await settle();
     const request = calls.find(call => call.operation === "runtime.btw");
     expect(request.args.sidecar_id).toBeTruthy();
     t.stdin.write("\u001b"); await settle(); await settle();
@@ -152,9 +153,9 @@ test("review exposes the selected native passages without accepting the proposal
   }
   const root = renderSync(<Fixture/>, {...t, patchConsole: false, exitOnCtrlC: false});
   try {
-    await settle(); t.stdin.write("p"); await settle();
+    await settle(); t.stdin.write("\r"); await settle();
     expect(t.output()).toContain("Evidence covers selected passages");
-    t.stdin.write("f"); await settle();
+    t.stdin.write("\t"); await settle(); t.stdin.write("\x1b[C"); await settle(); t.stdin.write("\r"); await settle();
     expect(t.output()).toContain("verified captured metadata passage");
     expect(t.output()).toContain("Snapshot from the change");
     expect(calls).not.toContain("lesson.harvest.resolve");

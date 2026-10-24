@@ -6,9 +6,14 @@ type LegacyUpdateStatus = ProductVersion & {
   channel: "stable"; can_apply: false;
   blockers: string[];
 };
+export type UpdatePreferences = {schema_version: 1; revision: number; channel: "stable" | "preview";
+  automatic_check: boolean; automatic_download: boolean; automatic_install: boolean};
 export type PreparationStatus = ProductVersion & {
-  schema_version: 2 | 3 | 4 | 5; status: "unconfigured" | "idle" | "available" | "up_to_date" | "downloaded" | "stale";
-  enabled: false; automatic_check: false; channel: "stable" | "preview"; can_apply: false;
+  schema_version: 2 | 3 | 4 | 5 | 6; status: "unconfigured" | "idle" | "available" | "up_to_date" | "downloaded" | "stale";
+  enabled: false; automatic_check: boolean; channel: "stable" | "preview"; can_apply: false;
+  automatic_install_available?: boolean;
+  preferences?: UpdatePreferences;
+  automatic?: {state: string; last_attempt: number | null; next_attempt: number | null; error_code: string | null};
   can_check: boolean; can_download: boolean; blockers: string[]; latest_version: string | null;
   can_request_apply: boolean;
   can_request_rollback: boolean; rollback: null | {rollback_id: string; version: string};
@@ -41,7 +46,7 @@ export function parseUpdateStatus(value: any): UpdateStatus {
   const product = identity(value);
   // Fail closed if a newer Host changes the capability contract. This panel
   // must not accidentally present a successful update or expose an apply action.
-  if (value.enabled !== false || value.automatic_check !== false || value.can_apply !== false
+  if (value.enabled !== false || (value.schema_version !== 6 ? value.automatic_check !== false : typeof value.automatic_check !== "boolean") || value.can_apply !== false
       || !Array.isArray(value.blockers) || value.blockers.length > 16
       || value.blockers.some((v: unknown) => typeof v !== "string" || v.length < 1 || v.length > 64 || /[^A-Z_]/.test(v))) {
     throw new Error("Update status unavailable");
@@ -50,7 +55,7 @@ export function parseUpdateStatus(value: any): UpdateStatus {
     return {...product, schema_version: 1, status: "disabled", enabled: false,
       automatic_check: false, channel: "stable", can_apply: false, blockers: [...value.blockers]};
   }
-  if (![2, 3, 4, 5].includes(value.schema_version) || !["stable", "preview"].includes(value.channel)
+  if (![2, 3, 4, 5, 6].includes(value.schema_version) || !["stable", "preview"].includes(value.channel)
       || !["unconfigured", "idle", "available", "up_to_date", "downloaded", "stale"].includes(value.status)
       || typeof value.can_check !== "boolean" || typeof value.can_download !== "boolean") throw new Error("Update status unavailable");
   if (value.schema_version >= 3 && (typeof value.can_request_apply !== "boolean"
@@ -68,7 +73,7 @@ export function parseUpdateStatus(value: any): UpdateStatus {
   }
   let pending: PreparationStatus["pending_restart"] = null;
   let strategy: PreparationStatus["apply_strategy"] = "immediate";
-  if (value.schema_version === 5) {
+  if (value.schema_version >= 5) {
     if (!["immediate", "after_reboot"].includes(value.apply_strategy)) throw new Error("Update strategy unavailable");
     strategy = value.apply_strategy;
     if (value.pending_restart !== null) {
@@ -100,7 +105,23 @@ export function parseUpdateStatus(value: any): UpdateStatus {
       || value.can_check !== (value.status !== "unconfigured")
       || (!selected && value.status !== "up_to_date" && value.latest_version !== null)
       || (value.status === "up_to_date" && value.latest_version === null)) throw new Error("Update capability mismatch");
-  return {...product, schema_version: value.schema_version, status: value.status, enabled: false, automatic_check: false,
+  let preferences: UpdatePreferences | undefined;
+  let automatic: PreparationStatus["automatic"];
+  if (value.schema_version === 6) {
+    const p = value.preferences, a = value.automatic;
+    if (typeof value.automatic_install_available !== "boolean" || p?.schema_version !== 1 || !Number.isSafeInteger(p.revision) || p.revision < 0
+        || !["stable", "preview"].includes(p.channel)
+        || ["automatic_check", "automatic_download", "automatic_install"].some(k => typeof p[k] !== "boolean")
+        || p.automatic_check !== value.automatic_check
+        || !["not_checked", "prepared", "up_to_date", "available", "blocked", "error"].includes(a?.state)
+        || ["last_attempt", "next_attempt"].some(k => a[k] !== null &&
+          (typeof a[k] !== "number" || !Number.isFinite(a[k]) || a[k] < 0 || a[k] >= 1e12))
+        || (a.error_code !== null && (typeof a.error_code !== "string" || !/^UPDATE_[A-Z_]+$/.test(a.error_code)
+            || a.error_code.length > 64))) throw new Error("Automatic update settings unavailable");
+    preferences = {...p}; automatic = {...a};
+  }
+  return {...product, schema_version: value.schema_version, status: value.status, enabled: false, automatic_check: value.automatic_check,
+    preferences, automatic, automatic_install_available: value.schema_version === 6 ? value.automatic_install_available : false,
     channel: value.channel, can_apply: false, can_check: value.can_check, can_download: value.can_download,
     can_request_apply: value.schema_version >= 3 && value.can_request_apply,
     rollback, can_request_rollback: value.schema_version >= 4 && value.can_request_rollback,
@@ -108,9 +129,9 @@ export function parseUpdateStatus(value: any): UpdateStatus {
     blockers: [...value.blockers], latest_version: value.latest_version, candidate};
 }
 
-export async function updateStatus(client: BackendClient, channel: "stable" | "preview" = "stable"): Promise<UpdateStatus> {
-  const result = parseUpdateStatus(await (channel === "stable" ? client.callTool("update.status") : client.callTool("update.status", {channel})));
-  if (result.schema_version !== 1 && result.channel !== channel) throw new Error("Update channel mismatch");
+export async function updateStatus(client: BackendClient, channel?: "stable" | "preview"): Promise<UpdateStatus> {
+  const result = parseUpdateStatus(await (channel === undefined ? client.callTool("update.status") : client.callTool("update.status", {channel})));
+  if (channel !== undefined && result.schema_version !== 1 && result.channel !== channel) throw new Error("Update channel mismatch");
   return result;
 }
 
@@ -153,4 +174,15 @@ export async function cancelPendingUpdate(client: BackendClient, requestId: stri
   if (result?.schema_version !== 1 || result.status !== "cancelled" || result.request_id !== requestId) {
     throw new Error("Pending cancellation mismatch");
   }
+}
+
+
+export async function configureUpdate(client: BackendClient, value: UpdatePreferences): Promise<UpdateStatus> {
+  const {schema_version, ...settings} = value;
+  const status = parseUpdateStatus(await client.callTool("update.configure", settings));
+  if (status.schema_version !== 6 || status.preferences?.revision !== value.revision + 1
+      || status.channel !== value.channel
+      || (["channel", "automatic_check", "automatic_download", "automatic_install"] as const)
+        .some(k => status.preferences![k] !== value[k])) throw new Error("Update settings acknowledgement mismatch");
+  return status;
 }

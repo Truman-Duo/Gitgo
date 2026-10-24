@@ -26,7 +26,7 @@ def inventory(root):
     def walk(path, prefix):
         nonlocal total
         # Keep this directory unrenamable while resolving its children.
-        with opened(path, share=3) as directory:
+        with opened(path, share=3, program=True) as directory:
             reject_alternate_streams(path)
             root_id = handle_identity(directory)
             with os.scandir(path) as children:
@@ -37,7 +37,7 @@ def inventory(root):
                     name = prefix + child.name
                     _parts("payload/" + name)
                     target = path / child.name
-                    with opened(target, share=1) as node:
+                    with opened(target, share=1, program=True) as node:
                         reject_alternate_streams(target)
                         identity = handle_identity(node)
                         if identity["device"] != root_id["device"]:
@@ -51,7 +51,7 @@ def inventory(root):
                             if size > limits.file_bytes or total > limits.total_bytes:
                                 reject("UPDATE_TREE_INVALID", "Windows payload exceeds size bounds")
                             digest = hashlib.sha256()
-                            fd = open_file(target)
+                            fd = open_file(target, program=True)
                             with os.fdopen(fd, "rb") as handle:
                                 count = 0
                                 while chunk := handle.read(64 * 1024):

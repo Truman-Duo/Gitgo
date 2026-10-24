@@ -1234,3 +1234,27 @@ def test_unavailable_dpapi_backend_refuses_without_plaintext_fallback(tmp_path_f
     with pytest.raises(SecretStoreError, match='DPAPI is unavailable'):
         EncryptedSecretStore(path)
     assert not path.exists()
+
+
+def test_routed_child_decision_never_inherits_or_replaces_project_root_cursor():
+    class ChildDaemon(FakeDaemon):
+        def send_task(self, command, timeout=300, on_ack=None):
+            self.last_task = dict(command)
+            assert command['process_id'] == 'child'
+            assert 'session_id' not in command
+            assert 'conversation_process_id' not in command
+            return {'event': 'agent_complete', 'session_id': 'child-session',
+                    'outcome': {'status': 'completed', 'task_id': command['task_id'],
+                                'process_id': 'child', 'response': 'Chinese',
+                                'steps_used': 1, 'llm_used': True}}
+    host = NativeHost(stdout=io.StringIO(), daemon_factory=ChildDaemon)
+    host._sessions['demo'] = 'root-session'
+    host._conversation_processes['demo'] = 'root'
+    try:
+        result = host._runtime_chat('child-reply', {'project': 'demo', 'process_id': 'child',
+            'task_id': 'child-task', 'decision_id': 'actual-child-decision', 'message': 'Chinese'}, action='decision')
+        assert result['session_id'] == 'child-session'
+        assert host._sessions['demo'] == 'root-session'
+        assert host._conversation_processes['demo'] == 'root'
+    finally:
+        host.close()

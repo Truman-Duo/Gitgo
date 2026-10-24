@@ -1,12 +1,13 @@
 // src/keybindings.ts — Command registry with scene + children hierarchy
 // Path-aware suggestion: typing /runtime shows children, /runtime lesson shows grandchildren.
+import {copy, type Copy, type Language} from "./ui/pageContract.js";
 import type { Scene } from "./state/store.js";
 import type { Suggestion } from "./components/CommandBar.js";
 import { sortByName } from "./theme/index.js";
 
 export type CommandDef = {
   name: string;
-  title: string;
+  title: Copy;
   category: "system" | "navigation" | "action";
   keys: string[];
   slashName: string;
@@ -18,41 +19,25 @@ export type CommandDef = {
   children?: CommandDef[];
 };
 
-const ZH_TITLES: Record<string, string> = {
-  "app.help": "帮助", "app.quit": "退出", "projects.bin": "归档项目",
-  "projects.create": "创建项目", "projects.archive": "归档项目",
-  "projects.update": "软件更新",
-  "projects.stats_overview": "全局用量概览", "workspace.stats": "项目统计与任务时间轴", "projects.export": "导出知识",
-  "projects.config": "设置", "config.general": "通用设置",
-  "config.llm": "模型服务商", "config.publish": "发布设置",
-  "nav.processlist": "Agent 进程列表", "workspace.compact": "压缩上下文",
-  "workspace.undo": "撤回最近一轮会话",
-  "workspace.btw": "独立旁路问答", "workspace.runtime": "运行时数据",
-  "runtime.lesson": "经验知识", "runtime.contract": "项目合同",
-  "runtime.governance": "治理数据", "runtime.memory": "记忆快照",
-  "runtime.history": "操作历史", "runtime.context": "上下文面板",
-  "runtime.recovery": "Daemon 恢复", "runtime.trial": "外部 PR 试验仓",
-  "runtime.formal": "正式提交",
-  "process.rename": "重命名所选 B（ID 不变）", "process.archive": "归档所选 B（不停止、不删除）",
-};
-
-function description(def: CommandDef, language: "en" | "zh") {
-  return language === "zh" ? (ZH_TITLES[def.name] || def.title) : def.title;
+function description(def: CommandDef, language: Language) {
+  return copy(def.title, language);
 }
 
 export const REGISTRY: CommandDef[] = [
-  {name: "process.create", title: "Ask A to create and supervise a new B", category: "action",
+  {name:"process.detail",title:{en:"Selected subprocess details",zh:"子进程详情"},category:"navigation",
+    keys:[],slashName:"detail",scene:["process_list","agent_detail"]},
+  {name: "process.create", title: {en:"Ask A to create and supervise a new B",zh:"请主进程创建并监督子进程"}, category: "action",
     keys: [], slashName: "create", inputMode: "fill", scene: ["process_list"]},
-  {name: "process.rename", title: "Rename selected B (identity unchanged)", category: "action",
+  {name: "process.rename", title: {en:"Rename selected B (identity unchanged)",zh:"重命名所选 B（ID 不变）"}, category: "action",
     keys: [], slashName: "rename", inputMode: "fill", scene: ["process_list"]},
-  {name: "process.archive", title: "Archive selected B (execution unchanged)", category: "action",
+  {name: "process.archive", title: {en:"Archive selected B (execution unchanged)",zh:"归档所选 B（不停止、不删除）"}, category: "action",
     keys: [], slashName: "archive", scene: ["process_list"]},
   // ═══════════════════════════════════════════════════════════
   // Global
   // ═══════════════════════════════════════════════════════════
   {
     name: "app.help",
-    title: "Help",
+    title: {en:"Help",zh:"帮助"},
     category: "system",
     keys: [],
     slashName: "help",
@@ -60,14 +45,14 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "app.quit",
-    title: "Quit",
+    title: {en:"Quit",zh:"退出"},
     category: "system",
     keys: ["q"],
     slashName: "quit",
   },
   {
     name: "projects.bin",
-    title: "Archived Projects",
+    title: {en:"Archived Projects",zh:"归档项目"},
     category: "action",
     keys: [],
     slashName: "bin",
@@ -79,7 +64,7 @@ export const REGISTRY: CommandDef[] = [
   // ═══════════════════════════════════════════════════════════
   {
     name: "projects.create",
-    title: "Create Project",
+    title: {en:"Create Project",zh:"创建项目"},
     category: "action",
     keys: [],
     slashName: "create",
@@ -87,7 +72,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "projects.update",
-    title: "Software Update",
+    title: {en:"Software Update",zh:"软件更新"},
     category: "system",
     keys: [],
     slashName: "update",
@@ -95,7 +80,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "projects.archive",
-    title: "Archive Project",
+    title: {en:"Archive Project",zh:"归档项目"},
     category: "action",
     keys: [],
     slashName: "archive",
@@ -103,7 +88,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "projects.stats_overview",
-    title: "Usage Overview",
+    title: {en:"Usage Overview",zh:"全局用量概览"},
     category: "action",
     keys: [],
     slashName: "stats",
@@ -112,7 +97,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "projects.export",
-    title: "Export Knowledge",
+    title: {en:"Export Knowledge",zh:"导出知识"},
     category: "action",
     keys: [],
     slashName: "export",
@@ -120,7 +105,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "projects.config",
-    title: "Settings",
+    title: {en:"Settings",zh:"设置"},
     category: "system",
     keys: [],
     slashName: "config",
@@ -128,31 +113,31 @@ export const REGISTRY: CommandDef[] = [
     children: [
       {
         name: "config.general",
-        title: "General Settings",
+        title: {en:"General Settings",zh:"通用设置"},
         category: "system",
         keys: [],
         slashName: "general",
       },
       {
         name: "config.llm",
-        title: "Providers",
+        title: {en:"Providers",zh:"模型服务商"},
         category: "system",
         keys: [],
         slashName: "providers",
         slashAliases: ["llm"],
         children: [
-          { name: "config.llm.default", title: "Default Provider", category: "system", keys: [], slashName: "default" },
+          { name: "config.llm.default", title: {en:"Default Provider",zh:"默认服务商"}, category: "system", keys: [], slashName: "default" },
         ],
       },
       {
         name: "config.bin",
-        title: "Bin",
+        title: {en:"Bin",zh:"归档与删除"},
         category: "system",
         keys: [],
         slashName: "bin",
         hidden: true,
         children: [
-          { name: "config.bin.delete_delay", title: "Delete Delay", category: "system", keys: [], slashName: "delete_delay" },
+          { name: "config.bin.delete_delay", title: {en:"Delete Delay",zh:"删除延迟"}, category: "system", keys: [], slashName: "delete_delay" },
         ],
       },
     ],
@@ -163,22 +148,22 @@ export const REGISTRY: CommandDef[] = [
   // ═══════════════════════════════════════════════════════════
   {
     name: "nav.processlist",
-    title: "Process List",
+    title: {en:"Process List",zh:"Agent 进程列表"},
     category: "navigation",
     keys: [],
     slashName: "processlist",
     scene: ["workspace", "agent_detail"],
   },
   {
-    name:"workspace.publish",title:"Publish",category:"action",keys:[],slashName:"publish",
+    name:"workspace.publish",title:{en:"Publish",zh:"发布管理"},category:"action",keys:[],slashName:"publish",
     scene:["projects","workspace","agent_detail"],children:[
-      {name:"publish.trial",title:"Trial changes",category:"action",keys:[],slashName:"trial"},
-      {name:"publish.formal",title:"Formal commits",category:"action",keys:[],slashName:"formal"},
+      {name:"publish.trial",title:{en:"Trial changes",zh:"试验变更"},category:"action",keys:[],slashName:"trial"},
+      {name:"publish.formal",title:{en:"Formal commits",zh:"正式提交"},category:"action",keys:[],slashName:"formal"},
     ],
   },
   {
     name: "workspace.compact",
-    title: "Compact Context",
+    title: {en:"Compact Context",zh:"压缩上下文"},
     category: "action",
     keys: [],
     slashName: "compact",
@@ -186,7 +171,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "workspace.undo",
-    title: "Rewind Latest Conversation Turn",
+    title: {en:"Rewind Latest Conversation Turn",zh:"撤回最近一轮会话"},
     category: "action",
     keys: [],
     slashName: "undo",
@@ -195,7 +180,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "workspace.btw",
-    title: "Isolated Side Question",
+    title: {en:"Isolated Side Question",zh:"独立旁路问答"},
     category: "action",
     keys: [],
     slashName: "btw",
@@ -204,7 +189,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "workspace.stats",
-    title: "Project Statistics & Timeline",
+    title: {en:"Project Statistics & Timeline",zh:"项目统计与任务时间轴"},
     category: "action",
     keys: [],
     slashName: "stats",
@@ -213,7 +198,7 @@ export const REGISTRY: CommandDef[] = [
   },
   {
     name: "workspace.runtime",
-    title: "Runtime Data",
+    title: {en:"Runtime Data",zh:"运行时数据"},
     category: "action",
     keys: [],
     slashName: "runtime",
@@ -221,98 +206,98 @@ export const REGISTRY: CommandDef[] = [
     children: [
       {
         name: "runtime.lesson",
-        title: "Lessons",
+        title: {en:"Lessons",zh:"经验知识"},
         category: "action",
         keys: [],
         slashName: "lesson",
         children: [
-          { name: "runtime.lesson.list", title: "List lessons", category: "action", keys: [], slashName: "list" },
-          { name: "runtime.lesson.search", title: "Search lessons", category: "action", keys: [], slashName: "search" },
-          { name: "runtime.lesson.verify", title: "Verify a lesson by ID", category: "action", keys: [], slashName: "verify" },
+          { name: "runtime.lesson.list", title: {en:"List lessons",zh:"浏览经验"}, category: "action", keys: [], slashName: "list" },
+          { name: "runtime.lesson.search", title: {en:"Search lessons",zh:"搜索经验"}, category: "action", keys: [], slashName: "search" },
+          { name: "runtime.lesson.verify", title: {en:"Verify a lesson by ID",zh:"按 ID 验证经验"}, category: "action", keys: [], slashName: "verify" },
         ],
       },
       {
         name: "runtime.contract",
-        title: "Contract",
+        title: {en:"Contract",zh:"项目合同"},
         category: "action",
         keys: [],
         slashName: "contract",
       },
       {
         name: "runtime.governance",
-        title: "Governance",
+        title: {en:"Governance",zh:"治理数据"},
         category: "action",
         keys: [],
         slashName: "governance",
         children: [
-          { name: "runtime.governance.quality", title: "Quality Metrics", category: "action", keys: [], slashName: "quality" },
-          { name: "runtime.governance.patterns", title: "Change Patterns", category: "action", keys: [], slashName: "patterns" },
-          { name: "runtime.governance.feed", title: "Event Feed", category: "action", keys: [], slashName: "feed" },
-          { name: "runtime.governance.releases", title: "Releases", category: "action", keys: [], slashName: "releases" },
+          { name: "runtime.governance.quality", title: {en:"Quality Metrics",zh:"质量指标"}, category: "action", keys: [], slashName: "quality" },
+          { name: "runtime.governance.patterns", title: {en:"Change Patterns",zh:"变更模式"}, category: "action", keys: [], slashName: "patterns" },
+          { name: "runtime.governance.feed", title: {en:"Event Feed",zh:"事件记录"}, category: "action", keys: [], slashName: "feed" },
+          { name: "runtime.governance.releases", title: {en:"Releases",zh:"发布记录"}, category: "action", keys: [], slashName: "releases" },
         ],
       },
       {
         name: "runtime.memory",
-        title: "Memory Snapshots",
+        title: {en:"Memory Snapshots",zh:"记忆快照"},
         category: "action",
         keys: [],
         slashName: "memory",
         children: [
-          { name: "runtime.memory.snapshot", title: "Create snapshot", category: "action", keys: [], slashName: "snapshot" },
-          { name: "runtime.memory.list", title: "List snapshots", category: "action", keys: [], slashName: "list" },
-          { name: "runtime.memory.restore", title: "Restore snapshot by timestamp", category: "action", keys: [], slashName: "restore" },
+          { name: "runtime.memory.snapshot", title: {en:"Create snapshot",zh:"创建快照"}, category: "action", keys: [], slashName: "snapshot" },
+          { name: "runtime.memory.list", title: {en:"List snapshots",zh:"浏览快照"}, category: "action", keys: [], slashName: "list" },
+          { name: "runtime.memory.restore", title: {en:"Restore snapshot by timestamp",zh:"按时间恢复快照"}, category: "action", keys: [], slashName: "restore" },
         ],
       },
       {
         name: "runtime.context",
-        title: "Context Panel",
+        title: {en:"Context Panel",zh:"上下文面板"},
         category: "navigation",
         keys: [],
         slashName: "context",
       },
       {
         name: "runtime.tools",
-        title: "Saved Custom Tools",
+        title: {en:"Saved Custom Tools",zh:"自定义动作"},
         category: "action",
         keys: [],
         slashName: "tools",
       },
       {
         name: "runtime.recovery",
-        title: "Daemon Recovery",
+        title: {en:"Daemon Recovery",zh:"Daemon 恢复"},
         category: "action",
         keys: [],
         slashName: "recovery",
         children: [
-          { name: "runtime.recovery.resume", title: "Resume a safe candidate", category: "action", keys: [], slashName: "resume" },
-          { name: "runtime.recovery.resume_verified", title: "Resume after manual verification", category: "action", keys: [], slashName: "resume_verified" },
-          { name: "runtime.recovery.discard", title: "Discard a recovery candidate", category: "action", keys: [], slashName: "discard" },
+          { name: "runtime.recovery.resume", title: {en:"Resume a safe candidate",zh:"恢复安全候选"}, category: "action", keys: [], slashName: "resume" },
+          { name: "runtime.recovery.resume_verified", title: {en:"Resume after manual verification",zh:"人工核验后恢复"}, category: "action", keys: [], slashName: "resume_verified" },
+          { name: "runtime.recovery.discard", title: {en:"Discard a recovery candidate",zh:"放弃恢复候选"}, category: "action", keys: [], slashName: "discard" },
         ],
       },
       {
         name: "runtime.trial",
-        title: "Trial (External PRs)",
+        title: {en:"Trial (External PRs)",zh:"外部 PR 试验仓"},
         category: "action",
         keys: [],
         slashName: "trial",
         hidden: true,
         children: [
-          { name: "runtime.trial.list", title: "List incoming PRs", category: "action", keys: [], slashName: "list" },
-          { name: "runtime.trial.triage", title: "Triage: accept/promote/discard", category: "action", keys: [], slashName: "triage" },
+          { name: "runtime.trial.list", title: {en:"List incoming PRs",zh:"浏览外部 PR"}, category: "action", keys: [], slashName: "list" },
+          { name: "runtime.trial.triage", title: {en:"Triage: accept/promote/discard",zh:"审阅并处置试验"}, category: "action", keys: [], slashName: "triage" },
         ],
       },
       {
         name: "runtime.formal",
-        title: "Formal Commits",
+        title: {en:"Formal Commits",zh:"正式提交"},
         category: "action",
         keys: [],
         slashName: "formal",
         hidden: true,
         children: [
-          { name: "runtime.formal.list", title: "List formal commits", category: "action", keys: [], slashName: "list" },
-          { name: "runtime.formal.edit", title: "Edit commit message", category: "action", keys: [], slashName: "edit" },
-          { name: "runtime.formal.delete", title: "Delete formal commit", category: "action", keys: [], slashName: "delete" },
-          { name: "runtime.formal.dissolve", title: "Dissolve formal commit", category: "action", keys: [], slashName: "dissolve" },
+          { name: "runtime.formal.list", title: {en:"List formal commits",zh:"浏览正式提交"}, category: "action", keys: [], slashName: "list" },
+          { name: "runtime.formal.edit", title: {en:"Edit commit message",zh:"编辑提交说明"}, category: "action", keys: [], slashName: "edit" },
+          { name: "runtime.formal.delete", title: {en:"Delete formal commit",zh:"删除正式提交"}, category: "action", keys: [], slashName: "delete" },
+          { name: "runtime.formal.dissolve", title: {en:"Dissolve formal commit",zh:"解除正式提交"}, category: "action", keys: [], slashName: "dissolve" },
         ],
       },
     ],
@@ -365,7 +350,7 @@ function visible(defs: CommandDef[]): CommandDef[] {
 /** Return top-level suggestions for the given scene. */
 function topLevelCommands(scene: Scene): CommandDef[] {
   if (scene === "process_list") return visible(REGISTRY).filter(c =>
-    c.name.startsWith("process.") || c.name === "app.help"
+    c.scene?.includes(scene) && c.name.startsWith("process.") || c.name === "app.help"
   );
   return visible(REGISTRY).filter((c) => !c.scene || c.scene.includes(scene));
 }
@@ -422,7 +407,6 @@ export function getCommands(scene: Scene, cmdValue?: string, language: "en" | "z
 }
 
 /** Returns all keybindings visible in the help panel for a given scene */
-export function getKeybindings(scene: Scene): CommandDef[] {
-  const defs = visible(REGISTRY).filter((c) => !c.scene || c.scene.includes(scene));
-  return sortByName(defs);
+export function getKeybindings(scene: Scene, language: Language = "en"): Array<Omit<CommandDef,"title"> & {title:string}> {
+  return sortByName(topLevelCommands(scene).map(def=>({...def,title:description(def,language)})));
 }

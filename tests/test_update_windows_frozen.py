@@ -72,7 +72,7 @@ def test_frozen_windows_bootstrap_recovers_after_switch_interruption(actual_lab,
         with pytest.raises(Crash): handoff._consume_request(store, nonce, 75, finish_disposable_handoff())
     host = store.root / "bootstrap/gitgo-host/gitgo-host.exe"
     result = subprocess.run([str(host), "--gitgo-internal-role", "managed-recover"], env=env,
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "rolled_back"
     boot(old)
@@ -85,7 +85,7 @@ def test_real_windows_managed_launcher_and_live_lease(actual_lab):
     # escaping of nested quotes is not cmd.exe's /s /c quoting grammar.
     command = 'cmd.exe /d /s /c ""' + str(store.root / 'gitgo.cmd') + '" --version"'
     result = subprocess.run(command,
-        env=env, capture_output=True, text=True, timeout=120)
+        env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "Gitgo " + old
     with store.runtime_lease():
@@ -160,16 +160,126 @@ except Exception as error:
             "installer_error": safe_errors[-4096:], "stderr_bytes": len(diagnostic_errors),
             "role_exit": role_proc.returncode, "role_output": role_output.strip(),
             "cleanup": proc._gitgo_cleanup}))
-    assert open_managed(root).registration["bootstrap_api"] == 7
+    assert open_managed(root).registration["bootstrap_api"] == 8
     command = bin_dir / "gitgo.ps1"
     assert command.read_bytes().startswith(b"\xef\xbb\xbf")
     launch = subprocess.run([shell, "-NoProfile", "-File", str(command), "--version"], env=env,
-        cwd=base, capture_output=True, text=True, timeout=120)
+        cwd=base, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     assert launch.returncode == 0, launch.stderr
     assert launch.stdout.strip() == "Gitgo " + old
     before = (root / "control/ledger.json").read_bytes()
     duplicate = subprocess.run([shell, "-NoProfile", "-File", str(seed / "install-managed.ps1"),
         "-Root", str(root), "-BinDir", str(bin_dir)], env=env,
-        cwd=base, capture_output=True, text=True, timeout=60)
+        cwd=base, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     assert duplicate.returncode != 0
     assert (root / "control/ledger.json").read_bytes() == before
+
+def test_real_windows_bootstrap_automatically_applies_prepared_update_on_clean_exit(actual_lab):
+    store, prepare, boot, _, old, new, env = actual_lab
+    prepare()
+    host=store.root/"bootstrap/gitgo-host/gitgo-host.exe"
+    result=subprocess.run([str(host),"--gitgo-internal-role","managed-launch","--version"],
+        env=env,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=180)
+    assert result.returncode==0,result.stderr
+    assert "Gitgo "+old in result.stdout,result.stdout
+    assert any(json.loads(line).get("update_status") == "committed"
+               for line in result.stdout.splitlines() if line.startswith("{")),result.stdout
+    assert store._ledger()["current"]["version"]==new
+    boot(new)
+
+
+def test_real_windows_bootstrap_respects_disabled_automatic_install(actual_lab):
+    store, prepare, boot, before, old, _, _ = actual_lab
+    service,_=prepare()
+    service.configure("preview",True,True,False,0)
+    boot(old)
+    assert tree_digest(store.root/"active")==before
+
+def test_real_managed_host_retains_lease_with_sandbox_program_rx(actual_lab):
+    from backend.core.sandbox_access import WorkspaceAccess
+    from scripts.smoke_packaged_runtime import ProtocolClient
+    store, _, boot, before, old, _, env = actual_lab
+    workspace=store.root.parent/"sandbox-rx-project";workspace.mkdir()
+    access=WorkspaceAccess(workspace,[store.root/"active"],store.root.parent/"sandbox-rx-access.json")
+    try:
+        access.prepare()
+        boot(old)
+        client=ProtocolClient(store.root/"active/internal/gitgo-host/gitgo-host.exe",env)
+        try:
+            assert client.call("product.version")["result"]["version"]==old
+            assert open_managed(store.root).recover().status=="busy"
+        finally:client.close()
+        assert tree_digest(store.root/"active")==before
+    finally:access.close()
+
+
+def test_managed_appcontainer_uses_only_inherited_lease_not_private_control(actual_lab):
+    """Actual frozen child; a source parent without admission cannot forge it."""
+    from backend.core.sandbox_access import WorkspaceAccess
+    from backend.core.sandbox import SandboxPolicy, sandbox_environment, sandbox_popen
+    from backend.core.process_control import terminate_tree
+    from backend.core.process_output import collect_output
+    store, _, _, before, _, _, env = actual_lab
+    # Health probes omit user folders; creating an AppContainer needs the
+    # operator profile location, as in the normal sandbox environment.
+    env={**env,"LOCALAPPDATA":os.environ["LOCALAPPDATA"]}
+    workspace=store.root.parent/"restricted-managed-tools";workspace.mkdir()
+    host=store.root/"active/internal/gitgo-host/gitgo-host.exe"
+    access=WorkspaceAccess(workspace,[store.root/"active"],store.root.parent/"restricted-access.json")
+    child = """
+import json,os
+from pathlib import Path
+from backend.core.update.sandbox_admission import in_appcontainer
+from backend.core.installation_lease import runtime_descriptors
+assert in_appcontainer()
+assert runtime_descriptors()
+denied=[]
+for descriptor in runtime_descriptors():
+    for operation in (lambda:os.read(descriptor,1),lambda:os.write(descriptor,b"x")):
+        try:operation()
+        except OSError:denied.append("contents")
+        else:raise AssertionError("Lease content authority leaked")
+control=Path(CONTROL_PATH)
+try:control.read_bytes()
+except PermissionError:denied.append("private-control")
+else:raise AssertionError("Private update control was readable")
+print(json.dumps({"restricted":True,"denied":denied}),flush=True)
+""".replace("CONTROL_PATH",repr(str(store.root/"control/ledger.json")))
+    driver = """
+import json,subprocess
+from pathlib import Path
+from backend.core.child_process import python_command
+from backend.core.sandbox import SandboxPolicy,sandbox_environment,sandbox_popen
+from backend.core.process_control import terminate_tree
+from backend.core.process_output import collect_output
+import os
+process=sandbox_popen(python_command(["-c",CHILD]),SandboxPolicy(Path(WORKSPACE)),
+ cwd=WORKSPACE,env=sandbox_environment(os.environ),
+ stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8")
+out,err,_=collect_output(process,timeout=45,limit=65536,terminate=lambda:terminate_tree(process))
+assert process.returncode==0,(process.returncode,out,err)
+cleanup=process.close_sandbox()
+assert cleanup["complete"],cleanup
+print(out,flush=True)
+""".replace("CHILD",repr(child)).replace("WORKSPACE",repr(str(workspace)))
+    try:
+        access.prepare()
+        run=subprocess.run([str(host),"--gitgo-internal-role","python","-c",driver],env=env,
+            capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=90)
+        assert run.returncode==0,run.stdout+"\n"+run.stderr
+        result=json.loads(run.stdout)
+        assert result["restricted"] and result["denied"].count("contents")>=2
+        assert "private-control" in result["denied"]
+        # No managed parent descriptor is registered in this source test process.
+        # A selector in an environment cannot substitute for that capability.
+        forged=sandbox_environment(env)
+        forged["GITGO_SANDBOX_INSTALL_LEASE_HANDLES"]="12345"
+        process=sandbox_popen([str(host),"--gitgo-internal-role","python","-c",
+            "print('UNSAFE_BODY_STARTED')"],SandboxPolicy(workspace),cwd=str(workspace),env=forged,
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8")
+        out,err,_=collect_output(process,timeout=45,limit=65536,terminate=lambda:terminate_tree(process))
+        assert process.returncode!=0,(out,err)
+        assert "UNSAFE_BODY_STARTED" not in out
+        assert process.close_sandbox()["complete"]
+        assert tree_digest(store.root/"active")==before
+    finally:access.close()

@@ -1,1 +1,17 @@
 Manage versioned requirement and evidence workflows through the existing runtime and user-question broker. Built-in presets accept profiles plus concrete test_id/target_files, questions(id,state_topic,depends_on), glossary_path or agent_document_path; check_argv/check_cwd bind non-pytest checks; preparation_files permits building evidence harnesses before red without permitting product fixes. omit nodes to compile a preset. configure accepts a bounded dependency graph with profiles alignment, domain_modeling, diagnosis, tdd, architecture, retrospective or agent_documentation. Nodes use decision(state_topic), observation(tools), check(test_id,passed), change(files), document(path), or report(format). depends_on controls the ready frontier; before_mutation enforces prerequisites. status returns outstanding evidence; ask routes one ready decision through the existing user broker. For requirement alignment, declare questions with request(question,why_user_must_decide,kind,options) and depends_on; when maps ancestor IDs to accepted labels. ask_frontier presents ONE ready question, then adopts the real answer before selecting another. Extend the graph as answers reveal new choices; revise_decision reopens an answer and invalidates its dependents. Research factual unknowns with observation nodes; only material user-owned decisions become questions. Do not interview greetings or ask facts available from tools. record saves a document hash or structured report. The runtime observes real tool receipts and user answers; the model supplies source-bound interpretations. Receiving free-form text does not resolve a decision. resolve_answer(node_id,decision_id,content) records a source-bound interpretation: content has disposition confirmed/partial/deferred/delegated, value, an exact quote from that user's answer, and remaining for unresolved input. Only confirmed or explicitly delegated answers close gates. retrospective derives findings from current task receipts. Existing permissions remain mandatory; unavailable checks never become passes. propose_amendment(plan,reason) offers a concrete scope change to the user; only the matching user decision can weaken an active plan.
+
+Graph API details: every node uses kind (not type) and a unique id; always include
+profiles and the full retained graph when extending an active plan. Omit nodes
+only when intentionally compiling a preset. Do not install an unrelated preset
+as a schema probe: doing so creates actual requirements. A check's passed boolean
+is the EXPECTED result, never a recorded pass; completion requires matching real
+execution receipts. before_mutation belongs on prerequisites, never on change.
+For custom read-only observation/report work, for example:
+{"profiles":["retrospective"],"nodes":[
+ {"id":"inspect","kind":"observation","tools":["status"]},
+ {"id":"retro","kind":"report","format":"retrospective","depends_on":["inspect"]}]}
+A ready node is eligible to collect evidence, not complete. status alone does not
+prove an attempted mutation was blocked. Distinguish schema rejection, dependency
+readiness, actual tool interception, test execution and test success in reports.
+
+For semantic questions, explain the missing user information and its relevance, not an invented wrong-choice risk. A request to discuss before choosing can be answered as a scoped exploratory response while the original choice remains unresolved.

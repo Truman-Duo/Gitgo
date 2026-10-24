@@ -30,7 +30,10 @@ def admission_snapshot(process, active_tools, known_tools):
         options.append({'tool': 'request_self_execute',
                         'effect': 'Request a task-scoped capability lease under existing policy.',
                         'leaf_approval_still_required': True})
-    return {'active_tools': sorted(active), 'execution_mode': contract.get('execution_mode', 'undeclared'),
+    return {'scope': 'current_process_current_contract',
+            'inactive_catalog_scope': 'self_execution_capability_profiles_only',
+            'control_protocols_require_task_routing': True,
+            'active_tools': sorted(active), 'execution_mode': contract.get('execution_mode', 'undeclared'),
             'lease_profile': getattr(lease, 'profile_id', '') if lease else '',
             'requestable_profiles': profiles, 'admission_options': options,
             'authority_granted': False}
@@ -101,6 +104,7 @@ def _select_authorized_tools(
             "decision_evidence", "declare_task_contract", "prepare_task_bundle", "delegate_task",
             "delegate_task_dag", "delegate_task_bundle", "list_agents", "wait_agents",
             "send_feedback", "cancel_agent", "request_review",
+            "list_coordination_events", "resolve_coordination_event",
             "review_child_outcome", "request_user_decision", "request_permission",
             "acknowledge_governance_signal",
             "define_tool", "author_tool", "engineering_workflow",

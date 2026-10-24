@@ -196,6 +196,7 @@ class ApplicationServices:
             "config.get": self.config_get,
             "product.version": self.product_version,
             "update.status": self.update_status,
+            "update.configure": self.update_configure,
             "update.check": self.update_check,
             "update.download": self.update_download,
             "update.cancel": self.update_cancel,
@@ -566,7 +567,11 @@ class ApplicationServices:
         except UpdateError as error: raise OperationError(error.code, str(error)) from None
         except Exception: raise OperationError("UPDATE_PREPARATION_FAILED", "Update preparation failed; current program unchanged") from None
 
-    def update_status(self, channel: str = "stable") -> dict:
+    def update_configure(self, channel: str, automatic_check: bool, automatic_download: bool,
+                         automatic_install: bool, revision: int) -> dict:
+        return self._update_call(self.updates.configure, channel, automatic_check, automatic_download, automatic_install, revision)
+
+    def update_status(self, channel: str | None = None) -> dict:
         return self._update_call(self.updates.status, channel)
 
     def update_check(self, channel: str, operation_id: str) -> dict:

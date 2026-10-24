@@ -707,3 +707,48 @@ def test_backend_cannot_open_sqlite_outside_storage_facade():
             elif isinstance(fn, ast.Name) and fn.id in sqlite_connectors:
                 offenders.append(str(path))
     assert offenders == []
+
+def test_legacy_child_failure_remains_readable_after_reopen(tmp_path_factory):
+    workspace = _workspace(tmp_path_factory)
+    state_home=tmp_path_factory/"state"
+    with StorageRuntime(workspace,state_home=state_home) as runtime:
+        runtime.save_agent_checkpoint({
+            "process_id":"root","session_id":"root-session","task_id":"root-task",
+            "status":"completed","actor_kind":"supervisor","role":"supervisor",
+            "messages":[{"role":"user","content":"inspect the failed child"}],
+            "result":{"status":"completed","response":"not delivered"}})
+        runtime.save_agent_checkpoint({
+            "process_id":"child","parent_process_id":"root","session_id":"child-session",
+            "task_id":"child-task","status":"failed","actor_kind":"worker",
+            "messages":[{"role":"user","content":"read required input"}],
+            "result":{"process_id":"child","status":"failed",
+                      "code":"UPSTREAM_DEPENDENCY_FAILED","error":"required upstream failed"}})
+    with StorageRuntime(workspace,state_home=state_home) as runtime:
+        view=runtime.read_latest_conversations()
+        message=view["agent_conversations"]["child"][-1]
+        assert message["kind"]=="error" and message["status"]=="failed"
+        assert message["content"]=="[Error: [UPSTREAM_DEPENDENCY_FAILED] required upstream failed]"
+
+
+def test_retained_user_annotations_keep_original_turn_on_continuation(tmp_path_factory):
+    from backend.core.storage import StorageRuntime
+    ws=tmp_path_factory/"retained";ws.mkdir()
+    with StorageRuntime(ws) as store:
+        def save(pid,task,messages,response):
+            store.save_agent_checkpoint(dict(process_id=pid,session_id="shared",task_id=task,
+                parent_id="owner",actor_kind="worker",status="completed",messages=messages,
+                result={"status":"completed","response":response,"process_id":pid}))
+        first={"role":"user","content":"first request"}
+        save("p1","t1",[first],"first answer")
+        retained={**first,"provider_visible":False}
+        save("p2","t2",[retained,{"role":"user","content":"second request"}],"second answer")
+        view=store._public_session_messages("shared")
+        assert [(m["role"],m["content"]) for m in view]==[
+            ("user","first request"),("assistant","first answer"),
+            ("user","second request"),("assistant","second answer")]
+        # Reproduce already stored old-version misbinding without changing CAS.
+        with store._state_lock:
+            store._state.execute("UPDATE messages SET task_id='t2' WHERE session_id='shared'")
+        view=store._public_session_messages("shared")
+        assert [m["content"] for m in view]==[
+            "first request","first answer","second request","second answer"]

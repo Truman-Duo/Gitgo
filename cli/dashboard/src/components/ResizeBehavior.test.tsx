@@ -146,6 +146,7 @@ test('subprocess selection scrolls into view without displacing the footer', asy
       <InputProvider>
         <ProcessList project="fixture" loopData={loopData} cols={columns} selIdx={selected}/>
       </InputProvider>
+      <Box height={1} minHeight={1} flexShrink={0}><Text>GLOBAL STATUS</Text></Box>
     </Box>;
   }
   const root = renderSync(<Fixture selected={0}/>, tty);
@@ -154,7 +155,13 @@ test('subprocess selection scrolls into view without displacing the footer', asy
     selectedRowIsVisible(tty, 'id-34');
     tty.stdout.columns = 36; tty.stdout.rows = 14; tty.stdout.emit('resize'); await settle();
     selectedRowIsVisible(tty, 'id-34');
-    expect(text((instances.get(tty.stdout) as any).rootNode)).toContain('detail');
+    const tree=(instances.get(tty.stdout) as any).rootNode;
+    expect(text(tree)).not.toContain('PgUp/PgDn scroll');
+    const footer=nodes(tree).find(node=>node.nodeName==='#text'&&node.nodeValue==='GLOBAL STATUS');
+    expect(footer).toBeDefined();
+    let top=0;
+    for(let node=footer.parentNode;node;node=node.parentNode)top+=node.yogaNode?.getComputedTop()||0;
+    expect(top).toBe(13);
   } finally { dispose(root, tty); }
 });
 

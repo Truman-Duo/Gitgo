@@ -172,7 +172,7 @@ export const colors = {
   // ── Animation ──────────────────────────────────────────────
   animation: {
     lerp: { frames: 4, intervalMs: 37 },
-    collapse: { durationMs: 180, intervalMs: 25 },
+    collapse: { durationMs: 180, intervalMs: 16 },
   },
 
   // ── Tool colors ──────────────────────

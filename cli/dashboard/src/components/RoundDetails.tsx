@@ -8,6 +8,7 @@ import type { ChatMessage, StreamActivity } from "../types.js";
 import { roundTraceEvents } from "../chat/roundTrajectory.js";
 import type { TraceRecord } from "../traceView.js";
 import { colors } from "../theme/index.js";
+import {cachedTrace, cacheTrace, traceCacheKey} from "../chat/traceCache.js";
 import { timelineFromTrace } from "../chat/turnTimeline.js";
 import { TurnTimeline } from "./TurnTimeline.js";
 
@@ -42,12 +43,17 @@ export function RoundDetails({ message, client, project, verbose, width, include
   message: ChatMessage; client?: BackendClient; project?: string;
   verbose: boolean; width: number; includeDescendants?: boolean; readTrace?: boolean;
 }) {
-  const [trace, setTrace] = useState<{ events: TraceRecord[]; truncated: boolean } | null>(null);
+  const cacheKey = traceCacheKey(project || "", message.trace_id || "", message.process_id || "", includeDescendants, message.status);
+  const terminal = ["completed", "failed", "cancelled", "timed_out", "degraded"].includes(message.status || "");
+  const [trace, setTrace] = useState<{ events: TraceRecord[]; truncated: boolean } | null>(
+    () => client && terminal ? cachedTrace(client, cacheKey) : null);
   const [error, setError] = useState("");
-  const canRead = Boolean(readTrace && client && project && message.trace_id);
+  const canRead = Boolean(client && project && message.trace_id);
   useEffect(() => {
     if (!readTrace || !client || !project || !message.trace_id) return;
     let alive = true;
+    const saved = terminal ? cachedTrace(client, cacheKey) : null;
+    if (saved) {setTrace(saved); setError(""); return;}
     setTrace(null);
     setError("");
     void (async () => {
@@ -75,10 +81,12 @@ export function RoundDetails({ message, client, project, verbose, width, include
         afterSeq = nextSeq;
         if (events.length >= maximumEvents) truncated = true;
       }
-      if (alive) setTrace({ events: events.slice(0, maximumEvents), truncated });
+      const value = {events: events.slice(0, maximumEvents), truncated};
+      if (terminal) cacheTrace(client, cacheKey, value);
+      if (alive) setTrace(value);
     })().catch((err: unknown) => { if (alive) setError(String(err)); });
     return () => { alive = false; };
-  }, [client, project, message.trace_id, message.process_id, includeDescendants, readTrace]);
+  }, [client, project, message.trace_id, message.process_id, includeDescendants, readTrace, cacheKey, terminal]);
 
   const fallbackActivity: StreamActivity[] = message.activity?.length
     ? message.activity

@@ -76,6 +76,7 @@ def install(ctx):
             "processes": {}, "all_terminal": False,
             "state_version": 0, "state_changed": False,
         }
+        from backend.core.loop.question_broker import decision_evidence
         for child_id, state in waited["processes"].items():
             child = _owned_child(child_id)
             outcome = (
@@ -101,6 +102,7 @@ def install(ctx):
                 "steps_used": outcome.get("steps_used", 0),
                 "tool_calls_executed": outcome.get("tool_calls_executed", 0),
                 "cache_summary": metadata.get("cache_summary"),
+                "user_decisions": decision_evidence(child) if child is not None else None,
             }
         return {
             "agents": results,

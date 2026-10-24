@@ -17,6 +17,18 @@ class TrialMixin:
         self.stage = SessionStage.TRIAL_CHECKING
         self.on_stage_changed(self.stage)
 
+        try:
+            return self._check_trial_changes()
+        except Exception:
+            self.stage = SessionStage.FAILED
+            self.on_stage_changed(self.stage)
+            raise
+        finally:
+            if self.stage is SessionStage.TRIAL_CHECKING:
+                self.stage = SessionStage.IDLE
+                self.on_stage_changed(self.stage)
+
+    def _check_trial_changes(self) -> list[IncomingChange]:
         trial_node = self.project.trial
         if not trial_node or not trial_node.file_access.path:
             self.on_log("未配置 Trial 仓库，跳过")

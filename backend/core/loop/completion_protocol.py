@@ -242,13 +242,23 @@ class HostCompletionEvaluator:
             if harness_result.blocked and not extra:
                 extra.append("completion policy plugin blocked delivery")
             gates.extend(extra.gates)
-        return {"ready": not gates, "gate_count": len(gates), "gates": gates}
+        return {"ready": not gates, "gate_count": len(gates), "gates": gates,
+                "assessment_kind": "readiness_probe" if candidate is None else "candidate_evaluation",
+                "candidate_source": ("supplied" if candidate is not None else
+                                     "completion_claim" if claim or review_claim else "placeholder"),
+                "task_id": process.active_task_id or process.process_id}
 
     @classmethod
     def evaluate(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
         from .completion_gates import CompletionReasons
         reasons = CompletionReasons()
         context, _ = process.read_context_snapshot() if getattr(process, 'read_context_snapshot', None) else ({}, 0)
+        from .coordination import pending_source_interface_decisions
+        pending_interfaces = pending_source_interface_decisions(process)
+        if pending_interfaces:
+            with reasons.scope("coordination_decision"):
+                reasons.append("output interface revision awaits supervisor decision: "
+                               + ", ".join(pending_interfaces))
         alignment = context.get('alignment_runtime') or {}
         review_required = True
         from .alignment_routing import uses_on_demand_review

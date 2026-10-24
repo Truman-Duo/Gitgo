@@ -53,7 +53,7 @@ export function HorizontalHeaderStrip({ items, selected, width, contentFocused =
   const visible = items.slice(window.start, window.end);
   const slot = (key: string, child: React.ReactNode) =>
     <Box key={key} flexGrow={1} flexBasis={window.slotWidth} justifyContent="center">{child}</Box>;
-  return <Box flexDirection="row" width="100%" overflow="hidden">
+  return <Box flexDirection="row" width="100%" height={1} minHeight={1} flexShrink={0} overflow="hidden">
     {window.left ? slot("overflow-left", <Text dimColor>...</Text>) : null}
     {visible.map((item, offset) => {
       const index = window.start + offset;

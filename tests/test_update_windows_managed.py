@@ -55,7 +55,7 @@ def managed(tmp_path_factory, monkeypatch, signing):
 def test_registration_uses_windows_only_bootstrap_and_schema(managed):
     store, _, _ = managed
     assert store.registration["schema_version"] == 6
-    assert store.registration["bootstrap_api"] == 7
+    assert store.registration["bootstrap_api"] == 8
     assert store.registration["simulation"] is False
     assert store.registration["updates_enabled"] is False
     assert (store.root / "bootstrap/gitgo-host/gitgo-host.exe").is_file()
@@ -84,7 +84,7 @@ def test_changed_immutable_control_cannot_admit_windows_runtime(managed, compone
     elif component == "bootstrap": (store.root / "bootstrap/gitgo-host/gitgo-host.exe").write_bytes(b"changed")
     else:
         path = store.root / "control/registration.json"; value = read_control(path)
-        value["schema_version" if component == "schema" else "bootstrap_api"] -= 1
+        value["schema_version" if component == "schema" else "bootstrap_api"] = (0 if component == "api" else value["schema_version"] - 1)
         atomic_control(path, value)
     with pytest.raises(UpdateError): open_managed(store.root)
 
@@ -104,7 +104,8 @@ def test_probe_profile_cannot_nest_inside_its_candidate_or_copy_itself(managed):
     assert not (seed / "program").exists()
 
 
-def test_native_windows_download_cache_can_be_flushed_and_revalidated(managed, signing):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_native_windows_download_cache_can_be_flushed_and_revalidated(managed, signing, monkeypatch, automatic):
     import hashlib
     import httpx
     import zipfile
@@ -136,8 +137,23 @@ def test_native_windows_download_cache_can_be_flushed_and_revalidated(managed, s
         return httpx.Response(200, stream=Stream(value))
     service = UpdatePreparationService(store_loader=lambda: open_managed(store.root), clock=lambda: NOW,
         transport_factory=lambda hosts, **options: httpx_transport(hosts, serve, **options))
-    selected = service.check("preview", "a" * 32)["candidate"]["candidate_id"]
-    assert service.download("preview", selected, "b" * 32)["status"] == "downloaded"
+    if automatic:
+        from backend.core.update.automatic import tick, queue_on_clean_exit, configure
+        from backend.core.update import handoff
+        tick(service)
+        selected = service.status()["candidate"]["candidate_id"]
+        assert service.status()["status"] == "downloaded"
+        with handoff.launch_session(store) as nonce:
+            result = queue_on_clean_exit(service, nonce)
+            assert result["candidate_id"] == selected and result["exit_code"] == 75
+            ticket = read_control(handoff._path(store, nonce, "request"))
+            assert ticket["schema_version"] == 2 and ticket["preference_revision"] == 0
+            configure(service, "preview", True, True, False, 0)
+            with pytest.raises(UpdateError, match="UPDATE_SELECTION_STALE"):
+                handoff._perform_request(store, ticket, verify_only=True)
+    else:
+        selected = service.check("preview", "a" * 32)["candidate"]["candidate_id"]
+        assert service.download("preview", selected, "b" * 32)["status"] == "downloaded"
     assert service.status("preview")["status"] == "downloaded"
     cached = next((store.root / "control/preparation").glob("gitgo-update-*/archive.verified"))
     descriptor = win.open_file(cached, write=True)
@@ -179,3 +195,42 @@ raise SystemExit(entry.main(sys.argv[1:]))
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)["native_host_check"] is True
         assert not (profile / "providers.json").exists() and not (profile / "secrets.json").exists()
+
+def test_managed_payload_allows_sandbox_rx_without_exposing_update_controls(managed):
+    from backend.core.sandbox_access import WorkspaceAccess
+    from backend.core.update.tree import tree_digest
+    store,_,_=managed
+    workspace=store.root.parent/"sandbox-workspace";workspace.mkdir()
+    (workspace/"input.txt").write_text("test",encoding="utf-8")
+    before=tree_digest(store.root/"active")
+    access=WorkspaceAccess(workspace,[store.root/"active"],store.root.parent/"sandbox-access.json")
+    try:
+        access.prepare()
+        assert tree_digest(store.root/"active")==before
+        with store.runtime_lease():pass
+        # Program RX must never relax the control ledger's private boundary.
+        with win.opened(store.root/"control/ledger.json"):pass
+    finally:access.close()
+
+def test_program_read_access_does_not_relax_private_control_acl(managed):
+    from backend.core.sandbox_access import WorkspaceAccess
+    store,_,_=managed
+    workspace=store.root.parent/"control-read-workspace";workspace.mkdir()
+    access=WorkspaceAccess(workspace,[store.root/"control"],store.root.parent/"control-read-access.json")
+    try:
+        access.prepare()
+        with pytest.raises(UpdateError,match="UPDATE_ACL_INVALID"):
+            with win.opened(store.root/"control/ledger.json"):pass
+    finally:access.close()
+
+
+def test_program_payload_still_rejects_sandbox_modify_permission(managed):
+    from backend.core.sandbox_access import WorkspaceAccess
+    from backend.core.update.tree import tree_digest
+    store,_,_=managed
+    access=WorkspaceAccess(store.root/"active",[],store.root.parent/"program-modify-access.json")
+    try:
+        access.prepare()
+        with pytest.raises(UpdateError,match="UPDATE_ACL_INVALID"):
+            tree_digest(store.root/"active")
+    finally:access.close()

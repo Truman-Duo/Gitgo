@@ -19,7 +19,7 @@ from .version import Version
 
 PROBE_ROLE = "update-data-probe"
 MAX_REPORT_BYTES = 64 * 1024
-MANAGED_API_VERSION = 7 if os.name == "nt" else 6
+from .bootstrap_contract import CURRENT_API as MANAGED_API_VERSION
 
 
 def isolated_environment(profile: Path) -> dict[str, str]:

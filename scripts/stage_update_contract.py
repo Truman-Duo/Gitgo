@@ -70,4 +70,4 @@ if __name__ == "__main__":
     parser.add_argument("--stage", required=True, type=Path)
     args = parser.parse_args()
     stage_contract(args.stage)
-    print("Frozen runtime data evidence staged; automatic updating remains disabled")
+    print("Frozen runtime data evidence staged; activation still requires managed trust and verified handoff")

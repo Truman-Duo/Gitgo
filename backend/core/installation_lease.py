@@ -38,3 +38,36 @@ def child_options() -> dict:
     # Windows managed spawning translates only this process's registered FDs
     # to an explicit native handle allowlist, never raw environment assertions.
     return {"pass_fds": descriptors} if descriptors and os.name == "posix" else {}
+
+@contextmanager
+def windows_sandbox_lease_handles():
+    """Attenuate registered leases to metadata-only inherited capabilities.
+
+    Duplicates retain the same kernel sharing reservation. They grant no lock
+    contents, mutation, DELETE, WRITE_DAC or WRITE_OWNER authority to tool code.
+    """
+    import ctypes as C
+    if os.name != "nt":
+        raise OSError("Windows lease handles require Windows")
+    descriptors=runtime_descriptors()
+    if len(descriptors)>16:raise ValueError("Too many registered sandbox leases")
+    kernel=C.WinDLL("kernel32",use_last_error=True)
+    duplicate=kernel.DuplicateHandle
+    duplicate.argtypes=[C.c_void_p,C.c_void_p,C.c_void_p,C.c_void_p,C.c_uint32,C.c_int,C.c_uint32]
+    duplicate.restype=C.c_int
+    kernel.GetCurrentProcess.restype=C.c_void_p
+    kernel.CloseHandle.argtypes=[C.c_void_p];kernel.CloseHandle.restype=C.c_int
+    import msvcrt
+    handles=[]
+    try:
+        process=kernel.GetCurrentProcess()
+        for descriptor in descriptors:
+            handle=C.c_void_p()
+            # SYNCHRONIZE | READ_CONTROL | FILE_READ_ATTRIBUTES, no READ_DATA.
+            if not duplicate(process,msvcrt.get_osfhandle(descriptor),process,
+                             C.byref(handle),0x00120080,False,0):
+                raise C.WinError(C.get_last_error())
+            handles.append(handle.value)
+        yield tuple(handles)
+    finally:
+        for handle in handles:kernel.CloseHandle(handle)

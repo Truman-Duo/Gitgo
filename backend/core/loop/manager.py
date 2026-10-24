@@ -275,6 +275,9 @@ class AgentProcessManager:
                 except Exception as exc:
                     process.lifecycle_finalized = False
                     transition(process, ProcessStatus.FAILED)
+                    if process.task_budget is not None:
+                        process.budget_lease = process.task_budget.release_process(
+                            process.process_id, status=process.status.value) or {}
                     process.result = {"process_id": process.process_id, "status": "failed",
                         "code": "SESSION_CHECKPOINT_FAILED", "error": str(exc),
                         "metadata": {"durable_terminal_barrier": False, "automatic_replay_suppressed": True}}
@@ -432,6 +435,31 @@ class AgentProcessManager:
                     self._state_condition.wait(timeout=0.5)
                     continue
                 return ""
+
+    def wait_for_interface_decision(self, process: AgentProcess) -> None:
+        """Park at a provider-safe boundary; reuse the task deadline and wake source.
+
+        A pending proposal is neither rejected work nor permission to seal it.
+        The owner decides; cancellation and task budget remain authoritative.
+        """
+        from .coordination import pending_source_interface_decisions
+        from .llm import StreamCancelledError
+        if not pending_source_interface_decisions(process):
+            return
+        transition(process, ProcessStatus.WAITING)
+        self.notify_state_changed(process.process_id)
+        try:
+            with self._state_condition:
+                while pending_source_interface_decisions(process):
+                    if process.cancellation_event.is_set():
+                        raise StreamCancelledError("cancelled while awaiting interface decision")
+                    if process.task_budget is not None:
+                        process.task_budget.check_deadline()
+                    self._state_condition.wait(timeout=0.25)
+        finally:
+            if process.status == ProcessStatus.WAITING:
+                transition(process, ProcessStatus.RUNNING)
+            self.notify_state_changed(process.process_id)
 
     def dependency_order(self, process_ids: list[str]) -> list[AgentProcess]:
         """Return deterministic topological order or reject an invalid graph."""
@@ -617,23 +645,33 @@ class AgentProcessManager:
             selected.update(item.process_id for item in self.dependency_closure(child))
         ordered = self.dependency_order(list(selected))
         from backend.core.loop.worktree import WorktreeLease
-        snapshots = {
-            str((item.worktree or {}).get("snapshot_commit") or "") for item in ordered
-        }
-        snapshots.discard("")
-        if len(snapshots) != 1:
-            raise ValueError("promotion nodes do not share one task snapshot")
+        code_nodes = []
+        evidence_nodes = []
         for item in ordered:
             if item.status != ProcessStatus.COMPLETED:
                 raise ValueError(f"process is not completed: {item.process_id}")
-            if not WorktreeLease.from_dict(item.worktree).has_promotable_result:
-                raise ValueError(f"process has no sealed result: {item.process_id}")
             review = (supervisor.child_reviews or {}).get(item.process_id, {})
             if review.get("verdict") != "approved":
                 raise ValueError(f"process lacks supervisor approval: {item.process_id}")
-        commits = [
-            str((item.worktree or {}).get("own_commit") or "") for item in ordered
-        ]
+            worktree = dict(item.worktree or {})
+            if not worktree.get("isolated") and not worktree.get("worktree_id"):
+                # Answer/plan/governance dependencies contribute reviewed
+                # evidence, not an invented code checkout. Never waive sealing
+                # for a code worker or an actual workspace mutation.
+                writes = any(receipt.get("succeeded") and receipt.get("effect") == "workspace_write"
+                             for receipt in item.tool_receipts)
+                if writes or (item.task_kind == "action" and item.capability_profile_id == "development.workspace"):
+                    raise ValueError(f"workspace-changing process has no sealed result: {item.process_id}")
+                evidence_nodes.append(item)
+                continue
+            if not WorktreeLease.from_dict(worktree).has_promotable_result:
+                raise ValueError(f"process has no sealed result: {item.process_id}")
+            code_nodes.append(item)
+        snapshots = {str(item.worktree.get("snapshot_commit") or "") for item in code_nodes}
+        snapshots.discard("")
+        if len(snapshots) != 1:
+            raise ValueError("promotion nodes do not share one task snapshot")
+        commits = [str(item.worktree.get("own_commit") or "") for item in code_nodes]
         with self._worktree_lock:
             snapshot, _ = supervisor.read_context_snapshot()
             service_args = {"_lesson_context": {"project_name": str(snapshot.get("project_name") or ""),
@@ -648,10 +686,10 @@ class AgentProcessManager:
                 ordered_commits=[item for item in commits if item],
                 promotion_id=supervisor.active_task_id or supervisor.process_id,
                 input_dependencies=[{**dependency, "process_id": item.process_id}
-                                    for item in ordered
+                                    for item in code_nodes
                                     for dependency in (item.worktree.get("input_dependencies") or [])
                                     if dependency["path"] not in item.worktree.get("changed_files", [])],
-                artifact_paths=[path for item in ordered
+                artifact_paths=[path for item in code_nodes
                                 for path in supervisor.delegated_contracts.get(item.process_id, {}).get("target_files", [])],
             )
             try:
@@ -680,14 +718,15 @@ class AgentProcessManager:
                     "error": str(exc),
                 }
             from backend.core.loop.worktree import WorktreeLease
-            for item in ordered:
+            for item in code_nodes:
                 if item.worktree.get("promoted"):
                     continue
                 lease = self.worktree_manager.mark_promoted(
                     WorktreeLease.from_dict(item.worktree)
                 )
                 item.worktree = lease.to_dict()
-            return {**result, "process_ids": [item.process_id for item in ordered]}
+            return {**result, "process_ids": [item.process_id for item in code_nodes],
+                    "verified_dependency_ids": [item.process_id for item in evidence_nodes]}
 
     def send_instruction(self, process_id: str, content: str) -> dict:
         process = self._processes.get(process_id)
@@ -871,6 +910,9 @@ class AgentProcessManager:
                         "task_id": target.active_task_id,
                         "status": "cancelled", "error": reason,
                     }
+                    if target.task_budget is not None:
+                        target.budget_lease = target.task_budget.release_process(
+                            target.process_id, status=target.status.value) or {}
                     target.lifecycle_finalized = True
                     cancelled_parked.append(target.process_id)
                 else:
@@ -1155,6 +1197,8 @@ class SessionStore:
                 "runtime_preferences": dict(
                     getattr(process, "runtime_preferences", {}) or {}
                 ),
+                "issued_tool_names": (process.tool_registry.list_all()
+                    if process.tool_registry is not None else []),
                 "ring_level": getattr(
                     getattr(process, "ring_level", None), "value", 0,
                 ),

@@ -5,3 +5,5 @@ When PARENT_SNAPSHOT includes lesson_proposal, discuss that unconfirmed candidat
 PARENT_SNAPSHOT:
 
 A user-requested lesson checker change may be proposed through the mounted lesson_checker interface. This creates the existing real permission card; it does not itself mutate the project or grant the sidecar authority. The application commits only the exact approved configuration. Do not claim it was enabled before that result.
+
+The first source is the current conversational focus; other sources are read-only related project context, not execution targets. Discuss the actual USER_QUESTION first, using relevant snapshots. Selecting read-only context needs no approval. Only a concrete proposed effect names a target and goes through the existing user confirmation/permission flow. If snapshots are missing or truncated, say exactly that; do not substitute your own sidecar status or unrelated lesson queries for parent conversation.

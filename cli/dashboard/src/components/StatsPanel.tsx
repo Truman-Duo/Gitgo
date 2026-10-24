@@ -1,3 +1,6 @@
+import {label} from "../ui/runtimeLabels.js";
+import {PageFrame,useCopy} from "../ui/PageFrame.js";
+import {pages,standardKey,moveSelection,reconcileSelection} from "../ui/pageContract.js";
 import React, {
   useCallback,
   useEffect,
@@ -27,6 +30,8 @@ type Props = {
   onDismiss: () => void;
 };
 export function StatsPanel({ client, project, cols, onDismiss }: Props) {
+  const t=useCopy();
+  const [actionFocus,setActionFocus]=useState(false),[action,setAction]=useState(0);
   const [refresh, setRefresh] = useState(0);
   const [tasks, setTasks] = useState<any[]>([]);
   const [selected, setSelected] = useState(0);
@@ -39,7 +44,7 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
   const [tracePage, setTracePage] = useState<any>({});
   const generation = useRef(0);
   const scroll = useRef<ScrollBoxHandle>(null);
-  useScrollInput(scroll);
+  useScrollInput(scroll,!actionFocus);
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -134,18 +139,25 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
         .finally(() => setLoading(false));
     }
   }, [client, project, task, tracePage, page, traceLoading, loading]);
-  useInput((input, key) => {
-    if (key.escape) onDismiss();
-    else if (key.leftArrow) setSelected((v) => Math.max(0, v - 1));
-    else if (key.rightArrow)
-      setSelected((v) => Math.min(tasks.length - 1, v + 1));
-    else if (key.upArrow) scroll.current?.scrollBy(-1);
-    else if (key.downArrow) scroll.current?.scrollBy(1);
-    else if (input.toLowerCase() === "l") loadMore();
-    else if (input.toLowerCase() === "r") {
-      setSelected(0);
-      setRefresh((v) => v + 1);
+  const actions=[{id:0,enabled:!loading&&!traceLoading&&Boolean(tracePage.has_more||page.has_more)},{id:1,enabled:!loading&&!traceLoading}];
+  const activeAction=reconcileSelection(actions,action);
+  useInput((input,key)=>{
+    const command=standardKey(input,key);
+    if(command==="back"){if(actionFocus)setActionFocus(false);else onDismiss();return;}
+    if(command==="next"){setActionFocus(v=>!v);return;}
+    if(actionFocus){
+      if(command==="left"||command==="right")setAction(v=>moveSelection(actions,v,command==="left"?-1:1)??v);
+      else if(command==="up")setActionFocus(false);
+      else if(command==="activate"){
+        if(activeAction===0)loadMore();
+        else if(activeAction===1){setSelected(0);setRefresh(v=>v+1);}
+      }
+      return;
     }
+    if(command==="left")setSelected(v=>Math.max(0,v-1));
+    else if(command==="right")setSelected(v=>Math.min(tasks.length-1,v+1));
+    else if(command==="up")scroll.current?.scrollBy(-1);
+    else if(command==="down")scroll.current?.scrollBy(1);
   });
   const rows = useMemo(() => waterfallRows(events), [events]);
   const multipleProcesses = new Set(rows.map((row) => row.process)).size > 1;
@@ -165,27 +177,27 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
   const field = (value: string, width: number) =>
     padEndWidth(truncate(value, width), width);
   return (
-    <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
-      <Text bold>Stats · {project} · Turn waterfall</Text>
+    <PageFrame page={pages.trace}>
+      <Text bold>{t({en:"Stats",zh:"用量"})} · {project} · {t({en:"Turn waterfall",zh:"逐轮瀑布图"})}</Text>
       {tasks.length ? (
         <Text>
-          Turn {selected + 1} / {tasks.length}
-          {page.has_more ? "+" : ""} · ← newer / → older
+          {t({en:"Turn",zh:"轮次"})} {selected + 1} / {tasks.length}
+          {page.has_more ? "+" : ""} · {t({en:"← newer / → older",zh:"← 较新 / → 较旧"})}
         </Text>
       ) : null}
       {error ? <Text color={colors.danger}>{error}</Text> : null}
       {loading ? (
-        <Text dimColor>Loading task usage…</Text>
+        <Text dimColor>{t({en:"Loading task usage…",zh:"正在读取任务用量…"})}</Text>
       ) : !task ? (
-        <Text dimColor>No recorded task usage yet.</Text>
+        <Text dimColor>{t({en:"No recorded task usage yet.",zh:"尚无任务用量记录。"})}</Text>
       ) : (
         <>
           <Text>
-            {task.task_kind || "Task"} · {task.status} ·{" "}
+            {label(task.task_kind || "Task",t)} · {label(task.status,t)} ·{" "}
             {formatDuration(Number(task.duration_ms || 0))} ·{" "}
-            {Number(task.input_tokens || 0).toLocaleString()} in /{" "}
-            {Number(task.output_tokens || 0).toLocaleString()} out ·{" "}
-            {task.provider_calls} requests · {task.tool_calls} tools
+            {Number(task.input_tokens || 0).toLocaleString()} {t({en:"in",zh:"输入"})} /{" "}
+            {Number(task.output_tokens || 0).toLocaleString()} {t({en:"out",zh:"输出"})} ·{" "}
+            {task.provider_calls} {t({en:"requests",zh:"次请求"})} · {task.tool_calls} {t({en:"tools",zh:"次工具调用"})}
           </Text>
           <Text dimColor>
             {String(task.created_at || "")
@@ -203,21 +215,20 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
         marginTop={1}
       >
         {traceError ? (
-          <Text color={colors.danger}>Trace unavailable: {traceError}</Text>
+          <Text color={colors.danger}>{t({en:"Trace unavailable: ",zh:"执行记录不可用："})}{traceError}</Text>
         ) : null}
-        {traceLoading ? <Text dimColor>Loading recorded rounds…</Text> : null}
+        {traceLoading ? <Text dimColor>{t({en:"Loading recorded rounds…",zh:"正在读取各轮记录…"})}</Text> : null}
         {!rows.length && !traceLoading && task ? (
           <Text dimColor>
-            No per-round timing retained for this task. Aggregate usage above
-            remains available.
+            {t({en:"No per-round timing retained for this task. Aggregate usage above remains available.",zh:"此任务未保留逐轮时间记录，仍可查看上方汇总用量。"})}
           </Text>
         ) : null}
         {rows.length ? (
           <>
             <Text dimColor>
-              {field("Round", 5)} {showProcess ? field("Process", 7) + " " : ""}
-              {field("Call", callWidth)} {field("Tokens in/out", tokenWidth)}{" "}
-              {field("Time", 8)} Timeline
+              {field(t({en:"Round",zh:"轮次"}), 5)} {showProcess ? field(t({en:"Process",zh:"进程"}), 7) + " " : ""}
+              {field(t({en:"Call",zh:"调用"}), callWidth)} {field(t({en:"Tokens in/out",zh:"输入/输出词元"}), tokenWidth)}{" "}
+              {field(t({en:"Time",zh:"用时"}), 8)} {t({en:"Timeline",zh:"时间线"})}
             </Text>
             <Text dimColor>
               {" ".repeat(prefixWidth)}
@@ -247,7 +258,7 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
                 {showProcess ? (
                   <Text dimColor>{field(row.process.slice(0, 6), 7)} </Text>
                 ) : null}
-                {field(row.kind === "model" ? (!showProcess && multipleProcesses ? `Model ${row.process.slice(0, 6)}` : "Model") : row.label, callWidth)}{" "}
+                {field(row.kind === "model" ? t({en:"Model",zh:"模型"}) + (!showProcess && multipleProcesses ? " "+row.process.slice(0,6) : "") : row.label, callWidth)}{" "}
                 <Text dimColor>{field(tokens, tokenWidth)}</Text>{" "}
                 {field(
                   row.duration === null ? "—" : formatDuration(row.duration),
@@ -277,24 +288,20 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
                   }
                 >
                   {" "}
-                  {row.status}
+                  {label(row.status,t)}
                 </Text>
               ) : null}
             </Box>
           );
         })}
       </ScrollBox>
-      <Text dimColor>
-        ▰ model · ▪ tool · — unrecorded · shared timeline per turn
-      </Text>
-      <Text dimColor>
-        {events.length} retained events
-        {tracePage.has_more ? " · partial trace; L loads more" : ""} ·{" "}
-        {tasks.length} loaded tasks{page.has_more ? " · older available" : ""}
-      </Text>
-      <Text dimColor>
-        ←/→ turn · ↑/↓ or PgUp/PgDn scroll · L load more · R refresh · Esc back
-      </Text>
-    </Box>
+      <Text dimColor>{t({en:"▰ model · ▪ tool · — unrecorded · shared timeline per turn",zh:"▰ 模型 · ▪ 工具 · — 未记录 · 同轮共用时间轴"})}</Text>
+      <Text dimColor>{events.length} {t({en:"retained events",zh:"条保留事件"})}{tracePage.has_more?t({en:" · partial trace",zh:" · 执行记录尚未载全"}):""} · {tasks.length} {t({en:"loaded tasks",zh:"项已载入任务"})}{page.has_more?t({en:" · older tasks available",zh:" · 还有更早任务"}):""}</Text>
+      <Box gap={2}>{[t({en:"Load more",zh:"加载更多"}),t({en:"Refresh",zh:"刷新"})].map((label,index)=><Text key={index}
+        dimColor={!actions[index]?.enabled}
+        color={actionFocus&&activeAction===index?colors.selection.block.fg:undefined}
+        backgroundColor={actionFocus&&activeAction===index?colors.selection.block.bg:undefined}>{label}</Text>)}</Box>
+      <Text dimColor>{actionFocus?t({en:"←/→ actions · Enter apply · Tab chart · Esc chart",zh:"←/→ 操作 · Enter 执行 · Tab 图表 · Esc 图表"}):t({en:"←/→ turn · ↑/↓ or PgUp/PgDn scroll · Tab actions · Esc back",zh:"←/→ 轮次 · ↑/↓ 或 PgUp/PgDn 滚动 · Tab 操作 · Esc 返回"})}</Text>
+    </PageFrame>
   );
 }

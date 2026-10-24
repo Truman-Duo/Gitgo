@@ -1,3 +1,4 @@
+import {copy,type Copy} from "../ui/pageContract.js";
 // src/components/Overview.tsx — compact project list
 // Uses string padding for column alignment — no inner Box wrappers so
 // backgroundColor on Text elements drives correct Ink dirty/blit behavior.
@@ -11,6 +12,7 @@ import { projectRuntimeCategory } from "../projectRuntimeState.js";
 type Props = { projects: ProjectRow[]; sel: number; mode: "NORMAL" | "COMMAND"; cols: number; listActive: boolean; language?: "en" | "zh" };
 
 export const Overview = memo(function Overview({ projects, sel, mode, cols: _cols, listActive, language = "en" }: Props) {
+  const t=(value:Copy)=>copy(value,language);
   const { w: terminalWidth, h } = usePanelSize({ minWidth: 60 });
   const w = Math.max(1, Math.min(terminalWidth, _cols) - 2);
   const scrollRef = useRef<ScrollBoxHandle>(null);
@@ -37,20 +39,16 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
 
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1} minHeight={0}>
-      <Box flexDirection="row" justifyContent="space-between">
-        <Text dimColor>{language === "zh" ? "项目" : "Projects"}</Text>
-      </Box>
-
       <Box flexDirection="row">
-        <Text bold>{"Name".padEnd(nameW)}</Text>
-        <Text bold dimColor>{"Procs".padEnd(procW)}</Text>
-        <Text bold dimColor>Path</Text>
+        <Text bold>{padEndWidth(truncate(t({en:"Name",zh:"项目名称"}),nameW),nameW)}</Text>
+        <Text bold dimColor>{padEndWidth(t({en:"Procs",zh:"进程"}),procW)}</Text>
+        <Text bold dimColor>{t({en:"Path",zh:"项目位置"})}</Text>
       </Box>
 
       {projects.length === 0 ? (
         <Box flexDirection="column" paddingTop={1}>
-          <Text dimColor>{language === "zh" ? "还没有项目。" : "No projects yet."}</Text>
-          <Text dimColor>{language === "zh" ? "使用 /create 注册工作区，然后按 Enter 打开。" : "Use /create to register a workspace, then Enter to open it."}</Text>
+          <Text dimColor>{t({en:"No projects yet.",zh:"还没有项目。"})}</Text>
+          <Text dimColor>{t({en:"Use /create to register a workspace, then Enter to open it.",zh:"使用 /create 注册工作区，然后按 Enter 打开。"})}</Text>
         </Box>
       ) : null}
 

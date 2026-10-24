@@ -147,6 +147,8 @@ class AlignmentRuntime:
         request_frame = validate_request_frame(assessment, payload)
         status = assessment.get('status')
         delivery = assessment.get('delivery_check')
+        if payload.get('stage') != 'delivery' and delivery is not None:
+            raise ValueError('delivery_check is only valid at delivery; admission assesses whether work may proceed, not whether an absent final answer is complete')
         if payload.get('stage') == 'delivery' and delivery is not None:
             if not isinstance(delivery, dict) or type(delivery.get('complete')) is not bool:
                 raise ValueError('delivery_check requires a boolean complete verdict')
@@ -165,7 +167,7 @@ class AlignmentRuntime:
                 # is mechanical formatting, not a new semantic verdict; do not
                 # spend another model call asking it to shorten valid evidence.
                 assessment = {**assessment, 'delivery_check': {**delivery, 'evidence': evidence[:8]}}
-            if not delivery['complete']:
+            if not delivery['complete'] and status not in {'needs_input', 'waiting'}:
                 return {'status': 'repair', 'reason': str(delivery.get('reason') or 'The candidate does not supply the requested deliverable.')}
         proposals = assessment.get('interpretations')
         questions = assessment.get('questions')
@@ -233,8 +235,8 @@ class AlignmentRuntime:
             topic = str(question.get('state_topic') or '').strip()
             if not topic or len(topic) > 120 or not question.get('question') or not question.get('why_user_must_decide'):
                 raise ValueError('new questions require a stable facet and user-owned reason')
-            request = {'kind': 'clarification', 'question': question['question'],
-                       'why_user_must_decide': question['why_user_must_decide'], 'options': [], 'allow_free_form': True}
+            from .alignment_question import question_request
+            request = question_request(question, payload)
             node = by_topic.get(topic)
             if node:
                 if node['id'] in state.get('records', {}):
@@ -303,7 +305,7 @@ class AlignmentRuntime:
         from .alignment_evidence import exploratory_scope
         exploration = exploratory_scope(shadow)
         if status == 'ready' and any(not (exploration and n['id'] in elicited) for n in unresolved):
-            raise ValueError('ready cannot discard unresolved actual questions')
+            raise ValueError('ready cannot discard unresolved actual questions. If the latest actual reply requests a current exploratory discussion/comparison, use scope_update(mode=exploration, decision_id, source_node_id if needed, quote=request=exact requested discussion text). Preserve the original unresolved nodes; do not change ready to waiting merely because those original choices remain open.')
         if status == 'needs_input' and not graph.get('question_frontier'):
             raise ValueError('needs_input requires an answerable frontier')
         if status == 'waiting' and not unresolved:

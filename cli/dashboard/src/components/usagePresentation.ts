@@ -189,3 +189,15 @@ export function heatCalendar(
     }),
   );
 }
+
+export function moveCalendarCell(calendar:ReturnType<typeof heatCalendar>,day:string,
+ direction:"left"|"right"|"up"|"down"):string {
+ const column=calendar.findIndex(week=>week.some(cell=>cell.date===day));
+ if(column<0)return day;
+ const row=calendar[column]!.findIndex(cell=>cell.date===day);
+ const nextColumn=column+(direction==="left"?-1:direction==="right"?1:0);
+ const nextRow=row+(direction==="up"?-1:direction==="down"?1:0);
+ if(nextColumn<0||nextColumn>=calendar.length||nextRow<0||nextRow>=7)return day;
+ const cell=calendar[nextColumn]![nextRow]!;
+ return cell.future?day:cell.date;
+}

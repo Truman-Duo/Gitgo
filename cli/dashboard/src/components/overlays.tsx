@@ -10,6 +10,7 @@ import { runCommandEffect, type RunCommandDeps } from "../effects/run.js";
 import type { Scene, AppState, AppAction } from "../state/store.js";
 import type { FooterConfig } from "./CommandBar.js";
 import type { DialogItem } from "./DialogSelect.js";
+import {ProcessDetailPanel} from "./ProcessDetailPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
 import { QuitPanel } from "./QuitPanel.js";
 import { InlineContext } from "./InlineContext.js";
@@ -63,6 +64,8 @@ export interface OverlayCtx {
   processes: Record<string, ProcessInfo>;
   sendChat: (text: string) => void;
   verbose: boolean;
+  onBrowseParent?: (delta:number)=>number;
+  language?: "en" | "zh";
   onSettingSaved?: (key: string) => Promise<string | void>;
   onUpdateExit?: () => Promise<void>;
 }
@@ -95,6 +98,11 @@ export function renderOverlay(
         project={overlay.props?.project || ctx.activeProject || ""}
         processId={overlay.props?.processId || ""} result={overlay.props?.result}
         onDismiss={ctx.popOverlay} />;
+    case "processDetail":
+      return <ProcessDetailPanel project={overlay.props?.project||ctx.activeProject||""}
+        processId={overlay.props?.processId||""}
+        processes={overlay.props?.project===ctx.activeProject?ctx.processes:{}}
+        onDismiss={ctx.popOverlay}/>;
     case "help":
       return <HelpPanel scene={ctx.scene} onDismiss={ctx.popOverlay} />;
     case "quitConfirm":
@@ -149,7 +157,7 @@ export function renderOverlay(
         onOpenFormal={()=>ctx.dispatch({type:"push_overlay",overlay:"formalPanel",props:{project:publishProject}})}/>:null;
     }
     case "whichkey": {
-      const bindings = getKeybindings(ctx.scene);
+      const bindings = getKeybindings(ctx.scene, ctx.language || "en");
       const items: DialogItem[] = bindings.map((c) => ({
         id: c.name,
         title: c.slashName,
@@ -168,18 +176,18 @@ export function renderOverlay(
             }
           }}
           onDismiss={ctx.popOverlay}
-          title="Which Key?"
-          placeholder="Filter commands..."
+          title={ctx.language==="zh"?"命令索引":"Command index"}
+          placeholder={ctx.language==="zh"?"筛选命令…":"Filter commands…"}
           height={ctx.h}
         />
       );
     }
     case "dialogSelect": {
-      const cmds = getCommands(ctx.scene);
+      const cmds = getCommands(ctx.scene, undefined, ctx.language || "en");
       const items: DialogItem[] = cmds.map((c) => ({
         id: c.label,
         title: c.label,
-        category: "Commands",
+        category: ctx.language==="zh"?"命令":"Commands",
         hint: c.description,
       }));
       return (
@@ -191,8 +199,8 @@ export function renderOverlay(
             ctx.cmdInput.setValue(id);
           }}
           onDismiss={ctx.popOverlay}
-          title="Command Palette"
-          placeholder="Type command..."
+          title={ctx.language==="zh"?"命令选择":"Command palette"}
+          placeholder={ctx.language==="zh"?"输入命令…":"Type a command…"}
           height={ctx.h}
         />
       );
@@ -217,9 +225,9 @@ export function renderOverlay(
       return <StatsOverview client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} onInspect={project => ctx.dispatch({type: "push_overlay", overlay: "statsPanel", props: {project}})} />;
     case "updatePanel":
       return ctx.scene === "projects"
-        ? <UpdatePanel client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} onUpdateExit={ctx.onUpdateExit} /> : null;
+        ? <UpdatePanel language={ctx.language} client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} onUpdateExit={ctx.onUpdateExit} /> : null;
     case "btwPanel":
-      return <BtwPanel client={ctx.client}
+      return <BtwPanel client={ctx.client} cols={ctx.w} maxBodyRows={Math.max(2,Math.floor(ctx.h/2)-6)} onBrowseParent={ctx.onBrowseParent}
         project={String(overlay.props?.project || ctx.activeProject || "")}
         processId={String(overlay.props?.processId || "")}
         question={String(overlay.props?.question || "")}

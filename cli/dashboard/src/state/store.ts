@@ -20,7 +20,7 @@ export function isChatScene(scene: Scene): boolean {
   return scene === "workspace" || scene === "agent_detail";
 }
 
-export type OverlayType = "interruptConfirm" | "help" | "context" | "runtimeContext" | "whichkey" | "dialogSelect" | "quitConfirm" | "createForm" | "configPanel" | "binPanel" | "publishPanel" | "exportPanel" | "statsOverview" | "statsPanel" | "btwPanel" | "compactPanel" | "undoPanel" | "lessonsPanel" | "governancePanel" | "memoryPanel" | "trialPanel" | "formalPanel" | "runtimeToolsPanel" | "runtimeMenu" | "updatePanel";
+export type OverlayType = "processDetail" | "interruptConfirm" | "help" | "context" | "runtimeContext" | "whichkey" | "dialogSelect" | "quitConfirm" | "createForm" | "configPanel" | "binPanel" | "publishPanel" | "exportPanel" | "statsOverview" | "statsPanel" | "btwPanel" | "compactPanel" | "undoPanel" | "lessonsPanel" | "governancePanel" | "memoryPanel" | "trialPanel" | "formalPanel" | "runtimeToolsPanel" | "runtimeMenu" | "updatePanel";
 
 export type OverlayEntry = {
   type: OverlayType;
@@ -33,6 +33,7 @@ export type AppState = {
   scene: Scene;
   activeProject: string | null;
   activeAgentId: string | null; // B-level agent process_id for detail view
+  agentReturnScene?: "workspace" | "process_list";
   processListSelIdx: number;   // process list selection index
   runningBSelIdx: number;      // running B footer strip selection index
   statusBarFocused: boolean;   // workspace-only: running-B strip is in selection mode
@@ -89,6 +90,8 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         scene: action.scene,
+        agentReturnScene: action.scene === "agent_detail" && state.scene !== "agent_detail"
+          ? (state.scene === "process_list" ? "process_list" : "workspace") : state.agentReturnScene,
         mode: isChatScene(action.scene) ? "NORMAL" : "COMMAND",
         statusBarFocused: false,
         cmdResult: "",

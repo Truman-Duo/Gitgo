@@ -92,7 +92,11 @@ def _apply_host_task_transitions(process: AgentProcess, results: list) -> bool:
     promotes so it cannot vanish into a plain-text answer.  A capability lease
     alone does not change task semantics; committed mutating receipts do.
     """
-    if process.actor_kind != "supervisor" or process.task_kind != "answer":
+    adaptive_worker = (
+        process.actor_kind == "worker"
+        and process.runtime_preferences.get("user_direct_continuation") is True
+    )
+    if (process.actor_kind != "supervisor" and not adaptive_worker) or process.task_kind != "answer":
         return False
     from backend.core.loop.operation_policy import is_effectful_mutation
     if any(

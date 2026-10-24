@@ -1,6 +1,6 @@
 # Linux 管理更新与回滚
 
-关联 [Issue 21](https://github.com/Truman-Duo/Gitgo/issues/21)。支持 x86_64 和 aarch64 的新管理安装，API 6/schema 5；普通旧目录不接管。安装与操作见[管理安装](managed-installation.md)和[手动更新](update-preparation.md)。
+关联 [Issue 21](https://github.com/Truman-Duo/Gitgo/issues/21)。支持 x86_64 和 aarch64 的新管理安装，API 9/schema 5；普通旧目录不接管。安装与操作见[管理安装](managed-installation.md)和[更新设置](update-preparation.md)。
 
 ## 行为
 

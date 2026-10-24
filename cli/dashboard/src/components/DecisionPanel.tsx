@@ -1,3 +1,4 @@
+import {useCopy} from "../ui/PageFrame.js";
 import React, { useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { PendingDecision } from "../types.js";
@@ -25,6 +26,7 @@ export function DecisionPanel({
   expanded: controlledExpanded,
   onExpandedChange,
 }: Props) {
+  const t=useCopy();
   const [localExpanded, setLocalExpanded] = useState(false);
   const expanded = controlledExpanded ?? localExpanded;
   const toggle = () => {
@@ -47,11 +49,11 @@ export function DecisionPanel({
         <Text bold>
           {active
             ? decision.kind === "permission"
-              ? "Permission required"
-              : `${decision.kind || "decision"} required`
+              ? t({en:"Permission required",zh:"需要授权"})
+              : t({en:"Information requested",zh:"需要补充信息"})
             : answer
-              ? "Decision answered"
-              : "Decision"}
+              ? t({en:"Decision answered",zh:"已答复"})
+              : t({en:"Decision",zh:"待确认事项"})}
           {!active ? (expanded ? " ▾" : " ▸") : ""}
         </Text>
       </Box>
@@ -70,25 +72,25 @@ export function DecisionPanel({
         {answer ? <Text>{formatAnswer(answer)}</Text> : null}
 
         <Text dimColor>
-          {permission ? "Why approval is needed" : "Why only you can decide"}:{" "}
+          {permission ? t({en:"Why approval is needed",zh:"为何需要授权"}) : t({en:"Information needed",zh:"需要补充的信息"})}:{" "}
           {decision.why_user_must_decide}
         </Text>
         {decision.permission_request ? (
           <Box flexDirection="column">
-            <Text>Purpose: {decision.permission_request.purpose}</Text>
-            <Text>Target: {decision.permission_request.resource}</Text>
+            <Text>{t({en:"Purpose: ",zh:"用途："})}{decision.permission_request.purpose}</Text>
+            <Text>{t({en:"Target: ",zh:"目标："})}{decision.permission_request.resource}</Text>
             {expanded ? (
               <>
                 <Text dimColor>
-                  Effect: {decision.permission_request.effect}
+                  {t({en:"Effect: ",zh:"行为："})}{decision.permission_request.effect}
                 </Text>
                 {decision.permission_request.arguments_preview ? (
                   <Text dimColor>
-                    Invocation: {decision.permission_request.arguments_preview}
+                    {t({en:"Invocation: ",zh:"调用："})}{decision.permission_request.arguments_preview}
                   </Text>
                 ) : null}
                 <Text dimColor>
-                  Technical details: {decision.permission_request.api_details}
+                  {t({en:"Technical details: ",zh:"技术详情："})}{decision.permission_request.api_details}
                 </Text>
               </>
             ) : null}
@@ -108,19 +110,19 @@ export function DecisionPanel({
                 <Text color={fg} backgroundColor={bg} bold={selected}>
                   {selected ? "› " : "  "}
                   {index + 1}. {option.label}
-                  {option.recommended ? " · recommended" : ""}
+                  {option.recommended ? t({en:" · recommended",zh:" · 建议"}) : ""}
                 </Text>
                 {permission ? (
                   <>
-                    <Text> Effect: {option.immediate_effect}</Text>
-                    <Text dimColor> Then: {option.downstream_effect}</Text>
+                    <Text> {t({en:"Effect: ",zh:"行为："})}{option.immediate_effect}</Text>
+                    <Text dimColor> {t({en:"Then: ",zh:"后续："})}{option.downstream_effect}</Text>
                     {expanded ? (
                       <>
-                        <Text dimColor> Principle: {option.principle}</Text>
-                        <Text> Risk: {option.risks}</Text>
+                        <Text dimColor> {t({en:"Principle: ",zh:"依据："})}{option.principle}</Text>
+                        <Text> {t({en:"Risk: ",zh:"风险："})}{option.risks}</Text>
                         <Text dimColor>
                           {" "}
-                          Reversibility: {option.reversibility}
+                          {t({en:"Reversibility: ",zh:"可逆性："})}{option.reversibility}
                         </Text>
                       </>
                     ) : null}
@@ -132,30 +134,35 @@ export function DecisionPanel({
                   </Text>
                 ) : (
                   <>
-                    <Text dimColor> Principle: {option.principle}</Text>
-                    <Text> Immediate: {option.immediate_effect}</Text>
-                    <Text> Downstream: {option.downstream_effect}</Text>
-                    <Text> Risk: {option.risks}</Text>
-                    <Text dimColor> Reversibility: {option.reversibility}</Text>
+                    <Text dimColor> {t({en:"Principle: ",zh:"依据："})}{option.principle}</Text>
+                    <Text> {t({en:"Immediate: ",zh:"当前影响："})}{option.immediate_effect}</Text>
+                    <Text> {t({en:"Downstream: ",zh:"后续影响："})}{option.downstream_effect}</Text>
+                    <Text> {t({en:"Risk: ",zh:"风险："})}{option.risks}</Text>
+                    <Text dimColor> {t({en:"Reversibility: ",zh:"可逆性："})}{option.reversibility}</Text>
                   </>
                 )}
               </Box>
             );
           })}
+          {active&&decision.allow_free_form?<Text
+            backgroundColor={selectedIndex===decision.options.length?colors.selection.block.bg:undefined}
+            color={selectedIndex===decision.options.length?colors.selection.block.fg:undefined}>
+            {selectedIndex===decision.options.length?"› ":"  "}{t({en:"Other / direct reply",zh:"其他 / 直接输入"})}
+          </Text>:null}
         </Box>
       </AnimatedReveal>
       {active ? (
         <Text dimColor>
           {decision.round_position && !decision.round_position.startsWith("1/")
-            ? "← previous question · "
+            ? t({en:"← previous question · ",zh:"← 上一题 · "})
             : ""}
           {submitting
-            ? "Submitting the selected decision…"
+            ? t({en:"Submitting the reply…",zh:"正在提交答复…"})
             : composing
-              ? "Editing decision reply in the NORMAL bar · Enter send · Esc return to choices"
+              ? t({en:"Enter send · Esc choices",zh:"Enter 发送 · Esc 返回选项"})
               : decision.options.length > 0
-                ? `↑↓ or 1-${decision.options.length} select · Enter confirm${decision.allow_free_form ? " · A amend · D discuss" : ""}`
-                : "Type your reply in the NORMAL bar and press Enter"}
+                ? t({en:"↑/↓ select · Enter choose/edit",zh:"↑/↓ 选择 · Enter 确认/输入"}) + (decision.allow_free_form ? t({en:" · A amend · D discuss · Other: direct reply",zh:" · A 补充 · D 讨论 · 其他：直接输入"}) : "")
+                : t({en:"Type your reply · Enter send",zh:"直接输入答复 · Enter 发送"})}
         </Text>
       ) : null}
     </Box>

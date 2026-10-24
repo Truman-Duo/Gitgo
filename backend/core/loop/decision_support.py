@@ -60,7 +60,12 @@ def collect_decision_evidence(process, focus: str = "all", *, identifier: str = 
     }
     if focus in {"all", "completion", "tests"}:
         evidence = HostCompletionEvidence.collect(process)
-        result["completion"] = evidence.to_dict()
+        result["completion"] = {
+            **evidence.to_dict(),
+            "scope": "current_task_action_evidence",
+            "effectful_receipts_required": process.task_kind == "action",
+            "task_id": process.active_task_id or process.process_id,
+        }
     if focus in {"all", "completion", "gates"}:
         from backend.core.loop.completion_protocol import HostCompletionEvaluator
         context, _version = process.read_context_snapshot()
@@ -141,8 +146,6 @@ def create_user_decision(process, args: dict) -> dict:
             f"state_topic is required for {kind}; provide a stable semantic topic "
             "so the newest confirmed answer supersedes stale state"
         )
-    if compact and not raw_options and not args.get("allow_free_form", True):
-        raise ValueError("an open clarification must allow a free-form reply")
     options = []
     labels: set[str] = set()
     recommended_count = 0
@@ -179,7 +182,11 @@ def create_user_decision(process, args: dict) -> dict:
         "question": question,
         "why_user_must_decide": why,
         "options": options,
-        "allow_free_form": bool(args.get("allow_free_form", True)),
+        # Semantic options cannot force a user to endorse an unsuitable answer.
+        # Receiving other text still grants no permission or resolved intent.
+        "allow_free_form": (kind in {"clarification","preference","direction","choice"}
+                            and not any(o.get("action") for o in options))
+                           or bool(args.get("allow_free_form", True)),
         "created_at": datetime.now().isoformat(),
         **_decision_position(process),
         "task_id": process.active_task_id or process.process_id,
@@ -191,6 +198,7 @@ def create_user_decision(process, args: dict) -> dict:
             raise ValueError("a clarification round requires 1..8 questions")
         if len(json.dumps(questions, ensure_ascii=False).encode()) > 32_000:
             raise ValueError("clarification round exceeds 32KB")
+        questions=[dict(item) if isinstance(item,dict) else item for item in questions]
         ids = set()
         for item in questions:
             if not isinstance(item, dict) or not item.get("node_id") or item["node_id"] in ids:
@@ -200,6 +208,8 @@ def create_user_decision(process, args: dict) -> dict:
                 raise ValueError("round questions require question, state_topic and non-permission kind")
             if item.get("kind", "clarification") not in {"clarification", "preference", "direction", "verification", "choice", "checkpoint"} or not item.get("why_user_must_decide"):
                 raise ValueError("round questions require a supported kind and user-decision reason")
+            if item.get("kind","clarification") in {"clarification","preference","direction","choice"}:
+                item["allow_free_form"]=True
             choices = item.get("options") or []
             simple = item.get("kind", "clarification") == "clarification"
             if not isinstance(choices, list) or not (0 <= len(choices) <= 3 if simple else 2 <= len(choices) <= 3):

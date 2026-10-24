@@ -313,7 +313,21 @@ def plan_agent_checkpoint(
             runtime_object["ref"],
         ),
     )
+    # Provider annotations can change the CAS reference of an old message.
+    # Preserve its turn when the actual message remains the same, rather than
+    # moving retained user history into the currently executing task.
+    with self._state_lock:
+        prior_messages = {int(row["sequence"]): dict(row) for row in self._state.execute(
+            "SELECT sequence, task_id, content_ref FROM messages WHERE session_id=?", (session_id,))}
     for sequence, message, message_object, reasoning_object in message_objects:
+        message_task_id = task_id
+        prior = prior_messages.get(sequence)
+        if prior and prior["task_id"] and prior["content_ref"] != message_object["ref"]:
+            old_message = self._read_json_blob(str(prior["content_ref"]))
+            if isinstance(old_message, dict) and all(
+                old_message.get(key) == message.get(key) for key in ("role", "content")
+            ):
+                message_task_id = str(prior["task_id"])
         message_id = hashlib.sha256(
             f"{session_id}:{sequence}".encode("utf-8")
         ).hexdigest()
@@ -333,7 +347,7 @@ def plan_agent_checkpoint(
                   OR messages.content_ref IS NOT excluded.content_ref
                   OR messages.reasoning_ref IS NOT excluded.reasoning_ref""",
             (
-                message_id, session_id, task_id or None, sequence,
+                message_id, session_id, message_task_id or None, sequence,
                 str(message.get("role") or ""), message_object["ref"],
                 reasoning_object["ref"] if reasoning_object else None, now,
             ),

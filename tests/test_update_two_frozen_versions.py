@@ -115,7 +115,7 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
     def boot_version(expected):
         command = ([str(root / "bootstrap/gitgo-host/gitgo-host.exe"), "--gitgo-internal-role", "managed-launch"]
                    if os.name == "nt" else [str(root / "gitgo")])
-        result = subprocess.run([*command, "--version"], env=env, capture_output=True, text=True, timeout=90)
+        result = subprocess.run([*command, "--version"], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "Gitgo " + expected
     boot_version(old_product["version"])
@@ -189,7 +189,7 @@ def test_actual_frozen_bootstrap_recovers_an_interrupted_switch(actual_lab, monk
         service.request_apply("preview", selected, "c" * 32)
         with pytest.raises(Crash): handoff._consume_request(store, nonce, 75, finish_disposable_handoff())
     result = subprocess.run([str(store.root / "bootstrap/gitgo-host/gitgo-host"), "--gitgo-internal-role", "managed-recover"],
-        env=env, capture_output=True, text=True, timeout=90)
+        env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "rolled_back"
     boot(old_version)

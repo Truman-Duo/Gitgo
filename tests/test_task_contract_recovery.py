@@ -462,3 +462,97 @@ def test_empty_bundle_is_never_reported_as_delegated(tmp_path_factory):
     assert result["error"] == "DELEGATION_EMPTY_RESULT"
     assert result["error_info"]["catalog_id"] == "GITGO-E3104"
     assert result["error_info"]["next_actions"][0]["action"] == "use_delegate_task"
+
+def test_delegated_surface_keeps_owner_coordination_tools(tmp_path_factory):
+    from backend.core.loop.tool_surface import _select_authorized_tools
+    process, tools = _supervisor(tmp_path_factory)
+    process.replace_context_snapshot({"task_contract": {"execution_mode": "delegate",
+        "revision": 1, "delegation_required": True}})
+    active, _ = _select_authorized_tools(process, tools)
+    assert {"list_coordination_events", "resolve_coordination_event"} <= set(active)
+
+
+def test_pending_interface_parks_source_and_exposes_pinned_evidence(tmp_path_factory):
+    import threading, time, json
+    from backend.core.loop.context_store import ContextObjectStore
+    from backend.core.loop.models import ProcessStatus
+    manager = AgentProcessManager()
+    root, _ = _supervisor(tmp_path_factory)
+    manager._processes[root.process_id] = root
+    path = tmp_path_factory / "api.py"
+    path.write_text("def normalize(value):\n    return value\n", encoding="utf-8")
+    contract = capture_declared_contract(tmp_path_factory, [{"node_id":"source",
+        "output_interfaces":["api.py:normalize"], "input_interfaces":[]}])
+    source = manager.fork(parent_id=root.process_id, role="worker",
+        actor_kind="worker", capability_profile_id="development.workspace",
+        tool_registry=ToolRegistry([]), max_steps=10, ring_level=RingLevel.RING_3,
+        task_id="source", workspace_path=str(tmp_path_factory),
+        context_snapshot={"task_contract":{"output_interfaces":["api.py:normalize"],
+            "interface_contract":contract}})
+    path.write_text("def normalize(value, *, trim=True):\n    return value\n", encoding="utf-8")
+    event = observe_interface_changes(manager, source, str(tmp_path_factory))["events"][0]
+    ref = event["details"]["artifact_ref"]
+    document = json.loads(ContextObjectStore(tmp_path_factory).resolve(ref).content)
+    assert document["state"] == "captured" and "trim=True" in document["content"]
+    gates = HostCompletionEvaluator.outstanding_gates(source)
+    assert any(g["kind"] == "coordination_decision" and not g["degradable_by_explicit_user_decision"]
+               for g in gates["gates"])
+    done = threading.Event()
+    thread = threading.Thread(target=lambda:(manager.wait_for_interface_decision(source),done.set()))
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2
+        while source.status != ProcessStatus.WAITING and time.monotonic() < deadline: time.sleep(.01)
+        assert not done.wait(.1)
+        assert source.steps_used == 0
+        resolve_coordination_event(manager, root, event["coordination_event_id"],
+            disposition="accept_revision", note="compatible option accepted")
+        assert done.wait(2)
+        assert source.status == ProcessStatus.RUNNING
+        baseline=source.read_context_snapshot()[0]["task_contract"]["interface_contract"]
+        assert verify_declared_contract(baseline,tmp_path_factory,["api.py:normalize"])==[]
+    finally:
+        source.cancellation_event.set()
+        manager.notify_state_changed(source.process_id)
+        thread.join(2)
+        assert not thread.is_alive()
+
+def test_interface_wait_is_cancelable_without_spending_provider_calls(tmp_path_factory):
+    import threading
+    from backend.core.loop.llm import StreamCancelledError
+    from backend.core.loop.models import ProcessStatus
+    manager=AgentProcessManager()
+    source=manager.fork(parent_id=None,role="worker",tool_registry=ToolRegistry([]),
+        max_steps=6,ring_level=RingLevel.RING_3,workspace_path=str(tmp_path_factory))
+    source.update_context_snapshot(lambda c:{**c,"coordination_events":[{
+        "coordination_event_id":"pending","kind":"interface_revision_proposed",
+        "source_process_id":source.process_id,"status":"awaiting_supervisor"}]})
+    errors=[]
+    def wait():
+        try:manager.wait_for_interface_decision(source)
+        except StreamCancelledError:errors.append("cancelled")
+    thread=threading.Thread(target=wait);thread.start()
+    source.cancellation_event.set();manager.notify_state_changed(source.process_id)
+    thread.join(2)
+    assert not thread.is_alive() and errors==["cancelled"]
+    assert source.steps_used==0 and source.status==ProcessStatus.RUNNING
+
+
+def test_btw_reads_completed_checkpoint_after_restart_without_restoring_execution(tmp_path_factory):
+    from backend.core.loop.manager import SessionStore
+    from backend.core.loop.models import ProcessStatus
+    process,_=_supervisor(tmp_path_factory)
+    process.session.append_user('Actual parent question')
+    process.session.append_assistant('Completed parent answer')
+    process.status=ProcessStatus.COMPLETED
+    store=SessionStore(tmp_path_factory,migrate_legacy=False)
+    try:
+        store.save_process_checkpoint(process)
+        cold=AgentProcessManager()
+        result=_btw_scope_snapshot(cold,[process.process_id],store=store)
+        assert result['attached']
+        assert result['sources'][0]['conversation'][-1]['content']=='Completed parent answer'
+        assert cold.get(process.process_id) is None
+        assert result['focus_process_id']==process.process_id
+    finally:
+        store.close()

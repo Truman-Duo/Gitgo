@@ -1,4 +1,4 @@
-"""Manual check/download application adapter. No candidate execution or switch.
+"""Shared manual/automatic preparation adapter. No candidate execution or switch.
 
 Release high water lives in the existing installation ledger. The preparation
 receipts contain reverified signed bytes, not a second release authority. A
@@ -76,6 +76,18 @@ class UpdatePreparationService:
         self._jobs = {}
         self._cancelled = {}
         self._closing = False
+        self._automatic_stop = threading.Event()
+        self._automatic_wake = threading.Event()
+        self._automatic_lock = threading.Lock()
+        self._automatic_thread = None
+
+    def start_automatic(self):
+        from .automatic import start
+        start(self)
+
+    def configure(self, channel, automatic_check, automatic_download, automatic_install, revision):
+        from .automatic import configure
+        return configure(self, channel, automatic_check, automatic_download, automatic_install, revision)
 
     @contextmanager
     def _job(self, operation_id):
@@ -103,6 +115,8 @@ class UpdatePreparationService:
         return {"cancelled": True}
 
     def close(self):
+        self._automatic_stop.set()
+        self._automatic_wake.set()
         with self._job_lock:
             self._closing = True
             for event in self._jobs.values(): event.set()
@@ -177,18 +191,22 @@ class UpdatePreparationService:
         if tree_digest(bundle) != value["tree_sha256"]:
             reject("UPDATE_PREPARATION_CHANGED", "Prepared payload changed")
 
-    def status(self, channel="stable"):
-        channel = _channel(channel)
+    def status(self, channel=None):
         store = self._store_loader()
         if store is None:
             from .status import legacy_status
             return legacy_status()
+        from .automatic import preferences, observation, installation_supported
+        settings = preferences(store)
+        channel = _channel(channel if channel is not None else settings["channel"])
         _, current, _ = self._local(store, channel)
         configuration = installed_release_policy(store)
         from .handoff import request_available, platform_ready, strategy
         from .deferred import pending_status
-        result = {"schema_version": 5, "product_id": "gitgo-terminal", "version": current.version,
-            "status": "unconfigured", "enabled": False, "automatic_check": False, "channel": channel,
+        result = {"schema_version": 6, "product_id": "gitgo-terminal", "version": current.version,
+            "status": "unconfigured", "enabled": False, "automatic_check": settings["automatic_check"], "channel": channel,
+            "preferences": settings, "automatic": observation(store, settings=settings),
+            "automatic_install_available": installation_supported(store) and platform_ready(store),
             "can_check": configuration is not None and channel in configuration.channels,
             "can_download": False, "can_apply": False, "can_request_apply": False,
             "blockers": ["PLATFORM_ACCEPTANCE_REQUIRED"],
@@ -218,6 +236,10 @@ class UpdatePreparationService:
                     self._prepared(store, manifest, prepared)
                     result["status"] = "downloaded"; result["can_download"] = False
                     result["can_request_apply"] = request_available(store)
+                    from .automatic import candidate_blocker
+                    blocker = candidate_blocker(store, manifest.manifest_sha256)
+                    if blocker:
+                        result["automatic"] = {**result["automatic"], "state": "blocked", "error_code": blocker}
         except (UpdateError, OSError, ValueError):
             result.update(status="stale", candidate=None, latest_version=None, can_download=False)
         return result

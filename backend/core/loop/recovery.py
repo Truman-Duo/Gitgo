@@ -330,7 +330,12 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
                 actor_kind == "supervisor" and profile_id == "supervisor.control"
             ):
                 raise ValueError("actor/profile mismatch")
-            tool_registry = ToolRegistry(CapabilityProfiles.resolve_tools(profile_id))
+            names = CapabilityProfiles.resolve_tools(profile_id)
+            if actor_kind != "supervisor":
+                from .conversation_continuation import bounded_continuation_tools
+                names = bounded_continuation_tools(names, contract=contract,
+                    issued_tools=runtime.get("issued_tool_names"))
+            tool_registry = ToolRegistry(names)
         except ValueError as exc:
             profile_error = str(exc)
             tool_registry = ToolRegistry([])

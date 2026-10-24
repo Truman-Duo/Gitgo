@@ -72,6 +72,28 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
             "SELECT metadata_ref FROM sessions WHERE session_id=?", (session_id,),
         ).fetchone()
 
+    from datetime import datetime
+    def instant(value):
+        try:return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):return None
+    tasks_by_id = {str(item["task_id"]): item for item in task_rows}
+    task_starts = [(instant(item["created_at"]), str(item["task_id"])) for item in task_rows]
+    task_starts = sorted((stamp, identity) for stamp, identity in task_starts if stamp is not None)
+    def message_task(row):
+        task_id = str(row["task_id"] or "")
+        task = tasks_by_id.get(task_id)
+        # Historical checkpoints could reassign retained messages to a newer
+        # task. Their journal creation time still precedes that task: recover
+        # the owning interval from durable task starts, without changing data.
+        created = instant(row["created_at"])
+        task_created = instant(task["created_at"]) if task is not None else None
+        if created is not None and task_created is not None and created < task_created:
+            from bisect import bisect_right
+            position = bisect_right(task_starts, (created, chr(0x10ffff))) - 1
+            if position >= 0:
+                return task_starts[position][1]
+        return task_id
+
     messages_by_task: dict[str, list[dict]] = {}
     unscoped: list[dict] = []
     for row in message_rows:
@@ -79,9 +101,9 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
             loaded = self._read_json_blob(str(row["content_ref"]))
         except StorageReferenceMissing as exc:
             warning = self._storage_projection_warning(
-                exc, turn_id=str(row["task_id"] or ""),
+                exc, turn_id=message_task(row),
             )
-            task_id = str(row["task_id"] or "")
+            task_id = message_task(row)
             if task_id:
                 messages_by_task.setdefault(task_id, []).append(warning)
             else:
@@ -91,7 +113,7 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
             continue
         projected = {
             "message_id": str(row["message_id"]),
-            "turn_id": str(row["task_id"] or ""),
+            "turn_id": message_task(row),
             "role": "user",
             "content": str(loaded.get("content") or ""),
             "timestamp": str(loaded.get("timestamp") or row["created_at"] or ""),
@@ -100,7 +122,7 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
             "visibility": "public",
             "sequence": int(row["sequence"]),
         }
-        task_id = str(row["task_id"] or "")
+        task_id = message_task(row)
         if task_id:
             messages_by_task.setdefault(task_id, []).append(projected)
         else:
@@ -149,9 +171,15 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
                 continue
         failed = status in {"failed", "cancelled", "timed_out", "degraded"}
         if failed:
-            error = loaded.get("error") or {}
-            code = str(error.get("code") or "AGENT_TASK_FAILED")
-            detail = str(error.get("message") or f"Agent task ended as {status}")
+            raw_error = loaded.get("error")
+            # Canonical TaskOutcome uses an error object; historical child
+            # lifecycle/dependency failures also carry a top-level code and
+            # string diagnostic. Reading that history must not break re-entry.
+            error = raw_error if isinstance(raw_error, dict) else {}
+            code = str(error.get("code") or loaded.get("code") or "AGENT_TASK_FAILED")
+            detail = str(error.get("message") or
+                         (raw_error if isinstance(raw_error, str) else "") or
+                         f"Agent task ended as {status}")
             report = f"[Error: [{code}] {detail}]"
             response = f"{report}\n\n{response}" if status == "degraded" and response else report
         if not response:

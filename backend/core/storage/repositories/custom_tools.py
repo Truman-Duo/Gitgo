@@ -144,6 +144,10 @@ def list_custom_tools(self: CustomToolsPort, *, include_archived: bool = False) 
             ),
             "effect": str(spec.get("effect") or "read"),
             "resources": list(spec.get("resources") or []),
+            "execution_mode": str(spec.get("execution_mode") or ""),
+            "input_schema": dict(spec.get("parameters") or {}),
+            "output_schema": dict(spec.get("output_schema") or {}),
+            "created_at": str(row["created_at"]),
         })
     return {"tools": tools, "count": len(tools)}
 

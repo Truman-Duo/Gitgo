@@ -3,6 +3,7 @@ import {
   waterfallRows,
   waterfallBar,
   heatCalendar,
+  moveCalendarCell,
   tokenTotal,
 } from "./usagePresentation.js";
 import { useSelectionStyle } from "../theme/useSelectionStyle.js";
@@ -110,4 +111,20 @@ test("nonfocused block uses the same high contrast foreground as the root tab", 
     fg: colors.selection.block.fg,
     bold: false,
   });
+});
+
+
+test("calendar arrows preserve row or column and stop at every grid and future boundary",()=>{
+ const grid=heatCalendar([],"2026-10-21",4);
+ const move=moveCalendarCell;
+ expect(move(grid,"2026-10-13","left")).toBe("2026-10-06");
+ expect(move(grid,"2026-10-13","right")).toBe("2026-10-20");
+ expect(move(grid,"2026-10-13","up")).toBe("2026-10-12");
+ expect(move(grid,"2026-10-13","down")).toBe("2026-10-14");
+ expect(move(grid,"2026-10-12","up")).toBe("2026-10-12");
+ expect(move(grid,"2026-10-18","down")).toBe("2026-10-18");
+ expect(move(grid,grid[0]![2]!.date,"left")).toBe(grid[0]![2]!.date);
+ expect(move(grid,"2026-10-21","right")).toBe("2026-10-21");
+ expect(move(grid,"2026-10-21","down")).toBe("2026-10-21");
+ expect(move(grid,"2026-10-18","right")).toBe("2026-10-18");
 });

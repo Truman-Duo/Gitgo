@@ -136,3 +136,31 @@ test("virtualized width reflow preserves a semantic mid-history anchor", async (
     root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();
   }
 });
+
+test("terminal guide closes at the result before trailing knowledge; waiting never closes", async () => {
+  const stdin: any = new PassThrough(); stdin.isTTY = true; stdin.setRawMode = () => stdin;
+  stdin.ref = () => stdin; stdin.unref = () => stdin;
+  const stdout: any = new PassThrough(); stdout.isTTY = true; stdout.columns = 100; stdout.rows = 18;
+  const stderr: any = new PassThrough(); stdout.on("data", () => {}); stderr.on("data", () => {});
+  const scroll = createRef<ScrollBoxHandle>();
+  const messages: ChatMessage[] = [
+    {role: "user", content: "Inspect", timestamp: "now", message_id: "u"},
+    {role: "assistant", content: "Failure explanation", status: "failed", timestamp: "now", message_id: "a"},
+    {role: "system", content: "Knowledge proposal saved", timestamp: "now", message_id: "n"},
+  ];
+  const draw = (rows: ChatMessage[]) => <Box height={18} width={100}><VirtualConversation
+    messages={rows} streaming={null} contentWidth={96} scrollRef={scroll}/></Box>;
+  const root = renderSync(draw(messages), {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
+  const settle = () => new Promise(resolve => setTimeout(resolve, 70));
+  try {
+    await settle();
+    const ink: any = instances.get(stdout);
+    const text = ink.getLastOutput ? ink.getLastOutput() : ink.lastOutput;
+    // Endpoint nodes are real Ink output, independent of stored message roles.
+    const mounted = mountedText(ink.rootNode);
+    expect(mounted).toContain("┗"); expect(mounted).toContain("Knowledge proposal saved");
+    root.rerender(draw([messages[0]!, {...messages[1]!, status: "awaiting_user"}]));
+    await settle();
+    expect(mountedText(ink.rootNode)).not.toContain("┗");
+  } finally {root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();}
+});

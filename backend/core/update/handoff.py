@@ -36,7 +36,7 @@ def _session(store, nonce):
 def platform_ready(store):
     if sys.platform == "linux" and store.registration["platform"] == "linux": return True
     if (sys.platform == "win32" and store.registration["platform"] == "windows"
-            and store.registration.get("bootstrap_api") == 7):
+            and store.registration.get("bootstrap_api") in (7, 8)):
         from .windows_storage import supported
         from backend.core.windows_job import _api
         try: return supported() and _api() is not None
@@ -51,7 +51,7 @@ def platform_ready(store):
 def strategy(store):
     # An older immutable bootstrap must not gain a capability it cannot run.
     return ("after_reboot" if sys.platform == "darwin" and store.registration["platform"] == "macos"
-            and store.registration.get("bootstrap_api") == 6 else "immediate")
+            and store.registration.get("bootstrap_api") in (6, 9) else "immediate")
 
 
 def request_available(store):
@@ -109,14 +109,14 @@ def launch_session(store):
             if error.code != "UPDATE_BUSY": raise
 
 
-def queue_request(service, store, configuration, channel, candidate_id, cancelled):
+def queue_request(service, store, configuration, channel, candidate_id, cancelled, *, session_nonce=None, automatic_revision=None):
     """Called inside the pinned preparation lock and an ordinary shared lease."""
     if not platform_ready(store):
         reject("UPDATE_SCOPE_UNAVAILABLE", "Platform process cleanup is not complete; cannot apply updates")
     from .deferred import pending_status
     if pending_status(store) is not None:
         reject("UPDATE_DEFERRED_EXISTS", "Cancel the pending restart request first")
-    nonce = os.environ.get(SESSION_ENV, "")
+    nonce = session_nonce if session_nonce is not None else os.environ.get(SESSION_ENV, "")
     session = _session(store, nonce)
     check = service._read_receipt(store, channel, "check")
     if check is None or check.get("candidate_id") != candidate_id:
@@ -133,6 +133,8 @@ def queue_request(service, store, configuration, channel, candidate_id, cancelle
     path = _path(store, nonce, "request")
     value = {"schema_version": 1, "installation_id": session["installation_id"], "nonce": nonce,
              "current": session["current"], "channel": channel, "candidate_id": candidate_id}
+    if automatic_revision is not None:
+        value.update(schema_version=2, preference_revision=automatic_revision)
     if path.exists() or path.is_symlink():
         if read_control(path) != value:
             reject("UPDATE_HANDOFF_STALE", "A different update has already been confirmed for this launch")
@@ -216,9 +218,13 @@ def _validate_request(store, request):
     from .transaction import _identity
     from .preparation_service import _channel
     rollback = request.get("action") == "rollback" if type(request) is dict else False
+    automatic = type(request) is dict and request.get("schema_version") == 2
     fields(request, {"schema_version", "installation_id", "nonce", "current"} |
-           ({"action", "rollback_id"} if rollback else {"channel", "candidate_id"}))
-    if (type(request["schema_version"]) is not int or request["schema_version"] != 1
+           ({"action", "rollback_id"} if rollback else {"channel", "candidate_id"}) |
+           ({"preference_revision"} if automatic else set()))
+    if (type(request["schema_version"]) is not int or request["schema_version"] not in (1, 2)
+            or (automatic and (rollback or type(request["preference_revision"]) is not int
+                               or not 0 <= request["preference_revision"] < 2**53))
             or request["installation_id"] != store.registration["installation_id"]):
         reject("UPDATE_HANDOFF_STALE", "Confirmed request does not match this installation")
     text(request["nonce"], r"[0-9a-f]{32}", 32)
@@ -236,6 +242,15 @@ def _perform_request(store, request, *, verify_only=False):
     from .preparation_service import UpdatePreparationService, _channel
     _validate_request(store, request)
     store._guard()
+    if request["schema_version"] == 2:
+        from .automatic import preferences, installation_supported, candidate_blocker
+        if candidate_blocker(store, request["candidate_id"]):
+            reject("UPDATE_SELECTION_STALE", "Rolled-back candidate requires explicit manual confirmation")
+        preference = preferences(store)
+        if (not installation_supported(store) or not preference["automatic_install"]
+                or preference["revision"] != request["preference_revision"]
+                or preference["channel"] != request["channel"]):
+            reject("UPDATE_SELECTION_STALE", "Automatic installation preference changed before handoff")
     from .installation import protected_install_paths
     for protected in protected_install_paths():
         if protected == store.root or protected.is_relative_to(store.root) or store.root.is_relative_to(protected):

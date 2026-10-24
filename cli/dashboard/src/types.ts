@@ -170,7 +170,8 @@ export type StreamingRow = {
 // Imperative scroll handle exposed by the chat ScrollBox, registered upward
 // (mirrors sendChatRef) so the keymap can drive scroll without React state.
 export type ChatScrollHandle = {
-  scrollBy: (dy: number) => void;
+  /** Return the unconsumed delta so an inline discussion can share scrolling. */
+  scrollBy: (dy: number) => number;
   scrollToBottom: () => void;
 };
 

@@ -57,14 +57,14 @@ test('live tool preview and turn guide fold gradually into the final reply witho
  const root=renderSync(draw([user],stream),{...io,patchConsole:false,exitOnCtrlC:false});
  try{
   await wait();const before=state(io.stdout).text;
-  expect(before).toContain('╭');expect(before).toContain('│');expect(before).not.toContain('╰');
-  expect(before.split('\n').find(line=>line.includes('Inspect this file'))?.[0]).toBe('╭');
+  expect(before).toContain('┏');expect(before).toContain('│');expect(before).not.toContain('┗');
+  expect(before.split('\n').find(line=>line.includes('Inspect this file'))?.[0]).toBe('┏');
   expect(before).toContain('python check.py');expect(before).toContain('preview-line-0');expect(before).not.toContain('preview-line-8');expect(before).not.toContain('private reasoning');
   const outcome:ChatMessage={role:'assistant',content:'Verified result\nLast line of answer',message_id:'outcome',timestamp:new Date().toISOString(),status:'completed',trace_id:'task',duration_ms:120,tools:stream.tools};
   root.rerender(draw([{...user,message_id:"persisted-user-1"},outcome],null));await wait(50);
   const during=state(io.stdout).text;expect(during).toContain('preview-line-0');expect(during).toContain('Verified result');
   await wait(270);const after=state(io.stdout).text;
-  expect(after).not.toContain('preview-line-0');expect(after).toContain('Verified result');expect(after).toContain('╰');expect(after.split('\n').find(line=>line.includes('Last line of answer'))?.[0]).toBe('╰');expect(calls).toHaveLength(0);
+  expect(after).not.toContain('preview-line-0');expect(after).toContain('Verified result');expect(after).toContain('┗');expect(after.split('\n').find(line=>line.includes('Last line of answer'))?.[0]).toBe('┗');expect(calls).toHaveLength(0);
  }finally{root.unmount();root.cleanup();Object.values(io).forEach(s=>s.destroy());}
 });
 

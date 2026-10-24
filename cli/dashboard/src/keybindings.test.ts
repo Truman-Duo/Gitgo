@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { getCommands, getKeybindings } from './keybindings.js'
+import { getCommands, getKeybindings, REGISTRY, type CommandDef } from './keybindings.js'
 import { executeCommand } from './commands.js'
 
 function names(scene: Parameters<typeof getKeybindings>[0]): string[] {
@@ -21,7 +21,7 @@ describe('scene-owned command registry', () => {
   });
   test('ProcessList exposes only its actions and scene help', () => {
     expect(getCommands('process_list').map(item => item.label).sort()).toEqual([
-      '/archive', '/create', '/help', '/rename',
+      '/archive', '/create', '/detail', '/help', '/rename',
     ]);
   });
 
@@ -181,3 +181,39 @@ describe('scene-owned command registry', () => {
     }
   })
 })
+
+
+test("every command and descendant has explicit translations; suggestions and Help agree",()=>{
+ function visit(defs:CommandDef[]){
+  for(const def of defs){
+   expect(def.title.en.trim().length).toBeGreaterThan(0);
+   expect(def.title.zh).toMatch(/[\u3400-\u9fff]/);
+   visit(def.children||[]);
+  }
+ }
+ visit(REGISTRY);
+ for(const scene of ["projects","workspace","process_list","agent_detail"] as const){
+  const menu=getCommands(scene,undefined,"zh"),help=getKeybindings(scene,"zh");
+  expect(menu.map(x=>x.label).sort()).toEqual(help.map(x=>"/"+x.slashName).sort());
+  for(const item of menu)expect(item.description).toBe(help.find(d=>"/"+d.slashName===item.label)?.title ?? "MISSING_TRANSLATION");
+ }
+ expect(getCommands("projects","/pub","zh")).toEqual([{label:"/publish",description:"发布管理",inputMode:undefined}]);
+ expect(getCommands("workspace","/publish ","zh").map(x=>x.description)).toEqual(["正式提交","试验变更"]);
+ expect(getCommands("workspace","/runtime lesson ","zh").every(x=>/[\u3400-\u9fff]/.test(x.description||""))).toBe(true);
+ expect(getCommands("projects","/publish","en")[0]?.description).toBe("Publish");
+});
+
+
+test("/detail binds to the selected or current subprocess without a backend operation",async()=>{
+ const base:any={client:{callTool:async()=>{throw Error("details must be read-only");}},projects:[{name:"other"}],
+  sel:0,activeProject:"current",refresh:async()=>{},activeProcessId:"current-child",selectedProcessId:"selected-child"};
+ expect((await executeCommand("/detail",{...base,scene:"process_list"})).showPanel)
+  .toEqual({overlay:"processDetail",props:{project:"current",processId:"selected-child"}});
+ expect((await executeCommand("/detail",{...base,scene:"agent_detail"})).showPanel)
+  .toEqual({overlay:"processDetail",props:{project:"current",processId:"current-child"}});
+ for(const scene of ["workspace","projects"] as const){
+  expect(getCommands(scene).some(c=>c.label==="/detail")).toBe(false);
+  expect((await executeCommand("/detail",{...base,scene})).showPanel).toBeUndefined();
+ }
+ expect((await executeCommand("/detail",{...base,scene:"process_list",selectedProcessId:undefined})).showPanel?.props?.processId).toBe("");
+});

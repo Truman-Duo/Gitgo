@@ -21,8 +21,8 @@ def _metadata(root, name, records):
     if item is None or item["kind"] != "file" or item["bytes"] > 2 * 1024**2:
         reject("UPDATE_PACKAGE_CONTRACT", "Missing or oversized regular package metadata")
     if os.name == "nt":
-        from .persistence import open_readonly
-        fd = open_readonly(root / name)
+        from .windows_storage import open_file
+        fd = open_file(root / name, program=True)
         with os.fdopen(fd, "rb") as handle:
             raw = handle.read(2 * 1024**2 + 1)
         if len(raw) != item["bytes"] or hashlib.sha256(raw).hexdigest() != item["sha256"]:

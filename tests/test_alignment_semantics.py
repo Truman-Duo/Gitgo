@@ -837,3 +837,144 @@ def test_mixed_known_facts_and_delegation_cannot_overwrite_same_node_twice(tmp_p
     assert HostCompletionEvaluator.evaluate(p, 'Japan plan with labelled assistant choices').allowed
     p.session.host_ledger = [e for e in p.session.host_ledger if e.get('event') != 'user_decision_received']
     assert not HostCompletionEvaluator.evaluate(p, 'Japan plan with labelled assistant choices').allowed
+
+
+def test_observation_boundary_does_not_demand_delivery_but_effects_and_delivery_still_review(tmp_path_factory):
+    from backend.core.loop.alignment_routing import review_reason
+    p = process(tmp_path_factory)
+    runtime = AlignmentRuntime(p)
+    runtime.payload('Inspect prerequisites and report')
+    EngineeringWorkflow(p).configure({'profiles': ['retrospective']})
+    payload = runtime.payload()
+    assert payload['stage'] == 'admission'
+    assert review_reason(p, payload) == ''
+    assert review_reason(p, payload, 'contract') == 'declared_task_boundary'
+    assert review_reason(p, payload, 'execution') == 'effect_boundary'
+    assert review_reason(p, runtime.payload(candidate='Report')) == 'declared_workflow_dependencies'
+    assert not HostCompletionEvaluator.evaluate(p, 'Report').allowed
+
+
+@pytest.mark.parametrize('stage', ['admission', 'question_proposal'])
+def test_delivery_verdict_cannot_be_applied_at_another_stage_atomically(tmp_path_factory, stage):
+    p = process(tmp_path_factory)
+    runtime = AlignmentRuntime(p)
+    payload = runtime.payload(proposed_questions=[] if stage == 'question_proposal' else None)
+    before = copy.deepcopy(p.context_snapshot)
+    with pytest.raises(ValueError, match='only valid at delivery'):
+        runtime.apply({'status': 'repair', 'interpretations': [], 'questions': [],
+                       'delivery_check': {'complete': False, 'reason': 'No final answer yet'}}, payload)
+    assert p.context_snapshot == before
+    assert not p.pending_decision
+
+
+def test_incomplete_delivery_can_pause_for_a_valid_user_choice_without_certifying_delivery(tmp_path_factory):
+    p = process(tmp_path_factory)
+    runtime = AlignmentRuntime(p)
+    runtime.payload('Plan a trip')
+    payload = runtime.payload(candidate='I need your destination before choosing a route.')
+    result = runtime.apply({'status': 'needs_input', 'interpretations': [],
+        'questions': [{'state_topic': 'destination', 'question': 'Which destination?',
+                       'why_user_must_decide': 'Determines the route'}],
+        'delivery_check': {'complete': False, 'reason': 'Destination is unresolved'}}, payload)
+    assert result['status'] == 'needs_input'
+    assert result['decision']['decision_id'] == p.pending_decision['decision_id']
+    assert not p.context_snapshot['alignment_runtime'].get('delivery')
+    assert not HostCompletionEvaluator.evaluate(p, payload['candidate']).allowed
+
+
+def test_boundary_repairs_do_not_consume_delivery_repair_budget_and_keep_reason(tmp_path_factory):
+    from backend.core.loop.agent_tool import AgentTool, ToolEffect
+    from backend.core.loop.execution_contract import data_broker
+    from backend.core.loop.tool_proposal_runtime import ToolProposalRuntime
+    p = process(tmp_path_factory)
+    p._nudge_counters['alignment_repair'] = 2
+    tool = AgentTool(execution_contract=data_broker('test.fixture'), name='observe',
+                     description='Read', parameters={'type': 'object'}, effect=ToolEffect.READ,
+                     execute=lambda _args: {})
+    review = ToolProposalRuntime(p, p.session, lambda: {'observe': tool},
+                                 lambda **_kwargs: {'alignment_repair': 'Proposed scope contradicts the request'})
+    assert review.review([{'name': 'observe', 'args': {}, 'id': 'one'}], '').retry
+    assert review.review([{'name': 'observe', 'args': {}, 'id': 'two'}], '').retry
+    result = review.review([{'name': 'observe', 'args': {}, 'id': 'three'}], '').result
+    assert result['error']['code'] == 'ALIGNMENT_BOUNDARY_REJECTED'
+    assert result['error']['message'] == 'Proposed scope contradicts the request'
+    assert p._nudge_counters['alignment_repair'] == 2
+
+
+def test_stage_confusion_uses_existing_bounded_compiler_recovery(tmp_path_factory):
+    from types import SimpleNamespace
+    from backend.core.loop.alignment_review import AlignmentReview, AlignmentReviewHooks
+    p = process(tmp_path_factory)
+    AlignmentRuntime(p).payload('Inspect and report')
+    events = []
+    calls = []
+    def assess(payload, **_kwargs):
+        calls.append(payload)
+        result = {'status': 'ready', 'interpretations': [], 'questions': []}
+        if len(calls) == 1:
+            result.update(status='repair', delivery_check={'complete': False, 'reason': 'No final answer'})
+        return result
+    noop = lambda *_args, **_kwargs: None
+    hooks = AlignmentReviewHooks(emit=lambda event, **_kwargs: events.append(event),
+        frontend_emit=None, notice=noop, refresh_prompt=noop, before_attempt=noop,
+        route_notice=noop, result=noop, cancellation=noop, budget_exhausted=noop)
+    result = AlignmentReview(p, SimpleNamespace(assess_alignment=assess), hooks).check(
+        'Inspect and report', trigger='contract', proposed_contracts=[{'goal': 'Inspect and report'}])
+    assert result is None
+    assert len(calls) == 2
+    assert 'only valid at delivery' in calls[1]['host_validation_error']
+    assert [e['status'] for e in events if e['event'] == 'alignment_assessment_completed'] == ['ready']
+    assert any(e['event'] == 'alignment_assessment_rejected' for e in events)
+
+
+def test_review_selected_question_preserves_options_and_is_a_real_broker_card(tmp_path_factory):
+    p = process(tmp_path_factory)
+    runtime = AlignmentRuntime(p)
+    request = {'kind': 'choice', 'question': 'Chinese or English?',
+               'why_user_must_decide': 'This determines the report language',
+               'allow_free_form': False,
+               'options': [{'label': label, 'principle': label, 'immediate_effect': label,
+                            'downstream_effect': label, 'risks': 'None', 'reversibility': 'Can change later'}
+                           for label in ['Chinese', 'English']]}
+    payload = runtime.payload('Choose report language', proposed_questions=[request])
+    question = {'proposal_index': 0, 'state_topic': 'report_language', 'question': 'Which report language?',
+                'why_user_must_decide': request['why_user_must_decide']}
+    result = runtime.apply({'status': 'needs_input', 'interpretations': [], 'questions': [question]}, payload)
+    actual = result['decision']['questions'][0]
+    assert actual['question'] == request['question']
+    assert actual['options'] == request['options']
+    assert actual['allow_free_form'] is True  # user can reject every semantic option
+    assert p.pending_decision['decision_id'] == result['decision']['decision_id']
+    assert any(e.get('event') == 'user_decision_requested' for e in p.session.host_ledger)
+
+
+@pytest.mark.parametrize('index', [-1, 2, True, '0'])
+def test_question_proposal_reference_cannot_select_foreign_or_coerced_input(tmp_path_factory, index):
+    from backend.core.loop.alignment_question import question_request
+    with pytest.raises(ValueError, match='actual proposed'):
+        question_request({'proposal_index': index}, {'stage': 'question_proposal', 'proposed_questions': [{}]})
+
+
+def test_discussion_delivery_keeps_original_choice_open_without_republishing(tmp_path_factory):
+    p=process(tmp_path_factory)
+    p.task_kind='answer'
+    runtime=AlignmentRuntime(p)
+    runtime.payload('Rewrite an introduction')
+    answer='Discuss the scientific introduction for beginners, its origins and current value.'
+    w,request,node=pending_reply(p,answer)
+    candidate='Here are the origins, development and current value for the beginner introduction.'
+    payload=runtime.payload(candidate=candidate)
+    assessment={'status':'ready','questions':[],
+        'request_frame':{'kind':'deliverable','source_quote':answer,'outcome':'Discuss the introduction before choosing'},
+        'interpretations':[interpretation(node,request,answer,disposition='deferred',remaining='Original choice open')],
+        'delivery_check':{'complete':True,'evidence':[candidate]}}
+    with pytest.raises(ValueError,match='scope_update'):
+        runtime.apply(assessment,payload)
+    assert p.pending_decision is None
+    assessment['scope_update']={'mode':'exploration','decision_id':request['decision_id'],'quote':answer,'request':answer}
+    count=len([e for e in p.session.host_ledger if e.get('event')=='user_decision_requested'])
+    assert runtime.apply(assessment,payload)['status']=='ready'
+    assert p.pending_decision is None
+    assert not w.status()['complete']
+    assert HostCompletionEvaluator.evaluate(p,candidate).allowed
+    assert len([e for e in p.session.host_ledger if e.get('event')=='user_decision_requested'])==count
