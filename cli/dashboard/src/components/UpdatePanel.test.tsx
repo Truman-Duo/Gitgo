@@ -314,8 +314,10 @@ test("arrow settings persist the channel and automation through the Host with a 
   let fixture = mount(host, () => {});
   try {
     await wait(); await wait();
+    expect(calls.filter(c => c.operation === "update.status")).toHaveLength(1);
     fixture.stdin.write("\x1b[C"); await wait(); await wait();
     expect(preferences.channel).toBe("stable");
+    expect(calls.filter(c => c.operation === "update.status")).toHaveLength(1);
     fixture.stdin.write("\x1b[B"); await wait();
     fixture.stdin.write("\x1b[D"); await wait();
     expect(preferences.automatic_check).toBe(false);

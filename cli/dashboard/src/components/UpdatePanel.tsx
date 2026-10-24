@@ -70,7 +70,11 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
   const changeSetting = (row: number) => {
     if (!data || data.schema_version === 1 || busy || job.current) return;
     if (data.schema_version !== 6 || !data.preferences) {
-      if (row === 0) setChannel(value => value === "stable" ? "preview" : "stable");
+      if (row === 0) {
+        setData(null); setState("loading");
+        setChannel(value => value === "stable" ? "preview" : "stable");
+        setRetry(value => value + 1);
+      }
       return;
     }
     const preferences = {...data.preferences};
@@ -138,7 +142,9 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
       }
     }).catch(() => {if (current && alive.current) setState("error");});
     return () => {current = false;};
-  }, [client, channel, retry]);
+  // Initial status/configuration acknowledgements already carry the selected
+  // channel's full status. Only an explicit refresh/legacy view change reloads.
+  }, [client, retry]);
   const row = (index: number, label: string, _available = true) => <Box key={index}
     ref={active === index ? selectedRow : undefined} flexShrink={0}><Text
     color={active === index && availableRows[index]?.enabled ? selection.fg : availableRows[index]?.enabled ? undefined : colors.chat.turnGuide}
