@@ -1,12 +1,26 @@
 name: Native Unix packages
 on:
   workflow_call:
+    inputs:
+      publisher_trust:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       ref:
         description: Exact commit SHA or immutable release tag (resolved once)
         required: true
         type: string
+      publisher_trust:
+        description: Embed reviewed preview publisher trust and test managed installation
+        required: false
+        default: false
+        type: boolean
+      verify_public:
+        description: Verify published signed assets and automatic checks on native workers
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 jobs:
@@ -24,6 +38,7 @@ jobs:
         run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   build:
     needs: resolve
+    if: ${{ !inputs.verify_public }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,15 +46,27 @@ jobs:
           - os: ubuntu-24.04
             target: linux-x86_64
             platform: linux
+            architecture: x86_64
           - os: macos-26
             target: macos-arm64
             platform: macos
+            architecture: arm64
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
+            platform: linux
+            architecture: aarch64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: inputs.publisher_trust
+        with:
+          ref: ${{ github.sha }}
+          path: dev-artifacts/publisher-tooling
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -68,7 +95,13 @@ jobs:
       - name: Build complete native archive
         env:
           TARGET_PLATFORM: ${{ matrix.platform }}
-        run: bash "packaging/build_${TARGET_PLATFORM}.sh" --python "$(command -v python)" --bun "$(command -v bun)"
+        run: |
+          extra=()
+          if [ "${{ inputs.publisher_trust }}" = true ]; then
+            python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py policy --source . --platform "${{ matrix.platform }}" --architecture "${{ matrix.architecture }}" --output "$RUNNER_TEMP/publisher-policy.json"
+            extra=(--update-evidence --update-release-policy "$RUNNER_TEMP/publisher-policy.json")
+          fi
+          bash "packaging/build_${TARGET_PLATFORM}.sh" --python "$(command -v python)" --bun "$(command -v bun)" "${extra[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-${{ matrix.target }}-${{ needs.resolve.outputs.commit }}
@@ -85,12 +118,20 @@ jobs:
             target: linux-x86_64
           - os: macos-26
             target: macos-arm64
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: inputs.publisher_trust
+        with:
+          ref: ${{ github.sha }}
+          path: dev-artifacts/publisher-tooling
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -109,11 +150,15 @@ jobs:
         env:
           SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
           TARGET: ${{ matrix.target }}
+          PUBLISHER_TRUST: ${{ inputs.publisher_trust }}
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             dbus-run-session -- bash -euc '
               printf "disposable-ci-fixture" | gnome-keyring-daemon --unlock --components=secrets
               python -B scripts/accept_unix_archive.py --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --report acceptance.json
+              if [ "$PUBLISHER_TRUST" = true ]; then
+                python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py managed --source . --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --output managed-acceptance.json
+              fi
             '
           else
             # Disposable native fixture; never unlock or modify login credentials.
@@ -126,10 +171,79 @@ jobs:
             security list-keychains -d user -s "$keychain"
             security default-keychain -d user -s "$keychain"
             python -B scripts/accept_unix_archive.py --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --report acceptance.json
+            if [ "$PUBLISHER_TRUST" = true ]; then
+              python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py managed --source . --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --output managed-acceptance.json
+            fi
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: acceptance-${{ matrix.target }}-${{ needs.resolve.outputs.commit }}
-          path: acceptance.json
+          path: |
+            acceptance.json
+            managed-acceptance.json
+          if-no-files-found: error
+          retention-days: 14
+
+  published:
+    needs: resolve
+    if: ${{ inputs.verify_public }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            architecture: x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux
+            architecture: aarch64
+          - os: macos-26
+            platform: macos
+            architecture: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          path: dev-artifacts/publisher-tooling
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.14.7'
+      - run: python -m pip install --require-hashes -r packaging/requirements-build.lock
+      - if: runner.os == 'Linux'
+        run: bash scripts/prepare_linux_update_ci.sh
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libsecret-tools
+      - name: Anonymous public download, signature, inventory, managed install and automatic check
+        env:
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          TARGET_ARCH: ${{ matrix.architecture }}
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            dbus-run-session -- bash -euc '
+              printf "disposable-ci-fixture" | gnome-keyring-daemon --unlock --components=secrets
+              python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py published --source . --platform "$TARGET_PLATFORM" --architecture "$TARGET_ARCH" --commit "$SOURCE_COMMIT" --output published-acceptance.json
+            '
+          else
+            keychain_dir="$(mktemp -d "$RUNNER_TEMP/gitgo-ci-keychain.XXXXXXXX")"
+            keychain="$keychain_dir/fixture.keychain-db"
+            security create-keychain -p disposable-ci-fixture "$keychain"
+            trap 'security delete-keychain "$keychain"' EXIT
+            security unlock-keychain -p disposable-ci-fixture "$keychain"
+            security list-keychains -d user -s "$keychain"
+            security default-keychain -d user -s "$keychain"
+            python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py published --source . --platform "$TARGET_PLATFORM" --architecture "$TARGET_ARCH" --commit "$SOURCE_COMMIT" --output published-acceptance.json
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: published-${{ matrix.platform }}-${{ matrix.architecture }}-${{ needs.resolve.outputs.commit }}
+          path: published-acceptance.json
           if-no-files-found: error
           retention-days: 14
