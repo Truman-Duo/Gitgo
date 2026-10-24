@@ -2,11 +2,12 @@
 import argparse
 import json
 import os
+import stat
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend.core.update.release_policy import POLICY_FILE, parse_release_policy, read_policy_file
+from backend.core.update.release_policy import POLICY_FILE, MAX_POLICY_BYTES, parse_release_policy
 from backend.core.update.validation import UpdateError
 
 
@@ -14,7 +15,16 @@ def stage_policy(stage: Path, policy: Path):
     product = json.loads((stage / "product.json").read_bytes())
     if not (stage / "update-data-contract.json").is_file():
         raise UpdateError("UPDATE_RELEASE_POLICY", "Public release trust requires verified runtime data evidence")
-    raw = read_policy_file(policy)
+    # Build inputs are public, reviewed source like this script. Installed
+    # bootstrap policy still uses read_policy_file and private native ACLs.
+    if policy.is_symlink():
+        raise UpdateError("UPDATE_RELEASE_POLICY", "Public build policy must be a regular file")
+    with policy.open("rb") as source:
+        info = os.fstat(source.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_size > MAX_POLICY_BYTES):
+            raise UpdateError("UPDATE_RELEASE_POLICY", "Public build policy size or type is invalid")
+        raw = source.read(MAX_POLICY_BYTES + 1)
     parse_release_policy(raw, product["platform"], product["architecture"])
     path = stage / POLICY_FILE
     with path.open("xb") as handle:
