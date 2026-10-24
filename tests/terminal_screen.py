@@ -106,22 +106,43 @@ def activate_menu_item(screen, label, send, pump, *, maximum_rows=12, timeout=15
     """
     import time
     deadline = time.monotonic() + timeout
+    seen = []
 
     def selected():
         return next((line.lstrip()[2:].strip() for line in screen.text().splitlines()
                      if line.lstrip().startswith("› ")), None)
 
+    def diagnostic():
+        frame = screen.text()
+        states = [text for text in ("Reading local update status", "Saving update settings",
+            "Downloaded and verified", "Restart/update is unavailable",
+            "Select Restart / update to review", "Update status unavailable") if text in frame]
+        return f"target={label!r}; selected={selected()!r}; visited={seen!r}; states={states!r}"
+
     def advance_until(predicate):
         while not predicate():
-            assert time.monotonic() < deadline, f"Menu selection did not reach {label!r}"
+            assert time.monotonic() < deadline, "Menu selection did not advance: " + diagnostic()
             pump()
 
+    # A matching text fragment may arrive before the rest of the same repaint
+    # and its input-owner commit. Drain to a bounded stable display before keys.
+    quiet_end = time.monotonic() + .25
+    settle_end = min(deadline, time.monotonic() + 2)
+    last = screen.text()
+    while time.monotonic() < min(quiet_end, settle_end):
+        pump()
+        frame = screen.text()
+        if frame != last:
+            last = frame
+            quiet_end = time.monotonic() + .25
+        time.sleep(.01)
     advance_until(lambda: selected() is not None)
     for _ in range(maximum_rows):
         current = selected()
+        seen.append(current)
         if current == label:
             send("\r")
             return
         send("\x1b[B")
         advance_until(lambda: selected() is not None and selected() != current)
-    raise AssertionError(f"Enabled menu item is unavailable: {label!r}")
+    raise AssertionError("Enabled menu item is unavailable: " + diagnostic())
