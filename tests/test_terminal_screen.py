@@ -85,3 +85,36 @@ def test_settle_screen_drains_split_repaint_before_input():
     settle_screen(screen, pump, quiet_seconds=.02, maximum_seconds=.2)
     assert not chunks
     assert screen.text().splitlines()[0] == "Ready"
+
+
+def assert_renderer_full_paint(bun):
+    import json
+    import os
+    from pathlib import Path
+    import shutil
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([bun, "--tsconfig-override", str(root / "cli/dashboard/tsconfig.json"),
+        str(root / "tests/fixtures/terminal_full_paint.ts")], cwd=root,
+        capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert result.returncode == 0, result.stderr
+    for mode, sequence in json.loads(result.stdout).items():
+        screen = TerminalScreen(8, 20)
+        # Existing terminal content is outside a fresh renderer's frame model.
+        for row in range(8):
+            screen.feed((f"\x1b[{row + 1};1H" + "previous text").encode())
+        screen.feed(b"\x1b[H")
+        screen.feed(sequence.encode())
+        assert screen.text().splitlines()[:3] == ["A B", "", "new"], mode
+
+
+def test_real_renderer_full_paint_overwrites_dirty_rows_and_blank_cells():
+    import os
+    from pathlib import Path
+    import shutil
+    root = Path(__file__).resolve().parents[1]
+    bun = os.environ.get("GITGO_BUN") or shutil.which("bun")
+    if not bun or not (root / "cli/dashboard/node_modules/@alcalzone/ansi-tokenize/package.json").is_file():
+        import pytest
+        pytest.skip("Requires Dashboard Bun/dependencies; mandatory Dashboard CI invokes the same assertion after install")
+    assert_renderer_full_paint(bun)

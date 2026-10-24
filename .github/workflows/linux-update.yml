@@ -55,6 +55,7 @@ jobs:
         working-directory: cli/dashboard
         run: |
           bun install --frozen-lockfile
+          (cd ../.. && python -B -c "from tests.test_terminal_screen import assert_renderer_full_paint; assert_renderer_full_paint('bun')")
           bun test
           bun run build
       - name: Build two independently committed real Linux bundles
