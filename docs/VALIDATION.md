@@ -2,7 +2,7 @@
 
 ## Alpha 3 基线确认（2026-10-24）
 
-正式 Windows Dashboard 已经 owner 试用，并获本次基线发布确认。试用版本 Dashboard 全量 351 passed / 0 failed，类型检查通过；真实模型覆盖主子进程协作、独立对话与冷恢复侧讨论。发行前仅补充签名配置、发布脚本校验和文档，不把协议测试当作人工视觉验收。
+正式 Windows Dashboard 已经 owner 试用，并获本次基线发布确认。试用版本 Dashboard 全量 351 passed / 0 failed，类型检查通过；真实模型覆盖主子进程协作、独立对话与冷恢复侧讨论。发行前补齐正式发行信任和发布脚本校验，并修复更新页采用渠道回执后重复加载；该修复另通过完整 Dashboard 351 项回归及类型检查。正式终端的 owner 试用与后续自动验证分别记录，不把协议测试当作人工视觉验收。
 
 最终提交仍须通过 Windows 全量、原生沙箱、双版本更新/回滚、正式 ZIP 连续性、Dashboard、Linux 原生/更新、Linux/macOS 原生包、隐私及 PR 契约等必需 CI。实际计数、跳过范围、源码 commit/tree、归档摘要、签名和上传后下载结果统一记录在 [Alpha 3 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 的 `validation-summary.json`，不沿用旧版本计数冒充本期全量结果。
 
