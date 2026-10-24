@@ -246,7 +246,8 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
             codes = sorted(set(re.findall(r"\bUPDATE_[A-Z_]{1,64}\b", screen.transcript())))
             assert time.monotonic() < deadline, (f"actual UI did not reach {text!r}; states={known_states}; codes={codes}; "
                 f"current_old={'Current version   ' + old_version in screen.transcript()}; "
-                f"current_new={'Current version   ' + new_version in screen.transcript()}")
+                f"current_new={'Current version   ' + new_version in screen.transcript()}; "
+                f"empty-profile fixed-copy frame={screen.text()!r}")
             assert proc.poll() is None, "actual managed UI stopped unexpectedly"
             pump()
     def pump():
