@@ -210,12 +210,12 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
     import struct
     import termios
     import re
-    from tests.terminal_screen import TerminalScreen
+    from tests.terminal_screen import TerminalScreen, activate_menu_item
     store, prepare, _, before, old_version, new_version, env = actual_lab
     prepare()
     profile = Path(env["GITGO_CONFIG_PATH"]).parent
     # Isolated test preference, no terminal selection dialog or external UI.
-    Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [],
+    Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [], "language": "en",
         "launcher": {"terminal": "current", "configured": True}}))
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
@@ -244,12 +244,16 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
             codes = sorted(set(re.findall(r"\bUPDATE_[A-Z_]{1,64}\b", screen.transcript())))
             assert time.monotonic() < deadline, f"actual UI did not reach {text!r}; states={known_states}; codes={codes}"
             assert proc.poll() is None, "actual managed UI stopped unexpectedly"
-            if select.select([master], [], [], .1)[0]:
-                chunk = os.read(master, 65536)
-                output.extend(chunk)
-                screen.feed(chunk)
-                last_frame = len(output)
-                assert len(output) < 4 * 1024**2, "bounded test terminal output exceeded limit"
+            pump()
+    def pump():
+        nonlocal last_frame
+        if select.select([master], [], [], .1)[0]:
+            chunk = os.read(master, 65536)
+            output.extend(chunk)
+            screen.feed(chunk)
+            last_frame = len(output)
+            assert len(output) < 4 * 1024**2, "bounded test terminal output exceeded limit"
+        assert proc.poll() is None, "actual managed UI stopped unexpectedly"
     def send(text): os.write(master, text.encode()); time.sleep(.15)
     def update_panel():
         start = len(output)
@@ -262,23 +266,24 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
     try:
         wait_for("Providers")  # Expected first launch without API credentials.
         send("\x1b")
-        wait_for("Projects")
+        wait_for("No projects yet.")
         update_panel()
-        send("c")  # Select the configured preview channel, local refresh only.
         wait_for("Downloaded and verified")
-        send("a"); wait_for("Close this Gitgo session")
+        activate_menu_item(screen, "Review restart / update", send, pump)
+        wait_for("Close this Gitgo session")
         start = len(output); send("\r")
         wait_for('"update_status": "committed"', after=start)
         wait_for("Providers", after=start); send("\x1b")
-        wait_for("Projects", after=start)
+        wait_for("No projects yet.", after=start)
         assert store._ledger()["current"]["version"] == new_version
         update_panel()
         wait_for("Retained version")
-        send("b"); wait_for("restore Gitgo " + old_version)
+        activate_menu_item(screen, "Review rollback", send, pump)
+        wait_for("Close this session and roll back?")
         start = len(output); send("\r")
         wait_for('"update_status": "rolled_back"', after=start)
         wait_for("Providers", after=start); send("\x1b")
-        wait_for("Projects", after=start)
+        wait_for("No projects yet.", after=start)
         assert store._ledger()["current"]["version"] == old_version
         assert tree_digest(store.root / "active") == before
     finally:

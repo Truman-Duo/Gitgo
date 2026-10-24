@@ -94,8 +94,8 @@ def confirm_with_actual_ui(store, env, *, rollback=False):
     import time
     from pathlib import Path
     from backend.core.update.installation import open_managed
-    from tests.terminal_screen import TerminalScreen
-    Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [],
+    from tests.terminal_screen import TerminalScreen, activate_menu_item
+    Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [], "language": "en",
         "launcher": {"terminal": "current", "configured": True}}))
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
@@ -108,18 +108,20 @@ def confirm_with_actual_ui(store, env, *, rollback=False):
         end = time.monotonic() + 90
         while text not in screen.transcript() or len(output) <= after:
             assert time.monotonic() < end, f"Actual Mac UI did not reach {text!r}"
-            if select.select([master], [], [], .1)[0]:
-                try:
-                    chunk = os.read(master, 65536)
-                    output.extend(chunk); screen.feed(chunk)
-                except OSError: raise AssertionError("Actual Mac UI closed before confirmation")
-                assert len(output) < 4 * 1024**2
-            else:
-                assert proc.poll() is None, "Actual Mac UI exited before confirmation"
+            pump()
+    def pump():
+        if select.select([master], [], [], .1)[0]:
+            try:
+                chunk = os.read(master, 65536)
+                output.extend(chunk); screen.feed(chunk)
+            except OSError: raise AssertionError("Actual Mac UI closed before confirmation")
+            assert len(output) < 4 * 1024**2
+        else:
+            assert proc.poll() is None, "Actual Mac UI exited before confirmation"
     def send(value): os.write(master, value.encode()); time.sleep(.15)
     try:
         wait_for("Providers")
-        start = len(output); send("\x1b"); wait_for("Projects", after=start)
+        start = len(output); send("\x1b"); wait_for("No projects yet.", after=start)
         # The initial menu shows only eight commands; /update is below that
         # visible window. Wait for the opened editor, not an offscreen item.
         start = len(output); send("/"); wait_for("/archive", after=start)
@@ -131,9 +133,11 @@ def confirm_with_actual_ui(store, env, *, rollback=False):
         start = len(output); send("\r"); wait_for("Gitgo Software Update", after=start)
         wait_for("After a manual macOS restart")
         if not rollback:
-            send("c"); wait_for("Downloaded and verified"); send("a")
+            wait_for("Downloaded and verified")
+            activate_menu_item(screen, "Review restart / update", send, pump)
         else:
-            wait_for("Retained version"); send("b")
+            wait_for("Retained version")
+            activate_menu_item(screen, "Review rollback", send, pump)
         wait_for("manually restart macOS")
         start = len(output); send("\r")
         wait_for('"update_status": "restart_required"', after=start)

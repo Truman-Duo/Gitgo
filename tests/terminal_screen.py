@@ -97,3 +97,31 @@ class TerminalScreen:
                 if self.column >= self.columns: self.column = 0; self.row += 1; self._scroll()
                 self.lines[self.row][self.column] = char; self.column += 1
         if len(self.buffer) > 1024: raise ValueError("Unbounded terminal control sequence")
+
+def activate_menu_item(screen, label, send, pump, *, maximum_rows=12, timeout=15):
+    """Use the rendered enabled selection, never obsolete action hotkeys.
+
+    The caller owns the real terminal and cleanup. pump() reads a fresh VT
+    frame; this helper cannot invoke backend actions or select disabled rows.
+    """
+    import time
+    deadline = time.monotonic() + timeout
+
+    def selected():
+        return next((line.lstrip()[2:].strip() for line in screen.text().splitlines()
+                     if line.lstrip().startswith("› ")), None)
+
+    def advance_until(predicate):
+        while not predicate():
+            assert time.monotonic() < deadline, f"Menu selection did not reach {label!r}"
+            pump()
+
+    advance_until(lambda: selected() is not None)
+    for _ in range(maximum_rows):
+        current = selected()
+        if current == label:
+            send("\r")
+            return
+        send("\x1b[B")
+        advance_until(lambda: selected() is not None and selected() != current)
+    raise AssertionError(f"Enabled menu item is unavailable: {label!r}")
