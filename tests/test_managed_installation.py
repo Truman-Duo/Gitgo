@@ -43,7 +43,7 @@ def managed(tmp_path_factory, monkeypatch):
 def test_managed_and_simulation_modes_cannot_adopt_one_another(managed):
     store, _, protected = managed
     assert store.registration["schema_version"] == 5
-    assert store.registration["bootstrap_api"] == 6
+    assert store.registration["bootstrap_api"] == 9  # Current POSIX immutable launcher contract.
     assert store.registration["simulation"] is False
     assert store.registration["updates_enabled"] is False
     assert (store.root / "bootstrap/gitgo-host/gitgo-host").is_file()

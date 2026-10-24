@@ -24,7 +24,7 @@ def test_explicit_offline_rollback_preserves_high_water_and_original_data(lab, m
     with handoff.launch_session(lab.store) as nonce:
         monkeypatch.setenv(handoff.SESSION_ENV, nonce)
         status = lab.service.status("preview")
-        assert status["schema_version"] == 5 and status["can_request_rollback"] is True
+        assert status["schema_version"] == 6 and status["can_request_rollback"] is True
         assert status["rollback"]["version"] == "1.0.0-alpha.2"
         response = lab.service.request_rollback(selected["rollback_id"], "d" * 32)
         assert response["exit_code"] == 75 and response["action"] == "rollback"

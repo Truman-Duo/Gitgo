@@ -8,6 +8,7 @@ import pytest
 
 from backend.core.loop.manager import SessionStore
 from backend.core.loop.session import AgentSession
+from backend.core.loop.tools import ToolRegistry
 from backend.core.storage import StorageRuntime
 
 
@@ -113,6 +114,7 @@ def test_process_checkpoint_populates_task_message_and_receipt_tables(
     )
     process = SimpleNamespace(
         process_id="process-typed",
+        tool_registry=ToolRegistry(["run_test"]),
         session=session,
         status=SimpleNamespace(value="completed"),
         active_task_id="task-typed",
@@ -170,6 +172,7 @@ def test_process_checkpoint_populates_task_message_and_receipt_tables(
     assert restored_process["runtime_state"]["pending_decision"]["decision_id"] == "decision-1"
     assert restored_process["runtime_state"]["mailbox"]["pending_ids"] == ["mail-1"]
     assert restored_process["runtime_state"]["task_budget"]["used"]["provider_calls"] == 2
+    assert restored_process["runtime_state"]["issued_tool_names"] == ["run_test"]
     cas_payload = b"\n".join(
         item.read_bytes()
         for item in store.storage_paths.cas_dir.rglob("*")
