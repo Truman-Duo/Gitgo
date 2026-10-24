@@ -74,3 +74,14 @@ def test_navigation_barrier_drops_old_scrollback_and_keeps_incremental_repaint_s
     # A new page reuses the unchanged "No " cells and updates only the suffix.
     screen.feed(b"1;4Hprojects yet.\x1b[K")
     assert screen.text().splitlines()[0] == "No projects yet."
+
+
+def test_settle_screen_drains_split_repaint_before_input():
+    from tests.terminal_screen import settle_screen
+    screen = TerminalScreen(2, 30)
+    chunks = [b"Old", b"\rNew", b"\rReady"]
+    def pump():
+        if chunks: screen.feed(chunks.pop(0))
+    settle_screen(screen, pump, quiet_seconds=.02, maximum_seconds=.2)
+    assert not chunks
+    assert screen.text().splitlines()[0] == "Ready"

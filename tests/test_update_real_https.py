@@ -87,6 +87,10 @@ def real_tls(tmp_path_factory, monkeypatch):
                 self.send_response(302); self.send_header("Location", "/package")
                 self.send_header("Set-Cookie", "disposable-cookie=not-forwarded"); self.end_headers()
                 return
+            if self.path == "/signed-redirect":
+                self.send_response(302); self.send_header("Location", "/package?signature=one%2Ftwo%3D")
+                self.send_header("Set-Cookie", "disposable-cookie=not-forwarded"); self.end_headers()
+                return
             if self.path == "/foreign":
                 self.send_response(302); self.send_header("Location", "https://unapproved.example.test/package")
                 self.end_headers(); return
@@ -241,3 +245,10 @@ def test_actual_proxy_rejection_does_not_expose_credentials(real_tls, monkeypatc
         message = "".join(traceback.format_exception(raised.value))
         assert "disposable-password" not in message and "private proxy diagnostic" not in message
         assert connections and not records
+
+def test_actual_tls_signed_query_redirect_keeps_transport_and_cookie_boundaries(real_tls):
+    records, destinations, _, _ = real_tls
+    assert HttpsTransport((HOST,)).fetch_bytes(f"https://{HOST}/signed-redirect", 4) == b"abcd"
+    assert [path for path, _ in records] == ["/signed-redirect", "/package?signature=one%2Ftwo%3D"]
+    assert all("cookie" not in {name.lower() for name in headers} for _, headers in records)
+    assert all(host == HOST and port == 443 for host, port in destinations)

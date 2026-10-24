@@ -106,6 +106,21 @@ class TerminalScreen:
                 self.lines[self.row][self.column] = char; self.column += 1
         if len(self.buffer) > 1024: raise ValueError("Unbounded terminal control sequence")
 
+def settle_screen(screen, pump, *, quiet_seconds=.25, maximum_seconds=2):
+    """Drain a bounded repaint before sending input to its committed owner."""
+    import time
+    quiet_end = time.monotonic() + quiet_seconds
+    end = time.monotonic() + maximum_seconds
+    last = screen.text()
+    while time.monotonic() < min(quiet_end, end):
+        pump()
+        frame = screen.text()
+        if frame != last:
+            last = frame
+            quiet_end = time.monotonic() + quiet_seconds
+        time.sleep(.01)
+
+
 def activate_menu_item(screen, label, send, pump, *, maximum_rows=12, timeout=15):
     """Use the rendered enabled selection, never obsolete action hotkeys.
 
@@ -134,16 +149,7 @@ def activate_menu_item(screen, label, send, pump, *, maximum_rows=12, timeout=15
 
     # A matching text fragment may arrive before the rest of the same repaint
     # and its input-owner commit. Drain to a bounded stable display before keys.
-    quiet_end = time.monotonic() + .25
-    settle_end = min(deadline, time.monotonic() + 2)
-    last = screen.text()
-    while time.monotonic() < min(quiet_end, settle_end):
-        pump()
-        frame = screen.text()
-        if frame != last:
-            last = frame
-            quiet_end = time.monotonic() + .25
-        time.sleep(.01)
+    settle_screen(screen, pump, maximum_seconds=min(2, max(0, deadline - time.monotonic())))
     advance_until(lambda: selected() is not None)
     for _ in range(maximum_rows):
         current = selected()

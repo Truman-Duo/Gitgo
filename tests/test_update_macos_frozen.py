@@ -94,7 +94,7 @@ def confirm_with_actual_ui(store, env, *, rollback=False):
     import time
     from pathlib import Path
     from backend.core.update.installation import open_managed
-    from tests.terminal_screen import TerminalScreen, activate_menu_item
+    from tests.terminal_screen import TerminalScreen, activate_menu_item, settle_screen
     Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [], "language": "en",
         "launcher": {"terminal": "current", "configured": True}}))
     master, slave = pty.openpty()
@@ -118,7 +118,9 @@ def confirm_with_actual_ui(store, env, *, rollback=False):
             assert len(output) < 4 * 1024**2
         else:
             assert proc.poll() is None, "Actual Mac UI exited before confirmation"
-    def send(value): os.write(master, value.encode()); time.sleep(.15)
+    def send(value):
+        settle_screen(screen, pump)
+        os.write(master, value.encode())
     try:
         wait_for("Providers")
         screen.forget_history()

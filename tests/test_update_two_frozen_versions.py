@@ -210,9 +210,9 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
     import struct
     import termios
     import re
-    from tests.terminal_screen import TerminalScreen, activate_menu_item
+    from tests.terminal_screen import TerminalScreen, activate_menu_item, settle_screen
     store, prepare, _, before, old_version, new_version, env = actual_lab
-    prepare()
+    service, _ = prepare()
     profile = Path(env["GITGO_CONFIG_PATH"]).parent
     # Isolated test preference, no terminal selection dialog or external UI.
     Path(env["GITGO_CONFIG_PATH"]).write_text(json.dumps({"projects": [], "language": "en",
@@ -239,10 +239,14 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
             return screen.transcript() if last_frame > after else ""
         while text not in displayed():
             known_states = [value for value in ("Reading local update status", "Update status unavailable",
-                "Current version", "Downloaded and verified", "Restart/update is unavailable")
+                "Current version", "Downloaded and verified", "Restart/update is unavailable",
+                "Software updates  Disabled", "A new managed installation", "Retained version",
+                "Publisher release source/public keys are not configured", "Review rollback")
                 if value in screen.transcript()]
             codes = sorted(set(re.findall(r"\bUPDATE_[A-Z_]{1,64}\b", screen.transcript())))
-            assert time.monotonic() < deadline, f"actual UI did not reach {text!r}; states={known_states}; codes={codes}"
+            assert time.monotonic() < deadline, (f"actual UI did not reach {text!r}; states={known_states}; codes={codes}; "
+                f"current_old={'Current version   ' + old_version in screen.transcript()}; "
+                f"current_new={'Current version   ' + new_version in screen.transcript()}")
             assert proc.poll() is None, "actual managed UI stopped unexpectedly"
             pump()
     def pump():
@@ -254,8 +258,10 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
             last_frame = len(output)
             assert len(output) < 4 * 1024**2, "bounded test terminal output exceeded limit"
         assert proc.poll() is None, "actual managed UI stopped unexpectedly"
-    def send(text): os.write(master, text.encode()); time.sleep(.15)
-    def update_panel():
+    def send(text):
+        settle_screen(screen, pump)
+        os.write(master, text.encode())
+    def update_panel(expected_version):
         screen.forget_history()
         start = len(output)
         send("/"); send("update"); send("\r")
@@ -263,7 +269,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         # The title renders before the Host's full status/inventory response.
         # While loading, the product correctly ignores channel/apply hotkeys.
         # Wait for actual data instead of assuming a worker finishes in 0.5s.
-        wait_for("Current version", after=start)
+        wait_for("Current version   " + expected_version, after=start)
     def projects_after_setup(after=0):
         wait_for("Providers", after=after)
         screen.forget_history()
@@ -272,7 +278,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         wait_for("No projects yet.", after=start)
     try:
         projects_after_setup()  # Expected first launch without API credentials.
-        update_panel()
+        update_panel(old_version)
         wait_for("Downloaded and verified")
         activate_menu_item(screen, "Review restart / update", send, pump)
         wait_for("Close this Gitgo session")
@@ -281,7 +287,11 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         wait_for('"update_status": "committed"', after=start)
         projects_after_setup(after=start)
         assert store._ledger()["current"]["version"] == new_version
-        update_panel()
+        # Read the same product service without mutating the fixture's ledger.
+        # A missing retained program and a stale terminal frame are distinct.
+        retained = service.status()["rollback"]
+        assert retained is not None and retained["version"] == old_version
+        update_panel(new_version)
         wait_for("Retained version")
         activate_menu_item(screen, "Review rollback", send, pump)
         wait_for("Close this session and roll back?")

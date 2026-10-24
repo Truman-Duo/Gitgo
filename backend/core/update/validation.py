@@ -116,7 +116,7 @@ def url_text(value: Any) -> str:
     return value
 
 
-def https_url(value: Any, allowed_hosts: tuple[str, ...]) -> str:
+def https_url(value: Any, allowed_hosts: tuple[str, ...], *, allow_query: bool = False) -> str:
     """Validate configured release hosts; a fetch adapter must also check redirects."""
     url_text(value)
     try:
@@ -124,7 +124,7 @@ def https_url(value: Any, allowed_hosts: tuple[str, ...]) -> str:
         decoded = unquote(parsed.path, errors="strict")
         valid = (parsed.scheme == "https" and parsed.hostname in allowed_hosts
                  and parsed.port in (None, 443) and parsed.username is None
-                 and parsed.password is None and not parsed.query and not parsed.fragment
+                 and parsed.password is None and (allow_query is True or not parsed.query) and not parsed.fragment
                  and parsed.path.startswith("/") and "\\" not in decoded
                  and not any(ord(char) < 32 or ord(char) == 127 for char in decoded)
                  and not any(part in (".", "..") for part in decoded.split("/")))

@@ -78,7 +78,10 @@ class HttpsTransport:
                             path = unquote(urlsplit(location).path, errors="strict")
                             if any(part in (".", "..") for part in path.split("/")):
                                 reject("UPDATE_REDIRECT_INVALID", "Unsafe redirect path")
-                            url = https_url(urljoin(url, location), self.allowed_hosts)
+                            # Approved CDNs issue short-lived signed query
+                            # parameters. They are transport redirects only:
+                            # configured/signed starting URLs stay canonical.
+                            url = https_url(urljoin(url, location), self.allowed_hosts, allow_query=True)
                             continue
                         if response.status_code != 200:
                             reject("UPDATE_HTTP_FAILED", "Release server did not return a full response")

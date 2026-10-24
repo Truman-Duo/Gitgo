@@ -58,7 +58,7 @@ def test_metadata_fetch_accepts_chunked_response_but_never_overflows():
 @pytest.mark.parametrize("location", [
     "https://evil.example.test/package", "http://cdn.example.test/package",
     "https://name:credential@cdn.example.test/package", "https://cdn.example.test:8443/package",
-    "/package?token=secret", "/package#fragment", "../outside", "/%2e%2e/outside",
+    "/package?token=bad%", "/package#fragment", "../outside", "/%2e%2e/outside",
     "/%5coutside", "file:///tmp/package", "", "/bad\nheader", "/bad%",
 ])
 def test_invalid_redirect_is_rejected_before_following(location):
@@ -180,8 +180,39 @@ def test_local_transport_settings_cannot_disable_limits(kwargs):
         HttpsTransport(HOSTS, **kwargs)
 
 
-def test_bad_initial_url_never_reaches_transport():
+@pytest.mark.parametrize("initial", ["https://evil.example.test/file",
+    URL + "?signature=opaque"])
+def test_bad_initial_url_never_reaches_transport(initial):
     def forbidden(_):
         pytest.fail("invalid URL reached network")
     with pytest.raises(UpdateError, match="UPDATE_URL_INVALID"):
-        adapter(forbidden).fetch_bytes("https://evil.example.test/file", 100)
+        adapter(forbidden).fetch_bytes(initial, 100)
+
+@pytest.mark.parametrize("location", ["/blob?signature=one%2Ftwo%3D&expires=123",
+    "https://cdn.example.test/blob?signature=one%2Ftwo%3D&expires=123"])
+def test_signed_cdn_queries_only_follow_validated_redirects_without_credentials(location):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert "authorization" not in request.headers and "cookie" not in request.headers
+        if len(calls) == 1:
+            return httpx.Response(302, headers={"Location": location, "Set-Cookie": "private=discard"})
+        assert request.url.params["signature"] == "one/two="
+        return httpx.Response(200, stream=Stream([b"ok"]))
+    assert adapter(handler).fetch_bytes(URL, 2) == b"ok"
+    assert len(calls) == 2
+    assert calls[1].url.host in HOSTS
+
+
+@pytest.mark.parametrize("location", ["https://evil.example.test/blob?signature=opaque",
+    "http://cdn.example.test/blob?signature=opaque",
+    "https://user:secret@cdn.example.test/blob?signature=opaque",
+    "https://cdn.example.test/blob?signature=opaque#fragment"])
+def test_signed_query_does_not_bypass_redirect_authority(location):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(302, headers={"Location": location})
+    with pytest.raises(UpdateError):
+        adapter(handler).fetch_bytes(URL, 2)
+    assert len(calls) == 1
