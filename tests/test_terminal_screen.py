@@ -60,3 +60,17 @@ def test_menu_driver_does_not_move_when_target_is_already_selected():
     activate_menu_item(screen, "Review rollback", calls.append,
                        lambda: None)
     assert calls == ["\r"]
+
+def test_navigation_barrier_drops_old_scrollback_and_keeps_incremental_repaint_state():
+    screen = TerminalScreen(2, 50)
+    screen.feed(b"Providers\r\nNo LLM providers configured.\r\nfooter")
+    assert "Providers" in screen.transcript()
+    cursor = (screen.row, screen.column)
+    screen.feed(b"\x1b[")
+    screen.forget_history()
+    assert "Providers" not in screen.transcript()
+    assert screen.text().splitlines()[0] == "No LLM providers configured."
+    assert (screen.row, screen.column) == cursor
+    # A new page reuses the unchanged "No " cells and updates only the suffix.
+    screen.feed(b"1;4Hprojects yet.\x1b[K")
+    assert screen.text().splitlines()[0] == "No projects yet."

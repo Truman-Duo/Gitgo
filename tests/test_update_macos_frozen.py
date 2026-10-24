@@ -121,9 +121,11 @@ def confirm_with_actual_ui(store, env, *, rollback=False):
     def send(value): os.write(master, value.encode()); time.sleep(.15)
     try:
         wait_for("Providers")
+        screen.forget_history()
         start = len(output); send("\x1b"); wait_for("No projects yet.", after=start)
         # The initial menu shows only eight commands; /update is below that
         # visible window. Wait for the opened editor, not an offscreen item.
+        screen.forget_history()
         start = len(output); send("/"); wait_for("/archive", after=start)
         prefix = "/"
         for letter in "update":

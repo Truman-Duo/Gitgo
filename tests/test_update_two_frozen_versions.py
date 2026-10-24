@@ -256,6 +256,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         assert proc.poll() is None, "actual managed UI stopped unexpectedly"
     def send(text): os.write(master, text.encode()); time.sleep(.15)
     def update_panel():
+        screen.forget_history()
         start = len(output)
         send("/"); send("update"); send("\r")
         wait_for("Gitgo Software Update", after=start)
@@ -263,27 +264,31 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         # While loading, the product correctly ignores channel/apply hotkeys.
         # Wait for actual data instead of assuming a worker finishes in 0.5s.
         wait_for("Current version", after=start)
-    try:
-        wait_for("Providers")  # Expected first launch without API credentials.
+    def projects_after_setup(after=0):
+        wait_for("Providers", after=after)
+        screen.forget_history()
+        start = len(output)
         send("\x1b")
-        wait_for("No projects yet.")
+        wait_for("No projects yet.", after=start)
+    try:
+        projects_after_setup()  # Expected first launch without API credentials.
         update_panel()
         wait_for("Downloaded and verified")
         activate_menu_item(screen, "Review restart / update", send, pump)
         wait_for("Close this Gitgo session")
+        screen.forget_history()
         start = len(output); send("\r")
         wait_for('"update_status": "committed"', after=start)
-        wait_for("Providers", after=start); send("\x1b")
-        wait_for("No projects yet.", after=start)
+        projects_after_setup(after=start)
         assert store._ledger()["current"]["version"] == new_version
         update_panel()
         wait_for("Retained version")
         activate_menu_item(screen, "Review rollback", send, pump)
         wait_for("Close this session and roll back?")
+        screen.forget_history()
         start = len(output); send("\r")
         wait_for('"update_status": "rolled_back"', after=start)
-        wait_for("Providers", after=start); send("\x1b")
-        wait_for("No projects yet.", after=start)
+        projects_after_setup(after=start)
         assert store._ledger()["current"]["version"] == old_version
         assert tree_digest(store.root / "active") == before
     finally:

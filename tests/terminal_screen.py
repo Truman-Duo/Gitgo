@@ -24,6 +24,14 @@ class TerminalScreen:
         """Include bounded lines actually scrolled off during fullscreen writes."""
         return "\n".join(self.scrollback + [self.text()])
 
+    def forget_history(self):
+        """Forget prior-stage scrollback, keeping the real visible VT canvas.
+
+        Unchanged visible cells are reused by Ink's incremental repaint; they
+        must survive navigation along with the cursor and stream decoder.
+        """
+        self.scrollback = []
+
     def _scroll(self):
         while self.row >= self.rows:
             self.scrollback.append("".join(self.lines.pop(0)).rstrip())
