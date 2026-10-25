@@ -1,0 +1,94 @@
+# Reference extract from Gitgo c8e7906e6ed5e23af29ebdbc51e4bfafe696926b
+from __future__ import annotations
+import re
+from pathlib import Path
+from typing import Optional
+from backend.adapters import GitRunner, LocalGitRunner
+from backend.core.config import ProjectConfig
+from backend.models import IncomingChange
+from .models import CommitInfo
+
+def _find_next_number(backup_path: str='', prefix: str='ANBM', *, git_runner: GitRunner | None=None, workspace_path: str='') -> int:
+    """从本地计数器或备份仓库的 commit 历史中确定下一个可用编号。
+
+    优先读 workspace .gitgo/next_number 本地计数器（单调递增）；
+    回退到扫 release repo git log（向后兼容已有项目）。
+    """
+    local_n = -1
+    if workspace_path:
+        counter_file = Path(workspace_path) / '.gitgo' / 'next_number'
+        if counter_file.exists():
+            try:
+                local_n = int(counter_file.read_text().strip())
+            except (ValueError, OSError):
+                local_n = -1
+    if git_runner is None:
+        if not backup_path:
+            return max(0, local_n + 1)
+        git_runner = LocalGitRunner(Path(backup_path).resolve())
+    if not git_runner.is_git_repo():
+        return max(0, local_n + 1)
+    lines = git_runner.log(grep=f'\\[{prefix}-\\d+\\]', fmt='%s', max_count=50)
+    max_n = -1
+    pat = re.compile(f'\\[{prefix}-(\\d+)\\]')
+    for line in lines:
+        m = pat.search(line)
+        if m:
+            n = int(m.group(1))
+            if n > max_n:
+                max_n = n
+    repo_max = max_n + 1 if max_n >= 0 else 0
+    next_n = max(repo_max, local_n + 1)
+    return min(next_n, 9999)
+
+def build_commit_template(commits: list[CommitInfo], project: ProjectConfig, *, template_name: str | None=None, git_runner: GitRunner | None=None) -> str:
+    """根据选中的 commit 生成正式 commit message 模板。
+
+    若指定 template_name，从 commit-config.json 加载对应模板；
+    否则使用项目默认模板（commit_format.template_name）。
+    无匹配模板时回退到内置默认格式（向后兼容）。
+    """
+    from backend.core.template_manager import TemplateManager, _BUILTIN_DEFAULT
+    prefix = project.commit_format.get('prefix', 'PROJ')
+    number_start = project.commit_format.get('number_start', 0)
+    tpl_name = template_name or project.commit_format.get('template_name', 'default')
+    template = TemplateManager.get_template(tpl_name)
+    if template is None:
+        template = _BUILTIN_DEFAULT
+    effective_prefix = template.prefix_override or prefix
+    types = set((c.type for c in commits))
+    scopes = set((c.scope for c in commits if c.scope))
+    type_str = '/'.join(sorted(types)) if len(types) > 1 else next(iter(types))
+    scope_str = f"({','.join(sorted(scopes))})" if scopes else ''
+    subjects = [c.subject for c in commits]
+    if not subjects:
+        agg_subject = 'update'
+    elif len(subjects) == 1:
+        agg_subject = subjects[0]
+    else:
+        agg_subject = f'{subjects[0][:30]} +{len(subjects) - 1} more'
+        if len(agg_subject) > 50:
+            agg_subject = agg_subject[:47] + '...'
+    max_n = _find_next_number(project.backup_path, effective_prefix, git_runner=git_runner)
+    n = max(max_n, number_start)
+    commit_lines = []
+    for i, c in enumerate(commits, 1):
+        scope_part = f'({c.scope})' if c.scope else ''
+        subj = c.subject[:60] + ('...' if len(c.subject) > 60 else '')
+        commit_lines.append(f'  {i}. {c.type}{scope_part}: {subj}')
+    commit_list = '\n'.join(commit_lines)
+    vars_dict = {'prefix': effective_prefix, 'number': n, 'type_str': type_str, 'scope_str': scope_str, 'subject': agg_subject, 'project_name': project.name, 'commit_count': str(len(commits)), 'commit_list': commit_list}
+    header = template.header_format.format(**vars_dict)
+    body = template.body_format.format(**vars_dict)
+    return header + '\n\n' + body
+
+def validate_commit_message(msg: str) -> Optional[str]:
+    """验证 commit message，返回 None 或错误信息"""
+    lines = [l for l in msg.split('\n') if l and (not l.startswith('#'))]
+    if not lines:
+        return 'Commit message 不能为空'
+    first = lines[0]
+    pattern = re.compile('^\\[[A-Z0-9]+-\\d+\\]\\s+\\w+')
+    if not pattern.match(first):
+        return '首行格式必须为 [PREFIX-N] type: subject'
+    return None

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gitgo · 流程交互</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<main id="terminal" tabindex="-1">
+  <header id="header" aria-label="页头"></header>
+  <section id="surface" aria-label="当前操作" tabindex="-1"></section>
+  <footer>
+    <div id="notice" role="status"></div>
+    <div id="normal-bar" class="bar normal" hidden><div id="input-label"></div><div class="input-row"><span>❯</span><textarea id="normal-input" aria-label="填写内容" rows="2" spellcheck="false"></textarea></div><div class="bar-bottom"><span>NORMAL</span></div></div>
+    <div id="command-bar" class="bar command" hidden><div class="input-row"><span>/</span><input id="command-input" aria-label="固定动作" autocomplete="off" spellcheck="false" placeholder="输入命令，或按 / 查看操作"></div><div class="bar-bottom"><span>COMMAND</span></div></div>
+    <div id="keys"></div>
+  </footer>
+</main>
+<script src="commit-layout.js"></script><script src="app.js"></script>
+</body></html>

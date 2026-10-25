@@ -1,0 +1,56 @@
+{
+  "gitgo_source_commit": "c8e7906e6ed5e23af29ebdbc51e4bfafe696926b",
+  "reference_date": "2026-10-25",
+  "sources": [
+    {
+      "path": "backend/core/config.py",
+      "source_sha256": "aa65464364ff8678e0afac9094043d507ca715dac5774a02145cfb83147e9cb4",
+      "definitions": [
+        "DEFAULT_COMMIT_FORMAT",
+        "DEFAULT_FORCE_EXCLUDE",
+        "DEFAULT_SECURITY_SCAN",
+        "default_outbound_policy",
+        "normalize_outbound_policy"
+      ]
+    },
+    {
+      "path": "backend/core/operations/utils.py",
+      "source_sha256": "2b095712f5c7cb879c5fa81facea941c45e237bd0e24a7ff86874900bc0326b8",
+      "definitions": [
+        "_match_glob"
+      ]
+    },
+    {
+      "path": "backend/core/operations/security.py",
+      "source_sha256": "68c1e4dc1a89e61bd2c94af478a451cd4d8d8ab359ef85cc768f70531573a9b8",
+      "definitions": [
+        "DEFAULT_SECURITY_PATTERNS",
+        "_SOURCE_CODE_SUFFIXES",
+        "_is_source_reference",
+        "scan_diff_for_secrets"
+      ]
+    },
+    {
+      "path": "backend/core/authorship.py",
+      "source_sha256": "417e65e007c46122cc36426af93e3833713fb2d3e1d37c3d28760f76d135d889",
+      "definitions": "module"
+    },
+    {
+      "path": "backend/core/template_manager.py",
+      "source_sha256": "2bc4cb2fb1c3c9cc83c5b9ca63e07fa8ec7954d7ec9171047123b57c9c348a0f",
+      "definitions": [
+        "_DEFAULT_BODY",
+        "_DEFAULT_HEADER"
+      ]
+    },
+    {
+      "path": "backend/core/operations/git.py",
+      "source_sha256": "d85b061c3d880ba24acc8bcf83607b2888c32007c0415e2e08fb26cd3a3ef9eb",
+      "definitions": [
+        "_find_next_number",
+        "build_commit_template",
+        "validate_commit_message"
+      ]
+    }
+  ]
+}

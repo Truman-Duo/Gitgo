@@ -1,0 +1,122 @@
+[
+  {
+    "path": ".gitignore",
+    "bytes": 54,
+    "sha256": "4d024f2961c40fd09efcd9688b9706ff572029d7b5308826760c6c0a0cdfbeb2"
+  },
+  {
+    "path": "README.md",
+    "bytes": 4949,
+    "sha256": "6d546b9171c5ab2f2c5c0aeeb3fef2cf593eb5ca32ea3f4364c7af3845ced30d"
+  },
+  {
+    "path": "REQUIREMENTS.md",
+    "bytes": 12777,
+    "sha256": "1f7948017ef43249ccf9abd03845c610b0846bf466324a95ff74c941bc4a4736"
+  },
+  {
+    "path": "DESIGN-REFERENCE.md",
+    "bytes": 13860,
+    "sha256": "2562cdee1d610ead628b2e7532e1d071628c1dd66ec3c81c4d12ea9f223237ed"
+  },
+  {
+    "path": "SOURCE-PROVENANCE.json",
+    "bytes": 1748,
+    "sha256": "4b6696fd979fa7dc45ce7c04426420c2eacb657a42b981640944f96ecb86e585"
+  },
+  {
+    "path": "demo/index.html",
+    "bytes": 1136,
+    "sha256": "e76383939b84f98d70ff286ce4e67faa480a5e1a2f5ebac24fa3fd21b1d39878"
+  },
+  {
+    "path": "demo/app.js",
+    "bytes": 35395,
+    "sha256": "a16f614d283d4821cdb7e9bbd26489c7a083e5d86c323823ebc907fdf486ee1c"
+  },
+  {
+    "path": "demo/style.css",
+    "bytes": 7397,
+    "sha256": "4d021a439087d805d5350ee0ecc41cb77ed368938e2d9e12f927625adcc8bf88"
+  },
+  {
+    "path": "demo/service.py",
+    "bytes": 24761,
+    "sha256": "77c01056e32087bb27907f12f0e427883479ad3821b03a642a69233598b2ed41"
+  },
+  {
+    "path": "demo/test_flow.py",
+    "bytes": 5207,
+    "sha256": "7171509880b2b5e0bc48f3f50bb49bbbfd82f0e65e0908aae0c99e0550b536a6"
+  },
+  {
+    "path": "demo/start.bat",
+    "bytes": 239,
+    "sha256": "4d1438c9deeb2cd3b121827e9a3f60295a45eb7c521b6ff23d938e5c65141b55"
+  },
+  {
+    "path": "demo/_fixture/server.py",
+    "bytes": 47506,
+    "sha256": "4bd001ceb7594f53abea6bd23b279f6164a03cf5d5adf10bfb09cfdda5922d04"
+  },
+  {
+    "path": "demo/_fixture/workflow.py",
+    "bytes": 15092,
+    "sha256": "0ea9142a2e689eeed33a5b9c7a112014feb7de259b003e075e9f5b27415b5fd2"
+  },
+  {
+    "path": "demo/_fixture/publish_features.py",
+    "bytes": 13731,
+    "sha256": "6f779c670c1b957774beaeee2e7250807aefcaee5e3e4bd4e04555dd74976932"
+  },
+  {
+    "path": "demo/_fixture/source_helpers.py",
+    "bytes": 5049,
+    "sha256": "679a5723e596c00f79b8d099ae1d49b11c6be9ba9e5cc476e7bcd8d31f55daa5"
+  },
+  {
+    "path": "demo/_fixture/commit-layout.js",
+    "bytes": 1980,
+    "sha256": "c889f6e8761f85a54074dae8d5a8e4311728a6b2400e2eec9d812e4280d24b11"
+  },
+  {
+    "path": "images/inline-flow-list.png",
+    "bytes": 35045,
+    "sha256": "b7153163c80fc09e86c27e40bf5c6945c4e03e83def0f61e3ce4ac4f13f224e1"
+  },
+  {
+    "path": "images/inline-flow-route.png",
+    "bytes": 27633,
+    "sha256": "0a4ba614feb1f3645478ec6f28e33e8d28f82ad7799f7f0eb0e2a0dc624b8d4a"
+  },
+  {
+    "path": "demo/_fixture/source-snapshot/backend/core/config.py",
+    "bytes": 3118,
+    "sha256": "df5475c6b7a81913b30b2b7a68aa6d7456848a20f08dac1a4a5477e6e5579376"
+  },
+  {
+    "path": "demo/_fixture/source-snapshot/backend/core/operations/utils.py",
+    "bytes": 1198,
+    "sha256": "49f407bc5bce4b8ed01eaa0d166b3bd17e89e3c34d9950f1589f48d4ac3eddfd"
+  },
+  {
+    "path": "demo/_fixture/source-snapshot/backend/core/operations/security.py",
+    "bytes": 5731,
+    "sha256": "4b24bb1b9e3468b9d4f9f7a218f5e0dcd5b7b0c1be4b95d6b1462cb5f5fa78c0"
+  },
+  {
+    "path": "demo/_fixture/source-snapshot/backend/core/authorship.py",
+    "bytes": 14964,
+    "sha256": "a1339db814c39392279248466122e3264ea15e522cf069ee1eb114ac75a05995"
+  },
+  {
+    "path": "demo/_fixture/source-snapshot/backend/core/template_manager.py",
+    "bytes": 544,
+    "sha256": "51fc1ea4ba1c9c6c83b32868850debdbd4ef4aca6625e786d5bbd56b04cefcae"
+  },
+  {
+    "path": "demo/_fixture/source-snapshot/backend/core/operations/git.py",
+    "bytes": 4470,
+    "sha256": "5cc5d77688e8ddea26e6e8a17e7dc2c3216d2c7b711a09e3fc1645fe1f5ef37e"
+  }
+]
