@@ -244,6 +244,7 @@ class Config:
     language: str = "en"  # UI copy only; commands/protocol identifiers stay stable
     verbose: bool = False
     diff_layout: str = "split"
+    keyboard_preset: str = "standard"
     auto_compact: bool = True
     agent_routing: str = "owner"
     prompt_profile: str = "default"
@@ -270,6 +271,7 @@ class Config:
                 language=d.get("language", "en"),
                 verbose=bool(d.get("verbose", False)),
                 diff_layout="unified" if d.get("diff_layout") == "unified" else "split",
+                keyboard_preset="portable" if d.get("keyboard_preset") == "portable" else "standard",
                 auto_compact=bool(d.get("auto_compact", True)),
                 agent_routing="fresh" if d.get("agent_routing") == "fresh" else "owner",
                 prompt_profile=d.get("prompt_profile", "default"),
@@ -295,6 +297,7 @@ class Config:
             language=d.get("language", "en"),
             verbose=bool(d.get("verbose", False)),
             diff_layout="unified" if d.get("diff_layout") == "unified" else "split",
+            keyboard_preset="portable" if d.get("keyboard_preset") == "portable" else "standard",
             auto_compact=bool(d.get("auto_compact", True)),
             agent_routing="fresh" if d.get("agent_routing") == "fresh" else "owner",
             prompt_profile=d.get("prompt_profile", "default"),

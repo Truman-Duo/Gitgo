@@ -17,7 +17,7 @@ export function helpGuide(scene:Scene,t:Translate){
  if(scene==="projects")return {title,purpose:t({en:"Open a project workspace, create a project, or manage application settings and updates.",zh:"进入项目继续工作，创建项目，或管理软件设置与更新。"}),steps:[
   t({en:"Select a project with the arrow keys and press Enter to open its main conversation.",zh:"用上下方向键选中项目，按 Enter 进入主进程对话。"}),
   t({en:"Use /create to create or register a workspace. Check the project name and directory before confirming.",zh:"用 /create 创建或登记工作区；确认前核对项目名称和目录。"}),
-  t({en:"Use /stats for daily usage across projects, /config for settings, and /update for software updates. /bin manages archived projects.",zh:"/stats 查看跨项目的每日用量，/config 修改设置，/update 管理软件更新，/bin 管理已归档项目。"}),
+  t({en:"Use /stats for daily usage across projects, /config for settings, and /update for software updates. /config keybindings shows and switches keyboard schemes. /bin manages archived projects.",zh:"/stats 查看跨项目的每日用量，/config 修改设置，/config keybindings 查看或切换绑键，/update 管理软件更新，/bin 管理已归档项目。"}),
   t({en:"Type / to browse commands, select one, then press Enter. Commands requiring text fill the editor before submission.",zh:"输入 / 浏览命令，选中后按 Enter；需要补充文字的命令会先填入输入框，补全后再提交。"}),
  ]};
  if(scene==="process_list")return {title,purpose:t({en:"Inspect subprocess status and relationships, and open a subprocess conversation.",zh:"查看子进程状态与相互关系，并进入具体子进程继续交流。"}),steps:[

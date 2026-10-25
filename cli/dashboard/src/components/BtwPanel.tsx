@@ -188,7 +188,7 @@ export function BtwPanel(props: Props) {
     if (key.tab) {
       setFocus(value => {
         const regions:typeof focus[]=props.lessonProposal?["body","input","choices"]:["body","input","choices",...(props.onBrowseParent?["parent" as const]:[])];
-        return regions[(regions.indexOf(value)+1)%regions.length]!;
+        return regions[(regions.indexOf(value)+(key.shift?-1:1)+regions.length)%regions.length]!;
       });
       return;
     }

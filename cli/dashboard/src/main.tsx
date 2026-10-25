@@ -12,7 +12,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { resolvePythonRuntime } from "./backend/pythonRuntime.js";
 import { resolveProjectRoot } from "./runtime/paths.js";
 import { spawn } from "node:child_process";
-import { probeRuntime } from "../scripts/runtime.mjs";
+import { probeRuntime, assertRuntimeSecurity } from "../scripts/runtime.mjs";
 import {
   acceptTerminalHandoff,
   currentFrontendOrigin,
@@ -34,6 +34,7 @@ if (process.argv.includes("--version")) {
   process.stdout.write(`Gitgo ${packageInfo.version}\n`);
   process.exit(0);
 }
+assertRuntimeSecurity();
 
 // Before launch-session/profile/terminal reads or writes. This also covers a
 // direct active binary and the Node companion, not only the public wrapper.

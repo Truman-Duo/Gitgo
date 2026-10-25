@@ -48,7 +48,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: runner.os == 'Windows'
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Configure owned Windows handoff lifecycle runtime
         if: runner.os == 'Windows'
         run: |
@@ -128,10 +128,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '24.15.0'
+          node-version: '24.22.1'
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Verify runtime and install locked dependencies
         working-directory: cli/dashboard
         run: |

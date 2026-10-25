@@ -45,6 +45,8 @@ if (-not $Python -or -not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $Bun -PathType Leaf)) {
     throw "Bun runtime not found: $Bun"
 }
+& $Bun (Join-Path $root "cli\dashboard\scripts\check-runtime.mjs")
+if ($LASTEXITCODE -ne 0) { throw "Build runtime failed the security version check" }
 & $Python -B (Join-Path $root "scripts\release_artifacts.py") --check
 if ($LASTEXITCODE -ne 0) { throw "Product versions do not agree" }
 if ((Test-Path -LiteralPath $stage) -and (Get-ChildItem -LiteralPath $stage -Force | Select-Object -First 1)) {
@@ -114,6 +116,7 @@ Push-Location (Join-Path $root "cli\dashboard")
 try {
     & $Bun test src\input\runtime.test.tsx src\backend\client.test.ts `
         src\backend\terminalLauncher.test.ts src\components\config\GeneralTab.test.tsx `
+        src\components\config\KeybindingsTab.test.tsx `
         src\components\promptRepaint.test.tsx
     if ($LASTEXITCODE -ne 0) {
         throw "Dashboard Unicode/input integrity release gate failed"
@@ -131,7 +134,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Dashboard compilation failed" }
     Push-Location (Join-Path $root "cli\dashboard")
     try {
-        & $Bun run build
+        & $Bun scripts/build.ts
         if ($LASTEXITCODE -ne 0) { throw "Dashboard portable bundle failed" }
     } finally { Pop-Location }
     $dashboardScripts = Join-Path $stage "dashboard\scripts"

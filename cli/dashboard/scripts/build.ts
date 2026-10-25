@@ -1,5 +1,7 @@
 // scripts/build.ts
 import { build } from "bun";
+import {assertRuntimeSecurity} from "./runtime.mjs";
+assertRuntimeSecurity();
 
 const dashboard = await build({
   entrypoints: ["./src/main.tsx"],

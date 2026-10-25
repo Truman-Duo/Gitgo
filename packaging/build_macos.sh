@@ -74,6 +74,7 @@ fi
 if [ -z "$BUN_BIN" ]; then BUN_BIN="$(command -v bun || true)"; fi
 if [ ! -x "$PYTHON_BIN" ]; then echo "Python build runtime not found: $PYTHON_BIN" >&2; exit 1; fi
 if [ ! -x "$BUN_BIN" ]; then echo "Bun runtime not found: $BUN_BIN" >&2; exit 1; fi
+"$BUN_BIN" "$ROOT/cli/dashboard/scripts/check-runtime.mjs"
 if [ -z "$RIPGREP_BIN" ]; then RIPGREP_BIN="$(command -v rg || true)"; fi
 if [ ! -x "$RIPGREP_BIN" ] || [ ! -f "$RIPGREP_NOTICES" ]; then
   echo "Release requires standalone ripgrep and matching complete notices; pass --ripgrep and --ripgrep-notices" >&2
@@ -100,7 +101,7 @@ mkdir -p "$STAGE/internal"
 
 (
   cd "$ROOT/cli/dashboard"
-  "$BUN_BIN" test src/input/runtime.test.tsx src/backend/client.test.ts
+  "$BUN_BIN" test src/input/runtime.test.tsx src/backend/client.test.ts src/components/config/KeybindingsTab.test.tsx
 )
 "$BUN_BIN" build "$ROOT/cli/dashboard/src/main.tsx" \
   --compile --outfile "$STAGE/gitgo"

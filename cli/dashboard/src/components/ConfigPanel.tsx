@@ -14,6 +14,7 @@ import { HorizontalHeaderStrip, clampHeaderIndex } from "./HorizontalHeaderStrip
 import { CONFIG_TABS } from "./config/registry.js";
 import type { ConfigTabId, ShellControls, TabReport } from "./config/types.js";
 import { matchChord } from "../input/bindings.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 type Props = {
   client: BackendClient;
@@ -32,6 +33,7 @@ export const ConfigPanel = memo(function ConfigPanel({
   client, project, initialTab, cmdInput, onFooter, onBack, onStatusUpdate, onRefresh, initialSetting, onSettingSaved,
 }: Props) {
   const requestedTab = initialTab === "bin" ? "general" : initialTab;
+  const t = useCopy();
   const [tab, setTab] = useState<ConfigTabId>((requestedTab as ConfigTabId) || "general");
   const [tabReport, setTabReport] = useState<TabReport>({ sub: false, fullscreen: false });
   const [contentFocused, setContentFocused] = useState(Boolean(initialSetting));
@@ -83,7 +85,7 @@ export const ConfigPanel = memo(function ConfigPanel({
       {!tabReport.fullscreen && (
         <Box flexDirection="column">
           <HorizontalHeaderStrip
-            items={CONFIG_TABS.map(item => ({id: item.id, label: item.label}))}
+            items={CONFIG_TABS.map(item => ({id: item.id, label: t(item.label)}))}
             selected={Math.max(0, CONFIG_TABS.findIndex(item => item.id === tab))}
             width={w}
             contentFocused={contentFocused}

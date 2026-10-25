@@ -180,6 +180,26 @@ def test_legacy_privacy_fields_migrate_to_canonical_outbound_policy():
     assert project.outbound_policy["deep_scan"] is True
 
 
+def test_keyboard_preset_persists_and_rejects_invalid_updates():
+    from backend.core.application import ApplicationServices, OperationError
+    import pytest
+
+    for payload in [{}, {"projects": []}, {"keyboard_preset": "unknown"}]:
+        assert Config.from_dict(payload).keyboard_preset == "standard"
+    ConfigManager.save(Config(projects=[]))
+    service = ApplicationServices()
+    assert service.config_get()["keyboard_preset"] == "standard"
+    for choice in ["portable", "standard"]:
+        service.config_set("keyboard_preset", choice)
+        assert ConfigManager.load().keyboard_preset == choice
+        assert service.config_get("keyboard_preset")["value"] == choice
+    for invalid in ["auto", "", True, None, ["portable"], {"preset": "portable"}]:
+        with pytest.raises(OperationError) as failure:
+            service.config_set("keyboard_preset", invalid)
+        assert failure.value.code == "INVALID_VALUE"
+        assert ConfigManager.load().keyboard_preset == "standard"
+
+
 def test_diff_layout_legacy_default_and_saved_config():
     from backend.core.application import ApplicationServices, OperationError
     import pytest

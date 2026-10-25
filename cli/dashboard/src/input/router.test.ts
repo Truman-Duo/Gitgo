@@ -1,9 +1,21 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { InputRouter, InputBindingRegistry } from "./router.js";
+import { InputRouter, InputBindingRegistry, presetSettings } from "./router.js";
 import { runningWorkers, agentLabel } from "../daemon/agentLabels.js";
 
 describe("central input ownership", () => {
+  test("portable preset is reversible and does not mistake Super for Ctrl", () => {
+    const registry = new InputBindingRegistry();
+    registry.configure(presetSettings("portable"));
+    assert.equal(registry.label("editor.newline"), "Alt+Enter");
+    assert.equal(registry.normalize({input:"",key:{return:true,meta:true}}).input, "\n");
+    assert.equal(registry.normalize({input:"p",key:{ctrl:true}}).key.tab, true);
+    const superP = {input:"p",key:{super:true}};
+    assert.deepEqual(registry.normalize(superP), superP);
+    registry.configure(presetSettings("standard"));
+    assert.equal(registry.label("editor.newline"), "Shift+Enter");
+    assert.equal(registry.normalize({input:"",key:{return:true,shift:true}}).input, "\n");
+  });
   test("overlay scroll owns wheel and paging while other keys reach one modal", () => {
     const router = new InputRouter();
     const calls: string[] = [];

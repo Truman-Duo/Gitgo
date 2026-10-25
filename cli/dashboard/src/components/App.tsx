@@ -27,6 +27,8 @@ import { CommandBar, type FooterConfig } from "./CommandBar.js";
 import { renderOverlay } from "./overlays.js";
 import { InputLayer, ScrollableInputLayer } from "../input/runtime.js";
 import { notifyGeneralConfigChanged, useGeneralConfig } from "../hooks/useGeneralConfig.js";
+import {useBindingSettings} from "../input/runtime.js";
+import {presetSettings} from "../input/router.js";
 import { runningWorkers } from "../daemon/agentLabels.js";
 import { editPromptExternally } from "../utils/externalPromptEditor.js";
 
@@ -63,6 +65,8 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
   const { providers: globalProviders, fetchStatus: fetchGlobalLLM } = useLLMConfig(client);
   const generalConfig = useGeneralConfig(client);
+  const inputSettings = useMemo(() => presetSettings(generalConfig.keyboardPreset), [generalConfig.keyboardPreset]);
+  useBindingSettings(inputSettings);
   const t=useCallback((value:Copy)=>copy(value,generalConfig.language),[generalConfig.language]);
 
   const scene = useStore(appStore, (s) => s.scene);

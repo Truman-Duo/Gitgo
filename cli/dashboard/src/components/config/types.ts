@@ -6,8 +6,9 @@ import type { ComponentType } from "react";
 import type { BackendClient } from "../../backend/client.js";
 import type { UseTextInputReturn } from "../../hooks/useTextInput.js";
 import type { FooterConfig } from "../CommandBar.js";
+import type {Copy} from "../../ui/pageContract.js";
 
-export type ConfigTabId = "general" | "providers";
+export type ConfigTabId = "general" | "providers" | "keybindings";
 
 /** Navigation + coordination callbacks the shell hands to each tab. */
 export type ShellControls = {
@@ -40,6 +41,6 @@ export type ConfigTabProps = {
 
 export type ConfigTabModule = {
   id: ConfigTabId;
-  label: string;
+  label: Copy;
   Component: ComponentType<ConfigTabProps>;
 };

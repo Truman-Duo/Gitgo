@@ -118,6 +118,8 @@ export const REGISTRY: CommandDef[] = [
         keys: [],
         slashName: "general",
       },
+      {name: "config.keybindings", title: {en: "Keybindings", zh: "绑键"}, category: "system",
+        keys: [], slashName: "keybindings", slashAliases: ["keys"]},
       {
         name: "config.llm",
         title: {en:"Providers",zh:"模型服务商"},

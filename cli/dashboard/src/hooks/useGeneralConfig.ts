@@ -7,6 +7,7 @@ import type {DiffLayout} from "../types.js";
 export type GeneralConfig = {
   verbose: boolean;
   diffLayout: DiffLayout;
+  keyboardPreset: "standard" | "portable";
   language: "en" | "zh";
   autoCompact: boolean;
   externalEditor: string;
@@ -21,7 +22,7 @@ export function notifyGeneralConfigChanged() {
 
 export function useGeneralConfig(client: BackendClient) {
   const [config, setConfig] = useState<GeneralConfig>({
-    verbose: false, diffLayout: "split", language: "en", autoCompact: true, externalEditor: "", webSearchMode: "auto", webSearchEndpoint: "", webSearchEngine: "duckduckgo",
+    verbose: false, diffLayout: "split", keyboardPreset: "standard", language: "en", autoCompact: true, externalEditor: "", webSearchMode: "auto", webSearchEndpoint: "", webSearchEngine: "duckduckgo",
   });
   const refresh = useCallback(async () => {
     try {
@@ -29,6 +30,7 @@ export function useGeneralConfig(client: BackendClient) {
       setConfig({
         verbose: Boolean(value?.verbose),
         diffLayout: value?.diff_layout === "unified" ? "unified" : "split",
+        keyboardPreset: value?.keyboard_preset === "portable" ? "portable" : "standard",
         language: value?.language === "zh" ? "zh" : "en",
         autoCompact: value?.auto_compact !== false,
         externalEditor: String(value?.external_editor || ""),

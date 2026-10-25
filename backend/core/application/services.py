@@ -598,6 +598,7 @@ class ApplicationServices:
         if not key:
             return {"safety": cfg.safety, "language": cfg.language,
                     "verbose": cfg.verbose, "diff_layout": cfg.diff_layout, "auto_compact": cfg.auto_compact,
+                    "keyboard_preset": cfg.keyboard_preset,
                     "agent_routing": cfg.agent_routing,
                     "prompt_profile": cfg.prompt_profile,
                     "prompt_profiles": list_profiles(),
@@ -646,6 +647,10 @@ class ApplicationServices:
                 cfg.diff_layout = value
             elif key == "auto_compact":
                 cfg.auto_compact = bool(value)
+            elif key == "keyboard_preset":
+                if not isinstance(value, str) or value not in ("standard", "portable"):
+                    raise OperationError("INVALID_VALUE", "keyboard_preset must be 'standard' or 'portable'")
+                cfg.keyboard_preset = value
             elif key == "agent_routing":
                 if value not in ("owner", "fresh"):
                     raise OperationError("INVALID_VALUE", "agent_routing must be 'owner' or 'fresh'")

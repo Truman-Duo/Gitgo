@@ -10,6 +10,13 @@ export type InputScope = {
 
 export type BindingSpec = { key: string; ctrl?: boolean; shift?: boolean; meta?: boolean };
 export type BindingSettings = { version: 1; overrides: Record<string, BindingSpec> };
+export type KeyboardPreset = "standard" | "portable";
+export function presetSettings(preset: KeyboardPreset): BindingSettings {
+  return {version: 1, overrides: preset === "portable" ? {
+    "editor.newline": {key: "return", meta: true},
+    "navigation.previousTab": {key: "p", ctrl: true},
+  } : {}};
+}
 
 /** Serializable action bindings, ready for a future config editor.
  * The canonical events keep existing scene-specific command resolvers compatible.
@@ -49,7 +56,8 @@ function matches(event: InputEvent, binding: BindingSpec) {
     ? event.input.toLowerCase() === binding.key.toLowerCase()
     : Boolean(event.key[binding.key]))
     && !!event.key.ctrl === !!binding.ctrl && !!event.key.shift === !!binding.shift
-    && !!(event.key.meta && !event.key.escape) === !!binding.meta;
+    && !!(event.key.meta && !event.key.escape) === !!binding.meta
+    && !event.key.super;
 }
 
 export class InputBindingRegistry {
@@ -85,16 +93,24 @@ export class InputBindingRegistry {
   }
   normalize(event: InputEvent): InputEvent {
     // Bracketed paste is literal input, never a shortcut/intent to execute.
-    if (event.key.paste || (event.input.length > 1 && !event.key.ctrl && !event.key.meta)) return event;
+    const namedKey = Object.values(INPUT_ACTIONS).some(binding => binding.key.length > 1 && event.key[binding.key]);
+    if (event.key.paste || (event.input.length > 1 && !namedKey && !event.key.ctrl && !event.key.meta)) return event;
     for (const [action, physical] of Object.entries(this.bindings)) {
       if (!matches(event, physical)) continue;
       const canonical = INPUT_ACTIONS[action]!;
+      // Every focused editor receives newline as literal input. It must never
+      // reach a generic Enter handler as a submit/confirm action.
+      if (action === "editor.newline") return {input: "\n", key: {newline: true}};
       return { input: canonical.key.length === 1 ? canonical.key : "",
         key: { ctrl: !!canonical.ctrl, shift: !!canonical.shift, meta: !!canonical.meta,
           ...(canonical.key.length > 1 ? { [canonical.key]: true } : {}) } };
     }
     // A displaced default must not remain an accidental second shortcut.
     if (Object.values(INPUT_ACTIONS).some(binding => matches(event, binding))) return { input: "", key: {} };
+    // Legacy modal handlers also consume return/tab directly. Unbound
+    // modifier combinations must not silently become confirm or next focus.
+    if ((event.key.return || event.key.tab) && (event.key.ctrl || event.key.meta || event.key.shift || event.key.super))
+      return {input: "", key: {}};
     return event;
   }
 }

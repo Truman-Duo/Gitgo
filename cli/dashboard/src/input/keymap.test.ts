@@ -38,6 +38,16 @@ function context(patch: Partial<InputContext> = {}): InputContext {
   };
 }
 
+test("modified Enter never accidentally sends a draft", () => {
+  const ctx = context({textValue:"draft",textCursor:5,chatInputFocused:true});
+  for (const key of [{return:true,ctrl:true},{return:true,meta:true},{return:true,super:true}]) {
+    assert.ok(!resolveSceneKey(ctx, "", key).some(item => item.kind === "effect" && item.effect.type === "send_chat"));
+  }
+  const acts = resolveSceneKey(ctx, "", {return:true,shift:true});
+  assert.ok(acts.some(item => item.kind === "text" && item.op.op === "insert" && item.op.text === "\n"));
+  assert.ok(!acts.some(item => item.kind === "effect" && item.effect.type === "send_chat"));
+});
+
 describe("host-driven decision interaction", () => {
   test("free-form replies use the decision channel while a root stream is still busy", () => {
     const ctx = context({decisionAllowFreeForm: true, chatBusy: true,

@@ -147,7 +147,7 @@ try {
         try {
             Invoke-Checked "Dashboard test suite" { & $Bun test }
             # The package builder performs this build during packaging.
-            if ($VerifyOnly) { Invoke-Checked "Dashboard production build" { & $Bun run build } }
+            if ($VerifyOnly) { Invoke-Checked "Dashboard production build" { & $Bun scripts/build.ts } }
         } finally { Pop-Location }
     }
     if (-not $VerifyOnly) {

@@ -68,6 +68,8 @@ export const CHORDS: Record<string, Chord> = {
 };
 
 export function matchChord(name: string, input: string, key: any): boolean {
+  if (["enter", "enterNoShift", "tab", "tabAny", "home", "end", "delete", "backspace"].includes(name)
+      && (key.ctrl || key.meta || key.super || (key.shift && name !== "tabAny"))) return false;
   if (["left", "right", "up", "down", "upDown", "leftRight"].includes(name) && (key.ctrl || key.meta)) return false;
   const chord = CHORDS[name];
   return chord ? chord.match(input, key) : false;

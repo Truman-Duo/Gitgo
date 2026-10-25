@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useId, useLayoutEffect, useRef, useEffect } from "react";
+import React, { createContext, useContext, useId, useLayoutEffect, useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useInput, useSelection, ScrollBox } from "@anthropic/ink";
 import type { ScrollBoxHandle } from "@anthropic/ink";
 import { InputRouter, applicationBindings, type InputKey, type BindingSettings } from "./router.js";
@@ -6,6 +6,12 @@ import { readClipboard } from "../utils/clipboard.js";
 
 const RouterContext = createContext<InputRouter | null>(null);
 const PriorityContext = createContext(0);
+const BindingsContext = createContext({revision: 0, configure: (_settings: BindingSettings) => {}});
+
+export function useBindingSettings(settings: BindingSettings) {
+  const {configure} = useContext(BindingsContext);
+  useLayoutEffect(() => configure(settings), [configure, settings]);
+}
 
 export type VerificationInput = {afterMs: number; input: string; key: InputKey};
 
@@ -13,8 +19,15 @@ export function InputProvider({ children, settings, verificationInput }: {
   children: React.ReactNode; settings?: BindingSettings; verificationInput?: VerificationInput[];
 }) {
   const router = useRef(new InputRouter(applicationBindings)).current;
+  const [revision, setRevision] = useState(0);
+  const configure = useCallback((value: BindingSettings) => {
+    router.bindings.configure(value);
+    setRevision(n => n + 1);
+  }, [router]);
+  const bindingsContext = useMemo(() => ({revision, configure}), [revision, configure]);
   const selection = useSelection();
   useLayoutEffect(() => { if (settings) router.bindings.configure(settings); }, [router, settings]);
+  useLayoutEffect(() => () => router.bindings.configure({version: 1, overrides: {}}), [router]);
   // Explicit acceptance flags automate keys through the production router.
   // They never replace the renderer, scene, backend calls or approval policy.
   useEffect(() => {
@@ -38,7 +51,7 @@ export function InputProvider({ children, settings, verificationInput }: {
       key: {...key, ctrl: key.ctrl || clipboardCommand, paste: Boolean(event?.keypress?.isPasted || (key as InputKey).paste)},
     });
   });
-  return <RouterContext.Provider value={router}>{children}</RouterContext.Provider>;
+  return <RouterContext.Provider value={router}><BindingsContext.Provider value={bindingsContext}>{children}</BindingsContext.Provider></RouterContext.Provider>;
 }
 
 export function InputLayer({ priority, children }: { priority: number; children: React.ReactNode }) {
@@ -51,6 +64,7 @@ export function InputLayer({ priority, children }: { priority: number; children:
 export function useManagedInput(handler: (input: string, key: InputKey) => void | boolean,
   options: { isActive?: boolean; priority?: number; clipboard?: boolean } = {}) {
   const router = useContext(RouterContext);
+  useContext(BindingsContext); // Re-render hints together with the effective binding map.
   const layer = useContext(PriorityContext);
   const id = useId();
   const current = useRef({ handler, options });

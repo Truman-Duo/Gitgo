@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { renderSync, Text } from "@anthropic/ink";
 import { InputProvider, useManagedInput } from "./runtime.js";
+import {presetSettings} from "./router.js";
 
 // In-memory renderer/input integration, NOT visual acceptance of a real terminal.
 test("Ink stdin reaches exactly one registered scene/modal owner", async () => {
@@ -50,8 +51,9 @@ test("Ink stdin reaches exactly one registered scene/modal owner", async () => {
     const sleep = () => new Promise(resolve => setTimeout(resolve, 25));
     stdin.write("\x1b[13;2u"); // Shift+Enter
     await sleep();
-    assert.strictEqual(keyEvents.at(-1).key.shift, true);
-    assert.strictEqual(keyEvents.at(-1).key.return, true);
+    assert.strictEqual(keyEvents.at(-1).input, "\n");
+    assert.strictEqual(keyEvents.at(-1).key.return, undefined);
+    assert.strictEqual(keyEvents.at(-1).key.newline, true);
     stdin.write("\x07"); // Ctrl+G
     await sleep();
     assert.strictEqual(keyEvents.at(-1).input, "g");
@@ -72,4 +74,36 @@ test("Ink stdin reaches exactly one registered scene/modal owner", async () => {
   }
   assert.strictEqual(rawModes[0], true);
   assert.strictEqual(rawModes.at(-1), false);
+});
+
+test("portable bindings decode real Alt+Enter, retain Ctrl+Shift and leave paste literal", async () => {
+  const stdin: any = new PassThrough();
+  stdin.isTTY = true; stdin.setRawMode = () => stdin; stdin.ref = () => stdin; stdin.unref = () => stdin;
+  const stdout: any = new PassThrough(); stdout.isTTY = false; stdout.columns = 80; stdout.rows = 24;
+  const stderr: any = new PassThrough(); stdout.on("data", () => {}); stderr.on("data", () => {});
+  const events: any[] = [];
+  function Probe() {
+    useManagedInput((input, key) => {events.push({input, key});});
+    return <Text>Portable input</Text>;
+  }
+  const root = renderSync(<InputProvider settings={presetSettings("portable")}><Probe/></InputProvider>,
+    {stdin, stdout, stderr, exitOnCtrlC:false, patchConsole:false});
+  const wait = () => new Promise(resolve => setTimeout(resolve, 30));
+  try {
+    await wait();
+    stdin.write("\x1b\r"); await wait();
+    assert.equal(events.at(-1)?.input, "\n");
+    assert.equal(events.at(-1)?.key.return, undefined);
+    stdin.write("\x10"); await wait(); // Ctrl+P -> canonical previous focus.
+    assert.equal(events.at(-1)?.key.tab, true); assert.equal(events.at(-1)?.key.shift, true);
+    stdin.write("\x1b[120;6u"); await wait();
+    assert.equal(events.at(-1)?.input, "x"); assert.equal(events.at(-1)?.key.ctrl, true);
+    assert.equal(events.at(-1)?.key.shift, true);
+    stdin.write("\r"); await wait();
+    assert.equal(events.at(-1)?.key.return, true);
+    stdin.write("\x1b[13;5u"); await wait(); // Unbound Ctrl+Enter must not confirm.
+    assert.equal(events.at(-1)?.key.return, undefined);
+    stdin.write("\x1b[200~a\nb\x1b[201~"); await wait();
+    assert.equal(events.at(-1)?.input, "a\nb"); assert.equal(events.at(-1)?.key.paste, true);
+  } finally {root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();}
 });

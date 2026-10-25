@@ -330,7 +330,10 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
     if (matchChord("tab", input, key)) {
       return [];
     }
-    if (matchChord("shiftEnter", input, key)) return [state({ type: "set_chat_input_focused", focused: true })];
+    if (matchChord("shiftEnter", input, key)) return [
+      state({ type: "set_chat_input_focused", focused: true }),
+      text("text", {op: "insert", text: "\n"}),
+    ];
   }
   if (ctx.scene === "agent_detail") {
     if (matchChord("shiftTab", input, key)) return [state({ type: "set_chat_input_focused", focused: !ctx.chatInputFocused })];
@@ -520,7 +523,7 @@ export function resolveCommandInput(ctx: InputContext, input: string, key: any):
       if (s.inputMode === "fill") value = value.trimEnd() + " ";
       return [
         text("cmd", { op: "set_value", text: value }),
-        state({ type: "set_suggestion_idx", index: suggestionIdx + 1 }),
+        state({ type: "set_suggestion_idx", index: (suggestionIdx + (key.shift ? suggestions.length - 1 : 1)) % suggestions.length }),
       ];
     }
     return [];

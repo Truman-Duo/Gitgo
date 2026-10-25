@@ -4,8 +4,10 @@
 import type { ConfigTabModule } from "./types.js";
 import { GeneralTab } from "./GeneralTab.js";
 import { ProvidersTab } from "./ProvidersTab.js";
+import {KeybindingsTab} from "./KeybindingsTab.js";
 
 export const CONFIG_TABS: ConfigTabModule[] = [
-  { id: "general", label: "General", Component: GeneralTab },
-  { id: "providers", label: "Providers", Component: ProvidersTab },
+  { id: "general", label: {en: "General", zh: "通用设置"}, Component: GeneralTab },
+  { id: "providers", label: {en: "Providers", zh: "模型服务商"}, Component: ProvidersTab },
+  { id: "keybindings", label: {en: "Keybindings", zh: "绑键"}, Component: KeybindingsTab },
 ];
