@@ -38,6 +38,8 @@ class SubprocessResult:
     cleanup: dict | None = None
     started: bool = False
     launch_state: str = "unknown"
+    evidence_state: str = "not_required"
+    invocation_id: str = ""
 
 
 class ProcessToolRunner:
@@ -57,13 +59,26 @@ class ProcessToolRunner:
             cancellation_event: threading.Event | None = None,
             *, read_binding=None, native_invocation=None) -> SubprocessResult:
         observation = {}
-        result = self._run(tool_name, args, timeout, cancellation_event,
-                           read_binding=read_binding, observation=observation, native_invocation=native_invocation)
+        try:
+            result = self._run(tool_name, args, timeout, cancellation_event,
+                               read_binding=read_binding, observation=observation, native_invocation=native_invocation)
+        except BaseException:
+            # _run's finally already attempted native retirement. Even a
+            # thread-level interruption must not leave a stale live-owner skip.
+            if observation.get("native_record") is not None:
+                observation["native_record"].finish(observation)
+            raise
         result.started = observation.get("started", False)
         result.launch_state = "started" if result.started else observation.get("launch_state", "not_started")
         result.cleanup = observation.get("cleanup", result.cleanup)
         if result.cleanup is None and result.launch_state in {"unknown", "started"}:
             result.cleanup = {"complete": False, "mode": "unknown", "issues": ["native_cleanup_not_observed"]}
+        record = observation.get("native_record")
+        if record is not None:
+            observation.update(launch_state=result.launch_state, cleanup=result.cleanup)
+            record.finish(observation)
+            result.evidence_state = "failed" if record.failed else "committed"
+            result.invocation_id = record.record["invocation_id"]
         return result
 
     def _run(self, tool_name, args, timeout, cancellation_event, *, read_binding, observation, native_invocation):
@@ -117,6 +132,10 @@ class ProcessToolRunner:
             child_env = sandbox_environment(child_env)
             input_data["_native_sandbox_workspace"] = str(policy.workspace)
             input_data["args"] = {**args, "_workspace": str(policy.workspace)}
+            from .native_invocation_scope import prepare_native_record
+            # Commit intent before entering the OS launch window. A kill after
+            # this point leaves unknown evidence, never permission to replay.
+            observation["native_record"] = prepare_native_record(native_invocation)
             proc = sandbox_popen(
                 tool_runner_command(), policy,
                 # DaemonClient starts ``python -m gitgo`` from the package's
@@ -135,6 +154,7 @@ class ProcessToolRunner:
                 start_new_session=sys.platform != "win32",
             )
             observation["started"] = True
+            observation["native_record"].started(proc.pid)
             if not getattr(proc, "_gitgo_job_handle", None):
                 proc._gitgo_job_handle = attach_kill_job(proc)
             from backend.core.sandbox_io import BoundedCommunication
@@ -266,6 +286,8 @@ class ProcessToolRunner:
                     # Host fact and keeps admission owners in the Pipeline.
                     observation["cleanup"] = {"complete": False, "mode": "unknown",
                         "issues": ["native_cleanup_failed"]}
+                # A transport's sentinel -1 is not an observed OS exit code.
+                observation["exit_code"] = spawned.poll()
                 for stream in (spawned.stdin, spawned.stdout, spawned.stderr):
                     if stream is not None:
                         try:

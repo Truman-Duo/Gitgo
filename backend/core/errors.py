@@ -23,6 +23,9 @@ class ErrorDefinition:
 
 
 _DEFINITIONS = (
+    ErrorDefinition("GITGO-E3817", "INVOCATION_JOURNAL_UNAVAILABLE",
+                    "Native launch evidence could not be committed; no process was started.",
+                    False, "inspect_project_storage_before_native_execution", procedure="sandbox"),
     ErrorDefinition("GITGO-E3816", "TEST_PROTOCOL_INVALID",
                     "The registered test helper returned unverified seed results; no test record was saved.",
                     False, "inspect_test_runtime_protocol", procedure="feedback"),
