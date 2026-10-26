@@ -1,11 +1,11 @@
 # CI 与合并门槛
 
-主仓库的 Gitgo CI 对所有目标为 master 的 PR、master push 和手动运行触发；预留 merge_group 支持，不表示个人仓库已启用合并队列。workflow 不按 paths 跳过，统一必需状态为 **CI gate**。gate 使用 always 汇总：失败、取消或意外跳过不能成为成功。
+主仓库的 Gitgo CI 对所有目标分支的 PR、master push 和手动运行触发；功能接纳分支也使用同一套检查。预留 merge_group 支持，不表示个人仓库已启用合并队列。workflow 不按 paths 跳过，统一必需状态为 **CI gate**。gate 使用 always 汇总：失败、取消或意外跳过不能成为成功。
 
 ## 检查范围
 
 - PR 标题遵守目标基线的 commit-config.json；贡献者无需申请全局编号。正文中的候选 head、验证 base 和源/目标身份必须与本次 PR 一致，包含问题、设计、验证、兼容/回滚、上下游和风险说明。允许同义标题，不机械要求复制模板；这只能检查说明存在，不能证明说明真实或设计合理。
-- 功能分支必须包含本次观察到的上游。目标主线继续推进时，由 strict required-status 规则阻止过时组合合入；作者同步并更新正文后重新验证。CI 保存实际测试的 merge commit/tree、head/base 和 run/attempt，旧绿灯不是新候选证据。
+- 开发分支必须包含本次观察到的实际目标。目标变化时同步并更新正文后重新验证；master 由 strict required-status 规则阻止过时组合合入。CI 保存实际测试的 merge commit/tree、head/base 和 run/attempt，旧绿灯不是新候选证据。
 - tracked-file 隐私边界、Windows 完整 Python suite、锁定 Bun 依赖的 dashboard suite 和 production build。基础源码验收不冒充跨平台覆盖；另有 macOS/Linux 包和原生凭据测试。
 - Bun/Node 三平台 runtime matrix、Windows 最终 ZIP 与 frozen 连续性、macOS ARM64/Linux x86_64 原生 build 和独立 worker 的最终包验收均进入 CI gate；完整来源、依赖固定和人工验收边界见 [原生包自动化](native-package-automation.md)。
 - 管理更新另调用 Windows x64 与 Linux x86_64/ARM64 的双版本真实包验收，并纳入同一 CI gate；任一失败或取消都会阻断。复用测试仅上传结果报告，临时更新包不作为正式 Release。Windows 源码测试使用用户 profile 下的规范私有临时目录，不通过修改共享 scratch 盘 ACL 绕过安装权限检查。
@@ -26,6 +26,8 @@ Windows 测试使用 runner 自有临时目录的规范绝对路径，并启用 
 required status 限定 GitHub Actions 来源，减少其他身份伪造同名状态的机会。PR 仍能修改自己的 workflow/测试，这个来源约束不能证明检查逻辑未被篡改；所有 CI、验收脚本、依赖和安全策略变更必须由维护者逐项审核。严格的独立可信 attestations/required workflows 是后续可选加强措施，不能把当前普通 Actions 说成不可绕过的安全审计。
 
 ## 远端 master 规则
+
+master 是版本基线，功能 PR 不直接合入。维护者先在独立功能分支接纳，再在版本整合分支完成组合验证，最后通过单独授权的基线 PR 更新 master，见 [分支与接纳生命周期](branch-lifecycle.md)。CI 对功能目标的覆盖不表示这些分支已自动获得 master 的远端保护规则；维护者仍须核对检查与合并条件。
 
 CI 配置首次在独立 PR 运行并修好后，再接纳并启用下面的仓库规则，避免凭空指定尚未产生过的状态名称：
 

@@ -73,8 +73,29 @@ class ToolPipeline:
 
     def execute(self, tool_call, tool, ctx, execution_id, call_index=0):
         from .read_approval import AdmissionResources
-        with AdmissionResources() as admission:
+        from .native_invocation_scope import native_invocation_scope
+        with AdmissionResources() as admission, native_invocation_scope(ctx, execution_id, call_index) as native_scope:
             result = self._execute(tool_call, tool, ctx, execution_id, call_index, admission=admission)
+            records = native_scope["records"]
+            if records:
+                result.receipt["native_invocations"] = [item.record["invocation_id"] for item in records]
+            if any(item.retirement_pending for item in records):
+                self._publish_tool_notices(ctx, result.tool_name, execution_id, call_index,
+                    {"warnings": [{"code": "INVOCATION_JOURNAL_UPDATE_FAILED",
+                                   "message": "Native terminal facts committed; pending-index housekeeping remains incomplete. Do not repeat the operation."}]})
+            if any(item.failed for item in records):
+                recovery = ctx.process.recovery or {}
+                ctx.process.recovery = {**recovery, "resume_forbidden": True, "requires_manual_verification": True,
+                    "reasons": list(recovery.get("reasons") or []) + [{
+                        "code": "INVOCATION_EVIDENCE_UNAVAILABLE", "execution_id": execution_id,
+                        "call_index": call_index, "effect_state": "ambiguous"}]}
+                if result.receipt.get("evidence_state") != "failed":
+                    result.receipt.update(evidence_state="failed", committed=False)
+                    result.diagnostics["evidence_state"] = "failed"
+                    result.formatted += "\n[Native invocation evidence update failed; retain results and inspect recovery before native execution.]"
+                self._publish_tool_notices(ctx, result.tool_name, execution_id, call_index,
+                    {"warnings": [{"code": "INVOCATION_JOURNAL_UPDATE_FAILED",
+                                   "message": "Native invocation evidence was not confirmed. Retained results must not be replayed."}]})
             cleanup = result.receipt.get("runtime_cleanup")
             if cleanup is not None and cleanup.get("complete") is not True:
                 admission.retain(ctx.process, execution_id, call_index)
@@ -141,6 +162,9 @@ class ToolPipeline:
             from .read_approval import native_cleanup_pending
             if execution_contract.kind.value == "native_process" and native_cleanup_pending(ctx.process):
                 raise ValueError("SANDBOX_CLEANUP_PENDING: prior native resources require inspection")
+            if execution_contract.kind.value == "native_process":
+                from .native_invocation_scope import check_native_recovery
+                check_native_recovery(ctx)
         except (AttributeError, ValueError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
@@ -968,7 +992,11 @@ class ToolPipeline:
                         reported[name] = result.receipt.pop(name)
                 if reported:
                     result.receipt["reported_facts"] = reported
-        evidence = runtime_metadata.get("evidence_state", "not_required")
+        from .native_invocation_scope import current_native_records
+        native_records = current_native_records(ctx)
+        if native_records:
+            result.receipt["native_invocations"] = [item.record["invocation_id"] for item in native_records]
+        evidence = "failed" if any(item.failed for item in native_records) else runtime_metadata.get("evidence_state", "not_required")
         result.receipt["evidence_state"] = evidence
         result.diagnostics["evidence_state"] = evidence
         if evidence == "failed":

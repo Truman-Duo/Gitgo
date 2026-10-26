@@ -15,6 +15,14 @@ class SandboxDenied(RuntimeError):
 
     def result(self) -> dict:
         from backend.core.errors import error_payload
+        if self.code == "INVOCATION_JOURNAL_UNAVAILABLE":
+            return {**error_payload(self.code, message=str(self), next_actions=[
+                {"action": "inspect_project_storage", "effect": "Restore reliable invocation evidence before native execution; do not replay unknown calls."}]),
+                "effect_state": "not_committed"}
+        if self.code == "SANDBOX_CLEANUP_PENDING":
+            return {**error_payload(self.code, message=str(self), next_actions=[
+                {"action": "inspect_native_ownership", "effect": "Inspect retained launch and cleanup facts. New approval, elapsed time and deleting records do not prove native retirement."}]),
+                "effect_state": getattr(self, "effect_state", "not_committed")}
         return {
             **error_payload(self.code, message=str(self), next_actions=[
                 {"action": "configure_native_sandbox",
