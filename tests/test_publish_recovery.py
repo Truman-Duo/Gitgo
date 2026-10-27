@@ -120,10 +120,15 @@ def test_pending_cleanup_retires_exact_boundary_without_fabricating_pass(formal_
     _, project, repo = formal_setup
     original = git(repo, "rev-parse", "formal")
     protocol(monkeypatch)
-    from backend.core.sandbox import SandboxDenied
-    def pending(self):
-        raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "injected retirement failure")
-    monkeypatch.setattr("backend.core.sandbox_access.WorkspaceAccess.close", pending)
+    from backend.core.loop.tool_pipeline import ToolPipeline
+    invoke = ToolPipeline._execute_isolated
+    def pending(self, *args, **kwargs):
+        result = invoke(self, *args, **kwargs)
+        # Native retirement exists on every backend. WorkspaceAccess.close is
+        # a Windows ACL boundary and is deliberately not called on Linux.
+        kwargs["runtime_metadata"]["cleanup"] = {"complete": False, "mode": "protocol-fixture"}
+        return result
+    monkeypatch.setattr(ToolPipeline, "_execute_isolated", pending)
     checking = command(formal_setup, "verify", item)["item"]
     operation = checking["operations"][-1]
     storage = get_storage(project.workspace_path)
@@ -132,11 +137,12 @@ def test_pending_cleanup_retires_exact_boundary_without_fabricating_pass(formal_
     assert producer["phase"] == "cleanup_pending" and Path(producer["stage"]).exists()
     # Explicit protocol fixture: no ACL was changed. Supply its retired access
     # observation rather than treating a missing production journal as success.
-    import json
-    journal = storage.paths.project_root / "sandbox_access" / (Path(producer["stage"]).name + ".json")
-    journal.parent.mkdir(exist_ok=True)
-    journal.write_text(json.dumps({"version": 1, "kind": "scoped_workspace_access", "phase": "revoked",
-                                   "workspace": producer["stage"]}), encoding="utf8")
+    import json, os
+    if os.name == "nt":
+        journal = storage.paths.project_root / "sandbox_access" / (Path(producer["stage"]).name + ".json")
+        journal.parent.mkdir(exist_ok=True)
+        journal.write_text(json.dumps({"version": 1, "kind": "scoped_workspace_access", "phase": "revoked",
+                                       "workspace": producer["stage"]}), encoding="utf8")
     seen = []
     def retire(identity, location):
         seen.append((identity, location))
