@@ -284,8 +284,6 @@ class PublishService(FormalMixin, SharingMixin, CollaborationMixin, Distribution
             # intent and require observation, never perform an automatic retry.
             return {"item": projection(item, None), "status": "needs_reconciliation", "effect_state": "ambiguous",
                     "reason": getattr(exc, "code", "PUBLISH_GIT_UNAVAILABLE")}
-        if result.returncode > 0:
-            return self._refused(item_id, intent["id"], "PUBLISH_REF_TRANSACTION_REJECTED")
         return self._observe(item_id, intent["id"], result.returncode == 0)
 
     def _refused(self, item_id, operation_id, reason):

@@ -16,18 +16,16 @@ def bundle_for(storage, plan):
 
 
 class PluginLifecycleMixin:
-    def _observe_formal_failure(self, item_id):
-        """Only a rejected CAS with the exact old ref is a known failed sync."""
+    def _observe_formal_failure(self, item_id, reason):
+        """Record a typed pre-write refusal, never infer it from a ref snapshot."""
         from .service import now
         ledger, ref = self.repo.load()
         item = find_item(ledger, item_id)
         operation = item["operations"][-1]
-        target = self._formal_git().target(item["plan"]["target_ref"])
-        if (operation["kind"] != "formal" or not target or target["symbolic"]
-                or target["oid"] != item["plan"]["expected_target_oid"]):
-            return None
+        if operation["kind"] != "formal" or operation["state"] != "intent":
+            raise PublishError("PUBLISH_REVISION_CONFLICT")
         operation.update(state="observed", outcome="failed", integration_succeeded=False,
-                         observed_at=now(), attribution="rejected_cas_and_unchanged_ref")
+                         observed_at=now(), reason=reason, attribution="prewrite_refused")
         item["revision"] += 1
         return self._save_item(ledger, item, ref)
 

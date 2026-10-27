@@ -295,14 +295,15 @@ class FormalMixin(PluginLifecycleMixin):
         try:
             result = target_git.integrate({"repository": self.workspace}, plan, result_oid)
         except RefWriteRefused as exc:
+            if plan.get("plugins"):
+                self._observe_formal_failure(item_id, exc.code)
+                return self._start_plugin_completion(item_id)
             return self._refused(item_id, intent["id"], exc.code)
         except (PublishError, OSError, RuntimeError) as exc:
             return {"item": projection(item, None), "status": "needs_reconciliation", "effect_state": "ambiguous",
                     "reason": getattr(exc, "code", "PUBLISH_GIT_UNAVAILABLE")}
-        if plan.get("plugins") and result.returncode > 0 and self._observe_formal_failure(item_id):
-            return self._start_plugin_completion(item_id)
-        if result.returncode > 0:
-            return self._refused(item_id, intent["id"], "PUBLISH_REF_TRANSACTION_REJECTED")
+        # An exit status alone does not establish that no ref/reflog effect
+        # occurred. Only the typed pre-write refusal above permits rework.
         observed = self._observe(item_id, intent["id"], result.returncode == 0)
         if plan.get("plugins") and observed.get("effect_state") == "committed":
             return self._start_plugin_completion(item_id)

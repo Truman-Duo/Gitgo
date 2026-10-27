@@ -35,18 +35,17 @@ def test_prewrite_target_change_is_failed_and_can_be_reprepared(formal_setup, mo
     assert revised["plan"]["expected_target_oid"] == peer
 
 
-@pytest.mark.parametrize("exit_code,status", [(128, "failed"), (-1, "executing")])
-def test_rejected_transaction_and_timeout_have_different_recovery(formal_setup, monkeypatch, exit_code, status):
+@pytest.mark.parametrize("exit_code", [128, -1])
+def test_nonzero_exit_and_timeout_cannot_prove_no_effect(formal_setup, monkeypatch, exit_code):
     from subprocess import CompletedProcess
     item = prepare(formal_setup)
     protocol(monkeypatch)
     checked = command(formal_setup, "verify", item)["item"]
     monkeypatch.setattr(CandidateGit, "integrate", lambda *a: CompletedProcess([], exit_code, "", "injected"))
     result = command(formal_setup, "execute", checked)
-    assert result["item"]["status"] == status
-    if status == "executing":
-        assert result["effect_state"] == "ambiguous"
-        assert command(formal_setup, "reconcile", result["item"])["effect_state"] == "ambiguous"
+    assert result["item"]["status"] == "executing"
+    assert result["effect_state"] == "ambiguous"
+    assert command(formal_setup, "reconcile", result["item"])["effect_state"] == "ambiguous"
 
 
 def test_adoption_prewrite_refusal_is_revisable(setup, monkeypatch):
@@ -172,7 +171,9 @@ def test_storage_capacity_failure_after_effect_recovers_without_replay(setup, mo
     assert result["item"]["status"] == "adopted"
 
 
-def test_lost_ack_then_peer_advance_is_never_reclassified_as_refused(formal_setup, monkeypatch):
+@pytest.mark.parametrize("failure", ["lost_ack", "nonzero_exit"])
+def test_lost_ack_then_peer_advance_is_never_reclassified_as_refused(formal_setup, monkeypatch, failure):
+    from subprocess import CompletedProcess
     item = prepare(formal_setup)
     protocol(monkeypatch)
     checked = command(formal_setup, "verify", item)["item"]
@@ -180,6 +181,8 @@ def test_lost_ack_then_peer_advance_is_never_reclassified_as_refused(formal_setu
     def lose_ack(self, *args):
         assert original(self, *args).returncode == 0
         git(formal_setup[2], "update-ref", "refs/heads/formal", "HEAD")
+        if failure == "nonzero_exit":
+            return CompletedProcess([], 128, "", "failure after write")
         raise OSError("lost acknowledgement after write and later peer update")
     monkeypatch.setattr(CandidateGit, "integrate", lose_ack)
     pending = command(formal_setup, "execute", checked)
@@ -187,6 +190,19 @@ def test_lost_ack_then_peer_advance_is_never_reclassified_as_refused(formal_setu
     monkeypatch.setattr(CandidateGit, "integrate", lambda *a: pytest.fail("recovery repeated a ref write"))
     observed = command(formal_setup, "reconcile", pending["item"])
     assert observed["effect_state"] == "ambiguous" and observed["item"]["status"] == "executing"
+
+
+def test_nonzero_exit_after_write_records_observed_adoption(setup, monkeypatch):
+    from subprocess import CompletedProcess
+    item = work_prepare(setup)["item"]
+    original = CandidateGit.adopt
+    def lose_ack(self, *args):
+        assert original(self, *args).returncode == 0
+        return CompletedProcess([], 128, "", "failure after write")
+    monkeypatch.setattr(CandidateGit, "adopt", lose_ack)
+    result = adopt(setup, item)
+    assert result["effect_state"] == "committed" and result["item"]["status"] == "adopted"
+    assert result["item"]["operations"][-1]["attribution"] == "matching_ref_observed"
 
 
 @pytest.mark.parametrize("identity", [

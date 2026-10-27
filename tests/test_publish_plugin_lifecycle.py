@@ -136,15 +136,16 @@ def test_completion_cleanup_debt_is_retired_without_replaying_callback(formal_se
 
 
 def test_known_refusal_calls_completion_with_failed_result(formal_setup, monkeypatch):
-    from subprocess import CompletedProcess
-    from backend.core.publish.git import CandidateGit
+    from backend.core.publish.git import CandidateGit, RefWriteRefused
     install(formal_setup, COMPLETION.replace("assert result['success'] is True", "assert result['success'] is False")
         .replace("assert len(result['commit_hash']) in (40, 64)", "assert result['commit_hash'] == ''"))
     item = prepare(formal_setup)
     plugin_protocol(monkeypatch)
     checked = command(formal_setup, "verify", item)["item"]
     before = git(formal_setup[2], "rev-parse", "formal")
-    monkeypatch.setattr(CandidateGit, "integrate", lambda *a: CompletedProcess([], 1, "", "refused"))
+    def refuse(*args):
+        raise RefWriteRefused("PUBLISH_TARGET_CHANGED")
+    monkeypatch.setattr(CandidateGit, "integrate", refuse)
     result = command(formal_setup, "execute", checked)
     assert result["error"] == "PUBLISH_FORMAL_NOT_APPLIED" and result["integration_failed"]
     assert result["item"]["status"] == "failed" and result["item"]["plugin_completion"]["state"] == "passed"
@@ -153,14 +154,15 @@ def test_known_refusal_calls_completion_with_failed_result(formal_setup, monkeyp
     assert git(formal_setup[2], "rev-parse", "formal") == before
 
 
-def test_timeout_does_not_authorize_failed_completion_or_clear_unknown_effect(formal_setup, monkeypatch):
+@pytest.mark.parametrize("exit_code", [-1, 128])
+def test_nonzero_exit_does_not_authorize_failed_completion_or_clear_unknown_effect(formal_setup, monkeypatch, exit_code):
     from subprocess import CompletedProcess
     from backend.core.publish.git import CandidateGit
     install(formal_setup, COMPLETION)
     item = prepare(formal_setup)
     plugin_protocol(monkeypatch)
     checked = command(formal_setup, "verify", item)["item"]
-    monkeypatch.setattr(CandidateGit, "integrate", lambda *a: CompletedProcess([], -1, "", "timeout"))
+    monkeypatch.setattr(CandidateGit, "integrate", lambda *a: CompletedProcess([], exit_code, "", "unconfirmed"))
     result = command(formal_setup, "execute", checked)
     assert result["effect_state"] == "ambiguous"
     assert result["item"]["status"] == "executing" and result["item"]["operations"][-1]["kind"] == "formal"
