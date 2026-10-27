@@ -60,8 +60,10 @@ class LinuxCgroup:
             controllers = set((root / 'cgroup.subtree_control').read_text().split())
             if not {'cpu', 'memory', 'pids'} <= controllers:
                 raise OSError("Delegate and enable cpu, memory and pids controllers")
-            self.path = root / ('gitgo-' + uuid.uuid4().hex)
-            self.path.mkdir(mode=0o700)
+            path = root / ('gitgo-' + (policy.recovery_id or uuid.uuid4().hex))
+            path.mkdir(mode=0o700)
+            # Only own the group after exclusive creation succeeded.
+            self.path = path
             if not (self.path / 'cgroup.kill').is_file():
                 raise OSError('Kernel cgroup.kill support is required')
             for name, value in {'memory.max': policy.memory_bytes, 'memory.swap.max': 0,

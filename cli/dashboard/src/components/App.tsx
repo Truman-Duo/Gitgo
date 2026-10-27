@@ -629,7 +629,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");
-  const runtimeOwnsViewport = ["processDetail", "help", "runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview", "updatePanel"].includes(topOverlay?.type || "");
+  const runtimeOwnsViewport = ["processDetail", "help", "runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview", "updatePanel", "publishPanel"].includes(topOverlay?.type || "");
   const footerDrawer = inlineOverlay
     ? topOverlay?.type === "btwPanel"
       ? <Box maxHeight={Math.max(8,Math.floor(h/2))} minHeight={0} flexDirection="column" flexShrink={0}><InputLayer priority={100}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer></Box>

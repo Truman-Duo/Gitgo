@@ -93,6 +93,11 @@ def _run_credential_cleanup_role(argv: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     role = _role_arguments(values)
+    if sys.platform == "win32" and role and role[0] in {"windows-scope", "windows-job-lease"}:
+        # installed_runtime already exempts these fixed handle-only helpers:
+        # their parent passes owned Job/lease handles before any payload starts.
+        # Dispatch before loading the application/update graph on every Git read.
+        return _main(values)
     from backend.core.update.installation import installed_runtime
     from backend.core.update.validation import UpdateError
     try:

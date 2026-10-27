@@ -23,10 +23,10 @@ class GitBoundaryError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
-CONTENT_READ_COMMANDS = frozenset({"rev-parse", "diff", "ls-files", "cat-file", "show", "ls-tree", "log",
+CONTENT_READ_COMMANDS = frozenset({"rev-parse", "symbolic-ref", "diff", "ls-files", "cat-file", "show", "ls-tree", "log",
                                    "status", "rev-list", "for-each-ref", "merge-base", "grep", "diff-tree"})
-LOCAL_WRITE_COMMANDS = frozenset({"apply", "add", "reset", "commit", "update-ref", "hash-object", "rm", "branch", "cherry-pick"})
-_ALLOWED = CONTENT_READ_COMMANDS | LOCAL_WRITE_COMMANDS | {"worktree", "fetch", "push"}
+LOCAL_WRITE_COMMANDS = frozenset({"apply", "add", "reset", "commit", "update-ref", "hash-object", "rm", "branch", "cherry-pick", "mktree", "commit-tree", "merge-tree"})
+_ALLOWED = CONTENT_READ_COMMANDS | LOCAL_WRITE_COMMANDS | {"worktree", "fetch", "push", "ls-remote"}
 # Global preferences that affect business bytes/path handling, never commands.
 _DATA_SETTINGS = frozenset({"core.autocrlf", "core.eol", "core.safecrlf",
     "core.filemode", "core.symlinks", "core.ignorecase", "core.precomposeunicode",
@@ -211,7 +211,26 @@ def _arguments(args):
         index += 2
     if index >= len(body) or body[index] not in _ALLOWED:
         raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "command is outside worktree plumbing")
+    if body[index] == "symbolic-ref" and (len(body[index:]) != 3 or body[index + 1] != "--quiet"
+            or not (body[index + 2] == "HEAD" or body[index + 2].startswith("refs/"))):
+        raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "Only an exact symbolic reference observation is supported")
     options = body[index + 1:]
+    if body[index] == "mktree" and options != ["-z"]:
+        raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "Only explicit tree input is supported")
+    full_oid = lambda value: bool(re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value))
+    if body[index] == "commit-tree":
+        parents = options[1:-2]
+        if (not 3 <= len(options) <= 21 or options[-2] != "-m" or not full_oid(options[0])
+                or len(parents) % 2 or any(parents[n] != "-p" or not full_oid(parents[n + 1])
+                    for n in range(0, len(parents), 2))):
+            raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "Only a fixed tree, zero to nine fixed parents and a message are supported")
+    if body[index] == "merge-tree":
+        fixed = options[4:]
+        if fixed and fixed[0].startswith("--merge-base=") and full_oid(fixed[0].split("=", 1)[1]):
+            fixed = fixed[1:]
+        if (options[:4] != ["--write-tree", "--name-only", "--no-messages", "-z"]
+                or len(fixed) != 2 or not all(full_oid(value) for value in fixed)):
+            raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "Only a fixed two-head merge preview is supported")
     if "--" in options:
         options = options[:options.index("--")]
     if any(part in {"--ext-diff", "--textconv"} or part.startswith(("--ext-diff=", "--textconv=")) for part in options):
@@ -222,13 +241,15 @@ def _arguments(args):
 
 
 @contextmanager
-def protected_git(cwd, args):
+def protected_git(cwd, args, *, transport_identity=None, _read_session=False):
     """Yield a fixed command/environment while configuration objects are pinned.
 
     The service may still perform its intended filesystem effects. This closes
     executable Git extensions, not arbitrary filesystem races or semantic review.
     """
     body = _arguments(args)
+    if _read_session and (body != ["cat-file", "--batch"] or transport_identity is not None):
+        raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "A read session cannot establish transport or write authority")
     if os.name != "nt" and sys.platform != 'linux':
         raise GitBoundaryError("GIT_BOUNDARY_UNAVAILABLE", "protected trusted Git backend is unavailable; no unrestricted fallback")
     cwd = Path(cwd).absolute()
@@ -294,9 +315,10 @@ def protected_git(cwd, args):
         from backend.core.git_transfer import TRANSPORT_COMMANDS, prepare_transfer
         if body[0] in TRANSPORT_COMMANDS:
             settings.extend(prepare_transfer(git, cwd, body, bootstrap=bootstrap, env=env,
-                local=local, entries=entries, pins=pins, gitdir=gitdir, common=common))
-        if body[0] == "cherry-pick" and any(re.fullmatch(r"merge\..+\.driver", key) and value for key, value in [*entries, *local]):
-            raise GitBoundaryError("GIT_REPOSITORY_EXTENSION_UNSUPPORTED", "Custom merge programs are unsupported for managed cherry-pick")
+                local=local, entries=entries, pins=pins, gitdir=gitdir, common=common, identity=transport_identity))
+        subcommand = next(part for part in body if part in _ALLOWED)
+        if subcommand in {"cherry-pick", "merge-tree"} and any(re.fullmatch(r"merge\..+\.driver", key) and value for key, value in [*entries, *local]):
+            raise GitBoundaryError("GIT_REPOSITORY_EXTENSION_UNSUPPORTED", "Custom merge programs are unsupported for managed merges")
         drivers = set()
         # A nested checkout can match a different includeIf condition. Disable
         # drivers from every protected branch, not just the bootstrap context.
@@ -310,18 +332,43 @@ def protected_git(cwd, args):
             for kind in ("clean", "smudge", "process"):
                 settings.append((f"filter.{driver}.{kind}", ""))
             settings.append((f"filter.{driver}.required", "true"))
-        command = [git, "--no-pager", "--no-lazy-fetch", "--no-replace-objects", *body]
-        # Internal safety overrides follow caller identity but precede subcommand.
-        offset = 4
-        while offset < len(command) and command[offset] == "-c":
-            offset += 2
-        command[offset:offset] = [part for k, v in settings for part in ("-c", f"{k}={v}")]
-        if os.name != 'nt':
-            from .git_linux import writable_git_paths
-            if body[:2] == ['worktree', 'prune']:
-                pins.worktree_views(common)
-            command = pins.wrap(command, cwd=cwd, writable=writable_git_paths(cwd, gitdir, common, body))
-        yield command, env
+        active = True
+        def command_for(arguments):
+            # Transfer preparation can append receiver safety arguments to the
+            # already validated body. Keep that exact body for ordinary calls.
+            selected = body if arguments is None else _arguments(arguments)
+            if not active or (_read_session and (selected[0] not in {"log", "cat-file", "merge-base", "diff", "diff-tree"}
+                    or any(part == "--output" or part.startswith("--output=") for part in selected))):
+                raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "Only bounded-query Git reads are supported in an active read session")
+            command = [git, "--no-pager", "--no-lazy-fetch", "--no-replace-objects", *selected]
+            # Internal safety overrides follow caller identity but precede subcommand.
+            offset = 4
+            while offset < len(command) and command[offset] == "-c":
+                offset += 2
+            command[offset:offset] = [part for k, v in settings for part in ("-c", f"{k}={v}")]
+            if os.name != 'nt':
+                from .git_linux import writable_git_paths
+                if selected[:2] == ['worktree', 'prune']:
+                    pins.worktree_views(common)
+                command = pins.wrap(command, cwd=cwd,
+                    writable=[] if _read_session else writable_git_paths(cwd, gitdir, common, selected))
+            return command
+        try:
+            yield (command_for if _read_session else command_for(None)), env
+        finally:
+            active = False
+
+
+@contextmanager
+def protected_git_read_session(cwd):
+    """Reuse pinned configuration for sequential, trusted read-only plumbing.
+
+    Callers retain their existing path/task authorization and output budgets.
+    Every generated command passes the normal argument guard and Linux wrapper;
+    a returned builder expires before the configuration pins are released.
+    """
+    with protected_git(cwd, ["git", "cat-file", "--batch"], _read_session=True) as session:
+        yield session
 
 
 @contextmanager

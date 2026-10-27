@@ -133,7 +133,9 @@ def _write_blob_file(
             if health.total_bytes + len(data) > self.policy.total_max_bytes:
                 raise StorageBlocked("project_storage_capacity_exceeded")
             target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(target.name + f".{uuid.uuid4().hex}.tmp")
+            # A sibling temporary needs uniqueness, not the full 62-character
+            # content hash again. Keep it inside Windows' supported path budget.
+            temporary = target.with_name(f".{uuid.uuid4().hex}.tmp")
             try:
                 with temporary.open("xb") as handle:
                     handle.write(data)
@@ -252,7 +254,7 @@ def _restore_canonical_blob(self: ObjectsPort, digest: str) -> bytes | None:
         if target.exists():
             return target.read_bytes()
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(target.name + f".{uuid.uuid4().hex}.repair.tmp")
+        temporary = target.with_name(f".{uuid.uuid4().hex}.repair.tmp")
         try:
             with temporary.open("xb") as handle:
                 handle.write(data)

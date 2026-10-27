@@ -15,12 +15,35 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from backend.core.config import Config, ConfigManager, ProjectConfig
 from scripts.smoke_packaged_runtime import ProtocolClient
+
+
+def continuity_stores(root: Path, workspace: Path) -> tuple[list[Path], list[Path]]:
+    """Separate the one conversation store from the optional maintenance store.
+
+    NativeHost creates its lifecycle catalog on a ten-second timer. Counting
+    every directory as a conversation store makes this gate depend on speed.
+    Accept only identities pinned in these two explicit fixture workspaces;
+    a second conversation identity or any unrelated store still fails closed.
+    """
+    def identity(path):
+        return str(uuid.UUID((path / ".gitgo" / "project-id").read_text(encoding="ascii").strip()))
+
+    projects = root / "state" / "projects"
+    conversation = projects / identity(workspace)
+    maintenance = root / "maintenance-catalog"
+    catalogs = [projects / identity(maintenance)] if (maintenance / ".gitgo" / "project-id").is_file() else []
+    assert conversation not in catalogs
+    expected = {conversation, *catalogs}
+    actual = set(projects.iterdir())
+    assert actual == expected and all(path.is_dir() for path in actual), sorted(str(path) for path in actual)
+    return [conversation], catalogs
 
 
 def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
@@ -134,8 +157,7 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
                 assert "history-marker-one" in json.dumps(requests[-1]["messages"])
             finally:
                 second.close()
-            stores = list((root / "state" / "projects").iterdir())
-            assert len(stores) == 1
+            stores, catalogs = continuity_stores(root, workspace)
             origins = []
             for database in stores[0].glob("*.sqlite3"):
                 connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
@@ -171,6 +193,7 @@ def check(host: Path, dashboard: Path | None = None, *, source=False) -> dict:
             assert summary["health"]["incomplete_samples"] == 0, summary["health"]
             return {"status": "passed", "protocol_host": str(host), "host_kind": "source" if source else "packaged", "provider_requests": len(requests),
                     "shared_session": True, "shared_store_count": len(stores), "origins": origins,
+                    "maintenance_store_count": len(catalogs),
                     "duplicate_host_rejected": True, "save_kept_current_host": True,
                     "git_bash_detected_and_verified": git_bash_detected, "saved_preference": preference,
                     "packaged_frontend_rejection_verified": bool(dashboard),

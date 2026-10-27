@@ -16,6 +16,14 @@ import { tmpdir } from "node:os";
 import { randomUUID, createHash } from "node:crypto";
 
 describe("installed terminal launcher", () => {
+  test("relaunch decisions need no parent-process probe", () => {
+    expect(shouldRelaunchInConfiguredTerminal({compiled: true, platform: "win32", argv: ["gitgo.exe", "--attached"],
+      config: {terminal: "git_bash", command: "verified", args: []}})).toBeFalse();
+    expect(shouldRelaunchInConfiguredTerminal({compiled: true, platform: "win32", argv: ["gitgo.exe"],
+      config: {terminal: "current", command: "", args: []}})).toBeFalse();
+    expect(shouldRelaunchInConfiguredTerminal({compiled: true, platform: "win32", argv: ["gitgo.exe"],
+      config: {terminal: "git_bash", command: "verified", args: []}})).toBeTrue();
+  });
   test("noninteractive child cannot acknowledge formal terminal readiness", () => {
     expect(() => assertInteractiveTerminal({isTTY: false}, {isTTY: true})).toThrow("TERMINAL_NOT_INTERACTIVE");
     expect(() => assertInteractiveTerminal({isTTY: true}, {isTTY: false})).toThrow("TERMINAL_NOT_INTERACTIVE");

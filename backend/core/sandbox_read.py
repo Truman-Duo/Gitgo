@@ -126,6 +126,31 @@ class PinnedRead:
             self._closed = True
             self._owners.close()
 
+    def sha256(self, *, max_bytes: int = 512 * 1024 * 1024) -> tuple[str, int]:
+        """Bounded streaming fingerprint for runtime binaries; no byte export."""
+        import hashlib
+        if self._closed or type(max_bytes) is not int or not 0 < max_bytes <= 512 * 1024 * 1024:
+            raise ValueError('Invalid bounded hash read')
+        before = os.fstat(self._fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > max_bytes:
+            raise ReadBoundaryError('Hash read requires a bounded singly linked regular file')
+        os.lseek(self._fd, 0, os.SEEK_SET)
+        result, count = hashlib.sha256(), 0
+        while True:
+            chunk = os.read(self._fd, min(65536, max_bytes + 1 - count))
+            if not chunk:
+                break
+            result.update(chunk)
+            count += len(chunk)
+            if count > max_bytes:
+                raise ReadBoundaryError('File grew beyond the hash read limit')
+        after = os.fstat(self._fd)
+        if (count != before.st_size or after.st_nlink != 1
+                or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ReadBoundaryError('File changed during the hash read')
+        return result.hexdigest(), count
+
     def __enter__(self):
         return self
 

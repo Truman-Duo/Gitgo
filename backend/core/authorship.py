@@ -252,7 +252,10 @@ def strip_authorship_from_code(content: str, aggressive: bool = False) -> str:
 
 # Level 2: 内容模式匹配默认正则
 _DEFAULT_PRIVACY_PATTERNS = {
-    "email": re.compile(r'[\w.\-+]+@[\w.\-]+\.\w+'),
+    # Start only at the beginning of a maximal local part. Retrying the same
+    # unbounded local part at every character made long binary/text lines
+    # quadratic, including build artifacts with no email address at all.
+    "email": re.compile(r'(?<![\w.\-+])[\w.\-+]+@[\w.\-]+\.\w+'),
     "ip": re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
     "apikey": re.compile(
         r'(?:sk-[A-Za-z0-9_-]{16,})|'

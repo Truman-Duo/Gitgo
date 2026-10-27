@@ -140,13 +140,19 @@ class LocalGitRunner(GitRunner):
 
 class ProtectedLocalGitRunner(LocalGitRunner):
     """Trusted local plumbing using the existing fixed-configuration boundary."""
-    def run(self, args, capture_output=True, timeout=None, text=True, encoding="utf-8"):
+    def run(self, args, capture_output=True, timeout=None, text=True, encoding="utf-8", *, input_bytes=None, transport_identity=None):
         from backend.core.loop.git_execution import protected_git, protected_git_config
         boundary = protected_git_config if args and args[0] in {"init", "remote", "--help", "--version"} else protected_git
-        with boundary(self._repo, ["git", *args]) as (command, environment):
+        with boundary(self._repo, ["git", *args], **({"transport_identity": transport_identity} if transport_identity is not None else {})) as (command, environment):
             options = {"cwd": self._repo, "env": environment, "capture_output": capture_output,
-                       "timeout": timeout or 120, "text": text, "stdin": subprocess.DEVNULL,
+                       "timeout": timeout or 120, "text": text,
                        "close_fds": True, "creationflags": subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0}
+            if input_bytes is not None:
+                if text or not isinstance(input_bytes, bytes):
+                    raise ValueError("Protected Git input requires binary mode")
+                options["input"] = input_bytes
+            else:
+                options["stdin"] = subprocess.DEVNULL
             if text:
                 options["encoding"] = encoding
             if os.name == 'posix' and hasattr(command, 'pass_fds'):

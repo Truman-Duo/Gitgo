@@ -11,11 +11,14 @@ import {useManagedInput as useInput} from "../input/runtime.js";
 import {colors, separator, usePanelSize, padEndWidth} from "../theme/index.js";
 import type {FooterConfig} from "./CommandBar.js";
 import {clampHeaderIndex, HorizontalHeaderStrip} from "./HorizontalHeaderStrip.js";
+import {formatChecks, parseChecks} from "./publishChecks.js";
+import type {PublishCheck} from "../backend/publish.js";
 
 const TABS = [
   {id: "commit", label: {en:"Commit Format",zh:"提交格式"}},
   {id: "privacy", label: {en:"Privacy",zh:"隐私"}},
   {id: "remote", label: {en:"Remote",zh:"远端"}},
+  {id: "checks", label: {en:"Checks",zh:"检查"}},
 ] as const;
 
 const ROWS = {
@@ -25,9 +28,11 @@ const ROWS = {
     "exclude_paths", "include_paths", "ignored_rules", "approved_fingerprints",
   ],
   remote: ["remote_url", "trial", "formal"],
+  checks: ["checks"],
 } as const;
 
 const LABELS: Record<string, Copy> = {
+  checks: {en:"Required tests",zh:"必需测试"},
   prefix: {en:"Prefix",zh:"前缀"}, number_start: {en:"Number Start",zh:"起始编号"}, padding: {en:"Padding",zh:"编号补零"},
   plugins: {en:"Commit Plugins",zh:"提交插件"}, template_name: {en:"Template",zh:"模板"}, enabled: {en:"Privacy Scan",zh:"隐私扫描"},
   deep_scan: {en:"Deep Scan",zh:"深度扫描"}, content_level: {en:"Content Level",zh:"内容级别"},
@@ -50,6 +55,7 @@ type PublishData = {
   commit_format: Record<string, unknown>;
   privacy: Record<string, unknown>;
   remote_url: string;
+  checks?: PublishCheck[];
   stages?: {trial_configured?: boolean; release_configured?: boolean};
 };
 type Props = {
@@ -111,24 +117,25 @@ export const PublishPanel = memo(function PublishPanel({
   const valueFor = useCallback((field: string): unknown => {
     if (!data) return undefined;
     if (field === "remote_url") return data.remote_url;
+    if (field === "checks") return data.checks ?? [];
     return tab === "commit" ? data.commit_format[field] : data.privacy[field];
   }, [data, tab]);
 
   const beginEdit = (field: string) => {
     const value = valueFor(field);
     setEditing(field);
-    cmdInput.setValue(Array.isArray(value) ? value.join("; ") : String(value ?? ""));
+    cmdInput.setValue(field === "checks" ? formatChecks(data?.checks ?? []) : Array.isArray(value) ? value.join("; ") : String(value ?? ""));
   };
 
   const save = useCallback(async () => {
     if (!editing || !data) return;
     try {
-      const value = parseEditedValue(editing, cmdInput.value,t);
+      const value = editing === "checks" ? parseChecks(cmdInput.value, data.checks) : parseEditedValue(editing, cmdInput.value,t);
       if (tab === "commit") {
         await publishSet(client, project, "commit_format", {...data.commit_format, [editing]: value});
       } else if (tab === "privacy") {
         await publishSet(client, project, "privacy", {...data.privacy, [editing]: value});
-      } else await publishSet(client, project, "remote_url", value);
+      } else await publishSet(client, project, tab === "checks" ? "checks" : "remote_url", value);
       setEditing(null);
       cmdInput.setValue("");
       setStatus(t({en:"Saved",zh:"已保存"}));
@@ -195,6 +202,12 @@ export const PublishPanel = memo(function PublishPanel({
         <Text bold={index === row}>{display(field)}</Text>
       </Box>)}
     </Box>
+    {tab === "checks" ? <Box flexDirection="column" marginTop={1}>
+      <Text>{t({en:"Format: file.py | seeds | seconds; another.py | 42 | 30",zh:"格式：file.py | 随机种子 | 秒数; another.py | 42 | 30"})}</Text>
+      <Text>{t({en:"Defaults: seed 42, 30 seconds. Up to 8 checks, 4 seeds each, 180 total seconds.",zh:"默认种子 42、时限 30 秒；最多 8 项，每项 4 个种子，总时限 180 秒。"})}</Text>
+      <Text>{t({en:"All project checks are required. Changes invalidate prepared plans.",zh:"项目检查均为必需检查；修改后需重新准备已有计划。"})}</Text>
+      {(data?.checks ?? []).map((check, index) => <Text key={check.id ?? index}>{formatChecks([check]).replace(/[\x00-\x1f\x7f-\x9f]/g, " ")}</Text>)}
+    </Box> : null}
     {tab === "remote" && history.length > 0 ? <Box flexDirection="column" marginTop={1}>
       <Text dimColor>{t({en:"Publish activity",zh:"发布活动"})}</Text>
       {history.map((item, index) => <Text key={item.event_id || index} dimColor>

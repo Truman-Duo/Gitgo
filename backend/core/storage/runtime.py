@@ -190,6 +190,52 @@ def read_project_list_status(workspace: str | Path) -> dict | None:
     }
 
 
+def read_existing_state_blob(workspace: str | Path, namespace: str, key: str):
+    """Read one committed state head without constructing a writer or repairing CAS.
+
+    Honor an injected project's paths. Cold reads resolve existing identity only;
+    absence does not create a project. Missing/corrupt owned payloads fail instead
+    of falling back to an older legacy snapshot.
+    """
+    from .bindings import peek_storage
+    from backend.core.sandbox_read import ReadRoot, MAX_READ_BYTES
+    validate_sqlite_runtime()
+    bound = peek_storage(workspace)
+    if bound is not None:
+        bound._ensure_open()
+    paths = bound.paths if bound is not None else resolve_existing_storage_paths(workspace)
+    if paths is None:
+        return None
+    # An existing identity with a missing DB is unavailable, not a new project.
+    _validate_sqlite_file_shape(paths.state_db)
+    connection = sqlite3.connect(paths.state_db.as_uri() + "?mode=ro", uri=True, timeout=.25)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        row = connection.execute(
+            "SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?", (namespace, key),
+        ).fetchone()
+        if row is None:
+            return None
+        reference = str(row[0])
+        digest = reference.removeprefix("sha256:")
+        if (not reference.startswith("sha256:") or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise StorageBlocked("STATE_REFERENCE_INVALID")
+        owned = connection.execute("SELECT byte_length FROM objects WHERE digest=?", (digest,)).fetchone()
+        maximum = min(MAX_READ_BYTES, StoragePolicy().max_cas_object_bytes,
+                      bound.policy.max_cas_object_bytes if bound is not None else StoragePolicy().max_cas_object_bytes)
+        if owned is None or type(owned[0]) is not int or not 0 <= owned[0] <= maximum:
+            raise StorageBlocked("STATE_OBJECT_OWNERSHIP_INVALID")
+        with ReadRoot(paths.cas_dir) as root, root.open(digest[:2] + "/" + digest[2:]) as opened:
+            payload = opened.read_bytes(max_bytes=maximum)
+        if len(payload) != owned[0] or hashlib.sha256(payload).hexdigest() != digest:
+            raise StorageBlocked("STATE_OBJECT_DIGEST_MISMATCH")
+        return {"reference": reference, "project_id": paths.project_id, "payload": payload}
+    finally:
+        connection.close()
+
+
 
 
 

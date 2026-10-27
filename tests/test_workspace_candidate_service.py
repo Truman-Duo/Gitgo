@@ -378,4 +378,10 @@ def test_real_native_command_with_deep_state_location(tmp_path_factory, workspac
         close_owned_storage()
         # Only this fixture's state; no product data outside it is removed.
         import shutil
-        shutil.rmtree(state.parent, ignore_errors=False)
+        target = state.parent.resolve()
+        assert target.is_relative_to(ws.parent.resolve()) and target.name == "deep-state-" + "s" * 12
+        # The Host journal supports extended paths without a machine registry
+        # change; fixture cleanup needs the same Windows I/O convention.
+        import os
+        cleanup_path = "\\\\?\\" + str(target) if os.name == "nt" else str(target)
+        shutil.rmtree(cleanup_path, ignore_errors=False)

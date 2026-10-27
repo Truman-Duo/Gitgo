@@ -559,6 +559,8 @@ def run_daemon(
     # Bind the canonical development tool set to this daemon workspace.  These
     # names are additive; legacy daemon/governance tools keep their contracts.
     tool_executors.update(build_workspace_tools(session.workspace_path))
+    from backend.core.tools.publish_service import build_publish_tools
+    tool_executors.update(build_publish_tools(project))
 
     from backend.core.daemon.policy_helpers import bind_project_tool_context
     def _bind_private_workspace(tool: AgentTool) -> None:
