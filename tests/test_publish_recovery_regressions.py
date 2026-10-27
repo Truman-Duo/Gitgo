@@ -162,8 +162,8 @@ def test_storage_capacity_failure_after_effect_recovers_without_replay(setup, mo
             raise StorageBlocked("injected physical capacity failure")
         return original(self, ledger, expected)
     monkeypatch.setattr(Repository, "save", capacity)
-    with pytest.raises(StorageBlocked):
-        adopt(setup, item)
+    result = adopt(setup, item)
+    assert failed and result["error"] == "PUBLISH_OPERATION_UNCERTAIN"
     ledger, _ = read_ledger(setup[2])
     pending = ledger["items"][item["id"]]
     assert pending["status"] == "executing"
