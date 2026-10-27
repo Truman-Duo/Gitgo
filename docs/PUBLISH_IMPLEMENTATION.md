@@ -29,11 +29,18 @@ Dashboard 与 Agent 调用同一应用服务和 PublishService。Runtime 负责�
 
 ## 终端与应用接口
 
+2026-10-27 交互补齐：`/task [序号]` 从本地事项打开已关联任务的正式公开对话，`P` 切换关联时记录的父任务，`D` 查看既有进程详情，Esc 返回原事项、节点与滚动位置。显示和跳转使用 `linked_task_id`，不误用关联操作发起者的 `task_id`。`publish.task` 在既有项目 SQLite 的只读快照中核对 process/session/task 关系，复用正式公开对话投影；较早的主任务、同一主进程的较早任务也可读取，不切换当前对话、不创建 writer、不启动 Daemon。读取每个 session 最多2000条消息、1000个任务，CAS读取总预算16MiB；超限或身份不符明确失败。
+
+页面选择、节点、列表分页、焦点、滚动、历史图分页/选择/父提交diff位置，以及未保存的操作/评论/审阅/配置表单按配置档案、项目名与工作目录隔离保存。私有前端状态位于配置文件同目录的 `ui/publish`，使用内容受限的JSON和同目录原子替换，每项目上限1MiB，不进入业务账本、共享元数据或发行包。输入逐次落盘，保留中文/emoji、当前字段和光标；账户令牌不进入草稿文件。Esc保留未保存表单，重新打开原入口继续；重启后打开 `/publish` 恢复未完成页面。事项revision/binding或平台观察变化后，旧草稿不能直接提交，Ctrl+R明确按当前对象重新填写；配置字段同样核对保存时的原值。恢复只读取，不重放操作或自动发送。
+
+`/history` 现在显示横向Git分支/合并轨道：左新右旧，`O`为选中提交、`*`为其他提交，边只来自真实parent；相邻轨道保留分叉和合并，跨页延续未到达的parent及其轨道编号，不把Publish业务流程当Git边。左右选择提交并自动平移，窄屏围绕选中轨道裁剪，Enter查看diff，`/parent N`选择merge父提交。图使用现有Ink和ASCII连线，没有新增依赖。
+
 正式入口为 `/publish`。事项页上下选事项、左右选节点、Enter 看详情、Esc 逐层返回；设置页保留提交格式、隐私、远端和 Trial/Formal。绿色 CommandBar 输入命令，蓝色 NormalBar 编辑草稿。刷新不抢焦点，异步回复绑定项目和请求代次。长内容和输入字段随终端尺寸裁剪/滚动；仓库文本控制字符按纯文字显示。真实经典Windows控制台发现新宋体把部分箭头/中点当双格而Unicode默认单格，导致增量重绘残字。Host现通过不激活的私有控制台buffer实测已分配BMP符号和ambiguous字符，布局、输入字宽与Ink绘制在首帧前安装相同映射；不改用户字体、活动画面或配置。ConPTY隐藏伪窗口继续使用终端默认Unicode规则。
 
 | 终端入口 | 应用服务/Agent工具职责 |
 | --- | --- |
 | 默认列表、详情 | `publish.items/item/operation`：纯查询；不开writer、不fetch、不测试、不迁移 |
+| `/task [N]`、P、D、Esc | `publish.task`：读取精确的已有任务及公开对话；跳转父任务/进程详情并返回原位置 |
 | `/prepare`、`/formal`、`/combine`、`/revise` | `publish.prepare`：固定 Workspace/Trial OID、范围、方法和最终树 |
 | `/plan`、`/adopt` | 调整接手目标/负责人/剩余工作；条件创建本事项工作分支 |
 | `/verify`、`/execute`、`/decide` | 检查固定最终树；正式写入；记录接受/返工/暂缓及理由 |

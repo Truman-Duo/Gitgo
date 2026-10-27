@@ -29,6 +29,7 @@ import { detectTerminals, startupTerminals } from "./backend/tools.js";
 import { registerLaunchSession } from "./backend/launchSession.js";
 import packageInfo from "../package.json";
 import {managedRoot, acquireManagedAdmission} from "./backend/managedAdmission.js";
+import {profilePublishStateStore} from "./state/publishLocalState.js";
 
 if (process.argv.includes("--version")) {
   process.stdout.write(`Gitgo ${packageInfo.version}\n`);
@@ -255,6 +256,7 @@ async function main() {
     <ScreenWrapper>
       <InputProvider verificationInput={verificationInput()}><App
         client={client}
+        publishState={profilePublishStateStore()}
         refreshSec={REFRESH_SEC}
         startupSmokeTask={startupSmokeTask()}
         startupTerminalSetup={!useMock && (!terminals || !terminals.configured)}

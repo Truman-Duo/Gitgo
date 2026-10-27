@@ -212,6 +212,7 @@ class ApplicationServices:
             "publish.set": self.publish_set,
             "publish.items": self.publish_items,
             "publish.item": self.publish_item,
+            "publish.task": self.publish_task,
             "publish.shared.items": self.publish_shared_items,
             "publish.history": self.publish_history,
             "publish.diff": self.publish_diff,
@@ -848,6 +849,21 @@ class ApplicationServices:
             raise OperationError(exc.code, "Publish item could not be read") from exc
         except (OSError, ValueError, RuntimeError, StorageDatabaseError) as exc:
             raise OperationError("PUBLISH_STATE_UNAVAILABLE", "Saved Publish records could not be verified") from exc
+
+    def publish_task(self, project: str, process_id: str, task_id: str) -> dict:
+        from backend.core.storage.runtime import read_existing_task_view
+        from backend.core.storage import StorageDatabaseError, StorageBlocked
+        if any(not isinstance(value, str) or not 1 <= len(value) <= 160 or any(ord(char) < 32 for char in value)
+               for value in (process_id, task_id)):
+            raise OperationError("PUBLISH_TASK_NOT_FOUND", "Select an existing task reference")
+        proj = self._publish_project(project)
+        try:
+            result = read_existing_task_view(proj.workspace_path, process_id, task_id)
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError, StorageBlocked) as exc:
+            raise OperationError("PUBLISH_STATE_UNAVAILABLE", "Saved task could not be verified") from exc
+        if result is None:
+            raise OperationError("PUBLISH_TASK_NOT_FOUND", "The exact task is no longer available")
+        return {"project": project, **result}
 
     def publish_command(self, operation, project, arguments):
         from backend.core.storage import StorageDatabaseError

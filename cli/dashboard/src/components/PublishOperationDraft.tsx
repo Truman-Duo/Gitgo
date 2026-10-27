@@ -1,6 +1,8 @@
 import React, {useEffect, useState} from "react";
+import {usePublishForm} from "../hooks/usePublishForm.js";
+import type {PublishLocalState} from "../state/publishLocalState.js";
 import {Box, Text} from "@anthropic/ink";
-import {useTextInput, applyTextOp} from "../hooks/useTextInput.js";
+import {applyTextOp} from "../hooks/useTextInput.js";
 import {useManagedInput as useInput} from "../input/runtime.js";
 import {matchChord} from "../input/bindings.js";
 import {useCopy} from "../ui/PageFrame.js";
@@ -39,23 +41,25 @@ const labels: Record<string, Copy> = {
   followup_status: {en: "Follow-up: pending_reply or resolved", zh: "跟进状态：pending_reply 待回复或 resolved 已处理"},
 };
 
-export function PublishOperationDraft({mode, item, busy, status, onFooter, onSubmit, onDismiss}: {
+export function PublishOperationDraft({mode, item, busy, status, onFooter, onSubmit, onDismiss, localState, formKey = mode}: {
   mode: PublishOperationMode; item?: PublishItem; busy: boolean; status: string;
   onFooter: (value: FooterConfig | null) => void; onSubmit: (operation: string, args: Record<string, unknown>) => void; onDismiss: () => void;
+  localState?: PublishLocalState; formKey?: string;
 }) {
-  const t = useCopy(), input = useTextInput(), {h} = usePanelSize({minWidth: 20, widthOffset: 4});
+  const t = useCopy(), {h} = usePanelSize({minWidth: 20, widthOffset: 4});
   const snapshot = item?.collaboration?.snapshots.at(-1);
   const target = snapshot?.target;
-  const [values, setValues] = useState<Record<string, string>>({kind: target?.kind ?? "github", instance: target?.instance ?? "https://github.com",
+  const defaults: Record<string, string> = {kind: target?.kind ?? "github", instance: target?.instance ?? "https://github.com",
     repository: target?.repository ?? "", account: target?.account ?? "", resource: mode === "search" ? "issues" : snapshot?.resource.kind ?? "issue",
     number: String(snapshot?.resource.number ?? ""), page: "1", token: "", body: mode === "edit" ? snapshot?.document?.body ?? "" : "", title: mode === "edit" ? snapshot?.document?.title ?? "" : "", decision: "COMMENT", path: "", line: "", side: "RIGHT",
     head: "", base: "", head_oid: item?.candidate_oid ?? "", base_oid: item?.plan?.expected_target_oid ?? "",
     version: "", entry: "", outputs: "", timeout: "120", package_id: item?.packages?.at(-1)?.id ?? "", destination: "", remote: "",
     package_path: "", sha256: "", process_id: "", parent_process_id: "", decision_id: "", snapshot_id: "", anchor_id: "", note: "",
     action: "retain_source", branch: item?.target ?? "", owner: item?.owner ?? "", reason: "", remote_branch: "", merge_item_id: "",
-    query: "", state: "closed", reference_kind: "comment", reference_id: "", followup_status: "pending_reply"});
+    query: "", state: "closed", reference_kind: "comment", reference_id: "", followup_status: "pending_reply"};
   const platform = ["kind", "instance", "repository", "account"];
-  const fields = mode === "remote" ? [...platform, "resource", ...(["issue", "pull"].includes(values.resource) ? ["number"] : []), "page"]
+  const {values, setValues, fields, index, setIndex, field, input, stale, reset} = usePublishForm(localState, formKey,
+    defaults, JSON.stringify([item?.id, item?.revision, item?.binding, snapshot?.id]), values => mode === "remote" ? [...platform, "resource", ...(["issue", "pull"].includes(values.resource) ? ["number"] : []), "page"]
     : mode === "search" ? [...platform, "resource", "query", "page"]
     : mode === "edit" ? ["title", "body"] : mode === "state" ? ["state"]
     : ["comment_edit", "reply"].includes(mode) ? ["reference_kind", "reference_id", "body"]
@@ -71,10 +75,8 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
     : mode === "export" ? ["package_id", "destination"]
     : mode === "review" ? ["decision", "path", ...(values.path ? ["line", "side"] : []), "body"]
     : mode === "pull" ? ["title", "head", "base", "head_oid", "base_oid", "body"]
-    : mode === "issue" ? ["title", "body"] : ["body"];
-  const [index, setIndex] = useState(0), [error, setError] = useState("");
-  const field = fields[index];
-  useEffect(() => { input.setValue(values[field] ?? ""); }, [index, field]);
+    : mode === "issue" ? ["title", "body"] : ["body"]);
+  const [error, setError] = useState("");
   useEffect(() => {
     onFooter({kind: "normal", cmdInput: field === "token" ? {...input, value: "•".repeat(input.value.length)} : input,
       statusText: t({en: "↑/↓ field · Enter next/save · Esc cancel", zh: "↑/↓ 字段 · Enter 下一项/保存 · Esc 取消"}), suggestions: [], suggestionIdx: 0, cmdResult: ""});
@@ -112,11 +114,13 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
   };
   useInput((text, key) => {
     if (busy) return;
-    if (matchChord("escape", text, key)) { input.setValue(""); onDismiss(); return; }
+    if (key.ctrl && text === "r") { reset(); return; }
+    if (matchChord("escape", text, key)) { onDismiss(); return; }
+    if (stale && matchChord("enter", text, key)) return;
     const move = matchChord("up", text, key) ? -1 : matchChord("down", text, key) ? 1 : 0;
-    if (move) { setValues({...values, [field]: input.value}); setIndex(Math.max(0, Math.min(fields.length - 1, index + move))); return; }
+    if (move) { setValues({...values, [field]: input.materialize()}); setIndex(Math.max(0, Math.min(fields.length - 1, index + move))); return; }
     if (matchChord("enter", text, key)) {
-      const value = input.value.trim();
+      const value = input.materialize().trim();
       if (!value && !["path", "entry", "remote", "parent_process_id", "decision_id", "snapshot_id", "anchor_id", "note", "remote_branch", "merge_item_id"].includes(field)) return;
       if (field === "action" && !["retain_source", "retain_work", "prepare_archive", "prepare_delete", "prepare_publish", "prepare_remote_delete"].includes(value)) return;
       if (field === "kind" && !["github", "gitlab"].includes(value) || field === "resource" && !["issue", "pull", "issues", "pulls"].includes(value)) return;
@@ -149,6 +153,8 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
       : mode === "account" ? {en: "This account is scoped to this platform repository. The token is stored in the OS encrypted store.", zh: "账户绑定此平台仓库；令牌使用操作系统加密保存。"}
       : {en: "Review the fixed target and inputs before saving.", zh: "保存前核对固定目标和输入。"})}</Text>
     {status || error ? <Text>{status || error}</Text> : null}
+    {stale ? <Text>{t({en: "This item changed since the draft. Ctrl+R starts again; Esc keeps the draft.", zh: "事项已变化，旧草稿不能直接保存。Ctrl+R 重新填写；Esc 保留草稿返回。"})}</Text> : null}
+    {localState?.error ? <Text>{t({en: "Local draft could not be saved.", zh: "本地草稿未能保存，请保留页面并重试编辑。"})}</Text> : null}
     {fields.slice(start, start + visible).map((name, offset) => { const i = start + offset; return <Text key={name} bold={i === index} wrap="truncate-end">{i === index ? "› " : "  "}{t(labels[name])}: {name === "token" ? "•".repeat((i === index ? input.value : values[name]).length) : (i === index ? input.value : values[name]).replace(/[\x00-\x1f\x7f-\x9f]/g, " ")}</Text>; })}
   </Box>;
 }

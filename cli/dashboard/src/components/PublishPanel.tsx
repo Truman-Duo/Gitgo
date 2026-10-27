@@ -1,6 +1,8 @@
 import {useCopy} from "../ui/PageFrame.js";
 import type {Copy} from "../ui/pageContract.js";
-import React, {memo, useCallback, useEffect, useMemo, useState} from "react";
+import React, {memo, useCallback, useEffect, useLayoutEffect, useMemo, useState} from "react";
+import {useTextInput} from "../hooks/useTextInput.js";
+import type {PublishLocalState} from "../state/publishLocalState.js";
 import {Box, Text} from "@anthropic/ink";
 import type {BackendClient} from "../backend/client.js";
 import {publishGet, publishSet} from "../backend/tools.js";
@@ -59,6 +61,7 @@ type PublishData = {
   stages?: {trial_configured?: boolean; release_configured?: boolean};
 };
 type Props = {
+  localState?: PublishLocalState;
   client: BackendClient; project: string; cmdInput: UseTextInputReturn;
   onFooter: (config: FooterConfig | null) => void; onDismiss: () => void;
   onOpenTrial: () => void; onOpenFormal: () => void;
@@ -80,18 +83,27 @@ function parseEditedValue(field: string, raw: string,t:(value:Copy)=>string): un
 }
 
 export const PublishPanel = memo(function PublishPanel({
-  client, project, cmdInput, onFooter, onDismiss, onOpenTrial, onOpenFormal,
+  client, project, onFooter, onDismiss, onOpenTrial, onOpenFormal, localState,
 }: Props) {
   const t=useCopy();
   const tabs=TABS.map(item=>({...item,label:t(item.label)}));
   const {w} = usePanelSize({minWidth: 40, widthOffset: 4});
-  const [tab, setTab] = useState<TabId>("commit");
-  const [row, setRow] = useState(0);
+  const [saved] = useState(() => localState?.get<{tab: TabId; row: number; editing: string | null}>("settings.view"));
+  const [tab, setTab] = useState<TabId>(saved && TABS.some(row => row.id === saved.tab) ? saved.tab : "commit");
+  const [row, setRow] = useState(Math.max(0, saved?.row ?? 0));
   const [data, setData] = useState<PublishData | null>(null);
   const [history, setHistory] = useState<any[]>([]);
-  const [editing, setEditing] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(saved?.editing && (ROWS[tab] as readonly string[]).includes(saved.editing) ? saved.editing : null);
+  const [savedField] = useState(() => localState?.get<{value: string; cursor: number; baseline: string}>(`setting/${tab}/${editing}`));
+  const cmdInput = useTextInput(savedField?.value ?? "");
+  const [baseline, setBaseline] = useState(savedField?.baseline);
   const [status, setStatus] = useState("");
   const rows = useMemo<readonly string[]>(() => ROWS[tab], [tab]);
+  useLayoutEffect(() => { if (savedField) { cmdInput.setValue(savedField.value); cmdInput.moveCursor(savedField.cursor - savedField.value.length); } }, []);
+  useLayoutEffect(() => {
+    localState?.set("settings.view", {tab, row, editing});
+    if (editing) localState?.set(`setting/${tab}/${editing}`, {value: cmdInput.materialize(), cursor: cmdInput.cursor, baseline});
+  }, [tab, row, editing, cmdInput.value, cmdInput.cursor, baseline]);
 
   const refresh = useCallback(async () => {
     const [value, events] = await Promise.all([
@@ -123,12 +135,15 @@ export const PublishPanel = memo(function PublishPanel({
 
   const beginEdit = (field: string) => {
     const value = valueFor(field);
+    const previous = localState?.get<{value: string; baseline: string}>(`setting/${tab}/${field}`);
     setEditing(field);
-    cmdInput.setValue(field === "checks" ? formatChecks(data?.checks ?? []) : Array.isArray(value) ? value.join("; ") : String(value ?? ""));
+    setBaseline(previous?.baseline ?? JSON.stringify(value));
+    cmdInput.setValue(previous?.value ?? (field === "checks" ? formatChecks(data?.checks ?? []) : Array.isArray(value) ? value.join("; ") : String(value ?? "")));
   };
+  const stale = Boolean(editing && data && baseline !== undefined && baseline !== JSON.stringify(valueFor(editing)));
 
   const save = useCallback(async () => {
-    if (!editing || !data) return;
+    if (!editing || !data || stale) return;
     try {
       const value = editing === "checks" ? parseChecks(cmdInput.value, data.checks) : parseEditedValue(editing, cmdInput.value,t);
       if (tab === "commit") {
@@ -137,11 +152,12 @@ export const PublishPanel = memo(function PublishPanel({
         await publishSet(client, project, "privacy", {...data.privacy, [editing]: value});
       } else await publishSet(client, project, tab === "checks" ? "checks" : "remote_url", value);
       setEditing(null);
+      localState?.remove(`setting/${tab}/${editing}`);
       cmdInput.setValue("");
       setStatus(t({en:"Saved",zh:"已保存"}));
       await refresh();
     } catch (error: any) { setStatus(String(error?.message || error)); }
-  }, [client, cmdInput, data, editing, project, refresh, tab]);
+  }, [client, cmdInput, data, editing, project, refresh, tab, stale, localState]);
 
   const toggle = useCallback(async (field: string) => {
     if (!data) return;
@@ -154,7 +170,8 @@ export const PublishPanel = memo(function PublishPanel({
 
   useInput((input: string, key: any) => {
     if (editing) {
-      if (matchChord("escape", input, key)) { setEditing(null); cmdInput.setValue(""); }
+      if (key.ctrl && input === "r") { localState?.remove(`setting/${tab}/${editing}`); setBaseline(JSON.stringify(valueFor(editing))); const value = valueFor(editing); cmdInput.setValue(editing === "checks" ? formatChecks(data?.checks ?? []) : Array.isArray(value) ? value.join("; ") : String(value ?? "")); }
+      else if (matchChord("escape", input, key)) { setEditing(null); cmdInput.setValue(""); }
       else if (matchChord("enter", input, key)) void save();
       else if (matchChord("backspace", input, key)) applyTextOp({op: "delete_back"}, cmdInput);
       else if (matchChord("delete", input, key)) applyTextOp({op: "delete_forward"}, cmdInput);
@@ -215,6 +232,8 @@ export const PublishPanel = memo(function PublishPanel({
       </Text>)}
     </Box> : null}
     <Box flexGrow={1}/>
+    {stale ? <Text>{t({en:"This setting changed since the draft. Ctrl+R reloads it before saving.",zh:"配置已变化，旧草稿不能直接保存。Ctrl+R 重新读取后填写。"})}</Text> : null}
+    {localState?.error ? <Text>{t({en:"Local draft could not be saved.",zh:"本地草稿未能保存。"})}</Text> : null}
     <Text dimColor>{status || t({en:"←/→ tabs · ↑/↓ select · Enter open/change",zh:"←/→ 页签 · ↑/↓ 选择 · Enter 打开/修改"})} · {t({en:"Esc back",zh:"Esc 返回"})}</Text>
   </Box>;
 });

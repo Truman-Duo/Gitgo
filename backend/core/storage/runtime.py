@@ -266,6 +266,66 @@ def read_existing_state_blob(workspace: str | Path, namespace: str, key: str):
 
 
 
+def read_existing_task_view(workspace, process_id, task_id):
+    """Read one exact historical task using the normal public chat projection.
+
+    Like read_existing_state_blob this never constructs a writer, migrates,
+    starts the daemon, repairs CAS, or changes the current conversation.
+    """
+    from types import SimpleNamespace
+    from .bindings import peek_storage
+    from backend.core.sandbox_read import ReadRoot, MAX_READ_BYTES
+    validate_sqlite_runtime()
+    bound = peek_storage(workspace)
+    paths = bound.paths if bound is not None else resolve_existing_storage_paths(workspace)
+    if paths is None:
+        return None
+    _validate_sqlite_file_shape(paths.state_db)
+    connection = sqlite3.connect(paths.state_db.as_uri() + "?mode=ro", uri=True, timeout=.25)
+    connection.row_factory = sqlite3.Row
+    budget = 16 * 1024 * 1024
+    def read_json(reference):
+        nonlocal budget
+        digest = str(reference).removeprefix("sha256:")
+        if not str(reference).startswith("sha256:") or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise StorageBlocked("STATE_REFERENCE_INVALID")
+        owned = connection.execute("SELECT byte_length FROM objects WHERE digest=?", (digest,)).fetchone()
+        if owned is None or type(owned[0]) is not int or not 0 <= owned[0] <= min(budget, MAX_READ_BYTES):
+            raise StorageBlocked("STATE_OBJECT_OWNERSHIP_INVALID")
+        with ReadRoot(paths.cas_dir) as root, root.open(digest[:2] + "/" + digest[2:]) as opened:
+            raw = opened.read_bytes(max_bytes=min(budget, MAX_READ_BYTES))
+        if len(raw) != owned[0] or hashlib.sha256(raw).hexdigest() != digest:
+            raise StorageBlocked("STATE_OBJECT_DIGEST_MISMATCH")
+        budget -= len(raw)
+        return json.loads(raw)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        row = connection.execute("""SELECT p.*, t.parent_task_id, t.status AS task_status FROM session_processes p
+            JOIN tasks t ON t.task_id=? AND t.session_id=p.session_id
+            WHERE p.process_id=?""", (task_id, process_id)).fetchone()
+        if row is None:
+            return None
+        for table, maximum in (("messages", 2000), ("tasks", 1000)):
+            count = connection.execute(f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE session_id=? LIMIT ?)",
+                (row["session_id"], maximum + 1)).fetchone()[0]
+            if count > maximum:
+                raise StorageBlocked("TASK_VIEW_LIMIT")
+        facade = SimpleNamespace(_state=connection, _state_lock=threading.RLock(), _read_json_blob=read_json,
+            _is_public_user_message=_presentation_repository._is_public_user_message,
+            _storage_projection_warning=_presentation_repository._storage_projection_warning)
+        messages = _presentation_repository._public_session_messages(facade, str(row["session_id"]))
+        presentation = connection.execute("SELECT display_name FROM process_presentation WHERE process_id=?", (process_id,)).fetchone()
+        process = {key: row[key] for key in ("process_id", "role", "actor_kind", "status", "steps_used", "max_steps", "created_at")}
+        process.update(active_task_id=task_id, status=row["task_status"], parent_id=row["parent_process_id"],
+            display_name=str(presentation[0] or "") if presentation else process_id)
+        return {"project_id": paths.project_id, "process": process,
+            "parent_task_id": str(row["parent_task_id"] or ""),
+            "messages": [message for message in messages if message.get("turn_id") == task_id]}
+    finally:
+        connection.close()
+
+
 class StorageRuntime:
     """The only supported SQLite entry point in the backend.
 

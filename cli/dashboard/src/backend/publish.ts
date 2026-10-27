@@ -14,7 +14,7 @@ export type PublishSharedPage = {schema_version: 1; item_id: string; observation
   observed_oid: string; total: number; next_cursor: string | null; read_only: true;
   items: {id: string; title: string; owner: string; rework: string; result_oids: string[];
     reviews: {id: string; decision: string; note: string; owner: string}[];
-    task_links?: {id: string; task_id: string; parent_task_id?: string; note?: string}[];
+    task_links?: {id: string; task_id: string; linked_task_id?: string; parent_task_id?: string; note?: string}[];
     branch_retention?: {id: string; ref: string; oid: string; owner: string; reason: string}[]}[]};
 export type PublishItem = {
   id: string; identity_kind: "snapshot_observation" | "stable_item"; title: string; label: string;
@@ -55,7 +55,7 @@ export type PublishItem = {
   distribution_operation?: {id: string; kind: string; state: string; reason?: string; destination?: string; package_id?: string;
     build_log?: string; build_environment?: {platform: string; architecture?: string; digest: string}};
   package_imports?: {id: string; sha256: string; source_oid: string; version: string; verification: string; installation: string}[];
-  task_links?: {id: string; process_id: string; task_id: string; parent_process_id?: string; parent_task_id?: string; note?: string}[];
+  task_links?: {id: string; process_id: string; task_id: string; linked_task_id?: string; parent_process_id?: string; parent_task_id?: string; note?: string}[];
   branches?: {retention: {id: string; kind: string; ref: string; oid: string; owner: string; reason: string}[];
     plan?: {state: string; kind: string; binding: string; branch: string; expected_oid: string; archive_ref?: string;
       observation?: {remote: string; ref: string; oid: string | null}}};

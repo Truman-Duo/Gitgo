@@ -14,8 +14,13 @@ import {PublishPanel} from "./PublishPanel.js";
 import {PublishDraft} from "./PublishDraft.js";
 import {PublishOperationDraft, type PublishOperationMode} from "./PublishOperationDraft.js";
 import {PublishHistoryPanel} from "./PublishHistoryPanel.js";
+import {PublishTaskPanel, type PublishTaskReference} from "./PublishTaskPanel.js";
+import {createPublishStateStore, type PublishLocalState} from "../state/publishLocalState.js";
 
-type Props = React.ComponentProps<typeof PublishPanel>;
+type Props = React.ComponentProps<typeof PublishPanel> & {localState?: PublishLocalState};
+type View = {tab?: number; focus?: "header" | "items" | "node" | "settings"; selectedId?: string; nodeId?: string;
+  cursor?: string; pageStart?: number; top?: number; form?: {family: "draft" | "operation"; mode: string; itemId?: string} | null;
+  history?: {itemId: string; head: string} | null; task?: PublishTaskReference | null};
 const NODE_NAMES: Record<string, Copy> = {
   record: {en: "Record", zh: "记录"}, verify: {en: "Verify", zh: "核对"},
   integrate: {en: "Integrate", zh: "合入"}, push: {en: "Push", zh: "推送"},
@@ -149,9 +154,11 @@ function PublishWorkspace(props: Props) {
   const {client, project, onFooter, onDismiss} = props;
   const t = useCopy();
   const {w, h} = usePanelSize({minWidth: 20, widthOffset: 4});
+  const [localState] = useState(() => props.localState ?? createPublishStateStore().scope(project));
+  const [savedView] = useState(() => localState.get<View>("view") ?? {});
   const input = useTextInput();
-  const [tab, setTab] = useState(0);
-  const [focus, setFocus] = useState<"header" | "items" | "node" | "settings">("header");
+  const [tab, setTab] = useState(savedView.tab === 1 ? 1 : 0);
+  const [focus, setFocus] = useState<"header" | "items" | "node" | "settings">(savedView.focus ?? "header");
   const [snapshot, setSnapshot] = useState<PublishSnapshot | null>(null);
   const [selected, setSelected] = useState(0);
   const [nodeIndex, setNodeIndex] = useState(1);
@@ -160,7 +167,12 @@ function PublishWorkspace(props: Props) {
   const [draft, setDraft] = useState<"prepare" | "plan" | "revise" | "formal" | "combine" | "work" | "migrate" | "decide" | null>(null);
   const [operationDraft, setOperationDraft] = useState<PublishOperationMode | null>(null);
   const [sharedPage, setSharedPage] = useState<PublishSharedPage | null>(null);
-  const [history, setHistory] = useState<{itemId: string; head: string} | null>(null);
+  const [history, setHistory] = useState<{itemId: string; head: string} | null>(savedView.history ?? null);
+  const [task, setTask] = useState<PublishTaskReference | null>(savedView.task ?? null);
+  const restored = useRef(false), cursor = useRef(savedView.cursor ?? "");
+  const viewRef = useRef<View>(savedView), bodyPosition = useRef("");
+  const restoreScroll = useRef(Boolean(savedView.selectedId));
+  const activeFormKey = useRef("");
   const auxiliaryRequest = useRef(0);
   const draftItem = useRef<PublishItem | undefined>(undefined);
   const [busy, setBusy] = useState(false);
@@ -181,17 +193,17 @@ function PublishWorkspace(props: Props) {
   useEffect(() => { auxiliaryRequest.current++; setSharedPage(null); }, [project, item?.id]);
   const settings = focus === "settings";
   const running = items.some(row => ["queued", "running", "stopping"].includes(row.run?.state ?? ""));
-  selection.current = item?.identity_kind === "stable_item" ? item.id : "";
+  selection.current = item?.id ?? savedView.selectedId ?? "";
 
-  const load = useCallback(async (cursor = "", preferred = "") => {
+  const load = useCallback(async (pageCursor = "", preferred = "", offset?: number) => {
     const generation = ++request.current;
     setLoading(true); setError("");
     try {
-      const next = await publishItems(client, project, cursor);
+      const next = await publishItems(client, project, pageCursor);
       if (generation !== request.current) return;
       const previous = currentSnapshot.current;
-      if (cursor && previous && previous.snapshot_id !== next.snapshot_id) throw new Error("PUBLISH_SNAPSHOT_CHANGED");
-      const keepSelection = !cursor && pageStart.current === 0 && previous?.snapshot_id === next.snapshot_id;
+      if (pageCursor && previous && previous.snapshot_id !== next.snapshot_id) throw new Error("PUBLISH_SNAPSHOT_CHANGED");
+      const keepSelection = !pageCursor && pageStart.current === 0 && previous?.snapshot_id === next.snapshot_id;
       currentSnapshot.current = next;
       setSnapshot(next);
       // The initial slice uses snapshot observations, not durable item IDs.
@@ -199,7 +211,8 @@ function PublishWorkspace(props: Props) {
       const stableIndex = next.items.findIndex(row => row.id === (preferred || selection.current));
       if (stableIndex >= 0) setSelected(stableIndex);
       else if (!keepSelection) { setSelected(0); setNodeIndex(1); }
-      pageStart.current = cursor ? pageStart.current + 50 : 0;
+      cursor.current = pageCursor;
+      pageStart.current = offset ?? (pageCursor ? pageStart.current + 50 : 0);
     } catch (failure: any) {
       if (generation !== request.current) return;
       setError(String(failure?.code || failure?.message || "PUBLISH_STATE_UNAVAILABLE"));
@@ -207,15 +220,54 @@ function PublishWorkspace(props: Props) {
       if (generation === request.current) setLoading(false);
     }
   }, [client, project]);
-  useEffect(() => { mounted.current = true; void load(); return () => { mounted.current = false; request.current++; }; }, [load]);
+  useEffect(() => { mounted.current = true;
+    void load(savedView.cursor ?? "", savedView.selectedId, savedView.pageStart ?? 0).then(() => {
+      // An old pagination snapshot can expire after facts change. Only reread;
+      // restoring presentation state never resumes a saved business command.
+      if (!currentSnapshot.current && savedView.cursor) { cursor.current = ""; void load("", savedView.selectedId); }
+    });
+    return () => { mounted.current = false; request.current++; };
+  }, [load]);
+  useLayoutEffect(() => {
+    if (!snapshot || restored.current) return;
+    restored.current = true;
+    const row = snapshot.items.find(row => row.id === savedView.selectedId);
+    const index = row?.nodes.findIndex(node => node.id === savedView.nodeId) ?? -1;
+    if (index >= 0) setNodeIndex(index);
+    const form = savedView.form;
+    if (form && (!form.itemId || row?.id === form.itemId)) {
+      draftItem.current = form.itemId ? row : undefined;
+      if (form.family === "draft" && ["prepare", "plan", "revise", "formal", "combine", "work", "migrate", "decide"].includes(form.mode)) setDraft(form.mode as NonNullable<typeof draft>);
+      else if (form.family === "operation" && ["remote", "search", "edit", "state", "comment_edit", "reply", "followup", "comment", "review", "issue", "pull", "account", "package", "export", "release", "tag", "import", "download", "link", "branch"].includes(form.mode)) setOperationDraft(form.mode as PublishOperationMode);
+    }
+  }, [snapshot]);
+  const formKey = draft || operationDraft ? `form/${draft ? "draft" : "operation"}/${draft ?? operationDraft}/${draftItem.current?.id ?? "new"}` : "";
+  activeFormKey.current = formKey;
+  useLayoutEffect(() => {
+    if (!snapshot) return;
+    viewRef.current = {...viewRef.current, tab, focus, selectedId: draftItem.current?.id && (draft || operationDraft) ? draftItem.current.id : item?.id, nodeId: node?.id, cursor: cursor.current, pageStart: pageStart.current,
+      form: draft || operationDraft ? {family: draft ? "draft" : "operation", mode: (draft ?? operationDraft)!, itemId: draftItem.current?.id} : null, history, task};
+    localState.set("view", viewRef.current);
+  }, [snapshot, tab, focus, item?.id, node?.id, draft, operationDraft, history, task]);
+  const scrollCleanup = useRef<(() => void) | undefined>(undefined);
+  const bindScroll = useCallback((handle: ScrollBoxHandle | null) => {
+    scrollCleanup.current?.(); scrollCleanup.current = undefined; scroll.current = handle;
+    if (!handle) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const remember = () => { viewRef.current = {...viewRef.current, top: Math.max(0, handle.getScrollTop() + handle.getPendingDelta())}; localState.set("view", viewRef.current); };
+    const unsubscribe = handle.subscribe(() => { remember(); clearTimeout(timer); timer = setTimeout(remember, 20); });
+    scrollCleanup.current = () => { clearTimeout(timer); remember(); unsubscribe(); };
+  }, [localState]);
   const execute = async (operation: string, args: Record<string, unknown>, retry = false) => {
     if (mutating.current) return;
     const call = retry ? pending.current : {operation, args, id: randomUUID()};
     if (!call) { setError("PUBLISH_ACTION_UNAVAILABLE"); return; }
+    const submittedForm = activeFormKey.current;
     pending.current = call; mutating.current = true; setBusy(true); setError(""); setNotice("");
     try {
       const result = await publishCommand(client, project, call.operation, call.args, call.id);
       if (!mounted.current) return;
+      if (submittedForm) localState.remove(submittedForm);
       setDraft(null);
       setOperationDraft(null);
       setNotice(result.effect_state === "ambiguous" ? "pending" : "saved");
@@ -233,7 +285,7 @@ function PublishWorkspace(props: Props) {
   };
   useEffect(() => {
     if (!running && (!busy || !["verify", "package"].includes(pending.current?.operation ?? ""))) return;
-    const timer = setInterval(() => { void load(); }, 1000);
+    const timer = setInterval(() => { void load(cursor.current, selection.current, pageStart.current); }, 1000);
     return () => clearInterval(timer);
   }, [busy, running, load]);
   const pauseRunning = async () => {
@@ -262,18 +314,30 @@ function PublishWorkspace(props: Props) {
     }
   };
   useLayoutEffect(() => {
+    if (!snapshot || settings || draft || operationDraft || history || task) return;
+    const position = JSON.stringify([focus, item?.id, node?.id]);
+    if (restoreScroll.current) {
+      if (item?.id === savedView.selectedId) {
+        if (savedView.nodeId && node?.id !== savedView.nodeId && item.nodes.some(row => row.id === savedView.nodeId)) return;
+        scroll.current?.scrollTo(savedView.top ?? 0); bodyPosition.current = position; restoreScroll.current = false; return;
+      }
+      restoreScroll.current = false;
+    }
+    const initial = JSON.stringify([savedView.focus ?? "header", savedView.selectedId, savedView.nodeId]);
+    if (bodyPosition.current === position || !bodyPosition.current && initial === position) scroll.current?.scrollTo(viewRef.current.top ?? 0);
     // Resolve the anchor in the same layout pass as the expanded evidence.
     // Numeric scrollTo(0) can be overtaken by ScrollBox's content-growth follow.
-    if (focus === "node" && detailTop.current) scroll.current?.scrollToElement(detailTop.current);
+    else if (focus === "node" && detailTop.current) scroll.current?.scrollToElement(detailTop.current);
     else scroll.current?.scrollTo(0);
-  }, [focus, selected, nodeIndex]);
+    bodyPosition.current = position;
+  }, [focus, selected, nodeIndex, Boolean(snapshot), settings, draft, operationDraft, history, task]);
   useEffect(() => {
-    if (settings || draft || operationDraft || history) return;
+    if (settings || draft || operationDraft || history || task) return;
     onFooter({kind: "command", cmdInput: input,
       statusText: t({en: "/prepare · /formal · /run verify execute · /settings", zh: "/prepare 接手准备 · /formal 正式整理 · /run verify execute 连续执行 · /settings 设置"}),
       suggestions: [], suggestionIdx: 0, cmdResult: ""});
     return () => onFooter(null);
-  }, [settings, draft, operationDraft, history, input, input.value, input.cursor, onFooter, t]);
+  }, [settings, draft, operationDraft, history, task, input, input.value, input.cursor, onFooter, t]);
 
   useInput((text, key) => {
     if (input.value.startsWith("/")) {
@@ -286,6 +350,12 @@ function PublishWorkspace(props: Props) {
           return;
         }
         if (command === "/prepare") { draftItem.current = undefined; setError(""); setDraft("prepare"); }
+        else if (/^\/task(?:\s+\d+)?$/.test(command)) {
+          const reference = item?.task_links?.[Number(command.split(/\s+/)[1] ?? 1) - 1];
+          if (!reference?.process_id || !reference.linked_task_id) setError("PUBLISH_ACTION_UNAVAILABLE");
+          else setTask({process_id: reference.process_id, linked_task_id: reference.linked_task_id,
+            parent_process_id: reference.parent_process_id, parent_task_id: reference.parent_task_id});
+        }
         else if (command === "/history" || command.startsWith("/history ")) {
           const head = command.split(/\s+/)[1] ?? "candidate";
           if (item?.identity_kind !== "stable_item" || !/^(candidate|formal|contribution:\d+)$/.test(head)) setError("PUBLISH_ACTION_UNAVAILABLE");
@@ -374,17 +444,20 @@ function PublishWorkspace(props: Props) {
       if (matchChord("up", text, key)) scroll.current?.scrollBy(-1);
       if (matchChord("down", text, key)) scroll.current?.scrollBy(1);
     }
-  }, {isActive: !settings && !draft && !operationDraft && !history});
+  }, {isActive: !settings && !draft && !operationDraft && !history && !task});
 
-  if (settings) return <PublishPanel {...props} onDismiss={() => setFocus("header")}/>;
-  if (history) return <PublishHistoryPanel client={client} project={project} itemId={history.itemId} head={history.head} onFooter={onFooter} onDismiss={() => setHistory(null)}/>;
+  if (settings) return <PublishPanel {...props} localState={localState} onDismiss={() => setFocus("header")}/>;
+  if (task) return <PublishTaskPanel client={client} project={project} reference={task} onFooter={onFooter} onDismiss={() => setTask(null)}/>;
+  if (history) return <PublishHistoryPanel client={client} project={project} itemId={history.itemId} head={history.head} localState={localState} onFooter={onFooter} onDismiss={() => setHistory(null)}/>;
   if (operationDraft) return <PublishOperationDraft mode={operationDraft} item={draftItem.current} busy={busy}
+    localState={localState} formKey={formKey}
     status={error ? t(ERRORS[error] ?? {en: error, zh: error}) : ""} onFooter={onFooter} onDismiss={() => { pending.current = null; setOperationDraft(null); }}
     onSubmit={(operation, args) => {
       if (operation === "package") setOperationDraft(null);
       void execute(operation, {...args, ...(operation === "account.save" ? {} : {item_id: draftItem.current?.id, expected_revision: draftItem.current?.revision})});
     }}/>;
   if (draft) return <PublishDraft mode={draft} item={draftItem.current}
+    localState={localState} formKey={formKey}
     busy={busy} status={error ? t(ERRORS[error] ?? {en: "Could not save. Check these values.", zh: "保存未完成，请检查这些字段。"}) : ""}
     onFooter={onFooter} onDismiss={() => setDraft(null)} onSubmit={args => {
       void execute(draft === "plan" ? "plan.update" : draft === "migrate" ? "migrate" : draft === "decide" ? "decide" : "prepare", {...args,
@@ -408,7 +481,8 @@ function PublishWorkspace(props: Props) {
       : {en: "Saved. The item shows the observed result.", zh: "已保存，事项显示实际核对结果。"})}</Text> : null}
     {error ? <Text>{t(ERRORS[error] ?? {en: "Operation unavailable; records may be stale. /refresh reads state; /retry reuses the request ID.", zh: "操作未完成，已有记录可能过期。/refresh 读取状态；/retry 复用原请求。"})}</Text> : null}
     </Box>
-    <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}>
+    {localState.error ? <Text>{t({en: "Local page/draft state could not be saved.", zh: "本地页面或草稿状态未能保存。"})}</Text> : null}
+    <ScrollBox ref={bindScroll} flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}>
       {sharedPage ? <Box flexDirection="column">
         <Text bold>{t({en: "Saved shared facts", zh: "已保存的共享事实"})} · {plain(sharedPage.remote)} · {sharedPage.total}</Text>
         <Text>{sharedPage.observed_oid}</Text>
@@ -419,7 +493,7 @@ function PublishWorkspace(props: Props) {
           {row.reviews.map(review => <Text key={review.id}>{review.decision} · {plain(review.owner)} · {plain(review.note)}</Text>)}
           {row.result_oids.map(oid => <Text key={oid}>{t({en: "Observed Formal result", zh: "已观察的正式结果"})}: {oid}</Text>)}
           {row.branch_retention?.map(retained => <Text key={retained.id}>{plain(retained.ref)} · {plain(retained.owner)} · {plain(retained.reason)}</Text>)}
-          {row.task_links?.map(link => <Text key={link.id}>{t({en: "Task reference", zh: "任务引用"})}: {plain(link.task_id)} · {plain(link.note ?? "")}</Text>)}
+          {row.task_links?.map(link => <Text key={link.id}>{t({en: "Task reference", zh: "任务引用"})}: {plain(link.linked_task_id ?? "")} · {plain(link.note ?? "")}</Text>)}
         </Box>)}
         {sharedPage.next_cursor ? <Text>{t({en: "/shared-more reads the next saved page.", zh: "/shared-more 读取下一页已保存事实。"})}</Text> : null}
       </Box> : tab === 1 ? <Text>{t({en: "Enter to manage commit format, privacy and remotes.", zh: "Enter 管理提交格式、隐私和远端。"})}</Text>
@@ -479,7 +553,7 @@ function PublishWorkspace(props: Props) {
             {item.distribution_operation?.build_environment ? <Text>{item.distribution_operation.build_environment.platform} · {item.distribution_operation.build_environment.architecture} · {item.distribution_operation.build_environment.digest}</Text> : null}
             {item.distribution_operation?.build_log ? <Text>{plain(item.distribution_operation.build_log)}</Text> : null}
             {item.package_imports?.map(row => <Text key={row.id}>{t({en: "Imported and verified", zh: "导入并验真"})}: {plain(row.version)} · {row.sha256} · {row.verification}</Text>)}
-            {item.task_links?.map(row => <Text key={row.id}>{t({en: "Linked task", zh: "关联任务"})}: {plain(row.task_id)} · {plain(row.parent_task_id ?? "")} · {plain(row.note ?? "")}</Text>)}
+            {item.task_links?.map((row, index) => <Text key={row.id}>{t({en: "Linked task", zh: "关联任务"})}: {plain(row.linked_task_id ?? "")} · {plain(row.parent_task_id ?? "")} · {plain(row.note ?? "")} · /task {index + 1}</Text>)}
             {item.sharing ? <Box flexDirection="column">
               <Text bold>{t({en: "Shared metadata", zh: "共享元数据"})}: {item.sharing.state} · {plain(item.sharing.observation.remote)}</Text>
               <Text>{plain(item.sharing.preview.title)} · {plain(item.sharing.preview.owner)} · {plain(item.sharing.preview.rework)}</Text>

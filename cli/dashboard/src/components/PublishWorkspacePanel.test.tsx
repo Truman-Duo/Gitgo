@@ -8,6 +8,7 @@ import {InputProvider} from "../input/runtime.js";
 import {LanguageContext} from "../ui/PageFrame.js";
 import {useTextInput} from "../hooks/useTextInput.js";
 import {PublishWorkspacePanel} from "./PublishWorkspacePanel.js";
+import {createPublishStateStore, type PublishLocalState} from "../state/publishLocalState.js";
 
 const wait = () => new Promise(resolve => setTimeout(resolve, 80));
 
@@ -321,7 +322,7 @@ test("a delayed refresh cannot retarget the item revision in an open plan draft"
     expect(saved.item_id).toBe("fixed-item"); expect(saved.expected_revision).toBe(1);
   } finally { io.close(); }
 });
-function mount(client: any, initial = "one") {
+function mount(client: any, initial = "one", localState?: PublishLocalState) {
   const stdin: any = new PassThrough(); stdin.isTTY = true; stdin.setRawMode = () => stdin; stdin.ref = () => stdin; stdin.unref = () => stdin;
   const stdout: any = new PassThrough(); stdout.isTTY = true; stdout.columns = 120; stdout.rows = 32; stdout.on("data", () => {});
   const stderr: any = new PassThrough(); stderr.on("data", () => {});
@@ -331,6 +332,7 @@ function mount(client: any, initial = "one") {
     const input = useTextInput();
     return <LanguageContext.Provider value="zh"><Box width="100%" height={stdout.rows} flexDirection="column">
       <PublishWorkspacePanel client={client} project={project} cmdInput={input} onFooter={onFooter}
+        localState={localState}
         onDismiss={() => dismissed++} onOpenTrial={() => {}} onOpenFormal={() => {}}/>
     </Box></LanguageContext.Provider>;
   }
@@ -343,6 +345,7 @@ function mount(client: any, initial = "one") {
     text() { const screen = (instances.get(stdout) as any).frontFrame.screen;
       return Array.from({length: screen.height}, (_, y) => Array.from({length: screen.width}, (_, x) => cellAt(screen, x, y)?.char || "").join("")).join("\n"); },
     footer: () => footer, dismissed: () => dismissed,
+    viewport() { const find = (node: any): any => node.scrollViewportHeight !== undefined ? node : (node.childNodes ?? []).map(find).find(Boolean); return find((instances.get(stdout) as any).rootNode); },
     close() { root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy(); },
   };
 }
@@ -374,6 +377,135 @@ test("platform viewing is offline and drafting never sends until the explicit dr
     expect(calls.some(c => c.op === "publish.collaborate.send")).toBe(false);
     await command("send draft-fixed");
     expect(calls.find(c => c.op === "publish.collaborate.send")!.args.draft_id).toBe("draft-fixed");
+  } finally { io.close(); }
+});
+
+test("linked task opens the exact existing conversation, parent and details then restores Publish scroll", async () => {
+  const state = createPublishStateStore().scope("one");
+  const calls: string[] = [];
+  const row = candidate("one");
+  Object.assign(row.items[0], {task_links: [{id: "link", process_id: "child", linked_task_id: "child-task", task_id: "actor-task",
+    parent_process_id: "main", parent_task_id: "main-task"}], evidence: Array.from({length: 50}, (_, i) => ({id: String(i), kind: "check", outcome: "failed", summary: "long record " + i}))});
+  const client: any = {async callTool(op: string, args: any) {
+    calls.push(op);
+    if (op === "publish.items") return row;
+    if (op === "publish.task") return {project: args.project,
+      process: {process_id: args.process_id, active_task_id: args.task_id, actor_kind: args.process_id === "main" ? "supervisor" : "worker", status: "completed", display_name: "Linked process"},
+      messages: [{role: "assistant", content: args.process_id === "main" ? "EXACT-PARENT-CONVERSATION" : "EXACT-CHILD-CONVERSATION", timestamp: "now", process_id: args.process_id, turn_id: args.task_id},
+        {role: "assistant", content: "UNRELATED-PRIVATE-CONVERSATION", timestamp: "now", turn_id: "other"}]};
+    throw new Error(op);
+  }};
+  const io = mount(client, "one", state);
+  try {
+    await wait(); await io.send("\r"); await io.send("\r"); for (let i = 0; i < 6; i++) await io.send("\x1b[B");
+    const top = io.viewport().scrollTop; expect(top).toBeGreaterThan(0);
+    await io.send("/"); await io.send("task 1"); await io.send("\r");
+    expect(io.text()).toContain("EXACT-CHILD-CONVERSATION"); expect(io.text()).not.toContain("actor-task");
+    await io.send("d"); expect(io.text()).toContain("进程 ID"); await io.send("\x1b");
+    await io.send("p"); expect(io.text()).toContain("EXACT-PARENT-CONVERSATION"); expect(io.text()).not.toContain("UNRELATED-PRIVATE-CONVERSATION");
+    await io.send("\x1b"); expect(io.viewport().scrollTop).toBe(top);
+    expect(calls).toEqual(["publish.items", "publish.task", "publish.task"]);
+  } finally { io.close(); }
+});
+
+test("a replaced linked task never displays another task's conversation", async () => {
+  const value = candidate("one"); Object.assign(value.items[0], {task_links: [{id: "link", process_id: "child", linked_task_id: "old-task", task_id: "actor"}]});
+  const client: any = {async callTool(op: string) { return op === "publish.items" ? value : {project: "one", process: {process_id: "child", active_task_id: "new-task"},
+    messages: [{role: "assistant", content: "WRONG-TASK-SECRET", timestamp: "now", turn_id: "new-task"}]}; }};
+  const io = mount(client);
+  try { await wait(); await io.send("/"); await io.send("task"); await io.send("\r");
+    expect(io.text()).toContain("身份发生变化"); expect(io.text()).not.toContain("WRONG-TASK-SECRET");
+    await io.send("\x1b"); expect(io.text()).toContain("本地已保存记录");
+  } finally { io.close(); }
+});
+
+test("unfinished forms survive leaving and remounting, and changed revisions require an explicit reset", async () => {
+  const state = createPublishStateStore().scope("one"); let revision = 1;
+  const writes: any[] = [];
+  const client: any = {async callTool(op: string, args: any) {
+    if (op === "publish.items") return candidate("one", "prepared", revision);
+    writes.push(args); return {request_id: args.request_id, effect_state: "committed", operation_id: "saved"};
+  }};
+  let io = mount(client, "one", state);
+  try {
+    await wait(); await io.send("/"); await io.send("plan"); await io.send("\r");
+    await io.send("\x15"); await io.send("publish/中文草稿🚀"); await io.send("\r");
+    await io.send("\x15"); await io.send("未保存负责人"); await io.send("\x1b");
+    await io.send("/"); await io.send("plan"); await io.send("\r"); expect(io.text()).toContain("未保存负责人");
+    io.close(); io = mount(client, "one", state); await wait();
+    expect(io.text()).toContain("publish/中文草稿🚀"); expect(io.footer().cmdInput.value).toBe("未保存负责人");
+    io.close(); revision = 7; io = mount(client, "one", state); await wait();
+    expect(io.text()).toContain("旧草稿不能直接保存"); await io.send("\r"); await io.send("\r"); expect(writes).toHaveLength(0);
+    await io.send("\x12"); expect(io.text()).not.toContain("旧草稿不能直接保存");
+    await io.send("\r"); await io.send("\r"); await io.send("\r");
+    expect(writes[0].expected_revision).toBe(7); expect(state.get("form/draft/plan/fixed-item")).toBeUndefined();
+  } finally { io.close(); }
+});
+
+test("saved item, node and scroll restore without running a business operation", async () => {
+  const state = createPublishStateStore().scope("one"), calls: string[] = [];
+  const client: any = {async callTool(op: string) { calls.push(op); const value = snapshot("one");
+    Object.assign(value.items[1], {...candidate("one").items[0], id: "one-1", title: "候选 🚀 1", evidence: Array.from({length: 60}, (_, i) => ({id: String(i), kind: "check", outcome: "passed", summary: "saved long record " + i}))});
+    return value;
+  }};
+  let io = mount(client, "one", state);
+  try {
+    await wait(); await io.send("\r"); await io.send("\x1b[B"); await io.send("\x1b[C"); await io.send("\r"); for (let i = 0; i < 6; i++) await io.send("\x1b[B");
+    const before = state.get<any>("view"); expect(before.selectedId).toBe("one-1"); expect(before.nodeId).toBe("integrate");
+    const top = io.viewport().scrollTop; expect(top).toBeGreaterThan(0);
+    io.close(); io = mount(client, "one", state); await wait();
+    expect(state.get<any>("view").selectedId).toBe("one-1"); expect(io.viewport().scrollTop).toBe(top);
+    expect(state.get<any>("view").nodeId).toBe("integrate"); expect(calls).toEqual(["publish.items", "publish.items"]);
+  } finally { io.close(); }
+});
+
+test("history retains merge lanes across pages and restores the selected parent diff after remount", async () => {
+  const state = createPublishStateStore().scope("one"), calls: {op: string; args: any}[] = [];
+  const oid = (digit: string) => digit.repeat(40);
+  const commit = (digit: string, parents: string[]) => ({oid: oid(digit), parents: parents.map(oid), subject: "Commit " + digit, author: {name: "Author", email: "a@b", timestamp: 0}});
+  const client: any = {async callTool(op: string, args: any) {
+    calls.push({op, args});
+    if (op === "publish.items") return candidate("one");
+    if (op === "publish.history") return {snapshot_id: "fixed", head_oid: oid("a"), relation: "git_parent",
+      commits: args.cursor ? [commit("c", ["d"]), commit("d", [])] : [commit("a", ["b", "c"]), commit("b", ["d"])], next_cursor: args.cursor ? null : "second"};
+    if (op === "publish.diff") return {text: Array.from({length: 80}, (_, i) => "diff line " + i).join("\n"), base_oid: args.base_oid, head_oid: args.head_oid};
+    throw new Error(op);
+  }};
+  let io = mount(client, "one", state);
+  const command = async (name: string) => { await io.send("/"); await io.send(name); await io.send("\r"); };
+  try {
+    await wait(); await command("history"); expect(io.text()).toContain("02");
+    await command("more"); expect(io.text()).toContain("02");
+    expect(state.get<any>("history/fixed-item/candidate").frontier).toEqual([oid("d"), oid("c")]);
+    for (const [width, height] of [[120, 32], [80, 24], [40, 20]]) { await io.resize(width!, height!); expect(io.text()).toContain("Git 分支 / 合并图"); }
+    await io.send("\x1b"); await command("parent 2");
+    expect(calls.filter(row => row.op === "publish.diff").at(-1)!.args.base_oid).toBe(oid("c"));
+    for (let i = 0; i < 4; i++) await io.send("\x1b[B");
+    const top = io.viewport().scrollTop; expect(top).toBeGreaterThan(0);
+    io.close(); io = mount(client, "one", state); await wait(); await wait();
+    expect(io.text()).toContain("diff line"); expect(io.viewport().scrollTop).toBe(top);
+    expect(calls.filter(row => row.op === "publish.diff").at(-1)!.args.base_oid).toBe(oid("c"));
+    expect(calls.every(row => ["publish.items", "publish.history", "publish.diff"].includes(row.op))).toBe(true);
+  } finally { io.close(); }
+});
+
+test("settings input survives leaving and restarting without silently overwriting changed configuration", async () => {
+  const state = createPublishStateStore().scope("one"); let prefix = "OLD"; const writes: any[] = [];
+  const client: any = {async callTool(op: string, args: any) {
+    if (op === "publish.items") return candidate("one");
+    if (op === "publish.get") return {commit_format: {prefix}, privacy: {}, remote_url: "", stages: {}};
+    if (op === "history.list") return [];
+    writes.push(args); return {};
+  }};
+  let io = mount(client, "one", state);
+  try {
+    await wait(); await io.send("/"); await io.send("settings"); await io.send("\r"); await io.send("\r");
+    await io.send("\x1b[H"); await io.send("中文🚀");
+    const value = io.footer().cmdInput.value;
+    io.close(); io = mount(client, "one", state); await wait(); expect(io.footer().cmdInput.value).toBe(value);
+    await io.send("\x1b"); await io.send("\r"); expect(io.footer().cmdInput.value).toBe(value);
+    io.close(); prefix = "CHANGED"; io = mount(client, "one", state); await wait();
+    expect(io.text()).toContain("配置已变化"); await io.send("\r"); expect(writes).toHaveLength(0);
   } finally { io.close(); }
 });
 
@@ -418,7 +550,7 @@ test("shared facts and real Git parents are opened only by explicit readonly com
     await wait(); expect(calls.map(c => c.op)).toEqual(["publish.items"]);
     await command("shared"); expect(io.text()).toContain("Shared contribution");
     await io.send("\x1b"); await command("history");
-    expect(io.text()).toContain("Git 提交父关系"); expect(io.text()).toContain("aaaaaaaaaaaa ← bbbbbbbbbbbb");
+    expect(io.text()).toContain("Git 分支 / 合并图"); expect(io.text()).toContain("父提交: bbbbbbbbbbbb");
     expect(calls.some(c => c.op === "publish.diff")).toBe(false);
     await io.send("\r"); expect(io.text()).toContain("+fixed tree content");
     expect(calls.find(c => c.op === "publish.diff")!.args).toMatchObject({item_id: "fixed-item", snapshot_id: "git-snapshot", head_oid: "a".repeat(40), base_oid: "b".repeat(40)});

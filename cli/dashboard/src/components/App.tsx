@@ -1,6 +1,7 @@
 import {label} from "../ui/runtimeLabels.js";
 import {copy,type Copy} from "../ui/pageContract.js";
 import {LanguageContext} from "../ui/PageFrame.js";
+import type {PublishStateStore} from "../state/publishLocalState.js";
 import {DiffLayoutContext} from "../theme/diffLayoutContext.js";
 // src/components/App.tsx — Three-scene routing with createStore
 import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
@@ -45,6 +46,7 @@ function processRuntimeStatus(process: ProcessInfo | undefined, t:(value:Copy)=>
 }
 
 type Props = {
+  publishState?: PublishStateStore;
   client: BackendClient;
   refreshSec?: number;
   startupSmokeTask?: StartupSmokeTask;
@@ -57,7 +59,7 @@ type Props = {
 const appStore = createReducerStore<AppState, AppAction>(reducer, initialAppState());
 
 export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalSetup = false,
-  startupNotice = "", onTerminalSetupComplete, onUpdateExit }: Props) {
+  startupNotice = "", onTerminalSetupComplete, onUpdateExit, publishState }: Props) {
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
@@ -601,6 +603,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   }, [footerOverride, overlayStack]);
 
   const overlayCtx = {
+    publishState,
     client,
     scene,
     activeProject,

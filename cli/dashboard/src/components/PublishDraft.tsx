@@ -1,6 +1,8 @@
 import React, {useEffect, useState} from "react";
+import {usePublishForm} from "../hooks/usePublishForm.js";
+import type {PublishLocalState} from "../state/publishLocalState.js";
 import {Box, Text} from "@anthropic/ink";
-import {useTextInput, applyTextOp} from "../hooks/useTextInput.js";
+import {applyTextOp} from "../hooks/useTextInput.js";
 import {useManagedInput as useInput} from "../input/runtime.js";
 import {matchChord} from "../input/bindings.js";
 import {useCopy} from "../ui/PageFrame.js";
@@ -25,17 +27,17 @@ const labels: Record<string, Copy> = {
   test_target: {en: "Additional tests (; separated; blank inherits project checks)", zh: "追加测试（; 分隔；留空沿用项目检查）"},
 };
 
-export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDismiss}: {
+export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDismiss, localState, formKey = mode}: {
   mode: "prepare" | "plan" | "revise" | "formal" | "combine" | "work" | "migrate" | "decide"; item?: PublishItem;
   busy: boolean; status: string;
   onFooter: (value: FooterConfig | null) => void;
   onSubmit: (args: Record<string, unknown>) => void; onDismiss: () => void;
+  localState?: PublishLocalState; formKey?: string;
 }) {
   const t = useCopy();
-  const input = useTextInput();
   const formal = mode === "formal" || mode === "combine" || mode === "migrate" || mode === "revise" && item?.plan?.destination === "formal";
   const previousChecks = item?.plan?.requested_checks ?? item?.plan?.checks ?? [];
-  const [values, setValues] = useState<Record<string, string>>({
+  const defaults: Record<string, string> = {
     source_role: item?.candidate?.role ?? "workspace", source_ref: (mode === "work" ? item?.candidate?.oid : item?.candidate?.source_ref) ?? "HEAD",
     target_branch: mode === "work" ? "publish/repair" : item?.target?.replace(/^refs\/heads\//, "") ?? (formal ? "" : "publish/work"),
     owner: item?.owner ?? "", rework: item?.rework ?? "",
@@ -44,17 +46,15 @@ export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDi
       ? formatChecks(previousChecks) : item?.plan?.test_target ?? "",
     contributions: item?.plan?.contributions?.slice(1).map(row => `${row.role} | ${row.source_ref}`).join("; ") ?? "",
     selected_commits: item?.plan?.selected_commits?.join(" ") ?? "", paths: item?.plan?.paths?.join("; ") ?? "",
-  });
+  };
   const multiple = mode === "combine" || (item?.plan?.contributions?.length ?? 0) > 1;
-  const fields = formal ? ["source_role", "source_ref", ...(multiple ? ["contributions"] : []), "target_branch", "method",
+  const {values, setValues, fields, index, setIndex, field, input, stale, reset} = usePublishForm(localState, formKey,
+    defaults, JSON.stringify([item?.id, item?.revision, item?.binding]), values => formal ? ["source_role", "source_ref", ...(multiple ? ["contributions"] : []), "target_branch", "method",
       ...(values.method === "cherry_pick" ? ["selected_commits"] : values.method === "partial" ? ["paths"] : []), "owner", "test_target", "rework"]
     : mode === "plan" ? ["target_branch", "owner", "rework"]
     : mode === "decide" ? ["decision", "owner", "note"]
-    : ["source_role", "source_ref", "target_branch", "owner", "rework"];
+    : ["source_role", "source_ref", "target_branch", "owner", "rework"]);
   const [error, setError] = useState("");
-  const [index, setIndex] = useState(0);
-  const field = fields[index];
-  useEffect(() => { input.setValue(values[field] ?? ""); }, [index]);
   useEffect(() => {
     onFooter({kind: "normal", cmdInput: input, statusText: t({en: "↑/↓ field · Enter next/save · Esc cancel", zh: "↑/↓ 字段 · Enter 下一项/保存 · Esc 取消"}),
       suggestions: [], suggestionIdx: 0, cmdResult: ""});
@@ -62,15 +62,17 @@ export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDi
   }, [input, input.value, input.cursor, onFooter, t]);
   useInput((text, key) => {
     if (busy) return;
+    if (key.ctrl && text === "r") { reset(); return; }
     if (matchChord("escape", text, key)) { onDismiss(); return; }
+    if (stale && matchChord("enter", text, key)) return;
     const move = matchChord("up", text, key) ? -1 : matchChord("down", text, key) ? 1 : 0;
     if (move) {
-      setValues({...values, [field]: input.value});
+      setValues({...values, [field]: input.materialize()});
       setIndex(Math.max(0, Math.min(fields.length - 1, index + move)));
       return;
     }
     if (matchChord("enter", text, key)) {
-      const value = input.value.trim();
+      const value = input.materialize().trim();
       if (!["rework", "test_target", "contributions"].includes(field) && !value) return;
       if (field === "source_role" && !["workspace", "trial"].includes(value)) return;
       if (field === "method" && !["squash", "ff", "merge", "rebase", "cherry_pick", "partial"].includes(value)) return;
@@ -108,6 +110,8 @@ export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDi
     {mode === "work" ? <Text>{t({en: "The fixed source is adopted for repair. Recorded merge conflicts remain attached; describe the remaining work.",
       zh: "接手固定来源进行修复；保留已记录的合并冲突，请填写剩余工作。"})}</Text> : null}
     {status ? <Text>{status}</Text> : null}
+    {stale ? <Text>{t({en: "This item changed since the draft. Ctrl+R starts again with the current item; Esc keeps the draft.", zh: "事项已变化，旧草稿不能直接保存。Ctrl+R 按当前事项重新填写；Esc 保留草稿返回。"})}</Text> : null}
+    {localState?.error ? <Text>{t({en: "Local draft could not be saved. Keep this page open and retry editing.", zh: "本地草稿未能保存，请保留页面并重试编辑。"})}</Text> : null}
     {error ? <Text>{error}</Text> : null}
     {fields.map((name, i) => <Text key={name} bold={i === index} wrap="truncate-end">
       {i === index ? "› " : "  "}{t(formal && name === "target_branch" ? {en: "Existing Formal branch", zh: "已有 Formal 分支"} : labels[name])}: {(i === index ? input.value : values[name]).replace(/[\x00-\x1f\x7f-\x9f]/g, " ")}

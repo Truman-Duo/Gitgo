@@ -38,8 +38,10 @@ import { RuntimeChildShell } from "./RuntimeShell.js";
 import { DialogSelect } from "./DialogSelect.js";
 import { getCommands } from "../commands.js";
 import { getKeybindings } from "../keybindings.js";
+import type {PublishStateStore} from "../state/publishLocalState.js";
 
 export interface OverlayCtx {
+  publishState?: PublishStateStore;
   client: BackendClient;
   scene: Scene;
   activeProject: string | null;
@@ -152,6 +154,7 @@ export function renderOverlay(
     case "publishPanel": {
       const publishProject=overlay.props?.project||ctx.activeProject;
       return publishProject?<PublishWorkspacePanel client={ctx.client} project={publishProject}
+        localState={ctx.publishState?.scope(publishProject, ctx.projects.find(row => row.name === publishProject)?.workspace)}
         cmdInput={ctx.llmCmdInput} onFooter={ctx.setFooterOverride} onDismiss={ctx.popOverlay}
         onOpenTrial={()=>ctx.dispatch({type:"push_overlay",overlay:"trialPanel",props:{project:publishProject}})}
         onOpenFormal={()=>ctx.dispatch({type:"push_overlay",overlay:"formalPanel",props:{project:publishProject}})}/>:null;

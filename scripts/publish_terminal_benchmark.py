@@ -179,9 +179,9 @@ def run(package, fixture, root, samples, startup_samples):
                     for index in range(samples):
                         prepare_command("history")
                         row["history_open_ms"].append(measure(lambda: console.key("\r", 13),
-                            lambda text: "Git 提交父关系" in text and "› " in text and "正在读取固定" not in text))
+                            lambda text: "Git 分支 / 合并图" in text and "O" in text and "正在读取固定" not in text))
                         console.key("\x1b", 27)
-                        wait(lambda text: "Git 提交父关系" not in text and "返回事项" in text)
+                        wait(lambda text: "Git 分支 / 合并图" not in text and "返回事项" in text)
                     console.capture(f"{width}x{height}-complete")
                     row["summary"] = {name: summary(values, 300 if name == "history_open_ms" else 100)
                                       for name, values in row.items() if name.endswith("_ms")}

@@ -21,7 +21,7 @@ def public_item(item):
         "reviews": [{key: row[key] for key in ("id", "binding", "decision", "note", "owner")} for row in item.get("reviews", [])],
         "evidence": [{key: row[key] for key in ("id", "binding", "kind", "outcome")} | {"digest": digest(row)} for row in item["evidence"]],
         "result_oids": [row["result_oid"] for row in item["operations"] if row.get("kind") == "formal" and row.get("state") == "observed" and row.get("result_oid")],
-        "task_links": [{key: row[key] for key in ("id", "process_id", "task_id", "parent_process_id", "parent_task_id", "decision_id", "snapshot_id", "anchor_id", "note") if key in row}
+        "task_links": [{key: row[key] for key in ("id", "process_id", "task_id", "linked_task_id", "parent_process_id", "parent_task_id", "decision_id", "snapshot_id", "anchor_id", "note") if key in row}
                        for row in item.get("task_links", [])],
         "branch_retention": [{key: row[key] for key in ("id", "kind", "ref", "oid", "owner", "reason") if key in row}
                              for row in item.get("branches", {}).get("retention", [])]}
@@ -37,7 +37,7 @@ def valid_public_item(row):
     tables = {"sources": {"role", "oid", "base_oid", "tree_oid"},
         "reviews": {"id", "binding", "decision", "note", "owner"},
         "evidence": {"id", "binding", "kind", "outcome", "digest"},
-        "task_links": {"id", "process_id", "task_id", "parent_process_id", "parent_task_id", "decision_id", "snapshot_id", "anchor_id", "note"},
+        "task_links": {"id", "process_id", "task_id", "linked_task_id", "parent_process_id", "parent_task_id", "decision_id", "snapshot_id", "anchor_id", "note"},
         "branch_retention": {"id", "kind", "ref", "oid", "owner", "reason"}}
     if (not isinstance(row, dict) or not (scalars | {"sources", "reviews", "evidence", "result_oids"}) <= set(row)
             or set(row) - scalars - set(tables) - {"result_oids"}
