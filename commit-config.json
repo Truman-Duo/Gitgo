@@ -4,6 +4,7 @@
   "validTypes": ["feat", "fix", "docs", "style", "refactor", "perf", "test", "chore"],
   "validScopes": [
     "core",
+    "publish",
     "adapter",
     "frontend",
     "cui",

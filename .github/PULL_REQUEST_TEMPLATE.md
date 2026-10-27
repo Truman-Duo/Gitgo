@@ -7,7 +7,7 @@
 - 关联 Issue／前置 PR：
 - 源仓库与功能分支：
 - 候选 head SHA：
-- 目标仓库与分支（通常为 Truman-Duo/Gitgo:master）：
+- 目标仓库与分支：
 - 验证时的目标 base SHA：
 
 <!-- 允许早期开 Draft；依赖未合入或验证尚未完成时明确说明。fork 的默认分支不等于上游正式目标。 -->

@@ -41,24 +41,45 @@ def snapshot():
                 def unreadable(error):
                     raise error
                 for directory, dirs, files in os.walk(root, followlinks=False, onerror=unreadable):
+                    links = {}
                     for child in [*dirs, *files]:
                         path = Path(directory) / child
                         if path.is_symlink() or path.is_junction():
-                            raise PublishError("PUBLISH_ENVIRONMENT_UNSUPPORTED")
+                            # Installed Python runtimes commonly use internal
+                            # executable/library links. Bind the link and its
+                            # canonical target; never grant a new runtime root.
+                            target = path.resolve(strict=True)
+                            owner = next((i for i, allowed in enumerate(roots) if target.is_relative_to(allowed)), None)
+                            if owner is None:
+                                raise PublishError("PUBLISH_ENVIRONMENT_UNSUPPORTED")
+                            relative = path.relative_to(root).as_posix()
+                            target_relative = target.relative_to(roots[owner]).as_posix()
+                            if len(rows) >= 30000 or max(len(relative), len(target_relative)) > 4096:
+                                raise PublishError("PUBLISH_ENVIRONMENT_LIMIT")
+                            rows.append([index, relative, "link", owner, target_relative])
+                            links[child] = (target, owner, os.readlink(path))
                     dirs[:] = sorted(d for d in dirs if d != "__pycache__")
                     for name in sorted(files):
                         if name.endswith((".pyc", ".pyo")):
                             continue
                         relative = (Path(directory) / name).relative_to(root).as_posix()
-                        with acquired.open(relative) as opened:
-                            fingerprint, size = opened.sha256()
+                        if name in links:
+                            target, owner, link_name = links[name]
+                            with ReadRoot(roots[owner]) as target_root, target_root.open(target.relative_to(roots[owner]).as_posix()) as opened:
+                                fingerprint, size = opened.sha256()
+                            if os.readlink(Path(directory) / name) != link_name:
+                                raise PublishError("PUBLISH_ENVIRONMENT_CHANGED")
+                        else:
+                            with acquired.open(relative) as opened:
+                                fingerprint, size = opened.sha256()
                         total += size
                         if total > 768 * 1024 * 1024 or len(rows) >= 30000:
                             raise PublishError("PUBLISH_ENVIRONMENT_LIMIT")
                         rows.append([index, relative, fingerprint])
                         if name == "METADATA" and Path(directory).name.endswith(".dist-info"):
                             # Package labels are metadata, never imported code.
-                            with acquired.open(relative) as opened:
+                            metadata_root, metadata_path = (roots[links[name][1]], links[name][0].relative_to(roots[links[name][1]]).as_posix()) if name in links else (root, relative)
+                            with ReadRoot(metadata_root) as reader, reader.open(metadata_path) as opened:
                                 text = opened.read_bytes().decode("utf8", errors="replace")[:65536]
                             fields = dict(line.split(": ", 1) for line in text.split("\n\n", 1)[0].splitlines() if ": " in line)
                             packages.append({"name": fields.get("Name", "")[:160], "version": fields.get("Version", "")[:80]})

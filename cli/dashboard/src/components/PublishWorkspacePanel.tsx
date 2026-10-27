@@ -547,17 +547,17 @@ function PublishWorkspace(props: Props) {
             {item.packages?.map(pkg => <Box key={pkg.id} flexDirection="column">
               <Text bold>{t({en: "Version assets", zh: "版本产物"})}: {plain(pkg.version)} · {pkg.id}</Text>
               <Text>{t({en: "Fixed source", zh: "固定源码"})}: {pkg.source_oid} · {pkg.tree_oid}</Text>
-              {pkg.assets.map(asset => <Text key={asset.name}>{plain(asset.name)} · {asset.size} B · SHA-256 {asset.sha256}</Text>)}
+              {pkg.assets.map(asset => <Text key={asset.name}>{plain(asset.name)} · {asset.size} {t({en: "B · SHA-256", zh: "字节 · SHA-256"})} {asset.sha256}</Text>)}
             </Box>)}
             {item.distribution_operation ? <Text>{t({en: "Distribution", zh: "分发"})}: {item.distribution_operation.kind} · {item.distribution_operation.state} · {plain(item.distribution_operation.reason ?? "")}</Text> : null}
             {item.distribution_operation?.build_environment ? <Text>{item.distribution_operation.build_environment.platform} · {item.distribution_operation.build_environment.architecture} · {item.distribution_operation.build_environment.digest}</Text> : null}
             {item.distribution_operation?.build_log ? <Text>{plain(item.distribution_operation.build_log)}</Text> : null}
             {item.package_imports?.map(row => <Text key={row.id}>{t({en: "Imported and verified", zh: "导入并验真"})}: {plain(row.version)} · {row.sha256} · {row.verification}</Text>)}
-            {item.task_links?.map((row, index) => <Text key={row.id}>{t({en: "Linked task", zh: "关联任务"})}: {plain(row.linked_task_id ?? "")} · {plain(row.parent_task_id ?? "")} · {plain(row.note ?? "")} · /task {index + 1}</Text>)}
+            {item.task_links?.map((row, index) => <Text key={row.id}>{t({en: "Linked task", zh: "关联任务"})}: {plain(row.linked_task_id ?? "")} · {plain(row.parent_task_id ?? "")} · {plain(row.note ?? "")} · {t({en: "/task", zh: "/task"})} {index + 1}</Text>)}
             {item.sharing ? <Box flexDirection="column">
               <Text bold>{t({en: "Shared metadata", zh: "共享元数据"})}: {item.sharing.state} · {plain(item.sharing.observation.remote)}</Text>
               <Text>{plain(item.sharing.preview.title)} · {plain(item.sharing.preview.owner)} · {plain(item.sharing.preview.rework)}</Text>
-              <Text>{item.sharing.result_oid} · SHA-256 {item.sharing.sha256}</Text>
+              <Text>{item.sharing.result_oid} · {t({en: "SHA-256", zh: "SHA-256"})} {item.sharing.sha256}</Text>
               {item.allowed_actions.includes("share_publish") ? <Text>{t({en: "/share-send publishes this reviewed snapshot.", zh: "/share-send 发布此已准备快照。"})}</Text> : null}
             </Box> : null}
             {item.shared_observations?.length ? <Text>{t({en: "/shared opens the latest saved shared observation; /share-refresh remote explicitly updates it.", zh: "/shared 查看最近的共享观察；/share-refresh 远端名 显式更新。"})}</Text> : null}

@@ -111,7 +111,8 @@ def test_terminal_launcher_is_part_of_the_single_public_executable():
     launcher = (root / "cli" / "dashboard" / "src" / "backend" / "terminalLauncher.ts").read_text(encoding="utf-8")
 
     assert "shouldRelaunchInConfiguredTerminal" in entry
-    assert "windowsParentProcessName" in entry
+    assert "windowsParentProcessName" not in entry
+    assert "startupTerminals(client" in entry
     assert 'resolve(EXECUTABLE_DIR, "product.json")' in entry
     assert '"--attached"' in launcher
     assert '"explorer"' in launcher

@@ -62,20 +62,28 @@ def compare_state_ref(self: ObjectsPort, namespace: str, key: str,
 
 def commit_state_revision(self: ObjectsPort, namespace: str, key: str,
                           value_ref: str, *, expected_ref: str | None,
-                          revision_key: str) -> bool:
+                          revision_key: str, related_refs: tuple[str, ...] = ()) -> bool:
     """Retain an immutable revision and advance its expected head atomically."""
     if not revision_key or key == revision_key:
         raise ValueError("distinct head and revision keys are required")
     return _publish_state_head(self, namespace, key, value_ref,
-                               expected_ref=expected_ref, revision_key=revision_key)
+                               expected_ref=expected_ref, revision_key=revision_key, related_refs=related_refs)
 
 
-def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revision_key=None):
+def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revision_key=None, related_refs=()):
     self._ensure_open()
     if not namespace or not key:
         raise ValueError("namespace and key are required")
     self.read_blob(value_ref)
-    self._reserve_authoritative_write(len(namespace) + len(key) + len(revision_key or "") + 2 * len(value_ref))
+    if not isinstance(related_refs, tuple) or len(related_refs) > 65536:
+        raise ValueError("bounded immutable state closure required")
+    digests = set()
+    for reference in related_refs:
+        if (not isinstance(reference, str) or not reference.startswith('sha256:') or len(reference) != 71
+                or any(c not in '0123456789abcdef' for c in reference[7:])):
+            raise ValueError("exact state closure reference required")
+        digests.add(reference[7:])
+    self._reserve_authoritative_write(len(namespace) + len(key) + len(revision_key or "") + 2 * len(value_ref) + 256 * len(digests))
     with self._state_lock:
         with authoritative_transaction(self._state):
             row = self._state.execute(
@@ -84,6 +92,9 @@ def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revisi
             current = str(row[0]) if row else None
             if current != expected_ref:
                 return False
+            for digest in digests:
+                if self._state.execute('SELECT 1 FROM objects WHERE digest=?', (digest,)).fetchone() is None:
+                    raise ValueError("state closure object is not registered")
             now = _utc_now()
             if revision_key is not None:
                 prior = self._state.execute(
@@ -94,6 +105,10 @@ def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revisi
                 self._state.execute(
                     "INSERT OR IGNORE INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)",
                     (namespace, revision_key, value_ref, now))
+            for digest in digests:
+                self._state.execute(
+                    'INSERT OR IGNORE INTO object_refs(owner_type,owner_id,field_name,digest,created_at) VALUES(?,?,?,?,?)',
+                    ('state_revision', value_ref, 'closure/' + digest, digest, now))
             self._state.execute(
                 "INSERT INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?) "
                 "ON CONFLICT(namespace,key) DO UPDATE SET value_ref=excluded.value_ref,updated_at=excluded.updated_at",

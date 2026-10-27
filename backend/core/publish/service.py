@@ -11,7 +11,7 @@ import inspect
 
 from backend.core.storage import get_storage
 from backend.core.storage.redaction import redact_for_persistence
-from .git import CandidateGit, branch_ref
+from .git import CandidateGit, RefWriteRefused, branch_ref
 from .state import Repository, PublishError, digest, identifier, identity, find_item, projection
 from .integration import FormalMixin
 from .sharing import SharingMixin
@@ -277,12 +277,30 @@ class PublishService(FormalMixin, SharingMixin, CollaborationMixin, Distribution
         self._save_item(ledger, item, ref)  # Durable intent BEFORE any Git effect.
         try:
             result = git.adopt(intent["candidate"], intent["plan"]["target_ref"])
+        except RefWriteRefused as exc:
+            return self._refused(item_id, intent["id"], exc.code)
         except (PublishError, OSError, RuntimeError) as exc:
             # Import/ref/IO failures may follow a committed Git effect. Keep the
             # intent and require observation, never perform an automatic retry.
             return {"item": projection(item, None), "status": "needs_reconciliation", "effect_state": "ambiguous",
                     "reason": getattr(exc, "code", "PUBLISH_GIT_UNAVAILABLE")}
+        if result.returncode > 0:
+            return self._refused(item_id, intent["id"], "PUBLISH_REF_TRANSACTION_REJECTED")
         return self._observe(item_id, intent["id"], result.returncode == 0)
+
+    def _refused(self, item_id, operation_id, reason):
+        """Persist a known refusal; uncertain transport/timeouts never call this."""
+        ledger, ref = self.repo.load()
+        item = find_item(ledger, item_id)
+        operation = item["operations"][-1]
+        if operation["id"] != operation_id or operation["state"] != "intent":
+            raise PublishError("PUBLISH_REVISION_CONFLICT")
+        operation.update(state="observed", outcome="failed", integration_succeeded=False,
+                         reason=reason, observed_at=now(), attribution="ref_transaction_refused")
+        item["status"], item["revision"] = "failed", item["revision"] + 1
+        item["binding"] = digest({"previous": item["binding"], "refused_operation": operation_id})
+        saved = self._save_item(ledger, item, ref)
+        return {**saved, "integration_failed": True, "error": reason, "reason": reason}
 
     def _reconcile(self, *, item_id, expected_revision):
         ledger, ref = self.repo.load()

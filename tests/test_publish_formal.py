@@ -33,7 +33,14 @@ def command(setup, name, item, request=None):
     return call(setup, name, request or name + str(item["revision"]), item_id=item["id"], expected_revision=item["revision"])
 
 
-def protocol(monkeypatch, *, passed=True, action=None):
+def protocol(monkeypatch, *, passed=True, action=None, real_environment=False):
+    if not real_environment:
+        # A mocked tool producer has a fixed protocol runtime, not the CI
+        # worker's arbitrary Python installation. Content witness tests and
+        # native integration tests explicitly retain the real snapshot path.
+        from backend.core.publish.state import digest
+        body = {"version": 1, "fixture": "publish-protocol-runtime"}
+        monkeypatch.setattr("backend.core.publish.environment.snapshot", lambda: {**body, "digest": digest(body)})
     def invoke(self, name, args, timeout, **kwargs):
         assert name == "run_test"
         stage = Path(args["_workspace"])

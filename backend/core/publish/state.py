@@ -10,6 +10,7 @@ from backend.core.storage.runtime import read_existing_state_blob
 
 NAMESPACE = "governance.publish.v1"
 MAX_BYTES = 4_000_000
+PAGE_BYTES = 512 * 1024
 
 
 class PublishError(ValueError):
@@ -41,8 +42,27 @@ def identifier(value):
     return value
 
 
-def decode(raw, workspace, project_id):
+def decode(raw, workspace, project_id, read_blob=None):
     value = json.loads(raw)
+    if isinstance(value, dict) and value.get("schema_version") == 2:
+        if (value.get("workspace") != identity(workspace) or value.get("project_id") != project_id
+                or not isinstance(value.get("pages"), list) or not 1 <= len(value["pages"]) <= 65536
+                or type(value.get("byte_length")) is not int
+                or not 0 < value["byte_length"] <= len(value["pages"]) * PAGE_BYTES
+                or read_blob is None):
+            raise PublishError("PUBLISH_STATE_UNAVAILABLE")
+        pages = []
+        for reference in value["pages"]:
+            if not isinstance(reference, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", reference):
+                raise PublishError("PUBLISH_STATE_UNAVAILABLE")
+            page = read_blob(reference)
+            if not 0 < len(page) <= PAGE_BYTES or "sha256:" + hashlib.sha256(page).hexdigest() != reference:
+                raise PublishError("PUBLISH_STATE_UNAVAILABLE")
+            pages.append(page)
+        payload = b"".join(pages)
+        if len(payload) != value["byte_length"] or hashlib.sha256(payload).hexdigest() != value.get("payload_sha256"):
+            raise PublishError("PUBLISH_STATE_UNAVAILABLE")
+        value = json.loads(payload)
     if (not isinstance(value, dict) or value.get("schema_version") != 1
             or value.get("workspace") != identity(workspace)
             or value.get("project_id") != project_id
@@ -51,11 +71,29 @@ def decode(raw, workspace, project_id):
     return value
 
 
+def payload_references(value):
+    """Typed Publish payload links, excluding user prose and Git ref names."""
+    references, pending = set(), [value]
+    fields = {"blob_ref", "document_ref", "plugin_snapshot_ref", "backup_ref"}
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            for key, entry in node.items():
+                if key in fields and isinstance(entry, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", entry):
+                    references.add(entry)
+                elif isinstance(entry, (dict, list)):
+                    pending.append(entry)
+        elif isinstance(node, list):
+            pending.extend(node)
+    return references
+
+
 def read_ledger(workspace):
-    saved = read_existing_state_blob(workspace, NAMESPACE, head_key(workspace))
+    saved = read_existing_state_blob(workspace, NAMESPACE, head_key(workspace),
+        decoder=lambda raw, project_id, read: decode(raw, workspace, project_id, read))
     if saved is None:
         return None, None
-    return decode(saved["payload"], workspace, saved["project_id"]), saved["reference"]
+    return saved["payload"], saved["reference"]
 
 
 class Repository:
@@ -68,17 +106,31 @@ class Repository:
             raw = self.storage.read_blob(ref)
             if "sha256:" + hashlib.sha256(raw).hexdigest() != ref:
                 raise PublishError("PUBLISH_STATE_UNAVAILABLE")
-            return decode(raw, self.workspace, self.storage.paths.project_id), ref
+            return decode(raw, self.workspace, self.storage.paths.project_id, self.storage.read_blob), ref
         return {"schema_version": 1, "workspace": identity(self.workspace),
                 "project_id": self.storage.paths.project_id, "items": {}}, None
 
     def save(self, ledger, expected):
         raw = encoded(ledger)
-        if len(raw) > MAX_BYTES or len(ledger["items"]) > 1000:
+        if len(ledger["items"]) > 1000:
             raise PublishError("PUBLISH_CAPACITY_REACHED")
+        related = tuple(sorted(payload_references(ledger)))
+        if len(raw) > MAX_BYTES:
+            # Archive immutable bodies; the small authoritative head no longer
+            # competes with growing history for room to record a terminal state.
+            # Existing project/CAS/disk quotas remain authoritative. A physical
+            # write failure leaves the old intent intact, without replay.
+            pages = tuple(self.storage.put_blob(raw[i:i + PAGE_BYTES]) for i in range(0, len(raw), PAGE_BYTES))
+            related += pages
+            raw = encoded({"schema_version": 2, "workspace": identity(self.workspace),
+                "project_id": self.storage.paths.project_id, "pages": list(pages),
+                "byte_length": len(raw), "payload_sha256": hashlib.sha256(raw).hexdigest()})
+            if len(raw) > MAX_BYTES:
+                raise PublishError("PUBLISH_CAPACITY_REACHED")
         ref = self.storage.put_blob(raw, media_type="application/json")
         if not self.storage.commit_state_revision(NAMESPACE, head_key(self.workspace), ref,
-                expected_ref=expected, revision_key=head_key(self.workspace) + "/revision/" + ref):
+                expected_ref=expected, revision_key=head_key(self.workspace) + "/revision/" + ref,
+                related_refs=related):
             raise PublishError("PUBLISH_REVISION_CONFLICT")
         return ref
 
@@ -142,6 +194,8 @@ def projection(item, state_ref):
         reason, actions = "PAUSE_PENDING", ["reconcile"]
     elif status == "paused":
         reason, actions = "PUBLISH_PAUSED", ["resume"]
+    elif status == "failed":
+        reason, actions = "PUBLISH_OPERATION_FAILED", ["revise"]
     from backend.core.loop.publish_queue import ACTIVE
     run = item.get("run", {})
     if run.get("state") in ACTIVE:
@@ -184,6 +238,8 @@ def projection(item, state_ref):
         actions.append("distribution_reconcile")
     if item.get("branches", {}).get("plan", {}).get("state") == "pending":
         reason, actions = "PUBLISH_BRANCH_RESULT_UNVERIFIED", ["branch_reconcile", "reconcile"]
+    if status == "failed":
+        reason, actions = "PUBLISH_OPERATION_FAILED", ["revise"]
     extra_nodes, current_node = [], "verify" if status in {"prepared", "checking", "paused", "pausing"} else "integrate"
     if item.get("collaboration"):
         unresolved = any(d.get("state") in {"sending", "unknown"} for d in item["collaboration"].get("drafts", []))

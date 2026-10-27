@@ -35,6 +35,18 @@ _DATA_SETTINGS = frozenset({"core.autocrlf", "core.eol", "core.safecrlf",
 _MAX_CONFIG = 4 * 1024 * 1024
 
 
+def commit_author_environment(args, identity):
+    """Narrow internal data override, after inherited Git variables are removed."""
+    if (not args or args[0] != "commit-tree" or not isinstance(identity, dict)
+            or set(identity) != {"name", "email", "date"}
+            or any(not isinstance(value, str) or not 1 <= len(value) <= 1024 for value in identity.values())
+            or re.fullmatch(r"[^<>\x00-\x1f\x7f]+", identity["name"]) is None
+            or re.fullmatch(r"[^<>\x00-\x20\x7f]+", identity["email"]) is None
+            or re.fullmatch(r"-?\d{1,20} [+-]\d{4}", identity["date"]) is None):
+        raise GitBoundaryError("GIT_COMMAND_UNSUPPORTED", "Only a fixed commit author identity is supported")
+    return {"GIT_AUTHOR_NAME": identity["name"], "GIT_AUTHOR_EMAIL": identity["email"], "GIT_AUTHOR_DATE": identity["date"]}
+
+
 def _environment():
     # No inherited alternate index/object store, executable, injected -c, pager,
     # tracing destination, transport or credential-program override.

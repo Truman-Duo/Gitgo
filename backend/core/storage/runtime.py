@@ -190,7 +190,7 @@ def read_project_list_status(workspace: str | Path) -> dict | None:
     }
 
 
-def read_existing_state_blob(workspace: str | Path, namespace: str, key: str):
+def read_existing_state_blob(workspace: str | Path, namespace: str, key: str, *, decoder=None):
     """Read one committed state head without constructing a writer or repairing CAS.
 
     Honor an injected project's paths. Cold reads resolve existing identity only;
@@ -218,19 +218,26 @@ def read_existing_state_blob(workspace: str | Path, namespace: str, key: str):
         if row is None:
             return None
         reference = str(row[0])
-        digest = reference.removeprefix("sha256:")
-        if (not reference.startswith("sha256:") or len(digest) != 64
-                or any(char not in "0123456789abcdef" for char in digest)):
-            raise StorageBlocked("STATE_REFERENCE_INVALID")
-        owned = connection.execute("SELECT byte_length FROM objects WHERE digest=?", (digest,)).fetchone()
         maximum = min(MAX_READ_BYTES, StoragePolicy().max_cas_object_bytes,
                       bound.policy.max_cas_object_bytes if bound is not None else StoragePolicy().max_cas_object_bytes)
-        if owned is None or type(owned[0]) is not int or not 0 <= owned[0] <= maximum:
-            raise StorageBlocked("STATE_OBJECT_OWNERSHIP_INVALID")
-        with ReadRoot(paths.cas_dir) as root, root.open(digest[:2] + "/" + digest[2:]) as opened:
-            payload = opened.read_bytes(max_bytes=maximum)
-        if len(payload) != owned[0] or hashlib.sha256(payload).hexdigest() != digest:
-            raise StorageBlocked("STATE_OBJECT_DIGEST_MISMATCH")
+        def read_owned(reference):
+            digest = reference.removeprefix("sha256:")
+            if (not reference.startswith("sha256:") or len(digest) != 64
+                    or any(char not in "0123456789abcdef" for char in digest)):
+                raise StorageBlocked("STATE_REFERENCE_INVALID")
+            owned = connection.execute("SELECT byte_length FROM objects WHERE digest=?", (digest,)).fetchone()
+            if owned is None or type(owned[0]) is not int or not 0 <= owned[0] <= maximum:
+                raise StorageBlocked("STATE_OBJECT_OWNERSHIP_INVALID")
+            with ReadRoot(paths.cas_dir) as root, root.open(digest[:2] + "/" + digest[2:]) as opened:
+                payload = opened.read_bytes(max_bytes=maximum)
+            if len(payload) != owned[0] or hashlib.sha256(payload).hexdigest() != digest:
+                raise StorageBlocked("STATE_OBJECT_DIGEST_MISMATCH")
+            return payload
+        payload = read_owned(reference)
+        if decoder is not None:
+            # Trusted repository decoding shares this exact read-only snapshot.
+            # It cannot construct a writer, migrate, repair CAS or resolve paths.
+            payload = decoder(payload, paths.project_id, read_owned)
         return {"reference": reference, "project_id": paths.project_id, "payload": payload}
     finally:
         connection.close()
@@ -656,9 +663,9 @@ class StorageRuntime:
             self, namespace, key, value_ref, expected_ref=expected_ref)
 
     def commit_state_revision(self, namespace: str, key: str, value_ref: str, *,
-                              expected_ref: str | None, revision_key: str) -> bool:
+                              expected_ref: str | None, revision_key: str, related_refs: tuple[str, ...] = ()) -> bool:
         return _objects_repository.commit_state_revision(
-            self, namespace, key, value_ref, expected_ref=expected_ref, revision_key=revision_key)
+            self, namespace, key, value_ref, expected_ref=expected_ref, revision_key=revision_key, related_refs=related_refs)
 
     def list_state_refs(self, namespace: str, *, prefix: str, after: str = "", limit: int = 50) -> list[dict]:
         return _objects_repository.list_state_refs(self, namespace, prefix=prefix, after=after, limit=limit)

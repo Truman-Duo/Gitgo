@@ -147,9 +147,24 @@ def test_known_refusal_calls_completion_with_failed_result(formal_setup, monkeyp
     monkeypatch.setattr(CandidateGit, "integrate", lambda *a: CompletedProcess([], 1, "", "refused"))
     result = command(formal_setup, "execute", checked)
     assert result["error"] == "PUBLISH_FORMAL_NOT_APPLIED" and result["integration_failed"]
-    assert result["item"]["status"] == "prepared" and result["item"]["plugin_completion"]["state"] == "passed"
+    assert result["item"]["status"] == "failed" and result["item"]["plugin_completion"]["state"] == "passed"
+    assert result["item"]["allowed_actions"] == ["revise"]
     assert result["item"]["plugin_completion"]["integration_succeeded"] is False
     assert git(formal_setup[2], "rev-parse", "formal") == before
+
+
+def test_timeout_does_not_authorize_failed_completion_or_clear_unknown_effect(formal_setup, monkeypatch):
+    from subprocess import CompletedProcess
+    from backend.core.publish.git import CandidateGit
+    install(formal_setup, COMPLETION)
+    item = prepare(formal_setup)
+    plugin_protocol(monkeypatch)
+    checked = command(formal_setup, "verify", item)["item"]
+    monkeypatch.setattr(CandidateGit, "integrate", lambda *a: CompletedProcess([], -1, "", "timeout"))
+    result = command(formal_setup, "execute", checked)
+    assert result["effect_state"] == "ambiguous"
+    assert result["item"]["status"] == "executing" and result["item"]["operations"][-1]["kind"] == "formal"
+    assert not result["item"].get("plugin_completion")
 
 
 from tests.test_native_sandbox import isolated_python

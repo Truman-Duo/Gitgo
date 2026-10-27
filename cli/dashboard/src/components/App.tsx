@@ -56,10 +56,9 @@ type Props = {
   onUpdateExit?: () => Promise<void>;
 };
 
-const appStore = createReducerStore<AppState, AppAction>(reducer, initialAppState());
-
 export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalSetup = false,
   startupNotice = "", onTerminalSetupComplete, onUpdateExit, publishState }: Props) {
+  const [appStore] = useState(() => createReducerStore<AppState, AppAction>(reducer, initialAppState()));
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);

@@ -140,10 +140,13 @@ class LocalGitRunner(GitRunner):
 
 class ProtectedLocalGitRunner(LocalGitRunner):
     """Trusted local plumbing using the existing fixed-configuration boundary."""
-    def run(self, args, capture_output=True, timeout=None, text=True, encoding="utf-8", *, input_bytes=None, transport_identity=None):
+    def run(self, args, capture_output=True, timeout=None, text=True, encoding="utf-8", *, input_bytes=None, transport_identity=None, author_identity=None):
         from backend.core.loop.git_execution import protected_git, protected_git_config
+        from backend.core.loop.git_execution import commit_author_environment
         boundary = protected_git_config if args and args[0] in {"init", "remote", "--help", "--version"} else protected_git
         with boundary(self._repo, ["git", *args], **({"transport_identity": transport_identity} if transport_identity is not None else {})) as (command, environment):
+            if author_identity is not None:
+                environment.update(commit_author_environment(args, author_identity))
             options = {"cwd": self._repo, "env": environment, "capture_output": capture_output,
                        "timeout": timeout or 120, "text": text,
                        "close_fds": True, "creationflags": subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0}

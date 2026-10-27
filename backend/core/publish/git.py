@@ -7,6 +7,10 @@ from .state import PublishError, identity
 OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
+class RefWriteRefused(PublishError):
+    """The fixed ref transaction was not entered, or Git rejected it."""
+
+
 def branch_ref(value):
     if (not isinstance(value, str) or not 1 <= len(value) <= 160
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value)
@@ -31,8 +35,8 @@ class CandidateGit:
         self.workspace = identity(workspace)
         self.runner = ProtectedLocalGitRunner(self.workspace)
 
-    def run(self, args):
-        return self.runner.run(args, timeout=30)
+    def run(self, args, *, author=None):
+        return self.runner.run(args, timeout=30, **({"author_identity": author} if author is not None else {}))
 
     def binary(self, args, payload=None):
         result = self.runner.run(args, timeout=60, text=False, input_bytes=payload)
@@ -54,8 +58,11 @@ class CandidateGit:
             raise PublishError("PUBLISH_TARGET_CHECKED_OUT")
 
     def integrate(self, candidate, plan, result_oid):
-        self.import_candidate({**candidate, "oid": result_oid, "tree_oid": plan["tree_oid"]})
-        self.require_target(plan["target_ref"], plan["expected_target_oid"])
+        try:
+            self.import_candidate({**candidate, "oid": result_oid, "tree_oid": plan["tree_oid"]})
+            self.require_target(plan["target_ref"], plan["expected_target_oid"])
+        except (PublishError, OSError, RuntimeError) as exc:
+            raise RefWriteRefused(getattr(exc, "code", "PUBLISH_GIT_UNAVAILABLE")) from exc
         return self.run(["update-ref", "--no-deref", "-m", "gitgo publish formal",
                          plan["target_ref"], result_oid, plan["expected_target_oid"]])
 
@@ -136,8 +143,11 @@ class CandidateGit:
             raise PublishError("PUBLISH_SOURCE_CHANGED")
 
     def adopt(self, candidate, ref):
-        self.import_candidate(candidate)
-        self.require_absent(ref)
+        try:
+            self.import_candidate(candidate)
+            self.require_absent(ref)
+        except (PublishError, OSError, RuntimeError) as exc:
+            raise RefWriteRefused(getattr(exc, "code", "PUBLISH_GIT_UNAVAILABLE")) from exc
         # --no-deref prevents an existing symbolic name from changing its target.
         # Git's old-zero check atomically refuses a competing nonempty ref.
         return self.run(["update-ref", "--no-deref", "-m", "gitgo publish adopt",

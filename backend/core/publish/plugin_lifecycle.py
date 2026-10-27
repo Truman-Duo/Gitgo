@@ -159,7 +159,9 @@ class PluginLifecycleMixin:
             "observations": result.get("observations", []), "recorded_at": now(),
             "producer": "registered_native_plugin", "native_producers": producers, "recovered": recovered}))
         succeeded = item["plugin_completion"].get("integration_succeeded", True)
-        item.update(status="integrated" if succeeded else "prepared", revision=item["revision"] + 1)
+        item.update(status="integrated" if succeeded else "failed", revision=item["revision"] + 1)
+        if not succeeded:
+            item["binding"] = digest({"previous": item["binding"], "refused_operation": operation["id"]})
         saved = self._save_item(ledger, item, ref)
         if not succeeded:
             return {**saved, "integration_failed": True, "error": "PUBLISH_FORMAL_NOT_APPLIED", "completion_failed": not passed}
@@ -191,5 +193,7 @@ class PluginLifecycleMixin:
         item["evidence"].append({"id": operation["id"] + "-completion-not-started", "kind": "plugin_completion",
             "scope": "isolated_post_integration_callback", "binding": item["binding"], "tree_oid": item["plan"]["tree_oid"],
             "outcome": "failed", "summary": "PUBLISH_PLUGIN_COMPLETION_NOT_STARTED", "recorded_at": now(), "producer": "reconciliation"})
-        item.update(status="integrated" if succeeded else "prepared", revision=item["revision"] + 1)
+        item.update(status="integrated" if succeeded else "failed", revision=item["revision"] + 1)
+        if not succeeded:
+            item["binding"] = digest({"previous": item["binding"], "refused_operation": operation["id"]})
         return {**self._save_item(ledger, item, ref), "completion_failed": True, "reason": "PUBLISH_PLUGIN_COMPLETION_NOT_STARTED"}

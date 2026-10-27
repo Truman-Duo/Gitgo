@@ -3,13 +3,31 @@ from backend.core.sandbox_read import relative_parts
 from . import formal
 from .git import OID
 from .state import PublishError
+import re
 
 METHODS = {"ff", "squash", "merge", "rebase", "cherry_pick", "partial"}
 
 
-def commit(git, tree, parents, message):
+def author(git, oid):
+    """Read the original immutable identity, never the current Git user."""
+    from .history import commit_bytes
+    headers = commit_bytes(git.workspace, oid).split(b"\n\n", 1)[0].splitlines()
+    rows = [row for row in headers if row.startswith(b"author ")]
+    if len(rows) != 1:
+        raise PublishError("PUBLISH_AUTHOR_UNAVAILABLE")
+    try:
+        match = re.fullmatch(r"author ([^<>\x00-\x1f\x7f]+) <([^<>\x00-\x20\x7f]+)> (-?\d{1,20} [+-]\d{4})", rows[0].decode("utf8"))
+    except UnicodeError as exc:
+        raise PublishError("PUBLISH_AUTHOR_UNAVAILABLE") from exc
+    if not match:
+        raise PublishError("PUBLISH_AUTHOR_UNAVAILABLE")
+    return dict(zip(("name", "email", "date"), match.groups()))
+
+
+def commit(git, tree, parents, message, *, author=None):
     parents = list(dict.fromkeys(parents))
-    result = git.run(["commit-tree", tree, *(value for parent in parents for value in ("-p", parent)), "-m", message])
+    result = git.run(["commit-tree", tree, *(value for parent in parents for value in ("-p", parent)), "-m", message],
+                     **({"author": author} if author is not None else {}))
     oid = result.stdout.strip()
     if result.returncode or not OID.fullmatch(oid):
         raise PublishError("PUBLISH_COMMIT_UNAVAILABLE")

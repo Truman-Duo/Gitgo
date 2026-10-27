@@ -102,6 +102,10 @@ GitHub先创建草稿，逐资产上传并真正下载验证后再发布；按�
 
 故障交接应保留事项ID/revision、operation/request ID、固定OID、运行记录和原因。读取 `publish.operation`，按所属领域使用reconcile；确认未发生的动作才可新建请求。令牌过期由账户入口更新；不要在日志、Issue或交接包中写令牌。
 
+维护修正：目标写入前的确定拒绝进入失败终态，旧检查失效并允许重新准备；超时和丢失应答继续只观察，不重复写入。rebase/cherry-pick 在计划中绑定原 Author/AuthorDate，提交人使用当前集成人身份。
+
+账本超过原有 4,000,000 字节内联阈值时，正文以不可变页面保存在同一项目 CAS，页面引用与新账本索引在既有 SQLite 事务内同时提交；旧版本 1 内联账本仍可读取。项目/CAS/磁盘配额没有取消，真正写入失败保留旧意图并要求恢复。生成分页账本后，旧程序不能读取新版索引；回退前需保存完整状态及页面，不能把旧快照强行恢复到已发生外部效果之前。
+
 ## 验收证据与限制
 
 用户授权的测试目录为 `C:/Users/jgeted/Desktop/Gitgo-Issue40-Acceptance`，所有生成目标、日志与产物放在该目录。已有一个真实GitHub账户jgeted；本地alice/bob clone仅是Git身份，不是两个平台账户。主机没有可用Docker/Podman或WSL发行版，未伪造自建GitLab。

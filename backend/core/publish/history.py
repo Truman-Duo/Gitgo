@@ -121,6 +121,17 @@ def _require(repository, args, **kwargs):
     return raw, truncated
 
 
+def commit_bytes(repository, oid):
+    """Read one fixed commit with the existing bounded, pinned Git reader."""
+    if not isinstance(oid, str) or OID.fullmatch(oid) is None:
+        raise PublishError("PUBLISH_HISTORY_UNAVAILABLE")
+    raw, _ = _require(repository, ["cat-file", "commit", oid], limit=MAX_COMMIT_BYTES)
+    algorithm = hashlib.sha1 if len(oid) == 40 else hashlib.sha256
+    if algorithm(b"commit " + str(len(raw)).encode() + b"\0" + raw).hexdigest() != oid:
+        raise PublishError("PUBLISH_HISTORY_UNAVAILABLE")
+    return raw
+
+
 def _commits(repository, oids, session=None):
     if not oids:
         return []

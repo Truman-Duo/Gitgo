@@ -128,7 +128,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
       <Text wrap="truncate-end">{t({en: "Newer → older · O selected · * commit · > continues · actual Git parents", zh: "左新右旧 · O 选中 · * 提交 · > 延续 · 连线为真实父关系"})}</Text>
       {page ? <Text wrap="truncate-end">{page.head_oid}</Text> : null}
       {busy ? <Text>{t({en: "Reading fixed Git objects…", zh: "正在读取固定 Git 对象…"})}</Text> : null}
-      {error ? <Text>{safe(error)} · /refresh</Text> : null}
+      {error ? <Text>{safe(error)} · {t({en: "/refresh to reload", zh: "/refresh 刷新"})}</Text> : null}
     </Box>
     {diff ? <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}>
       <Text>{diff.base_oid || t({en: "Empty tree", zh: "空树"})} → {diff.head_oid}</Text>
@@ -140,7 +140,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
         <Text bold wrap="truncate-end">{selected + 1}/{page!.commits.length} · {commit.oid.slice(0, 12)} · {safe(commit.subject)}</Text>
         <Text wrap="truncate-end">{safe(commit.author.name)} · {t({en: "Parents", zh: "父提交"})}: {commit.parents.map(oid => oid.slice(0, 12)).join(" + ") || t({en: "root", zh: "根提交"})}</Text>
       </> : null}
-      {page?.next_cursor ? <Text>/more →</Text> : null}
+      {page?.next_cursor ? <Text>{t({en: "/more → Next page", zh: "/more → 下一页"})}</Text> : null}
     </Box>}
   </Box>;
 }

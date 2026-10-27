@@ -3,7 +3,7 @@ from copy import deepcopy
 
 from backend.core.storage.redaction import redact_for_persistence
 from . import formal, checks as check_policy, plugins, preview
-from .git import CandidateGit, branch_ref, OID
+from .git import CandidateGit, RefWriteRefused, branch_ref, OID
 from .state import PublishError, digest, encoded, find_item, projection, active_evidence, formal_ready
 from .plugin_lifecycle import PluginLifecycleMixin
 
@@ -104,7 +104,8 @@ class FormalMixin(PluginLifecycleMixin):
                     configuration, self.workspace, selected=[row["source_oid"]], revisions=revisions)
                 if formal.privacy(step_files, configuration, step_message)["outcome"] != "passed":
                     raise PublishError("PUBLISH_HISTORY_PRIVACY_BLOCKED")
-                series.append({**row, "tree_oid": step_tree, "message": step_message, "number": step_number})
+                series.append({**row, "tree_oid": step_tree, "message": step_message, "number": step_number,
+                               "author": preview.author(git, row["source_oid"])})
             message, number = series[-1]["message"], series[-1]["number"]
         elif method != "ff":
             message, number = formal.commit_message(self.project, git, target["oid"], candidate["oid"],
@@ -277,7 +278,9 @@ class FormalMixin(PluginLifecycleMixin):
             if plan.get("commit_series"):
                 result_oid = plan["expected_target_oid"]
                 for step in plan["commit_series"]:
-                    result_oid = preview.commit(git, step["tree_oid"], [result_oid], step["message"])
+                    if step.get("author") != preview.author(git, step["source_oid"]):
+                        raise PublishError("PUBLISH_PLAN_STALE")
+                    result_oid = preview.commit(git, step["tree_oid"], [result_oid], step["message"], author=step["author"])
             else:
                 result_oid = preview.commit(git, plan["tree_oid"], plan.get("parents", [plan["expected_target_oid"]]), plan["commit_message"])
         if git.oid(result_oid, "tree") != plan["tree_oid"]:
@@ -291,11 +294,15 @@ class FormalMixin(PluginLifecycleMixin):
         self._save_item(ledger, item, ref)
         try:
             result = target_git.integrate({"repository": self.workspace}, plan, result_oid)
+        except RefWriteRefused as exc:
+            return self._refused(item_id, intent["id"], exc.code)
         except (PublishError, OSError, RuntimeError) as exc:
             return {"item": projection(item, None), "status": "needs_reconciliation", "effect_state": "ambiguous",
                     "reason": getattr(exc, "code", "PUBLISH_GIT_UNAVAILABLE")}
-        if plan.get("plugins") and result.returncode != 0 and self._observe_formal_failure(item_id):
+        if plan.get("plugins") and result.returncode > 0 and self._observe_formal_failure(item_id):
             return self._start_plugin_completion(item_id)
+        if result.returncode > 0:
+            return self._refused(item_id, intent["id"], "PUBLISH_REF_TRANSACTION_REJECTED")
         observed = self._observe(item_id, intent["id"], result.returncode == 0)
         if plan.get("plugins") and observed.get("effect_state") == "committed":
             return self._start_plugin_completion(item_id)

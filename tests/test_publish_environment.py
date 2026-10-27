@@ -46,6 +46,24 @@ def test_large_binary_is_hashed_without_exporting_bytes(tmp_path_factory):
             opened.sha256(max_bytes=32)
 
 
+def test_runtime_links_bind_only_targets_in_declared_roots(environment_root, tmp_path_factory):
+    import os
+    link = environment_root / "python-link.exe"
+    try:
+        link.symlink_to(environment_root / "python.exe")
+    except OSError:
+        pytest.skip("Creating a symlink requires an enabled OS capability")
+    before = environment.snapshot()
+    (environment_root / "python.exe").write_bytes(b"changed executable")
+    assert environment.snapshot()["digest"] != before["digest"]
+    link.unlink()
+    outside = tmp_path_factory / "outside-runtime.py"
+    outside.write_bytes(b"not a granted runtime")
+    link.symlink_to(outside)
+    with pytest.raises(PublishError, match="PUBLISH_ENVIRONMENT_UNSUPPORTED"):
+        environment.snapshot()
+
+
 def test_fixed_dependency_files_ignore_dirty_workspace(formal_setup):
     _, _, repo = formal_setup
     (repo / "requirements.txt").write_text("example==1.0\n", encoding="utf8")
@@ -57,7 +75,7 @@ def test_fixed_dependency_files_ignore_dirty_workspace(formal_setup):
 
 def test_runtime_changed_after_checks_blocks_formal_until_rechecked(formal_setup, environment_root, monkeypatch):
     item = prepare(formal_setup)
-    protocol(monkeypatch)
+    protocol(monkeypatch, real_environment=True)
     checked = command(formal_setup, "verify", item)["item"]
     assert checked["formal_eligible"]
     (environment_root / "dependency.py").write_bytes(b"version = 2\n")
@@ -68,7 +86,7 @@ def test_runtime_changed_after_checks_blocks_formal_until_rechecked(formal_setup
 
 def test_runtime_changed_during_tests_never_passes(formal_setup, environment_root, monkeypatch):
     item = prepare(formal_setup)
-    protocol(monkeypatch, action=lambda _: (environment_root / "dependency.py").write_bytes(b"changed"))
+    protocol(monkeypatch, real_environment=True, action=lambda _: (environment_root / "dependency.py").write_bytes(b"changed"))
     checked = command(formal_setup, "verify", item)["item"]
     assert not checked["formal_eligible"]
     assert checked["evidence"][-1]["summary"] == "PUBLISH_ENVIRONMENT_CHANGED"
@@ -86,7 +104,7 @@ def test_authorship_filter_checks_transformed_tree_without_changing_source(forma
     assert [f["path"] for f in item["plan"]["transformed_files"]] == ["module.py"]
     def assert_filtered(stage):
         assert (stage / "module.py").read_text() == "value = 42\n"
-    protocol(monkeypatch, action=assert_filtered)
+    protocol(monkeypatch, real_environment=True, action=assert_filtered)
     checked = command(formal_setup, "verify", item)["item"]
     assert command(formal_setup, "execute", checked)["item"]["status"] == "integrated"
     assert (repo / "module.py").read_text() == original
