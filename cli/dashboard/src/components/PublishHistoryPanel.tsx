@@ -90,9 +90,11 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
   }, [diff]);
   useEffect(() => {
     onFooter({kind: "command", cmdInput: input, suggestions: [], suggestionIdx: 0, cmdResult: "",
-      statusText: t({en: "←/→ commit · Enter diff · /more · /parent N · Esc back", zh: "←/→ 选择提交 · Enter 差异 · /more 下一页 · /parent N 父提交 · Esc 返回"})});
+      statusText: t(w < 60 ? {en: "←/→ · Enter diff · Esc back", zh: "←/→ · Enter 差异 · Esc 返回"}
+        : w < 100 ? {en: "←/→ commit · Enter diff · /parent N · Esc back", zh: "←/→ 选择 · Enter 差异 · /parent N · Esc 返回"}
+        : {en: "←/→ commit · Enter diff · /more · /parent N · Esc back", zh: "←/→ 选择提交 · Enter 差异 · /more 下一页 · /parent N 父提交 · Esc 返回"})});
     return () => onFooter(null);
-  }, [input, input.value, input.cursor, onFooter, t]);
+  }, [input, input.value, input.cursor, onFooter, t, w]);
   useInput((text, key) => {
     if (input.value.startsWith("/")) {
       if (matchChord("escape", text, key)) input.setValue("");

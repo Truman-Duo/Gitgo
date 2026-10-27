@@ -1,6 +1,7 @@
 import React, {useEffect, useState} from "react";
 import {usePublishForm} from "../hooks/usePublishForm.js";
 import type {PublishLocalState} from "../state/publishLocalState.js";
+import {usePanelSize} from "../theme/index.js";
 import {Box, Text} from "@anthropic/ink";
 import {applyTextOp} from "../hooks/useTextInput.js";
 import {useManagedInput as useInput} from "../input/runtime.js";
@@ -35,6 +36,7 @@ export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDi
   localState?: PublishLocalState; formKey?: string;
 }) {
   const t = useCopy();
+  const {w} = usePanelSize({minWidth: 20, widthOffset: 4});
   const formal = mode === "formal" || mode === "combine" || mode === "migrate" || mode === "revise" && item?.plan?.destination === "formal";
   const previousChecks = item?.plan?.requested_checks ?? item?.plan?.checks ?? [];
   const defaults: Record<string, string> = {
@@ -56,10 +58,11 @@ export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDi
     : ["source_role", "source_ref", "target_branch", "owner", "rework"]);
   const [error, setError] = useState("");
   useEffect(() => {
-    onFooter({kind: "normal", cmdInput: input, statusText: t({en: "↑/↓ field · Enter next/save · Esc cancel", zh: "↑/↓ 字段 · Enter 下一项/保存 · Esc 取消"}),
+    onFooter({kind: "normal", cmdInput: input, statusText: t(w < 60 ? {en: "↑/↓ · Enter next/save · Esc back", zh: "↑/↓ · Enter继续 · Esc返回"}
+      : {en: "↑/↓ field · Enter next/save · Esc keeps draft", zh: "↑/↓ 字段 · Enter 下一项/保存 · Esc 保留返回"}),
       suggestions: [], suggestionIdx: 0, cmdResult: ""});
     return () => onFooter(null);
-  }, [input, input.value, input.cursor, onFooter, t]);
+  }, [input, input.value, input.cursor, onFooter, t, w]);
   useInput((text, key) => {
     if (busy) return;
     if (key.ctrl && text === "r") { reset(); return; }

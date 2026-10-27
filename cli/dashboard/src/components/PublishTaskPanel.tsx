@@ -55,6 +55,7 @@ export function PublishTaskPanel({client, project, reference, onFooter, onDismis
     </Box>
     <VirtualConversation key={processId} messages={messages} streaming={null} scrollRef={scroll} contentWidth={Math.max(12, w - 2)}
       client={client} project={project} empty={<Text>{verified ? t({en: "No conversation recorded.", zh: "暂无对话记录。"}) : ""}</Text>}/>
-    <Box flexShrink={0}><Text wrap="truncate-end">{t({en: "↑/↓ scroll · D details · P parent/task · Esc return to Publish", zh: "↑/↓ 滚动 · D 详情 · P 父任务/关联任务 · Esc 返回 Publish"})}</Text></Box>
+    <Box flexShrink={0}><Text wrap="truncate-end">{t(w < 60 ? {en: "↑/↓ · D detail · P parent · Esc back", zh: "↑/↓ · D详情 · P父任务 · Esc返回"}
+      : {en: "↑/↓ scroll · D details · P parent/task · Esc return to Publish", zh: "↑/↓ 滚动 · D 详情 · P 父任务/关联任务 · Esc 返回 Publish"})}</Text></Box>
   </Box>;
 }

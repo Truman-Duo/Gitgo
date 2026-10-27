@@ -46,7 +46,7 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
   onFooter: (value: FooterConfig | null) => void; onSubmit: (operation: string, args: Record<string, unknown>) => void; onDismiss: () => void;
   localState?: PublishLocalState; formKey?: string;
 }) {
-  const t = useCopy(), {h} = usePanelSize({minWidth: 20, widthOffset: 4});
+  const t = useCopy(), {h, w} = usePanelSize({minWidth: 20, widthOffset: 4});
   const snapshot = item?.collaboration?.snapshots.at(-1);
   const target = snapshot?.target;
   const defaults: Record<string, string> = {kind: target?.kind ?? "github", instance: target?.instance ?? "https://github.com",
@@ -79,9 +79,10 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
   const [error, setError] = useState("");
   useEffect(() => {
     onFooter({kind: "normal", cmdInput: field === "token" ? {...input, value: "•".repeat(input.value.length)} : input,
-      statusText: t({en: "↑/↓ field · Enter next/save · Esc cancel", zh: "↑/↓ 字段 · Enter 下一项/保存 · Esc 取消"}), suggestions: [], suggestionIdx: 0, cmdResult: ""});
+      statusText: t(w < 60 ? {en: "↑/↓ · Enter next/save · Esc back", zh: "↑/↓ · Enter继续 · Esc返回"}
+        : {en: "↑/↓ field · Enter next/save · Esc keeps draft", zh: "↑/↓ 字段 · Enter 下一项/保存 · Esc 保留返回"}), suggestions: [], suggestionIdx: 0, cmdResult: ""});
     return () => onFooter(null);
-  }, [input, input.value, input.cursor, field, onFooter, t]);
+  }, [input, input.value, input.cursor, field, onFooter, t, w]);
   const submit = (next: Record<string, string>) => {
     const selectedTarget = Object.fromEntries(platform.map(name => [name, next[name]]));
     if (mode === "account") return onSubmit("account.save", {target: selectedTarget, token: next.token});

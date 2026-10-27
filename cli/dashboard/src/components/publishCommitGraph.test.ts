@@ -20,6 +20,7 @@ test("pagination preserves pending lanes instead of inventing edges or resetting
   const last = layoutCommitGraph([{oid: "root", parents: []}], second.frontier);
   expect(last.nodes[0]!.lane).toBe(0); expect(last.nodes[0]!.parents).toEqual([]);
   expect(drawCommitGraph(second, 1, 40, 6).every(line => line.length <= 40)).toBe(true);
+  expect(drawCommitGraph(first, 0, 40, 6).join("\n")).toContain(">");
 });
 
 test("octopus merges, multiple roots and a narrow clipped viewport retain real parent identity", () => {

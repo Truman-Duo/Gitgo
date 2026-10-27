@@ -11,6 +11,7 @@ import tempfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from publish_acceptance_terminal import console_client
 from publish_terminal_benchmark import LiveConsole
 
@@ -42,7 +43,8 @@ def run(package, root):
     from backend.core.config import Config, ConfigManager, ProjectConfig
     from backend.core.application import ApplicationServices
     from backend.core.storage import close_owned_storage, get_storage
-    project = ProjectConfig(name="publish-交互-🚀", workspace_path=str(workspace))
+    project = ProjectConfig(name="publish-交互-🚀")
+    project.workspace_path = str(workspace)
     ConfigManager.save(Config(projects=[project], language="zh", animation=False,
         launcher={"terminal": "current", "command": "", "args": []}))
     services = ApplicationServices()

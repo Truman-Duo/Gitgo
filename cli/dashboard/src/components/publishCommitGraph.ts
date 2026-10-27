@@ -40,6 +40,7 @@ export function drawCommitGraph(graph: CommitGraph, selected: number, width: num
   const mark = (x: number, y: number, char: string) => {
     if (x < 0 || x >= count * cell || y < 0 || y >= rows) return;
     const old = canvas[y]![x];
+    if (char === ">" || old === ">") { canvas[y]![x] = ">"; return; }
     canvas[y]![x] = old === " " || old === char ? char : "+";
   };
   const edge = (column: number, lane: number, parentColumn: number, parentLane: number) => {
