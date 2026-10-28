@@ -69,6 +69,10 @@ def register_all(register) -> None:
     register("lesson_list", tool_wrappers.lesson_list, NATIVE_PROCESS)
     register("privacy_scan", tool_wrappers.privacy_scan, NATIVE_PROCESS)
     register("run_test", _run_test_isolated, NATIVE_PROCESS)
+    from backend.core.tools.publish_plugins import run_publish_plugins
+    register("run_publish_plugins", run_publish_plugins, NATIVE_PROCESS)
+    from backend.core.tools.publish_build import run_publish_build
+    register("run_publish_build", run_publish_build, NATIVE_PROCESS)
     from backend.core.tools.dynamic_tools import (
         execute_authored_python, execute_authored_privileged_python, execute_composite,
     )

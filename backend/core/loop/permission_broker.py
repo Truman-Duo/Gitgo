@@ -73,6 +73,13 @@ def _runtime_implementation_digest() -> str:
                 "backend.core.loop.execution_contract", "backend.core.loop.process_tool_runner",
                 "backend.core.sandbox", "backend.core.sandbox_windows", "backend.core.sandbox_linux",
                 "backend.core.child_process", "backend.core.native_host_entry", "backend.core.git_transfer"]
+    modules += [f"backend.core.publish.{name}" for name in
+                ("service", "state", "git", "formal", "preview", "integration", "checks", "environment", "legacy",
+                 "plugins", "plugin_lifecycle", "sharing", "shared_query", "history", "history_cache", "remote_git", "collaboration", "branches",
+                 "package", "package_io", "distribution", "release_transport")]
+    modules += ["backend.core.tools.publish_service", "backend.core.tools.publish_plugins", "backend.core.tools.publish_build",
+                "backend.core.loop.publish_runtime", "backend.core.loop.publish_build_runtime", "backend.core.loop.publish_recovery",
+                "backend.core.loop.publish_queue", "backend.remote.publish_platform", "backend.remote.publish_accounts"]
     for module_name in modules:
         spec = importlib.util.find_spec(module_name)
         if spec is None or spec.loader is None:
@@ -247,7 +254,7 @@ def remap_project_paths(process, arguments: dict, effective_workspace: str, *, l
 def out_of_scope_resources(arguments: dict, effective_workspace: str) -> list[str]:
     workspace = Path(effective_workspace).resolve(strict=False)
     outside: list[str] = []
-    for key in PATH_ARGUMENTS:
+    for key in (*PATH_ARGUMENTS, "_publish_source_path", "_publish_target_path", "_publish_trial_path", "_publish_export_path", "_publish_import_path", "_publish_history_path"):
         raw = arguments.get(key)
         if not isinstance(raw, str) or not raw.strip():
             continue

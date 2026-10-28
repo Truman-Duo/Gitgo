@@ -31,6 +31,7 @@ class RegisteredTestRuntime(FileCandidateRuntime):
     def execute_seeds(self, workspace, args, validation):
         self.phase = "execute"
         producer = WorkspaceCandidateRuntime(self.pipeline, self.ctx, self.registration, self.owner, self.tool)
+        producer.lifecycle = getattr(self, "lifecycle", None)
         diagnostics = {}
         try:
             record = producer.preview("run_test", args, self.timeout, trusted_arguments={}, copy_inputs=True, diagnostics=diagnostics,

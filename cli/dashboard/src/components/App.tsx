@@ -1,6 +1,7 @@
 import {label} from "../ui/runtimeLabels.js";
 import {copy,type Copy} from "../ui/pageContract.js";
 import {LanguageContext} from "../ui/PageFrame.js";
+import type {PublishStateStore} from "../state/publishLocalState.js";
 import {DiffLayoutContext} from "../theme/diffLayoutContext.js";
 // src/components/App.tsx — Three-scene routing with createStore
 import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
@@ -45,6 +46,7 @@ function processRuntimeStatus(process: ProcessInfo | undefined, t:(value:Copy)=>
 }
 
 type Props = {
+  publishState?: PublishStateStore;
   client: BackendClient;
   refreshSec?: number;
   startupSmokeTask?: StartupSmokeTask;
@@ -54,10 +56,9 @@ type Props = {
   onUpdateExit?: () => Promise<void>;
 };
 
-const appStore = createReducerStore<AppState, AppAction>(reducer, initialAppState());
-
 export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalSetup = false,
-  startupNotice = "", onTerminalSetupComplete, onUpdateExit }: Props) {
+  startupNotice = "", onTerminalSetupComplete, onUpdateExit, publishState }: Props) {
+  const [appStore] = useState(() => createReducerStore<AppState, AppAction>(reducer, initialAppState()));
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
@@ -601,6 +602,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   }, [footerOverride, overlayStack]);
 
   const overlayCtx = {
+    publishState,
     client,
     scene,
     activeProject,
@@ -629,7 +631,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");
-  const runtimeOwnsViewport = ["processDetail", "help", "runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview", "updatePanel"].includes(topOverlay?.type || "");
+  const runtimeOwnsViewport = ["processDetail", "help", "runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview", "updatePanel", "publishPanel"].includes(topOverlay?.type || "");
   const footerDrawer = inlineOverlay
     ? topOverlay?.type === "btwPanel"
       ? <Box maxHeight={Math.max(8,Math.floor(h/2))} minHeight={0} flexDirection="column" flexShrink={0}><InputLayer priority={100}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer></Box>

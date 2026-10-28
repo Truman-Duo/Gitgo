@@ -1,6 +1,6 @@
 # CI 与合并门槛
 
-主仓库的 Gitgo CI 对所有目标为 master 的 PR、master push 和手动运行触发；预留 merge_group 支持，不表示个人仓库已启用合并队列。workflow 不按 paths 跳过，统一必需状态为 **CI gate**。gate 使用 always 汇总：失败、取消或意外跳过不能成为成功。
+主仓库的 Gitgo CI 对所有目标为 master 或 feat/** 功能接纳分支的 PR、这些分支的 push 和手动运行触发；预留 merge_group 支持，不表示个人仓库已启用合并队列。workflow 不按 paths 跳过，统一必需状态为 **CI gate**。gate 使用 always 汇总：失败、取消或意外跳过不能成为成功。功能接纳与版本基线更新分别验证，见 [分支生命周期](branch-lifecycle.md)。
 
 ## 检查范围
 

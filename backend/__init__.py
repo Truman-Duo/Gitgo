@@ -7,11 +7,29 @@
     remote/     — 外部 API 连接器 (GitHub/GitLab)
 """
 
-from backend.core.config import Config, ConfigManager, ProjectConfig
-from backend.core.history import HistoryManager, HistoryEntry
-from backend.core.i18n import _tr, load_language, available_languages
-from backend.core.sync_session import SyncSession, SessionStage
-from backend.remote import RemoteConnector, GitHubConnector, GitLabConnector, create_connector
+from importlib import import_module
+
+# Importing a tiny child-process transport must not initialize configuration,
+# providers and the full application. Keep the public facade, resolve on use.
+_EXPORTS = {
+    **dict.fromkeys(("Config", "ConfigManager", "ProjectConfig"), "backend.core.config"),
+    **dict.fromkeys(("HistoryManager", "HistoryEntry"), "backend.core.history"),
+    **dict.fromkeys(("_tr", "load_language", "available_languages"), "backend.core.i18n"),
+    **dict.fromkeys(("SyncSession", "SessionStage"), "backend.core.sync_session"),
+    **dict.fromkeys(("RemoteConnector", "GitHubConnector", "GitLabConnector", "create_connector"), "backend.remote"),
+}
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(_EXPORTS[name]), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))
 
 __all__ = [
     "Config", "ConfigManager", "ProjectConfig",

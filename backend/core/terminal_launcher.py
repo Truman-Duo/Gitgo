@@ -107,6 +107,26 @@ def _terminal_packages(environment):
         return [], "Windows Terminal package lookup unavailable; PATH and known install locations were checked."
 
 
+def startup_terminal_inventory(launcher=None, *, attached=False):
+    """Discover only when this Windows startup can actually change terminals.
+
+    First-run setup and General explicitly load the complete, verified catalog.
+    An attached launch or saved 'current' preference needs no other executable.
+    This response never grants verification to an undiscovered terminal.
+    """
+    launcher = dict(launcher or {})
+    selected = str(launcher.get("terminal") or "auto")
+    configured = launcher.get("configured") is True or ("configured" not in launcher and selected != "auto")
+    if sys.platform != "win32" or (not attached and configured and selected != "current"):
+        return terminal_inventory(launcher)
+    choices = [
+        {"id": "auto", "label": "Automatic", "available": True, "command": "", "args": []},
+        {"id": "current", "label": "Current terminal", "available": True, "command": "", "args": []},
+    ]
+    return {"platform": sys.platform, "options": choices, "selected": selected, "configured": configured,
+            "effective": choices[1], "warnings": [], "discovery": "deferred"}
+
+
 def terminal_inventory(launcher=None, *, platform=None, environment=None, registered_paths=None, package_paths=None,
                        git_roots=None, git_verifier=None, terminal_verifier=None, windows_build=None):
     platform = sys.platform if platform is None else platform

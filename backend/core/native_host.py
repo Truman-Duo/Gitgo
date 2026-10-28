@@ -1715,6 +1715,8 @@ class NativeHost:
         if self._stopping.is_set():
             return
         self._stopping.set()
+        publish_runtime = getattr(self.services, "publish_runtime", None)
+        if publish_runtime is not None: publish_runtime.close()
         updates = getattr(self.services, "updates", None)
         if updates is not None: updates.close()
         if self._maintenance_thread is not None:

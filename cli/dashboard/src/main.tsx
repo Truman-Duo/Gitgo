@@ -1,5 +1,6 @@
 // src/main.tsx
 import React from "react";
+import {configureTerminalWidths} from "../vendor/ink/src/core/terminalWidth.js";
 import {createInterface} from "node:readline";
 import { renderSync, AlternateScreen, Box, useTerminalSize } from "@anthropic/ink";
 import { NativeHostClient, type BackendClient } from "./backend/client.js";
@@ -23,12 +24,12 @@ import {
   ensureWindowsUtf8Console,
   relaunchInConfiguredTerminal,
   shouldRelaunchInConfiguredTerminal,
-  windowsParentProcessName,
 } from "./backend/terminalLauncher.js";
-import { detectTerminals } from "./backend/tools.js";
+import { detectTerminals, startupTerminals } from "./backend/tools.js";
 import { registerLaunchSession } from "./backend/launchSession.js";
 import packageInfo from "../package.json";
 import {managedRoot, acquireManagedAdmission} from "./backend/managedAdmission.js";
+import {profilePublishStateStore} from "./state/publishLocalState.js";
 
 if (process.argv.includes("--version")) {
   process.stdout.write(`Gitgo ${packageInfo.version}\n`);
@@ -201,7 +202,7 @@ async function main() {
   let startupNotice = "";
   if (!useMock) {
     try {
-      terminals = await detectTerminals(client) as TerminalInventory;
+      terminals = await startupTerminals(client, process.argv.includes("--attached")) as TerminalInventory;
       startupNotice = (terminals.warnings || []).join(" ");
     } catch {
       startupNotice = "Terminal detection unavailable; continuing here. Retry in /config → General.";
@@ -209,7 +210,7 @@ async function main() {
   }
   if (terminals?.configured && shouldRelaunchInConfiguredTerminal({
     compiled: COMPILED, platform: process.platform, argv: process.argv,
-    parentProcessName: windowsParentProcessName(), config: launcherFromInventory(terminals),
+    config: launcherFromInventory(terminals),
   })) {
     process.stderr.write("[gitgo-dashboard] Opening configured terminal…\n");
     const handoff = client instanceof NativeHostClient
@@ -250,10 +251,12 @@ async function main() {
     }
     return {completed: handoff.launched, message: handoff.message};
   };
+  configureTerminalWidths(terminals?.display_metrics?.kind === "windows_console" ? terminals.display_metrics.codepoint_widths : undefined);
   renderer = renderSync(
     <ScreenWrapper>
       <InputProvider verificationInput={verificationInput()}><App
         client={client}
+        publishState={profilePublishStateStore()}
         refreshSec={REFRESH_SEC}
         startupSmokeTask={startupSmokeTask()}
         startupTerminalSetup={!useMock && (!terminals || !terminals.configured)}

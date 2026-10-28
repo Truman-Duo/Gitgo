@@ -243,6 +243,9 @@ class ToolPipeline:
                     args["_workspace"] = str(ctx.workspace_path)
                 if "workspace_path" in args:
                     args["workspace_path"] = str(ctx.workspace_path)
+                if execution_contract.broker == "governance.publish":
+                    args["_publish_actor"] = ctx.process.process_id
+                    args["_publish_task"] = ctx.process.active_task_id or ctx.process.process_id
                 if tool_name in {"web_search", "web_fetch"}:
                     # Host configuration is private runtime authority.  Bind it
                     # here so A, B and expanded composite tools share one
@@ -639,6 +642,20 @@ class ToolPipeline:
                         # Producer launch/effects stay nested: it did not write
                         # the formal target, and cache reuse launches nothing.
                         runtime_metadata["cleanup"] = runtime.last_render["cleanup"]
+            elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "governance.publish" and tool_name == "publish_run":
+                from .publish_queue import drive_agent
+                result_data = drive_agent(self, ctx, tool.execute(args), execution_id, runtime_metadata)
+            elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "governance.publish" and tool_name in {"publish_verify", "publish_execute", "publish_package"}:
+                from .publish_build_runtime import PublishBuildRuntime
+                from .service_runtime import tool_service_scope
+                runtime = PublishBuildRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
+                try:
+                    with tool_service_scope(lambda: ctx.is_cancelled(), runtime):
+                        result_data = tool.execute(args)
+                finally:
+                    if isinstance(runtime.last_render.get("cleanup"), dict):
+                        runtime_metadata["cleanup"] = runtime.last_render["cleanup"]
+                    runtime_metadata["native_producers"] = runtime.producers
             elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "tests.workspace.run":
                 from .registered_test_runtime import RegisteredTestRuntime
                 runtime = RegisteredTestRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool, timeout=effective_timeout)
@@ -745,7 +762,7 @@ class ToolPipeline:
         if business_error and untrusted_program_result:
             business_error = "CUSTOM_TOOL_EXECUTION_FAILED"
         if ((execution_contract.file_action == "produce_workspace" or
-                (execution_contract.kind.value == "data_broker" and (execution_contract.broker.startswith("files.workspace.") or execution_contract.broker in {"governance.formalize", "identity.memory_snapshot"})))
+                (execution_contract.kind.value == "data_broker" and (execution_contract.broker.startswith("files.workspace.") or execution_contract.broker in {"governance.formalize", "governance.publish", "identity.memory_snapshot"})))
                 and isinstance(result_data, dict) and result_data.get("effect_state") in {"not_committed", "committed", "partial", "ambiguous"}):
             runtime_metadata["effect_state"] = result_data["effect_state"]
         if business_error:

@@ -272,8 +272,14 @@ class WindowsSandboxProcess(subprocess.Popen):
             # registry key (ERROR_KEY_DELETED), before any child even starts.
             # Derive the same deterministic SID; this grants no ACLs/capabilities.
             sid = api.preview_profile_sid(self._sandbox_policy.profile_name)
-            job = api.create_job(None, None)  # not inheritable
+            recovery_id = self._sandbox_policy.recovery_id
+            C.set_last_error(0)
+            job = api.create_job(None, "Local\\Gitgo.Publish." + recovery_id if recovery_id else None)
+            existed = C.get_last_error() == 183
             api.check(job)
+            if existed:
+                # Never adopt an existing boundary into a replacement launch.
+                raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "Native recovery identity is still owned")
             limits = ExtendedLimits()
             # KILL_ON_JOB_CLOSE, ACTIVE_PROCESS, JOB_MEMORY, JOB_TIME.
             # No BREAKAWAY flags: every descendant remains in this job.
@@ -335,6 +341,7 @@ class WindowsSandboxProcess(subprocess.Popen):
             self._handle = Handle(info.process)
             self.pid = info.pid
             self._gitgo_job_handle = NativeJobHandle(job, api)
+            self._gitgo_job_handle.recovery_id = recovery_id
             self._sandbox_job = self._gitgo_job_handle
             job = None
             api.close(info.thread)

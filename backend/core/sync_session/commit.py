@@ -13,6 +13,7 @@ from backend.core.operations import (
 )
 
 from backend.core.sync_session.models import SessionStage, FormalCommit
+from backend.core.publish.legacy import legacy_mutation
 
 
 class CommitMixin:
@@ -125,6 +126,7 @@ class CommitMixin:
             self.selected_workspace = {index}
         return self.selected_workspace
 
+    @legacy_mutation
     def step_delete_formal(self, index: int) -> bool:
         """删除 formal commit。"""
         if index < 0 or index >= len(self.formal_commits):
@@ -136,6 +138,7 @@ class CommitMixin:
         self._publish_metadata(f"已删除 formal commit: [{fc.prefix}-{fc.number}]", [("delete_formal", {"commit": f"[{fc.prefix}-{fc.number}]"})])
         return True
 
+    @legacy_mutation
     def step_edit_formal_message(self, index: int, message: str) -> bool:
         """编辑 formal commit message。"""
         if index < 0 or index >= len(self.formal_commits):
@@ -150,6 +153,7 @@ class CommitMixin:
         self._publish_metadata("Formal commit message 已更新", [("governance_edited", {"index": index, "prefix": self.formal_commits[index].prefix, "number": self.formal_commits[index].number})])
         return True
 
+    @legacy_mutation
     def step_edit_formal_number(self, index: int, new_number: int) -> bool:
         """编辑 formal commit 编号（同步更新 message 中的 tag）。"""
         if index < 0 or index >= len(self.formal_commits):
@@ -171,6 +175,7 @@ class CommitMixin:
         self._publish_metadata(f"编号已更新: [{fc.prefix}-{fc.number}]", [("governance_renumbered", {"index": index, "prefix": fc.prefix, "old_number": old_number, "new_number": new_number})])
         return True
 
+    @legacy_mutation
     def step_dissolve_formal(self, index: int) -> bool:
         """Dissolve formal commit — 清除来源引用并删除。"""
         if index < 0 or index >= len(self.formal_commits):
@@ -186,6 +191,7 @@ class CommitMixin:
         self._publish_metadata(f"已 Dissolve: [{fc.prefix}-{fc.number}]，Workspace commits 已恢复", [("dissolve_formal", {"commit": f"[{fc.prefix}-{fc.number}]"}), ("governance_dissolved", {"commit": f"[{fc.prefix}-{fc.number}]", "source_indices": sorted(fc.source_indices)})])
         return True
 
+    @legacy_mutation
     def step_clear_formal_sources(self, index: int) -> bool:
         """清除 formal commit 的 workspace 来源引用。"""
         if index < 0 or index >= len(self.formal_commits):

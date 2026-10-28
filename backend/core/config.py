@@ -138,6 +138,7 @@ class ProjectConfig:
     integrity: dict = field(default_factory=lambda: dict(DEFAULT_INTEGRITY_CONFIG))
     authorship: dict = field(default_factory=lambda: dict(DEFAULT_AUTHORSHIP_CONFIG))
     outbound_policy: dict = field(default_factory=default_outbound_policy)
+    publish_checks: list = field(default_factory=list)
     archived: bool = False
     pending_hard_delete_at: str = ""  # ISO timestamp, empty = no pending delete
     unavailable_entry: dict = field(default_factory=dict)  # first failed entry, bound to workspace
@@ -230,6 +231,7 @@ class ProjectConfig:
             integrity=d.get("integrity", dict(DEFAULT_INTEGRITY_CONFIG)),
             authorship=authorship,
             outbound_policy=outbound,
+            publish_checks=d.get("publish_checks", []),
             archived=d.get("archived", False),
             pending_hard_delete_at=d.get("pending_hard_delete_at", ""),
             unavailable_entry=dict(d.get("unavailable_entry") or {}),
