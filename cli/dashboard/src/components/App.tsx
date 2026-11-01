@@ -1,6 +1,7 @@
 import {label} from "../ui/runtimeLabels.js";
 import {copy,type Copy} from "../ui/pageContract.js";
 import {LanguageContext} from "../ui/PageFrame.js";
+import type {PublishStateStore} from "../state/publishLocalState.js";
 import {DiffLayoutContext} from "../theme/diffLayoutContext.js";
 // src/components/App.tsx — Three-scene routing with createStore
 import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
@@ -10,6 +11,8 @@ import {NativeHostClient, type BackendClient} from "../backend/client.js";
 import { colors, contextPct } from "../theme/index.js";
 import { useGitgoData } from "../hooks/useGitgoData.js";
 import { useLoopData, type ProcessInfo } from "../hooks/useLoopData.js";
+import {useAdvancement} from "../hooks/useAdvancement.js";
+import {isBindingAction} from "../input/router.js";
 import { useLLMConfig } from "../hooks/useLLMConfig.js";
 import { createReducerStore, reducer, useStore, initialAppState, type AppState, type AppAction, type OverlayType, type Scene } from "../state/store.js";
 import { getCommands, type CommandContext } from "../commands.js";
@@ -28,7 +31,6 @@ import { renderOverlay } from "./overlays.js";
 import { InputLayer, ScrollableInputLayer } from "../input/runtime.js";
 import { notifyGeneralConfigChanged, useGeneralConfig } from "../hooks/useGeneralConfig.js";
 import {useBindingSettings} from "../input/runtime.js";
-import {presetSettings} from "../input/router.js";
 import { runningWorkers } from "../daemon/agentLabels.js";
 import { editPromptExternally } from "../utils/externalPromptEditor.js";
 
@@ -47,6 +49,7 @@ function processRuntimeStatus(process: ProcessInfo | undefined, t:(value:Copy)=>
 }
 
 type Props = {
+  publishState?: PublishStateStore;
   client: BackendClient;
   refreshSec?: number;
   startupSmokeTask?: StartupSmokeTask;
@@ -56,16 +59,15 @@ type Props = {
   onUpdateExit?: () => Promise<void>;
 };
 
-const appStore = createReducerStore<AppState, AppAction>(reducer, initialAppState());
-
 export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalSetup = false,
-  startupNotice = "", onTerminalSetupComplete, onUpdateExit }: Props) {
+  startupNotice = "", onTerminalSetupComplete, onUpdateExit, publishState }: Props) {
+  const [appStore] = useState(() => createReducerStore<AppState, AppAction>(reducer, initialAppState()));
   const { exit } = useApp();
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const { projects, loading, error, refresh } = useGitgoData(client, refreshSec);
   const { providers: globalProviders, fetchStatus: fetchGlobalLLM } = useLLMConfig(client);
   const generalConfig = useGeneralConfig(client);
-  const inputSettings = useMemo(() => presetSettings(generalConfig.keyboardPreset), [generalConfig.keyboardPreset]);
+  const inputSettings = generalConfig.keyboardBindings;
   useBindingSettings(inputSettings);
   const t=useCallback((value:Copy)=>copy(value,generalConfig.language),[generalConfig.language]);
 
@@ -74,6 +76,8 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   const loopData = useLoopData(client, scene === "projects" ? null : activeProject, 2); // single runtime poll source for the active project
   const { providers, processes } = loopData;
   const activeAgentId = useStore(appStore, (s) => s.activeAgentId);
+  const advancement = useAdvancement(client, scene === "workspace" || scene === "agent_detail" ? activeProject : null,
+    scene === "agent_detail" ? activeAgentId || "" : "", processes);
   const processListSelIdx = useStore(appStore, (s) => s.processListSelIdx);
   const runningBSelIdx = useStore(appStore, (s) => s.runningBSelIdx);
   const sel = useStore(appStore, (s) => s.sel);
@@ -551,7 +555,18 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     }
   }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput, client, scene, t]);
 
+  const decisionKeysActive = Boolean(pendingDecision?.options.length && !decisionComposing
+    && !chatInputFocused && !statusBarFocused && mode !== "COMMAND");
+  const commandTriggerActive = scene === "projects" || scene === "process_list"
+    ? cmdInput.value === "" : textInput.value === "" && mode !== "COMMAND";
+
   // ── Keyboard dispatch (global) ───────────────────────────
+  useInput((input, key) => {
+    if (!isBindingAction("advancement.toggle", input, key)) return false;
+    void advancement.toggle();
+    return true;
+  }, {isActive: overlayStack.length === 0 && (scene === "workspace" || scene === "agent_detail"),
+    priority: 10, bindingContext: "task", clipboard: false});
   useInput((input: string, key: any) => {
     const ctx: InputContext = {
       scene,
@@ -586,7 +601,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       interruptTarget: resolveInterruptTarget(),
     };
     applyInputActions(resolveSceneKey(ctx, input, key));
-  }, { isActive: overlayStack.length === 0 });
+  }, { isActive: overlayStack.length === 0, bindingContext: decisionKeysActive ? "decision" : commandTriggerActive ? "scene" : "" });
 
   // ── Render ───────────────────────────────────────────────
   const w = Math.max(1, termCols || 80);
@@ -605,6 +620,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   }, [footerOverride, overlayStack]);
 
   const overlayCtx = {
+    publishState,
     client,
     scene,
     activeProject,
@@ -632,8 +648,9 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     onUpdateExit,
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
+  const overlayBindingContext = ["createForm", "exportPanel"].includes(topOverlay?.type || "") ? "form" : "";
   const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");
-  const runtimeOwnsViewport = ["processDetail", "help", "runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview", "updatePanel"].includes(topOverlay?.type || "");
+  const runtimeOwnsViewport = ["processDetail", "help", "configPanel", "runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview", "updatePanel", "publishPanel"].includes(topOverlay?.type || "");
   const footerDrawer = inlineOverlay
     ? topOverlay?.type === "btwPanel"
       ? <Box maxHeight={Math.max(8,Math.floor(h/2))} minHeight={0} flexDirection="column" flexShrink={0}><InputLayer priority={100}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer></Box>
@@ -650,8 +667,8 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       <Box flexGrow={1} flexBasis={0} minHeight={0} overflow="hidden" display={scene === "workspace" && (!topOverlay || inlineOverlay) ? "none" : "flex"}>
       {overlayStack.length > 0 && !inlineOverlay ? (
         runtimeOwnsViewport
-          ? <InputLayer priority={100}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer>
-          : <ScrollableInputLayer>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
+          ? <InputLayer priority={100} bindingContext={overlayBindingContext}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer>
+          : <ScrollableInputLayer bindingContext={overlayBindingContext}>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
       ) : loading ? (
         <Box paddingLeft={1} paddingTop={1}><Text dimColor>{t({en:"Loading projects…",zh:"正在读取项目…"})}</Text></Box>
       ) : scene === "process_list" && activeProject ? (
@@ -723,9 +740,13 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       <CommandBar
         width={w}
         mode={mode}
+        advancement={advancement.value?.phase === "effective" ? advancement.value.mode : null}
+        advancementPending={advancement.pending}
         textInput={textInput}
         cmdInput={cmdInput}
-        cmdResult={cmdResult || (scene !== "projects" && !topOverlay && loopData.error ? t({en:`Runtime status unavailable: ${loopData.error}`,zh:`运行状态不可用：${loopData.error}`}) : "")}
+        cmdResult={cmdResult || advancement.error || (advancement.value?.continuation_error
+          ? t({en:`Task continuation paused: ${advancement.value.continuation_error}`,zh:`任务恢复已暂停：${advancement.value.continuation_error}`})
+          : scene !== "projects" && !topOverlay && loopData.error ? t({en:`Runtime status unavailable: ${loopData.error}`,zh:`运行状态不可用：${loopData.error}`}) : "")}
         statusText={derivedStatus}
         suggestions={suggestions}
         suggestionIdx={suggestionIdx}

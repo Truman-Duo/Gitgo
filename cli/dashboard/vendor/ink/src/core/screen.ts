@@ -1,8 +1,8 @@
 import {
   type AnsiCode,
   ansiCodesToString,
-  diffAnsiCodes,
 } from '@alcalzone/ansi-tokenize'
+import {diffAnsiCodes} from './ansi-style-diff.js'
 import {
   type Point,
   type Rectangle,

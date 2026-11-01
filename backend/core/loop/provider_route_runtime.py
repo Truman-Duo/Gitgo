@@ -17,6 +17,18 @@ class ProviderRouteRuntime:
         if discovery is not None:
             self.discovery = discovery
         self.envelope = _build_current_turn_envelope(self.process, tools_param, self.discovery)
+        from .provider_context import ContextSections
+        from .provider_tool_transport import catalog, GUIDANCE
+        if tools_param:
+            self.envelope = ContextSections(str(self.envelope), {**self.envelope.sections,
+                'runtime.tool_transport':GUIDANCE, 'runtime.tool_contracts':catalog(tools_param)},
+                scope=self.envelope.scope)
+        from backend.core.mechanism_runtime.application import bound_application
+        composition = bound_application(self.process)
+        if composition:
+            sections = composition.context_sections()
+            self.envelope = ContextSections(str(self.envelope) + composition.envelope(sections=sections),
+                {**self.envelope.sections, **sections}, scope=self.envelope.scope)
 
     def selected(self, artifact):
         if artifact.get('event') != 'provider_route_selected':

@@ -3,6 +3,7 @@ import { Box, Text } from "@anthropic/ink";
 import type { Color } from "@anthropic/ink";
 import type { RuntimeNotice, RuntimeNoticeSeverity } from "../types.js";
 import { colors } from "../theme/index.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 function severityColor(severity: RuntimeNoticeSeverity): Color {
   switch (severity) {
@@ -16,6 +17,7 @@ function severityColor(severity: RuntimeNoticeSeverity): Color {
 export function RuntimeNoticeList({
   notices, verbose = true,
 }: { notices: RuntimeNotice[]; verbose?: boolean }) {
+  const t=useCopy();
   if (notices.length === 0) return null;
   // runtimeNotices already filters routine control-plane churn.  What remains
   // is actionable or semantically meaningful in both compact and verbose mode;
@@ -23,7 +25,7 @@ export function RuntimeNoticeList({
   const visible = notices;
   return (
     <Box flexDirection="column" paddingLeft={2} marginTop={1}>
-      {verbose ? <Text dimColor>trajectory</Text> : null}
+      {verbose ? <Text dimColor>{t({en:"trajectory",zh:"轨迹"})}</Text> : null}
       {visible.map((notice) => <RuntimeNoticeRow key={notice.key} notice={notice} verbose={verbose}/>)}
     </Box>
   );
@@ -32,6 +34,7 @@ export function RuntimeNoticeList({
 export function RuntimeNoticeRow({
   notice, verbose = true,
 }: { notice: RuntimeNotice; verbose?: boolean }) {
+  const t=useCopy();
   return <Box flexDirection="column">
     <Box flexDirection="row">
       <Text color={severityColor(notice.severity)}>◆ </Text>
@@ -43,7 +46,7 @@ export function RuntimeNoticeRow({
     {notice.detail || (verbose && notice.detail_ref) ? <Box paddingLeft={2}>
       <Text dimColor>
         {notice.detail || ""}{notice.detail && verbose && notice.detail_ref ? " · " : ""}
-        {verbose && notice.detail_ref ? "trace ref available" : ""}
+        {verbose && notice.detail_ref ? t({en:"trace ref available",zh:"可查看轨迹引用"}) : ""}
       </Text>
     </Box> : null}
   </Box>;

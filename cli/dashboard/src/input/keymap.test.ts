@@ -236,7 +236,7 @@ describe("parameterised command completion", () => {
     ]);
   });
 
-  test("Tab fills /btw without duplicating the rendered slash", () => {
+  test("Tab no longer accepts or cycles command suggestions", () => {
     const ctx = context({
       mode: "COMMAND",
       cmdValue: "bt",
@@ -245,24 +245,21 @@ describe("parameterised command completion", () => {
         label: "/btw", description: "Isolated Side Question", inputMode: "fill",
       }],
     });
-    assert.ok((resolveCommandInput(ctx, "", { tab: true })).some(item => isDeepStrictEqual(item, {
-      kind: "text", buffer: "cmd", op: { op: "set_value", text: "btw " },
-    })));
+    assert.deepEqual(resolveCommandInput(ctx, "", {tab: true}), []);
+    assert.deepEqual(resolveCommandInput(ctx, "", {tab: true, shift: true}), []);
   });
 
-  test("Tab completes every chat command without duplicating the rendered slash", () => {
+  test("Tab leaves the selected chat command unchanged", () => {
     const ctx = context({
       mode: "COMMAND",
       cmdValue: "co",
       cmdCursor: 2,
       suggestions: [{ label: "/compact", description: "Compact context" }],
     });
-    assert.ok((resolveCommandInput(ctx, "", { tab: true })).some(item => isDeepStrictEqual(item, {
-      kind: "text", buffer: "cmd", op: { op: "set_value", text: "compact" },
-    })));
+    assert.deepEqual(resolveCommandInput(ctx, "", {tab: true}), []);
   });
 
-  test("Tab preserves the slash when the command bar itself owns it", () => {
+  test("Tab leaves the non-chat command editor unchanged", () => {
     const ctx = context({
       scene: "projects",
       mode: "COMMAND",
@@ -270,9 +267,7 @@ describe("parameterised command completion", () => {
       cmdCursor: 3,
       suggestions: [{ label: "/stats", description: "Usage overview" }],
     });
-    assert.ok((resolveCommandInput(ctx, "", { tab: true })).some(item => isDeepStrictEqual(item, {
-      kind: "text", buffer: "cmd", op: { op: "set_value", text: "/stats" },
-    })));
+    assert.deepEqual(resolveCommandInput(ctx, "", {tab: true}), []);
   });
 });
 
@@ -301,4 +296,33 @@ test("neutral question row composes no selected option and D never confirms a ch
  const discuss=resolveSceneKey({...ctx,decisionSelection:0},"d",{});
  assert.ok(discuss.some(a=>a.kind==="text"&&a.op.op==="set_value"&&a.op.text.startsWith("Discuss option 1")));
  assert.ok(!discuss.some(a=>a.kind==="effect"));
+});
+
+import {InputBindingRegistry, BINDING_DEFINITIONS, INPUT_ACTIONS, bindingFromEvent} from "./router.js";
+import {resolveTrialKey} from "./overlays/trial.js";
+import {resolveFormalKey} from "./overlays/formal.js";
+
+test("every catalog default decodes in its declared context and scoped handlers keep their meaning",()=>{
+ const registry=new InputBindingRegistry();registry.configure({version:1,overrides:{}});
+ for(const item of BINDING_DEFINITIONS){
+  const physical=INPUT_ACTIONS[item.id];
+  const event={input:physical.key.length===1?physical.key:"",key:{...physical,...(physical.key.length>1?{[physical.key]:true}:{})}};
+  delete (event.key as any).key;
+  const normalized=registry.normalize(event,item.contexts.find(c=>c!=="*")||"");
+  assert.equal(normalized.key.bindingAction,item.id,item.id);
+ }
+ registry.configure({version:1,overrides:{"decision.conditions":{key:"j",ctrl:true},"decision.option1":{key:"q"},
+  "trial.accept":{key:"j",ctrl:true},"formal.delete":{key:"j",ctrl:true},"command.open":{key:"o",ctrl:true}}});
+ const decision=context({decisionOptionLabels:["first","second"],decisionAllowFreeForm:true});
+ let event=registry.normalize({input:"j",key:{ctrl:true}},"decision");
+ assert.ok(resolveSceneKey(decision,event.input,event.key).some(a=>a.kind==="state"&&a.action.type==="set_decision_composing"));
+ event=registry.normalize({input:"q",key:{}},"decision");
+ assert.ok(resolveSceneKey(decision,event.input,event.key).some(a=>a.kind==="state"&&a.action.type==="set_decision_selection"&&a.action.index===0));
+ event=registry.normalize({input:"j",key:{ctrl:true}},"trial");assert.deepEqual(resolveTrialKey(false,event.input,event.key),[{type:"triage",action:"accept"}]);
+ event=registry.normalize({input:"j",key:{ctrl:true}},"formal");assert.deepEqual(resolveFormalKey(false,event.input,event.key),[{type:"delete"}]);
+ event=registry.normalize({input:"o",key:{ctrl:true}},"scene");
+ assert.ok(resolveSceneKey(context({scene:"projects",mode:"COMMAND"}),event.input,event.key).length>0);
+ assert.deepEqual(registry.normalize({input:"",key:{leftArrow:true,shift:true}}),{input:"",key:{}});
+ assert.equal(bindingFromEvent({input:"paste",key:{paste:true}}),null);
+ assert.deepEqual(bindingFromEvent({input:"j",key:{ctrl:true,shift:true}}),{key:"j",ctrl:true,shift:true});
 });

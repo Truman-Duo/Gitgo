@@ -16,8 +16,8 @@ export const createProject = (c: BackendClient, p: {
   llm_provider?: string;
 }) => c.callTool("project.create", p);
 export const publishGet = (c: BackendClient, project: string) => c.callTool("publish.get", {project});
-export const publishSet = (c: BackendClient, project: string, section: string, value: unknown) =>
-  c.callTool("publish.set", {project, section, value});
+export const publishSet = (c: BackendClient, project: string, section: string, value: unknown, expectedValue?: unknown) =>
+  c.callTool("publish.set", {project, section, value, ...(expectedValue !== undefined ? {expected_value: expectedValue} : {})});
 export const listArchivedProjects = (c: BackendClient) => c.callTool("project.list_archived");
 export const enterProject = (c: BackendClient, name: string) => c.callTool("project.enter", {name});
 export const archiveProject = (c: BackendClient, name: string) => c.callTool("project.archive", { name });
@@ -62,6 +62,8 @@ export const formalEditMessage = (c: BackendClient, project: string, index: numb
 export const formalDelete = (c: BackendClient, project: string, index: number) => c.callTool("formal.delete", { project, index });
 export const formalDissolve = (c: BackendClient, project: string, index: number) => c.callTool("formal.dissolve", { project, index });
 export const loopStatus = (c: BackendClient, project: string) => c.callTool("runtime.status", { project });
+export const taskMechanism = (c: BackendClient, project: string, processId: string, args: Record<string, unknown> = {}) =>
+  c.callTool("runtime.mechanism", {project, process_id: processId, ...args});
 export const runtimeSummaries = (c: BackendClient) => c.callTool("runtime.summaries");
 export const runtimeUsage = (
   c: BackendClient, project = "", limit = 100, cursor = "",
@@ -97,6 +99,11 @@ export const cancelBtw = (
 export const saveBtwNote = (
   c: BackendClient, project: string, sidecarId: string, note: string,
 ) => c.callTool("runtime.btw.note", { project, sidecar_id: sidecarId, note });
+export const adoptBtw = (
+  c: BackendClient, project: string, processId: string, taskId: string, expectedRevision: number,
+  sidecarId: string, discussionRef: string, mode: "boundary" | "interrupt",
+) => c.callTool("runtime.btw.adopt", { project, process_id: processId, task_id: taskId,
+  expected_revision: expectedRevision, sidecar_id: sidecarId, discussion_ref: discussionRef, mode }, 330);
 export const sendRuntimeFeedback = (
   c: BackendClient, project: string, processId: string, message: string,
   onEvent?: (event: Record<string, any>) => void,
@@ -119,6 +126,8 @@ export const discardRecovery = (
 ) => c.callTool("runtime.recovery.discard", { project, process_id: processId, reason });
 export const configGet = (c: BackendClient) => c.callTool("config.get");
 export const detectTerminals = (c: BackendClient) => c.callTool("config.terminals", {}, 15);
+export const startupTerminals = (c: BackendClient, attached: boolean) =>
+  c.callTool("config.terminals", {startup: true, attached}, 15);
 export const configSet = (c: BackendClient, key: string, value: any) => c.callTool("config.set", { key, value });
 export const testWebSearchConfig = (c: BackendClient) => c.callTool("config.web_search.test", {}, 35);
 export const templateList = (c: BackendClient) => c.callTool("template.list");

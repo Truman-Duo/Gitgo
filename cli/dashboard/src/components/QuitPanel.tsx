@@ -1,10 +1,12 @@
+import {SelectionText} from "./Selection.js";
 // src/components/QuitPanel.tsx — truthful graceful-exit panel.
 import React, { memo, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../input/runtime.js";
 import { resolveQuitKey } from "../input/overlays/quit.js";
-import { colors, useSelectionStyle } from "../theme/index.js";
+import { colors} from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 type Props = {
   onQuit: () => void;
@@ -12,11 +14,12 @@ type Props = {
 };
 
 const OPTIONS = [
-  { label: "Quit", desc: "Close the Native Host and its managed daemons, then exit", action: "quit" as const },
-  { label: "Cancel", desc: "Return to dashboard", action: "cancel" as const },
+  { label: {en:"Quit",zh:"退出"}, desc: {en:"Close the Native Host and its managed daemons, then exit",zh:"关闭当前宿主和受管进程，然后退出"}, action: "quit" as const },
+  { label: {en:"Cancel",zh:"取消"}, desc: {en:"Return to dashboard",zh:"返回看板"}, action: "cancel" as const },
 ];
 
 export const QuitPanel = memo(function QuitPanel({ onQuit, onCancel }: Props) {
+  const t=useCopy();
   const [sel, setSel] = useState(0);
 
   useInput((input: string, key: any) => {
@@ -38,32 +41,32 @@ export const QuitPanel = memo(function QuitPanel({ onQuit, onCancel }: Props) {
   return (
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
-        <Text bold>Quit gitgo</Text>
+        <Text bold>{t({en:"Quit Gitgo",zh:"退出 Gitgo"})}</Text>
       </Box>
 
       {OPTIONS.map((opt, i) => {
         const active = i === sel;
-        const optStyle = useSelectionStyle(active ? "focused" : "non-focused", "block", "success");
+
         return (
           <Box key={opt.action} flexDirection="column" marginBottom={1}>
             <Box>
-              <Text
-                color={optStyle.fg}
-                backgroundColor={optStyle.bg}
-                bold={optStyle.bold}
+              <SelectionText selected={active} variant="block" accent={"success"}
+
+
+
               >
-                {opt.label}
-              </Text>
+                {t(opt.label)}
+              </SelectionText>
             </Box>
             <Box paddingLeft={2}>
-              <Text dimColor={!active}>{opt.desc}</Text>
+              <Text dimColor={!active}>{t(opt.desc)}</Text>
             </Box>
           </Box>
         );
       })}
 
       <Box marginTop={1}>
-        <Text dimColor>{chordLabel("upDown")} select  {chordLabel("enter")} confirm  {chordLabel("escape")} cancel</Text>
+        <Text dimColor>{t({en:"↑/↓ select · Enter confirm · Esc cancel",zh:"↑/↓ 选择 · Enter 确认 · Esc 取消",keys:true})}</Text>
       </Box>
     </Box>
   );

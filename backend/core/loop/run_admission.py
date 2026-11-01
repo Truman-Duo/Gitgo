@@ -70,6 +70,8 @@ def _create_tool_context(process, surface, observations, workspace):
         event_bus=bus, cancellation=process.cancellation_event, storage=process.bound_storage)
     surface.ctx = ctx
     ctx.artifacts['tool_catalog'] = surface.tools
+    ctx.artifacts['mechanism_dependencies'] = surface.known_tools
+    ctx.artifacts['synchronize_mechanism_consumers'] = surface.synchronize
     frontend = observations.publish if observations.frontend is not None else None
     ctx.artifacts['engineering_workflow'] = EngineeringWorkflow(process, frontend)
     transcript = TaskTranscriptBuilder(task_id=process.process_id)

@@ -6,6 +6,7 @@ import type { ChatScrollHandle, PendingDecision } from "../types.js";
 import type { LoopData } from "../hooks/useLoopData.js";
 import { useChat } from "../hooks/useChat.js";
 import { ChatPanel } from "./ChatPanel.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 type Props = {
   project: string;
@@ -43,6 +44,7 @@ export const ProjectWorkspace = memo(function ProjectWorkspace({
   verbose = false,
   visible = true,
 }: Props) {
+  const t=useCopy();
   const { loading, mainConversation, processes } = loopData;
   const rootProcess = Object.values(processes)
     .filter((process) => process.parent_id === null && process.actor_kind === "supervisor")
@@ -105,7 +107,7 @@ export const ProjectWorkspace = memo(function ProjectWorkspace({
   return (
     <Box flexDirection="column" width={cols} paddingTop={1} flexGrow={1}>
       {loading ? (
-        <Box paddingLeft={1}><Text dimColor>Loading loop data...</Text></Box>
+        <Box paddingLeft={1}><Text dimColor>{t({en:"Loading loop data…",zh:"正在读取会话数据…"})}</Text></Box>
       ) : null}
       <ChatPanel
         client={client}

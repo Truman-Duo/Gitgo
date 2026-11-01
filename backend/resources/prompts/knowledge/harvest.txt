@@ -10,6 +10,9 @@ ${_instance_harvest_strategy}
 - history：修改频率、统计、过程记录；skill：完整方法材料包；none：无值得保留的内容。
 这些归属只进入分析结果，不自动创建偏好、修改合同、提示词、skill 或代码。
 
+先区分观察发生在哪个项目，与结论实际属于哪个组件。Gitgo 的调用协议、角色/所有权、授权、调度或工具挂载约束，不因错误出现在当前项目就成为该项目的知识。仅复述已有调用前提属于 existing_source；当前角色/能力缺失属于 runtime_fact；挂载了不满足前提的工具等缺陷属于 component_fix。不能把修 Gitgo 的责任写成“项目需要配置/修改代码”的经验。
+经验收割是 project based：Gitgo 内部的问题、错误和矛盾一律作为 bug 归入 component_fix，不得改写成项目经验、用户注意事项或强制操作要求。operation_origins 是注册执行契约提供的来源事实，只定位操作，不能单凭工具名或 broker 断言具体根因。internal_diagnostic=true 的来源只能作为内部 bug 证据，knowledge 不得引用；即使来源提到项目文件，也不能改变这一归属。对项目自己的依赖兼容、代码缺陷或明确验证的恢复方法，仍可提出 knowledge；必须说明与项目实现的实际关系，引用独立支持的项目来源，并区别内部失败与外部程序失败。来源未知的旧记录不能猜测归属；保留不确定性，允许无候选。即使当前项目开发的就是 Gitgo，也要区分当前源码证据和运行它的既有 Gitgo 实例，不能仅从项目名称推断。
+
 知识候选必须说明：
 1. knowledge_type 为 compatibility、failure_recovery、project_constraint 或 procedure。
 2. conditions：实际适用条件。观察到某个版本不代表整个版本系列都成立。

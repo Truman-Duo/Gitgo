@@ -799,3 +799,112 @@ def test_child_sandbox_access_is_ready_before_model_and_retired_before_terminal(
         if failure_stage == "prepare": assert "model" not in calls
         assert (repo/"app.txt").read_text() == "base\n"
     manager.dispose_process_worktree(child,keep_ref=False)
+
+
+@pytest.mark.parametrize("resume_mode", ["auto", "manual"])
+def test_child_manual_wait_resumes_same_worktree_through_access_lifecycle(
+    tmp_path_factory, monkeypatch, worktree_case, resume_mode,
+):
+    from types import SimpleNamespace
+    import queue
+    from backend.core.loop import executor as executor_module, mechanisms
+    from backend.core.loop.agent_tool import AgentTool, ToolEffect
+    from backend.core.loop.execution_contract import data_broker
+    from backend.core.loop.execution_context import ExecutionContext
+    from backend.core.loop.event_bus import EventBus
+    from backend.core.loop.tool_batch_runtime import ToolBatchRuntime
+    from backend.core.loop.engineering_workflow import EngineeringWorkflow
+    from backend.core.daemon.mechanism_control import resume_waiters
+    from backend.core.daemon.dispatch import _cmd_task
+    repo = _repo(tmp_path_factory)
+    storage, manager = worktree_case(repo, tmp_path_factory / "state")
+    manager.session_store = SessionStore(str(repo), storage=storage)
+    calls, executions, paths, instructions = [], [], [], []
+    cleaning, retire = threading.Event(), threading.Event()
+    class Access:
+        active = False
+        def prepare(self, lease):
+            assert not self.active
+            self.active = True
+            calls.append("prepare")
+        def release(self, process_id):
+            if self.active:
+                if calls.count("prepare") == 1:
+                    cleaning.set()
+                    assert retire.wait(15)
+                calls.append("retire")
+                self.active = False
+    access = Access()
+    manager.worktree_manager.sandbox_access = access
+    supervisor = manager.fork(None, "supervisor",
+        ToolRegistry(CapabilityProfiles.resolve_tools("supervisor.control")), 8, RingLevel.RING_0,
+        workspace_path=str(repo), task_id="mode-resume", task_kind="supervisor",
+        actor_kind="supervisor", capability_profile_id="supervisor.control")
+    mechanisms.activate(supervisor, "manual", 0, manager.session_store)
+    session, project = SimpleNamespace(workspace_path=repo), SimpleNamespace(name="fixture")
+    daemon_ctx = {"apm": manager, "session_store": manager.session_store, "evq": queue.Queue()}
+    manager.on_process_idle = lambda p: resume_waiters(session, project, daemon_ctx)
+    def fake_agent_step(*, process, workspace_path, instruction, **_):
+        assert access.active and process._run_lock.locked()
+        process.status = ProcessStatus.RUNNING
+        process.tool_registry = ToolRegistry(["unit"])
+        paths.append(workspace_path); instructions.append(instruction)
+        ctx = ExecutionContext(process=process, session=process.session, workspace_path=workspace_path,
+                               event_bus=EventBus(), cancellation=process.cancellation_event)
+        ctx.artifacts["engineering_workflow"] = EngineeringWorkflow(process)
+        def write(args):
+            executions.append(args["value"])
+            Path(workspace_path, "app.txt").write_text(args["value"])
+            return {"ok": True}
+        candidate = AgentTool(name="unit", description="fixture", effect=ToolEffect.PROCESS,
+            parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+            execution_contract=data_broker("test.fixture"), execute=write)
+        guard = SimpleNamespace(check_storm_break=lambda *a: None, record_tool_result=lambda *a, **kw: None)
+        batch = ToolBatchRuntime(process, process.session, lambda: {"unit": candidate}, guard, ctx,
+                                 workspace_path, time.time(), lambda *a, **kw: None)
+        batch.commit_results = lambda *a, **kw: None
+        if len(paths) == 1:
+            return batch.execute_live_batch([{"id": "original-call", "name": "unit", "args": {"value": "once"}}]).result
+        saved = process.pending_tool_batch
+        process.pending_tool_batch = None
+        assert batch.execute_resumed_batch(saved) is None
+        process.status = ProcessStatus.COMPLETED
+        process.result = {"status": "completed", "process_id": process.process_id, "metadata": {}}
+        return process.result
+    monkeypatch.setattr(executor_module, "agent_step", fake_agent_step)
+    tools = executor_module._build_internal_tools(supervisor, {}, str(repo), object(),
+        SimpleNamespace(_executors={}), on_stream_event=lambda event: None)
+    delegated = tools["delegate_task"].execute({"task_description": "Change app.txt",
+        "capability_profile_id": "development.workspace", "task_kind": "action",
+        "target_files": ["app.txt"], "acceptance_criteria": ["updated"], "max_steps": 3})
+    child = manager.get(delegated["process_id"])
+    try:
+        assert cleaning.wait(15)
+        assert child.pending_decision and child.pending_decision["kind"] == "manual_execution" and executions == [], child.result
+        original = manager._threads[child.process_id]
+        if resume_mode == "auto":
+            mechanisms.activate(supervisor, "auto", 1, manager.session_store)
+            resume_waiters(session, project, daemon_ctx)
+            assert len(paths) == 1  # Cleanup still owns the first execution.
+        if resume_mode == "manual":
+            emitted = []
+            _cmd_task({"action": "decision", "process_id": child.process_id,
+                       "decision_id": child.pending_decision["decision_id"],
+                       "instruction": "Choose option 1: Run once"}, session, project, daemon_ctx, emitted.append)
+            assert "error" not in emitted[-1], emitted
+            assert len(paths) == 1
+        retire.set(); original.join(15)
+        assert not original.is_alive()
+        deadline = time.monotonic() + 20
+        while (manager._threads[child.process_id] is original or not child.lifecycle_finalized) and time.monotonic() < deadline:
+            time.sleep(.02)
+        _await_worktree_workers(manager, [child.process_id], timeout=20)
+        assert child.status == ProcessStatus.COMPLETED, child.result
+        assert paths[0] == paths[1] and instructions[0].startswith("Change app.txt") and instructions[1] == ""
+        assert calls == ["prepare", "retire", "prepare", "retire"]
+        assert executions == ["once"] and not access.active
+        assert child.approval_grants == []
+        assert (repo / "app.txt").read_text() == "base\n"
+        assert child.budget_lease["state"] == "released"
+    finally:
+        retire.set()

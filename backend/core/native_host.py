@@ -1044,6 +1044,7 @@ class NativeHost:
             "task_description": message[:200],
             "runtime_preferences": {
                 "frontend_origin": dict(self.frontend_origin),
+                "task_maintenance_enabled": True,
                 "auto_compact": bool(host_config.get("auto_compact", True)),
                 "agent_routing": host_config.get("agent_routing", "owner"),
                 "web_search_mode": str(host_config.get("web_search_mode") or "auto"),
@@ -1078,9 +1079,9 @@ class NativeHost:
             command["process_id"] = process_id
             command["manually_verified"] = bool(arguments.get("manually_verified", False))
             command["verification_note"] = str(arguments.get("verification_note") or "")
-        # A decision already identifies its exact process/task. The project cursor
-        # belongs to A and must never be attached to a routed B decision.
-        session_id = self._sessions.get(project) if session_mode == "continue" and action != "decision" else None
+        # Targeted decisions and recovery already identify their process/task.
+        # The active conversation cursor must not select a different session.
+        session_id = self._sessions.get(project) if session_mode == "continue" and action == "chat" else None
         if session_id:
             command["session_id"] = session_id
             command["conversation_process_id"] = self._conversation_processes.get(project, "")
@@ -1184,7 +1185,7 @@ class NativeHost:
                 "agent_elapsed_ms": round(agent_elapsed_ms, 3),
             })
             outcome.setdefault("metadata", {})["timing"] = timing
-            if new_session and action != "decision":
+            if new_session and action == "chat":
                 self._sessions[project] = new_session
                 self._conversation_processes[project] = str(
                     outcome.get("process_id", "")
@@ -1259,6 +1260,38 @@ class NativeHost:
                 self._sessions[project] = str(result["session_id"])
             if updates_root_conversation and result.get("process_id"):
                 self._conversation_processes[project] = str(result["process_id"])
+        return {"project": project, **result}
+
+    def _runtime_advancement(self, arguments: dict) -> dict:
+        project = str(arguments.get("project") or "")
+        if not project:
+            raise OperationError("INVALID_ARGUMENTS", "project is required")
+        client = self._get_daemon(project, start=True)
+        result = client.send_command({
+            "cmd": "mechanism", "process_id": str(arguments.get("process_id") or self._conversation_processes.get(project, "")),
+            **({"mode": arguments["mode"], "expected_revision": arguments.get("expected_revision")}
+               if "mode" in arguments else {}),
+        }, timeout=30)
+        if result.get("error"):
+            raise OperationError("MECHANISM_CHANGE_FAILED", str(result["error"]))
+        if result.get("process_id") and not arguments.get("process_id"):
+            self._conversation_processes[project] = result["process_id"]
+            if result.get("session_id"):
+                self._sessions[project] = result["session_id"]
+        return {"project": project, **result}
+
+    def _runtime_mechanism(self, arguments: dict) -> dict:
+        project = str(arguments.get("project") or "")
+        if not project:
+            raise OperationError("INVALID_ARGUMENTS", "project is required")
+        client = self._get_daemon(project, start=True)
+        result = client.send_command({"cmd": "mechanism", "task_operation": arguments.get("action", "status"),
+            "process_id": str(arguments.get("process_id") or ""),
+            "task_id": str(arguments.get("task_id") or ""), "expected_revision": arguments.get("expected_revision"),
+            **({'instance_id': str(arguments['instance_id'])} if arguments.get('instance_id') else {}),
+            "contract": arguments.get("contract")}, timeout=30)
+        if result.get("error"):
+            raise OperationError("TASK_MECHANISM_REJECTED", str(result["error"]))
         return {"project": project, **result}
 
     def _runtime_compact(self, project: str, process_id: str = "", *,
@@ -1341,8 +1374,29 @@ class NativeHost:
         })
         return {"project": project, **result}
 
+    def _runtime_btw_adopt(self, project: str, arguments: dict, request_id="") -> dict:
+        if not project or arguments.get("mode", "boundary") not in {"boundary", "interrupt"}:
+            raise OperationError("INVALID_ARGUMENTS", "BTW adoption requires a project and boundary/interrupt mode")
+        client = self._get_daemon(project, start=True)
+        if client is None:
+            raise OperationError("RUNTIME_OFFLINE", "Target runtime is offline")
+        process_id = str(arguments.get("process_id") or "")
+        result = client.send_command({"cmd": "task", "action": "btw_adopt", "process_id": process_id,
+            "task_id": str(arguments.get("task_id") or ""), "expected_revision": arguments.get("expected_revision"),
+            "sidecar_id": str(arguments.get("sidecar_id") or ""), "discussion_ref": str(arguments.get("discussion_ref") or "")})
+        if result.get("error"):
+            raise OperationError("BTW_ADOPTION_REJECTED", str(result["error"]))
+        if arguments.get("mode") == "interrupt" and result.get("status") == "pending":
+            self._runtime_stop(project, process_id, reason="btw_interrupt_and_adopt", wait_timeout=30.0)
+            change = result["change"]
+            continued = self._runtime_feedback(project, process_id,
+                "Continue the original task goal and reconcile the explicitly adopted BTW requirement recorded in task_mechanism status.",
+                request_id=request_id, adopted_change={"process_id": process_id, "task_id": change["target_task_id"], "change_id": change["id"]})
+            return {**continued, "adoption": result}
+        return {"project": project, **result}
+
     def _runtime_feedback(
-        self, project: str, process_id: str, message: str, *, request_id: str = "",
+        self, project: str, process_id: str, message: str, *, request_id: str = "", adopted_change=None,
     ) -> dict:
         """Instruct a live B or continue its durable session after termination."""
         if not project or not process_id or not message.strip():
@@ -1360,6 +1414,8 @@ class NativeHost:
         if str(process.get("status") or "") in {
             "running", "waiting", "awaiting_user", "cancelling", "recovering",
         }:
+            if adopted_change is not None:
+                raise OperationError("BTW_CANCELLATION_PENDING", "The adopted change is saved; wait for cancellation/cleanup before continuing it.")
             result = client.send_command({
                 "cmd": "task",
                 "action": "instruct",
@@ -1369,7 +1425,9 @@ class NativeHost:
             })
             return {"project": project, "process_id": process_id, **result}
 
-        task_id = str(uuid.uuid4())
+        task_id = str(adopted_change["task_id"]) if adopted_change is not None else str(uuid.uuid4())
+        if adopted_change is not None and task_id != process.get("active_task_id"):
+            raise OperationError("BTW_ADOPTION_CONTINUATION_CHANGED", "The original task identity changed before continuation.")
         host_config = self.services.config_get()
         hard_seconds = max(self.limits.max_task_seconds, self.limits.max_task_hard_seconds)
         command = {
@@ -1385,6 +1443,7 @@ class NativeHost:
             "max_steps": max(1, min(int(process.get("max_steps") or self.limits.max_agent_steps), self.limits.max_agent_steps)),
             "fresh_task_budget": True,
             "runtime_preferences": {
+                "task_maintenance_enabled": True,
                 "auto_compact": bool(host_config.get("auto_compact", True)),
                 "agent_routing": host_config.get("agent_routing", "owner"),
                 "web_search_mode": str(host_config.get("web_search_mode") or "auto"),
@@ -1402,6 +1461,8 @@ class NativeHost:
                 "initial_seconds": self.limits.max_task_seconds if hard_seconds > self.limits.max_task_seconds else 0,
             },
         }
+        if adopted_change is not None:
+            command["adopted_change_origin"] = dict(adopted_change)
 
         def on_ack(ack: dict) -> None:
             self._emit({
@@ -1414,6 +1475,10 @@ class NativeHost:
             })
 
         complete = client.send_task(command, timeout=hard_seconds + 15, on_ack=on_ack)
+        if adopted_change is not None and not process.get("parent_id"):
+            self._conversation_processes[project] = str(complete.get("process_id") or process_id)
+            if complete.get("session_id"):
+                self._sessions[project] = str(complete["session_id"])
         return {
             "project": project,
             "continued_from_process_id": process_id,
@@ -1498,9 +1563,9 @@ class NativeHost:
                         "host.capabilities", "host.cancel", "runtime.status",
                         "project.overview", "runtime.summaries",
                         "runtime.usage",
-                        "runtime.chat", "runtime.decision", "runtime.feedback", "runtime.stop",
+                        "runtime.chat", "runtime.decision", "runtime.feedback", "runtime.stop", "runtime.advancement", "runtime.mechanism",
                          "runtime.trace", "runtime.compact", "runtime.btw",
-                         "runtime.btw.cancel", "runtime.btw.note",
+                         "runtime.btw.cancel", "runtime.btw.note", "runtime.btw.adopt",
                         "runtime.undo.preview", "runtime.undo",
                         "runtime.recovery.resume",
                         "runtime.recovery.discard"],
@@ -1522,6 +1587,10 @@ class NativeHost:
             return self._cancel(str(arguments.get("request_id", "")))
         if operation == "runtime.status":
             return self._runtime_status(str(arguments.get("project", "")))
+        if operation == "runtime.advancement":
+            return self._runtime_advancement(arguments)
+        if operation == "runtime.mechanism":
+            return self._runtime_mechanism(arguments)
         if operation == "runtime.summaries":
             return self._runtime_summaries()
         if operation == "project.overview":
@@ -1584,6 +1653,8 @@ class NativeHost:
             return self._runtime_btw_note(
                 str(arguments.get("project", "")), arguments,
             )
+        if operation == "runtime.btw.adopt":
+            return self._runtime_btw_adopt(str(arguments.get("project", "")), arguments, request_id=request_id)
         if operation == "runtime.trace":
             return self._runtime_trace(
                 str(arguments.get("project", "")), arguments,
@@ -1715,6 +1786,8 @@ class NativeHost:
         if self._stopping.is_set():
             return
         self._stopping.set()
+        publish_runtime = getattr(self.services, "publish_runtime", None)
+        if publish_runtime is not None: publish_runtime.close()
         updates = getattr(self.services, "updates", None)
         if updates is not None: updates.close()
         if self._maintenance_thread is not None:

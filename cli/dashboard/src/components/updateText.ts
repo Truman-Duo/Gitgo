@@ -1,4 +1,9 @@
 export const updateChinese = {
+  "This is not a managed installation. Update settings, downloads and installation are unavailable; only local status refresh is available.": "当前不是受管安装，更新设置、下载和安装不可用；仅可刷新本地状态。",
+  "Only Refresh is available · Enter refresh · Esc close · ↑/↓ browse overflow": "仅刷新可用 · Enter 刷新 · Esc 关闭 · 内容超出时 ↑/↓ 浏览",
+  "↑/↓ browse · PgUp/PgDn page · Enter refresh · Esc close": "↑/↓ 浏览 · PgUp/PgDn 翻页 · Enter 刷新 · Esc 关闭",
+  "←/→ choose · Enter save · Esc cancel": "←/→ 选择 · Enter 保存 · Esc 取消",
+  "↑/↓ select · Enter open · Esc close": "↑/↓ 选择 · Enter 打开 · Esc 关闭",
   "Gitgo Software Update": "Gitgo 软件更新",
   "Reading local update status…": "正在读取本地更新状态…",
   "Checking publisher-signed release metadata…": "正在检查发行方签名信息…",
@@ -31,6 +36,7 @@ export const updateChinese = {
   "Restart/update is unavailable here: use a supported managed launcher with complete process cleanup.": "此处无法重启更新，请使用支持完整进程清理的受管启动器。",
   "Select Restart / update to review.": "选择重启 / 更新以查看确认信息。",
   "Retained version  ": "保留版本    ",
+  "This update migrated data. Restoring the previous program requires a compatible reverse migration; current user data will not be replaced by an old snapshot.": "此次更新已迁移数据。回滚程序需要兼容的逆向迁移；不会用旧快照覆盖当前用户数据。",
   "Select Rollback to review the retained version.": "选择回滚以查看保留版本。",
   "Check now": "立即检查",
   "Download selected release": "下载选定版本",

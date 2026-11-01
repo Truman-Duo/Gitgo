@@ -53,6 +53,10 @@ class AgentProcessManager:
         # same source paths; writers and snapshot reviewers remain exclusive.
         self._resource_claims: dict[str, tuple[set[str], str]] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._continuations: dict[str, tuple] = {}
+        self._resume_queued: set[str] = set()
+        self._continuation_lock = threading.RLock()
+        self.on_process_idle = None
         self._state_condition = threading.Condition()
         self._state_version = 0
         self.worktree_manager = worktree_manager
@@ -155,6 +159,15 @@ class AgentProcessManager:
             )
 
         try:
+            # A child binds the task mechanism instance; never copy an effective
+            # mode that could become stale while its parent keeps running.
+            preferences = dict(runtime_preferences if runtime_preferences is not None
+                               else getattr(parent, "runtime_preferences", {}))
+            if parent is not None:
+                from .mechanisms import owner
+                preferences.pop("mechanisms", None)
+                preferences.pop("manual_unit_ticket", None)
+                preferences["mechanism_owner_id"] = owner(parent).process_id
             process = AgentRuntimeFactory.create(
                 RuntimeSpec(
                     role=role,
@@ -174,11 +187,7 @@ class AgentProcessManager:
                     task_kind=task_kind,
                     required_test_ids=tuple(required_test_ids or []),
                     task_budget=task_budget,
-                    runtime_preferences=(
-                        runtime_preferences
-                        if runtime_preferences is not None
-                        else getattr(parent, "runtime_preferences", {})
-                    ),
+                    runtime_preferences=preferences,
                 ),
                 session=session,
             )
@@ -217,7 +226,7 @@ class AgentProcessManager:
         return process
 
     def start(self, process_id: str, target, *, resources: list[str] | None = None,
-              resource_mode: str = "exclusive", on_terminal=None) -> None:
+              resource_mode: str = "exclusive", on_terminal=None, resume_target=None) -> None:
         """Run a child asynchronously under concurrency and resource bounds.
 
         ``shared`` claims can overlap each other.  ``exclusive`` claims conflict
@@ -233,6 +242,10 @@ class AgentProcessManager:
         resource_mode = str(resource_mode).strip().lower()
         if resource_mode not in {"shared", "exclusive"}:
             raise ValueError("resource_mode must be shared or exclusive")
+        if not process._run_lock.acquire(blocking=False):
+            raise ValueError(f"Process execution active: {process_id}")
+        if resume_target is not None:
+            self._continuations[process_id] = (resume_target, list(claims), resource_mode, on_terminal)
 
         def run() -> None:
             process.lifecycle_finalized = False
@@ -255,18 +268,22 @@ class AgentProcessManager:
                                           "error": "cancelled while waiting for resources", "code": "TASK_CANCELLED"}
                         return
                     result = target()
-                    if isinstance(result, dict):
+                    if (isinstance(result, dict) and not (
+                            result.get("status") == "awaiting_user"
+                            and process.status != ProcessStatus.AWAITING_USER)):
+                        # A durable answer can arrive while the old child is
+                        # retiring access. It owns the next state already.
                         process.result = result
             except Exception as exc:
                 transition(process, ProcessStatus.FAILED)
                 process.result = {"process_id": process.process_id, "status": "failed", "error": str(exc)}
             finally:
-                self._release_resources(process.process_id)
-                if process.task_budget is not None:
-                    released = process.task_budget.release_process(process.process_id, status=process.status.value)
-                    if released is not None:
-                        process.budget_lease = released
                 try:
+                    self._release_resources(process.process_id)
+                    if process.task_budget is not None:
+                        released = process.task_budget.release_process(process.process_id, status=process.status.value)
+                        if released is not None:
+                            process.budget_lease = released
                     # The callback invokes the existing durable checkpoint
                     # barrier before dependencies or UI can observe finality.
                     if on_terminal is not None:
@@ -282,13 +299,75 @@ class AgentProcessManager:
                         "code": "SESSION_CHECKPOINT_FAILED", "error": str(exc),
                         "metadata": {"durable_terminal_barrier": False, "automatic_replay_suppressed": True}}
                 finally:
-                    self.notify_state_changed(process.process_id)
+                    try:
+                        self.notify_state_changed(process.process_id)
+                    finally:
+                        process._run_lock.release()
+                    from .lifecycle import TERMINAL
+                    if process.status.value in TERMINAL:
+                        with self._continuation_lock:
+                            self._continuations.pop(process_id, None)
+                    if self.on_process_idle is not None:
+                        try:
+                            self.on_process_idle(process)
+                        except Exception as exc:
+                            process.runtime_preferences["mechanism_resume_blocked"] = str(exc)
+                            self.notify_state_changed(process.process_id)
 
         thread = threading.Thread(
             target=run, name=f"gitgo-agent-{process_id[:8]}", daemon=True,
         )
         self._threads[process_id] = thread
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            process._run_lock.release()
+            raise
+
+    def has_continuation(self, process_id: str) -> bool:
+        """A live runner descriptor is scheduling data, never restored authority."""
+        return process_id in self._continuations
+
+    def resume_child(self, process_id: str, instruction: str = "") -> None:
+        """Re-enter the original lifecycle after its cleanup/checkpoint finishes."""
+        process = self._processes.get(process_id)
+        descriptor = self._continuations.get(process_id)
+        if process is None or not process.parent_id or descriptor is None:
+            raise ValueError("CHILD_CONTINUATION_UNAVAILABLE")
+        with self._continuation_lock:
+            if process_id in self._resume_queued:
+                return
+            self._resume_queued.add(process_id)
+            previous = self._threads.get(process_id)
+
+        def resume():
+            queued = True
+            try:
+                if previous is not None:
+                    previous.join()
+                if process.cancellation_event.is_set() or process.status != ProcessStatus.RUNNING:
+                    return
+                target, resources, mode, terminal = descriptor
+                with self._continuation_lock:
+                    self._resume_queued.discard(process_id)
+                    queued = False
+                    process.runtime_preferences.pop("mechanism_resume_blocked", None)
+                    self.start(process_id, lambda: target(instruction), resources=resources,
+                               resource_mode=mode, on_terminal=terminal, resume_target=target)
+            except Exception as exc:
+                process.runtime_preferences["mechanism_resume_blocked"] = str(exc)
+                self.notify_state_changed(process_id)
+            finally:
+                if queued:
+                    with self._continuation_lock:
+                        self._resume_queued.discard(process_id)
+
+        try:
+            threading.Thread(target=resume, name=f"gitgo-resume-{process_id[:8]}", daemon=True).start()
+        except Exception:
+            with self._continuation_lock:
+                self._resume_queued.discard(process_id)
+            raise
 
     def register_thread(self, process_id: str, thread: threading.Thread) -> None:
         """Register a root task thread so recursive cancellation can await it."""
@@ -298,6 +377,11 @@ class AgentProcessManager:
         """Publish a checkpoint-rebuilt process without creating new authority."""
         if process.process_id in self._processes:
             raise ValueError(f"Process already registered: {process.process_id}")
+        # Historical process checkpoints can address one continuing session.
+        # Keep one live session object (and one mechanism fence) for that identity.
+        existing_session = self._sessions.get(process.session.session_id)
+        if existing_session is not None:
+            process.session = existing_session
         from backend.core.loop.runtime import AgentRuntimeFactory
         AgentRuntimeFactory.assert_valid(process)
         if process.task_budget is not None:
@@ -562,6 +646,40 @@ class AgentProcessManager:
                         "state": "task_snapshot",
                         "isolated": False,
                     }
+            process.worktree = lease.to_dict()
+            process.worktree_path = lease.path
+            return lease.path
+
+    def resume_process_worktree(self, process: AgentProcess) -> str:
+        """Validate and reuse this parked execution's lease without resnapshotting."""
+        from backend.core.loop.worktree import WorktreeError, WorktreeLease
+        manager = self.worktree_manager
+        if manager is None:
+            raise WorktreeError("worktree runtime is unavailable")
+        with self._worktree_lock:
+            state = manager.storage.load_worktree_state(process.process_id)
+            lease = WorktreeLease.from_dict(state or {}) if state else None
+            previous = process.worktree or {}
+            if (lease is None or lease.state not in {"leased", "review_ready"}
+                    or lease.process_id != process.process_id
+                    or previous.get("task_id") != process.active_task_id
+                    or (lease.task_id is not None and lease.task_id != process.active_task_id)
+                    or Path(lease.root_workspace).resolve() != manager.repo_root.resolve()
+                    or Path(lease.path).resolve() != manager._target_path(manager._safe_id(process.process_id)).resolve()
+                    or any(state.get(key) != previous.get(key)
+                           for key in ("worktree_id", "process_id", "path", "mode", "snapshot_commit", "base_commit"))):
+                raise WorktreeError("parked worktree lease is missing or changed")
+            if not manager.verify(lease).get("valid"):
+                raise WorktreeError("parked worktree is no longer valid")
+            # The worktrees table deliberately leaves its task FK null when
+            # creation precedes the first session checkpoint. The same live
+            # process and its original lease still own the stable task id.
+            lease.task_id = process.active_task_id
+            common = manager._git_text(Path(lease.path), "rev-parse", "--git-common-dir")
+            expected = manager._git_text(manager.repo_root, "rev-parse", "--git-common-dir")
+            if ((Path(lease.path) / common).resolve()
+                    != (manager.repo_root / expected).resolve()):
+                raise WorktreeError("parked worktree belongs to a different repository")
             process.worktree = lease.to_dict()
             process.worktree_path = lease.path
             return lease.path
@@ -1051,11 +1169,13 @@ class SessionStore:
         "provider_usage", "cache_telemetry", "context_inventory", "epoch_archive",
         "steering_sequence", "compiled_prompt_hash", "compiled_prompt_sections", "stable_prefix_hash",
         "last_cache_intent_key", "last_cache_context_epoch",
+        "provider_tool_order", "provider_context_cache", "provider_context_seed",
         "active_provider_route",
         "manual_compact_requested",
         "force_compact_requested", "context_abort_requested",
         "compaction_failure_count", "last_compaction_error",
         "pending_compaction_decision",
+        "mechanism_instances", "mechanism_activation_blocked", "authority_sequence",
     )
 
     def __init__(
@@ -1077,10 +1197,13 @@ class SessionStore:
 
     @staticmethod
     def _session_metadata(session: "AgentSession") -> dict:
-        return {
+        metadata = {
             key: getattr(session, key)
             for key in SessionStore._METADATA_FIELDS
         }
+        from .provider_context import durable_cache
+        metadata['provider_context_cache'] = durable_cache(session.provider_context_cache)
+        return metadata
 
     def save_checkpoint(self, process_id: str, session: "AgentSession") -> str:
         """Persist a compatibility checkpoint without process/task metadata."""
@@ -1104,7 +1227,7 @@ class SessionStore:
             process._checkpoint_lock = lock
         from backend.core.storage import StorageCommitUnknown
         try:
-            with lock:
+            with process.session._mechanism_lock, lock:
                 restored_source = getattr(process.session, "_restored_checkpoint_source", None)
                 if restored_source is not None and restored_source[0] == process.process_id:
                     process.durable_revision = restored_source[1]

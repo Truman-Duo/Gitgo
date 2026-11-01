@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
+from functools import wraps
 import os
 from pathlib import Path
 import stat
@@ -13,6 +14,52 @@ from .validation import json_object, reject, number, text
 
 
 MAX_CONTROL_BYTES = 256 * 1024
+
+
+@contextmanager
+def private_namespace(path):
+    if os.name == "nt":
+        from .windows_storage import private_namespace as windows_namespace
+        with windows_namespace(path): yield
+    else: yield
+
+
+def pinned_initialization(function):
+    @wraps(function)
+    def wrapped(root, seed, *args, **kwargs):
+        if not isinstance(root, Path) or not isinstance(seed, Path):
+            # Preserve the callee's platform/argument gate before path I/O.
+            return function(root, seed, *args, **kwargs)
+        with private_namespace(root), private_namespace(seed):
+            return function(root, seed, *args, **kwargs)
+    return wrapped
+
+
+def pinned_registration(function):
+    @wraps(function)
+    def wrapped(self, *args, **kwargs):
+        with private_namespace(self.root): return function(self, *args, **kwargs)
+    return wrapped
+
+
+def pinned_context(function):
+    @wraps(function)
+    @contextmanager
+    def wrapped(self, *args, **kwargs):
+        with private_namespace(self.root), function(self, *args, **kwargs) as value:
+            yield value
+    return wrapped
+
+
+def pinned_profile(function):
+    @wraps(function)
+    def wrapped(host, profile, *args, **kwargs):
+        with ExitStack() as stack:
+            try: stack.enter_context(private_namespace(profile))
+            except Exception:
+                reject("UPDATE_HEALTH_FAILED", "Probe profile cannot be pinned safely")
+            return function(host, profile, *args, **kwargs)
+    return wrapped
 
 
 def _darwin() -> bool:
@@ -85,7 +132,11 @@ def sync_directory(path: Path) -> None:
         # No POSIX directory fsync on Windows. NTFS replacements below use
         # WRITE_THROUGH; verify the directory boundary instead of claiming a
         # directory FlushFileBuffers succeeded. Physical power loss is separate.
-        from .windows_storage import opened
+        from .windows_storage import opened, pinned_directory, handle_identity
+        retained = pinned_directory(path)
+        if retained is not None:
+            handle_identity(retained)
+            return
         with opened(path): pass
         return
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

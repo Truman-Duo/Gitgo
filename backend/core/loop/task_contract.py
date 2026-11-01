@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
+import uuid
 
 
 EXECUTION_MODES = (
@@ -37,7 +39,7 @@ def semantic_contract(contract):
         'goal', 'execution_mode', 'deliverables', 'acceptance_criteria', 'uncertainties',
         'requires_user_decision', 'estimated_complexity', 'independent_workstreams',
         'delegation_required', 'user_requested_delegation', 'engineering_workflow',
-        'required_tool_calls') if key in contract}
+        'required_tool_calls', 'mechanism', 'maintenance_intent') if key in contract}
 
 
 def _relative_workspace_path(workspace: Path, raw: str) -> str:
@@ -57,6 +59,12 @@ def _relative_workspace_path(workspace: Path, raw: str) -> str:
 
 
 def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any]:
+    if "expected_revision" in args and (type(args["expected_revision"]) is not int or args["expected_revision"] < 0):
+        raise ValueError("expected_revision must be a non-negative integer")
+    mechanism = None
+    if args.get("mechanism") is not None:
+        from .mechanism_catalog import compile_definition
+        mechanism = compile_definition(args["mechanism"])
     goal = str(args.get("goal") or "").strip()
     if not goal:
         raise ValueError("goal is required")
@@ -69,7 +77,7 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
             "delegation_required=true requires execution_mode delegate or either"
         )
     minimum = int(args.get("minimum_delegated_outcomes", 0) or 0)
-    if delegation_required and minimum < 1:
+    if delegation_required and 'minimum_delegated_outcomes' not in args:
         minimum = 1
     if minimum < 0 or minimum > 8:
         raise ValueError("minimum_delegated_outcomes must be between 0 and 8")
@@ -123,7 +131,8 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
                 "user_requested_delegation=true requires execution_mode delegate or either"
             )
         delegation_required = True
-        minimum = max(1, minimum)
+        if 'minimum_delegated_outcomes' not in args:
+            minimum = max(1, minimum)
 
     required_tool_calls = []
     ignored_protocol_requirements = []
@@ -186,6 +195,9 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
             ignored_protocol_requirements
         )),
         **({"engineering_workflow": workflow} if workflow is not None else {}),
+        **({"expected_revision": args["expected_revision"]} if "expected_revision" in args else {}),
+        **({"mechanism": mechanism} if mechanism is not None else {}),
+        **({key: deepcopy(args[key]) for key in ("maintenance", "preview_digest") if key in args}),
     }
 
 
@@ -285,9 +297,7 @@ def compile_routing_proposal(
                 "The user explicitly requested a new B; execution_mode must be delegate or either"
             )
         normalized["delegation_required"] = True
-        normalized["minimum_delegated_outcomes"] = max(
-            1, int(normalized.get("minimum_delegated_outcomes", 0))
-        )
+        normalized.setdefault('minimum_delegated_outcomes', 1)
     elif normalized.get("user_requested_delegation"):
         if normalized.get("execution_mode") not in ("delegate", "either"):
             raise ValueError(
@@ -298,9 +308,7 @@ def compile_routing_proposal(
                 "A semantically explicit subprocess request requires quoted user evidence"
             )
         normalized["delegation_required"] = True
-        normalized["minimum_delegated_outcomes"] = max(
-            1, int(normalized.get("minimum_delegated_outcomes", 0))
-        )
+        normalized.setdefault('minimum_delegated_outcomes', 1)
 
     compiled_candidate = {**candidate, **normalized}
     compiled_advice = routing_advice(compiled_candidate)
@@ -362,29 +370,149 @@ def _compile_contract(process, previous: dict, proposal: dict) -> dict:
         for key in (
             "task_description", "task_kind", "capability_profile_id",
             "required_test_ids", "host_requirements",
+            "maintenance_intent",
+            "target_files", "allowed_tools", "required_for_parent_completion", "input_contract", "output_contract",
         )
         if key in previous
     }
     # Host facts come from explicit UI actions, never natural-language inference.
     requirements = dict(previous.get("host_requirements") or {})
     workflow_started = bool(previous.get("workflow_started") or getattr(process, "successful_actions", 0))
-    normalized, compilation = compile_routing_proposal(previous, proposal, workflow_started=workflow_started)
+    normalized, compilation = compile_routing_proposal(previous,
+        {key: value for key, value in proposal.items() if key not in {"expected_revision", "maintenance", "preview_digest"}}, workflow_started=workflow_started)
     merged.update(normalized)
     if requirements:
         merged["host_requirements"] = requirements
     merged["routing_compilation"] = compilation
     merged["revision"] = revision
     merged["delegation_attempts"] = preserved_attempts
+    # Omission never retires an active plan. Replacement still goes through
+    # EngineeringWorkflow's existing explicit scope-amendment decision.
+    from .engineering_workflow import EngineeringWorkflow, KEY
+    state = EngineeringWorkflow(process)._load()
+    if KEY not in merged and state:
+        merged[KEY] = deepcopy(state["plan"])
+    if "mechanism" not in merged and previous.get("mechanism") and not (getattr(process, "context_snapshot", {}) or {}).get("task_maintenance", {}).get("detached"):
+        merged["mechanism"] = deepcopy(previous["mechanism"])
     return merged
+
+
+class TaskContractRevisionConflict(ValueError):
+    pass
+
+
+def _prepare_contract(process, proposal):
+    previous = get_task_contract(process)
+    revision = int(previous.get("revision", 0) or 0)
+    expected = proposal.get("expected_revision", revision)
+    if type(expected) is not int or expected != revision:
+        raise TaskContractRevisionConflict("TASK_CONTRACT_REVISION_CONFLICT: read the current contract before revising it")
+    contract = _compile_contract(process, previous, proposal)
+    if getattr(process, 'session', None) is not None:
+        from .mechanisms import reconcile_definition
+        reconcile_definition(process, contract)
+    from .engineering_workflow import EngineeringWorkflow, KEY
+    workflow = EngineeringWorkflow(process).configured_state(contract[KEY]) if contract.get(KEY) else None
+    if proposal.get("maintenance"):
+        contract["maintenance_intent"] = {key: deepcopy(value) for key, value in proposal["maintenance"].items() if key != "expected_revision"}
+    maintenance = None
+    if getattr(process, "session", None) is not None:
+        from .task_maintenance import prepare_contract_state
+        maintenance = prepare_contract_state(process, contract, proposal, workflow)
+    if proposal.get("preview_digest"):
+        from .mechanism_catalog import digest
+        if proposal["preview_digest"] != digest(contract):
+            raise TaskContractRevisionConflict("TASK_CONTRACT_PREVIEW_CHANGED: recompile the behavior preview")
+    return contract, workflow, maintenance
 
 
 def preview_contract(process, proposal: dict) -> dict:
     """Use the exact publication compiler without changing state or authority."""
-    return _compile_contract(process, get_task_contract(process), proposal)
+    if getattr(process, "session", None) is not None:
+        from .mechanism_lifecycle import fence
+        with fence(process), process.session._mechanism_lock, process._context_lock:
+            return _prepare_contract(process, proposal)[0]
+    with process._context_lock:
+        return _prepare_contract(process, proposal)[0]
 
 
-def publish_contract(process, proposal: dict) -> dict:
-    return _update_contract(process, lambda previous: _compile_contract(process, previous, proposal))
+def publish_contract(process, proposal: dict, *, store=None) -> dict:
+    """Activate one task revision with its workflow and adopted obligations.
+
+    Production adapters pass their existing SessionStore. Pure compiler callers
+    may omit it; those activations are explicitly marked memory-only.
+    """
+    if getattr(process, "session", None) is None:
+        # Legacy compiler clients have a context but no runnable AgentSession.
+        # They cannot publish durable activation evidence or enter admission.
+        if store is not None:
+            raise ValueError("task contract activation requires an AgentSession")
+        return _update_contract(process, lambda previous: _prepare_contract(process, proposal)[0])
+    from .mechanism_lifecycle import fence, commit_activation
+    from .engineering_workflow import KEY
+    with fence(process) as root, process.session._mechanism_lock, process._context_lock, process._coordination_lock:
+        if root.session.mechanism_activation_blocked or process.session.mechanism_activation_blocked:
+            raise ValueError("MECHANISM_ACTIVATION_BLOCKED")
+        contract, workflow, maintenance = _prepare_contract(process, proposal)
+        revision = contract["revision"]
+        activation = {"transaction_id": str(uuid.uuid4()), "base_revision": revision - 1,
+            "revision": revision, "process_id": process.process_id,
+            "task_id": process.active_task_id or process.process_id,
+            "contract_digest": hashlib.sha256(json.dumps(semantic_contract(contract), sort_keys=True).encode()).hexdigest(),
+            "workflow_digest": (workflow or {}).get("plan", {}).get("digest"),
+            "consumers": ["task_routing", "engineering_workflow", "semantic_alignment", "completion", "tool_admission"],
+            "phase": "effective", "persistence": "checkpoint" if store is not None else "memory_only"}
+        contract["activation"] = activation
+        before_context, before_version = process.context_snapshot, process.context_version
+        before_children = deepcopy(process.delegated_contracts)
+        before_mechanisms = deepcopy(root.session.mechanism_instances)
+        staged_mechanisms = before_mechanisms
+        context = {**(before_context or {}), "task_contract": contract}
+        if workflow is not None:
+            context[KEY] = workflow
+        if maintenance is not None:
+            from .task_maintenance import KEY as MAINTENANCE_KEY
+            context[MAINTENANCE_KEY] = maintenance
+            from .mechanism_catalog import enabled
+            advancement = enabled(maintenance.get("definition"), "task.advancement")
+            previous_definition = (before_context or {}).get(MAINTENANCE_KEY, {}).get("definition")
+            if advancement is not None and maintenance.get("definition") != previous_definition:
+                if root is not process:
+                    raise ValueError("shared advancement must be revised by its owning task")
+                from . import mechanisms
+                from .mechanism_lifecycle import snapshot, compile_revision
+                current = snapshot(process, mechanisms.DEFINITION)
+                if current["parameters"] != advancement:
+                    control_sequence = current.get("control_sequence", -1)
+                    receipts = maintenance.get("source_receipts", {})
+                    if control_sequence >= 0 and not any(receipts.get(ref, {}).get("authority_sequence", -1) > control_sequence
+                            for ref in maintenance["definition"]["source_refs"]):
+                        raise ValueError("MECHANISM_USER_CONTROL_NEWER: retain the user's newer mode selection; a prior request cannot override it")
+                    staged_mechanisms = {**before_mechanisms,
+                        mechanisms.ADVANCEMENT: compile_revision(current, mechanisms.DEFINITION, advancement, current["revision"])}
+        for child_id in proposal.get("adopt_process_ids") or []:
+            child = process.delegated_contracts.get(child_id)
+            if child is None or child.get("superseded_by"):
+                raise ValueError("cannot adopt a missing or superseded task contract")
+        root.session.mechanism_instances = staged_mechanisms
+        process.context_snapshot, process.context_version = context, before_version + 1
+        for child_id in proposal.get("adopt_process_ids") or []:
+            process.delegated_contracts[child_id]["required_for_parent_completion"] = True
+
+        def rollback():
+            process.context_snapshot, process.context_version = before_context, before_version
+            process.delegated_contracts = before_children
+            root.session.mechanism_instances = before_mechanisms
+
+        event = {"event": "task_contract_revision_activated", **deepcopy(activation),
+                 "adopted_changes": [key for key, value in (maintenance or {}).get("changes", {}).items()
+                     if value.get("contract_revision") == revision],
+                 "mechanism_manifest": deepcopy((maintenance or {}).get("manifest"))}
+        if store is not None:
+            commit_activation(process, event, store, rollback)
+        else:
+            process.session.host_ledger.append(event)
+        return deepcopy(contract)
 
 
 def get_task_contract(process) -> dict:

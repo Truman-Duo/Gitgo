@@ -468,6 +468,10 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
     if runtime_storage is not None:
         def tool_result_open(args: dict) -> dict:
             try:
+                from .review_evidence import read_review_evidence
+                review_page = read_review_evidence(process, args)
+                if review_page is not None:
+                    return review_page
                 return runtime_storage.read_tool_result(
                     str(args.get("locator", "")),
                     offset=int(args.get("offset", 0) or 0),

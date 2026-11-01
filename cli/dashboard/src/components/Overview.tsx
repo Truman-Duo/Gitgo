@@ -6,7 +6,8 @@ import React, { memo, useLayoutEffect, useRef } from "react";
 import { Box, Text, ScrollBox } from "@anthropic/ink";
 import type {DOMElement, ScrollBoxHandle} from "@anthropic/ink";
 import type { ProjectRow } from "../hooks/useGitgoData.js";
-import { colors, usePanelSize, truncate, padEndWidth, useSelectionStyle } from "../theme/index.js";
+import { colors, usePanelSize, truncate, padEndWidth } from "../theme/index.js";
+import {SelectionRow, SelectionText, TableHeaderText} from "./Selection.js";
 import { projectRuntimeCategory } from "../projectRuntimeState.js";
 
 type Props = { projects: ProjectRow[]; sel: number; mode: "NORMAL" | "COMMAND"; cols: number; listActive: boolean; language?: "en" | "zh" };
@@ -39,16 +40,14 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
 
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1} minHeight={0}>
-      <Box flexDirection="row">
-        <Text bold>{padEndWidth(truncate(t({en:"Name",zh:"项目名称"}),nameW),nameW)}</Text>
-        <Text bold dimColor>{padEndWidth(t({en:"Procs",zh:"进程"}),procW)}</Text>
-        <Text bold dimColor>{t({en:"Path",zh:"项目位置"})}</Text>
-      </Box>
+      <TableHeaderText>{padEndWidth(truncate(t({en:"Name",zh:"项目名称"}),nameW),nameW)}<Text dimColor>
+        {padEndWidth(t({en:"Procs",zh:"进程"}),procW)}{t({en:"Path",zh:"项目位置"})}
+      </Text></TableHeaderText>
 
       {projects.length === 0 ? (
         <Box flexDirection="column" paddingTop={1}>
           <Text dimColor>{t({en:"No projects yet.",zh:"还没有项目。"})}</Text>
-          <Text dimColor>{t({en:"Use /create to register a workspace, then Enter to open it.",zh:"使用 /create 注册工作区，然后按 Enter 打开。"})}</Text>
+          <Text dimColor>{t({en:"Use /create to register a workspace, then Enter to open it.",zh:"使用 /create 注册工作区，然后按 Enter 打开。",keys:true})}</Text>
         </Box>
       ) : null}
 
@@ -63,8 +62,6 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
             {group.items.map((p, gi) => {
               const i = group.start + gi;
               const isSelected = i === sel;
-              const highlightBg = isSelected && tableFocused ? colors.selection.row.bg : undefined;
-              const nameStyle = useSelectionStyle(isSelected && tableFocused ? "focused" : "non-focused", "row");
 
               const procBadge = p.activeProcessCount > 0 ? String(p.activeProcessCount) : "";
               const procColor = p.activeProcessCount > 0 ? colors.accent : undefined;
@@ -76,17 +73,13 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
               const pathStr = truncate(pathBase, pathW);
 
               return (
-                <Box key={p.name} ref={isSelected ? selectedRow : undefined} flexDirection="row" backgroundColor={highlightBg}>
-                  <Text
-                    color={nameStyle.fg}
-                    bold={nameStyle.bold}
-                    backgroundColor={highlightBg}
-                  >
+                <SelectionRow key={p.name} ref={isSelected ? selectedRow : undefined} selected={isSelected} focused={tableFocused} flexDirection="row">
+                  <SelectionText>
                     {paddedName}
-                  </Text>
-                  <Text color={procColor} dimColor={!procBadge} backgroundColor={highlightBg}>{procStr}</Text>
-                  <Text dimColor backgroundColor={highlightBg}>{pathStr}</Text>
-                </Box>
+                  </SelectionText>
+                  <SelectionText color={procColor} dimColor={!procBadge}>{procStr}</SelectionText>
+                  <SelectionText dimColor>{pathStr}</SelectionText>
+                </SelectionRow>
               );
             })}
           </React.Fragment>

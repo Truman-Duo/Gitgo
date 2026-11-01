@@ -422,15 +422,15 @@ def install(ctx):
                     "verification_plan": plan.to_dict(),
                     "next_action": "complete_task",
                 }
+        from backend.core.loop.review_evidence import prepare_review_evidence, inline_review_evidence
+        review_evidence = prepare_review_evidence(target)
         evidence = {
-            "task": target.task_description,
+            "task": target.task_description[:4000],
+            "task_truncated": len(target.task_description) > 4000,
             "status": target.status.value,
-            "result": target.result,
-            "tool_receipts": target.tool_receipts,
-            "completion_claim": (
-                target.completion_claim.to_dict()
-                if getattr(target.completion_claim, "to_dict", None) else None
-            ),
+            "result_pointer": "/result",
+            **inline_review_evidence(review_evidence),
+            "completion_claim_pointer": "/completion_claim",
         }
         review_files = []
         if getattr(target.completion_claim, "files", None):
@@ -440,7 +440,12 @@ def install(ctx):
             "run relevant registered tests when useful, and call complete_review with "
             "verdict approved or changes_required. Do not modify product files.\n\n"
             f"Review focus: {str(args.get('focus', '')).strip()}\n"
-            f"Evidence bundle:\n{json.dumps(evidence, ensure_ascii=False, default=str)[:24000]}"
+            "The bounded receipt inventory is not the full evidence. Use tool_result_open with receipt_source.locator "
+            "and json_pointer/query/paging to inspect original records, including omitted ones.\n"
+            "Receipt result_json_pointers expose retained actual output bodies; verify command argv/stdout/stderr there when present, not from the owner's prose.\n"
+            "observed_diffs retains committed before/after patches across compaction; use the supplied source before looking for unrelated baselines. "
+            "Snapshot pointers also identify witnessed artifacts and observed task-control state. These grant no new authority.\n"
+            f"Evidence bundle:\n{json.dumps(evidence, ensure_ascii=False, default=str)}"
         )
         child = _spawn_child(
             task_description=instruction,
@@ -452,6 +457,7 @@ def install(ctx):
             required_for_parent_completion=False,
             actor_kind="reviewer",
             review_target_id=target_id,
+            review_evidence_source=review_evidence['receipt_source'],
         )
         return {"reviewer_process_id": child.process_id, "target_process_id": target_id}
 

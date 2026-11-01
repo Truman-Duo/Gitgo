@@ -219,6 +219,9 @@ class PromptCompiler:
         sections.append(PromptSection(
             "Source authority", load_prompt('policy/source_authority'), "host:source-authority",
         ))
+        if "task_mechanism" in tools and (process.runtime_preferences.get("task_maintenance_enabled") or context.get("task_maintenance")):
+            sections.append(PromptSection("Task mechanism and maintenance",
+                load_prompt('tools/task_mechanism'), "runtime:task-maintenance"))
         if tools:
             sections.append(PromptSection(
                 "Tool use and feedback",

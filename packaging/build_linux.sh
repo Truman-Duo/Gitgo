@@ -107,6 +107,7 @@ HOST_BUILD="$ROOT/build/terminal-host-linux-$ARCH"
   --name gitgo-host \
   --paths "$ROOT" --collect-submodules backend \
   --hidden-import backend.core.tools.registrations \
+  --add-data "$ROOT/backend/resources/keyboard:backend/resources/keyboard" \
   --add-data "$ROOT/backend/resources/prompts:backend/resources/prompts" \
   --distpath "$STAGE/internal" \
   --workpath "$HOST_BUILD" \

@@ -20,6 +20,7 @@ import { type Rectangle, unionRect } from './layout/geometry.js';
 import { dispatchClick, dispatchHover } from './hit-test.js';
 import instances from './instances.js';
 import { LogUpdate } from './log-update.js';
+import {sameRasters, clearRasters, encodeSixel} from './raster.js';
 import { nodeCache } from './node-cache.js';
 import { optimize } from './optimizer.js';
 import Output from './output.js';
@@ -700,6 +701,21 @@ export default class Ink {
       prevFrame = { ...this.frontFrame, cursor: ALT_SCREEN_ANCHOR_CURSOR };
     }
 
+    const rastersChanged = !sameRasters(prevFrame.rasters, frame.rasters);
+    const oldRasters = prevFrame.rasters ?? [], newRasters = frame.rasters ?? [];
+    const rasterGeometryChanged = oldRasters.length !== newRasters.length || oldRasters.some((value, index) => {
+      const next = newRasters[index];
+      return !next || value.x !== next.x || value.y !== next.y || value.columns !== next.columns || value.rows !== next.rows;
+    });
+    const rebuildRasterText = this.altScreenActive && rasterGeometryChanged && oldRasters.length > 0;
+    // A removed/resized image can cover cells that were blank in the text buffer.
+    // Rebuild text against a blank buffer after clearing those image rectangles.
+    if (rebuildRasterText) {
+      const previous = prevFrame.screen;
+      prevFrame = {...prevFrame, screen: createScreen(previous.width, previous.height,
+        this.stylePool, previous.charPool, previous.hyperlinkPool)};
+    }
+
     const tDiff = performance.now();
     const diff = this.log.render(
       prevFrame,
@@ -712,6 +728,12 @@ export default class Ink {
       SYNC_OUTPUT_SUPPORTED,
     );
     const diffMs = performance.now() - tDiff;
+    if (this.altScreenActive) {
+      if (rastersChanged && (prevFrame.rasters?.length || frame.rasters?.length))
+        diff.unshift({type: 'stdout', content: rebuildRasterText ? '\x1b[2J\x1b[H' : clearRasters([...(prevFrame.rasters ?? []), ...(frame.rasters ?? [])], terminalWidth, terminalRows)});
+      if (rastersChanged || diff.length) for (const raster of frame.rasters ?? [])
+        diff.push({type: 'stdout', content: `\x1b[${raster.y + 1};${raster.x + 1}H${encodeSixel(raster.image)}\x1b[${frame.cursor.y + 1};${frame.cursor.x + 1}H`});
+    }
     // Swap buffers
     this.backFrame = this.frontFrame;
     this.frontFrame = frame;
@@ -1130,6 +1152,7 @@ export default class Ink {
    * matches the physical cursor after ENTER_ALT_SCREEN + CSI H (home).
    */
   private resetFramesForAltScreen(): void {
+    const previousRasters = this.frontFrame.rasters;
     const rows = this.terminalRows;
     const cols = this.terminalColumns;
     const blank = (): Frame => ({
@@ -1137,7 +1160,7 @@ export default class Ink {
       viewport: { width: cols, height: rows + 1 },
       cursor: { x: 0, y: 0, visible: true },
     });
-    this.frontFrame = blank();
+    this.frontFrame = {...blank(), rasters: previousRasters};
     this.backFrame = blank();
     this.log.reset();
     // Defense-in-depth: alt-screen skips the cursor preamble anyway (CSI H

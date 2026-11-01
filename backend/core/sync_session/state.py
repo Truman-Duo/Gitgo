@@ -97,7 +97,32 @@ def read_state(workspace):
         raise GovernanceStateUnavailable() from exc
 
 
+def read_state_snapshot(workspace):
+    """Query-only counterpart: no writer, migration, identity or CAS repair."""
+    from backend.core.storage.runtime import read_existing_state_blob
+    try:
+        committed = read_existing_state_blob(workspace, _NAMESPACE, _session_key(workspace))
+        if committed is not None:
+            value = json.loads(committed["payload"])
+            if (not isinstance(value, dict) or value.get("schema_version") != 1
+                    or value.get("project_id") != committed["project_id"]
+                    or value.get("workspace") != str(Path(workspace).resolve())):
+                raise GovernanceStateUnavailable()
+            return _validate(value["state"]), committed["reference"]
+        raw = _legacy_bytes(workspace, "session.json")
+        return (_validate(json.loads(raw)), None) if raw is not None else (None, None)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise GovernanceStateUnavailable() from exc
+
+
 def save_state(workspace, data, *, expected_ref):
+    from backend.core.publish.legacy import writer, validate_saved_state
+    with writer(workspace):
+        validate_saved_state(workspace, data)
+        return _save_state(workspace, data, expected_ref=expected_ref)
+
+
+def _save_state(workspace, data, *, expected_ref):
     runtime = get_storage(workspace)
     envelope = {"schema_version": 1, "project_id": runtime.paths.project_id,
                 "workspace": str(Path(workspace).resolve()),

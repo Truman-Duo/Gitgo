@@ -83,7 +83,7 @@ test("portable bindings decode real Alt+Enter, retain Ctrl+Shift and leave paste
   const stderr: any = new PassThrough(); stdout.on("data", () => {}); stderr.on("data", () => {});
   const events: any[] = [];
   function Probe() {
-    useManagedInput((input, key) => {events.push({input, key});});
+    useManagedInput((input, key) => {events.push({input, key});}, {bindingContext: "form"});
     return <Text>Portable input</Text>;
   }
   const root = renderSync(<InputProvider settings={presetSettings("portable")}><Probe/></InputProvider>,

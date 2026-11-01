@@ -24,6 +24,7 @@ def main():
     subprocess.run([sys.executable, '-m', 'PyInstaller', *extra, '--noconfirm', '--clean', '--onedir',
         '--name', 'gitgo-host', '--paths', str(root), '--collect-submodules', 'backend',
         '--hidden-import', 'backend.core.tools.registrations',
+        '--add-data', str(root / 'backend/resources/keyboard') + os.pathsep + 'backend/resources/keyboard',
         '--add-data', str(root / 'backend/resources/prompts') + os.pathsep + 'backend/resources/prompts',
         '--distpath', str(root / 'dev-artifacts/sandbox-acceptance/dist'),
         '--workpath', str(root / 'dev-artifacts/sandbox-acceptance/build'),

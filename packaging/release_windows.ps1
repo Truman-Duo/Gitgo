@@ -22,6 +22,10 @@ param(
     [ValidateSet("stable", "preview")][string]$Channel = "preview",
     [long]$Sequence = 1,
     [string]$ReleaseTag = "",
+    [string]$BaselineManifest = "",
+    [string]$BaselineSignature = "",
+    [ValidateSet("direct", "legacy-repair")][string]$UpgradeRoute = "direct",
+    [switch]$InitialRelease,
     [switch]$AllowDirty
 )
 $ErrorActionPreference = "Stop"
@@ -31,6 +35,12 @@ if ($Sign -and ($BuildOnly -or $VerifyOnly -or $AllowDirty -or -not $ManagedUpda
     throw "Signing requires a clean managed release with full validation"
 }
 if ($ManagedUpdate -and $BuildInstaller) { throw "Managed releases use the complete ZIP and install-managed.ps1, not Inno" }
+if ($Sign -and -not $InitialRelease -and (-not $BaselineManifest -or -not $BaselineSignature)) {
+    throw "Update signing requires the previous published manifest and signature"
+}
+if ($InitialRelease -and ($BaselineManifest -or $BaselineSignature)) {
+    throw "Choose an initial release or a previous published baseline"
+}
 
 # Local settings contain tool paths, never private-key bytes. Only explicit
 # parameters may enable signing, dirty builds or test omission.
@@ -187,6 +197,8 @@ try {
             $signArguments = @("--stage", [IO.Path]::GetFullPath($Output), "--archive", $archives[0].FullName,
                 "--private-key", $SigningKey, "--key-id", $KeyId, "--channel", $Channel, "--sequence", $Sequence,
                 "--release-tag", $ReleaseTag, "--output", (Join-Path $ArtifactOutput "signed-release"))
+            if ($InitialRelease) { $signArguments += "--initial-release" }
+            else { $signArguments += @("--baseline-manifest", $BaselineManifest, "--baseline-signature", $BaselineSignature, "--upgrade-route", $UpgradeRoute) }
             Invoke-Checked "Publisher-signed manifest preparation" {
                 & $Python -B scripts\prepare_update_release.py @signArguments
             }

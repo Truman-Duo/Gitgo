@@ -28,6 +28,55 @@ from backend.core.process_control import close_job, terminate_tree
 from backend.core.sandbox_io import BoundedCommunication
 
 
+@pytest.mark.parametrize('packaged', [False, True], ids=['source', 'packaged'])
+def test_windows_read_lifecycle_evidence(native_box, isolated_python, monkeypatch, packaged):
+    """Real AppContainer read, Job retirement and authoritative launch history."""
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    workspace, _, _ = native_box
+    (workspace / 'note.txt').write_text('native lifecycle read', encoding='utf8')
+    if packaged:
+        configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+        if not configured:
+            pytest.skip('Requires an actually built Host')
+        host = Path(configured).resolve(strict=True)
+        source = (
+            'import json;from backend.core.loop.process_tool_runner import ProcessToolRunner;'
+            'from backend.core.storage import get_storage;'
+            'from backend.core.storage.native_invocations import NAMESPACE,pending_native_invocations;'
+            f'w={str(workspace)!r};'
+            "r=ProcessToolRunner().run('read_file',{'_workspace':w,'path':'note.txt'});"
+            's=get_storage(w);'
+            "history=json.loads(s.read_blob(s.get_state_ref(NAMESPACE,'history/'+r.invocation_id)));"
+            'print(json.dumps(dict(success=r.success,data=r.data,cleanup=r.cleanup,'
+            'evidence=r.evidence_state,history=history,pending=pending_native_invocations(s,include_active=True))))'
+        )
+        result = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-c', source],
+                                capture_output=True, text=True, encoding='utf8', timeout=90)
+        assert result.returncode == 0, result.stderr
+        observed = json.loads(result.stdout)
+    else:
+        from tests.native_source_runtime import populate_source_runtime
+        from backend.core.storage import get_storage
+        from backend.core.storage.native_invocations import NAMESPACE, pending_native_invocations
+        runtime = populate_source_runtime(isolated_python / 'source')
+        bootstrap = f'import sys;sys.path.insert(0,{str(runtime)!r});from backend.core.tools.runner import main;main()'
+        monkeypatch.setattr('backend.core.loop.process_tool_runner.tool_runner_command',
+                            lambda: [str(isolated_python / 'python.exe'), '-c', bootstrap])
+        monkeypatch.setattr('backend.core.loop.process_tool_runner.owned_child_cwd', lambda _: runtime)
+        result = ProcessToolRunner().run('read_file', {'_workspace': str(workspace), 'path': 'note.txt'})
+        assert result.invocation_id, result
+        store = get_storage(workspace)
+        history = json.loads(store.read_blob(store.get_state_ref(NAMESPACE, 'history/' + result.invocation_id)))
+        observed = dict(success=result.success, data=result.data, cleanup=result.cleanup,
+                        evidence=result.evidence_state, history=history,
+                        pending=pending_native_invocations(store, include_active=True))
+    assert observed['success'] and 'native lifecycle read' in str(observed['data']), observed
+    assert observed['evidence'] == 'committed' and observed['pending'] == []
+    assert observed['cleanup'] == {'complete': True, 'mode': 'windows-job', 'issues': []}
+    assert observed['history']['launch_state'] == 'started'
+    assert observed['history']['runtime_cleanup'] == observed['cleanup']
+
+
 def test_sensitive_handlers_have_no_model_selectable_opt_out():
     from backend.core.tools.runner import handler_bindings
     from backend.core.loop.execution_contract import NATIVE_PROCESS

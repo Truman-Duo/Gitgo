@@ -10,6 +10,7 @@ import {InputProvider} from "../input/runtime.js";
 import {StatsOverview} from "../components/StatsOverview.js";
 import {useTextInput} from "../hooks/useTextInput.js";
 import {BtwPanel} from "../components/BtwPanel.js";
+import {TaskMechanismsPanel} from "../components/TaskMechanismsPanel.js";
 import type {BackendClient} from "../backend/client.js";
 import type {ProcessInfo} from "../hooks/useLoopData.js";
 
@@ -58,9 +59,9 @@ test("stats arrows select headers first, then content; Chinese uses the same rou
 test("BTW clears submitted editor, pairs latest question with result and can browse parent",async()=>{
  const calls:any[]=[],browse:number[]=[];
  const client:BackendClient={ready:true,close(){},async callTool(operation,args){
-  calls.push({operation,args});return operation==="runtime.btw"?{answer:"**Answer** "+args?.question,sidecar_id:"s"}:{status:"queued"};
+  calls.push({operation,args});return operation==="runtime.btw"?{answer:"**Answer** "+args?.question,sidecar_id:"s",discussion_ref:"source:"+args?.question}:{status:"pending"};
  }};
- const process={process_id:"a",parent_id:null,created_at:"2026-10-23",actor_kind:"supervisor"} as ProcessInfo;
+ const process={process_id:"a",active_task_id:"task-a",task_contract_revision:7,parent_id:null,created_at:"2026-10-23",actor_kind:"supervisor"} as ProcessInfo;
  const io=terminal(<Box height={14} flexDirection="column"><BtwPanel client={client} project="p" processId="a"
   question="Initial" answer="" sidecarId="s" processes={{a:process}} cols={100} onDismiss={()=>{}} onApply={()=>{}}
   onBrowseParent={n=>{browse.push(n);return n;}}/></Box>);
@@ -73,10 +74,36 @@ test("BTW clears submitted editor, pairs latest question with result and can bro
   expect(browse).toEqual([-10]);
   await io.send("\t");await io.send("\t");await io.send("\t");
   await io.send("\x1b[C");await io.send("\x1b[C");await io.send("\r");
-  expect(calls.some(c=>c.operation==="runtime.feedback")).toBe(false);await io.send("\r");
-  const applied=calls.find(c=>c.operation==="runtime.feedback");
-  expect(applied?.args.message).toContain("Question: Follow-up question");
-  expect(applied?.args.message).not.toContain("Question: Initial");
+  expect(calls.some(c=>c.operation==="runtime.btw.adopt")).toBe(false);await io.send("\r");
+  const applied=calls.find(c=>c.operation==="runtime.btw.adopt");
+  expect(applied?.args).toEqual({project:"p",process_id:"a",task_id:"task-a",expected_revision:7,
+    sidecar_id:"s",discussion_ref:"source:Follow-up question",mode:"boundary"});
+  expect(calls.some(c=>c.operation==="runtime.feedback")).toBe(false);
+ }finally{io.close();}
+});
+
+test("task mechanisms keep bounded selection and submit exact confirmed lifecycle revisions",async()=>{
+ const calls:any[]=[];
+ const state:any={task_id:"task-a",revision:7,epoch:3,phase:"ready",suspended:false,
+  definition:{intent:"Keep consumers aligned"},plan:{revision:2,summary:"Update the feature and display",steps:[]},changes:{},related:{candidates:{}}};
+ const client:BackendClient={ready:true,close(){},async callTool(operation,args){
+  calls.push({operation,args});
+  if(args?.action==="suspend"){state.suspended=true;state.revision=8;}
+  return {process_id:"a",state:{...state},contract:{goal:"Real current task",revision:3},advancement:{mode:"manual"},consumer_projection:{epoch:3}};
+ }};
+ const process={process_id:"a",active_task_id:"task-a",status:"running",created_at:"1",parent_id:null,
+  task_maintenance:{revision:7,epoch:3}} as ProcessInfo;
+ const io=terminal(<Box height={14} flexDirection="column"><TaskMechanismsPanel client={client} project="p"
+  processes={{a:process}} onDismiss={()=>{}}/></Box>);
+ try{
+  await settle();
+  for(let n=0;n<12;n++)await io.send("\x1b[B");
+  await io.send("\r");expect(io.frame()).toContain("Real current task");
+  await io.send("\r");expect(calls.filter(c=>c.args.action==="suspend")).toHaveLength(0);
+  await io.send("\r");await settle();
+  expect(calls.find(c=>c.args.action==="suspend")?.args).toEqual({project:"p",process_id:"a",action:"suspend",
+   task_id:"task-a",expected_revision:7});
+  expect(io.frame()).toContain("Suspended");
  }finally{io.close();}
 });
 

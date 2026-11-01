@@ -1,13 +1,28 @@
 """Host decides whether a semantic assessment has new work to do."""
 from .alignment_evidence import alignment_input_digest, answer_digest
 
-POLICY_VERSION = 6
+POLICY_VERSION = 14
 REVIEW_POLICY = f'on_demand_v{POLICY_VERSION}'
 
 
 def uses_on_demand_review(state):
     """Keep persisted v2 tasks subject to the same boundary guards."""
-    return state.get('review_policy') in {'on_demand_v2', 'on_demand_v3', 'on_demand_v4', 'on_demand_v5', REVIEW_POLICY}
+    return state.get('review_policy') in {'on_demand_v2', 'on_demand_v3', 'on_demand_v4', 'on_demand_v5', 'on_demand_v6', 'on_demand_v7', 'on_demand_v8', 'on_demand_v9', 'on_demand_v10', 'on_demand_v11', 'on_demand_v12', 'on_demand_v13', REVIEW_POLICY}
+
+
+def admission_input_digest(process, payload):
+    """Bind typed operation subjects without treating them as task contracts.
+
+    A single ordinary contract can certify its committed semantic state. Other
+    operation proposals certify only this exact ordered batch and evidence.
+    The trusted tool compilers, not user prose, supply the kind discriminant.
+    """
+    declarations=payload.get('proposed_contracts') or []
+    if any(not isinstance(value,dict) for value in declarations):
+        raise ValueError('semantic boundary proposals must be objects')
+    contracts=[value for value in declarations if not value.get('kind')]
+    subjects=declarations if len(declarations)>1 or any(value.get('kind') for value in declarations) else []
+    return alignment_input_digest(process,contract_override=contracts[-1] if contracts else None,boundary_subjects=subjects)
 
 
 def main_model_initial_question(process, payload):
@@ -18,7 +33,10 @@ def main_model_initial_question(process, payload):
     """
     context, _ = process.read_context_snapshot()
     contract = context.get('task_contract') or {}
+    task = process.active_task_id or process.process_id
+    performed_work = any(r.get('task_id') == task and r.get('committed') is True for r in process.tool_receipts)
     return (process.task_kind == 'answer' and process.actor_kind == 'supervisor' and not process.parent_id
+            and not performed_work
             and not complex_delivery(process, payload)
             and not payload.get('workflow', {}).get('nodes')
             and not any(payload.get(k) for k in ('actual_answers', 'confirmed_answers', 'user_updates', 'questions_asked'))
@@ -45,11 +63,11 @@ def review_reason(process, payload, trigger='admission'):
         return '' if main_model_initial_question(process, payload) else 'question_necessity'
     if trigger in {'contract', 'execution'}:
         return 'declared_task_boundary' if trigger == 'contract' else 'effect_boundary'
-    if payload.get('stage') == 'admission' and payload.get('actual_answers'):
-        # Let the main Agent use the actual reply first. Interpretation and
-        # adoption can be compiled together at delivery. A proposed new question,
-        # changed contract or effect boundary above still reviews before acting;
-        # unresolved receipt gates have not been discharged by this deferral.
+    if payload.get('stage') == 'admission':
+        # Ordinary evidence reads/status calls are not a new semantic proposal.
+        # Adoption is reviewed at contract, question, effect and delivery
+        # boundaries, not on every read while the main model prepares it.
+        # Deferral does not discharge unresolved-answer or maintenance gates.
         return ''
     if payload.get('actual_answers') or payload.get('confirmed_answers'):
         return 'actual_answer_dependencies'
@@ -74,10 +92,11 @@ def reuse_assessment(process, payload):
     context, _ = process.read_context_snapshot()
     state = context.get("alignment_runtime") or {}
     ready = state.get("admission_review") or {}
-    declarations = payload.get('proposed_contracts') or []
-    current = alignment_input_digest(process, contract_override=declarations[-1] if declarations else None)
+    current = admission_input_digest(process, payload)
     if ready.get("input_digest") != current or ready.get("status") != "ready":
         return ""
+    if ready.get('scope') == 'observation_only' and (payload.get('stage') != 'admission' or payload.get('observation_only') is not True):
+        return ''
     if payload["stage"] == "admission":
         return "unchanged_admission"
     if (payload["stage"] == "delivery" and not complex_delivery(process, payload)

@@ -201,7 +201,11 @@ export function writeDiffToTerminal(
   const useSync = !skipSyncMarkers
 
   // Buffer all writes into a single string to avoid multiple write calls
-  let buffer = useSync ? BSU : ''
+  // LogUpdate starts each frame from StylePool.none. Establish the same
+  // physical state after startup/log/native output; cursor moves and erase
+  // do not reset SGR attributes. Keep plain piped output unchanged.
+  const resetRendition = (terminal.stdout as Writable & {isTTY?: boolean}).isTTY === true
+  let buffer = (useSync ? BSU : '') + (resetRendition ? '\x1b[0m' : '')
 
   for (const patch of diff) {
     switch (patch.type) {
@@ -241,6 +245,7 @@ export function writeDiffToTerminal(
   }
 
   // Add synchronized update end and flush buffer
+  if (resetRendition) buffer += '\x1b[0m'
   if (useSync) buffer += ESU
   terminal.stdout.write(buffer)
 }

@@ -40,6 +40,16 @@ class ContextCompaction:
         if changed:
             session.compaction_failure_count = 0
             session.last_compaction_error = ""
+            from backend.core.mechanism_runtime.application import bound_application
+            composition = bound_application(process)
+            if composition:
+                store = getattr(getattr(process, "_manager", None), "session_store", None)
+                if store is None:
+                    raise ValueError("MECHANISM_COMPACTION_CHECKPOINT_UNAVAILABLE")
+                # Commit the context generation before its lifecycle callbacks
+                # can publish effects. Restore cannot then observe a completed
+                # callback for an epoch that never reached the checkpoint.
+                store.save_process_checkpoint(process)
             _emit_observation({
                 "event": "context_compaction_completed",
                 "trigger": trigger,
@@ -48,6 +58,9 @@ class ContextCompaction:
                 "context_epoch": session.context_epoch,
                 "changed": True,
             }, detail=(session.epoch_archive[-1] if session.epoch_archive else None))
+            if composition:
+                composition.dispatch("after_compaction", f"compaction:{session.session_id}:{session.context_epoch}",
+                    {"previous_epoch": previous_epoch, "context_epoch": session.context_epoch, "trigger": trigger})
             return True, None
         if no_op:
             _emit_observation({

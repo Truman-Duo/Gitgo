@@ -10,22 +10,24 @@ import threading
 
 _guard = threading.RLock()
 _descriptors: dict[int, int] = {}
+_namespace_descriptors: dict[int, int] = {}
 
 
 @contextmanager
-def retain_descriptor(descriptor: int):
+def retain_descriptor(descriptor: int, *, namespace: bool = False):
     if os.name not in {"posix", "nt"} or type(descriptor) is not int or descriptor < 3:
         raise ValueError("Invalid installation lease descriptor")
     os.fstat(descriptor)
+    registry = _namespace_descriptors if namespace else _descriptors
     with _guard:
-        _descriptors[descriptor] = _descriptors.get(descriptor, 0) + 1
+        registry[descriptor] = registry.get(descriptor, 0) + 1
     try:
         yield
     finally:
         with _guard:
-            count = _descriptors[descriptor] - 1
-            if count: _descriptors[descriptor] = count
-            else: del _descriptors[descriptor]
+            count = registry[descriptor] - 1
+            if count: registry[descriptor] = count
+            else: del registry[descriptor]
 
 
 def runtime_descriptors() -> tuple[int, ...]:
@@ -33,8 +35,18 @@ def runtime_descriptors() -> tuple[int, ...]:
         return tuple(sorted(_descriptors))
 
 
+def sharing_descriptors() -> tuple[int, ...]:
+    """All retained sharing reservations, including pinned private namespaces.
+
+    Namespace handles cannot authorize a runtime, probe or update by themselves.
+    They only preserve no-delete lifetime through existing child supervision.
+    """
+    with _guard:
+        return tuple(sorted(set(_descriptors) | set(_namespace_descriptors)))
+
+
 def child_options() -> dict:
-    descriptors = runtime_descriptors()
+    descriptors = sharing_descriptors()
     # Windows managed spawning translates only this process's registered FDs
     # to an explicit native handle allowlist, never raw environment assertions.
     return {"pass_fds": descriptors} if descriptors and os.name == "posix" else {}
@@ -49,7 +61,7 @@ def windows_sandbox_lease_handles():
     import ctypes as C
     if os.name != "nt":
         raise OSError("Windows lease handles require Windows")
-    descriptors=runtime_descriptors()
+    descriptors=sharing_descriptors()
     if len(descriptors)>16:raise ValueError("Too many registered sandbox leases")
     kernel=C.WinDLL("kernel32",use_last_error=True)
     duplicate=kernel.DuplicateHandle

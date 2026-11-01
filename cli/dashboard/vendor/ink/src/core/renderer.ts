@@ -12,6 +12,7 @@ import renderNodeToOutput, {
   resetScrollHint,
 } from './render-node-to-output.js'
 import { createScreen, type StylePool } from './screen.js'
+import {collectRasters} from './raster.js'
 
 export type RenderOptions = {
   frontFrame: Frame
@@ -148,6 +149,7 @@ export default function createRenderer(
       scrollHint: options.altScreen ? getScrollHint() : null,
       scrollDrainPending: drainNode !== null,
       screen: renderedScreen,
+      rasters: options.altScreen ? collectRasters(node, terminalWidth, terminalRows) : [],
       viewport: {
         width: terminalWidth,
         // Alt screen: fake viewport.height = rows + 1 so that

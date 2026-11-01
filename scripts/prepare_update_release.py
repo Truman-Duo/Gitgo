@@ -54,7 +54,8 @@ def staged_policy(stage, public, key_id, platform, architecture, repository, cha
     return raw, parsed
 
 
-def prepare(stage, archive, private_key, key_id, channel, sequence, repository, release_tag, now=None):
+def prepare(stage, archive, private_key, key_id, channel, sequence, repository, release_tag, now=None,
+            *, baseline_manifest=None, baseline_signature=None, initial_release=False, upgrade_route="direct"):
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
     product = json.loads((stage / "product.json").read_bytes())
     build = json.loads((stage / "build-manifest.json").read_bytes())
@@ -70,6 +71,7 @@ def prepare(stage, archive, private_key, key_id, channel, sequence, repository, 
     stamp = lambda value: value.isoformat().replace("+00:00", "Z")
     with archive.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
+    from backend.core.update.data_transition import ENGINE_VERSION
     wire = {"schema_version": 1, "product_id": product["product_id"], "release_id": release_tag,
         "channel": channel, "sequence": sequence, "published_at": stamp(instant),
         "expires_at": stamp(instant + timedelta(days=7)), "version": product["version"],
@@ -77,12 +79,15 @@ def prepare(stage, archive, private_key, key_id, channel, sequence, repository, 
         "archive_format": "zip" if product["platform"] == "windows" else "tar.gz",
         "url": f"https://github.com/{repository}/releases/download/{release_tag}/{archive.name}",
         "bytes": archive.stat().st_size, "sha256": digest, "source": {k: build["source"][k] for k in ("commit", "tree")},
-        "data_compatibility": contract["data_compatibility"], "minimum_updater_version": "0.1.0"}
+        "data_compatibility": contract["data_compatibility"], "minimum_updater_version": ENGINE_VERSION}
     raw = encode(wire)
     signature = encode({"schema_version": 1, "algorithm": "ed25519", "key_id": key_id,
         "signature": base64.b64encode(private_key.sign(raw)).decode()})
     manifest = ManifestVerifier({key_id: public}).verify(raw, signature)
     installed_trust.verifier.verify(raw, signature)
+    validate_upgrade_baseline(installed_trust.verifier, manifest,
+        baseline_manifest=baseline_manifest, baseline_signature=baseline_signature,
+        initial_release=initial_release, upgrade_route=upgrade_route)
     if (channel == "preview") != bool(__import__("backend.core.update.version", fromlist=["Version"]).Version.parse(manifest.version).prerelease):
         raise ValueError("Stable and preview releases must use their respective version class")
     verify_bundle_contract(stage, manifest)
@@ -100,6 +105,24 @@ def prepare(stage, archive, private_key, key_id, channel, sequence, repository, 
     return raw, signature, policy
 
 
+def validate_upgrade_baseline(verifier, candidate, *, baseline_manifest=None,
+                              baseline_signature=None, initial_release=False, upgrade_route="direct"):
+    """Never sign an update using only the candidate updater's own assumptions."""
+    if type(initial_release) is not bool or upgrade_route not in {"direct", "legacy-repair"}:
+        raise ValueError("Initial-release selection must be explicit")
+    if initial_release:
+        if baseline_manifest is not None or baseline_signature is not None or upgrade_route != "direct":
+            raise ValueError("Initial releases cannot also claim a previous release")
+        return None
+    if baseline_manifest is None or baseline_signature is None:
+        raise ValueError("Updates require the previous published manifest and signature")
+    # Uses the pinned publisher public key; no unverified baseline JSON or
+    # caller-authored compatibility override can authorize a release path.
+    previous = verifier.verify(baseline_manifest, baseline_signature)
+    from backend.core.update.upgrade_path import require_upgrade_path
+    return require_upgrade_path(previous, candidate, route=upgrade_route)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("stage", "archive", "private-key", "output"):
@@ -109,6 +132,12 @@ def main():
     parser.add_argument("--sequence", type=int, required=True)
     parser.add_argument("--release-tag", required=True)
     parser.add_argument("--repository", default="Truman-Duo/Gitgo")
+    parser.add_argument("--baseline-manifest", type=Path)
+    parser.add_argument("--baseline-signature", type=Path)
+    parser.add_argument("--upgrade-route", choices=("direct", "legacy-repair"), default="direct",
+                        help="legacy-repair requires a separately delivered trusted repair executor; never direct /update")
+    parser.add_argument("--initial-release", action="store_true",
+                        help="Only for the first release of a new update channel/target")
     args = parser.parse_args()
     try:
         key_path = args.private_key.resolve(strict=True)
@@ -119,16 +148,22 @@ def main():
         key = load_pem_private_key(key_path.read_bytes(), password=None)
         if not isinstance(key, Ed25519PrivateKey): raise ValueError("Expected an Ed25519 signing key")
         raw, signature, policy = prepare(args.stage, args.archive, key, args.key_id, args.channel,
-            args.sequence, args.repository, args.release_tag)
+            args.sequence, args.repository, args.release_tag,
+            baseline_manifest=args.baseline_manifest.read_bytes() if args.baseline_manifest else None,
+            baseline_signature=args.baseline_signature.read_bytes() if args.baseline_signature else None,
+            initial_release=args.initial_release, upgrade_route=args.upgrade_route)
         value = json.loads(raw)
         args.output.mkdir(parents=True, exist_ok=False)
         target = value["platform"] + "-" + value["architecture"]
         (args.output / (target + ".manifest.json")).write_bytes(raw)
         (args.output / (target + ".manifest.sig")).write_bytes(signature)
         (args.output / "release-trust.json").write_bytes(policy)
-    except Exception:
+    except Exception as error:
         # Never print exceptions that could contain private key material.
         print("Release assets were not prepared. Check committed source, package, signing key and explicit channel.", file=sys.stderr)
+        from backend.core.update.upgrade_path import UpgradePathRequired
+        if isinstance(error, UpgradePathRequired):
+            print(json.dumps(error.assessment.to_dict(), sort_keys=True), file=sys.stderr)
         return 2
     print("Signed release assets prepared locally; no Release was published.")
     return 0

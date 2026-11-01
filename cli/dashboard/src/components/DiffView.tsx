@@ -5,8 +5,10 @@
 import React, { memo, useContext } from "react";
 import { Ansi, Box, Text } from "@anthropic/ink";
 import type { Color } from "@anthropic/ink";
-import { highlight, supportsLanguage } from "cli-highlight";
+import {supportsLanguage} from "cli-highlight";
+import {highlightCode} from "../theme/syntax.js";
 import {DiffLayoutContext} from "../theme/diffLayoutContext.js";
+import {useCopy} from "../ui/PageFrame.js";
 import type { FileDiff, DiffHunk, DiffLine, DiffLayout } from "../types.js";
 import {
   colors,
@@ -85,10 +87,7 @@ function CodeCell({sign, text, width, style, language}: {
 }) {
   if (text == null) return <Text color={style.fg}>{sign === " " ? "" : sign}</Text>;
   const source = truncate(text, Math.max(1, width - 2));
-  let rendered = source;
-  if (language) {
-    try { rendered = highlight(source, {language, ignoreIllegals: true}); } catch { /* plain fallback */ }
-  }
+  const rendered = highlightCode(source, language, false);
   return <><Text color={style.fg}>{sign} </Text>{language ? <Ansi>{rendered}</Ansi> : <Text color={style.fg}>{source}</Text>}</>;
 }
 
@@ -215,6 +214,7 @@ function UnifiedFile({ file, avail, maxRows }: { file: FileDiff; avail: number; 
 export const DiffView = memo(function DiffView({ files, width, layout, maxRows }: {
   files: FileDiff[]; width?: number; layout?: DiffLayout; maxRows?: number;
 }) {
+  const t = useCopy();
   const savedLayout = useContext(DiffLayoutContext);
   const { w: terminalWidth } = usePanelSize({ minWidth: 30 });
   const panelWidth = Math.max(1, Math.min(terminalWidth, width ?? terminalWidth));
@@ -234,14 +234,14 @@ export const DiffView = memo(function DiffView({ files, width, layout, maxRows }
   });
   return (
     <Box flexDirection="column" marginTop={1}
-      borderStyle="single" borderColor={colors.diff.frame} paddingLeft={1}>
+      borderStyle="single" borderColor={colors.diff.frame} backgroundColor={colors.diff.bg} paddingLeft={1}>
       {visible.map(({file, split, limit}, i) => (
         <Box key={i} flexDirection="column" marginTop={i === 0 ? 0 : 1}>
           {split ? <SplitFile file={file} avail={avail} maxRows={limit}/>
             : <UnifiedFile file={file} avail={avail} maxRows={limit}/>}
         </Box>
       ))}
-      {omitted ? <Text dimColor>… additional changes omitted</Text> : null}
+      {omitted ? <Text dimColor>{t({en:"… additional changes omitted",zh:"… 已省略其余改动"})}</Text> : null}
     </Box>
   );
 });

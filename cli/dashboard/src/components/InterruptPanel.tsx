@@ -1,3 +1,6 @@
+import {geometry} from "../theme/tokens.js";
+import {SelectionText} from "./Selection.js";
+import {useCopy} from "../ui/PageFrame.js";
 import React, { useRef, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { BackendClient } from "../backend/client.js";
@@ -31,13 +34,14 @@ export function InterruptPanel({ client, project, processId, requestId, subtree,
   client: BackendClient; project: string; processId: string; requestId?: string;
   subtree: boolean; onDismiss: () => void;
 }) {
+  const t=useCopy();
   const [selection, setSelection] = useState(1);
   const [status, setStatus] = useState("");
   const inFlight = useRef(false);
   const confirm = async () => {
     if (inFlight.current) return;
     inFlight.current = true;
-    setStatus("Interrupting… waiting for the host acknowledgement");
+    setStatus(t({en:"Interrupting… waiting for the host acknowledgement",zh:"正在中断，等待宿主确认…"}));
     try {
       // A request cancellation is stronger than a process-only stop: it also
       // covers recovery/admission before the process exists and asks the Host
@@ -60,12 +64,12 @@ export function InterruptPanel({ client, project, processId, requestId, subtree,
     if (key.return) { if (selection === 1) onDismiss(); else void confirm(); }
   });
   return <Box flexDirection="column" paddingX={1}>
-    <Text bold>Interrupt {subtree ? "the main process and its active subprocesses" : "this subprocess"}?</Text>
-    <Text>Stop the current calls; preserve the conversation and completed file changes. No automatic rollback.</Text>
-    <Box gap={2}>{["Interrupt", "Keep working"].map((label, index) => <Text key={label}
-      backgroundColor={selection === index ? colors.selection.block.bg : undefined}
-      color={selection === index ? colors.selection.block.fg : undefined}>{` ${label} `}</Text>)}</Box>
+    <Text bold>{t({en:"Interrupt ",zh:"中断 "})}{subtree ? t({en:"the main process and its active subprocesses",zh:"主进程及其活动子进程"}) : t({en:"this subprocess",zh:"当前子进程"})}?</Text>
+    <Text>{t({en:"Stop the current calls; preserve the conversation and completed file changes. No automatic rollback.",zh:"停止当前调用，保留对话和已完成的文件更改，不自动回滚。"})}</Text>
+    <Box gap={geometry.actions.gap}>{[t({en:"Interrupt",zh:"中断"}), t({en:"Keep working",zh:"继续工作"})].map((label, index) => <SelectionText selected={selection === index} variant="block" key={label}
+
+      >{` ${label} `}</SelectionText>)}</Box>
     {status ? <Text>{status}</Text> : null}
-    <Text dimColor>←/→ select · Enter confirm · Esc close</Text>
+    <Text dimColor>{t({en:"←/→ select · Enter confirm · Esc close",zh:"←/→ 选择 · Enter 确认 · Esc 关闭",keys:true})}</Text>
   </Box>;
 }

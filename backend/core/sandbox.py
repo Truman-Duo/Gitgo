@@ -15,6 +15,14 @@ class SandboxDenied(RuntimeError):
 
     def result(self) -> dict:
         from backend.core.errors import error_payload
+        if self.code == "INVOCATION_JOURNAL_UNAVAILABLE":
+            return {**error_payload(self.code, message=str(self), next_actions=[
+                {"action": "inspect_project_storage", "effect": "Restore reliable invocation evidence before native execution; do not replay unknown calls."}]),
+                "effect_state": "not_committed"}
+        if self.code == "SANDBOX_CLEANUP_PENDING":
+            return {**error_payload(self.code, message=str(self), next_actions=[
+                {"action": "inspect_native_ownership", "effect": "Inspect retained launch and cleanup facts. New approval, elapsed time and deleting records do not prove native retirement."}]),
+                "effect_state": getattr(self, "effect_state", "not_committed")}
         return {
             **error_payload(self.code, message=str(self), next_actions=[
                 {"action": "configure_native_sandbox",
@@ -60,6 +68,8 @@ class SandboxPolicy:
     memory_bytes: int = 512 * 1024 * 1024
     process_limit: int = 32
     cpu_seconds: int = 120
+    # Optional Host-owned identity for a durable producer's recovery boundary.
+    recovery_id: str = ""
 
     def __post_init__(self):
         try:
@@ -70,6 +80,9 @@ class SandboxPolicy:
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "A concrete workspace directory is required.")
         validate_runtime_separation(root, trusted_runtime_roots())
         object.__setattr__(self, "workspace", root)
+        import re
+        if self.recovery_id and not re.fullmatch(r"[0-9a-f]{32}", self.recovery_id):
+            raise SandboxDenied("SANDBOX_POLICY_INVALID", "Invalid native recovery identity")
         if min(self.memory_bytes, self.process_limit, self.cpu_seconds) <= 0:
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "Sandbox resource limits must be positive.")
 

@@ -1,6 +1,8 @@
 import React from "react";
 import { Box, Text } from "@anthropic/ink";
 import { colors, displayWidth, truncate } from "../theme/index.js";
+import {SelectionText} from "./Selection.js";
+import {geometry} from "../theme/tokens.js";
 
 export type HeaderStripItem = { id: string; label: string };
 
@@ -15,7 +17,7 @@ export function fitHeaderWindow(items: HeaderStripItem[], selected: number, widt
   // Every visible label and every overflow marker occupies one equal header
   // slot.  This preserves the established edge/inter-tab rhythm instead of
   // letting a five-character ellipsis collapse spacing at narrow widths.
-  const slotWidth = Math.min(Math.max(1, width), Math.max(5, ...items.map(item => displayWidth(item.label) + 2)));
+  const slotWidth = Math.min(Math.max(1, width), Math.max(geometry.header.minimumSlot, ...items.map(item => displayWidth(item.label) + geometry.header.padding * 2)));
   const slots = Math.max(1, Math.floor(Math.max(1, width) / slotWidth));
   if (slots < 3 && items.length > slots) {
     // Keep the selected tab visible before spending scarce cells on markers.
@@ -51,6 +53,7 @@ type Props = {
 export function HorizontalHeaderStrip({ items, selected, width, contentFocused = false }: Props) {
   const window = fitHeaderWindow(items, selected, width);
   const visible = items.slice(window.start, window.end);
+  const padding = " ".repeat(geometry.header.padding);
   const slot = (key: string, child: React.ReactNode) =>
     <Box key={key} flexGrow={1} flexBasis={window.slotWidth} justifyContent="center">{child}</Box>;
   return <Box flexDirection="row" width="100%" height={1} minHeight={1} flexShrink={0} overflow="hidden">
@@ -58,15 +61,11 @@ export function HorizontalHeaderStrip({ items, selected, width, contentFocused =
     {visible.map((item, offset) => {
       const index = window.start + offset;
       const active = index === selected;
-      const bg = active
-        ? (contentFocused ? colors.selection.dim.block.bg : colors.selection.block.bg)
-        : undefined;
-      const fg = active ? colors.selection.block.fg : colors.tab.detail.fg;
       return <Box key={item.id} flexGrow={1} flexBasis={window.slotWidth} justifyContent="center">
-        <Text color={fg} backgroundColor={bg} bold={active && !contentFocused} dimColor={!active}>
-          {window.slotWidth < 3 ? truncate(item.label, window.slotWidth)
-            : ` ${truncate(item.label, window.slotWidth - 2)} `}
-        </Text>
+        <SelectionText selected={active} focused={!contentFocused} variant="block" color={colors.tab.detail.fg} dimColor={!active}>
+          {window.slotWidth < geometry.header.padding * 2 + 1 ? truncate(item.label, window.slotWidth)
+            : padding + truncate(item.label, window.slotWidth - geometry.header.padding * 2) + padding}
+        </SelectionText>
       </Box>;
     })}
     {window.right ? slot("overflow-right", <Text dimColor>...</Text>) : null}

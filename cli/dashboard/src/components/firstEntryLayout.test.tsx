@@ -23,10 +23,27 @@ test('complete App keeps both editor borders in the viewport on first entry and 
  const wait=()=>new Promise(r=>setTimeout(r,130));
  const ink:any=instances.get(stdout);
  const check=()=>{const screen=ink.frontFrame.screen;const lines=Array.from({length:screen.height},(_,y)=>Array.from({length:screen.width},(_,x)=>cellAt(screen,x,y)?.char||' ').join(''));
-  const borders=lines.map((line,index)=>({line,index})).filter(({line})=>/^─{80}/u.test(line));
+  const borders=lines.map((line,index)=>({line,index})).filter(({line})=>/^─{80,}\s*$/u.test(line));
   expect(borders).toHaveLength(2);expect(borders[1]!.index-borders[0]!.index).toBe(2);expect(borders[1]!.index).toBeLessThan(28);
  };
  try{ink.setAltScreenActive(true);ink.onRender();await wait();check();stdin.write('\r');await wait();await wait();check();
   stdin.write('/');await wait();check();stdin.write('\x1b');await wait();check();
  }finally{root.unmount();root.cleanup();stdin.destroy();stdout.destroy();stderr.destroy();}
+});
+
+test("complete App opens /processlist with no subprocesses and returns safely",async()=>{
+ const stdin:any=new PassThrough();Object.assign(stdin,{isTTY:true,setRawMode(){},ref(){},unref(){}});
+ const stdout:any=new PassThrough();Object.assign(stdout,{isTTY:false,columns:100,rows:28});let output="";stdout.on("data",(chunk:Buffer)=>output+=chunk);
+ const stderr:any=new PassThrough();stderr.on("data",()=>{});
+ const client:BackendClient={ready:true,close(){},async callTool(op){
+  if(op==='project.overview')return {projects:[{name:'empty',workspace:'C:/synthetic',runtime_summary:{state_available:true,daemon_online:false}}]};
+  if(op==='project.enter')return {ok:true,name:'empty'};
+  if(op==='config.get')return {language:'en',verbose:false,auto_compact:true};
+  if(op==='runtime.status')return {daemon_online:false,state_available:true,processes:{},main_conversation:[]};
+  return {};
+ }};
+ const root=renderSync(<InputProvider><App client={client}/></InputProvider>,{stdin,stdout,stderr,patchConsole:false,exitOnCtrlC:false});
+ const send=async(keys:string)=>{stdin.write(keys);await new Promise(r=>setTimeout(r,150));};
+ try{await send('');await send('\r');await send('/');await send('processlist');await send('\r');expect(output).toContain('No subprocesses.');await send('\x1b');expect(output).not.toContain('Dashboard error');}
+ finally{root.unmount();root.cleanup();stdin.destroy();stdout.destroy();stderr.destroy();}
 });

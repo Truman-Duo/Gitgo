@@ -1,5 +1,5 @@
-import React, {memo, useCallback, useEffect, useMemo, useState} from "react";
-import {Box, Text} from "@anthropic/ink";
+import React, {memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from "react";
+import {Box, ScrollBox, Text, type DOMElement, type ScrollBoxHandle} from "@anthropic/ink";
 import type {BackendClient} from "../backend/client.js";
 import {archiveProject, configGet, configSet} from "../backend/tools.js";
 import type {UseTextInputReturn} from "../hooks/useTextInput.js";
@@ -7,8 +7,13 @@ import {
   applyCommandAction, isCommandMode, resolveCommandKeys, type CommandHandlers,
 } from "../input/commandInput.js";
 import {chordLabel, matchChord} from "../input/bindings.js";
-import {useManagedInput as useInput} from "../input/runtime.js";
-import {colors, separator, usePanelSize, useSelectionStyle} from "../theme/index.js";
+import {useManagedInput as useInput, useScrollInput} from "../input/runtime.js";
+import {colors, separator, usePanelSize} from "../theme/index.js";
+import {SelectionRow, SelectionText} from "./Selection.js";
+import {FormFieldRow, fieldLabelWidth} from "./FormFieldRow.js";
+import {useCopy} from "../ui/PageFrame.js";
+import {useFeedback} from "../hooks/useFeedback.js";
+import {cycleChoiceIndex} from "../input/choice.js";
 import type {FooterConfig, Suggestion} from "./CommandBar.js";
 import {clampHeaderIndex, HorizontalHeaderStrip} from "./HorizontalHeaderStrip.js";
 
@@ -23,15 +28,15 @@ type Target = {
 type Confirmation = {planId: string; message: string};
 
 const TABS = [
-  {id: "targets", label: "Projects and Subprocesses"},
-  {id: "plans", label: "Deletion Plans"},
-  {id: "delay", label: "Retention and Delays"},
+  {id: "targets", label: {en:"Projects and Subprocesses",zh:"项目与子进程"}},
+  {id: "plans", label: {en:"Deletion Plans",zh:"删除计划"}},
+  {id: "delay", label: {en:"Retention and Delays",zh:"保留与延迟"}},
 ] as const;
 const DELAYS = [0, 5, 10, 15, 60, 1440, 4320];
 const DELAY_ROWS = [
-  {field: "project", key: "delete_delay_minutes", label: "Project deletion"},
-  {field: "process", key: "process_delete_delay_minutes", label: "Subprocess deletion"},
-  {field: "missing", key: "unavailable_project_archive_delay_minutes", label: "Missing workspace archive"},
+  {field: "project", key: "delete_delay_minutes", label: {en:"Project deletion",zh:"项目删除"}},
+  {field: "process", key: "process_delete_delay_minutes", label: {en:"Subprocess deletion",zh:"子进程删除"}},
+  {field: "missing", key: "unavailable_project_archive_delay_minutes", label: {en:"Missing workspace archive",zh:"工作区缺失后归档"}},
 ] as const;
 
 type Props = {
@@ -45,13 +50,15 @@ type Props = {
 export const BinWorkspace = memo(function BinWorkspace({
   client, cmdInput, onFooter, onDismiss, onRefresh,
 }: Props) {
-  const {w} = usePanelSize({minWidth: 40, widthOffset: 4});
+  const t=useCopy();
+  const {w, h, contentH} = usePanelSize({minWidth: 40, widthOffset: 4, headerRows: 6, footerRows: 2});
   const [tab, setTab] = useState<TabId>("targets");
   const [index, setIndex] = useState(0);
   const [suggestion, setSuggestion] = useState(0);
   const [data, setData] = useState<any>({projects: [], processes: []});
   const [plans, setPlans] = useState<any[]>([]);
-  const [status, setStatus] = useState("");
+  const feedback = useFeedback({kind:"page",id:`bin:${tab}`});
+  const status=feedback.text, setStatus=feedback.show;
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [confirmNo, setConfirmNo] = useState(true);
   const [delays, setDelays] = useState({project: 10, process: 10, missing: 60});
@@ -59,6 +66,9 @@ export const BinWorkspace = memo(function BinWorkspace({
   const [editing, setEditing] = useState(false);
   const [delayDraft, setDelayDraft] = useState(10);
   const [delaySaving, setDelaySaving] = useState(false);
+  const scroll=useRef<ScrollBoxHandle>(null),selectedRow=useRef<DOMElement>(null);
+  useScrollInput(scroll);
+  useLayoutEffect(()=>{if(selectedRow.current)scroll.current?.scrollIntoView(selectedRow.current);},[index,delayRow,tab,w,h,data,plans]);
 
   const refresh = useCallback(async () => {
     const [targets, items] = await Promise.all([
@@ -102,11 +112,11 @@ export const BinWorkspace = memo(function BinWorkspace({
     if (tab === "delay") onFooter({hidden: true});
     else onFooter({
       kind: "command", cmdInput,
-      statusText: status || `Type ${chordLabel("slash")} for commands`,
+      statusText: status || t({en:`Type ${chordLabel("slash")} for commands`,zh:`输入 ${chordLabel("slash")} 查看命令`}),
       suggestions, suggestionIdx: suggestion, cmdResult: "",
     });
     return () => onFooter(null);
-  }, [cmdInput, cmdInput.value, cmdInput.cursor, onFooter, status, suggestion, suggestions, tab]);
+  }, [cmdInput, cmdInput.value, cmdInput.cursor, onFooter, status, suggestion, suggestions, tab, t]);
 
   const moveTab = (delta: number) => {
     const current = TABS.findIndex(item => item.id === tab);
@@ -116,21 +126,21 @@ export const BinWorkspace = memo(function BinWorkspace({
 
   const prepare = useCallback(async (mode: "soft" | "hard") => {
     const target = targets[index];
-    if (!target) { setStatus("Nothing selected"); return; }
+    if (!target) { setStatus(t({en:"Nothing selected",zh:"尚未选择任何项目"})); return; }
     const args: any = {project: target.project, scope: target.scope, mode};
     if (target.scope === "process") args.process_id = target.process_id;
     const plan: any = await client.callTool("deletion.preview", args);
     const manifest = plan.manifest;
-    const label = target.scope === "project" ? target.project : target.display_name || "Subprocess";
+    const label = target.scope === "project" ? target.project : target.display_name || t({en:"Subprocess",zh:"子进程"});
     const cascade = target.scope === "project" && manifest.b_process_count
-      ? `\nIncludes ${manifest.b_process_count} subprocess(es); ${manifest.unfinished_b_process_count || 0} unfinished.`
+      ? t({en:`\nIncludes ${manifest.b_process_count} subprocess(es); ${manifest.unfinished_b_process_count || 0} unfinished.`,zh:`\n包含 ${manifest.b_process_count} 个子进程，其中 ${manifest.unfinished_b_process_count || 0} 个尚未完成。`})
       : "";
     setConfirmation({
       planId: plan.plan_id,
-      message: `${mode.toUpperCase()} delete ${label}${cascade}\n${manifest.effect}\nDelay: ${manifest.delay_minutes} min; worktrees: ${manifest.worktrees.length}`,
+      message: t({en:`${mode.toUpperCase()} delete ${label}${cascade}\n${manifest.effect}\nDelay: ${manifest.delay_minutes} min; worktrees: ${manifest.worktrees.length}`,zh:`${mode === "soft" ? "软" : "永久"}删除 ${label}${cascade}\n${manifest.effect}\n延迟 ${manifest.delay_minutes} 分钟；工作树 ${manifest.worktrees.length} 个`}),
     });
     setConfirmNo(true);
-  }, [client, index, targets]);
+  }, [client, index, targets, t, setStatus]);
 
   const runCommand = useCallback(async (raw: string) => {
     const command = raw.replace(/^[:/]\s*/, "").trim();
@@ -142,18 +152,18 @@ export const BinWorkspace = memo(function BinWorkspace({
         else if (selected?.scope === "process") await client.callTool("process.archive", {
           project: selected.project, process_id: selected.process_id, archived: false,
         });
-        else throw new Error("Select an archived item");
+        else throw new Error(t({en:"Select an archived item",zh:"请选择已归档的项目"}));
       } else if (command === "soft-delete" || command === "hard-delete") {
         await prepare(command.startsWith("soft") ? "soft" : "hard");
       } else if (command === "cancel" && selected) {
         await client.callTool("deletion.cancel", {plan_id: selected.plan_id});
       } else if (command === "retry" && selected) {
         await client.callTool("deletion.retry", {plan_id: selected.plan_id});
-      } else throw new Error("Unknown command: " + command);
+      } else throw new Error(t({en:"Unknown command: ",zh:"未知命令："}) + command);
       if (!command.endsWith("delete")) { await refresh(); onRefresh?.(); }
     } catch (error: any) { setStatus(String(error?.message || error)); }
     cmdInput.setValue("");
-  }, [client, cmdInput, index, onRefresh, prepare, refresh, rows]);
+  }, [client, cmdInput, index, onRefresh, prepare, refresh, rows, t, setStatus]);
 
   const handlers: CommandHandlers = {
     cmdInput, suggestionLabels: suggestions.map(item => item.label), suggestionIdx: suggestion,
@@ -169,12 +179,12 @@ export const BinWorkspace = memo(function BinWorkspace({
         if (confirmNo) { setConfirmation(null); return; }
         const planId = confirmation.planId;
         setConfirmation(null);
-        setStatus("Scheduling deletion…");
+        setStatus(t({en:"Scheduling deletion…",zh:"正在安排删除…"}), {retention:{kind:"until-resolved",reason:"operation-pending"}});
         void client.callTool("deletion.confirm", {plan_id: planId}).then(async (plan: any) => {
           const result = plan.not_before * 1000 <= Date.now()
             ? await client.callTool("deletion.run", {plan_id: planId}, 120) : plan;
-          setStatus(result.state === "completed" ? "Deletion completed"
-            : `Deletion ${result.state}${result.error ? ": " + result.error : ""}`);
+          setStatus(result.state === "completed" ? t({en:"Deletion completed",zh:"删除完成"})
+            : t({en:`Deletion ${result.state}${result.error ? ": " + result.error : ""}`,zh:`删除状态：${result.state}${result.error ? "：" + result.error : ""}`}));
           await refresh();
           onRefresh?.();
         }).catch(error => setStatus(String(error?.message || error)));
@@ -207,7 +217,7 @@ export const BinWorkspace = memo(function BinWorkspace({
           const value = delayDraft;
           setDelaySaving(true);
           void configSet(client, "safety." + name, value)
-            .then(() => { setDelays(current => ({...current, [field]: value})); setStatus("Delay saved"); })
+            .then(() => { setDelays(current => ({...current, [field]: value})); setStatus(t({en:"Delay saved",zh:"延迟已保存"})); })
             .catch(error => setStatus(String(error?.message || error)))
             .finally(() => setDelaySaving(false));
           setEditing(false);
@@ -216,7 +226,7 @@ export const BinWorkspace = memo(function BinWorkspace({
         const current = delayDraft;
         const position = Math.max(0, DELAYS.findIndex(value => value >= current));
         const delta = matchChord("left", input, key) ? -1 : 1;
-        setDelayDraft(DELAYS[Math.max(0, Math.min(DELAYS.length - 1, position + delta))]!);
+        setDelayDraft(DELAYS[cycleChoiceIndex(position, delta, DELAYS.length)]!);
       } else if (!editing && (matchChord("left", input, key) || matchChord("right", input, key))) {
         moveTab(matchChord("left", input, key) ? -1 : 1);
       }
@@ -229,40 +239,41 @@ export const BinWorkspace = memo(function BinWorkspace({
   });
 
   if (confirmation) return <Box flexDirection="column">
-    <Text bold>Confirm deletion</Text>
+    <Text bold>{t({en:"Confirm deletion",zh:"确认删除"})}</Text>
     <Text>{confirmation.message}</Text>
     <Box marginTop={1}>
-      <Text {...useSelectionStyle(!confirmNo ? "focused" : "non-focused", "block")}>Delete</Text>
+      <SelectionText selected={!confirmNo} variant="block">{t({en:"Delete",zh:"删除"})}</SelectionText>
       <Text>   </Text>
-      <Text {...useSelectionStyle(confirmNo ? "focused" : "non-focused", "block")}>Cancel</Text>
+      <SelectionText selected={confirmNo} variant="block">{t({en:"Cancel",zh:"取消"})}</SelectionText>
     </Box>
-    <Text dimColor>{chordLabel("leftRight")} select   {chordLabel("enter")} confirm   {chordLabel("escape")} cancel</Text>
+    <Text dimColor>{t({en:"←/→ select · Enter confirm · Esc cancel",zh:"←/→ 选择 · Enter 确认 · Esc 取消",keys:true})}</Text>
   </Box>;
 
-  const visibleStart = Math.max(0, index - 5);
+  const visibleCount = Math.max(1, contentH);
+  const visibleStart = Math.max(0, Math.min(index - Math.floor(visibleCount / 2), rows.length - visibleCount));
+  const labelWidth=fieldLabelWidth(DELAY_ROWS.map(item=>t(item.label)), Math.max(1,w-12), "");
   return <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
-    <HorizontalHeaderStrip items={[...TABS]} selected={TABS.findIndex(item => item.id === tab)} width={w}/>
+    <HorizontalHeaderStrip items={TABS.map(item=>({id:item.id,label:t(item.label)}))} selected={TABS.findIndex(item => item.id === tab)} width={w}/>
     <Text color={colors.divider.color}>{separator(w)}</Text>
-    <Box flexDirection="column" flexGrow={1} paddingTop={1}>
+    <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} minHeight={0} paddingTop={1}>
       {tab === "delay" ? <>{DELAY_ROWS.map((item, rowIndex) =>
-        <Text key={item.key} {...useSelectionStyle(rowIndex === delayRow ? "focused" : "non-focused", "row")}>
-          {item.label.padEnd(28)} {editing && rowIndex === delayRow ? delayDraft : delays[item.field]} min{editing && rowIndex === delayRow ? "  editing" : ""}
-        </Text>)}<Text dimColor>Missing workspaces: from first failed entry; 0 disables archiving. No files are deleted.</Text></> : rows.length === 0 ? <Text dimColor>Nothing archived here.</Text>
-        : rows.slice(visibleStart, visibleStart + 12).map((item: any, offset: number) => {
+        <Box key={item.key} ref={rowIndex === delayRow ? selectedRow : undefined} flexShrink={0}><FormFieldRow label={t(item.label)} selected={rowIndex === delayRow} editing={editing && rowIndex === delayRow}
+          labelWidth={labelWidth} suffix="" highlight={false}>
+          <SelectionText>{editing && rowIndex === delayRow ? delayDraft : delays[item.field]} {t({en:"min",zh:"分钟"})}</SelectionText>
+        </FormFieldRow></Box>)}<Text dimColor>{t({en:"Missing workspaces: from first failed entry; 0 disables archiving. No files are deleted.",zh:"从首次打开工作区失败起计时；0 表示不归档。不会删除文件。"})}</Text></> : rows.length === 0 ? <Text dimColor>{t({en:"Nothing archived here.",zh:"此处暂无归档记录。"})}</Text>
+        : rows.slice(visibleStart, visibleStart + visibleCount).map((item: any, offset: number) => {
           const absolute = visibleStart + offset;
           const label = tab === "targets"
-            ? item.scope === "project" ? `Project   ${item.project}` : `Subprocess   ${item.display_name || "Subprocess"} (${item.project})`
+            ? item.scope === "project" ? t({en:`Project   ${item.project}`,zh:`项目   ${item.project}`}) : t({en:`Subprocess   ${item.display_name || "—"} (${item.project})`,zh:`子进程   ${item.display_name || "—"} (${item.project})`})
             : `${item.manifest?.project || "?"} / ${item.manifest?.scope || "?"}   ${item.state}${item.error ? "   " + item.error : ""}`;
-          return <Text key={item.plan_id || item.process_id || item.project}
-            {...useSelectionStyle(absolute === index ? "focused" : "non-focused", "row")}>
-            {label}
-          </Text>;
+          return <SelectionRow key={item.plan_id || item.process_id || item.project} selected={absolute === index} ref={absolute === index ? selectedRow : undefined}>
+            <SelectionText wrap="truncate-end">{label}</SelectionText>
+          </SelectionRow>;
         })}
-      <Box flexGrow={1}/>
+    </ScrollBox>
       <Text dimColor>{status || (tab === "delay"
-        ? editing ? `${chordLabel("leftRight")} change   ${chordLabel("enter")} save`
-          : `${chordLabel("upDown")} select   ${chordLabel("enter")} edit`
-        : `${chordLabel("leftRight")} tabs   ${chordLabel("upDown")} select   ${commands.join("   ")}`)}   {chordLabel("escape")} back</Text>
-    </Box>
+        ? editing ? t({en:"←/→ choose · Enter save",zh:"←/→ 选择 · Enter 保存",keys:true})
+          : t({en:"↑/↓ select · Enter edit",zh:"↑/↓ 选择 · Enter 编辑",keys:true})
+        : t({en:`←/→ tabs · ↑/↓ select · ${commands.join("   ")}`,zh:`←/→ 页签 · ↑/↓ 选择 · ${commands.join("   ")}`,keys:true}))} · {t({en:"Esc back",zh:"Esc 返回",keys:true})}</Text>
   </Box>;
 });

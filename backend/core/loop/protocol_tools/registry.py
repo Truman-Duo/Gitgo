@@ -50,14 +50,14 @@ def install_factories(ctx, factories):
 def build_internal_tools(process, available_tools, workspace_path, llm_provider, dispatcher, on_stream_event):
     from . import (requirements_and_decisions, coordination, task_contracts,
         artifacts, child_execution, delegation, task_dag, bundle_preparation,
-        bundle_execution, child_review, dynamic_and_completion, workbench)
+        bundle_execution, child_review, dynamic_and_completion, workbench, harness_composition)
     ctx = ToolBindings(process, available_tools or {}, workspace_path, llm_provider,
         dispatcher, on_stream_event, build_context_tools(process, workspace_path), getattr(process, "_manager", None))
-    factories = [Factory(requirements_and_decisions, provides=("engineering",)), Factory(workbench)]
+    factories = [Factory(requirements_and_decisions, provides=("engineering",)), Factory(workbench), Factory(harness_composition),
+                 Factory(task_contracts, requires=("engineering",))]
     if process.actor_kind == "supervisor":
         factories.extend([
             Factory(coordination),
-            Factory(task_contracts, requires=("engineering",)),
             Factory(artifacts, provides=("owned_child",)),
             Factory(child_execution, requires=("owned_child",), provides=("spawn_child",)),
             Factory(delegation, requires=("spawn_child",), provides=("delegate_task",)),

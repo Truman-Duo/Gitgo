@@ -1,3 +1,6 @@
+import {SelectionText} from "./Selection.js";
+import {useCopy} from "../ui/PageFrame.js";
+import {applicationBindings} from "../input/router.js";
 // src/components/TrialPanel.tsx — /runtime trial: incoming external changes + triage
 import React, { memo, useState, useEffect, useCallback } from "react";
 import { Box, Text } from "@anthropic/ink";
@@ -19,6 +22,7 @@ type Props = {
 };
 
 export const TrialPanel = memo(function TrialPanel({ client, project, onDismiss }: Props) {
+  const t=useCopy();
   const [items, setItems] = useState<Incoming[]>([]);
   const [sel, setSel] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -59,7 +63,7 @@ export const TrialPanel = memo(function TrialPanel({ client, project, onDismiss 
           break;
       }
     }
-  });
+  }, {bindingContext: confirm ? "" : "trial"});
 
   const { w } = usePanelSize({ minWidth: 40 });
 
@@ -71,26 +75,26 @@ export const TrialPanel = memo(function TrialPanel({ client, project, onDismiss 
     );
   }
 
-  if (loading) return <Box padding={1}><Text dimColor>Loading incoming changes...</Text></Box>;
+  if (loading) return <Box padding={1}><Text dimColor>{t({en:"Loading incoming changes...",zh:"正在读取传入变更…"})}</Text></Box>;
 
   return (
     <Box flexDirection="column" padding={1} width={w}>
       <Box marginBottom={1}>
-        <Text bold>Trial Incoming: {project}</Text>
-        <Text dimColor>    {items.length} changes</Text>
+        <Text bold>{t({en:"Trial Incoming: ",zh:"试验传入变更： "})}{project}</Text>
+        <Text dimColor>    {items.length} {t({en:" changes",zh:" 项变更"})}</Text>
       </Box>
       {status ? <Text dimColor>{status}</Text> : null}
 
       {items.length === 0 ? (
-        <Text dimColor>No incoming changes.</Text>
+        <Text dimColor>{t({en:"No incoming changes.",zh:"尚无传入变更。"})}</Text>
       ) : (
         items.map((it, i) => {
           const active = i === sel;
           return (
             <Box key={it.index} flexDirection="row">
-              <Text color={active ? colors.selection.row.fg : undefined} bold={active}>
+              <SelectionText selected={active}  >
                 #{it.index}  {it.hash.slice(0, 10)}  [{it.triage}]
-              </Text>
+              </SelectionText>
               {active && (
                 <Text dimColor>  {it.message.slice(0, Math.max(10, w - 48))}  {it.author || "?"}</Text>
               )}
@@ -100,7 +104,7 @@ export const TrialPanel = memo(function TrialPanel({ client, project, onDismiss 
       )}
 
       <Box marginTop={1}>
-        <Text dimColor>{chordLabel("letterA")} accept    {chordLabel("letterP")} promote    {chordLabel("letterD")} discard    {chordLabel("upDown")} select    {chordLabel("escape")} back</Text>
+        <Text dimColor>{applicationBindings.label("trial.accept")} {t({en:" accept    ",zh:" 接受    "})}{applicationBindings.label("trial.promote")} {t({en:" promote    ",zh:" 提升    "})}{applicationBindings.label("trial.discard")} {t({en:" discard    ",zh:" 丢弃    "})}{chordLabel("upDown")} {t({en:" select    ",zh:" 选择    "})}{chordLabel("escape")} {t({en:" back",zh:" 返回"})}</Text>
       </Box>
     </Box>
   );

@@ -30,6 +30,8 @@ def _input(process, payload, answer, *, published_question=None):
     alignment = context.get('alignment_runtime') or {}
     from .task_contract import semantic_contract
     from .alignment_routing import POLICY_VERSION
+    from .task_maintenance import alignment_basis as task_basis
+    from backend.core.mechanism_runtime.semantic_projection import alignment_basis as harness_basis
     shape = published_question or (questions[0] if questions else request)
     data = {'cache_schema': 1, 'policy': POLICY_VERSION, 'task': task, 'process': process.process_id,
             'kind': process.task_kind, 'node': node['id'], 'answer': answer_digest(source['answer']),
@@ -41,6 +43,8 @@ def _input(process, payload, answer, *, published_question=None):
             'contract': semantic_contract(context.get('task_contract') or {}), 'constraints': process.task_constraints,
             'request': alignment.get('request'), 'scope': alignment.get('scope'), 'defaults': alignment.get('assumptions'),
             'updates': payload.get('user_updates'), 'history': payload.get('historical_decisions'),
+            'boundary': {key:payload.get(key) for key in ('stage','trigger','proposed_contracts','proposed_questions','observation_only')},
+            'maintenance':task_basis(process),'harness_configuration':harness_basis(process),
             'conversation': payload.get('conversation_context'), 'description': process.task_description,
             'governance': {k: context.get(k) for k in ('brief', 'signals', 'context_policy')},
             'receipts': [r for r in process.tool_receipts if r.get('task_id') == task]}

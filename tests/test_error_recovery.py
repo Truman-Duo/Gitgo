@@ -151,6 +151,10 @@ class TestTransactionRollback:
 
     def test_schema_error_is_model_correctable_and_does_not_rollback(self, tmp_path_factory):
         from backend.core.loop.tool_execution import ToolExecution
+        from backend.core.loop.execution_context import ExecutionContext
+        from backend.core.loop.models import AgentProcess, RingLevel
+        from backend.core.loop.session import AgentSession
+        from backend.core.loop.tools import ToolRegistry
 
         called = False
 
@@ -168,12 +172,11 @@ class TestTransactionRollback:
             },
             execute=execute, read_only=False, effect=ToolEffect.WORKSPACE_WRITE,
         )
-        ctx = MagicMock()
-        ctx.workspace_path = str(tmp_path_factory)
-        ctx.session = None
-        ctx.is_cancelled.return_value = False
-        ctx.process.cancel_requested = False
-        ctx.artifacts = {"tool_catalog": {tool.name: tool}}
+        process = AgentProcess('schema-worker', 'worker', RingLevel.RING_3,
+            session=AgentSession(), active_task_id='schema-task', worktree_path=str(tmp_path_factory),
+            tool_registry=ToolRegistry([tool.name]), capability_profile_id='development.workspace')
+        ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(tmp_path_factory),
+            cancellation=process.cancellation_event, artifacts={"tool_catalog": {tool.name: tool}})
         execution = ToolExecution(
             execution_id="schema-error", ctx=ctx,
             tool_calls=[{"name": tool.name, "args": {}}],

@@ -95,8 +95,19 @@ class ToolExecution:
         groups = _build_conflict_groups(resolved)
         # Approval suspension has an ordered continuation. Nothing after a
         # composite may start speculatively while one of its leaves waits.
-        if any(tool is not None and tool.composite_spec for _, _, tool, _ in resolved):
-            groups = [[item] for item in resolved]
+        # Only contiguous observation calls may start together. This preserves
+        # a resumable suffix when a mode revision fences a mutation mid-batch,
+        # including a batch generated while the previous mode was effective.
+        from .operation_policy import is_observation_effect
+        groups = []
+        for item in resolved:
+            tool = item[2]
+            observation = tool is not None and not tool.composite_spec and is_observation_effect(tool.effect)
+            if observation and groups and all(t[2] is not None and not t[2].composite_spec
+                                              and is_observation_effect(t[2].effect) for t in groups[-1]):
+                groups[-1].append(item)
+            else:
+                groups.append([item])
 
         results: list[ToolResult] = []
 

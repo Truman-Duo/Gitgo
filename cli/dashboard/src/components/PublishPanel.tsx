@@ -1,218 +1,153 @@
-import {useCopy} from "../ui/PageFrame.js";
-import type {Copy} from "../ui/pageContract.js";
-import React, {memo, useCallback, useEffect, useMemo, useState} from "react";
+import React, {useEffect, useState} from "react";
 import {Box, Text} from "@anthropic/ink";
 import type {BackendClient} from "../backend/client.js";
 import {publishGet, publishSet} from "../backend/tools.js";
-import {applyTextOp} from "../hooks/useTextInput.js";
+import type {PublishLocalState} from "../state/publishLocalState.js";
 import type {UseTextInputReturn} from "../hooks/useTextInput.js";
-import {chordLabel, matchChord} from "../input/bindings.js";
-import {useManagedInput as useInput} from "../input/runtime.js";
-import {colors, separator, usePanelSize, padEndWidth} from "../theme/index.js";
+import {usePublishForm} from "../hooks/usePublishForm.js";
+import {usePublishFormEditor} from "../hooks/usePublishFormEditor.js";
+import {useManagedInput} from "../input/runtime.js";
+import {matchChord} from "../input/bindings.js";
+import {useCopy} from "../ui/PageFrame.js";
+import type {Copy} from "../ui/pageContract.js";
+import {colors, usePanelSize} from "../theme/index.js";
+import {HorizontalHeaderStrip} from "./HorizontalHeaderStrip.js";
 import type {FooterConfig} from "./CommandBar.js";
-import {clampHeaderIndex, HorizontalHeaderStrip} from "./HorizontalHeaderStrip.js";
+import {formatChecks, parseChecks} from "./publishChecks.js";
+import type {PublishCheck} from "../backend/publish.js";
+import {publishCommand} from "../backend/publish.js";
+import {randomUUID} from "node:crypto";
+import {useFeedback} from "../hooks/useFeedback.js";
+import {FeedbackMessage} from "./FeedbackMessage.js";
 
-const TABS = [
-  {id: "commit", label: {en:"Commit Format",zh:"提交格式"}},
-  {id: "privacy", label: {en:"Privacy",zh:"隐私"}},
-  {id: "remote", label: {en:"Remote",zh:"远端"}},
-] as const;
-
-const ROWS = {
-  commit: ["prefix", "number_start", "padding", "plugins", "template_name"],
-  privacy: [
-    "enabled", "deep_scan", "content_level", "severity_threshold",
-    "exclude_paths", "include_paths", "ignored_rules", "approved_fingerprints",
-  ],
-  remote: ["remote_url", "trial", "formal"],
-} as const;
-
-const LABELS: Record<string, Copy> = {
-  prefix: {en:"Prefix",zh:"前缀"}, number_start: {en:"Number Start",zh:"起始编号"}, padding: {en:"Padding",zh:"编号补零"},
-  plugins: {en:"Commit Plugins",zh:"提交插件"}, template_name: {en:"Template",zh:"模板"}, enabled: {en:"Privacy Scan",zh:"隐私扫描"},
-  deep_scan: {en:"Deep Scan",zh:"深度扫描"}, content_level: {en:"Content Level",zh:"内容级别"},
-  severity_threshold: {en:"Minimum Severity",zh:"最低严重级别"}, exclude_paths: {en:"Excluded Paths",zh:"排除路径"},
-  include_paths: {en:"Explicit Includes",zh:"显式包含"}, ignored_rules: {en:"Ignored Rules",zh:"忽略规则"},
-  approved_fingerprints: {en:"Approved Matches",zh:"已批准匹配"}, remote_url: {en:"Release URL",zh:"发布地址"},
-  trial: {en:"Trial Changes",zh:"试用变更"}, formal: {en:"Formal Commits",zh:"正式提交"},
-};
-
-const PUBLISH_ACTIVITY = new Set([
-  "scan", "trial", "formalize", "sync", "push",
-  "governance_synced", "governance_pushed", "governance_dissolved",
-]);
-const ARRAY_FIELDS = new Set([
-  "plugins", "exclude_paths", "include_paths", "ignored_rules", "approved_fingerprints",
-]);
-
-type TabId = keyof typeof ROWS;
-type PublishData = {
-  commit_format: Record<string, unknown>;
-  privacy: Record<string, unknown>;
-  remote_url: string;
-  stages?: {trial_configured?: boolean; release_configured?: boolean};
-};
 type Props = {
-  client: BackendClient; project: string; cmdInput: UseTextInputReturn;
+  localState?: PublishLocalState; client: BackendClient; project: string; cmdInput: UseTextInputReturn;
   onFooter: (config: FooterConfig | null) => void; onDismiss: () => void;
-  onOpenTrial: () => void; onOpenFormal: () => void;
+  onOpenTrial: () => void; onOpenFormal: () => void; onOpenAccount?: () => void;
 };
+type Data = {commit_format: Record<string, unknown>; privacy: Record<string, unknown>; authorship?: Record<string, unknown>;
+  remote_url: string; repositories?: Record<string, string>; checks?: PublishCheck[]};
+const tabs: Copy[] = [{en: "Repository / branches", zh: "仓库与分支"}, {en: "Account", zh: "账户"},
+  {en: "Commit conventions", zh: "提交规范"}, {en: "Privacy / authorship", zh: "隐私与署名"}, {en: "Verification", zh: "验证检查"}];
+const labels: Record<string, Copy> = {
+  remote_url: {en: "Remote repository", zh: "远端仓库"}, trial: {en: "Inspect Trial changes", zh: "查看试用变更"}, formal: {en: "Inspect Formal commits", zh: "查看正式提交"},
+  account: {en: "Configure repository account", zh: "配置仓库账户"}, prefix: {en: "Prefix", zh: "前缀"}, number_start: {en: "Starting number", zh: "起始编号"},
+  padding: {en: "Zero padding", zh: "编号补零"}, plugins: {en: "Commit plugins (; separated)", zh: "提交插件（; 分隔）"}, template_name: {en: "Template", zh: "模板"},
+  enabled: {en: "Privacy scan", zh: "隐私扫描"}, deep_scan: {en: "Deep scan", zh: "深度扫描"}, content_level: {en: "Content level", zh: "内容级别"},
+  severity_threshold: {en: "Minimum severity", zh: "最低严重级别"}, exclude_paths: {en: "Excluded paths (; separated)", zh: "排除路径（; 分隔）"},
+  include_paths: {en: "Explicit includes (; separated)", zh: "显式包含（; 分隔）"}, ignored_rules: {en: "Ignored rules (; separated)", zh: "忽略规则（; 分隔）"},
+  approved_fingerprints: {en: "Approved fingerprints (; separated)", zh: "已批准匹配（; 分隔）"}, extra_patterns: {en: "Custom secret rules (JSON array)", zh: "自定义秘密规则（JSON 数组）"},
+  mode: {en: "Authorship mode", zh: "署名策略"}, strip_commit_coauthors: {en: "Remove tool coauthor trailers", zh: "清理工具共同署名"},
+  strip_code_comments: {en: "Clean tool authorship comments", zh: "清理工具署名注释"}, checks: {en: "Required checks", zh: "必需检查"},
+};
+const privacyFields = ["enabled", "deep_scan", "content_level", "severity_threshold", "exclude_paths", "include_paths", "ignored_rules", "approved_fingerprints", "extra_patterns"];
+const authorshipFields = ["mode", "strip_commit_coauthors", "strip_code_comments"];
+const arrays = ["plugins", "exclude_paths", "include_paths", "ignored_rules", "approved_fingerprints"];
+const fieldSets = [["remote_url", "trial", "formal"], ["account"], ["prefix", "number_start", "padding", "plugins", "template_name"], [...privacyFields, ...authorshipFields], ["checks"]];
 
-function parseEditedValue(field: string, raw: string,t:(value:Copy)=>string): unknown {
-  if (ARRAY_FIELDS.has(field)) return raw.split(";").map(value => value.trim()).filter(Boolean);
-  if (field === "number_start") {
-    const value = Number(raw);
-    if (!Number.isInteger(value) || value < 0) throw new Error(t({en:"Number Start must be a non-negative integer",zh:"起始编号必须为非负整数"}));
-    return value;
-  }
-  if (field === "content_level") {
-    const value = Number(raw);
-    if (!Number.isInteger(value) || value < 1 || value > 3) throw new Error(t({en:"Content Level must be 1, 2 or 3",zh:"内容级别必须为 1、2 或 3"}));
-    return value;
-  }
-  return raw;
+export function PublishPanel(props: Props) {
+  const t = useCopy(), {w} = usePanelSize({minWidth: 20, widthOffset: 4});
+  const [tab, setTab] = useState(() => Math.max(0, Math.min(4, props.localState?.get<number>("settings.tab") ?? 0)));
+  const [focus, setFocus] = useState<"header" | "body">("header"), [data, setData] = useState<Data | null>(null);
+  const feedback = useFeedback({kind: "page", id: `${props.project}:publish/settings/${tab}`}, {tone: "error"});
+  const error = feedback.text, setError = feedback.show;
+  const read = () => {void publishGet(props.client, props.project).then(v => setData(v as Data)).catch(e => setError(String(e?.message || e)));};
+  useEffect(read, [props.client, props.project]);
+  useEffect(() => {props.localState?.set("settings.tab", tab);}, [tab]);
+  useEffect(() => {if (focus === "header") {props.onFooter({hidden: true}); return () => props.onFooter(null);}}, [focus, props.onFooter]);
+  useManagedInput((text, key) => {
+    if (matchChord("escape", text, key)) props.onDismiss();
+    else if (matchChord("left", text, key)) setTab(v => Math.max(0, v - 1));
+    else if (matchChord("right", text, key)) setTab(v => Math.min(tabs.length - 1, v + 1));
+    else if (matchChord("enter", text, key)) setFocus("body");
+  }, {isActive: focus === "header"});
+  return <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
+    <HorizontalHeaderStrip items={tabs.map((label, index) => ({id: String(index), label: t(label)}))} selected={tab} width={w} contentFocused={focus !== "header"}/>
+    <FeedbackMessage feedback={feedback.message}/>
+    {!data ? <Text dimColor>{t({en: "Reading settings…", zh: "正在读取配置…"})}</Text> : tab === 1 ?
+      <AccountFields {...props} focused={focus === "body"} onDismiss={() => setFocus("header")}/> :
+      <SettingFields key={tab} {...props} data={data} tab={tab} focused={focus === "body"} onDismiss={() => setFocus("header")} onSaved={value => setData(value)}/>}
+    {focus === "header" ? <Text dimColor>{t({en: "←/→ section · Enter select fields · Esc back", zh: "←/→ 分区 · Enter 选择字段 · Esc 返回"})}</Text> : null}
+  </Box>;
 }
 
-export const PublishPanel = memo(function PublishPanel({
-  client, project, cmdInput, onFooter, onDismiss, onOpenTrial, onOpenFormal,
-}: Props) {
-  const t=useCopy();
-  const tabs=TABS.map(item=>({...item,label:t(item.label)}));
-  const {w} = usePanelSize({minWidth: 40, widthOffset: 4});
-  const [tab, setTab] = useState<TabId>("commit");
-  const [row, setRow] = useState(0);
-  const [data, setData] = useState<PublishData | null>(null);
-  const [history, setHistory] = useState<any[]>([]);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [status, setStatus] = useState("");
-  const rows = useMemo<readonly string[]>(() => ROWS[tab], [tab]);
-
-  const refresh = useCallback(async () => {
-    const [value, events] = await Promise.all([
-      publishGet(client, project),
-      client.callTool("history.list", {project, limit: 100}),
-    ]);
-    setData(value as PublishData);
-    setHistory((Array.isArray(events) ? events : [])
-      .filter(item => PUBLISH_ACTIVITY.has(String(item.operation))).slice(-8));
-  }, [client, project]);
-
-  useEffect(() => { void refresh().catch(error => setStatus(String(error?.message || error))); }, [refresh]);
-  useEffect(() => { setRow(value => Math.min(value, rows.length - 1)); }, [rows]);
-  useEffect(() => {
-    onFooter(editing ? {
-      kind: "normal", cmdInput,
-      statusText: t({en:"Enter save · Esc cancel",zh:"Enter 保存 · Esc 取消"}),
-      suggestions: [], suggestionIdx: 0, cmdResult: "",
-    } : {hidden: true});
-    return () => onFooter(null);
-  }, [editing, cmdInput, cmdInput.value, cmdInput.cursor, onFooter]);
-
-  const valueFor = useCallback((field: string): unknown => {
-    if (!data) return undefined;
-    if (field === "remote_url") return data.remote_url;
-    return tab === "commit" ? data.commit_format[field] : data.privacy[field];
-  }, [data, tab]);
-
-  const beginEdit = (field: string) => {
-    const value = valueFor(field);
-    setEditing(field);
-    cmdInput.setValue(Array.isArray(value) ? value.join("; ") : String(value ?? ""));
-  };
-
-  const save = useCallback(async () => {
-    if (!editing || !data) return;
-    try {
-      const value = parseEditedValue(editing, cmdInput.value,t);
-      if (tab === "commit") {
-        await publishSet(client, project, "commit_format", {...data.commit_format, [editing]: value});
-      } else if (tab === "privacy") {
-        await publishSet(client, project, "privacy", {...data.privacy, [editing]: value});
-      } else await publishSet(client, project, "remote_url", value);
-      setEditing(null);
-      cmdInput.setValue("");
-      setStatus(t({en:"Saved",zh:"已保存"}));
-      await refresh();
-    } catch (error: any) { setStatus(String(error?.message || error)); }
-  }, [client, cmdInput, data, editing, project, refresh, tab]);
-
-  const toggle = useCallback(async (field: string) => {
-    if (!data) return;
-    const section = tab === "commit" ? "commit_format" : "privacy";
-    const owner = tab === "commit" ? data.commit_format : data.privacy;
-    await publishSet(client, project, section, {...owner, [field]: !owner[field]});
-    setStatus(t({en:"Saved",zh:"已保存"}));
-    await refresh();
-  }, [client, data, project, refresh, tab]);
-
-  useInput((input: string, key: any) => {
-    if (editing) {
-      if (matchChord("escape", input, key)) { setEditing(null); cmdInput.setValue(""); }
-      else if (matchChord("enter", input, key)) void save();
-      else if (matchChord("backspace", input, key)) applyTextOp({op: "delete_back"}, cmdInput);
-      else if (matchChord("delete", input, key)) applyTextOp({op: "delete_forward"}, cmdInput);
-      else if (matchChord("left", input, key)) applyTextOp({op: "move_cursor", delta: -1}, cmdInput);
-      else if (matchChord("right", input, key)) applyTextOp({op: "move_cursor", delta: 1}, cmdInput);
-      else if (matchChord("home", input, key)) applyTextOp({op: "move_to_start"}, cmdInput);
-      else if (matchChord("end", input, key)) applyTextOp({op: "move_to_end"}, cmdInput);
-      else if (input && !key.ctrl && !key.meta) applyTextOp({op: "insert", text: input}, cmdInput);
-      return;
-    }
-    if (matchChord("escape", input, key)) { onDismiss(); return; }
-    if (matchChord("left", input, key) || matchChord("right", input, key)) {
-      const current = TABS.findIndex(item => item.id === tab);
-      const delta = matchChord("left", input, key) ? -1 : 1;
-      setTab(TABS[clampHeaderIndex(current, delta, TABS.length)]!.id);
-      setRow(0);
-      return;
-    }
-    if (matchChord("up", input, key)) { setRow(value => Math.max(0, value - 1)); return; }
-    if (matchChord("down", input, key)) { setRow(value => Math.min(rows.length - 1, value + 1)); return; }
-    if (!matchChord("enter", input, key) || !data) return;
-    const field = rows[row]!;
-    if (field === "trial") onOpenTrial();
-    else if (field === "formal") onOpenFormal();
-    else if (["enabled", "deep_scan", "padding"].includes(field)) {
-      void toggle(field).catch(error => setStatus(String(error?.message || error)));
-    } else beginEdit(field);
-  });
-
-  const display = (field: string): string => {
-    if (field === "trial") return data?.stages?.trial_configured ? t({en:"Configured",zh:"已配置"}) : t({en:"Not configured",zh:"未配置"});
-    if (field === "formal") return data?.stages?.release_configured ? t({en:"Available",zh:"可用"}) : t({en:"Release not configured",zh:"未配置发布仓库"});
-    const value = valueFor(field);
-    if (typeof value === "boolean") return value ? t({en:"ON",zh:"开启"}) : t({en:"OFF",zh:"关闭"});
-    if (Array.isArray(value)) return t({en:`${value.length} items`,zh:`${value.length} 项`});
-    return String(value || "—");
-  };
-
-  return <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
-    <HorizontalHeaderStrip items={tabs} selected={TABS.findIndex(item => item.id === tab)} width={w}/>
-    <Text color={colors.divider.color}>{separator(w)}</Text>
-    <Box flexDirection="column" paddingTop={1}>
-      {!data ? <Text dimColor>{t({en:"Loading publish configuration…",zh:"正在读取发布配置…"})}</Text> : rows.map((field, index) => <Box key={field}>
-        <Text bold={index === row} dimColor={index !== row}>{padEndWidth(t(LABELS[field]!),20)}</Text>
-        <Text bold={index === row}>{display(field)}</Text>
-      </Box>)}
-    </Box>
-    {tab === "remote" && history.length > 0 ? <Box flexDirection="column" marginTop={1}>
-      <Text dimColor>{t({en:"Publish activity",zh:"发布活动"})}</Text>
-      {history.map((item, index) => <Text key={item.event_id || index} dimColor>
-        {String(item.timestamp || "").slice(0, 19)}  {activityName(String(item.operation),t)}  {activityName(String(item.status),t)}
-      </Text>)}
-    </Box> : null}
-    <Box flexGrow={1}/>
-    <Text dimColor>{status || t({en:"←/→ tabs · ↑/↓ select · Enter open/change",zh:"←/→ 页签 · ↑/↓ 选择 · Enter 打开/修改"})} · {t({en:"Esc back",zh:"Esc 返回"})}</Text>
+/** Account fields belong directly to the Account section, not a third menu. */
+function AccountFields(props: Props & {focused: boolean}) {
+  const t = useCopy(), [busy, setBusy] = useState(false);
+  const feedback = useFeedback({kind: "page", id: `${props.project}:publish/account`});
+  const status = feedback.text, setStatus = feedback.show;
+  const defaults = {kind: "github", instance: "https://github.com", repository: "", account: "", token: ""};
+  const form = usePublishForm(props.localState, "settings/account", defaults, props.project, () => Object.keys(defaults));
+  const accountLabels: Record<string, Copy> = {kind: {en: "Platform", zh: "平台"}, instance: {en: "Instance", zh: "实例地址"},
+    repository: {en: "Repository", zh: "仓库"}, account: {en: "Account", zh: "账户"}, token: {en: "Access token", zh: "访问令牌"}};
+  const editor = usePublishFormEditor(form, {busy, isActive: props.focused, onFooter: props.onFooter, onDismiss: props.onDismiss,
+    choices: {kind: ["github", "gitlab"]}, onSave: async values => {
+      setBusy(true); setStatus("");
+      try {
+        const {token, ...target} = values;
+        await publishCommand(props.client, props.project, "account.save", {target, token}, randomUUID());
+        form.setValues({...values, token: ""}); if (form.field === "token") form.input.setValue("");
+        setStatus(t({en: "Credential saved. Repository access still verifies this account.", zh: "凭据已保存；读取仓库时仍会核对账户。"}));
+      } catch (error: any) {setStatus(String(error?.message || error), {tone: "error"});}
+      finally {setBusy(false);}
+    }});
+  return <Box flexDirection="column" flexGrow={1} minHeight={0}>
+    {editor.rows(name => t(accountLabels[name]!))}
+    <FeedbackMessage feedback={feedback.message}/>
   </Box>;
-});
+}
 
-
-function activityName(value:string,t:(copy:Copy)=>string):string{
- const names:Record<string,Copy>={
-  scan:{en:"Scan",zh:"扫描"},trial:{en:"Trial",zh:"试用"},formalize:{en:"Formalize",zh:"正式化"},
-  sync:{en:"Sync",zh:"同步"},push:{en:"Push",zh:"推送"},success:{en:"Success",zh:"成功"},error:{en:"Error",zh:"错误"},
-  failed:{en:"Failed",zh:"失败"},info:{en:"Info",zh:"信息"},
-  governance_synced:{en:"Synced",zh:"已同步"},governance_pushed:{en:"Pushed",zh:"已推送"},governance_dissolved:{en:"Dissolved",zh:"已拆解"},
- };
- return names[value]?t(names[value]!):value;
+function SettingFields(props: Props & {data: Data; tab: number; focused: boolean; onSaved: (data: Data) => void}) {
+  const {data, tab} = props, t = useCopy(), {h} = usePanelSize({minWidth: 20});
+  const defaults: Record<string, string> = {};
+  const source = tab === 0 ? {remote_url: data.remote_url, trial: "↵", formal: "↵"} : tab === 1 ? {account: "↵"} : tab === 2 ? data.commit_format
+    : tab === 3 ? {...data.privacy, mode: "mixed", strip_commit_coauthors: true, strip_code_comments: false, ...data.authorship} : {checks: formatChecks(data.checks ?? [])};
+  for (const name of fieldSets[tab]!) {
+    const value = (source as Record<string, unknown>)[name];
+    defaults[name] = name === "extra_patterns" ? JSON.stringify(value ?? []) : Array.isArray(value) ? value.join("; ") : String(value ?? "");
+  }
+  const form = usePublishForm(props.localState, `settings/group/${tab}`, defaults, JSON.stringify(data), () => fieldSets[tab]!, {persistPristine: false});
+  const [busy, setBusy] = useState(false);
+  const feedback = useFeedback({kind: "page", id: `${props.project}:publish/settings/group/${tab}`}, {tone: "error"});
+  const status = feedback.text, setStatus = feedback.show;
+  const editor = usePublishFormEditor(form, {busy, isActive: props.focused, onFooter: props.onFooter, onDismiss: props.onDismiss,
+    choices: {padding: ["false", "true"], enabled: ["true", "false"], deep_scan: ["false", "true"], content_level: ["1", "2", "3"],
+      severity_threshold: ["low", "medium", "high", "critical"], mode: ["mixed", "clean"], strip_commit_coauthors: ["true", "false"], strip_code_comments: ["false", "true"]},
+    actions: {trial: props.onOpenTrial, formal: props.onOpenFormal, account: props.onOpenAccount ?? (() => setStatus(t({en: "Open account settings from Publish.", zh: "请从 Publish 打开账户配置。"})))},
+    onSave: async values => {
+      if (busy || tab === 1) return;
+      setBusy(true); setStatus("");
+      try {
+        const parsed: Record<string, unknown> = {};
+        for (const name of fieldSets[tab]!.filter(name => !["trial", "formal"].includes(name))) {
+          const raw = values[name]!.trim();
+          parsed[name] = arrays.includes(name) ? raw.split(";").map(v => v.trim()).filter(Boolean)
+            : name === "extra_patterns" ? JSON.parse(raw) : name === "number_start" || name === "content_level" ? Number(raw)
+            : ["enabled", "deep_scan", "padding", "strip_commit_coauthors", "strip_code_comments"].includes(name) ? raw === "true" : raw;
+        }
+        if (tab === 2 && (!Number.isInteger(parsed.number_start) || Number(parsed.number_start) < 0)) throw Error(t({en: "Starting number must be a non-negative integer", zh: "起始编号必须为非负整数"}));
+        const section = ["remote_url", "", "commit_format", "privacy_authorship", "checks"][tab]!;
+        const value = tab === 0 ? parsed.remote_url : tab === 2 ? {...data.commit_format, ...parsed} : tab === 4 ? parseChecks(values.checks!, data.checks)
+          : {privacy: {...data.privacy, ...Object.fromEntries(privacyFields.map(name => [name, parsed[name]]))}, authorship: {...data.authorship, ...Object.fromEntries(authorshipFields.map(name => [name, parsed[name]]))}};
+        const expected = tab === 0 ? data.remote_url : tab === 2 ? data.commit_format : tab === 4 ? data.checks ?? []
+          : {privacy: data.privacy, authorship: data.authorship ?? {}};
+        await publishSet(props.client, props.project, section, value, expected);
+        props.localState?.remove(`settings/group/${tab}`);
+        const saved = await publishGet(props.client, props.project) as Data;
+        form.accept(values, JSON.stringify(saved));
+        props.onSaved(saved); props.onDismiss();
+      } catch (e: any) {
+        setStatus(String(e?.message || e));
+        try {props.onSaved(await publishGet(props.client, props.project) as Data);} catch { /* Preserve the draft and original failure. */ }
+      } finally {setBusy(false);}
+    }});
+  const count = Math.max(1, h - 13), start = Math.max(0, Math.min(form.index - Math.floor(count / 2), form.fields.length - count));
+  return <Box flexDirection="column" flexGrow={1} minHeight={0}>
+    {tab === 0 ? Object.entries(data.repositories ?? {}).map(([role, path]) => <Text key={role} dimColor wrap="truncate-end">{role}: {path || "—"}</Text>) : null}
+    {tab === 3 ? <Text dimColor>{t({en: "Privacy and authorship save together. Changes invalidate earlier prepared plans.", zh: "隐私与署名一起保存；修改后已有预备计划需要重新检查。"})}</Text> : null}
+    {tab === 4 ? <Text dimColor>{t({en: "file.py | seeds | seconds; other.py | 42 | 30. Every configured check is required.", zh: "file.py | 随机种子 | 秒数; other.py | 42 | 30。所有已配置检查都必须通过。"})}</Text> : null}
+    {editor.rows(name => t(labels[name]!), start, count)}
+    {form.stale ? <Text>{t({en: "Settings changed. Ctrl+R reloads the current values.", zh: "配置已变化，请 Ctrl+R 重新读取当前值。"})}</Text> : null}
+    <FeedbackMessage feedback={feedback.message}/>
+  </Box>;
 }

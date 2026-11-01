@@ -18,23 +18,24 @@ function truncate(
   position: 'start' | 'middle' | 'end',
 ): string {
   if (columns < 1) return ''
-  if (columns === 1) return ELLIPSIS
 
   const length = stringWidth(text)
   if (length <= columns) return text
+  const suffix = stringWidth(ELLIPSIS) <= columns ? ELLIPSIS : ''
+  const available = columns - stringWidth(suffix)
 
   if (position === 'start') {
-    return ELLIPSIS + sliceFit(text, length - columns + 1, length)
+    return suffix + sliceFit(text, length - available, length)
   }
   if (position === 'middle') {
-    const half = Math.floor(columns / 2)
+    const half = Math.ceil(available / 2)
     return (
       sliceFit(text, 0, half) +
-      ELLIPSIS +
-      sliceFit(text, length - (columns - half) + 1, length)
+      suffix +
+      sliceFit(text, length - (available - half), length)
     )
   }
-  return sliceFit(text, 0, columns - 1) + ELLIPSIS
+  return sliceFit(text, 0, available) + suffix
 }
 
 export default function wrapText(

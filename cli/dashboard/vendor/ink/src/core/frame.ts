@@ -10,6 +10,7 @@ import {
 } from './screen.js'
 
 export type Frame = {
+  readonly rasters?: import('./raster.js').PositionedRaster[]
   readonly screen: Screen
   readonly viewport: Size
   readonly cursor: Cursor

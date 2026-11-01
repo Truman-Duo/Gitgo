@@ -117,6 +117,8 @@ test("provider /new enters a field-by-field NormalBar form", async () => {
     await new Promise(resolve => setTimeout(resolve, 60));
     expect(output()).toContain("New Provider");
     expect(output()).toContain("Name");
+    // Enter selects editing; selecting the form alone does not edit values.
+    stdin.write("\r"); await new Promise(resolve => setTimeout(resolve, 60));
     expect(footers.some(footer => footer.kind === "normal")).toBe(true);
   } finally {
     root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();
@@ -187,4 +189,36 @@ test("provider edit cancellation clears the shared CommandBar buffer", async () 
   } finally {
     root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();
   }
+});
+
+test("provider fields stage on Enter, undo one field and save once with visible failures",async()=>{
+  const {stdin,stdout,stderr,output}=terminal();const saves:any[]=[];const footers:any[]=[];
+  let release:any;
+  const client:BackendClient={ready:true,close(){},async callTool(operation,args:any={}){
+    if(operation==="provider.status")return {providers:[],active_provider:""};
+    if(operation==="runtime.status")return {};
+    if(operation==="provider.save"){
+      saves.push(args);
+      if(saves.length===1)throw new Error("LOCAL_ENDPOINT_INVALID: endpoint is unavailable");
+      return new Promise(resolve=>release=resolve);
+    }
+    throw new Error(operation);
+  }};
+  function Fixture(){const input=useTextInput("/local");return <InputProvider><ProvidersTab client={client} project="test" cmdInput={input} onFooter={value=>footers.push(value)} report={()=>{}} contentFocused shell={{back(){},goToTab(){},tabPrev(){},tabNext(){},leaveContent(){}}}/></InputProvider>;}
+  const root=renderSync(<Fixture/>,{stdin,stdout,stderr,patchConsole:false,exitOnCtrlC:false});
+  const send=async(keys:string)=>{stdin.write(keys);await new Promise(r=>setTimeout(r,70));};
+  try{
+    await send("");await send("\r");await send("ignored");await send("\r");await send("local-test");await send("\r");
+    expect(saves).toHaveLength(0);expect(output()).not.toContain("▸");
+    await send("\r");await send("-discard");await send("\x1b");
+    for(let i=0;i<5;i++)await send("\t");
+    await send("\r");await send("local-model");await send("\r");
+    await send("\t");await send("\r");await send("\x1b[C");await send("\x1b");
+    expect(saves).toHaveLength(0);
+    await send("\x13");expect(saves).toHaveLength(1);expect(output()).toContain("LOCAL_ENDPOINT_INVALID");
+    expect(saves[0]).toMatchObject({name:"local-test",model_id:"local-model",protocol:"openai_chat",kind:"local",auth_mode:"none"});
+    await send("\x13");await send("\x13");expect(saves).toHaveLength(2);
+    release({ok:true});await send("");expect(footers.at(-1)?.statusText).toContain("Created");
+    expect(footers.at(-1)?.kind).toBe("command");
+  }finally{root.unmount();root.cleanup();stdin.destroy();stdout.destroy();stderr.destroy();}
 });

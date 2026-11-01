@@ -213,6 +213,9 @@ class DependencyGraph:
 
 def build_dependency_graph(workspace_path: Path) -> DependencyGraph:
     workspace = workspace_path.resolve()
+    from backend.core.storage.metadata_files import read_metadata_bytes, MetadataFileChanged
+    previous = read_metadata_bytes(workspace, GRAPH_FILE, max_bytes=16*1024*1024)
+    base_digest = hashlib.sha256(previous).hexdigest() if previous is not None else ""
     graph = DependencyGraph(workspace)
     from backend.adapters.bounded_local_reader import BoundedLocalReader
     reader = BoundedLocalReader(workspace, ignored=_IGNORED_PARTS)
@@ -252,7 +255,13 @@ def build_dependency_graph(workspace_path: Path) -> DependencyGraph:
     _add_observation_edges(graph)
     _apply_feedback(graph)
     graph.aux_fingerprints = _aux_fingerprints(workspace)
-    _save_graph(graph)
+    try:
+        _save_graph(graph, expected_sha256=base_digest)
+    except MetadataFileChanged:
+        # Another builder published since we observed the cache. Return this
+        # call's observed graph without replacing that newer cache generation.
+        # A subsequent load still checks its fingerprints against real inputs.
+        pass
     return graph
 
 
@@ -706,17 +715,18 @@ def _apply_feedback(graph: DependencyGraph) -> None:
         )
 
 
-def _save_graph(graph: DependencyGraph) -> None:
-    _atomic_json_write(graph.workspace_path / ".gitgo" / GRAPH_FILE, graph.to_dict())
+def _save_graph(graph: DependencyGraph, *, expected_sha256=None) -> None:
+    _atomic_json_write(graph.workspace_path / ".gitgo" / GRAPH_FILE, graph.to_dict(),
+                       expected_sha256=expected_sha256, lock_timeout=5)
 
 
-def _atomic_json_write(path: Path, data: dict, *, expected_sha256=None) -> None:
+def _atomic_json_write(path: Path, data: dict, *, expected_sha256=None, lock_timeout=0) -> None:
     from backend.core.storage.metadata_files import write_metadata_bytes
     if path.parent.name != ".gitgo":
         raise ValueError("Only fixed project metadata is writable here")
     write_metadata_bytes(path.parent.parent, path.name,
                          json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf8"),
-                         expected_sha256=expected_sha256, max_bytes=16*1024*1024)
+                         expected_sha256=expected_sha256, max_bytes=16*1024*1024, lock_timeout=lock_timeout)
 
 
 def _aux_fingerprints(workspace: Path) -> dict[str, str]:

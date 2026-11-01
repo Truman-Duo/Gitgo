@@ -14,6 +14,13 @@ import json
 KEY = 'alignment_runtime'
 
 
+class AlignmentValidationError(ValueError):
+    """Bounded mechanical diagnostics, never a semantic answer or permission."""
+    def __init__(self, message, details):
+        super().__init__(message)
+        self.validation_details = details
+
+
 def optional_object(value, name):
     """Normalize empty nullable form objects, never weaken substantive commands."""
     if value is None:
@@ -34,8 +41,17 @@ def assess_with_provider(provider, payload, *, before_attempt=None, on_notice=No
     if payload.get('stage') == 'delivery' and payload.get('candidate'):
         from .candidate_evidence import candidate_segments
         wire_payload = {**payload, 'candidate': {'segments': candidate_segments(payload['candidate'])}}
-    messages = [{'role': 'system', 'content': POLICY},
-                {'role': 'user', 'content': json.dumps(wire_payload, ensure_ascii=False)}]
+    # Preserve all review evidence, but put task-stable inputs before evolving
+    # cards/candidates. Candidate-first or stage-first serialization throws
+    # away an otherwise reusable prefix on every review.
+    stable_fields = ('original_request', 'task_constraints', 'conversation_context', 'task_maintenance', 'request',
+                     'confirmed_answers', 'historical_decisions', 'user_updates', 'scope',
+                     'questions_asked', 'working_assumptions', 'workflow')
+    ordered = {key: wire_payload[key] for key in stable_fields if key in wire_payload}
+    ordered.update({key: wire_payload[key] for key in sorted(wire_payload) if key not in ordered})
+    from .alignment_payload import encode, ENCODING_GUIDANCE
+    messages = [{'role': 'system', 'content': POLICY + '\n\n' + ENCODING_GUIDANCE},
+                {'role': 'user', 'content': encode(ordered)}]
     routed = hasattr(provider, 'stream_session_events')
     if before_attempt and not routed:
         kwargs['timeout'] = before_attempt(0, provider)
@@ -57,7 +73,7 @@ def assess_with_provider(provider, payload, *, before_attempt=None, on_notice=No
         # Keep billing even when hidden reasoning consumed the entire response.
         # The existing two-attempt compiler recovery remains the only retry.
         return {'schema_error': 'provider_response_incomplete', 'incomplete_reason': exc.reason,
-                '_provider_usage': exc.usage}
+                '_provider_usage': exc.usage, '_provider_cache_intent': getattr(exc, 'cache_intent', None)}
     raw = response.get('content', '') if isinstance(response, dict) else response
     text = str(raw).strip()
     if text.startswith('```'):
@@ -75,6 +91,7 @@ def assess_with_provider(provider, payload, *, before_attempt=None, on_notice=No
         result = {**result, 'status': 'invalid_delivery_check', 'schema_error': 'delivery_check_required'}
     if isinstance(response, dict) and response.get('usage'):
         result['_provider_usage'] = response['usage']
+        result['_provider_cache_intent'] = response.get('cache_intent')
     return result
 
 
@@ -85,7 +102,7 @@ class AlignmentRuntime:
         self.workflow = EngineeringWorkflow(process, emit)
         self.emit = emit
 
-    def payload(self, instruction='', candidate='', proposed_questions=None, proposed_contracts=None, proposed_files=None):
+    def payload(self, instruction='', candidate='', proposed_questions=None, proposed_contracts=None, proposed_files=None, *, observation_only=False):
         context, _ = self.process.read_context_snapshot()
         state = copy.deepcopy(context.get(KEY) or {})
         task_id = self.process.active_task_id or self.process.process_id
@@ -108,33 +125,68 @@ class AlignmentRuntime:
             if items:
                 item = {'node_id': node['id'], 'state_topic': node['state_topic'],
                         'decision_id': items[-1]['decision_id'], 'answer': items[-1]['answer']}
+                answer = items[-1]
+                source_node = node['id'] if node['id'] in (answer.get('answers') or {}) else next(
+                    (e.get('source_node_id', '') for e in reversed(self.process.session.host_ledger)
+                     if e.get('event') == 'user_decision_interpreted' and e.get('task_id') == task_id
+                     and e.get('node_id') == node['id'] and e.get('decision_id') == answer['decision_id']), '')
+                item['source_node_id'] = source_node
                 (confirmed if node['status'] == 'complete' else answers).append(item)
-        from .alignment_evidence import CONTROL_DECISION_KINDS
+        from .alignment_evidence import CONTROL_DECISION_KINDS, business_answer_receipts, exploratory_scope
+        represented = {(a['decision_id'], a.get('source_node_id', a.get('node_id', ''))) for a in answers + confirmed}
+        receipts = business_answer_receipts(self.process.session.host_ledger, task_id)
+        for item in receipts:
+            # Superseded receipts remain in the ledger, not as additional
+            # current unanswered facets. Preserve every item of the newest
+            # actual round, including legacy cards with no workflow binding.
+            if item['decision_id'] != receipts[-1]['decision_id']:
+                continue
+            key = (item['decision_id'], item.get('source_node_id', ''))
+            if key not in represented:
+                answers.append({**item, 'unbound_to_workflow': True})
+                represented.add(key)
         requests = [e for e in self.process.session.host_ledger if e.get('event') == 'user_decision_requested'
                     and e.get('task_id') == task_id and e.get('kind') not in CONTROL_DECISION_KINDS]
-        payload = {'request': (state.get('scope') or {}).get('request') or state['request'], 'original_request': state['request'],
+        active_scope = exploratory_scope(self.process, admission=observation_only)
+        payload = {'request': (state.get('scope') or {}).get('request') if active_scope else state['request'], 'original_request': state['request'],
                    'scope': state.get('scope'), 'stage': 'question_proposal' if proposed_questions is not None else 'delivery' if candidate else 'admission',
                    'questions_asked': requests, 'actual_answers': answers,
                    'confirmed_answers': confirmed, 'workflow': graph, 'candidate': candidate,
                    'task_constraints': self.process.task_constraints,
+                   'task_maintenance': __import__('backend.core.loop.task_maintenance', fromlist=['inspect']).inspect(self.process),
                    'user_updates': [m['content'] for m in self.process.session.messages[state['message_start']:]
                                     if m.get('mailbox_message_id') and m.get('message_type') == 'conversation']}
         from .decision_support import confirmed_user_state
         payload['historical_decisions'] = confirmed_user_state(self.process.session.host_ledger)
+        from backend.core.mechanism_runtime.semantic_projection import snapshot
+        payload['harness_semantics'] = snapshot(self.process, observations=True)
+        if candidate:
+            from .alignment_evidence import answer_digest
+            payload['candidate_digest'] = answer_digest(candidate)
         payload['working_assumptions'] = state.get('assumptions') or {}
         if proposed_questions is not None:
             payload['proposed_questions'] = proposed_questions
         if proposed_contracts:
             payload['proposed_contracts'] = proposed_contracts
+        if observation_only:
+            payload['observation_only'] = True
         payload['conversation_context'] = [{k: m[k] for k in ('role', 'content')}
             for m in self.process.session.messages[:state['message_start']]
             if m.get('content') and (m.get('role') == 'assistant' or m.get('message_type') == 'conversation')][-8:]
         for message in payload['conversation_context']:
             message['content'] = str(message['content'])[:6000]
+        if candidate and proposed_files is None:
+            # Post-stage delivery uses the same accepted claim as stage entry.
+            # Do not silently drop its file evidence just because this caller
+            # did not repeat the already recorded publication list.
+            claim = self.process.completion_claim
+            if claim is not None and claim.result == candidate:
+                proposed_files = list(claim.files)
         if candidate and proposed_files is not None:
             from .delivery_artifacts import collect_artifacts
             payload['published_artifacts'], payload['artifact_notices'] = collect_artifacts(self.process, proposed_files)
-        if len(json.dumps(payload, ensure_ascii=False).encode()) > 120_000:
+        from .alignment_payload import encode
+        if len(encode(payload).encode()) > 120_000:
             raise ValueError('alignment context exceeds bounded semantic review; inspect retained evidence')
         return payload
 
@@ -178,6 +230,10 @@ class AlignmentRuntime:
             raise ValueError('explicit waiting cannot introduce working defaults')
         if status not in {'ready', 'needs_input', 'waiting', 'repair'} or not isinstance(proposals, list) or not isinstance(questions, list) or len(questions) > 8:
             raise ValueError('invalid alignment assessment schema')
+        if payload.get('stage') == 'question_proposal' and status == 'ready' and questions:
+            raise ValueError('A question-proposal assessment cannot both accept questions and declare ready without input. '
+                'Use needs_input for accepted questions; use ready with an empty questions list only when rejecting all proposed questions. '
+                'This does not authorize answers or execution.')
         # Prepare changes on a clone. Invalid final proposals cannot partially
         # resolve real requirements or publish orphaned questions.
         from .models import AgentProcess, RingLevel
@@ -197,10 +253,13 @@ class AlignmentRuntime:
             source = source_answer(shadow.session.host_ledger, shadow.active_task_id or shadow.process_id,
                                    scope.get('decision_id'), scope.get('source_node_id', ''))
             quote = str(scope.get('quote') or '').strip()
+            read_admission = payload.get('stage') in {'admission', 'question_proposal'} and payload.get('observation_only') is True
             if (not source or scope.get('mode') != 'exploration' or not quote or quote not in source['answer']
-                    or scope.get('request') != quote or shadow.task_kind not in {'answer', 'plan'} or status == 'waiting'):
+                    or scope.get('request') != quote or (shadow.task_kind not in {'answer', 'plan'} and not read_admission) or status == 'waiting'):
                 raise ValueError('exploratory scope requires an exact actual user request and read-only task')
             scope = {**scope, 'answer_digest': answer_digest(source['answer'])}
+            if shadow.task_kind not in {'answer', 'plan'}:
+                scope['admission_only'] = True
             shadow.update_context_snapshot(lambda ctx: {**ctx, KEY: {**ctx[KEY], 'scope': scope}})
             shadow.session.host_ledger.append({'event': 'alignment_scope_updated', 'task_id': shadow.active_task_id or shadow.process_id, **scope})
         interpreted_nodes = set()
@@ -230,7 +289,18 @@ class AlignmentRuntime:
         topic_ids.update({q.get('state_topic'): 'q_' + hashlib.sha256(str(q.get('state_topic')).encode()).hexdigest()[:16]
                           for q in questions if q.get('state_topic') not in topic_ids})
         topic_ids.update(aliases)
+        for question in questions:
+            prerequisites = question.get('depends_on_topics', [])
+            if not isinstance(prerequisites, list) or any(not isinstance(topic, str) for topic in prerequisites):
+                raise ValueError('QUESTION_DEPENDENCY_INVALID: depends_on_topics must be a list of exact question topics')
+            unknown = [topic for topic in prerequisites if topic not in topic_ids]
+            if unknown:
+                raise ValueError('QUESTION_DEPENDENCY_UNKNOWN: available question topics=' +
+                    json.dumps(sorted(str(topic) for topic in topic_ids)[:8], ensure_ascii=False) +
+                    '; unknown=' + json.dumps(unknown[:8], ensure_ascii=False) +
+                    '. Use only existing/proposed question topics, or [] if none; completed operations are not question topics.')
         bound_questions = set()
+        revisions = []
         for question in questions:
             topic = str(question.get('state_topic') or '').strip()
             if not topic or len(topic) > 120 or not question.get('question') or not question.get('why_user_must_decide'):
@@ -240,8 +310,23 @@ class AlignmentRuntime:
             node = by_topic.get(topic)
             if node:
                 if node['id'] in state.get('records', {}):
-                    raise ValueError('do not repeat a resolved question; use explicit revision when intent changes')
+                    previous = state['records'][node['id']].get('decision_id')
+                    if not request.get('supersedes_decision_id'):
+                        raise ValueError('do not repeat a resolved question; use explicit revision when intent changes')
+                    if not previous or request['supersedes_decision_id'] != previous:
+                        raise ValueError('question revision must target the current confirmed decision_id')
+                    if status != 'needs_input' or len(questions) != 1 or self.process.pending_decision:
+                        raise ValueError('publish one explicit decision revision at a time after answering the pending question')
+                    # Validate the whole assessment before the existing
+                    # workflow publishes and invalidates the confirmed record.
+                    revisions.append((node['id'], request))
+                    bound_questions.add(node['id'])
+                    continue
+                elif request.get('supersedes_decision_id'):
+                    raise ValueError('question revision requires a current confirmed decision')
             else:
+                if request.get('supersedes_decision_id'):
+                    raise ValueError('question revision requires an existing decision node')
                 node = {'id': 'q_' + hashlib.sha256(topic.encode()).hexdigest()[:16],
                         'kind': 'decision', 'state_topic': topic, 'before_mutation': True,
                         'depends_on': [topic_ids[t] for t in question.get('depends_on_topics', [])] if 'depends_on_topics' in question
@@ -303,10 +388,27 @@ class AlignmentRuntime:
             if missing:
                 raise ValueError('partial answers require narrowed questions bound to the SAME node_id: ' + ', '.join(sorted(missing)))
         from .alignment_evidence import exploratory_scope
-        exploration = exploratory_scope(shadow)
-        if status == 'ready' and any(not (exploration and n['id'] in elicited) for n in unresolved):
-            raise ValueError('ready cannot discard unresolved actual questions. If the latest actual reply requests a current exploratory discussion/comparison, use scope_update(mode=exploration, decision_id, source_node_id if needed, quote=request=exact requested discussion text). Preserve the original unresolved nodes; do not change ready to waiting merely because those original choices remain open.')
-        if status == 'needs_input' and not graph.get('question_frontier'):
+        read_admission = payload.get('stage') in {'admission', 'question_proposal'} and payload.get('observation_only') is True
+        exploration = exploratory_scope(shadow, admission=read_admission)
+        remaining = [n for n in unresolved if not (exploration and n['id'] in elicited)]
+        # Admission readiness permits gathering evidence before an as-yet
+        # unpublished declared question. It is not a completion verdict and
+        # cannot resolve that question. Actual published/answered choices and
+        # delivery remain protected by the existing source-bound checks.
+        blocks_readiness = payload.get('stage') == 'delivery' or any(
+            n['id'] in state.get('requests', {}) for n in remaining)
+        if status == 'ready' and remaining and blocks_readiness:
+            blocked = [n for n in remaining if payload.get('stage') == 'delivery' or n['id'] in state.get('requests', {})]
+            details = {'code':'UNRESOLVED_ACTUAL_QUESTIONS', 'stage':payload.get('stage'),
+                'observation_only':payload.get('observation_only') is True,
+                'blocked_count':len(blocked), 'partial':len(blocked)>8,
+                'blocked_questions':[{'node_id':n['id'], 'decision_id':state.get('requests', {}).get(n['id']),
+                    'status':n['status']} for n in blocked[:8]]}
+            raise AlignmentValidationError('ready cannot discard unresolved actual questions. For a source-bound current read-only outcome, '
+                'use scope_update(mode=exploration, decision_id, source_node_id if needed, quote=request=exact requested text). '
+                'In an executing task this applies only to observation_only admission/question boundaries, never effects or completion. '
+                'Preserve unresolved nodes; do not repeatedly rewrite the contract to bypass them.', details)
+        if status == 'needs_input' and not revisions and not graph.get('question_frontier'):
             raise ValueError('needs_input requires an answerable frontier')
         if status == 'waiting' and not unresolved:
             raise ValueError('waiting requires retained unresolved intent')
@@ -338,7 +440,7 @@ class AlignmentRuntime:
                     state = self.workflow._load()
                     state['request_overrides'] = overrides
                     self.workflow._save(state)
-            decision = self.workflow.ask_frontier()
+            decision = self.workflow.revise_decision(*revisions[0]) if revisions else self.workflow.ask_frontier()
             if decision.get('status') != 'awaiting_user':
                 raise ValueError('alignment did not publish a valid pending frontier')
             return {'status': status, 'decision': decision, 'reason': str(assessment.get('reason') or '')}
@@ -353,9 +455,9 @@ class AlignmentRuntime:
                              'input_digest': alignment_input_digest(self.process),
                              'artifact_manifest': artifact_manifest(used_artifacts)}}})
         if status == 'ready' and payload.get('stage') != 'delivery':
-            from .alignment_evidence import alignment_input_digest
-            declarations = payload.get('proposed_contracts') or []
-            digest = alignment_input_digest(self.process, contract_override=declarations[-1] if declarations else None)
+            from .alignment_routing import admission_input_digest
+            digest = admission_input_digest(self.process, payload)
             self.process.update_context_snapshot(lambda ctx: {**ctx, KEY: {**ctx.get(KEY, {}),
-                'admission_review': {'status': 'ready', 'input_digest': digest}}})
+                'admission_review': {'status': 'ready', 'input_digest': digest,
+                    **({'scope': 'observation_only'} if exploration and shadow.task_kind not in {'answer', 'plan'} else {})}}})
         return {'status': status, 'reason': str(assessment.get('reason') or '')}

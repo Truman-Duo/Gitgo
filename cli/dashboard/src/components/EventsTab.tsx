@@ -3,10 +3,12 @@ import React, { memo } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { ToolEvent } from "../hooks/useLoopData.js";
 import { toolIcon, colors } from "../theme/index.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 type Props = { events: any[]; toolEvents: ToolEvent[]; width: number };
 
 export const EventsTab = memo(function EventsTab({ events, toolEvents, width }: Props) {
+  const t=useCopy();
   const toolItems = toolEvents.slice(-15).map((t) => ({
     type: "tool" as const,
     time: t.timestamp?.slice(11, 19) || "",
@@ -25,11 +27,11 @@ export const EventsTab = memo(function EventsTab({ events, toolEvents, width }: 
     .sort((a, b) => b.time.localeCompare(a.time))
     .slice(0, 15);
 
-  if (combined.length === 0) return <Text dimColor>No recent events</Text>;
+  if (combined.length === 0) return <Text dimColor>{t({en:"No recent events",zh:"暂无近期事件"})}</Text>;
 
   return (
     <Box flexDirection="column">
-      <Text bold dimColor>Recent Events</Text>
+      <Text bold dimColor>{t({en:"Recent Events",zh:"近期事件"})}</Text>
       {combined.map((item, i) => {
         if (item.type === "event") {
           return (

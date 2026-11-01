@@ -187,6 +187,14 @@ def _project_edit(args: dict):
         content = raw.decode("utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         return {"error": "READ_ERROR", "detail": str(exc)}
+    # read_file exposes logical lines joined by LF. For a uniformly CRLF
+    # file, align that text view to the existing style before exact matching.
+    # Mixed line endings retain byte-exact anchor semantics; do not guess.
+    crlf = content.count('\r\n')
+    if crlf and content.count('\n') == crlf and content.count('\r') == crlf:
+        if '\r' not in old:
+            old = old.replace('\n', '\r\n')
+        new = new.replace('\r\n', '\n').replace('\n', '\r\n')
     count = content.count(old)
     replace_all = bool(args.get("replace_all", False))
     if count == 0:

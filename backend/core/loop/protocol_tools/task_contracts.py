@@ -8,61 +8,108 @@ from backend.core.loop.capabilities import CapabilityProfiles
 from backend.core.loop.completion_protocol import CompletionClaim
 
 def install(ctx):
-    from backend.core.loop.task_contract import preview_contract, validate_contract_proposal
+    from backend.core.loop.mechanism_catalog import ELEMENTS, maintenance_schema
+    from backend.core.loop.task_contract import preview_contract, validate_contract_proposal, get_task_contract, TaskContractRevisionConflict
     process = ctx.process
     available_tools = ctx.available_tools
     workspace_path = ctx.workspace_path
     tools = ctx.tools
     manager = ctx.manager
     engineering = ctx.engineering
+    def proposal_for(args):
+        proposal = validate_contract_proposal(args, workspace_path or process.worktree_path)
+        if process.actor_kind != "supervisor":
+            from backend.core.loop.task_maintenance import state_for
+            if not state_for(process).get("allow_contract_reconciliation"):
+                raise ValueError("worker scope revision requires an explicit adopted user change")
+            previous = get_task_contract(process)
+            if not set(previous.get("acceptance_criteria") or []).issubset(proposal.get("acceptance_criteria") or []):
+                raise ValueError("worker revisions cannot remove supervisor-assigned acceptance obligations")
+            for required in previous.get("deliverables") or []:
+                if required.get("required", True) and not any(item.get("required", True)
+                    and (item.get("kind"), item.get("path")) == (required.get("kind"), required.get("path"))
+                    for item in proposal.get("deliverables") or []):
+                    raise ValueError("worker revisions cannot remove supervisor-assigned deliverables")
+            if proposal.get("execution_mode") in {"delegate", "either"} or proposal.get("adopt_process_ids"):
+                raise ValueError("worker scope revision cannot acquire supervisor delegation authority")
+        if get_task_contract(process).get("revision", 0) and "expected_revision" not in proposal:
+            raise TaskContractRevisionConflict("TASK_CONTRACT_REVISION_REQUIRED: submit expected_revision from the current contract")
+        adopted = proposal.get("adopt_process_ids", [])
+        if len(adopted) > 64:
+            raise ValueError("at most 64 previous executions may be adopted")
+        for child_id in adopted:
+            if manager is None or not manager.owns_child(process, manager.get(child_id)):
+                raise ValueError("adopt_process_ids must identify owned child executions from list_agents, never the current process. "
+                    "For the supervisor's own continuing work use keep_supervisor without adoption.")
+            if child_id not in process.delegated_contracts or process.delegated_contracts[child_id].get("superseded_by"):
+                raise ValueError("cannot adopt a missing or superseded task contract")
+        return proposal
+
     def declare_task_contract(args: dict) -> dict:
         from backend.core.loop.task_contract import (
             publish_contract,
             validate_contract_proposal,
         )
         try:
-            proposal = validate_contract_proposal(
-                args, workspace_path or process.worktree_path,
-            )
-            adopted = proposal.get("adopt_process_ids", [])
-            if len(adopted) > 64:
-                raise ValueError("at most 64 previous executions may be adopted")
-            for child_id in adopted:
-                if manager is None or not manager.owns_child(process, manager.get(child_id)):
-                    raise ValueError("adopt_process_ids must identify owned executions from list_agents")
-                if child_id not in process.delegated_contracts or process.delegated_contracts[child_id].get("superseded_by"):
-                    raise ValueError("cannot adopt a missing or superseded task contract")
+            proposal = proposal_for(args)
+        except TaskContractRevisionConflict as exc:
+            return {"error": "TASK_CONTRACT_REVISION_CONFLICT", "detail": str(exc),
+                    "accepted": False, "effect_state": "not_committed", "contract": get_task_contract(process)}
         except (TypeError, ValueError) as exc:
             return {
                 "error": "INVALID_TASK_CONTRACT",
                 "detail": str(exc),
                 "accepted": False,
+                "effect_state": "not_committed",
             }
         try:
-            contract = publish_contract(process, proposal)
+            contract = publish_contract(process, proposal, store=getattr(manager, "session_store", None))
+        except TaskContractRevisionConflict as exc:
+            return {"error": "TASK_CONTRACT_REVISION_CONFLICT", "detail": str(exc),
+                    "accepted": False, "effect_state": "not_committed", "contract": get_task_contract(process)}
         except ValueError as exc:
             return {
                 "error": "INVALID_TASK_ROUTING",
                 "detail": str(exc),
                 "accepted": False,
+                "effect_state": "not_committed",
                 "routing_advice": {
                     "recommended": "self_execute",
                     "next_action": "request_self_execute",
                 },
             }
+        except (OSError, RuntimeError) as exc:
+            from backend.core.storage import StorageCommitUnknown
+            uncertain = isinstance(exc, StorageCommitUnknown)
+            return {"error": "TASK_CONTRACT_COMMIT_UNKNOWN" if uncertain else "TASK_CONTRACT_CHECKPOINT_FAILED",
+                    "detail": str(exc), "accepted": False,
+                    "effect_state": "ambiguous" if uncertain else "not_committed"}
         from backend.core.loop.task_contract import routing_advice
         if proposal.get("engineering_workflow"):
             engineering.notice("WORKFLOW_CONFIGURED", "工程工作流已随任务契约启用；未完成证据会进入 Host 完成检查。")
-        with process._coordination_lock:
-            for child_id in adopted:
-                process.delegated_contracts[child_id]["required_for_parent_completion"] = True
+        from backend.core.loop.task_maintenance import state_for
+        adopted_changes = [value["id"] for value in state_for(process).get("changes", {}).values()
+                           if value.get("contract_revision") == contract["revision"]]
+        if adopted_changes:
+            engineering.notice("TASK_CHANGE_ADOPTED", "新增要求已纳入当前任务的契约、计划与验收条件。", change_ids=adopted_changes,
+                               contract_revision=contract["revision"])
+        maintenance = state_for(process)
         return {
             "accepted": True,
             "contract": contract,
             "host_validated": True,
             "authority_granted": False,
+            "activation": contract["activation"],
             "routing_advice": routing_advice(contract),
             "routing_compilation": dict(contract.get("routing_compilation") or {}),
+            "maintenance_status": {
+                "phase": maintenance.get("phase"),
+                "revision": maintenance.get("revision"),
+                "review_requirements": dict(maintenance.get("review_requirements") or {}),
+                "pending_trigger_ids": [key for key, item in maintenance.get("maintenance_items", {}).items()
+                                        if item.get("status") == "pending"],
+                "next_action": "reconcile_with_declare_task_contract" if maintenance.get("phase") == "needs_review" else "",
+            } if maintenance else None,
             "budget_card": (
                 process.task_budget.decision_card(process.process_id)
                 if process.task_budget is not None else None
@@ -73,14 +120,27 @@ def install(ctx):
     tools["declare_task_contract"] = AgentTool(
         execution_contract=data_broker("host.runtime.declare_task_contract"),
         name="declare_task_contract",
-        alignment_contract=lambda args: preview_contract(process,
-            validate_contract_proposal(args, workspace_path or process.worktree_path)),
+        alignment_contract=lambda args: preview_contract(process, proposal_for(args)),
         description=(
             load_prompt('tools/declare_task_contract')
         ),
         parameters={
             "type": "object",
             "properties": {
+                "mechanism": {"type": "object", "additionalProperties": False,
+                    "description": "Registered task mechanism draft. Each element requires use=exact catalog id; id is an optional instance name. Copy exact source_refs from task_mechanism status, never file paths.",
+                    "properties": {
+                        "id": {"type": "string"}, "intent": {"type": "string"}, "catalog_version": {"type": "string"},
+                        "source_refs": {"type": "array", "items": {"type": "string", "pattern": "^(user|decision|change):"}, "minItems": 1, "maxItems": 32},
+                        "elements": {"type": "array", "maxItems": len(ELEMENTS), "items": {"type": "object", "additionalProperties": False,
+                            "properties": {"id": {"type": "string"}, "use": {"type": "string", "enum": list(ELEMENTS)},
+                                "version": {"type": "integer", "enum": [1]}, "parameters": {"type": "object"}}, "required": ["use"]}},
+                        "bindings": {"type": "array", "items": {"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}}, "required": ["from", "to"], "additionalProperties": False}}},
+                    "required": ["intent", "source_refs", "elements"]},
+                "maintenance": maintenance_schema(),
+                "preview_digest": {"type": "string", "description": "Optional task_mechanism preview digest; rejects a changed preview before activation."},
+                "expected_revision": {"type": "integer", "minimum": 0,
+                    "description": "Required for a revision after initial declaration. Use the current contract revision; stale previews must be recomputed."},
                 "goal": {"type": "string"},
                 "execution_mode": {
                     "type": "string",
@@ -90,7 +150,8 @@ def install(ctx):
                     ],
                 },
                 "delegation_required": {"type": "boolean"},
-                "adopt_process_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
+                "adopt_process_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 64,
+                    "description": "Only existing owned child executions from list_agents whose results this task must adopt. Never the current process id; omit for continuing your own work."},
                 "minimum_delegated_outcomes": {
                     "type": "integer", "minimum": 0, "maximum": 8,
                 },
@@ -130,6 +191,7 @@ def install(ctx):
                 "user_request_evidence": {"type": "string"},
                 "routing_transition": {
                     "type": "string",
+                    "description": "keep_supervisor continues or revises the supervisor's own work. continue_owner continues an existing owned worker and requires its adopt_process_ids. Neither grants authority.",
                     "enum": [
                         "initial", "keep_supervisor", "delegate_initial",
                         "handoff_to_worker", "continue_owner", "parallelize",

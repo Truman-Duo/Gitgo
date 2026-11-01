@@ -20,6 +20,7 @@ import { GovernancePanel } from "./GovernancePanel.js";
 import { MemoryPanel } from "./MemoryPanel.js";
 import { RuntimeContextPanel } from "./RuntimeContextPanel.js";
 import { RuntimeToolsPanel } from "./RuntimeToolsPanel.js";
+import { TaskMechanismsPanel } from "./TaskMechanismsPanel.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
 import type { FooterConfig } from "./CommandBar.js";
 
@@ -46,7 +47,7 @@ export const RuntimeMenu = memo(function RuntimeMenu({
   const [contentFocused, setContentFocused] = useState(false);
   const scrollRef = useRef<ScrollBoxHandle>(null);
   const activeId = ITEMS[selIdx]?.id || "lesson";
-  const ownsScroll = ["lesson", "governance", "context", "tools", "memory"].includes(activeId);
+  const ownsScroll = ["lesson", "governance", "context", "tools", "memory", "mechanisms"].includes(activeId);
   useScrollInput(scrollRef, contentFocused && !ownsScroll);
   useEffect(() => { scrollRef.current?.scrollTo(0); }, [activeId]);
   const [contract, setContract] = useState<any>(null);
@@ -88,7 +89,7 @@ export const RuntimeMenu = memo(function RuntimeMenu({
           {contractError ? <Text color={colors.danger}>{t({en:"Error: ",zh:"错误："})}{contractError}</Text>
             : contract === null ? <Text dimColor>{t({en:"Loading…",zh:"正在读取…"})}</Text>
             : <ContractTab contract={contract} width={w}/>}
-          <Text dimColor>{contentFocused ? t({en:"Esc tabs",zh:"Esc 返回页签"}) : t({en:"Enter open",zh:"Enter 打开"})}</Text>
+          <Text dimColor>{contentFocused ? t({en:"Esc tabs",zh:"Esc 返回页签",keys:true}) : t({en:"Enter open",zh:"Enter 打开",keys:true})}</Text>
         </Box>
       : activeId === "governance"
         ? <GovernancePanel client={client} project={project} cols={_cols} onDismiss={leaveContent} interactive={contentFocused}/>
@@ -96,7 +97,9 @@ export const RuntimeMenu = memo(function RuntimeMenu({
           ? <MemoryPanel client={client} project={project} cols={_cols} onDismiss={leaveContent} interactive={contentFocused}/>
           : activeId === "context"
             ? <RuntimeContextPanel project={project} processes={processes} onDismiss={leaveContent} interactive={contentFocused}/>
-            : <RuntimeToolsPanel client={client} project={project} cols={_cols} onDismiss={leaveContent} interactive={contentFocused}/>;
+            : activeId === "mechanisms"
+              ? <TaskMechanismsPanel client={client} project={project} processes={processes} onDismiss={leaveContent} interactive={contentFocused}/>
+              : <RuntimeToolsPanel client={client} project={project} cols={_cols} onDismiss={leaveContent} interactive={contentFocused}/>;
 
   return (
     <PageFrame page={pages.runtime}>

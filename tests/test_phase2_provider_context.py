@@ -892,8 +892,11 @@ def test_prompt_cache_key_reuses_stable_prefix_across_sessions_and_epochs():
     assert left.cache_intent([], mode="automatic").stable_prefix_key == (
         right.cache_intent([], mode="automatic").stable_prefix_key
     )
-    assert left.cache_intent([{"name": "x"}], mode="automatic").stable_prefix_key != (
+    assert left.cache_intent([{"name": "x"}], mode="automatic").stable_prefix_key == (
         right.cache_intent([], mode="automatic").stable_prefix_key
+    )
+    assert left.cache_intent([{"name": "x"}], mode="automatic").tool_schema_hash != (
+        right.cache_intent([], mode="automatic").tool_schema_hash
     )
 
 

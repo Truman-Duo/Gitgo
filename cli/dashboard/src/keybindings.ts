@@ -139,7 +139,7 @@ export const REGISTRY: CommandDef[] = [
         slashName: "bin",
         hidden: true,
         children: [
-          { name: "config.bin.delete_delay", title: {en:"Delete Delay",zh:"删除延迟"}, category: "system", keys: [], slashName: "delete_delay" },
+          { name: "config.bin.delete_delay", title: {en:"Delete Delay",zh:"删除延迟",keys:true}, category: "system", keys: [], slashName: "delete_delay" },
         ],
       },
     ],
@@ -298,7 +298,7 @@ export const REGISTRY: CommandDef[] = [
         children: [
           { name: "runtime.formal.list", title: {en:"List formal commits",zh:"浏览正式提交"}, category: "action", keys: [], slashName: "list" },
           { name: "runtime.formal.edit", title: {en:"Edit commit message",zh:"编辑提交说明"}, category: "action", keys: [], slashName: "edit" },
-          { name: "runtime.formal.delete", title: {en:"Delete formal commit",zh:"删除正式提交"}, category: "action", keys: [], slashName: "delete" },
+          { name: "runtime.formal.delete", title: {en:"Delete formal commit",zh:"删除正式提交",keys:true}, category: "action", keys: [], slashName: "delete" },
           { name: "runtime.formal.dissolve", title: {en:"Dissolve formal commit",zh:"解除正式提交"}, category: "action", keys: [], slashName: "dissolve" },
         ],
       },

@@ -125,7 +125,7 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
         </Box>
       </Box>}
     </ScrollBox>
-    <Box flexShrink={0}><Text dimColor>{t({en:"←/→ process · ↑/↓ scroll · Esc back",zh:"←/→ 进程 · ↑/↓ 滚动 · Esc 返回"})}</Text></Box>
+    <Box flexShrink={0}><Text dimColor>{t({en:"←/→ process · ↑/↓ scroll · Esc back",zh:"←/→ 进程 · ↑/↓ 滚动 · Esc 返回",keys:true})}</Text></Box>
   </Box>;
 });
 

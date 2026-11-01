@@ -5,7 +5,7 @@
 
 import React, { memo, useState, useCallback, useMemo } from "react";
 import { Box, Text } from "@anthropic/ink";
-import { useManagedInput as useInput } from "../input/runtime.js";
+import { useManagedInput as useInput, ScrollableInputLayer } from "../input/runtime.js";
 import type { BackendClient } from "../backend/client.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
 import type { FooterConfig } from "./CommandBar.js";
@@ -79,11 +79,24 @@ export const ConfigPanel = memo(function ConfigPanel({
   const Active = active.Component;
 
   const { w } = usePanelSize({ minWidth: 40, widthOffset: 4 });
+  const content = <Active
+    client={client}
+    project={project}
+    cmdInput={cmdInput}
+    onFooter={onFooter}
+    onStatusUpdate={onStatusUpdate}
+    onRefresh={onRefresh}
+    report={report}
+    shell={shell}
+    contentFocused={contentFocused}
+    initialSetting={initialSetting}
+    onSettingSaved={onSettingSaved}
+  />;
 
   return (
-    <Box flexDirection="column" paddingTop={1} paddingLeft={1} flexGrow={1}>
+    <Box flexDirection="column" paddingTop={1} paddingLeft={1} flexGrow={1} flexBasis={0} minHeight={0}>
       {!tabReport.fullscreen && (
-        <Box flexDirection="column">
+        <Box flexDirection="column" flexShrink={0}>
           <HorizontalHeaderStrip
             items={CONFIG_TABS.map(item => ({id: item.id, label: t(item.label)}))}
             selected={Math.max(0, CONFIG_TABS.findIndex(item => item.id === tab))}
@@ -93,20 +106,8 @@ export const ConfigPanel = memo(function ConfigPanel({
           <Text color={colors.divider.color}>{separator(w)}</Text>
         </Box>
       )}
-      <Box flexDirection="column" flexGrow={1}>
-        <Active
-          client={client}
-          project={project}
-          cmdInput={cmdInput}
-          onFooter={onFooter}
-          onStatusUpdate={onStatusUpdate}
-          onRefresh={onRefresh}
-          report={report}
-          shell={shell}
-          contentFocused={contentFocused}
-          initialSetting={initialSetting}
-          onSettingSaved={onSettingSaved}
-        />
+      <Box flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}>
+        {active.ownsViewport ? content : <ScrollableInputLayer>{content}</ScrollableInputLayer>}
       </Box>
     </Box>
   );

@@ -1,6 +1,7 @@
 import React from "react";
 import {describe, expect, test} from "bun:test";
 import {PassThrough} from "node:stream";
+import stripAnsi from "strip-ansi";
 import {renderSync} from "@anthropic/ink";
 import {InputProvider} from "../input/runtime.js";
 import type {BackendClient} from "../backend/client.js";
@@ -33,7 +34,7 @@ function mount(client: BackendClient, onDismiss: () => void, onUpdateExit?: () =
     stdin.write("\x1b[A".repeat(20));await wait();
     stdin.write("\x1b[B".repeat(at));await wait();
     stdin.write("\r");await wait();
-  }, text: () => text.replace(/\s+/g, " "), close() {
+  }, text: () => stripAnsi(text).replace(/\s+/g, " "), close() {
     root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();
   }};
 }
@@ -240,13 +241,18 @@ describe("manual update preparation UI", () => {
       expect(calls.some(call => call[0] === "update.apply")).toBe(false);
     } finally {fixture.close();}
   });
-  test("changing channels is only a local refresh; paste and Enter do not check", async () => {
+  test("channel editing is staged and only its confirmation refreshes local status", async () => {
     const calls: any[] = [];
     const fixture = mount({ready: true, close() {}, async callTool(...args) {
       calls.push(args); return {...idle, channel: args[1]?.channel || "stable"};
     }}, () => {});
     try {
       await wait(); fixture.stdin.write("\x1b[C"); await wait();
+      expect(calls).toEqual([["update.status"]]);
+      fixture.stdin.write("\r"); await wait();
+      fixture.stdin.write("\x1b[C"); await wait();
+      expect(calls).toEqual([["update.status"]]);
+      fixture.stdin.write("\r"); await wait();
       expect(calls).toEqual([["update.status"], ["update.status", {channel: "preview"}]]);
       fixture.stdin.write("\x1b[200~k\x1b[201~"); await wait();
       expect(calls).toHaveLength(2);
@@ -299,7 +305,7 @@ describe("manual update preparation UI", () => {
   });
 });
 
-test("arrow settings persist the channel and automation through the Host with a revision", async () => {
+test("settings stage choices, cancel cleanly and confirm through the Host with a revision", async () => {
   let preferences = {schema_version: 1, revision: 0, channel: "preview", automatic_check: true,
     automatic_download: true, automatic_install: true};
   const calls: any[] = [];
@@ -315,11 +321,19 @@ test("arrow settings persist the channel and automation through the Host with a 
   try {
     await wait(); await wait();
     expect(calls.filter(c => c.operation === "update.status")).toHaveLength(1);
-    fixture.stdin.write("\x1b[C"); await wait(); await wait();
+    fixture.stdin.write("\r"); await wait();
+    fixture.stdin.write("\x1b[C"); await wait();
+    expect(preferences.channel).toBe("preview");
+    expect(calls.filter(c => c.operation === "update.configure")).toHaveLength(0);
+    fixture.stdin.write("\x1b"); await new Promise(r=>setTimeout(r,100));
+    expect(preferences.channel).toBe("preview");
+    fixture.stdin.write("\r"); await wait(); fixture.stdin.write("\x1b[C"); await wait(); fixture.stdin.write("\r"); await wait();
     expect(preferences.channel).toBe("stable");
     expect(calls.filter(c => c.operation === "update.status")).toHaveLength(1);
     fixture.stdin.write("\x1b[B"); await wait();
-    fixture.stdin.write("\x1b[D"); await wait();
+    fixture.stdin.write("\r"); await wait(); fixture.stdin.write("\x1b[D"); await wait();
+    expect(preferences.automatic_check).toBe(true);
+    fixture.stdin.write("\r"); await wait();
     expect(preferences.automatic_check).toBe(false);
     expect(preferences.revision).toBe(2);
     expect(calls.filter(c => c.operation === "update.configure")).toHaveLength(2);
@@ -337,6 +351,15 @@ test("arrow settings persist the channel and automation through the Host with a 
 test("Chinese update page localizes settings, status and keyboard help", async () => {
  const fixture=mount({ready:true,close(){},async callTool(){return sample;}},()=>{},undefined,"zh");
  try{await wait();expect(fixture.text()).toContain("软件更新");expect(fixture.text()).toContain("当前版本");
- expect(fixture.text()).toContain("更新渠道");expect(fixture.text()).toContain("选择");
+ expect(fixture.text()).toContain("更新渠道");expect(fixture.text()).toContain("浏览");
  expect(fixture.text()).not.toContain("Automatic checks");}finally{fixture.close();}
+});
+
+test("data migration explains why ordinary program rollback is unavailable", async () => {
+ const value={...sample,schema_version:4,status:"unconfigured",channel:"preview",can_check:false,
+ can_download:false,can_request_apply:false,can_request_rollback:false,rollback:null,candidate:null,latest_version:null,
+ blockers:["UPDATE_REVERSE_MIGRATION_REQUIRED"]};
+ const fixture=mount({ready:true,close(){},async callTool(){return value;}},()=>{},undefined,"zh");
+ try{await wait();expect(fixture.text()).toContain("此次更新已迁移数据");
+ expect(fixture.text().replace(/\s/g,"")).toContain("不会用旧快照覆盖当前用户数据");}finally{fixture.close();}
 });

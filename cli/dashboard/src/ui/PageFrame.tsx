@@ -1,8 +1,10 @@
+import {useEffectiveBindings} from "../input/runtime.js";
 import React, {createContext, useContext, useCallback, type ReactNode} from "react";
 import {Box} from "@anthropic/ink";
 import {copy, type Copy, type Language, type PageDefinition} from "./pageContract.js";
 export const LanguageContext = createContext<Language>("en");
 export function useCopy() {
+ useEffectiveBindings();
  const language=useContext(LanguageContext);
  return useCallback((value:Copy) => copy(value,language),[language]);
 }

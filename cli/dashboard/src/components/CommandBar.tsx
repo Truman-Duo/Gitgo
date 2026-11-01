@@ -7,8 +7,8 @@ import {copy,type Copy} from "../ui/pageContract.js";
 // the overlay's cmdInput/suggestions/status instead of the default scene props.
 import React, { memo, useState, useEffect } from "react";
 import { Box, Text, Ansi } from "@anthropic/ink";
-// import type { BorderTextOptions } from "@anthropic/ink"; // reserved for Auto/Manual badge
 import { TextInput } from "./TextInput.js";
+import {SelectionText} from "./Selection.js";
 import { isChatScene, type Scene, type Mode } from "../state/store.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
 import { colors, useColorTransition, useSuggestionStyle } from "../theme/index.js";
@@ -38,6 +38,8 @@ export type FooterConfig =
 type Props = {
   width: number;
   mode: Mode;
+  advancement?: "auto" | "manual" | null;
+  advancementPending?: boolean;
   textInput: UseTextInputReturn;
   cmdInput: UseTextInputReturn;
   cmdResult: string;
@@ -57,7 +59,7 @@ type Props = {
 };
 
 export const CommandBar = memo(function CommandBar({
-  width, mode, textInput, cmdInput, cmdResult,
+  width, mode, advancement, advancementPending = false, textInput, cmdInput, cmdResult,
   statusText, suggestions, suggestionIdx, scene, footerOverride,
   runningB, runningBSelIdx, statusBarFocused, contextPct, cachePct,
   footerDrawer, editorHidden = false,
@@ -68,7 +70,7 @@ export const CommandBar = memo(function CommandBar({
   const overrideKind = isOverridden ? (footerOverride.kind ?? "command") : "command";
 
   // Overrides may be a COMMAND bar (green, / prompt) or a NORMAL bar
-  // (blue, ▸ prompt) via the `kind` field.
+  // (blue, shared normal prompt) via the `kind` field.
   const isCommand = isOverridden ? overrideKind === "command" : mode === "COMMAND";
   const effectiveCommand = isOverridden ? overrideKind === "command" : (isCommand || !isChatScene(scene));
   const explicitCommand = isOverridden ? false : (isCommand && isChatScene(scene));
@@ -99,20 +101,6 @@ export const CommandBar = memo(function CommandBar({
   );
   const contextValue = contextPct || "";
 
-  // Reserved for future Auto/Manual display; border color currently identifies the editor.
-  /*
-  // Mode badge rendered in the bottom border via borderText.
-  const modeBadge: BorderTextOptions = {
-    content: effectiveCommand
-      ? colors.input.command.badge
-      : colors.input.normal.badge,
-    position: "bottom",
-    align: "start",
-    offset: 0,
-  };
-
-  */
-
   // Footer override hidden → render nothing (after all hooks to keep order stable).
   if (footerOverride && footerOverride.hidden) {
     return <Box flexDirection="column" flexShrink={0} />;
@@ -138,7 +126,6 @@ export const CommandBar = memo(function CommandBar({
           borderLeft={false}
           borderRight={false}
           borderColor={effectiveColor}
-          // borderText={modeBadge} // reserved for Auto/Manual
         >
           <Box flexDirection="row">
             {effectiveCommand && !explicitCommand ? null : (
@@ -191,16 +178,13 @@ export const CommandBar = memo(function CommandBar({
             const active = actualIdx === idx;
             return (
               <Box key={s.label} flexDirection="row"
-                paddingLeft={active ? 1 : 0}
+                paddingLeft={1}
               >
-                <Text
-                  color={active ? colors.suggestion.active.fg : undefined}
+                <SelectionText selected={active} variant="suggestion"
                   dimColor={!active}
-                  bold={active}
-                  backgroundColor={active ? colors.suggestion.active.bg : undefined}
                 >
                   {s.label}
-                </Text>
+                </SelectionText>
                 <Text dimColor={!active}>  {s.description}</Text>
               </Box>
             );
@@ -213,8 +197,10 @@ export const CommandBar = memo(function CommandBar({
 
       {/* Status text */}
       <Box paddingLeft={1} paddingRight={1} marginTop={showInput ? 1 : 0}>
-        {!isOverridden && runningB !== undefined ? (
-          <RunningBStrip statusText={activeStatusText} language={language} width={Math.max(1, width - 2)} runningB={runningB} selIdx={runningBSelIdx ?? 0} focused={statusBarFocused ?? false} contextPct={contextPct ?? ""} cachePct={cachePct} />
+        {!isOverridden && (runningB !== undefined || isChatScene(scene)) ? (
+          <RunningBStrip statusText={activeStatusText} language={language} width={Math.max(1, width - 2)}
+            advancement={isChatScene(scene) ? advancement ?? null : undefined} advancementPending={advancementPending}
+            runningB={runningB ?? []} selIdx={runningBSelIdx ?? 0} focused={statusBarFocused ?? false} contextPct={contextPct ?? ""} cachePct={cachePct} />
         ) : (
           <>
             {contextValue ? <><ContextStatus contextPct={contextValue} cachePct={cachePct} /><Text>  </Text></> : null}

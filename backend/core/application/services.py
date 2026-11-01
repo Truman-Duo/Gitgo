@@ -174,6 +174,8 @@ class ApplicationServices:
         self._write_lock = threading.RLock()
         from backend.core.update.preparation_service import UpdatePreparationService
         self.updates = UpdatePreparationService()
+        from backend.core.loop.publish_queue import PublishQueue
+        self.publish_runtime = PublishQueue()
         from .deletion import DeletionService
         self.deletion = DeletionService(prepare_runtime=prepare_deletion)
         self._operations: dict[str, Callable[..., Any]] = {
@@ -208,6 +210,42 @@ class ApplicationServices:
             "config.web_search.test": self.config_web_search_test,
             "publish.get": self.publish_get,
             "publish.set": self.publish_set,
+            "publish.items": self.publish_items,
+            "publish.item": self.publish_item,
+            "publish.task": self.publish_task,
+            "publish.shared.items": self.publish_shared_items,
+            "publish.history": self.publish_history,
+            "publish.workspace": self.publish_workspace,
+            "publish.diff": self.publish_diff,
+            "publish.preview_diff": self.publish_preview_diff,
+            "publish.platform_read": self.publish_platform_read,
+            "publish.prepare": lambda project, **args: self.publish_command("prepare", project, args),
+            "publish.plan.update": lambda project, **args: self.publish_command("plan", project, args),
+            "publish.adopt": lambda project, **args: self.publish_command("adopt", project, args),
+            "publish.reconcile": lambda project, **args: self.publish_command("reconcile", project, args),
+            "publish.verify": lambda project, **args: self.publish_command("verify", project, args),
+            "publish.execute": lambda project, **args: self.publish_command("execute", project, args),
+            "publish.pause": lambda project, **args: self.publish_command("pause", project, args),
+            "publish.resume": lambda project, **args: self.publish_command("resume", project, args),
+            "publish.run": lambda project, **args: self.publish_command("run", project, args),
+            "publish.migrate": lambda project, **args: self.publish_command("migrate", project, args),
+            "publish.decide": lambda project, **args: self.publish_command("decide", project, args),
+            "publish.share": lambda project, **args: self.publish_command("share", project, args),
+            "publish.share.publish": lambda project, **args: self.publish_command("share_publish", project, args),
+            "publish.collaborate": lambda project, **args: self.publish_command("collaborate", project, args),
+            "publish.collaborate.send": lambda project, **args: self.publish_command("collaborate_send", project, args),
+            "publish.account.save": self.publish_account_save,
+            "publish.link_task": lambda project, **args: self.publish_command("link_task", project, args),
+            "publish.package": lambda project, **args: self.publish_command("package", project, args),
+            "publish.export": lambda project, **args: self.publish_command("export", project, args),
+            "publish.tag": lambda project, **args: self.publish_command("tag", project, args),
+            "publish.release": lambda project, **args: self.publish_command("release", project, args),
+            "publish.import_package": lambda project, **args: self.publish_command("import_package", project, args),
+            "publish.distribution_reconcile": lambda project, **args: self.publish_command("distribution_reconcile", project, args),
+            "publish.download": lambda project, **args: self.publish_command("download", project, args),
+            "publish.branch": lambda project, **args: self.publish_command("branch", project, args),
+            "publish.branch.apply": lambda project, **args: self.publish_command("branch_apply", project, args),
+            "publish.operation": self.publish_operation,
             "lesson.list": self.lesson_list,
             "lesson.search": self.lesson_search,
             "lesson.verify": self.lesson_verify,
@@ -401,13 +439,27 @@ class ApplicationServices:
             )
         with self._write_lock:
             cfg = ConfigManager.load()
-            if any(p.name.lower() == clean_name.lower() for p in cfg.projects):
-                raise OperationError("DUPLICATE_NAME", f"Project '{clean_name}' already exists")
+            for existing in cfg.projects:
+                if existing.name.lower() == clean_name.lower():
+                    hint = (" It is archived; restore it from Bin or choose a different name."
+                            if existing.archived else " Choose a different project name.")
+                    raise OperationError(
+                        "DUPLICATE_NAME", f"Project '{existing.name}' already exists.{hint}",
+                        details={"existing_project": existing.name,
+                                 "archived": existing.archived,
+                                 "workspace": existing.workspace_path},
+                    )
             for existing in cfg.projects:
                 if existing.workspace_path and Path(existing.workspace_path).resolve(strict=False) == workspace:
+                    hint = (" It is archived; archiving keeps the workspace registered. "
+                            "Restore it from Bin or choose a different folder."
+                            if existing.archived else " Open that project or choose a different folder.")
                     raise OperationError(
                         "WORKSPACE_ALREADY_REGISTERED",
-                        f"Workspace is already registered as project '{existing.name}'",
+                        f"Workspace is already registered as project '{existing.name}'.{hint}",
+                        details={"existing_project": existing.name,
+                                 "archived": existing.archived,
+                                 "workspace": str(workspace)},
                     )
 
             created = False
@@ -598,7 +650,7 @@ class ApplicationServices:
         if not key:
             return {"safety": cfg.safety, "language": cfg.language,
                     "verbose": cfg.verbose, "diff_layout": cfg.diff_layout, "auto_compact": cfg.auto_compact,
-                    "keyboard_preset": cfg.keyboard_preset,
+                    "keyboard_preset": cfg.keyboard_preset, "keyboard_bindings": cfg.keyboard_bindings,
                     "agent_routing": cfg.agent_routing,
                     "prompt_profile": cfg.prompt_profile,
                     "prompt_profiles": list_profiles(),
@@ -620,9 +672,14 @@ class ApplicationServices:
                 raise OperationError("INVALID_KEY", f"Invalid config key: {key}")
         return {"key": key, "value": value}
 
-    def config_terminals(self) -> dict:
-        from backend.core.terminal_launcher import terminal_inventory
-        return terminal_inventory(ConfigManager.load().launcher)
+    def config_terminals(self, startup=False, attached=False) -> dict:
+        if type(startup) is not bool or type(attached) is not bool:
+            raise OperationError("INVALID_VALUE", "Terminal startup flags must be booleans")
+        from backend.core.terminal_launcher import terminal_inventory, startup_terminal_inventory
+        from backend.core.terminal_metrics import console_display_metrics
+        launcher = ConfigManager.load().launcher
+        inventory = startup_terminal_inventory(launcher, attached=attached) if startup else terminal_inventory(launcher)
+        return {**inventory, "display_metrics": console_display_metrics()}
 
     def config_set(self, key: str, value: Any) -> dict:
         with self._write_lock:
@@ -651,6 +708,17 @@ class ApplicationServices:
                 if not isinstance(value, str) or value not in ("standard", "portable"):
                     raise OperationError("INVALID_VALUE", "keyboard_preset must be 'standard' or 'portable'")
                 cfg.keyboard_preset = value
+                cfg.keyboard_bindings = {"version": 1, "overrides": ({
+                    "editor.newline": {"key": "return", "meta": True},
+                    "navigation.previousTab": {"key": "p", "ctrl": True},
+                } if value == "portable" else {})}
+            elif key == "keyboard_bindings":
+                from backend.core.keyboard_bindings import validate_keyboard_bindings
+                try:
+                    value = validate_keyboard_bindings(value)
+                except ValueError as exc:
+                    raise OperationError("INVALID_VALUE", str(exc)) from exc
+                cfg.keyboard_bindings = value
             elif key == "agent_routing":
                 if value not in ("owner", "fresh"):
                     raise OperationError("INVALID_VALUE", "agent_routing must be 'owner' or 'fresh'")
@@ -779,25 +847,198 @@ class ApplicationServices:
             "engine": cfg.web_search_engine,
         }
 
+    @staticmethod
+    def _publish_project(project):
+        # An explicit config path suppresses implicit legacy import/movement.
+        path = ConfigManager.find_config()
+        cfg = ConfigManager.load(path, strict=True) if path is not None else None
+        proj = next((item for item in cfg.projects if item.name == project), None) if cfg else None
+        if proj is None:
+            raise OperationError("PROJECT_NOT_FOUND", "Project was not found")
+        if not proj.workspace_path:
+            raise OperationError("PUBLISH_WORKSPACE_UNCONFIGURED", "Publish requires an explicit workspace")
+        _external_workspace(proj.workspace_path)
+        return proj
+
+    def publish_items(self, project: str, limit: int = 50, cursor: str = "") -> dict:
+        from backend.core.storage import StorageDatabaseError
+        from .publish import list_items, PublishQueryError
+        proj = self._publish_project(project)
+        try:
+            return list_items(proj, limit=limit, cursor=cursor)
+        except PublishQueryError as exc:
+            raise OperationError(exc.code, "Refresh the Publish list or check query arguments") from exc
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError) as exc:
+            raise OperationError("PUBLISH_STATE_UNAVAILABLE", "Saved Publish records could not be verified") from exc
+
+    def publish_item(self, project: str, item_id: str) -> dict:
+        from backend.core.storage import StorageDatabaseError
+        from backend.core.publish.state import read_ledger, find_item, projection, PublishError
+        proj = self._publish_project(project)
+        try:
+            ledger, reference = read_ledger(proj.workspace_path)
+            return {"project": project, "item": projection(find_item(ledger, item_id), reference)}
+        except PublishError as exc:
+            raise OperationError(exc.code, "Publish item could not be read") from exc
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError) as exc:
+            raise OperationError("PUBLISH_STATE_UNAVAILABLE", "Saved Publish records could not be verified") from exc
+
+    def publish_task(self, project: str, process_id: str, task_id: str) -> dict:
+        from backend.core.storage.runtime import read_existing_task_view
+        from backend.core.storage import StorageDatabaseError, StorageBlocked
+        if any(not isinstance(value, str) or not 1 <= len(value) <= 160 or any(ord(char) < 32 for char in value)
+               for value in (process_id, task_id)):
+            raise OperationError("PUBLISH_TASK_NOT_FOUND", "Select an existing task reference")
+        proj = self._publish_project(project)
+        try:
+            result = read_existing_task_view(proj.workspace_path, process_id, task_id)
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError, StorageBlocked) as exc:
+            raise OperationError("PUBLISH_STATE_UNAVAILABLE", "Saved task could not be verified") from exc
+        if result is None:
+            raise OperationError("PUBLISH_TASK_NOT_FOUND", "The exact task is no longer available")
+        return {"project": project, **result}
+
+    def publish_command(self, operation, project, arguments):
+        from backend.core.storage import StorageDatabaseError
+        from backend.core.tools.publish_service import invoke_local_publish
+        from backend.core.publish.state import PublishError
+        proj = self._publish_project(project)
+        try:
+            return invoke_local_publish(proj, operation, arguments, queue=self.publish_runtime, operator_authorized=True)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Publish command could not proceed") from exc
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError) as exc:
+            code = "PUBLISH_REQUEST_CONFLICT" if str(exc) == "COMMAND_IDENTITY_CONFLICT" else "PUBLISH_OPERATION_UNCERTAIN"
+            raise OperationError(code, "Read the saved item before retrying this request") from exc
+
+    def publish_shared_items(self, project, item_id, observation_id="", limit=20, cursor=""):
+        from backend.core.publish.shared_query import shared_items
+        from backend.core.publish.state import PublishError
+        proj = self._publish_project(project)
+        try:
+            return shared_items(proj, item_id=item_id, observation_id=observation_id, limit=limit, cursor=cursor)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Read an explicit saved shared observation") from exc
+
+    def publish_history(self, project, item_id, head="candidate", limit=50, cursor=""):
+        from backend.core.publish.history import history_page
+        from backend.core.publish.state import PublishError
+        try:
+            return history_page(self._publish_project(project), item_id=item_id, head=head, limit=limit, cursor=cursor)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Fixed Git history could not be read") from exc
+
+    def publish_workspace(self, project, limit=50, cursor=""):
+        from backend.core.publish.history import workspace_page
+        from backend.core.publish.state import PublishError
+        try:
+            return workspace_page(self._publish_project(project), limit=limit, cursor=cursor)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Workspace Git history could not be read") from exc
+
+    def publish_diff(self, project, item_id, base_oid, head_oid="", head="candidate", limit_bytes=262144, snapshot_id=""):
+        from backend.core.publish.history import diff_view
+        from backend.core.publish.state import PublishError
+        try:
+            return diff_view(self._publish_project(project), item_id=item_id, base_oid=base_oid, head_oid=head_oid,
+                head=head, limit_bytes=limit_bytes, snapshot_id=snapshot_id)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Fixed Git difference could not be read") from exc
+
+    def publish_preview_diff(self, project, item_id, binding=""):
+        from backend.core.publish.history import preview_diff
+        from backend.core.publish.state import PublishError
+        try:
+            return preview_diff(self._publish_project(project), item_id=item_id, binding=binding)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Prepared result difference could not be read") from exc
+
+    def publish_platform_read(self, project, target, resource, page=1):
+        """Repository browsing needs no local candidate, ledger or Git mutation."""
+        self._publish_project(project)
+        from backend.remote.publish_platform import PlatformTarget, PlatformClient, PlatformError
+        from backend.remote.publish_accounts import resolve_secret
+        from backend.core.publish.state import digest
+        from backend.core.storage.redaction import redact_for_persistence
+        if type(page) is not int or not 1 <= page <= 20:
+            raise OperationError("PUBLISH_PLATFORM_PAGE_INVALID", "Page must be between 1 and 20")
+        try:
+            parsed = PlatformTarget.parse(target)
+            with PlatformClient(parsed, resolve_secret(parsed)) as client:
+                snapshot = redact_for_persistence(client.snapshot(resource, page))
+            return {**snapshot, "schema_version": 1, "read_only": True, "target": parsed.descriptor(),
+                    "id": digest({"target": parsed.descriptor(), "snapshot": snapshot}), "binding": "read_only"}
+        except PlatformError as exc:
+            raise OperationError(exc.code, "Repository platform observation could not be read") from exc
+
+    def publish_operation(self, project, item_id, operation_id):
+        from backend.core.tools.publish_service import build_publish_tools
+        from backend.core.publish.state import PublishError
+        proj = self._publish_project(project)
+        tool = build_publish_tools(proj)["publish_operation"]
+        try:
+            return tool.execute(tool.prepare_args({"item_id": item_id, "operation_id": operation_id}))
+        except PublishError as exc:
+            raise OperationError(exc.code, "Publish operation could not be read") from exc
+
     def publish_get(self, project: str) -> dict:
         _cfg, proj = _project(project)
         remote = proj.release.remote.url if proj.release.remote else ""
         return {
             "project": proj.name,
             "commit_format": dict(proj.commit_format or {}),
+            "checks": proj.publish_checks,
             "privacy": dict(proj.outbound_policy or {}),
+            "authorship": dict(proj.authorship or {}),
+            "repositories": {"workspace": proj.workspace_path, "trial": proj.trial_path or "", "formal": proj.backup_path or ""},
             "remote_url": str(remote or ""),
             "stages": {"trial_configured": bool(proj.trial_path),
                        "release_configured": bool(remote or proj.backup_path)},
         }
 
-    def publish_set(self, project: str, section: str, value: Any) -> dict:
+    def publish_account_save(self, project: str, target: dict, token: str, request_id: str) -> dict:
+        # Native credential settings intentionally bypass command argument
+        # receipts, exactly as provider credentials do. No Agent tool exposes it.
+        self._publish_project(project)
+        from backend.remote.publish_accounts import provision_secret
+        from backend.remote.publish_platform import PlatformError
+        try:
+            result = provision_secret(target, token)
+        except PlatformError as exc:
+            raise OperationError(exc.code, "Publish account could not be saved") from exc
+        return {**result, "request_id": request_id, "operation_id": "account-settings", "effect_state": "committed"}
+
+    def publish_set(self, project: str, section: str, value: Any, expected_value: Any = None) -> dict:
         from backend.core.config import normalize_outbound_policy
         from backend.models import RemoteTarget
         clean_section = str(section or "").strip().lower()
         with self._write_lock:
             cfg, proj = _project(project)
-            if clean_section == "privacy":
+            current = {"privacy": dict(proj.outbound_policy or {}), "commit_format": dict(proj.commit_format or {}),
+                "privacy_authorship": {"privacy": dict(proj.outbound_policy or {}), "authorship": dict(proj.authorship or {})},
+                "checks": proj.publish_checks, "remote_url": str(proj.release.remote.url or "") if proj.release.remote else ""}
+            if expected_value is not None and expected_value != current.get(clean_section):
+                raise OperationError("PUBLISH_SETTINGS_CHANGED", "Settings changed; reload before saving this draft")
+            if clean_section == "privacy_authorship":
+                if not isinstance(value, dict) or set(value) != {"privacy", "authorship"}:
+                    raise OperationError("INVALID_OUTBOUND_POLICY", "Expected privacy and authorship")
+                try:
+                    policy = normalize_outbound_policy(value["privacy"])
+                except (TypeError, ValueError) as exc:
+                    raise OperationError("INVALID_OUTBOUND_POLICY", str(exc)) from exc
+                authorship = value["authorship"]
+                if (not isinstance(authorship, dict) or authorship.get("mode") not in {"mixed", "clean"}
+                        or any(type(authorship.get(key)) is not bool for key in ("strip_commit_coauthors", "strip_code_comments"))):
+                    raise OperationError("INVALID_AUTHORSHIP_POLICY", "Invalid authorship settings")
+                policy["version"] = int((proj.outbound_policy or {}).get("version", 0) or 0) + 1
+                proj.outbound_policy = policy
+                proj.force_exclude = list(policy["exclude_paths"])
+                proj.security_scan = {key: policy[key] for key in ("enabled", "severity_threshold", "ignored_rules", "extra_patterns")}
+                proj.authorship = {**dict(proj.authorship or {}), **authorship,
+                    "exclude_tool_configs": list(policy["exclude_paths"]),
+                    "privacy": {"level": policy["content_level"], "deep_scan": policy["deep_scan"]}}
+                result = {"privacy": policy, "authorship": proj.authorship}
+            elif clean_section == "privacy":
                 try:
                     policy = normalize_outbound_policy(value)
                 except (TypeError, ValueError) as exc:
@@ -830,6 +1071,14 @@ class ApplicationServices:
                     raise OperationError("INVALID_COMMIT_FORMAT", f"Unsupported fields: {', '.join(unknown)}")
                 result = {**dict(proj.commit_format or {}), **value}
                 proj.commit_format = result
+            elif clean_section == "checks":
+                from backend.core.publish.checks import normalize
+                from backend.core.publish.state import PublishError
+                try:
+                    result = normalize(value)
+                except PublishError as exc:
+                    raise OperationError(exc.code, "Invalid Publish check policy") from exc
+                proj.publish_checks = result
             elif clean_section == "remote_url":
                 remote_url = str(value or "").strip()
                 if remote_url:
@@ -855,7 +1104,7 @@ class ApplicationServices:
                 proj.release.remote.url = remote_url
                 result = remote_url
             else:
-                raise OperationError("INVALID_PUBLISH_SECTION", "section must be privacy, commit_format or remote_url")
+                raise OperationError("INVALID_PUBLISH_SECTION", "section must be privacy, commit_format, checks or remote_url")
             ConfigManager.save(cfg)
         return {"ok": True, "project": project, "section": clean_section, "value": result}
 
@@ -976,12 +1225,14 @@ class ApplicationServices:
             if not lessons:
                 resolve_harvest_proposal(
                     project,
-                    stage_harvest_proposal(project, [signal_id], [])["proposal_id"],
+                    stage_harvest_proposal(project, [signal_id], [], summary_report=summary_report)["proposal_id"],
                     accepted=False,
                 )
                 raise OperationError(
                     "LESSON_NOT_ACTIONABLE",
                     "The observation did not contain a reusable, testable lesson.",
+                    details={"classifications": summary_report.get("classifications", []),
+                             "scope": "project_knowledge_only"},
                 )
             proposal = stage_harvest_proposal(project, [signal_id], lessons, summary_report=summary_report)
         return {

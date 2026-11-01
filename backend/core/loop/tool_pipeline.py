@@ -71,13 +71,79 @@ class ToolPipeline:
     def __init__(self, gate: RingGate | None = None):
         self._gate = gate or RingGate()
 
+    @staticmethod
+    def _contract_revision_actions(process, code):
+        if code != "TASK_CONTRACT_REVISION_CONFLICT":
+            return []
+        from .task_contract import get_task_contract
+        return [{"action": "declare_task_contract", "require_reconciliation": True,
+                 "current_contract": get_task_contract(process)}]
+
+    @staticmethod
+    def _alignment_admission_error(process, tool, args):
+        from .alignment_evidence import alignment_input_digest
+        from .alignment_routing import uses_on_demand_review
+        from .task_contract import TaskContractRevisionConflict
+        context, _ = process.read_context_snapshot()
+        state = context.get("alignment_runtime") or {}
+        expected_contract = None
+        if tool.alignment_contract is not None:
+            try:
+                expected_contract = tool.alignment_contract(dict(args or {}))
+            except TaskContractRevisionConflict as exc:
+                return "TASK_CONTRACT_REVISION_CONFLICT", str(exc)
+            except (ValueError, TypeError, KeyError) as exc:
+                return "INVALID_TOOL_ARGUMENTS", str(exc)
+        ready = state.get("admission_review") or {}
+        if (uses_on_demand_review(state)
+                and state.get("task_id") == (process.active_task_id or process.process_id)
+                and state.get("process_id") == process.process_id
+                and (ready.get("status") != "ready" or ready.get("input_digest") != alignment_input_digest(
+                    process, contract_override=expected_contract))):
+            return "ALIGNMENT_REVIEW_REQUIRED", "Current requirement evidence must be reviewed before this effect; no effect started and no grant consumed."
+        return None
+
     def execute(self, tool_call, tool, ctx, execution_id, call_index=0):
         from .read_approval import AdmissionResources
-        with AdmissionResources() as admission:
+        from .native_invocation_scope import native_invocation_scope
+        from .execution_contract import ExecutionContract
+        registered = getattr(tool, "execution_contract", None)
+        registered = registered if isinstance(registered, ExecutionContract) and not tool.composite_spec else None
+        from backend.core.mechanism_runtime.invocations import InvocationScope
+        with AdmissionResources() as admission, native_invocation_scope(ctx, execution_id, call_index) as native_scope, InvocationScope(ctx) as mechanism_scope:
             result = self._execute(tool_call, tool, ctx, execution_id, call_index, admission=admission)
+            if registered is not None:
+                result.receipt.setdefault("execution_contract", registered.to_dict())
+            if result.is_error and (result.diagnostics.get("nature") in {"system", "governance"}
+                    or registered is not None and registered.broker.startswith("host.runtime.")):
+                # Runtime-produced admission/protocol failures remain bug
+                # diagnostics, not project knowledge. Program stdout cannot
+                # assert this provenance or change its execution permissions.
+                result.receipt["diagnostic_scope"] = "gitgo_runtime"
+            records = native_scope["records"]
+            if records:
+                result.receipt["native_invocations"] = [item.record["invocation_id"] for item in records]
+            if any(item.retirement_pending for item in records):
+                self._publish_tool_notices(ctx, result.tool_name, execution_id, call_index,
+                    {"warnings": [{"code": "INVOCATION_JOURNAL_UPDATE_FAILED",
+                                   "message": "Native terminal facts committed; pending-index housekeeping remains incomplete. Do not repeat the operation."}]})
+            if any(item.failed for item in records):
+                recovery = ctx.process.recovery or {}
+                ctx.process.recovery = {**recovery, "resume_forbidden": True, "requires_manual_verification": True,
+                    "reasons": list(recovery.get("reasons") or []) + [{
+                        "code": "INVOCATION_EVIDENCE_UNAVAILABLE", "execution_id": execution_id,
+                        "call_index": call_index, "effect_state": "ambiguous"}]}
+                if result.receipt.get("evidence_state") != "failed":
+                    result.receipt.update(evidence_state="failed", committed=False)
+                    result.diagnostics["evidence_state"] = "failed"
+                    result.formatted += "\n[Native invocation evidence update failed; retain results and inspect recovery before native execution.]"
+                self._publish_tool_notices(ctx, result.tool_name, execution_id, call_index,
+                    {"warnings": [{"code": "INVOCATION_JOURNAL_UPDATE_FAILED",
+                                   "message": "Native invocation evidence was not confirmed. Retained results must not be replayed."}]})
             cleanup = result.receipt.get("runtime_cleanup")
             if cleanup is not None and cleanup.get("complete") is not True:
                 admission.retain(ctx.process, execution_id, call_index)
+            mechanism_scope.finish(result)
             return result
 
     def _execute(
@@ -141,6 +207,9 @@ class ToolPipeline:
             from .read_approval import native_cleanup_pending
             if execution_contract.kind.value == "native_process" and native_cleanup_pending(ctx.process):
                 raise ValueError("SANDBOX_CLEANUP_PENDING: prior native resources require inspection")
+            if execution_contract.kind.value == "native_process":
+                from .native_invocation_scope import check_native_recovery
+                check_native_recovery(ctx)
         except (AttributeError, ValueError) as exc:
             result = self._error_result(
                 tool_name, execution_id, call_index, start, str(exc),
@@ -154,6 +223,21 @@ class ToolPipeline:
             PolicyDisposition, decide_tool_operation,
         )
         operation_policy = decide_tool_operation(tool, dict(raw_args or {}))
+        if is_effectful_mutation(tool.effect):
+            from .task_maintenance import guard
+            from .mechanism_lifecycle import fence
+            # Mode/lifecycle facts can commit while the provider is streaming
+            # or an exact batch is parked. Refresh the existing consumers at
+            # admission, rather than returning a stale-projection tool error.
+            synchronize_consumers = ctx.artifacts.get('synchronize_mechanism_consumers')
+            if synchronize_consumers:
+                with fence(ctx.process):
+                    synchronize_consumers()
+            maintenance_error = guard(ctx.process, tool_name)
+            if maintenance_error:
+                return self._error_result(tool_name, execution_id, call_index, start, maintenance_error[1],
+                    diagnostics={"nature": "governance", "code": maintenance_error[0],
+                                 "effect_state": "not_committed", "execution_state": "not_started"})
         explicit_user_grant = None
         if operation_policy.disposition == PolicyDisposition.DENY:
             return self._error_result(
@@ -243,6 +327,9 @@ class ToolPipeline:
                     args["_workspace"] = str(ctx.workspace_path)
                 if "workspace_path" in args:
                     args["workspace_path"] = str(ctx.workspace_path)
+                if execution_contract.broker == "governance.publish":
+                    args["_publish_actor"] = ctx.process.process_id
+                    args["_publish_task"] = ctx.process.active_task_id or ctx.process.process_id
                 if tool_name in {"web_search", "web_fetch"}:
                     # Host configuration is private runtime authority.  Bind it
                     # here so A, B and expanded composite tools share one
@@ -318,26 +405,13 @@ class ToolPipeline:
         # approval is independent of prerequisite evidence and is consumed only
         # after both checks succeed. Wrappers defer this guard to their leaves.
         if is_effectful_mutation(tool.effect) and getattr(ctx.process, 'read_context_snapshot', None):
-            from .alignment_evidence import alignment_input_digest
-            from .alignment_routing import uses_on_demand_review
-            context, _ = ctx.process.read_context_snapshot()
-            state = context.get('alignment_runtime') or {}
-            ready = state.get('admission_review') or {}
-            expected_contract = None
-            if uses_on_demand_review(state) and tool.alignment_contract is not None:
-                try:
-                    expected_contract = tool.alignment_contract(dict(args or {}))
-                except (ValueError, TypeError, KeyError) as exc:
-                    return self._error_result(tool_name, execution_id, call_index, start, str(exc),
-                        diagnostics={'nature': 'business', 'code': 'INVALID_TOOL_ARGUMENTS'})
-            if (uses_on_demand_review(state)
-                    and state.get('task_id') == (ctx.process.active_task_id or ctx.process.process_id)
-                    and state.get('process_id') == ctx.process.process_id
-                    and (ready.get('status') != 'ready' or ready.get('input_digest') != alignment_input_digest(
-                        ctx.process, contract_override=expected_contract))):
-                return self._error_result(tool_name, execution_id, call_index, start,
-                    'Current requirement evidence must be reviewed before this effect; no effect started and no grant consumed.',
-                    diagnostics={'nature': 'governance', 'code': 'ALIGNMENT_REVIEW_REQUIRED', 'effect_state': 'not_committed', 'execution_state': 'not_started'})
+            runtime_metadata["task_contract_revision"] = int((ctx.process.read_context_snapshot()[0].get("task_contract") or {}).get("revision", 0))
+            alignment_error = self._alignment_admission_error(ctx.process, tool, args)
+            if alignment_error:
+                return self._error_result(tool_name, execution_id, call_index, start, alignment_error[1],
+                    diagnostics={'nature': 'business' if alignment_error[0] in {'INVALID_TOOL_ARGUMENTS', 'TASK_CONTRACT_REVISION_CONFLICT'} else 'governance', 'code': alignment_error[0],
+                                 'next_actions': self._contract_revision_actions(ctx.process, alignment_error[0]),
+                                 'effect_state': 'not_committed', 'execution_state': 'not_started'})
         spec = getattr(tool, "composite_spec", None) or {}
         if getattr(ctx.process, "read_context_snapshot", None) and (not spec or spec.get("execution_mode") in {"authored_pure_python", "authored_privileged_python"}):
             from backend.core.loop.engineering_workflow import EngineeringWorkflow
@@ -476,21 +550,87 @@ class ToolPipeline:
         from .execution_contract import NativeInvocation, native_timeout
         native_invocation = None
         try:
+            from backend.core.mechanism_runtime.application import bound_application
+            composition = bound_application(ctx.process)
+            if composition and execution_contract.broker != "host.runtime.harness_mechanism":
+                from .mechanisms import unit_identity
+                from backend.core.mechanism_runtime.contracts import digest
+                unit = unit_identity(ctx.process, tool, raw_args, execution_id, call_index, str(tool_call.get("id") or ""))
+                preview = {str(key): (value[:2000] if isinstance(value, str) else value if type(value) in {str, bool, int, float, type(None)} else
+                    {"shape": type(value).__name__, "digest": digest(value)}) for key, value in list(dict(raw_args or {}).items())[:16]}
+                pause = composition.before_tool(unit,
+                    {"tool_name": tool_name, "arguments": preview, "arguments_digest": digest(raw_args),
+                     "arguments_are_preview": preview != raw_args, "effect": str(getattr(tool.effect, "value", tool.effect))})
+                runtime_metadata["harness_unit"] = unit
+                if pause:
+                    ctx.artifacts["mechanism_pause"] = pause
+                    return ToolResult(tool_name=tool_name, execution_id=execution_id, call_index=call_index, suspended=True,
+                        data={"execution_state": "not_started", "checkpoint": pause})
+                runtime_metadata["harness_instances"] = [{"id": value["id"], "epoch": value["epoch"]}
+                    for value in composition.repo.list_instances(composition.task, limit=100) if value["phase"] == "ready"]
             if execution_contract.kind.value == "native_process" and not tool.composite_spec and execution_contract.file_action != "produce_workspace":
                 native_invocation = NativeInvocation.compile(tool.runner_name or tool_name,
                     {**args, "_workspace": str(ctx.workspace_path)}, native_timeout(tool, args),
                     owner=runtime_metadata["owner"], registration=registered_digest)
-            admitted_roots, admission_error = admit_invocation_grants(
-                ctx.process, tool, dict(raw_args or {}), dict(args or {}),
-                out_of_scope_resources(args, str(ctx.workspace_path)),
-                require_explicit=((operation_policy.requires_user and resume_state is None)
-                                  or explicit_user_grant is not None),
-                admission=admission,
-            )
+            from .mechanisms import admit, snapshot
+            from .mechanism_lifecycle import fence
+            with fence(ctx.process):
+                if composition:
+                    for expected in runtime_metadata.get("harness_instances", []):
+                        current, _ = composition.repo.instance(composition.task, expected["id"])
+                        if current["phase"] != "ready" or current["epoch"] != expected["epoch"]:
+                            raise ValueError("MECHANISM_GENERATION_CHANGED_BEFORE_TOOL_ADMISSION")
+                if is_effectful_mutation(tool.effect):
+                    from .task_maintenance import guard, synchronize
+                    synchronize_consumers = ctx.artifacts.get('synchronize_mechanism_consumers')
+                    if synchronize_consumers:
+                        synchronize_consumers()
+                    synchronize(ctx.process, ctx.artifacts.get("mechanism_dependencies")
+                                or ctx.artifacts.get("tool_catalog") or {tool.name: tool})
+                    maintenance_error = guard(ctx.process, tool_name)
+                    if maintenance_error is None:
+                        from .task_maintenance import state_for
+                        from .mechanism_catalog import digest as mechanism_digest
+                        projection = getattr(ctx.process, "_mechanism_projection", {})
+                        mounted = ctx.artifacts.get("tool_catalog")
+                        if state_for(ctx.process) and mounted is not None and projection.get("tool_digest") != mechanism_digest({name: tool_contract_digest(t) for name, t in mounted.items()}):
+                            maintenance_error = ("TASK_MANIFEST_NOT_READY", "Tool registrations changed after prompt compilation; refresh the current generation before admission.")
+                    if maintenance_error:
+                        return self._error_result(tool_name, execution_id, call_index, start, maintenance_error[1],
+                            diagnostics={"nature": "governance", "code": maintenance_error[0],
+                                         "effect_state": "not_committed", "execution_state": "not_started"})
+                if "task_contract_revision" in runtime_metadata:
+                    current = int((ctx.process.read_context_snapshot()[0].get("task_contract") or {}).get("revision", 0))
+                    alignment_error = self._alignment_admission_error(ctx.process, tool, args)
+                    if current != runtime_metadata["task_contract_revision"] or alignment_error:
+                        code, detail = alignment_error or ("TASK_CONTRACT_REVISION_CONFLICT", "Task contract changed before admission; recompute the proposal against its current revision.")
+                        return self._error_result(tool_name, execution_id, call_index, start, detail,
+                            diagnostics={"nature": "governance", "code": code,
+                                         "next_actions": self._contract_revision_actions(ctx.process, code),
+                                         "effect_state": "not_committed", "execution_state": "not_started"})
+                unit = admit(ctx.process, tool, raw_args, execution_id, call_index, str(tool_call.get("id") or ""))
+                if unit is not None:
+                    ctx.artifacts["advancement_pause"] = unit
+                    return ToolResult(tool_name=tool_name, execution_id=execution_id,
+                                      call_index=call_index, suspended=True,
+                                      data={"execution_state": "not_started"})
+                runtime_metadata["mechanism_revision"] = snapshot(ctx.process)
+                if composition and runtime_metadata.get("harness_instances") and (tool.composite_spec or {}).get("execution_mode") != "host_pipeline":
+                    from backend.core.mechanism_runtime.invocations import current_scope
+                    current_scope(ctx).admit(composition, runtime_metadata["harness_unit"], runtime_metadata["harness_instances"])
+                admitted_roots, admission_error = admit_invocation_grants(
+                    ctx.process, tool, dict(raw_args or {}), dict(args or {}),
+                    out_of_scope_resources(args, str(ctx.workspace_path)),
+                    require_explicit=((operation_policy.requires_user and resume_state is None)
+                                      or explicit_user_grant is not None),
+                    admission=admission,
+                )
         except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
+            mechanism_blocked = str(exc).startswith(("MECHANISM_", "ADVANCEMENT_"))
             result = self._error_result(
-                tool_name, execution_id, call_index, start, f"grant admission failed: {exc}",
-                diagnostics={"nature": "system", "code": "SANDBOX_POLICY_INVALID",
+                tool_name, execution_id, call_index, start, f"{'mechanism' if mechanism_blocked else 'grant'} admission failed: {exc}",
+                diagnostics={"nature": "governance" if mechanism_blocked else "system",
+                             "code": "MECHANISM_ADMISSION_BLOCKED" if mechanism_blocked else "SANDBOX_POLICY_INVALID",
                              "effect_state": "not_committed", "execution_state": "not_started"},
             )
             result.receipt["effect_state"] = "not_committed"
@@ -639,6 +779,20 @@ class ToolPipeline:
                         # Producer launch/effects stay nested: it did not write
                         # the formal target, and cache reuse launches nothing.
                         runtime_metadata["cleanup"] = runtime.last_render["cleanup"]
+            elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "governance.publish" and tool_name == "publish_run":
+                from .publish_queue import drive_agent
+                result_data = drive_agent(self, ctx, tool.execute(args), execution_id, runtime_metadata)
+            elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "governance.publish" and tool_name in {"publish_verify", "publish_execute", "publish_package"}:
+                from .publish_build_runtime import PublishBuildRuntime
+                from .service_runtime import tool_service_scope
+                runtime = PublishBuildRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
+                try:
+                    with tool_service_scope(lambda: ctx.is_cancelled(), runtime):
+                        result_data = tool.execute(args)
+                finally:
+                    if isinstance(runtime.last_render.get("cleanup"), dict):
+                        runtime_metadata["cleanup"] = runtime.last_render["cleanup"]
+                    runtime_metadata["native_producers"] = runtime.producers
             elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "tests.workspace.run":
                 from .registered_test_runtime import RegisteredTestRuntime
                 runtime = RegisteredTestRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool, timeout=effective_timeout)
@@ -745,7 +899,7 @@ class ToolPipeline:
         if business_error and untrusted_program_result:
             business_error = "CUSTOM_TOOL_EXECUTION_FAILED"
         if ((execution_contract.file_action == "produce_workspace" or
-                (execution_contract.kind.value == "data_broker" and (execution_contract.broker.startswith("files.workspace.") or execution_contract.broker in {"governance.formalize", "identity.memory_snapshot"})))
+                (execution_contract.kind.value == "data_broker" and (execution_contract.broker.startswith("files.workspace.") or execution_contract.broker in {"governance.formalize", "governance.publish", "identity.memory_snapshot", "host.runtime.declare_task_contract"})))
                 and isinstance(result_data, dict) and result_data.get("effect_state") in {"not_committed", "committed", "partial", "ambiguous"}):
             runtime_metadata["effect_state"] = result_data["effect_state"]
         if business_error:
@@ -951,6 +1105,14 @@ class ToolPipeline:
     def _attach_runtime_cleanup(cls, result, runtime_metadata, ctx):
         """Keep supervisor facts separate from handler data and effect success."""
         result.receipt["process_id"] = ctx.process.process_id
+        if "task_contract_revision" in runtime_metadata:
+            result.receipt["task_contract_revision"] = runtime_metadata["task_contract_revision"]
+        if "mechanism_revision" in runtime_metadata:
+            result.receipt["mechanism_revision"] = runtime_metadata["mechanism_revision"]
+        for key in ("harness_unit", "harness_instances"):
+            if key in runtime_metadata:
+                from copy import deepcopy
+                result.receipt[key] = deepcopy(runtime_metadata[key])
         cls._attach_child_lineage(result.receipt, result.data, runtime_metadata)
         if runtime_metadata.get("native_producers"):
             from copy import deepcopy
@@ -968,7 +1130,11 @@ class ToolPipeline:
                         reported[name] = result.receipt.pop(name)
                 if reported:
                     result.receipt["reported_facts"] = reported
-        evidence = runtime_metadata.get("evidence_state", "not_required")
+        from .native_invocation_scope import current_native_records
+        native_records = current_native_records(ctx)
+        if native_records:
+            result.receipt["native_invocations"] = [item.record["invocation_id"] for item in native_records]
+        evidence = "failed" if any(item.failed for item in native_records) else runtime_metadata.get("evidence_state", "not_required")
         result.receipt["evidence_state"] = evidence
         result.diagnostics["evidence_state"] = evidence
         if evidence == "failed":
@@ -1030,6 +1196,10 @@ class ToolPipeline:
         """
         if not isinstance(result_data, dict):
             return
+        if execution_contract is not None and bound_definition is None:
+            # Registration-owned provenance, never tool-returned JSON. This
+            # locates the operation; it does not establish a semantic root cause.
+            receipt["execution_contract"] = execution_contract.to_dict()
         from .execution_contract import ExecutionType
         trusted_files = (getattr(execution_contract, "file_action", "") == "produce_workspace" or
                          (getattr(execution_contract, "kind", None) == ExecutionType.DATA_BROKER
@@ -1463,9 +1633,8 @@ def _validate_args(args: dict, schema: dict) -> None:
         if field_name in properties:
             expected = properties[field_name].get("type", "")
             actual = _typeof(value)
-            compatible = expected == actual or (
-                expected == "number" and actual == "integer"
-            )
+            accepted = expected if isinstance(expected, list) else [expected]
+            compatible = actual in accepted or ("number" in accepted and actual == "integer")
             if expected and not compatible:
                 raise ValueError(
                     f"参数 '{field_name}' 类型错误: 期望 {expected}, "
@@ -1474,6 +1643,8 @@ def _validate_args(args: dict, schema: dict) -> None:
 
 
 def _typeof(value) -> str:
+    if value is None:
+        return "null"
     if isinstance(value, str):
         return "string"
     if isinstance(value, bool):
@@ -1495,7 +1666,7 @@ def _maybe_truncate(tool_name: str, result_data: dict | None,
                     ) -> tuple[str, bool, str | None, dict]:
     """截断工具结果。超限时持久化完整 JSON，返回预览。"""
     from backend.core.dispatch.truncation import (
-        MAX_OUTPUT_CHARS, PREVIEW_CHARS, format_tool_result as trunc_format,
+        MAX_OUTPUT_CHARS, PREVIEW_CHARS, format_tool_result as trunc_format, serialize_result,
     )
     if result_data is None:
         return f"[工具 {tool_name} 完成，无输出]", False, None, {}
@@ -1507,7 +1678,7 @@ def _maybe_truncate(tool_name: str, result_data: dict | None,
             result_data["validation_version"] = version_summary(result_data["validation_version"])
         elif isinstance(result_data.get("result"), dict) and "validation_version" in result_data["result"]:
             result_data["result"] = {**result_data["result"], "validation_version": version_summary(result_data["result"]["validation_version"])}
-    output = json.dumps(result_data, ensure_ascii=False, indent=2)
+    output = serialize_result(result_data)
     if len(output) <= MAX_OUTPUT_CHARS:
         return f"[工具 {tool_name} 结果]\n{output}", False, None, {}
 

@@ -61,6 +61,8 @@ class ToolBatchRuntime:
                 referenced_files=ref_files,
             )
             self.process.tool_receipts.append(dict(r.receipt or {}))
+            from .task_maintenance import observe_result
+            observe_result(self.process, r)
             from .loop_bookkeeping import capture_lesson_outcome
             capture_lesson_outcome(self.process, r, self.workspace_path,
                                    rolled_back=rolled_back, on_event=self.emit)
@@ -101,7 +103,7 @@ class ToolBatchRuntime:
             from backend.core.loop.operation_policy import is_effectful_mutation
             if not r.is_error and is_effectful_mutation(effect):
                 self.process.successful_actions += 1
-                if self.process.parent_id:
+                if (self.process.parent_id and not getattr(self.process, "_manager", None).has_continuation(self.process.process_id)):
                     try:
                         from backend.core.loop.coordination import observe_interface_changes
                         manager = getattr(self.process, "_manager", None)
@@ -146,6 +148,10 @@ class ToolBatchRuntime:
             tool = self.tools_dict.get(str(call.get("name") or ""))
             if tool is None:
                 continue
+            from .task_maintenance import guard
+            from .operation_policy import is_effectful_mutation
+            if is_effectful_mutation(tool.effect) and guard(self.process, tool.name):
+                continue  # Pipeline reports stale scope before asking for new authority.
             from .composite_runtime import call_key
             key = call_key(call, execution_id, call_index)
             if key in self.process.runtime_preferences.get("composite_continuations", {}):
@@ -200,6 +206,53 @@ class ToolBatchRuntime:
             return None
         index = int(suspended.call_index)
         self.commit_results(calls, [r for r in results if int(r.call_index) < index], rolled_back=False)
+        mechanism_pause = self.ctx.artifacts.pop("mechanism_pause", None)
+        if mechanism_pause is not None:
+            decision = self.process.pending_decision
+            if decision is None or decision["decision_id"] != mechanism_pause["decision_id"]:
+                raise ValueError("MECHANISM_CHECKPOINT_QUESTION_CHANGED")
+            self.process.pending_tool_batch = {"execution_id": execution_id, "tool_calls": calls[index:],
+                "permission_call_index": 0, "decision_id": decision["decision_id"], "harness_checkpoint": mechanism_pause}
+            transition(self.process, ProcessStatus.AWAITING_USER)
+            store = getattr(getattr(self.process, "_manager", None), "session_store", None)
+            if store is None:
+                raise ValueError("MECHANISM_CHECKPOINT_STORE_REQUIRED")
+            store.save_process_checkpoint(self.process)
+            self.emit({"event": "decision_required", "decision": dict(decision)})
+            from .decision_support import format_decision_request
+            result = _make_result(self.process, self.session, format_decision_request(decision), outcome_status=OutcomeStatus.AWAITING_USER)
+            self.process.result = result
+            return result
+        unit = self.ctx.artifacts.pop("advancement_pause", None)
+        if unit is not None:
+            from .mechanisms import snapshot, publish_manual_decision
+            from .mechanism_lifecycle import fence
+            with fence(self.process):
+                current = snapshot(self.process)
+                unit["revision"] = current["revision"]
+                decision = publish_manual_decision(self.process, unit)
+                if self.process.parent_id:
+                    # A child must re-enter its worktree/access/resource
+                    # lifecycle. The root chat runner is not that boundary.
+                    self.process.runtime_preferences["mechanism_resume_blocked"] = "CHILD_CONTINUATION_UNAVAILABLE"
+                self.process.pending_tool_batch = {
+                    "execution_id": execution_id, "tool_calls": calls[index:],
+                    "permission_call_index": 0, "decision_id": decision["decision_id"],
+                    "manual_unit": unit,
+                    "nested_permission": bool(self.process.runtime_preferences.get("composite_continuations")),
+                }
+                transition(self.process, ProcessStatus.AWAITING_USER)
+                manager = getattr(self.process, "_manager", None)
+                store = getattr(manager, "session_store", None)
+                if store is None:
+                    raise ValueError("MANUAL_UNIT_CHECKPOINT_UNAVAILABLE")
+                store.save_process_checkpoint(self.process)
+            self.emit({"event": "decision_required", "decision": decision})
+            from .decision_support import format_decision_request
+            result = _make_result(self.process, self.session, format_decision_request(decision),
+                                  outcome_status=OutcomeStatus.AWAITING_USER)
+            self.process.result = result
+            return result
         permission = self.ctx.artifacts.pop("nested_permission")
         return self.suspend_for_permission(calls[index:], execution_id, 0,
             permission["tool"], permission["arguments"], nested=True)
@@ -238,6 +291,34 @@ class ToolBatchRuntime:
         calls = [dict(item) for item in list(batch.get("tool_calls") or [])]
         execution_id = str(batch.get("execution_id") or "permission-resume")
         action = str(batch.get("decision_action") or "")
+        checkpoint = batch.get('harness_checkpoint')
+        if checkpoint:
+            from backend.core.mechanism_runtime.application import bound_application
+            from .mechanisms import unit_identity
+            from .tool_pipeline import ToolResult
+            app = bound_application(self.process)
+            if app is None or not checkpoint.get('unit_id') or not calls:
+                raise ValueError('MECHANISM_CHECKPOINT_RESUME_UNAVAILABLE')
+            unit = checkpoint['unit_id']
+            # A canonical prediction/control reply is consumed independently
+            # of subsequent permission/lease checks. It grants no authority.
+            pause = app.interactions.admit(unit)
+            if pause:
+                self.ctx.artifacts['mechanism_pause'] = pause
+                return self.pause_nested_results(calls, [ToolResult(tool_name=calls[0]['name'], execution_id=execution_id,
+                    call_index=0, suspended=True)], execution_id)
+            tool = self.tools_dict.get(str(calls[0].get('name') or ''))
+            current_unit = unit_identity(self.process, tool, calls[0].get('args') or {}, execution_id, 0,
+                str(calls[0].get('id') or '')) if tool else None
+            if current_unit != unit:
+                app.interactions.retire_unstarted(unit, 'invocation_changed_before_resume')
+                errors = [_host_tool_error_result(tool_name=str(call.get('name') or 'unknown'), execution_id=execution_id,
+                    call_index=index, error_name='TOOL_NOT_STARTED',
+                    details={'execution_state': 'not_started', 'checkpoint_state': 'superseded',
+                        'reason': 'The pending invocation or its task/tool contract changed. Repropose it; an old prediction cannot authorize the changed call.'},
+                    next_actions=[{'action': 'repropose_current_invocation'}]) for index, call in enumerate(calls)]
+                self.commit_results(calls, errors, rolled_back=False)
+                return None
         if action == "deny":
             if batch.get("nested_permission"):
                 from .composite_runtime import discard
@@ -255,8 +336,8 @@ class ToolBatchRuntime:
                     tool_name=str(denied_call[0].get("name") or "unknown"),
                     execution_id=execution_id,
                     call_index=0,
-                    error_name="TOOL_PERMISSION_DENIED",
-                    details={"execution_state": "not_started", "user_decision": "deny"},
+                    error_name="TOOL_NOT_STARTED" if batch.get("manual_unit") else "TOOL_PERMISSION_DENIED",
+                    details={"execution_state": "not_started", "user_decision": "skip" if batch.get("manual_unit") else "deny"},
                     next_actions=[{"action": "change_strategy"}],
                 )
                 self.commit_results(denied_call, [denied], rolled_back=False)
@@ -277,6 +358,10 @@ class ToolBatchRuntime:
                 remaining, execution_id, 0, tool, public_args,
             )
         segment_result = self.execute_approved_segment(calls, execution_id)
+        if checkpoint and isinstance(segment_result, list) and segment_result:
+            first = segment_result[0]
+            if not first.suspended and (not first.allowed or (first.data or {}).get('execution_state') == 'not_started'):
+                app.interactions.retire_unstarted(checkpoint['unit_id'], 'call_rejected_before_effect_admission')
         return segment_result if isinstance(segment_result, dict) else None
 
 

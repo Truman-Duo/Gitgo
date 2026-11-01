@@ -84,3 +84,41 @@ def test_removed_file_from_completion_claim_cannot_reuse_artifact_certificate(tm
         'delivery_check': {'complete': True, 'evidence_refs': [ref]}}, payload)
     p.completion_claim = CompletionClaim.from_args({'result': candidate}, step=1)
     assert not HostCompletionEvaluator.evaluate(p, candidate).allowed
+
+
+def test_native_batch_publication_uses_canonical_per_file_hashes(tmp_path_factory):
+    from backend.core.loop.delivery_artifacts import artifact_manifest, verify_manifest
+    p = written(tmp_path_factory)
+    content = b'actual generated business output'
+    (tmp_path_factory / 'app.py').write_bytes(content)
+    mutation = {'path': 'app.py', 'after_sha256': sha256(content).hexdigest(), 'effect_state': 'committed'}
+    receipt = {'receipt_id': 'native-batch', 'task_id': 't', 'succeeded': True, 'committed': True,
+        'effect_state': 'committed', 'effect': 'workspace_write', 'files': ['app.py'],
+        'file_service_result': True, 'file_mutations': [mutation]}
+    p.tool_receipts.append(receipt)
+    p.session.append_tool_result('Committed native batch', tool_name='exec_command',
+        data={'files': ['app.py'], 'after_sha256': 'batch digest', 'file_results': [mutation]}, receipt=receipt)
+    artifacts, notices = collect_artifacts(p, ['plan.md', 'app.py'])
+    assert not notices and {a['path'] for a in artifacts} == {'app.py', 'plan.md'}
+    manifest = artifact_manifest(artifacts)
+    assert verify_manifest(p, manifest, ['app.py', 'plan.md'])
+    # Native receipt provenance survives a context epoch; legacy unbound prose
+    # is deliberately not a substitute for its archived tool result.
+    p.session.messages.clear()
+    native, native_notices = collect_artifacts(p, ['app.py'])
+    assert not native_notices and native[0]['receipt_id'] == 'native-batch'
+    (tmp_path_factory / 'app.py').write_bytes(b'changed after publication')
+    assert not verify_manifest(p, manifest, ['app.py', 'plan.md'])
+
+
+def test_arbitrary_tool_file_results_do_not_witness_published_artifacts(tmp_path_factory):
+    p = written(tmp_path_factory)
+    (tmp_path_factory / 'app.py').write_text('untrusted', encoding='utf-8')
+    receipt = {'receipt_id': 'script', 'task_id': 't', 'succeeded': True, 'committed': True,
+        'effect_state': 'committed', 'effect': 'workspace_write', 'files': ['app.py']}
+    p.tool_receipts.append(receipt)
+    p.session.append_tool_result('claimed script JSON', tool_name='exec_command',
+        data={'file_results': [{'path': 'app.py', 'after_sha256': sha256(b'untrusted').hexdigest(),
+                               'effect_state': 'committed'}]}, receipt=receipt)
+    artifacts, notices = collect_artifacts(p, ['app.py'])
+    assert not artifacts and notices

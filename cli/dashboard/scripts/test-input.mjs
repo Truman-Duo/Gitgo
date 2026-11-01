@@ -4,12 +4,12 @@ import {dirname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const output = resolve(root, '.runtime-tests');
+const output = resolve(root, '../../dev-artifacts/dashboard-input-runtime-tests');
 mkdirSync(output, {recursive: true});
 const entries = [
   'src/input/runtime.test.tsx', 'src/input/router.test.ts', 'src/input/keymap.test.ts',
   'src/input/pasteStore.test.ts', 'src/input/overlays/inlineContext.test.ts',
-  'src/input/unicode.test.ts',
+  'src/input/unicode.test.ts', 'src/input/hints.test.ts', 'src/input/scrollViewport.test.ts',
 ];
 const build = spawnSync(process.env.GITGO_BUN || 'bun', ['build', ...entries,
   '--target=node', '--outdir', output], {cwd: root, stdio: 'inherit'});

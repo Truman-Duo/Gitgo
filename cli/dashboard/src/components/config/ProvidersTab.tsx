@@ -1,8 +1,11 @@
+import {SelectionText} from "../Selection.js";
+import {useCopy} from "../../ui/PageFrame.js";
+import {keyHintText} from "../../input/hints.js";
 // src/components/config/ProvidersTab.tsx — /config Providers tab (self-contained).
 // Owns: LLM provider list/edit/switch/delete/test + dual-column detail view.
 // COMMAND input for /new /edit /delete /test /switch.
 
-import React, { memo, useState, useEffect, useCallback, useMemo } from "react";
+import React, { memo, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../../input/runtime.js";
 import type { LLMProvider } from "../../hooks/useLLMConfig.js";
@@ -13,11 +16,14 @@ import {
   resolveCommandKeys,
   applyCommandAction,
   type CommandAction,
-  type CommandHandlers,
-} from "../../input/commandInput.js";
+  type CommandHandlers} from "../../input/commandInput.js";
 import { matchChord, chordLabel } from "../../input/bindings.js";
 import { applyTextOp } from "../../hooks/useTextInput.js";
-import { colors, truncate, useSelectionStyle } from "../../theme/index.js";
+import {useStagedForm} from "../../hooks/useStagedForm.js";
+import {FormFieldRow, fieldLabelWidth} from "../FormFieldRow.js";
+import {useFeedback} from "../../hooks/useFeedback.js";
+import {cycleChoiceIndex} from "../../input/choice.js";
+import { colors, truncate, usePanelSize } from "../../theme/index.js";
 import type { ConfigTabProps } from "./types.js";
 import type { Suggestion } from "../CommandBar.js";
 
@@ -34,6 +40,7 @@ const isChoiceField = (field: string) => ["protocol", "context_window", "kind", 
 
 type ProvidersCtx = {
   mode: Mode;
+  editingField: boolean;
   providersView: ProvidersView;
   focusCol: FocusCol;
   cmdValue: string;
@@ -48,6 +55,7 @@ type ProvidersAction =
   | { type: "editNextField" }
   | { type: "editPrevField" }
   | { type: "editAdvance" }
+  | { type: "editSave" }
   | { type: "editText"; op: "backspace" | "delete" | "left" | "right" | "home" | "end" | "insert"; text?: string }
   | { type: "editChoice"; delta: -1 | 1 }
   | { type: "esc" }
@@ -65,10 +73,14 @@ type ProvidersAction =
 function resolveProvidersKey(ctx: ProvidersCtx, input: string, key: any): ProvidersAction[] {
   // Edit mode
   if (ctx.mode === "edit") {
+    if (matchChord("formSave", input, key)) return [{type: "editSave"}];
     if (matchChord("escape", input, key)) return [{ type: "editCancel" }];
-    if (key.shiftTab) return [{ type: "editPrevField" }];
-    if (matchChord("tabAny", input, key)) return [{ type: "editNextField" }];
     if (matchChord("enter", input, key)) return [{ type: "editAdvance" }];
+    if (!ctx.editingField) {
+      if (matchChord("shiftTab", input, key) || matchChord("up", input, key)) return [{type: "editPrevField"}];
+      if (matchChord("tab", input, key) || matchChord("down", input, key)) return [{type: "editNextField"}];
+      return [];
+    }
     const field = FIELDS[ctx.editFieldIdx];
     if (isChoiceField(field) && matchChord("left", input, key)) return [{ type: "editChoice", delta: -1 }];
     if (isChoiceField(field) && matchChord("right", input, key)) return [{ type: "editChoice", delta: 1 }];
@@ -117,12 +129,12 @@ function resolveProvidersKey(ctx: ProvidersCtx, input: string, key: any): Provid
 }
 
 export const ProvidersTab = memo(function ProvidersTab({
-  client, project, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused,
-}: ConfigTabProps) {
+  client, project, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused}: ConfigTabProps) {
+  const t=useCopy();
+  const {w} = usePanelSize({widthOffset: 4});
   const {
     providers, activeProvider, failoverEnabled, failoverOrder, configureFailover, error, health,
-    loading, saveProvider, switchProvider, deleteProvider, fetchStatus,
-  } = useLLMConfig(client, project);
+    loading, saveProvider, switchProvider, deleteProvider, fetchStatus} = useLLMConfig(client, project);
 
   const [mode, setMode] = useState<Mode>("list");
   const [providersView, setProvidersView] = useState<ProvidersView>("projects");
@@ -132,22 +144,19 @@ export const ProvidersTab = memo(function ProvidersTab({
   const [routingEdit, setRoutingEdit] = useState<{providerId?: string; value: number} | null>(null);
   const [routingSaving, setRoutingSaving] = useState(false);
 
-  const [editForm, setEditForm] = useState<EditForm>(emptyForm);
-  const [editFieldIdx, setEditFieldIdx] = useState(0);
+  const form = useStagedForm<EditForm>(emptyForm(), FIELDS, ["protocol", "context_window", "kind", "auth_mode"], cmdInput);
+  const editForm = form.current.kind === "remote" ? {...form.current, auth_mode: "api_key" as const} : form.current;
+  const editFieldIdx = form.fieldIdx;
+  const submitting = useRef(false);
+  const [formSaving, setFormSaving] = useState(false);
   const [editId, setEditId] = useState("");
-  const [statusMsg, setStatusMsg] = useState("");
+  const feedback = useFeedback({kind: "page", id: `config/providers:${project}`});
+  const statusMsg = feedback.text, setStatusMsg = feedback.show;
   const [testResult, setTestResult] = useState<string | null>(null);
 
   const [suggestionIdx, setSuggestionIdx] = useState(0);
-  // Provider forms follow the same restrained gray/white row focus language
-  // as the rest of /config.  `edit-field` is a black-on-gray block token; the
-  // old renderer applied only its foreground and made the active row nearly
-  // invisible in the formal dark terminal.
-  const focusedEditStyle = useSelectionStyle("focused", "row");
-  const unfocusedEditStyle = useSelectionStyle("non-focused", "row");
-  const defaultRowStyle = useSelectionStyle(
-    contentFocused ? "focused" : "non-focused", "row",
-  );
+  // Field geometry, selection weight and label blinking are shared with the other forms.
+
   const PROTOCOL_OPTIONS: EditForm["protocol"][] = ["auto", "openai_responses", "openai_chat", "anthropic_messages"];
   const backupCandidates = useMemo(() => {
     const selected = failoverOrder.map(id => providers.find(p => p.id === id)).filter((p): p is LLMProvider => Boolean(p) && p!.id !== activeProvider);
@@ -166,11 +175,11 @@ export const ProvidersTab = memo(function ProvidersTab({
     if (!cmdInput.value.startsWith("/")) return [];
     const prefix = cmdInput.value.slice(1).toLowerCase();
     const commands: Suggestion[] = [
-      {label: "/new", description: "Create provider", inputMode: "execute"},
-      {label: "/local", description: "Create local API provider", inputMode: "execute"},
-      {label: "/edit", description: "Edit selected provider", inputMode: "execute"},
-      {label: "/delete", description: "Delete selected provider", inputMode: "execute"},
-      {label: "/test", description: "Test selected provider", inputMode: "execute"},
+      {label: t({en:"/new",zh:"/new"}), description: t({en:"Create provider",zh:"创建 Provider"}), inputMode: "execute"},
+      {label: t({en:"/local",zh:"/local"}), description: t({en:"Create local API provider",zh:"创建本地 API Provider"}), inputMode: "execute"},
+      {label: t({en:"/edit",zh:"/edit"}), description: t({en:"Edit selected provider",zh:"编辑所选 Provider"}), inputMode: "execute"},
+      {label: t({en:"/delete",zh:"/delete"}), description: t({en:"Delete selected provider",zh:"删除所选 Provider",keys:true}), inputMode: "execute"},
+      {label: t({en:"/test",zh:"/test"}), description: t({en:"Test selected provider",zh:"测试所选 Provider"}), inputMode: "execute"},
     ];
     return commands.filter((command) => command.label.slice(1).startsWith(prefix));
   }, [cmdInput.value]);
@@ -184,7 +193,7 @@ export const ProvidersTab = memo(function ProvidersTab({
   }, [report, providersView, mode]);
 
   const activeEditField = FIELDS[editFieldIdx];
-  const editUsesNormalBar = mode === "edit" && !isChoiceField(activeEditField);
+  const editUsesNormalBar = mode === "edit" && form.editing && !isChoiceField(activeEditField);
 
   // Commands create/edit/test resources. Finite settings remain panel choices.
   useEffect(() => {
@@ -195,9 +204,8 @@ export const ProvidersTab = memo(function ProvidersTab({
     if (mode === "edit") {
       onFooter({
         kind: "normal", cmdInput,
-        statusText: `${chordLabel("enter")} next/save · ${chordLabel("tab")} next · ${chordLabel("escape")} cancel`,
-        suggestions: [], suggestionIdx: 0, cmdResult: "",
-      });
+        statusText: `${chordLabel("enter")} confirm field · ${chordLabel("escape")} undo field · ${chordLabel("formSave")} save form`,
+        suggestions: [], suggestionIdx: 0, cmdResult: ""});
       return () => onFooter(null);
     }
     const statusParts = [error, statusMsg, testResult].filter(Boolean) as string[];
@@ -209,8 +217,7 @@ export const ProvidersTab = memo(function ProvidersTab({
         : `Type ${chordLabel("slash")} for commands`,
       suggestions,
       suggestionIdx,
-      cmdResult: "",
-    });
+      cmdResult: ""});
     return () => onFooter(null);
   }, [cmdInput.value, cmdInput.cursor, statusMsg, testResult, error, mode, editUsesNormalBar,
       suggestions, suggestionIdx, onFooter, cmdInput, contentFocused, routingEdit]);
@@ -232,47 +239,26 @@ export const ProvidersTab = memo(function ProvidersTab({
     if (p) {
       // Secrets are never round-tripped from the backend. Empty means retain
       // the existing key; entering text explicitly replaces it.
-      setEditForm({ name: p.name, kind: p.kind || "remote", auth_mode: p.auth_mode || "api_key", base_url: p.base_url, api_key: "", model_id: p.model_id, protocol: p.protocol || "openai_chat", context_window: String(p.context_window || 128000), max_output_tokens: String(p.max_output_tokens || 4096) });
+      form.reset({ name: p.name, kind: p.kind || "remote", auth_mode: p.auth_mode || "api_key", base_url: p.base_url, api_key: "", model_id: p.model_id, protocol: p.protocol || "openai_chat", context_window: String(p.context_window || 128000), max_output_tokens: String(p.max_output_tokens || 4096) });
       setEditId(p.id);
     } else {
-      setEditForm(emptyForm());
+      form.reset(emptyForm());
       setEditId("");
     }
-    setEditFieldIdx(0);
-    cmdInput.setValue(p?.name || "");
     setMode("edit");
   }, [cmdInput]);
 
   const leaveEdit = useCallback((status = "") => {
     setMode("list");
-    setEditFieldIdx(0);
     setEditId("");
-    setEditForm(emptyForm());
+    form.reset(emptyForm());
     setSuggestionIdx(0);
     cmdInput.setValue("");
     setStatusMsg(status);
   }, [cmdInput]);
 
-  const commitTextField = useCallback((fieldIndex: number) => {
-    const field = FIELDS[fieldIndex];
-    if (!isChoiceField(field)) {
-      setEditForm(current => ({...current, [field]: cmdInput.value}));
-    }
-  }, [cmdInput.value]);
-
-  const moveEditField = useCallback((nextIndex: number) => {
-    commitTextField(editFieldIdx);
-    const bounded = Math.max(0, Math.min(FIELDS.length - 1, nextIndex));
-    setEditFieldIdx(bounded);
-    const field = FIELDS[bounded];
-    if (!isChoiceField(field)) {
-      cmdInput.setValue(String(editForm[field] || ""));
-    } else {
-      cmdInput.setValue("");
-    }
-  }, [commitTextField, editFieldIdx, editForm, cmdInput]);
-
   const saveEdit = useCallback(async (form: EditForm = editForm) => {
+    if (submitting.current) return;
     const p: LLMProvider = {
       id: editId, name: form.name, base_url: form.base_url,
       api_key: form.api_key, model_id: form.model_id, created_at: "",
@@ -280,8 +266,7 @@ export const ProvidersTab = memo(function ProvidersTab({
       kind: form.kind, auth_mode: form.auth_mode,
       context_window: Number(form.context_window),
       max_output_tokens: Number(form.max_output_tokens),
-      api_key_present: Boolean(editId), api_key_display: "",
-    };
+      api_key_present: Boolean(editId), api_key_display: ""};
     if (!p.name || !p.base_url || !p.model_id || (!editId && !p.api_key && p.auth_mode !== "none")
         || !Number.isInteger(p.context_window) || p.context_window < 1024
         || !Number.isInteger(p.max_output_tokens) || p.max_output_tokens < 1
@@ -291,14 +276,13 @@ export const ProvidersTab = memo(function ProvidersTab({
         : "Provider fields, API Key, and valid token limits required");
       return;
     }
-    setStatusMsg("Saving...");
-    const result = await saveProvider(p);
-    if (result) {
-      leaveEdit(result.credential_cleanup?.pending
+    submitting.current = true; setFormSaving(true); setStatusMsg("Saving...");
+    try {
+      const result = await saveProvider(p);
+      if (result) leaveEdit(result.credential_cleanup?.pending
         ? "Saved · old credential cleanup pending" : editId ? "Updated" : "Created");
-    } else {
-      setStatusMsg("Save failed");
-    }
+      else setStatusMsg("Save failed");
+    } finally {submitting.current = false; setFormSaving(false);}
   }, [editId, editForm, saveProvider, leaveEdit]);
 
   const handleSwitch = useCallback(async (providerId: string) => {
@@ -342,7 +326,7 @@ export const ProvidersTab = memo(function ProvidersTab({
         break;
       case "local":
         openEdit();
-        setEditForm({...emptyForm(), kind: "local", auth_mode: "none", base_url: "http://127.0.0.1:11434/v1", context_window: "32768"});
+        form.reset({...emptyForm(), kind: "local", auth_mode: "none", base_url: "http://127.0.0.1:11434/v1", context_window: "32768"});
         break;
       case "edit": {
         if (providersView === "detail") {
@@ -396,13 +380,12 @@ export const ProvidersTab = memo(function ProvidersTab({
     suggestionLabels,
     suggestionIdx,
     setSuggestionIdx,
-    runCommand,
-  };
+    runCommand};
 
   // ── Keyboard ────────────────────────────────────────────
   useInput((input: string, key: any) => {
     if (!contentFocused) return false;
-    if (routingSaving) return true;
+    if (routingSaving || formSaving) return true;
     if (routingEdit) {
       if (matchChord("escape", input, key)) setRoutingEdit(null);
       else if (matchChord("left", input, key) || matchChord("right", input, key)) {
@@ -424,33 +407,31 @@ export const ProvidersTab = memo(function ProvidersTab({
     }
     const ctx: ProvidersCtx = {
       mode,
+      editingField: form.editing,
       providersView,
       focusCol,
       cmdValue: cmdInput.value,
       suggestionCount: suggestionLabels.length,
       activeSuggestion: suggestionLabels[suggestionIdx % Math.max(1, suggestionLabels.length)] || "",
       activeSuggestionMode: suggestions[suggestionIdx % Math.max(1, suggestions.length)]?.inputMode ?? "fill",
-      editFieldIdx,
-    };
+      editFieldIdx};
     for (const a of resolveProvidersKey(ctx, input, key)) {
       switch (a.type) {
         case "editCancel":
-          leaveEdit();
+          if (form.editing) form.cancel(); else leaveEdit();
           break;
         case "editNextField":
-          moveEditField(Math.min(FIELDS.length - 1, editFieldIdx + 1));
+          form.move(1);
           break;
         case "editPrevField":
-          moveEditField(Math.max(0, editFieldIdx - 1));
+          form.move(-1);
           break;
         case "editAdvance":
-          if (editFieldIdx < FIELDS.length - 1) moveEditField(editFieldIdx + 1);
-          else {
-            commitTextField(editFieldIdx);
-            const finalForm = {...editForm, [FIELDS[editFieldIdx]]: cmdInput.value};
-            setEditForm(finalForm);
-            void saveEdit(finalForm);
-          }
+          if (!form.editing) form.begin();
+          else form.confirm(editForm.kind === "remote" ? {...editForm, auth_mode: "api_key"} : editForm);
+          break;
+        case "editSave":
+          void saveEdit(editForm);
           break;
         case "editText": {
           if (isChoiceField(activeEditField)) break;
@@ -466,20 +447,22 @@ export const ProvidersTab = memo(function ProvidersTab({
         }
         case "editChoice": {
           if (activeEditField === "kind") {
-            setEditForm(form => ({...form, kind: a.delta > 0 ? "local" : "remote", auth_mode: a.delta < 0 ? "api_key" : form.auth_mode}));
+            const options = ["remote", "local"];
+            form.setChoice(options[cycleChoiceIndex(options.indexOf(editForm.kind), a.delta, options.length)]!);
           } else if (activeEditField === "auth_mode") {
-            setEditForm(form => ({...form, auth_mode: form.kind === "local" && a.delta > 0 ? "none" : "api_key"}));
+            const options = editForm.kind === "local" ? ["api_key", "none"] : ["api_key"];
+            form.setChoice(options[cycleChoiceIndex(options.indexOf(editForm.auth_mode), a.delta, options.length)]!);
           } else if (activeEditField === "protocol") {
             const index = Math.max(0, PROTOCOL_OPTIONS.indexOf(editForm.protocol));
-            const next = Math.max(0, Math.min(PROTOCOL_OPTIONS.length - 1, index + a.delta));
-            setEditForm(form => ({...form, protocol: PROTOCOL_OPTIONS[next]!}));
+            const next = cycleChoiceIndex(index, a.delta, PROTOCOL_OPTIONS.length);
+            form.setChoice(PROTOCOL_OPTIONS[next]!);
           } else if (activeEditField === "context_window") {
             const current = Number(editForm.context_window);
             const nearest = CONTEXT_PRESETS.reduce((best, value, index) => (
               Math.abs(value - current) < Math.abs(CONTEXT_PRESETS[best] - current) ? index : best
             ), 0);
-            const next = Math.max(0, Math.min(CONTEXT_PRESETS.length - 1, nearest + a.delta));
-            setEditForm(form => ({...form, context_window: String(CONTEXT_PRESETS[next])}));
+            const next = cycleChoiceIndex(nearest, a.delta, CONTEXT_PRESETS.length);
+            form.setChoice(String(CONTEXT_PRESETS[next]));
           }
           break;
         }
@@ -533,7 +516,7 @@ export const ProvidersTab = memo(function ProvidersTab({
           break;
       }
     }
-  });
+  }, {bindingContext: mode === "edit" ? "form" : ""});
 
   // ── Render ──────────────────────────────────────────────
   if (mode === "edit") return renderEdit();
@@ -543,62 +526,50 @@ export const ProvidersTab = memo(function ProvidersTab({
   function renderEdit() {
     return (
       <Box flexDirection="column">
-        <Box paddingLeft={1}>
-          <Text bold>{editId ? "Edit Provider" : "New Provider"}</Text>
-          <Text dimColor>    Esc Cancel</Text>
+        <Box>
+          <Text bold>{editId ? t({en:"Edit Provider",zh:"编辑 Provider"}) : t({en:"New Provider",zh:"新建 Provider"})}</Text>
+          <Text dimColor>{t({en:"    Esc Cancel",zh:"    Esc 取消",keys:true})}</Text>
         </Box>
         {FIELD_LABELS.map((label, i: number) => {
           const field = FIELDS[i];
-          const displayedValue = i === editFieldIdx && !isChoiceField(field)
-            ? cmdInput.value : editForm[field];
+          const displayedValue = editForm[field];
           return (
-            <Box key={label} flexDirection="row" paddingLeft={1}>
-              {(() => {
-                const editStyle = i === editFieldIdx ? focusedEditStyle : unfocusedEditStyle;
-                return <Text color={editStyle.fg} bold={editStyle.bold}
-                  dimColor={i !== editFieldIdx}>
-                  {label.padEnd(10)}: {" "}
-                </Text>;
-              })()}
-              {(() => {
-                const editStyle = i === editFieldIdx ? focusedEditStyle : unfocusedEditStyle;
-                return <Text color={editStyle.fg} bold={editStyle.bold}
-                  dimColor={i !== editFieldIdx}>
+            <FormFieldRow key={label} label={label} labelWidth={fieldLabelWidth([...FIELD_LABELS], Math.max(1, w - 10))} selected={i === editFieldIdx} editing={i === editFieldIdx && form.editing}>
+                <SelectionText  wrap="truncate-end">
                     {field === "api_key"
                       ? displayedValue
                         ? "•".repeat(Math.min(24, displayedValue.length))
-                        : editForm.auth_mode === "none" ? "not required" : editId ? "••••••••  leave blank to retain" : ""
+                        : editForm.auth_mode === "none" ? t({en:"not required",zh:"不需要"}) : editId ? t({en:"••••••••  leave blank to retain",zh:"••••••••  留空保留"}) : ""
                       : displayedValue}
-                  </Text>;
-              })()}
-            </Box>
+                  </SelectionText>
+            </FormFieldRow>
           );
         })}
         <Box paddingLeft={1}>
-          <Text dimColor>{chordLabel("enter")} Next / save on final field  {chordLabel("tab")} Next  {chordLabel("shiftTab")} Previous</Text>
+          <Text dimColor>{chordLabel("enter")} {form.editing ? t({en:"confirm field",zh:"暂存当前字段"}) : t({en:"edit field",zh:"修改字段"})}{!form.editing ? ` · ${chordLabel("tab")} / ${chordLabel("upDown")} ${t({en:"select",zh:"选择"})}` : ""} · {chordLabel("formSave")} {t({en:"save form",zh:"保存表单"})} · {chordLabel("escape")} {form.editing ? t({en:"undo field",zh:"撤销当前字段"}) : t({en:"cancel form",zh:"取消表单"})}</Text>
         </Box>
         <Box paddingLeft={1}>
-          <Text dimColor>Location, auth, protocol and context: ←/→ · local endpoints must be loopback</Text>
+          <Text dimColor>{t({en:"Location, auth, protocol and context: ←/→ · local endpoints must be loopback",zh:"位置、认证、协议与上下文：←/→；本地端点必须使用环回地址。",keys:true})}</Text>
         </Box>
-        {statusMsg ? (
-          <Box paddingLeft={1}><Text color={colors.warning}>{statusMsg}</Text></Box>
+        {error || statusMsg ? (
+          <Box paddingLeft={1}><Text color={colors.warning}>{[statusMsg, error].filter(Boolean).join(" · ")}</Text></Box>
         ) : null}
       </Box>
     );
   }
 
   function renderProjectsList() {
-    if (loading) return <Text dimColor>Loading...</Text>;
+    if (loading) return <Text dimColor>{t({en:"Loading...",zh:"读取中…"})}</Text>;
     if (providers.length === 0) {
       return (
         <Box flexDirection="column">
-          <Text dimColor>No LLM providers configured.</Text>
-          <Text dimColor>Type /new to create one:</Text>
+          <Text dimColor>{t({en:"No LLM providers configured.",zh:"尚未配置模型 Provider。"})}</Text>
+          <Text dimColor>{t({en:"Type /new to create one:",zh:"输入 /new 创建："})}</Text>
           <Box paddingLeft={2} marginTop={1}>
-            <Text dimColor>Name: Groq Llama 3.3</Text>
-            <Text dimColor>URL:  https://api.groq.com/openai/v1</Text>
-            <Text dimColor>Key:  gsk_your_key_here</Text>
-            <Text dimColor>Model: llama-3.3-70b-versatile</Text>
+            <Text dimColor>{t({en:"Name: Groq Llama 3.3",zh:"名称：Groq Llama 3.3"})}</Text>
+            <Text dimColor>{t({en:"URL:  https://api.groq.com/openai/v1",zh:"地址：https://api.groq.com/openai/v1"})}</Text>
+            <Text dimColor>{t({en:"Key:  gsk_your_key_here",zh:"密钥：gsk_your_key_here"})}</Text>
+            <Text dimColor>{t({en:"Model: llama-3.3-70b-versatile",zh:"模型：llama-3.3-70b-versatile"})}</Text>
           </Box>
         </Box>
       );
@@ -609,19 +580,19 @@ export const ProvidersTab = memo(function ProvidersTab({
       <Box flexDirection="column">
         <Box flexDirection="row">
           <Box flexDirection="row" flexGrow={1}>
-            <Text>Default:  </Text>
-            <Text
-              bold={defaultRowStyle.bold}
-              color={defaultRowStyle.fg}
+            <Text>{t({en:"Default:  ",zh:"默认：  "})}</Text>
+            <SelectionText selected={contentFocused}
+
+
             >
-              {activeP ? `● ${activeP.name}` : "● none"}
-            </Text>
+              {activeP ? `● ${activeP.name}` : t({en:"● none",zh:"● 无"})}
+            </SelectionText>
           </Box>
-          <Text dimColor>automatic failover {failoverEnabled ? "on" : "off"}</Text>
+          <Text dimColor>{t({en:"automatic failover ",zh:"自动备用切换 "})}{failoverEnabled ? t({en:"on",zh:"开启"}) : t({en:"off",zh:"关闭"})}</Text>
         </Box>
 
         <Box marginTop={1}>
-          <Text dimColor>{chordLabel("enter")} models    {chordLabel("escape")} back</Text>
+          <Text dimColor>{chordLabel("enter")} {t({en:" models    ",zh:" 模型    "})}{chordLabel("escape")} {t({en:" back",zh:" 返回"})}</Text>
         </Box>
       </Box>
     );
@@ -629,23 +600,23 @@ export const ProvidersTab = memo(function ProvidersTab({
 
   function renderDualColumn() {
     if (loading || providers.length === 0) {
-      return <Text dimColor>No providers configured.</Text>;
+      return <Text dimColor>{t({en:"No providers configured.",zh:"尚未配置 Provider。"})}</Text>;
     }
     return (
       <Box flexDirection="column" flexGrow={1}>
         <Box marginBottom={1}>
-          <Text dimColor>{chordLabel("escape")} back</Text>
+          <Text dimColor>{chordLabel("escape")} {t({en:" back",zh:" 返回"})}</Text>
         </Box>
 
         <Box flexDirection="row">
           <Box flexGrow={1} marginRight={1}>
-            <Text dimColor bold>Main Model:</Text>
+            <Text dimColor bold>{t({en:"Main Model:",zh:"主模型："})}</Text>
           </Box>
           <Box flexGrow={1}>
-            <Text bold color={focusCol === "failover" && failoverSelIdx === -1 ? colors.selection.row.fg : undefined}
-              backgroundColor={focusCol === "failover" && failoverSelIdx === -1 ? colors.selection.row.bg : undefined}>
-              Automatic Failover: {routingEdit && !routingEdit.providerId ? (routingEdit.value ? "on" : "off") : failoverEnabled ? "on" : "off"}
-            </Text>
+            <SelectionText selected={focusCol === "failover" && failoverSelIdx === -1}
+              >
+              {t({en:"Automatic Failover: ",zh:"自动备用切换： "})}{routingEdit && !routingEdit.providerId ? (routingEdit.value ? t({en:"on",zh:"开启"}) : t({en:"off",zh:"关闭"})) : failoverEnabled ? t({en:"on",zh:"开启"}) : t({en:"off",zh:"关闭"})}
+            </SelectionText>
           </Box>
         </Box>
 
@@ -659,13 +630,13 @@ export const ProvidersTab = memo(function ProvidersTab({
                   <Text color={isActive ? colors.success : undefined} dimColor={!isActive}>
                     {isActive ? "●" : "○"}
                   </Text>
-                  <Text
-                    color={active ? colors.selection.row.fg : undefined}
-                    backgroundColor={active ? colors.selection.row.bg : undefined}
-                    bold={active}
+                  <SelectionText selected={active}
+
+
+
                   >
-                    {" "}{truncate(p.name, 32)} · {health[p.id]?.breaker_state || "unobserved"}
-                  </Text>
+                    {" "}{truncate(p.name, 32)} · {health[p.id]?.breaker_state || t({en:"unobserved",zh:"尚未观察"})}
+                  </SelectionText>
                 </Box>
               );
             })}
@@ -676,14 +647,14 @@ export const ProvidersTab = memo(function ProvidersTab({
               const enabled = failoverOrder.includes(p.id);
               const priority = failoverOrder.filter(id => id !== activeProvider).indexOf(p.id);
               const selected = focusCol === "failover" && index === failoverSelIdx;
-              return <Text key={p.id} bold={selected} color={selected ? colors.selection.row.fg : undefined} backgroundColor={selected ? colors.selection.row.bg : undefined}>
-                {routingEdit?.providerId === p.id ? (routingEdit.value ? `[${routingEdit.value}]` : "[ ]") : enabled ? `[${priority + 1}]` : "[ ]"} {truncate(p.name, 24)}{p.kind === "local" ? " · local" : ""} · {health[p.id]?.breaker_state || "unobserved"}
-              </Text>;
+              return <SelectionText selected={selected} key={p.id}   >
+                {routingEdit?.providerId === p.id ? (routingEdit.value ? `[${routingEdit.value}]` : "[ ]") : enabled ? `[${priority + 1}]` : "[ ]"} {truncate(p.name, 24)}{p.kind === "local" ? t({en:" · local",zh:" · 本地"}) : ""} · {health[p.id]?.breaker_state || t({en:"unobserved",zh:"尚未观察"})}
+              </SelectionText>;
             })}
-            {!backupCandidates.length ? <Text dimColor>Create another provider to select a backup.</Text> : null}
-            <Text dimColor>{routingSaving ? "Saving failover…" : routingEdit
+            {!backupCandidates.length ? <Text dimColor>{t({en:"Create another provider to select a backup.",zh:"创建另一个 Provider 以选择备用节点。"})}</Text> : null}
+            <Text dimColor>{keyHintText(routingSaving ? "Saving failover…" : routingEdit
               ? `← → ${routingEdit.providerId ? "disabled / priority" : "off / on"} · Enter save · Esc cancel`
-              : "↑ ↓ select · Enter change · ← → columns"}</Text>
+              : "↑ ↓ select · Enter change · ← → columns")}</Text>
           </Box>
         </Box>
       </Box>

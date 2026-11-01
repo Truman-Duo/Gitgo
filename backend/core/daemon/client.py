@@ -467,7 +467,7 @@ class DaemonClient:
                 # The original task deadline remains authoritative.  A
                 # transient reconciliation failure is not itself task failure.
                 continue
-            if state.get("terminal") and isinstance(state.get("outcome"), dict):
+            if (state.get("terminal") or state.get("turn_settled")) and isinstance(state.get("outcome"), dict):
                 recovered = {
                     "event": "agent_complete",
                     "task_id": task_id,

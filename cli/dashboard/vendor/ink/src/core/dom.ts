@@ -113,7 +113,7 @@ export type DOMNode<T = { nodeName: NodeNames }> = T extends {
   : never
 
 // eslint-disable-next-line @typescript-eslint/naming-convention
-export type DOMNodeAttribute = boolean | string | number
+export type DOMNodeAttribute = boolean | string | number | import('./raster.js').Raster
 
 export const createNode = (nodeName: ElementNames): DOMElement => {
   const needsYogaNode =

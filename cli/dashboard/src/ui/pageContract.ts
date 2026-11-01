@@ -1,7 +1,9 @@
+import {keyHintText} from "../input/hints.js";
 import type {InputKey} from "../input/router.js";
+import {geometry} from "../theme/tokens.js";
 
 export type Language = "en" | "zh";
-export type Copy = Readonly<Record<Language, string>>;
+export type Copy = Readonly<Record<Language, string> & {keysResolved?:boolean;keys?:boolean}>;
 export type Element =
  | {kind: "text"; rich: boolean}
  | {kind: "header"; levels: 1 | 2; divider:"after"}
@@ -24,7 +26,7 @@ export function definePage<const Id extends string>(page: PageDefinition<Id>): P
 export function copy(value: Copy, language: Language): string {
  const text = value[language];
  if (!text?.trim()) throw Error("UI_TRANSLATION_MISSING: "+language);
- return text;
+ return value.keys && !value.keysResolved ? keyHintText(text) : text;
 }
 export type Selectable<Id extends string | number = string> = {id: Id; enabled: boolean};
 export function reconcileSelection<Id extends string | number>(items: readonly Selectable<Id>[], selected: Id): Id | undefined {
@@ -36,7 +38,7 @@ export function moveSelection<Id extends string | number>(items: readonly Select
  const at = enabled.findIndex(item => item.id === selected);
  return enabled[Math.max(0,Math.min(enabled.length-1,at < 0 ? 0 : at + delta))]?.id;
 }
-export type StandardKey = "back" | "activate" | "up" | "down" | "left" | "right" | "next" | "pageUp" | "pageDown";
+export type StandardKey = "back" | "activate" | "up" | "down" | "left" | "right" | "next" | "previous" | "pageUp" | "pageDown";
 export function standardKey(input: string, key: InputKey): StandardKey | undefined {
  if (key.paste || key.ctrl || key.meta) return;
  if (key.escape) return "back";
@@ -45,12 +47,24 @@ export function standardKey(input: string, key: InputKey): StandardKey | undefin
  if (key.downArrow) return "down";
  if (key.leftArrow) return "left";
  if (key.rightArrow) return "right";
- if (key.tab) return "next";
+ if (key.tab) return key.shift ? "previous" : "next";
  if (key.pageUp || key.wheelUp) return "pageUp";
  if (key.pageDown || key.wheelDown) return "pageDown";
  // Printable letters are never implicit actions in standard pages.
 }
-const common = {spacing: {paddingX: 1, paddingTop: 1}, motion: "none"} as const;
+/** Element contracts used by field/feedback components, independent of page navigation. */
+export const elementStandards = {
+  selection: {components: ["SelectionRow", "SelectionText", "HorizontalHeaderStrip"], leadingMarker: false,
+    weight: "selected-independent-of-focus", color: "theme-only", motion: "immediate"},
+  tableHeader: {component: "TableHeaderText", weight: "always-bold"},
+  field: {labelWidth: "terminal-cells", editIndicator: "blink-label-only", leadingMarker: false,
+    weight: "selected-only", textEditor: "normal-bar-only-while-editing"},
+  choice: {presentation: "current-value", keys: "left-right", navigation: "cycle", confirmation: "enter"},
+  feedback: {owner: "explicit-page-project-or-global", defaultRetention: "timed",
+    persistent: "explicit-unresolved-operation-or-state", staleAsyncDelivery: "discard"},
+  language: {source: "bilingual-copy", externalContent: "preserve-original"},
+} as const;
+const common = {spacing: geometry.page, motion: "none"} as const;
 export const pages = {
  processDetail: definePage({...common,id:"processDetail",title:{en:"Subprocess details",zh:"子进程详情"},layout:"viewport",
   navigation:"rows",elements:[{kind:"text",rich:true}]}),

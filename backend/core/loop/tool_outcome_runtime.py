@@ -30,7 +30,8 @@ class ToolOutcomeRuntime:
             return DeliveryBoundary()
         if claim.tool_name == 'complete_supervision' and claim.data.get('terminal_status') == 'failed':
             return self._supervised_failure(claim, duration_ms, window)
-        guard = self.delivery.guard.check(process, 'TASK_COMPLETE', session, self.delivery.signal_bus, signals)
+        stage_arguments = {"completion_stage_entry": True} if self.delivery.has_registered_stages() else {}
+        guard = self.delivery.guard.check(process, 'TASK_COMPLETE', session, self.delivery.signal_bus, signals, **stage_arguments)
         if guard.is_complete:
             if claim.tool_name == 'complete_supervision':
                 text = str(claim.data.get('result', ''))

@@ -10,6 +10,14 @@ const labels = {
  review:{en:"Review",zh:"审阅"}, research:{en:"Research",zh:"研究"}, Task:{en:"Task",zh:"任务"},
  completed:{en:"Completed",zh:"已完成"}, complete:{en:"Complete",zh:"已完成"},
  running:{en:"Running",zh:"运行中"}, pending:{en:"Pending",zh:"待处理"},
+ proposed:{en:"Proposed",zh:"提案"},adopted:{en:"Adopted",zh:"已采用"},rejected:{en:"Rejected",zh:"已拒绝"},
+ candidate:{en:"Candidate",zh:"候选"},pending_adoption:{en:"Pending adoption",zh:"采用待对账"},merged:{en:"Merged",zh:"已合并"},
+ reviewing:{en:"Reviewing",zh:"审阅中"},rework:{en:"Return to execution",zh:"返回执行"},approved:{en:"Approved",zh:"审阅通过"},
+ changes_required:{en:"Changes required",zh:"需要修改"},needs_review:{en:"Needs review",zh:"待修订"},inspect_required:{en:"Inspection required",zh:"需要核对"},
+ withdrawn:{en:"Withdrawn",zh:"已撤回"},resolved:{en:"Resolved",zh:"已解决"},acknowledged:{en:"Acknowledged",zh:"已解释"},
+ processed:{en:"Processed",zh:"已处理"},discarded:{en:"Discarded",zh:"已丢弃"},unknown:{en:"Unknown",zh:"结果不明"},
+ saved:{en:"Saved",zh:"已保存"},pending_activation:{en:"Pending activation",zh:"待生效"},activating:{en:"Activating",zh:"生效中"},
+ ready:{en:"Ready",zh:"就绪"},suspended:{en:"Suspended",zh:"已暂停"},retiring:{en:"Retiring",zh:"卸载中"},detached:{en:"Detached",zh:"已卸载"},
  awaiting_user:{en:"Awaiting user",zh:"等待用户"}, blocked:{en:"Blocked",zh:"受阻"},
  failed:{en:"Failed",zh:"失败"}, cancelled:{en:"Cancelled",zh:"已取消"},
  incomplete:{en:"Incomplete",zh:"未完成"}, archived:{en:"Archived",zh:"已归档"}, active:{en:"Active",zh:"可用"},
@@ -35,6 +43,8 @@ const labels = {
  "User conversation":{en:"User conversation",zh:"用户对话"}, "Assistant conversation":{en:"Assistant conversation",zh:"助手对话"},
  "Other history":{en:"Other history",zh:"其他历史"},
  "Provider continuation":{en:"Provider continuation",zh:"模型接口续接"},
+ "Runtime context updates":{en:"Runtime context updates",zh:"运行态上下文"},
+ "Pending tool catalog":{en:"Pending tool catalog",zh:"待装配工具目录"},
  "Provider overhead":{en:"Provider overhead",zh:"模型接口额外用量"},
 } satisfies Record<string,Copy>;
 export function label(value:unknown,t:(value:Copy)=>string):string {

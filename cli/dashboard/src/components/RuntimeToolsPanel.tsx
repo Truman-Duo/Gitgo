@@ -1,3 +1,4 @@
+import {SelectionText} from "./Selection.js";
 import {label} from "../ui/runtimeLabels.js";
 import {useCopy} from "../ui/PageFrame.js";
 import React, {memo, useCallback, useEffect, useRef, useState} from "react";
@@ -5,7 +6,7 @@ import {Box, ScrollBox, Text, type ScrollBoxHandle} from "@anthropic/ink";
 import type {BackendClient} from "../backend/client.js";
 import {customToolArchive, customToolList, customToolRestore} from "../backend/tools.js";
 import {useManagedInput as useInput, useScrollInput} from "../input/runtime.js";
-import {colors, truncate, usePanelSize, useSelectionStyle} from "../theme/index.js";
+import {colors, truncate, usePanelSize} from "../theme/index.js";
 
 type Props = {client: BackendClient; project: string; cols: number; onDismiss: () => void; interactive?: boolean};
 
@@ -65,7 +66,7 @@ export const RuntimeToolsPanel = memo(function RuntimeToolsPanel({client, projec
     else if (key.downArrow) setSelected(value => Math.min(items.length - 1, value + 1));
     else if (key.return && items[selected]) setDetail(true);
   }, {isActive: interactive});
-  const selection = useSelectionStyle(interactive ? "focused" : "non-focused", "row");
+
   const item = items[selected];
   return <Box flexDirection="column" paddingX={1} paddingTop={1} width={w} flexGrow={1} minHeight={0}>
     <Text bold>{t({en:"Saved custom actions —",zh:"已保存的自定义动作 —"})} {project}</Text>
@@ -86,15 +87,15 @@ export const RuntimeToolsPanel = memo(function RuntimeToolsPanel({client, projec
         <Text dimColor>{t({en:"Digest: ",zh:"摘要："})}{item.digest || t({en:"Not recorded",zh:"未记录"})}</Text>
         <Text dimColor>{t({en:"Viewing does not mount, authorize or execute this action.",zh:"查看不会挂载、授权或执行此动作。"})}</Text>
       </> : items.map((value, index) => <Box key={value.tool_id || value.name} flexDirection="column">
-        <Text color={index === selected ? selection.fg : undefined} backgroundColor={index === selected ? selection.bg : undefined}>
-          {index === selected ? "› " : "  "}{truncate(value.name + "  v" + value.version + "  " + label(value.state,t), Math.max(10, w - 4))}
-        </Text>
+        <SelectionText selected={index === selected} focused={interactive}  >
+          {truncate(value.name + "  v" + value.version + "  " + label(value.state,t), Math.max(10, w - 4))}
+        </SelectionText>
         {index === selected ? <Text dimColor>  {truncate(value.description || t({en:"No description",zh:"无说明"}), Math.max(10, w - 4))}</Text> : null}
       </Box>)}
     </ScrollBox>
     {status ? <Text color={colors.warning}>{status}</Text> : null}
-    <Text dimColor>{confirm ? t({en:"Enter confirm · Esc cancel",zh:"Enter 确认 · Esc 取消"})
-      : detail ? t({en:"Enter review archive/restore · Esc list",zh:"Enter 确认归档/恢复 · Esc 列表"})
-      : t({en:"↑/↓ select · Enter details · Esc tabs",zh:"↑/↓ 选择 · Enter 详情 · Esc 页签"})}</Text>
+    <Text dimColor>{confirm ? t({en:"Enter confirm · Esc cancel",zh:"Enter 确认 · Esc 取消",keys:true})
+      : detail ? t({en:"Enter review archive/restore · Esc list",zh:"Enter 确认归档/恢复 · Esc 列表",keys:true})
+      : t({en:"↑/↓ select · Enter details · Esc tabs",zh:"↑/↓ 选择 · Enter 详情 · Esc 页签",keys:true})}</Text>
   </Box>;
 });

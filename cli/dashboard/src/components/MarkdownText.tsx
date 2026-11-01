@@ -1,7 +1,7 @@
 import React, {useContext, useMemo, useRef} from "react";
 import {Ansi, Box, Text as InkText, type TextProps} from "@anthropic/ink";
 import {marked} from "marked";
-import {highlight, supportsLanguage} from "cli-highlight";
+import {highlightCode} from "../theme/syntax.js";
 import {colors, displayWidth, padEndWidth, wrap} from "../theme/index.js";
 
 type Props = {content: string; width: number; dimColor?: boolean};
@@ -39,7 +39,7 @@ function Inline({tokens}: {tokens: any[]}) {
     if (token.type === "strong") return <Text key={key} bold><Inline tokens={token.tokens || []}/></Text>;
     if (token.type === "em") return <Text key={key} italic><Inline tokens={token.tokens || []}/></Text>;
     if (token.type === "del") return <Text key={key} strikethrough><Inline tokens={token.tokens || []}/></Text>;
-    if (token.type === "codespan") return <Text key={key} color={colors.accent}>{token.text}</Text>;
+    if (token.type === "codespan") return <Text key={key} color={colors.chat.emphasis}>{token.text}</Text>;
     if (token.type === "link") return <Text key={key} underline><Inline tokens={token.tokens || []}/>{token.href ? ` (${token.href})` : ""}</Text>;
     if (token.type === "br") return <Text key={key}>{"\n"}</Text>;
     if (token.tokens) return <Inline key={key} tokens={token.tokens}/>;
@@ -48,30 +48,36 @@ function Inline({tokens}: {tokens: any[]}) {
 }
 
 function Table({token, width}: {token: any; width: number}) {
+  const columns = Math.max(1, token.header?.length || 0, ...(token.rows || []).map((row: any[]) => row.length));
+  const capacity = Math.max(2, Math.floor((Math.max(8, width) - 1) / 3));
+  const groups: number[][] = [];
+  if (columns <= capacity) groups.push(Array.from({length: columns}, (_, index) => index));
+  else {
+    groups.push(Array.from({length: capacity}, (_, index) => index));
+    for (let start = capacity; start < columns; start += capacity - 1) {
+      // Keep the row key beside each remaining group of columns. Never turn
+      // tabular data into unrelated label/value paragraphs or drop columns.
+      groups.push([0, ...Array.from({length: Math.min(capacity - 1, columns - start)}, (_, index) => start + index)]);
+    }
+  }
+  return <Box flexDirection="column">{groups.map((group, index) =>
+    <Box key={index} marginTop={index ? 1 : 0}><TableGrid width={width} token={{
+      header: token.header?.length ? group.map(column => token.header[column]) : [],
+      rows: (token.rows || []).map((row: any[]) => group.map(column => row[column])),
+      align: group.map(column => token.align?.[column]),
+    }}/></Box>,
+  )}</Box>;
+}
+
+function TableGrid({token, width}: {token: any; width: number}) {
   const header = token.header || [];
   const rows = token.rows || [];
   const columns = Math.max(1, header.length, ...rows.map((row: any[]) => row.length));
   const matrix = [header, ...rows];
-  const frameWidth = columns * 3 + 1; // borders plus one-cell padding on both sides
-  const available = Math.max(1, Math.max(8, width) - frameWidth);
-  const minimum = 6;
-  // A squeezed grid is less useful than a readable vertical projection. This
-  // is especially important for CJK, where code-unit length is not cell width.
-  if (columns > 4 || available < columns * minimum) {
-    const labels = header.map((cell: any, index: number) => plain(cell) || `Column ${index + 1}`);
-    const data = rows.length ? rows : [header];
-    return <Box flexDirection="column">
-      {data.map((row: any[], rowIndex: number) => <Box key={rowIndex} flexDirection="column"
-        marginBottom={rowIndex < data.length - 1 ? 1 : 0}>
-        {Array.from({length: columns}, (_, column) => {
-          const prefix = header.length ? `${labels[column]}: ` : "";
-          const lines = wrap(prefix + plain(row[column]), Math.max(8, width));
-          return lines.map((line, lineIndex) => <Text key={`${column}:${lineIndex}`}
-            dimColor={lineIndex > 0}>{line}</Text>);
-        })}
-      </Box>)}
-    </Box>;
-  }
+  const minimum = 2; // one complete CJK/emoji grapheme must fit
+  const padding = width >= columns * 5 + 1 ? 1 : 0;
+  const frameWidth = columns * (1 + padding * 2) + 1;
+  const available = Math.max(columns * minimum, Math.floor(width) - frameWidth);
   const widths = Array.from({length: columns}, (_, column) => Math.max(
     minimum,
     Math.min(40, Math.max(...matrix.map((row: any[]) => displayWidth(plain(row[column])) || 0))),
@@ -104,12 +110,16 @@ function Table({token, width}: {token: any; width: number}) {
       wrap(plain(cells[column]), widths[column]!),
     );
     const height = Math.max(1, ...wrapped.map(cell => cell.length));
-    return Array.from({length: height}, (_, lineIndex) => "│" + wrapped.map((cell, column) =>
-      ` ${padEndWidth(cell[lineIndex] || "", widths[column]!)} `,
-    ).join("│") + "│");
+    return Array.from({length: height}, (_, lineIndex) => "│" + wrapped.map((cell, column) => {
+      const value = cell[lineIndex] || "";
+      const spare = Math.max(0, widths[column]! - displayWidth(value));
+      const align = token.align?.[column];
+      const left = align === "right" ? spare : align === "center" ? Math.floor(spare / 2) : 0;
+      return " ".repeat(padding + left) + padEndWidth(value, widths[column]! - left) + " ".repeat(padding);
+    }).join("│") + "│");
   };
   const rule = (left: string, middle: string, right: string) => left
-    + widths.map(value => "─".repeat(value + 2)).join(middle) + right;
+    + widths.map(value => "─".repeat(value + padding * 2)).join(middle) + right;
   return <Box flexDirection="column">
     <Text dimColor>{rule("┌", "┬", "┐")}</Text>
     {header.length ? lines(header).map((line, index) => <Text key={`h${index}`} bold>{line}</Text>) : null}
@@ -121,17 +131,6 @@ function Table({token, width}: {token: any; width: number}) {
   </Box>;
 }
 
-function highlightedCode(source: string, language?: string): string {
-  try {
-    return highlight(source, {
-      ...(language && supportsLanguage(language) ? {language} : {}),
-      ignoreIllegals: true,
-    });
-  } catch {
-    return source;
-  }
-}
-
 function Blocks({tokens, width, dimColor}: {tokens: any[]; width: number; dimColor?: boolean}) {
   return <>{tokens.map((token, index) => {
     const key = `${token.type}-${index}`;
@@ -141,7 +140,7 @@ function Blocks({tokens, width, dimColor}: {tokens: any[]; width: number; dimCol
     if (token.type === "code") return <Box key={key} flexDirection="column" paddingLeft={1} borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor={colors.named.gray}>
       {token.lang ? <Text dimColor>{token.lang}</Text> : null}
       {dimColor ? <Text dimColor>{String(token.text || "")}</Text>
-        : <Ansi>{highlightedCode(String(token.text || ""), String(token.lang || ""))}</Ansi>}
+        : <Ansi>{highlightCode(String(token.text || ""), String(token.lang || ""))}</Ansi>}
     </Box>;
     if (token.type === "blockquote") return <Box key={key} paddingLeft={1} borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor={colors.named.gray}>
       <Blocks tokens={token.tokens || []} width={Math.max(8, width - 2)} dimColor/>

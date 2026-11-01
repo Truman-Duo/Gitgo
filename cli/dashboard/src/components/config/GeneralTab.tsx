@@ -1,14 +1,20 @@
+import {SelectionText} from "../Selection.js";
+import {useCopy} from "../../ui/PageFrame.js";
+import {isBindingAction, applicationBindings} from "../../input/router.js";
 import React, { memo, useCallback, useEffect, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../../input/runtime.js";
 import { configGet, configSet, detectTerminals, testWebSearchConfig } from "../../backend/tools.js";
 import type { TerminalInventory, TerminalOption } from "../../backend/terminalLauncher.js";
 import { matchChord, chordLabel } from "../../input/bindings.js";
-import { colors } from "../../theme/index.js";
+import { colors, padEndWidth, usePanelSize } from "../../theme/index.js";
+import {FormFieldRow, fieldLabelWidth} from "../FormFieldRow.js";
+import {cycleChoiceIndex} from "../../input/choice.js";
 import type { ConfigTabProps } from "./types.js";
 import { notifyGeneralConfigChanged } from "../../hooks/useGeneralConfig.js";
 import { applyTextOp } from "../../hooks/useTextInput.js";
 import { productVersion } from "../../backend/update.js";
+import {useFeedback} from "../../hooks/useFeedback.js";
 
 type SettingId = "verbose" | "language" | "auto_compact" | "agent_routing" | "external_editor" | "web_search_mode" | "web_search_engine" | "web_search_endpoint" | "terminal" | "prompt_profile" | "diff_layout";
 type Settings = {
@@ -25,19 +31,7 @@ type Settings = {
   prompt_profile: string;
 };
 
-const ROWS: { id: SettingId; label: string }[] = [
-  { id: "verbose", label: "Verbose" },
-  { id: "language", label: "Language" },
-  { id: "auto_compact", label: "Auto Compact" },
-  { id: "agent_routing", label: "Agent Routing" },
-  { id: "external_editor", label: "External Editor" },
-  { id: "web_search_mode", label: "Web Search" },
-  { id: "web_search_engine", label: "Fallback Engine" },
-  { id: "web_search_endpoint", label: "SearXNG Fallback" },
-  { id: "terminal", label: "Terminal" },
-  { id: "prompt_profile", label: "Prompt Instance" },
-  { id: "diff_layout", label: "Diff Layout" },
-];
+
 const OPTIONS: Record<Exclude<SettingId, "external_editor" | "web_search_endpoint" | "terminal" | "prompt_profile">, readonly (string | number | boolean)[]> = {
   verbose: [false, true],
   diff_layout: ["split", "unified"],
@@ -54,8 +48,24 @@ function isTextSetting(id: SettingId): id is TextSettingId {
 }
 
 export const GeneralTab = memo(function GeneralTab({
-  client, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused, initialSetting, onSettingSaved,
+  client, project, cmdInput, onFooter, onStatusUpdate, report, shell, contentFocused, initialSetting, onSettingSaved,
 }: ConfigTabProps) {
+  const t=useCopy();
+  const {w} = usePanelSize({widthOffset: 4});
+  const ROWS: { id: SettingId; label: string }[] = [
+    { id: "verbose", label: t({en:"Verbose",zh:"详细显示"}) },
+    { id: "language", label: t({en:"Language",zh:"语言"}) },
+    { id: "auto_compact", label: t({en:"Auto Compact",zh:"自动压缩"}) },
+    { id: "agent_routing", label: t({en:"Agent Routing",zh:"Agent 路由"}) },
+    { id: "external_editor", label: t({en:"External Editor",zh:"外部编辑器"}) },
+    { id: "web_search_mode", label: t({en:"Web Search",zh:"网页搜索"}) },
+    { id: "web_search_engine", label: t({en:"Fallback Engine",zh:"备用搜索引擎"}) },
+    { id: "web_search_endpoint", label: t({en:"SearXNG Fallback",zh:"SearXNG 备用端点"}) },
+    { id: "terminal", label: t({en:"Terminal",zh:"终端"}) },
+    { id: "prompt_profile", label: t({en:"Prompt Instance",zh:"提示词实例"}) },
+    { id: "diff_layout", label: t({en:"Diff Layout",zh:"差异布局"}) },
+  ];
+
   const [settings, setSettings] = useState<Settings>({
     verbose: false, diff_layout: "split", language: "en", auto_compact: true, agent_routing: "owner",
     external_editor: "", web_search_mode: "auto", web_search_endpoint: "",
@@ -66,19 +76,20 @@ export const GeneralTab = memo(function GeneralTab({
   const [editing, setEditing] = useState<SettingId | null>(initialSetting === "terminal" ? "terminal" : null);
   const [draft, setDraft] = useState<string | number | boolean>("");
   const [saving, setSaving] = useState<SettingId | null>(null);
-  const [message, setMessage] = useState("");
+  const feedback = useFeedback({kind: "page", id: `config/general:${project}`});
+  const message = feedback.text, setMessage = feedback.show;
   const [terminals, setTerminals] = useState<TerminalOption[]>([]);
   const [terminalWarning, setTerminalWarning] = useState("");
   const [detectingTerminals, setDetectingTerminals] = useState(true);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
-  const [version, setVersion] = useState("Loading…");
+  const [version, setVersion] = useState(t({en:"Loading…",zh:"正在读取…"}));
   useEffect(() => {
     let active = true;
-    setVersion("Loading…");
+    setVersion(t({en:"Loading…",zh:"正在读取…"}));
     productVersion(client).then(value => { if (active) setVersion(value.version); })
-      .catch(() => { if (active) setVersion("Unavailable · reopen General to retry"); });
+      .catch(() => { if (active) setVersion(t({en:"Unavailable · reopen General to retry",zh:"不可用，请重新打开通用设置重试"})); });
     return () => { active = false; };
-  }, [client]);
+  }, [client, t]);
   const refreshTerminals = useCallback(async () => {
     setDetectingTerminals(true);
     try {
@@ -141,16 +152,17 @@ export const GeneralTab = memo(function GeneralTab({
   useEffect(() => { report({ sub: editing !== null, fullscreen: false }); }, [editing, report]);
   useEffect(() => {
     if (editing && isTextSetting(editing)) {
-      onFooter({kind: "normal", cmdInput, statusText: "Enter save · Esc cancel",
+      onFooter({kind: "normal", cmdInput, statusText: t({en:"Enter save · Esc cancel",zh:"Enter 保存 · Esc 取消",keys:true}),
         suggestions: [], suggestionIdx: 0, cmdResult: ""});
     } else onFooter({ hidden: true });
     return () => onFooter(null);
   }, [onFooter, editing, cmdInput.value, cmdInput.cursor, cmdInput]);
   useEffect(() => { onStatusUpdate?.(message); }, [message, onStatusUpdate]);
+  useEffect(() => () => onStatusUpdate?.(""), [onStatusUpdate]);
 
   const save = useCallback(async (id: SettingId, value: string | number | boolean) => {
     setSaving(id);
-    setMessage(`Saving ${ROWS.find((item) => item.id === id)?.label || id}…`);
+    setMessage(`Saving ${ROWS.find((item) => item.id === id)?.label || id}…`, {retention: {kind: "until-resolved", reason: "operation-pending"}});
     try {
       const key = id === "terminal" ? "launcher.terminal" : id;
       await configSet(client, key, value);
@@ -174,7 +186,7 @@ export const GeneralTab = memo(function GeneralTab({
       if (notice) setMessage(notice);
       setEditing(null);
     } catch (error) {
-      setMessage(`Save failed: ${String(error)}`);
+      setMessage(`Save failed: ${String(error)}`, {tone: "error"});
     } finally {
       setSaving(null);
     }
@@ -183,7 +195,7 @@ export const GeneralTab = memo(function GeneralTab({
   useInput((input, key) => {
     if (!contentFocused) return false;
     if (saving) return;
-    if ((editing === "terminal" || ROWS[row]?.id === "terminal") && input.toLowerCase() === "r") {
+    if ((editing === "terminal" || ROWS[row]?.id === "terminal") && isBindingAction("terminal.rescan", input, key)) {
       void refreshTerminals(); return;
     }
     if (editing) {
@@ -205,10 +217,10 @@ export const GeneralTab = memo(function GeneralTab({
       if (editing === "terminal" && (!settingsLoaded || detectingTerminals || options.length === 0)) return;
       const index = Math.max(0, options.indexOf(draft));
       if (matchChord("left", input, key)) {
-        setDraft(options[(index + options.length - 1) % options.length]!); return;
+        setDraft(options[cycleChoiceIndex(index, -1, options.length)]!); return;
       }
       if (matchChord("right", input, key)) {
-        setDraft(options[(index + 1) % options.length]!); return;
+        setDraft(options[cycleChoiceIndex(index, 1, options.length)]!); return;
       }
       if (matchChord("enter", input, key)) void save(editing, draft);
       return;
@@ -220,7 +232,7 @@ export const GeneralTab = memo(function GeneralTab({
       const options = terminals.filter(t => t.available).map(t => t.id);
       if (detectingTerminals || !options.length) return;
       const index = Math.max(0, options.indexOf(settings.terminal));
-      setDraft(options[(index + (key.leftArrow ? options.length - 1 : 1)) % options.length]!);
+      setDraft(options[cycleChoiceIndex(index, key.leftArrow ? -1 : 1, options.length)]!);
       setEditing("terminal"); return;
     }
     if (!matchChord("enter", input, key)) return;
@@ -228,63 +240,56 @@ export const GeneralTab = memo(function GeneralTab({
     setEditing(id);
     setDraft(settings[id]);
     if (isTextSetting(id)) cmdInput.setValue(String(settings[id] || ""));
-  });
+  }, {bindingContext: contentFocused && (editing === "terminal" || (!editing && ROWS[row]?.id === "terminal")) ? "terminal" : ""});
 
   const valueLabel = (id: SettingId) => {
     const value = editing === id ? draft : settings[id];
-    if (saving === id) return "SAVING";
+    if (saving === id) return t({en:"SAVING",zh:"正在保存"});
     if (id === "prompt_profile") return profiles.find(p => p.id === value)?.label || String(value);
     if (id === "terminal") {
-      if (detectingTerminals) return "Detecting installed terminals…";
+      if (detectingTerminals) return t({en:"Detecting installed terminals…",zh:"正在检测已安装终端…"});
       const option = terminals.find(t => t.id === value);
-      return option ? option.label + (option.available ? "" : " · unavailable") : String(value || "Not selected");
+      return option ? (option.id === "auto" ? t({en:"Automatic",zh:"自动选择"}) : option.id === "current" ? t({en:"Current terminal",zh:"当前终端"}) : option.label) + (option.available ? "" : t({en:" · unavailable",zh:" · 不可用"})) : String(value || t({en:"Not selected",zh:"未选择"}));
     }
     if (id === "verbose" || id === "auto_compact") return value ? "ON" : "OFF";
-    if (id === "diff_layout") return value === "unified" ? "Unified" : "Split";
+    if (id === "diff_layout") return value === "unified" ? t({en:"Unified",zh:"统一"}) : t({en:"Split",zh:"并排"});
     if (id === "language") return value === "zh" ? "中文" : "English";
-    if (id === "agent_routing") return value === "fresh" ? "Fresh agent" : "Original owner";
-    if (id === "web_search_mode") return value === "auto" ? "Provider → SearXNG" : String(value);
+    if (id === "agent_routing") return value === "fresh" ? t({en:"Fresh agent",zh:"新进程"}) : t({en:"Original owner",zh:"原负责进程"});
+    if (id === "web_search_mode") return value === "auto" ? t({en:"Provider → SearXNG",zh:"服务商 → SearXNG"}) : value === "disabled" ? t({en:"Disabled",zh:"已禁用"}) : value === "provider" ? t({en:"Provider",zh:"服务商"}) : String(value);
     if (id === "web_search_engine") return String(value).replace(/^./, char => char.toUpperCase());
     if (isTextSetting(id)) {
-      const fallback = id === "web_search_endpoint" ? "Not configured" : "System default";
+      const fallback = id === "web_search_endpoint" ? t({en:"Not configured",zh:"未配置"}) : t({en:"System default",zh:"系统默认"});
       const text = String(editing === id ? cmdInput.value : value || fallback);
       return text.length > 58 ? "…" + text.slice(-57) : text;
     }
     return String(value);
   };
 
+  const labelWidth = fieldLabelWidth(["Gitgo Version", ...ROWS.map(item => item.label)], Math.max(1, w - 10), "");
   return (
     <Box flexDirection="column" flexGrow={1}>
-      <Text dimColor>{"Gitgo Version".padEnd(18)}{version} (read-only)</Text>
+      <Text dimColor>{padEndWidth("Gitgo Version", labelWidth)}{version} {t({en:" (read-only)",zh:" （只读）"})}</Text>
       {ROWS.map((item, index) => {
         const selected = contentFocused && index === row;
         const isEditing = editing === item.id;
         return (
-          <Box key={item.id} flexDirection="row">
-            <Text bold={selected} color={selected ? colors.selection.row.fg : undefined}>
-              {item.label.padEnd(18)}
-            </Text>
-            <Text bold={isEditing || selected} color={isEditing ? colors.selection.row.fg : undefined}>
-              {item.id === "web_search_engine" ? (
-                <Text color={searchHealth === "online" ? colors.success : searchHealth === "offline" ? colors.danger : colors.named.gray}>
-                  ●{" "}
-                </Text>
-              ) : null}
+          <FormFieldRow key={item.id} label={item.label} labelWidth={labelWidth} suffix="" highlight={false} selected={selected} editing={isEditing}>
+            <SelectionText selected={selected}  >
+              {item.id === "web_search_engine" ? <Text color={searchHealth === "online" ? colors.success : searchHealth === "offline" ? colors.danger : colors.named.gray}>● </Text> : null}
               {valueLabel(item.id)}
-            </Text>
-          </Box>
+            </SelectionText>
+          </FormFieldRow>
         );
       })}
       <Text dimColor>
         {editing
-          ? `${chordLabel("leftRight")} choose  ${chordLabel("enter")} save  ${chordLabel("escape")} cancel`
+          ? isTextSetting(editing) ? t({en:"Enter save · Esc cancel",zh:"Enter 保存 · Esc 取消",keys:true}) : t({en:"←/→ choose · Enter save · Esc cancel",zh:"←/→ 选择 · Enter 保存 · Esc 取消",keys:true})
           : contentFocused
-            ? `${chordLabel("upDown")} select  ${chordLabel("enter")} change  ${chordLabel("escape")} tabs`
-            : `${chordLabel("leftRight")} tabs  ${chordLabel("enter")} open  ${chordLabel("escape")} back`}
+            ? t({en:"↑↓ select · Enter change · Esc tabs",zh:"↑↓ 选择 · Enter 修改 · Esc 页签",keys:true})
+            : t({en:"←/→ tabs · Enter open · Esc back",zh:"←/→ 页签 · Enter 打开 · Esc 返回",keys:true})}
       </Text>
       {ROWS[row]?.id === "terminal" && <Text dimColor>
-        {initialSetting === "terminal" ? "First launch · choose a terminal and press Enter. " : "Changes apply on the next launch. "}R rescan
-      </Text>}
+        {initialSetting === "terminal" ? t({en:"First launch · choose a terminal and press Enter. ",zh:"首次启动：选择终端并按 Enter。 ",keys:true}) : t({en:"Changes apply on the next launch. ",zh:"更改在下次启动时生效。 "})}{applicationBindings.label("terminal.rescan")} {t({en:"rescan",zh:"重新扫描"})}</Text>}
       {terminalWarning && ROWS[row]?.id === "terminal" ? <Text color={colors.warning}>{terminalWarning}</Text> : null}
     </Box>
   );

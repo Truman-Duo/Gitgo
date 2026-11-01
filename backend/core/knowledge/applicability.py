@@ -62,6 +62,8 @@ def capture_lesson_evidence(workspace: str | Path, signals: list[dict]) -> dict:
     from backend.core.workbench.materials import captured_bindings
     materials = [binding for signal in signals for binding in captured_bindings(root, signal)]
     return {
+        "operation_origins": [origin for signal in signals
+                              if (origin := _operation_origin(signal)) is not None],
         **({"workbench_materials": materials} if materials else {}),
         "available_excerpts": [item for signal in signals for item in capture_excerpts(root, signal)],
         "schema_version": 1,
@@ -73,6 +75,33 @@ def capture_lesson_evidence(workspace: str | Path, signals: list[dict]) -> dict:
         "workspace_files": files,
         "dependency_graph_digest": graph_digest,
     }
+
+
+def _operation_origin(signal):
+    """Preserve producer facts; an internal operation is not proof of its cause."""
+    detail = signal.get("detail") if isinstance(signal.get("detail"), dict) else signal
+    record = detail.get("source_record")
+    if isinstance(record, dict) and isinstance(record.get("detail"), dict):
+        detail = record["detail"]
+    receipt = detail.get("receipt") or {}
+    if not isinstance(receipt, dict):
+        return None
+    contract = receipt.get("execution_contract") or {}
+    runtime_diagnostic = (receipt.get("diagnostic_scope") == "gitgo_runtime"
+                          or detail.get("diagnostic_scope") == "gitgo_runtime")
+    if not isinstance(contract, dict) or contract.get("kind") not in {
+            "host_compute", "data_broker", "native_process", "external_service"}:
+        if not runtime_diagnostic:
+            return None
+        contract = {"kind": "runtime_admission", "broker": ""}
+    return {"signal_id": str(signal.get("signal_id") or ""),
+            "receipt_id": str(receipt.get("receipt_id") or ""),
+            "kind": contract["kind"], "broker": str(contract.get("broker") or ""),
+            "authority": "runtime_observation" if contract["kind"] == "runtime_admission" else "registered_execution_contract",
+            "internal_diagnostic": runtime_diagnostic or (contract["kind"] == "data_broker"
+                and str(contract.get("broker") or "").startswith("host.runtime.")
+                and (receipt.get("succeeded") is False or detail.get("is_error") is True)),
+            "causal_fault_domain": "not_established"}
 
 
 def assess_lesson(lesson, workspace: str | Path) -> dict:

@@ -35,6 +35,13 @@ class ContractTests(unittest.TestCase):
     def test_valid_plain_contribution(self):
         self.assertEqual(contract.validate_pr(candidate(), CONFIG), [])
 
+    def test_feature_acceptance_target_uses_its_actual_identity(self):
+        pr = candidate()
+        pr["base"]["ref"] = "feat/sandbox-recovery-v1"
+        self.assertTrue(any("target field" in error for error in contract.validate_pr(pr, CONFIG)))
+        pr["body"] = pr["body"].replace("Truman-Duo/Gitgo:master", "Truman-Duo/Gitgo:feat/sandbox-recovery-v1")
+        self.assertEqual(contract.validate_pr(pr, CONFIG), [])
+
     def test_old_sha_in_history_does_not_validate_latest_candidate(self):
         pr = candidate()
         pr["head"]["sha"] = "c" * 40

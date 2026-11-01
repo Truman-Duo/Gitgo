@@ -117,8 +117,8 @@ export const GovernancePanel = memo(function GovernancePanel({
         items={TABS.map((label,index) => ({id: label, label:[t({en:"Quality",zh:"质量"}),t({en:"Patterns",zh:"模式"}),t({en:"Feed",zh:"动态"}),t({en:"Releases",zh:"发布"})][index]!}))}
         selected={tab} width={Math.max(10, w - 2)} contentFocused={!interactive}
       />
-      <Text dimColor>{project}  ·  {interactive ? t({en:"←/→ tab · ↑/↓ scroll · Esc back",zh:"←/→ 页签 · ↑/↓ 滚动 · Esc 返回"}) : t({en:"Enter to browse",zh:"Enter 浏览"})}</Text>
-      {tab === 2 ? <Text dimColor>{t({en:"Page ",zh:"页 "})}{feedHistory.current.length + 1} · {(data?.items || []).length} {t({en:"events · PgUp newer · PgDn older",zh:"条事件 · PgUp 较新 · PgDn 较旧"})}{feedLoadingOlder ? t({en:" · Loading…",zh:" · 正在读取…"}) : data?.page?.has_more ? "" : t({en:" · End of history",zh:" · 已到历史末尾"})}</Text> : null}
+      <Text dimColor>{project}  ·  {interactive ? t({en:"←/→ tab · ↑/↓ scroll · Esc back",zh:"←/→ 页签 · ↑/↓ 滚动 · Esc 返回",keys:true}) : t({en:"Enter to browse",zh:"Enter 浏览",keys:true})}</Text>
+      {tab === 2 ? <Text dimColor>{t({en:"Page ",zh:"页 "})}{feedHistory.current.length + 1} · {(data?.items || []).length} {t({en:"events · PgUp newer · PgDn older",zh:"条事件 · PgUp 较新 · PgDn 较旧",keys:true})}{feedLoadingOlder ? t({en:" · Loading…",zh:" · 正在读取…"}) : data?.page?.has_more ? "" : t({en:" · End of history",zh:" · 已到历史末尾",keys:true})}</Text> : null}
       <ScrollBox ref={scrollRef} marginTop={1} flexDirection="column" flexGrow={1}>
         {err ? <Text color={colors.danger}>{t({en:"Error: ",zh:"错误："})}{err}</Text>
           : !data ? <Text dimColor>{t({en:"Loading...",zh:"正在读取…"})}</Text>

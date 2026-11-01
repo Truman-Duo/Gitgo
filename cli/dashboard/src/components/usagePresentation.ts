@@ -1,4 +1,5 @@
 /** Views over recorded usage/trace facts. Missing timing or billing stays unknown. */
+import type {Copy} from "../ui/pageContract.js";
 export type WaterfallRow = {
   id: string;
   process: string;
@@ -17,7 +18,7 @@ function time(event: any): number | null {
   const n = Date.parse(String(event.time || event.timestamp || ""));
   return Number.isFinite(n) ? n : null;
 }
-export function waterfallRows(events: any[]): WaterfallRow[] {
+export function waterfallRows(events: any[], t: (value: Copy) => string = value => value.en): WaterfallRow[] {
   const rows: WaterfallRow[] = [];
   const latest = new Map<string, WaterfallRow>();
   for (const event of events) {
@@ -29,7 +30,7 @@ export function waterfallRows(events: any[]): WaterfallRow[] {
         id: `model-${event.seq ?? rows.length}-${process}`,
         process,
         round: Number(event.step || (latest.get(process)?.round || 0) + 1),
-        label: "Model request",
+        label: t({en:"Model request",zh:"模型请求"}),
         kind: "model",
         start: at,
         duration: null,
@@ -54,7 +55,7 @@ export function waterfallRows(events: any[]): WaterfallRow[] {
           id: `model-${event.seq ?? rows.length}-${process}`,
           process,
           round: Number(event.completed_step || event.step || 0),
-          label: "Model request",
+          label: t({en:"Model request",zh:"模型请求"}),
           kind: "model",
           start: null,
           duration: null,

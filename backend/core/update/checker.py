@@ -185,7 +185,10 @@ def check_for_update(
     https_url(manifest.url, policy.allowed_hosts)
     if updater_version < Version.parse(manifest.minimum_updater_version):
         reject("UPDATE_CLIENT_TOO_OLD", "This release requires a newer updater")
-    if manifest.data_compatibility != current.data_compatibility:
+    # v1 consumers have no data transaction protocol. New coordinators verify
+    # and migrate copies before publication; writer-code identity is evidence
+    # about a program, not a universal data-format compatibility predicate.
+    if manifest.data_compatibility != current.data_compatibility and updater_version < Version.parse("0.2.0"):
         reject("UPDATE_MIGRATION_REQUIRED", "Data compatibility changed; automatic migration is not supported")
     target_version = Version.parse(manifest.version)
     if target_version < current_version:

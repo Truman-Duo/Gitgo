@@ -8,7 +8,7 @@ The sole ledger commits current identity and replay evidence in one record.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -21,7 +21,7 @@ from .archive import ExtractionLimits, _extract_archive
 from .checker import CurrentInstallation, ReplayState, UpdatePolicy, check_for_update
 from .contracts import verify_bundle_contract
 from .manifest import DataCompatibility, ManifestVerifier
-from .persistence import atomic_control, filesystem_identity, lock_file, read_control, sync_directory, validate_device, open_readonly
+from .persistence import atomic_control, filesystem_identity, lock_file, read_control, sync_directory, validate_device, open_readonly, pinned_initialization, pinned_registration, pinned_context
 from .staging import _staging_parent, _verify_file
 from .tree import sync_tree, tree_digest
 from .validation import UpdateError, digest, fields, json_object, number, reject, text, timestamp
@@ -81,7 +81,8 @@ def initialize_simulation(root: Path, seed: Path, current: CurrentInstallation, 
     return _initialize_store(root, seed, current, protected_paths=protected_paths, store_type=SimulationStore)
 
 
-def _initialize_store(root, seed, current, *, protected_paths, store_type):
+@pinned_initialization
+def _initialize_store(root, seed, current, *, protected_paths, store_type, repair=None):
     _staging_parent(root, protected_paths)
     _staging_parent(seed, protected_paths)
     if any(root.iterdir()) or root == seed or root.is_relative_to(seed) or seed.is_relative_to(root):
@@ -103,6 +104,10 @@ def _initialize_store(root, seed, current, *, protected_paths, store_type):
         reject("UPDATE_SIMULATION_INVALID", "Seed changed during simulation provisioning")
     sync_tree(root / "active")
     extra = store_type._provision_extra(root, seed)
+    if repair is not None:
+        # A new registration must never become runnable during an interrupted
+        # legacy bootstrap replacement. This is a blocking local marker only.
+        atomic_control(root / "control/repair-pending.json", repair)
     installation_id = uuid.uuid4().hex
     atomic_control(root / "control/ledger.json", {"schema_version": 1, "installation_id": installation_id,
                    "revision": 1, "current": {"version": current.version, "tree_sha256": seed_hash},
@@ -146,6 +151,7 @@ class InstallationStore:
         except Exception:
             raise UpdateError("UPDATE_CONTROL_INVALID", "Simulation ownership could not be validated") from None
 
+    @pinned_registration
     def _registration(self):
         _staging_parent(self.root, self.protected_paths)
         _staging_parent(self.root / "control", self.protected_paths)
@@ -185,6 +191,7 @@ class InstallationStore:
         # A caller's inspection must not mutate the captured authority in place.
         return deepcopy(self._registered)
 
+    @pinned_context
     @contextmanager
     def _operation(self):
         self._guard()
@@ -266,6 +273,20 @@ class InstallationStore:
     def _matches(self, path, expected):
         return path.exists() and not path.is_symlink() and tree_digest(path) == expected["tree_sha256"]
 
+    @pinned_registration
+    def data_compatibility(self, path=None, identity=None):
+        """Read the admitted generation, not the first installation's writers."""
+        path = path or self.root / "active"
+        identity = identity or self._ledger()["current"]
+        if not self._matches(path, identity):
+            reject("UPDATE_RECOVERY_REQUIRED", "Data contract generation changed")
+        if self.SIMULATION and not (path / "update-data-contract.json").exists():
+            return DataCompatibility.parse(self.registration["data_compatibility"])
+        from .contracts import _metadata
+        from .tree import inventory
+        contract = _metadata(path, "update-data-contract.json", {item["path"]: item for item in inventory(path)})
+        return DataCompatibility.parse(contract["data_compatibility"])
+
     def _move(self, source, target, expected=None):
         self._guard()
         for parent in (source.parent, target.parent):
@@ -291,6 +312,16 @@ class InstallationStore:
         _staging_parent(directory, self.protected_paths)
         return self.root / "active", directory / "old", directory / "new", directory / "failed"
 
+    @pinned_registration
+    def rollback_blocker(self):
+        from .data_upgrade import JOURNAL
+        self._guard()
+        txn = self._ledger()["transaction"]
+        if txn is not None and txn["state"] == "COMMITTED" and (self.root / "transactions" / txn["id"] / JOURNAL).exists():
+            return "UPDATE_REVERSE_MIGRATION_REQUIRED"
+        return None
+
+    @pinned_registration
     def rollback_selection(self):
         """Only the retained predecessor of the last committed transaction.
 
@@ -305,6 +336,12 @@ class InstallationStore:
         ledger = self._ledger()
         txn = ledger["transaction"]
         if txn is None or txn["state"] != "COMMITTED": return None
+        from .data_upgrade import JOURNAL
+        if (self.root / "transactions" / txn["id"] / JOURNAL).exists():
+            # Reverting a program must not silently restore a pre-migration
+            # snapshot over newer user work. A reverse adapter is a separate,
+            # explicit data operation, not ordinary program rollback.
+            return None
         active, old, new, failed = self._slots(txn)
         if (not self._matches(active, txn["new"]) or not self._matches(old, txn["old"])
                 or new.exists() or new.is_symlink() or failed.exists() or failed.is_symlink()):
@@ -314,7 +351,7 @@ class InstallationStore:
         expected = SimpleNamespace(product_id=self.registration["product_id"], version=txn["old"]["version"],
             platform=self.registration["platform"], architecture=self.registration["architecture"],
             source_commit=build["source"]["commit"], source_tree=build["source"]["tree"],
-            data_compatibility=DataCompatibility.parse(self.registration["data_compatibility"]))
+            data_compatibility=self.data_compatibility(old, txn["old"]))
         if product.get("version") != expected.version:
             reject("UPDATE_PACKAGE_CONTRACT", "Retained version differs from recorded predecessor")
         verify_bundle_contract(old, expected)
@@ -366,7 +403,7 @@ class InstallationStore:
                     return TransactionResult("failed", result.version, "UPDATE_OPERATION_FAILED")
                 return result
 
-    def _recover_locked(self, *, checkpoint=lambda _: None, failure_code="UPDATE_INTERRUPTED"):
+    def _recover_locked(self, *, checkpoint=lambda _: None, failure_code="UPDATE_INTERRUPTED", data_locks_held=False):
         try:
             ledger = self._ledger()
             transaction = ledger["transaction"]
@@ -376,6 +413,10 @@ class InstallationStore:
                     reject("UPDATE_RECOVERY_REQUIRED", "Current payload changed")
                 return TransactionResult("idle", ledger["current"]["version"])
             active, old, new, failed = self._slots(transaction)
+            from .data_transition import reopen_transition
+            data_upgrade = reopen_transition(self, transaction)
+            if data_upgrade is not None and transaction["state"] != "ROLLED_BACK":
+                data_upgrade.recover(committed=transaction["state"] == "COMMITTED", checkpoint=checkpoint, locks_held=data_locks_held)
             old_id, new_id = transaction["old"], transaction["new"]
             # Inspect all recorded slots. Never remove, overwrite, or adopt an
             # unknown directory, including a symlink/dangling link at a slot.
@@ -429,6 +470,7 @@ class InstallationStore:
         except Exception:
             return TransactionResult("recovery_required", error_code="UPDATE_RECOVERY_REQUIRED")
 
+    @pinned_context
     @contextmanager
     def runtime_lease(self):
         """Admit a verified payload and retain its kernel lease through child use."""
@@ -470,7 +512,7 @@ class InstallationStore:
             return TransactionResult("disabled")
         if not callable(health_check):
             reject("UPDATE_HEALTH_DRIVER", "An explicit trusted simulation health driver is required")
-        with self._operation():
+        with self._operation(), ExitStack() as data_scope:
             ledger = self._ledger()
             transaction = ledger["transaction"]
             if transaction is not None and transaction["state"] not in TERMINAL:
@@ -478,8 +520,9 @@ class InstallationStore:
             if self._recover_locked().status == "recovery_required":
                 reject("UPDATE_RECOVERY_REQUIRED", "Current or retained installation evidence changed")
             local = self.registration
+            from .data_transition import executing_engine_version
             current = CurrentInstallation(local["product_id"], ledger["current"]["version"], local["platform"],
-                       local["architecture"], local["updater_version"], DataCompatibility.parse(local["data_compatibility"]), True)
+                       local["architecture"], executing_engine_version(local), self.data_compatibility(identity=ledger["current"]), True)
             previous = next((_watermark(w) for w in ledger["watermarks"] if w["channel"] == policy.channel), None)
 
             def checked():
@@ -498,6 +541,8 @@ class InstallationStore:
             manifest = result.candidate
             # No PreparedResult, bool approval or caller-provided tree hash can
             # authorize a switch. Reverify archive and re-extract locally.
+            from .persistence import private_namespace
+            data_scope.enter_context(private_namespace(archive.parent))
             _staging_parent(archive.parent, self.protected_paths)
             if archive.is_symlink() or not archive.is_file():
                 reject("UPDATE_PACKAGE_CONTRACT", "Archive must be a regular local file")
@@ -540,6 +585,17 @@ class InstallationStore:
             (directory / "probe").mkdir(mode=0o700)
             sync_directory(directory)
             checkpoint("candidate_synced")
+            data_upgrade = None
+            if manifest.data_compatibility != current.data_compatibility:
+                from .data_transition import prepare_transition, resource_bindings
+                from .data_upgrade import storage_maintenance
+                resources = resource_bindings(current.data_compatibility, manifest.data_compatibility)
+                data_scope.enter_context(storage_maintenance(resources))
+                data_upgrade = prepare_transition(self, directory, current.data_compatibility,
+                    manifest.data_compatibility, directory / "new", resources=resources)
+                if not self._matches(directory / "new", new_identity):
+                    reject("UPDATE_HEALTH_FAILED", "Migration changed the candidate program")
+                checkpoint("data_validated")
             checked()  # freshness/compatibility immediately before durable intent
             mark = _watermark_wire(result.watermark)
             ledger["watermarks"] = sorted([w for w in ledger["watermarks"] if w["channel"] != policy.channel] + [mark],
@@ -574,6 +630,8 @@ class InstallationStore:
                     reject("UPDATE_RECOVERY_REQUIRED", "Retained previous payload changed during health check")
                 checked()
                 checkpoint("health_passed")
+                if data_upgrade is not None:
+                    data_upgrade.publish(checkpoint=checkpoint)
                 ledger["current"] = dict(new_identity)
                 self._save(ledger, "COMMITTED")
                 checkpoint("commit_written")
@@ -582,7 +640,7 @@ class InstallationStore:
                 # Reload durable authority; an fsync/write error may have taken
                 # effect even if the call raised. Never trust the in-memory step.
                 failure = "UPDATE_HEALTH_FAILED" if isinstance(error, UpdateError) and error.code == "UPDATE_HEALTH_FAILED" else "UPDATE_OPERATION_FAILED"
-                recovered = self._recover_locked(checkpoint=checkpoint, failure_code=failure)
+                recovered = self._recover_locked(checkpoint=checkpoint, failure_code=failure, data_locks_held=data_upgrade is not None)
                 if recovered.status == "idle" or (recovered.status == "committed" and recovered.version != manifest.version):
                     return TransactionResult("failed", current.version, failure)
                 return recovered

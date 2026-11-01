@@ -16,6 +16,16 @@ MAX_OUTPUT_CHARS = 32_000      # Reasonix 标准：32KB
 PREVIEW_CHARS = 2_000          # Claude Code 标准：2KB
 
 
+def serialize_result(result_data) -> str:
+    """Keep complete structured output when only whitespace exceeds budget."""
+    output = json.dumps(result_data, ensure_ascii=False, indent=2)
+    if len(output) > MAX_OUTPUT_CHARS:
+        compact = json.dumps(result_data, ensure_ascii=False, separators=(",", ":"))
+        if len(compact) <= MAX_OUTPUT_CHARS:
+            return compact
+    return output
+
+
 def format_tool_result(
     tool_name: str,
     result_data: dict | None,
@@ -34,7 +44,7 @@ def format_tool_result(
     if result_data is None:
         return f"[工具 {tool_name} 完成，无输出]"
 
-    output = json.dumps(result_data, ensure_ascii=False, indent=2)
+    output = serialize_result(result_data)
 
     if len(output) <= MAX_OUTPUT_CHARS:
         return f"[工具 {tool_name} 结果]\n{output}"

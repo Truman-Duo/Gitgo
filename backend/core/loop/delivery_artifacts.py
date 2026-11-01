@@ -40,6 +40,12 @@ def _witness(process, path):
         entries = data.get('files')
         candidates = [data, *(item for item in (entries if isinstance(entries, list) else [])
                                if isinstance(item, dict))]
+        if receipt.get('file_service_result') is True:
+            # Native producers publish a batch digest plus per-file mutations.
+            # The batch digest is not a file hash. Only the pipeline-projected,
+            # committed file-service rows can witness these artifacts.
+            candidates.extend(item for item in receipt.get('file_mutations', [])
+                              if isinstance(item, dict) and item.get('effect_state') == 'committed')
         for item in candidates:
             raw = item.get('path')
             if not raw or raw not in receipt.get('files', []):
@@ -51,6 +57,29 @@ def _witness(process, path):
             if observed == path:
                 return (receipt['receipt_id'], str(item.get('after_sha256') or ''),
                         str(item.get('evidence_kind') or 'committed_write'))
+    # Compaction archives tool messages, but canonical native file receipts
+    # remain task-bound state. Their projected hashes keep the original write
+    # evidence usable without reconstructing it from a summary or rereading
+    # arbitrary tool JSON.
+    for receipt in reversed(process.tool_receipts):
+        if receipt.get('receipt_id') not in receipts or receipt.get('file_service_result') is not True:
+            continue
+        rows = list(receipt.get('file_mutations') or [])
+        if not rows and len(receipt.get('files') or []) == 1:
+            rows = [{'path': receipt['files'][0], 'after_sha256': receipt.get('after_sha256'),
+                     'effect_state': 'committed'}]
+        for item in rows:
+            if not isinstance(item, dict) or item.get('effect_state') != 'committed':
+                continue
+            raw = item.get('path')
+            if not raw or raw not in receipt.get('files', []):
+                continue
+            try:
+                observed = _confined_path(_root(process), raw, must_exist=False)
+            except (ValueError, OSError):
+                continue
+            if observed == path:
+                return receipt['receipt_id'], str(item.get('after_sha256') or ''), 'committed_write'
     return '', '', ''
 
 
@@ -101,6 +130,21 @@ def artifact_manifest(artifacts):
 
 
 def verify_manifest(process, manifest, files):
-    artifacts, notices = collect_artifacts(process, files)
+    # The semantic review certifies only these witnessed artifacts. Other
+    # mentioned files (for example an unchanged original test) remain outside
+    # that certificate; their missing write evidence cannot invalidate it.
+    # Never promote those extra files into evidence or reread them here.
+    if not isinstance(files, (list, tuple)) or len(files) > MAX_ARTIFACTS:
+        return False
+    paths = {item['path'] for item in manifest}
+    selected = []
+    for raw in files:
+        try:
+            relative = _confined_path(_root(process), raw, must_exist=False).relative_to(_root(process)).as_posix()
+        except (ValueError, TypeError, OSError):
+            continue
+        if relative in paths:
+            selected.append(raw)
+    artifacts, notices = collect_artifacts(process, selected)
     current = artifact_manifest(artifacts)
     return not notices and all(item in current for item in manifest)

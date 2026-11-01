@@ -467,6 +467,11 @@ def _process_status_payload(proc, *, presentation: dict | None = None) -> dict:
         ),
         "coordination": coordination_summary_from_context(process_context),
         "pending_decision": dict(proc.pending_decision) if proc.pending_decision else None,
+        "advancement": __import__("backend.core.loop.mechanisms", fromlist=["projection"]).projection(proc),
+        "task_contract_revision": int((process_context.get("task_contract") or {}).get("revision", 0)),
+        "harness_mechanisms": __import__("backend.core.mechanism_runtime.application", fromlist=["projection"]).projection(proc),
+        "task_maintenance": {key: (process_context.get("task_maintenance") or {}).get(key)
+                             for key in ("task_id", "revision", "epoch", "phase", "manifest", "changes", "maintenance_items")},
         "recovery": dict(proc.recovery) if isinstance(proc.recovery, dict) else None,
         "mailbox": (
             proc.mailbox.snapshot() if getattr(proc, "mailbox", None) is not None else None
@@ -665,6 +670,8 @@ def _cmd_task_result(cmd, session, project, daemon_ctx, emit):
         ProcessStatus.RESUME_AVAILABLE,
         ProcessStatus.RECOVERY_REVIEW_REQUIRED,
     }
+    turn_settled = bool(process.status == ProcessStatus.AWAITING_USER
+                        and process.lifecycle_finalized and isinstance(process.result, dict))
     emit({"event": "command_result", "cmd": "task_result",
           "result": {
               "task_id": str(process.active_task_id or task_id),
@@ -672,7 +679,8 @@ def _cmd_task_result(cmd, session, project, daemon_ctx, emit):
               "session_id": str(getattr(process.session, "session_id", "")),
               "status": process.status.value,
               "terminal": terminal,
-              "outcome": dict(process.result) if terminal and isinstance(process.result, dict) else None,
+              "turn_settled": turn_settled,
+              "outcome": dict(process.result) if (terminal or turn_settled) and isinstance(process.result, dict) else None,
           }})
 
 
@@ -739,11 +747,14 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000, store=
         runtime = state.get("runtime_state") or {}
         context = dict(runtime.get("context_snapshot") or {})
         proxy = SimpleNamespace(process_id=process_id, role=raw.get("role",""),
+            active_task_id=(state.get("task") or {}).get("task_id") or (state.get("task") or {}).get("id") or process_id,
             parent_id=raw.get("parent_process_id"),
             depends_on=[d["depends_on_process_id"] for d in state.get("dependencies",[]) if d.get("depends_on_process_id")],
             status=SimpleNamespace(value=raw.get("status","")),
             task_description=(state.get("task",{}).get("contract") or {}).get("task_description",""),
-            session=SimpleNamespace(messages=(state.get("session") or {}).get("messages",[])),
+            pending_decision=runtime.get("pending_decision"),
+            session=SimpleNamespace(messages=(state.get("session") or {}).get("messages",[]),
+                host_ledger=(state.get("session") or {}).get("host_ledger",[])),
             read_context_snapshot=lambda: (context,int(raw.get("state_revision",0))))
         return _btw_parent_snapshot(SimpleNamespace(get=lambda _id:proxy),process_id,max_chars=max_chars)
 
@@ -759,7 +770,11 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000, store=
     }
     remaining = max(0, int(max_chars))
     selected: list[dict] = []
-    messages = list(getattr(getattr(process, "session", None), "messages", []) or [])
+    from backend.core.loop.session import _is_conversation_user
+    messages = [item for item in list(getattr(getattr(process, "session", None), "messages", []) or [])
+        if isinstance(item, dict) and not item.get("host_authority") and item.get("provider_visible") is not False
+        and (_is_conversation_user(item) or item.get("role") == "assistant")]
+    clipped_content = False
     for item in reversed(messages):
         if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
             continue
@@ -769,12 +784,21 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000, store=
         if remaining <= 0:
             break
         clipped = content[:min(6000, remaining)]
+        clipped_content = clipped_content or len(clipped) < len(content)
         selected.append({"role": item["role"], "content": clipped})
         remaining -= len(clipped)
     selected.reverse()
+    # Keep the current public card outside conversational truncation. Reuse the
+    # ledger projection, not an invented question or a copy of internal policy.
+    from backend.core.loop.question_broker import decision_evidence
+    pending = getattr(process, "pending_decision", None) or {}
+    pending_question = next((item for item in decision_evidence(process, limit=32)["items"]
+        if item["decision_id"] == pending.get("decision_id") and item["status"] == "awaiting_user"), None) if pending else None
     return {
         "attached": True,
         "process_id": process.process_id,
+        "task_id": getattr(process, "active_task_id", "") or process.process_id,
+        "contract_revision": int(contract.get("revision", 0)),
         "role": process.role,
         "status": process.status.value,
         "task_description": process.task_description,
@@ -783,8 +807,9 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000, store=
         "owner_process_id": getattr(process,"parent_id",None) or "",
         "depends_on": list(getattr(process,"depends_on",[]) or []),
         "relationship_policy": dict(context.get("relationship_policy") or {}),
+        "pending_question": pending_question,
         "conversation": selected,
-        "truncated": len(selected) < sum(
+        "truncated": clipped_content or len(selected) < sum(
             1 for item in messages
             if isinstance(item, dict)
             and item.get("role") in {"user", "assistant"}
@@ -822,6 +847,19 @@ def _btw_scope_snapshot(apm, process_ids: list[str], *, max_chars: int = 32000, 
 
 
 def _cmd_task(cmd, session, project, daemon_ctx, emit):
+    # A decision ticket and a mechanism revision must linearize on the same
+    # admission fence. Provider execution happens on its separate run thread.
+    if cmd.get("action") == "decision":
+        manager = (daemon_ctx or {}).get("apm")
+        process = manager.get(str(cmd.get("process_id") or "")) if manager else None
+        if process is not None:
+            from backend.core.loop.mechanism_lifecycle import fence
+            with fence(process):
+                return _cmd_task_body(cmd, session, project, daemon_ctx, emit)
+    return _cmd_task_body(cmd, session, project, daemon_ctx, emit)
+
+
+def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
     # ── 原生 Task 命令 —— Agent 编排的单一入口 ──
     # 整合了 MCP 层之前的 _resolve_llm_config / _ensure_agent / _chat_via_daemon 逻辑。
     # MCP 工具变为薄适配器：只构建上下文 + 调用此命令。
@@ -831,6 +869,8 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
     llm_provider = daemon_ctx.get("llm") if daemon_ctx else None
     action = cmd.get("action", "chat")
     canonical_user_turn = action == "chat"
+    if action == "continue_mechanism":
+        action = "chat"
 
     if action in {"undo_preview", "undo"}:
         if apm is None:
@@ -1037,10 +1077,15 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     else:
                         sidecar.session.append_assistant(content)
 
-                instruction = (
+                # Parent evidence and application policy are model context,
+                # not a new user goal. Passing the entire snapshot as the
+                # instruction duplicated it in alignment's original/current
+                # request and promoted quoted parent text into intent sources.
+                sidecar.session.append_host_steering(
                     load_prompt('runtime/btw')
-                    + json.dumps(parent_snapshot, ensure_ascii=False, sort_keys=True)
-                    + "\n\nUSER_QUESTION:\n" + question
+                    + "\nPARENT_SNAPSHOT_DATA:\n"
+                    + json.dumps(parent_snapshot, ensure_ascii=False, sort_keys=True),
+                    steering_type='btw_parent_context', version=sidecar_id,
                 )
 
                 def emit_sidecar_event(event: dict) -> None:
@@ -1054,7 +1099,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                 outcome = agent_step(
                     process=sidecar,
                     llm_provider=llm_provider,
-                    instruction=instruction,
+                    instruction=question,
                     dispatcher=dispatcher,
                     workspace_path=str(session.workspace_path),
                     on_stream_event=emit_sidecar_event,
@@ -1097,8 +1142,18 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     "source_process_ids": list(parent_snapshot.get("source_process_ids") or []),
                     "attached_source_count": len(parent_snapshot.get("sources") or []),
                 }
+                storage = (daemon_ctx or {}).get("storage") or getattr(apm, "storage", None)
+                if storage is not None and hasattr(storage, "commit_state_revision"):
+                    from backend.core.loop.discussion_adoption import save_discussion
+                    result.update(save_discussion(storage, sidecar_id, question, result, parent_snapshot.get("sources") or []))
                 emit({"event": "btw_complete", "sidecar_id": sidecar_id,
                       "result": result})
+                # The immutable discussion is the source, never an instruction
+                # or permission. Existing registered lifecycle consumers may
+                # classify/collect it while the main model keeps working.
+                from .discussion_delivery import notify_discussion
+                notify_discussion(result, apm, (daemon_ctx or {}).get("session_store"),
+                                  str(session.workspace_path), llm_provider, emit)
                 if evq is not None:
                     evq.put({"event": "btw_completed", "sidecar_id": sidecar_id,
                              "usage": usage, "isolated": True})
@@ -1124,6 +1179,40 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             "isolated": True, "read_only_tools": True,
         }})
         thread.start()
+        return
+
+    if action == "btw_adopt":
+        try:
+            from backend.core.loop.discussion_adoption import adopt_discussion
+            process = apm.get(str(cmd.get("process_id") or "")) if apm else None
+            if process is None:
+                raise ValueError("BTW_ADOPTION_TARGET_UNAVAILABLE")
+            result = adopt_discussion(process, (daemon_ctx or {}).get("storage") or apm.storage,
+                sidecar_id=str(cmd.get("sidecar_id") or ""), discussion_ref=str(cmd.get("discussion_ref") or ""),
+                expected_task_id=str(cmd.get("task_id") or ""), expected_contract_revision=cmd.get("expected_revision"),
+                store=(daemon_ctx or {}).get("session_store"))
+            if process.parent_id and result["status"] == "pending":
+                from backend.core.loop.coordination import publish_coordination_event
+                try:
+                    publish_coordination_event(apm, process, kind="task_scope_revision",
+                        summary="The user explicitly adopted a BTW requirement for this owned task; reconcile its parent plan and retain assigned obligations.",
+                        details={"change_id": result["change"]["id"], "source_ref": result["change"]["source_ref"]},
+                        requires_supervisor_action=True)
+                    owner = apm.get(process.parent_id)
+                    if owner is not None and (daemon_ctx or {}).get("session_store") is not None:
+                        daemon_ctx["session_store"].save_process_checkpoint(owner)
+                except Exception as exc:
+                    result["notification_warning"] = str(exc)
+            emit({"event": "command_result", "cmd": "task", "result": result})
+            if evq is not None:
+                evq.put({"event": "task_change_admitted", "process_id": process.process_id,
+                    "task_id": process.active_task_id, **result})
+                evq.put({"event": "progress_summary", "phase": "task_maintenance", "process_id": process.process_id,
+                    "task_id": process.active_task_id, "message": "讨论采用请求已保存，等待主任务对齐目标、计划与验收条件。"})
+            from backend.core.daemon.mechanism_control import resume_waiters
+            resume_waiters(session, project, daemon_ctx)
+        except (ValueError, KeyError, TypeError, OSError, RuntimeError) as exc:
+            emit({"event": "command_result", "cmd": "task", "error": str(exc)})
         return
 
     if action == "btw_note":
@@ -1338,13 +1427,37 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             emit({"event": "command_result", "cmd": "task",
                   "error": f"Process not found: {process_id}"})
             return
-        if process.status not in (ProcessStatus.RUNNING, ProcessStatus.WAITING):
+        if process.status not in (ProcessStatus.RUNNING, ProcessStatus.WAITING, ProcessStatus.AWAITING_USER):
             emit({"event": "command_result", "cmd": "task",
                   "error": f"PROCESS_NOT_RUNNING:{process.status.value}"})
             return
+        message, source_event, change = None, None, None
+        store = (daemon_ctx or {}).get("session_store") or getattr(apm, "session_store", None)
         try:
-            message = process.mailbox.enqueue_instruction(instruction)
-        except (ValueError, RuntimeError) as exc:
+            from backend.core.loop.mechanism_lifecycle import fence
+            from backend.core.loop.task_contract import get_task_contract
+            from backend.core.loop.task_maintenance import add_change
+            from backend.core.loop.mechanism_catalog import digest
+            with fence(process), process.session._mechanism_lock, process._context_lock:
+                try:
+                    message = process.mailbox.enqueue_instruction(instruction)
+                    if store is not None:
+                        from backend.core.loop.mechanism_lifecycle import next_authority_sequence
+                        source_event = {"event": "task_user_instruction_received", "task_id": process.active_task_id,
+                            "process_id": process.process_id, "source_ref": "user:" + digest(str(instruction)), "content": str(instruction),
+                            "authority_sequence": next_authority_sequence(process.session)}
+                        process.session.host_ledger.append(source_event)
+                        change = add_change(process, str(instruction), identifier="feedback-" + message.message_id,
+                            source_ref=source_event["source_ref"], expected_task_id=process.active_task_id,
+                            expected_contract_revision=get_task_contract(process).get("revision", 0), store=store, user_adopted=False)
+                except (ValueError, RuntimeError, OSError) as exc:
+                    if not isinstance(exc, StorageCommitUnknown):
+                        if message is not None:
+                            process.mailbox.retract_uncommitted(message.message_id)
+                        if source_event is not None:
+                            process.session.host_ledger.remove(source_event)
+                    raise
+        except (ValueError, RuntimeError, OSError) as exc:
             emit({"event": "command_result", "cmd": "task",
                   "error": str(exc)})
             return
@@ -1354,7 +1467,11 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                   "process_id": process_id,
                   "task_id": process.active_task_id,
                   "instruction": message.to_dict(),
+                  "change": change, "persistence": "checkpoint" if store is not None else "memory_only",
               }})
+        if change is not None:
+            from backend.core.daemon.mechanism_control import resume_waiters
+            resume_waiters(session, project, daemon_ctx)
         return
 
     if action == "discard":
@@ -1630,6 +1747,16 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                       "error": "DECISION_ACTION_INVALID"})
                 return
         approval_grant = None
+        if process.parent_id and not apm.has_continuation(process.process_id):
+            emit({"event": "command_result", "cmd": "task", "error": "CHILD_CONTINUATION_UNAVAILABLE"})
+            return
+        if pending.get("kind") == "manual_execution":
+            from backend.core.loop.mechanisms import approve_unit
+            try:
+                approve_unit(process, pending, str((selected_option or {}).get("action") or ""))
+            except ValueError as exc:
+                emit({"event": "command_result", "cmd": "task", "error": str(exc)})
+                return
         if pending.get("kind") == "permission" and selected_option is None:
             emit({"event": "command_result", "cmd": "task",
                   "error": "PERMISSION_DECISION_SELECTION_REQUIRED"})
@@ -1666,6 +1793,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                 return
         process.session.host_ledger.append({
             "event": "user_decision_received",
+            "authority_sequence": __import__('backend.core.loop.mechanism_lifecycle', fromlist=['next_authority_sequence']).next_authority_sequence(process.session),
             "created_at": datetime.now().isoformat(),
             "process_id": process.process_id,
             "decision_id": decision_id,
@@ -1750,6 +1878,16 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             return
         if process.task_budget is not None:
             process.task_budget.resume_from_user()
+        if process.parent_id:
+            instruction = ("" if pending.get("kind") in {"permission", "manual_execution", "runtime_checkpoint"} and process.pending_tool_batch
+                           else f"[USER DECISION {decision_id}]\n{answer}\nContinue the same task under this decision.")
+            apm.resume_child(process.process_id, instruction)
+            emit({"event": "command_result", "cmd": "task", "result": {
+                "status": "running", "process_id": process.process_id, "task_id": process.active_task_id}})
+            if evq is not None:
+                evq.put({"event": "decision_resumed", "process_id": process.process_id,
+                         "task_id": process.active_task_id, "decision_id": decision_id})
+            return
         cmd = {
             **cmd,
             "action": "chat",
@@ -1763,7 +1901,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             "capability_profile_id": process.capability_profile_id,
             "max_steps": process.max_steps,
             "instruction": (
-                "" if pending.get("kind") == "permission" and process.pending_tool_batch
+                "" if pending.get("kind") in {"permission", "manual_execution", "runtime_checkpoint"} and process.pending_tool_batch
                 else f"[USER DECISION {decision_id}]\n{answer}\n"
                      "Continue the same task under this decision."
             ),
@@ -1806,7 +1944,7 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                 emit({"event": "command_result", "cmd": "task",
                       "error": str(exc), "code": str(exc).split(":", 1)[0]})
                 return
-        if cmd.get("fresh_task_budget") and process is not None:
+        if cmd.get("fresh_task_budget") and process is not None and not cmd.get("adopted_change_origin"):
             # A new user turn is adaptive, as for A: observation starts without
             # an invented mutation requirement; committed effects promote it.
             cmd = {**cmd, "parent_id": process.parent_id,
@@ -1985,6 +2123,9 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         if process is not None and process.status not in (
             ProcessStatus.RUNNING, ProcessStatus.WAITING,
         ):
+            if cmd.get("action") == "continue_mechanism":
+                emit({"event": "command_result", "cmd": "task", "error": "MECHANISM_CONTINUATION_NOT_RUNNABLE"})
+                return
             # 4A: a terminal task never reopens its execution lease. A new
             # process may continue the same durable conversation session.
             reuse_session = process.session
@@ -2008,7 +2149,8 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     if candidate.session_id == requested_session_id:
                         reuse_session = candidate
                         apm._sessions[candidate.session_id] = candidate
-        if canonical_user_turn and reuse_session is not None and predecessor_process is not None:
+        if (canonical_user_turn and reuse_session is not None and predecessor_process is not None
+                and not cmd.get("adopted_change_origin")):
             previous_result = dict(predecessor_process.result or {})
             child_outcomes = []
             child_ids, contracts, reviews = predecessor_process.coordination_snapshot()
@@ -2042,6 +2184,30 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                     "context_epoch": reuse_session.context_epoch,
                     "changed": True,
                 })
+        transferred_maintenance = None
+        if cmd.get("adopted_change_origin"):
+            origin = cmd["adopted_change_origin"]
+            source = apm.get(str(origin.get("process_id") or ""))
+            from backend.core.loop.task_maintenance import state_for, KEY as MAINTENANCE_KEY
+            from copy import deepcopy
+            source_state = state_for(source) if source is not None else {}
+            change = source_state.get("changes", {}).get(origin.get("change_id"))
+            if (predecessor_process is not source or not change or change["status"] != "pending"
+                    or origin.get("task_id") != source.active_task_id or task_id != source.active_task_id):
+                emit({"event": "command_result", "cmd": "task", "error": "BTW_ADOPTION_CONTINUATION_CHANGED"})
+                return
+            transferred_maintenance = deepcopy(source_state)
+            transferred_maintenance.update(task_id=task_id, process_id="")
+            for item in transferred_maintenance["changes"].values():
+                if item["status"] == "pending":
+                    item["continued_from_task_id"] = item["target_task_id"]
+                    item["target_task_id"] = task_id
+            context_snapshot[MAINTENANCE_KEY] = transferred_maintenance
+            source_context = source.read_context_snapshot()[0]
+            for key in ("task_contract", "engineering_workflow", "alignment_runtime"):
+                if key in source_context:
+                    context_snapshot[key] = deepcopy(source_context[key])
+            task_description = source.task_description
         if process is None:
             # Fork new agent
             try:
@@ -2115,6 +2281,18 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
             if context_snapshot:
                 process.replace_context_snapshot(context_snapshot)
 
+        if transferred_maintenance is not None:
+            from backend.core.loop.discussion_adoption import inherit_interrupted_task
+            inherit_interrupted_task(process, predecessor_process)
+            from backend.core.loop.task_maintenance import KEY as MAINTENANCE_KEY
+            transferred_maintenance["process_id"] = process.process_id
+            transferred_maintenance["epoch"] += 1
+            transferred_maintenance.pop("manifest", None)
+            for item in transferred_maintenance["changes"].values():
+                if item["status"] == "pending":
+                    item["target_process_id"] = process.process_id
+            process.update_context_snapshot(lambda ctx: {**ctx, MAINTENANCE_KEY: transferred_maintenance})
+
         if not process._run_lock.acquire(blocking=False):
             emit({"event": "command_result", "cmd": "task",
                   "error": f"PROCESS_BUSY:{process.process_id}"})
@@ -2134,6 +2312,13 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
         if canonical_user_turn:
             store = (daemon_ctx or {}).get("session_store")
             try:
+                if not cmd.get("adopted_change_origin"):
+                    from backend.core.loop.mechanism_catalog import digest
+                    from backend.core.loop.mechanism_lifecycle import next_authority_sequence
+                    with process.session._mechanism_lock:
+                        process.session.host_ledger.append({"event": "task_user_instruction_received",
+                            "task_id": task_id, "process_id": process.process_id, "content": str(instruction),
+                            "source_ref": "user:" + digest(str(instruction)), "authority_sequence": next_authority_sequence(process.session)})
                 if store is not None:
                     checkpoint = store.checkpoint_before_user_turn(
                         process,
@@ -2370,6 +2555,8 @@ def _cmd_task(cmd, session, project, daemon_ctx, emit):
                 process.lifecycle_finalized = True
                 apm.notify_state_changed(process.process_id)
                 process._run_lock.release()
+                from .mechanism_control import resume_waiters
+                resume_waiters(session, project, daemon_ctx or {})
 
         try:
             task_thread = threading.Thread(
@@ -2412,6 +2599,8 @@ COMMAND_HANDLERS = {
     "task_result": _cmd_task_result,
     "task": _cmd_task,
 }
+from .mechanism_control import command as _cmd_mechanism
+COMMAND_HANDLERS["mechanism"] = _cmd_mechanism
 
 
 def _handle_command(cmd: dict, session: SyncSession, project: ProjectConfig,

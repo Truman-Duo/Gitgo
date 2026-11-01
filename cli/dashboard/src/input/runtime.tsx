@@ -3,9 +3,11 @@ import { useInput, useSelection, ScrollBox } from "@anthropic/ink";
 import type { ScrollBoxHandle } from "@anthropic/ink";
 import { InputRouter, applicationBindings, type InputKey, type BindingSettings } from "./router.js";
 import { readClipboard } from "../utils/clipboard.js";
+import {scrollViewport} from "./scrollViewport.js";
 
 const RouterContext = createContext<InputRouter | null>(null);
 const PriorityContext = createContext(0);
+const BindingScopeContext = createContext("");
 const BindingsContext = createContext({revision: 0, configure: (_settings: BindingSettings) => {}});
 
 export function useBindingSettings(settings: BindingSettings) {
@@ -43,39 +45,40 @@ export function InputProvider({ children, settings, verificationInput }: {
       return true; // Never let a clipboard shortcut reach task cancellation.
     } }), [router, selection]);
   useInput((input, key, event: any) => {
-    // Kitty-enabled terminals can report Cmd separately from Alt. Translate
-    // clipboard shortcuts only; Cmd must never turn arbitrary text into Ctrl.
-    const clipboardCommand = key.super && !key.meta && !key.shift && (input === "c" || input === "v");
     router.dispatch({
       input,
-      key: {...key, ctrl: key.ctrl || clipboardCommand, paste: Boolean(event?.keypress?.isPasted || (key as InputKey).paste)},
+      key: {...key, paste: Boolean(event?.keypress?.isPasted || (key as InputKey).paste)},
     });
   });
   return <RouterContext.Provider value={router}><BindingsContext.Provider value={bindingsContext}>{children}</BindingsContext.Provider></RouterContext.Provider>;
 }
 
-export function InputLayer({ priority, children }: { priority: number; children: React.ReactNode }) {
-  return <PriorityContext.Provider value={priority}>{children}</PriorityContext.Provider>;
+export function InputLayer({ priority, bindingContext, children }: { priority: number; bindingContext?: string; children: React.ReactNode }) {
+  const inherited = useContext(BindingScopeContext);
+  return <PriorityContext.Provider value={priority}><BindingScopeContext.Provider value={bindingContext ?? inherited}>{children}</BindingScopeContext.Provider></PriorityContext.Provider>;
 }
 
 /** Compatibility adapter: existing scene resolvers remain pure consumers.
  * Return false to defer to another registered owner; void means consumed.
  */
 export function useManagedInput(handler: (input: string, key: InputKey) => void | boolean,
-  options: { isActive?: boolean; priority?: number; clipboard?: boolean } = {}) {
+  options: { isActive?: boolean; priority?: number; clipboard?: boolean; bindingContext?: string; raw?: boolean } = {}) {
   const router = useContext(RouterContext);
   useContext(BindingsContext); // Re-render hints together with the effective binding map.
   const layer = useContext(PriorityContext);
+  const bindingScope = useContext(BindingScopeContext);
   const id = useId();
-  const current = useRef({ handler, options });
-  useLayoutEffect(() => { current.current = { handler, options }; });
+  const current = useRef({ handler, options, bindingScope });
+  useLayoutEffect(() => { current.current = { handler, options, bindingScope }; });
   useLayoutEffect(() => {
     if (!router) throw new Error("INPUT_ROUTER_MISSING: mount InputProvider");
     let mounted = true;
     const unregister = router.register({ id, priority: layer + (options.priority || 0),
       enabled: () => current.current.options.isActive !== false,
+      context: () => current.current.options.bindingContext ?? current.current.bindingScope,
+      raw: () => Boolean(current.current.options.raw),
       handle: ({ input, key }) => {
-        if (key.ctrl && input === "v" && current.current.options.clipboard !== false) {
+        if (!current.current.options.raw && key.ctrl && input === "v" && current.current.options.clipboard !== false) {
           // All editors receive literal text through their normal input path.
           // Capture the owner/editor callback before asynchronous OS clipboard IO.
           const owner = current.current.handler;
@@ -95,16 +98,28 @@ export function useScrollInput(ref: React.RefObject<ScrollBoxHandle | null>, ena
     const direction = key.pageUp || key.wheelUp ? -1
       : key.pageDown || key.wheelDown ? 1 : 0;
     if (!direction || !ref.current) return false;
-    ref.current.scrollBy(direction * (key.pageUp || key.pageDown ? 10 : 3));
+    scrollViewport(ref.current, direction * (key.pageUp || key.pageDown ? 10 : 3));
     return true;
   }, { priority: 50, clipboard: false, isActive: enabled });
 }
 
-export function ScrollableInputLayer({ children, priority = 100 }: { children: React.ReactNode; priority?: number }) {
-  return <InputLayer priority={priority}><ScrollableContent>{children}</ScrollableContent></InputLayer>;
+export function ScrollableInputLayer({ children, priority = 100, bindingContext }: { children: React.ReactNode; priority?: number; bindingContext?: string }) {
+  return <InputLayer priority={priority} bindingContext={bindingContext}><ScrollableContent>{children}</ScrollableContent></InputLayer>;
 }
 function ScrollableContent({ children }: { children: React.ReactNode }) {
   const ref = useRef<ScrollBoxHandle>(null);
   useScrollInput(ref);
   return <ScrollBox ref={ref} flexDirection="column" flexGrow={1}>{children}</ScrollBox>;
+}
+
+/** Read the live registry used by dispatch; revision changes refresh all consumers. */
+export function useEffectiveBindings() {
+  useContext(BindingsContext);
+  return applicationBindings;
+}
+export function useBindingRevision() {
+  return useContext(BindingsContext).revision;
+}
+export function useConfigureBindings() {
+  return useContext(BindingsContext).configure;
 }

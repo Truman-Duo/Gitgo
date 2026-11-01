@@ -605,6 +605,9 @@ def test_real_daemon_process_restart_keeps_candidate_explicit(
 
     repo_root = Path(__file__).resolve().parents[1]
     bootstrap = (
+        # Embedded Python's ._pth can intentionally omit cwd. Use this checkout
+        # explicitly, as the source runtime launcher does in production tests.
+        f"import sys; sys.path.insert(0, {str(repo_root)!r}); "
         "from backend.core.config import Config, ProjectConfig; "
         "from backend.core.daemon import run_daemon; "
         f"p=ProjectConfig(name='recovery-process-e2e'); p.workspace_path={str(workspace)!r}; "

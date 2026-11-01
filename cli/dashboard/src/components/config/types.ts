@@ -43,4 +43,6 @@ export type ConfigTabModule = {
   id: ConfigTabId;
   label: Copy;
   Component: ComponentType<ConfigTabProps>;
+  /** Self-scrolling tabs receive the bounded body directly; other tabs use the shell viewport. */
+  ownsViewport?: boolean;
 };

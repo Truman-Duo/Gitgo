@@ -219,3 +219,27 @@ def test_diff_layout_legacy_default_and_saved_config():
             service.config_set("diff_layout", invalid)
         assert failure.value.code == "INVALID_VALUE"
         assert ConfigManager.load().diff_layout == "split"
+
+def test_keyboard_overrides_roundtrip_and_scoped_conflicts():
+    from backend.core.application import ApplicationServices, OperationError
+    from backend.core.keyboard_bindings import validate_keyboard_bindings
+    import pytest
+    value = {"version": 1, "overrides": {"trial.accept": {"key": "j", "ctrl": True},
+                                         "formal.delete": {"key": "j", "ctrl": True}}}
+    ConfigManager.save(Config(projects=[]))
+    service = ApplicationServices()
+    service.config_set("keyboard_bindings", value)
+    assert ConfigManager.load().keyboard_bindings == value
+    assert service.config_get()["keyboard_bindings"] == value
+    for invalid in [None, [], {"version": True, "overrides": {}},
+                    {"version": 1, "overrides": {"unknown": {"key": "j"}}},
+                    {"version": 1, "overrides": {"editor.external": {"key": "j"}}},
+                    {"version": 1, "overrides": {"trial.accept": {"key": "c", "ctrl": True}}},
+                    {"version": 1, "overrides": {"trial.discard": {"key": "a", "shift": True}}},
+                    {"version": 1, "overrides": {"trial.accept": {"key": "j", "ctrl": 1}}}]:
+        with pytest.raises(OperationError):
+            service.config_set("keyboard_bindings", invalid)
+        assert ConfigManager.load().keyboard_bindings == value
+    migrated = Config.from_dict({"keyboard_preset": "portable"})
+    assert migrated.keyboard_bindings["overrides"]["editor.newline"] == {"key": "return", "meta": True}
+    assert validate_keyboard_bindings({"version": 1, "overrides": {}})["overrides"] == {}

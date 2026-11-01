@@ -167,12 +167,14 @@ $pyInstallerArguments = @(
     # Tools are registered/imported dynamically and approval digests cover their
     # implementations even before first use. Match native acceptance packaging.
     "--paths", $root, "--collect-submodules", "backend",
+    "--additional-hooks-dir", (Join-Path $root "packaging\pyinstaller-hooks"),
     "--hidden-import", "backend.core.tools.registrations",
     "--distpath", $internal,
     "--workpath", (Join-Path $root "build\terminal-host"),
     "--specpath", (Join-Path $root "build\terminal-host"),
     "--version-file", $versionFile,
     "--add-data", "$terminalReferences;backend/resources/terminal_provenance",
+    "--add-data", "$(Join-Path $root 'backend/resources/keyboard');backend/resources/keyboard",
     "--add-data", "$promptResources;backend/resources/prompts",
     (Join-Path $root "backend\core\native_host_entry.py")
 )
@@ -192,6 +194,10 @@ if ($ManagedUpdate) {
 if ($LASTEXITCODE -ne 0) { throw "Product manifest rendering failed" }
 
 $packagedHost = Join-Path $internal "gitgo-host\gitgo-host.exe"
+$sourceNotices = Join-Path $stage 'source-notices'
+New-Item -ItemType Directory -Path $sourceNotices | Out-Null
+Copy-Item -LiteralPath (Join-Path $root 'LICENSE.md') -Destination (Join-Path $sourceNotices 'Gitgo-LICENSE.md')
+Copy-Item -LiteralPath (Join-Path $root 'cli\dashboard\vendor\ink\PROVENANCE.md'), (Join-Path $root 'cli\dashboard\vendor\ink\provenance.json') -Destination $sourceNotices
 $reportedVersion = & (Join-Path $stage "$($product.primary_command).exe") --version
 if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne "Gitgo $($product.version)") {
     throw "Packaged Dashboard reports an unexpected product version"

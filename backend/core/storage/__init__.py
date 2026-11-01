@@ -4,6 +4,10 @@ All SQLite access is deliberately kept behind :class:`StorageRuntime`.  Other
 modules must use this facade instead of opening database connections directly.
 """
 
+# Callers classify database failures through the storage facade, without
+# importing or opening the underlying SQLite implementation themselves.
+from sqlite3 import Error as StorageDatabaseError
+
 from .models import (
     StorageBlocked,
     StorageCommitUnknown,
@@ -29,6 +33,7 @@ from .scope import RepositoryScope, assess_repository_scope
 __all__ = [
     "RepositoryScope",
     "StorageBlocked",
+    "StorageDatabaseError",
     "StorageCommitUnknown",
     "StorageCorruptionDetected",
     "StorageReferenceMissing",

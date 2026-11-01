@@ -2,7 +2,7 @@
 
 import type { StatusState, StatusDot } from "./types.js";
 import { colors } from "./tokens.js";
-import { eastAsianWidth } from "get-east-asian-width";
+import {terminalCodepointWidth} from "../../vendor/ink/src/core/terminalWidth.js";
 import type { HexColor } from "@anthropic/ink";
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -17,7 +17,7 @@ function graphemeWidth(value: string): number {
   for (const char of value) {
     const point = char.codePointAt(0) ?? 0;
     if (point === 0x200d || /\p{Mark}/u.test(char) || point === 0xfe0f) continue;
-    width = Math.max(width, eastAsianWidth(point));
+    width = Math.max(width, terminalCodepointWidth(point));
   }
   return width;
 }
@@ -29,7 +29,8 @@ export function displayWidth(text: string): number {
 /** Truncate string with ellipsis. */
 export function truncate(s: string, max: number): string {
   if (displayWidth(s) <= max) return s;
-  const target = Math.max(0, max - 1);
+  const suffix = displayWidth("…") <= max ? "…" : "";
+  const target = Math.max(0, max - displayWidth(suffix));
   let width = 0;
   let result = "";
   for (const item of graphemes(s)) {
@@ -38,7 +39,7 @@ export function truncate(s: string, max: number): string {
     result += item;
     width += next;
   }
-  return result + "…";
+  return result + suffix;
 }
 
 export function padEndWidth(s: string, width: number): string {

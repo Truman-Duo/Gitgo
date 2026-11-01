@@ -68,6 +68,7 @@ class LoopGuard:
         session: "AgentSession",
         signal_bus=None,
         signals=None,
+        *, completion_stage_entry=False,
     ) -> GuardResult:
         """综合检查：完成判定 → 重复检测 → doom_loop → budget → plain_text。"""
 
@@ -91,7 +92,8 @@ class LoopGuard:
             if signal_bus is not None and signals is not None:
                 completion_result = signal_bus.dispatch(signals, process, context="completion")
             from backend.core.loop.completion_protocol import HostCompletionEvaluator
-            gate_status = HostCompletionEvaluator.outstanding_gates(process, signals, completion_result, candidate=response)
+            gate_status = HostCompletionEvaluator.outstanding_gates(process, signals, completion_result, candidate=response,
+                stage_entry=completion_stage_entry)
             if not gate_status["ready"]:
                 from .completion_gates import accepts_partial
                 if accepts_partial(process, gate_status["gates"]):

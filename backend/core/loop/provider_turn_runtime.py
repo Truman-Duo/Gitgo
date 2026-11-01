@@ -34,6 +34,9 @@ class ProviderTurnBoundary:
 def _to_provider_tool_calls(tool_calls: list[dict]) -> list[dict]:
     result = []
     for index, call in enumerate(tool_calls):
+        if call.get('_provider_wire_call'):
+            result.append(call['_provider_wire_call'])
+            continue
         result.append(
             {
                 'id': str(call.get('id') or f'call_{index}'),

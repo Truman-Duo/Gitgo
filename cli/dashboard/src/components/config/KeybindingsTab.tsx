@@ -1,119 +1,145 @@
-import React, {memo, useCallback, useEffect, useRef, useState} from "react";
-import {Box, ScrollBox, Text, type ScrollBoxHandle} from "@anthropic/ink";
-import {useManagedInput as useInput, useScrollInput} from "../../input/runtime.js";
-import {INPUT_ACTIONS, InputBindingRegistry, presetSettings, type KeyboardPreset} from "../../input/router.js";
+import {SelectionText} from "../Selection.js";
+import React, {memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from "react";
+import {Box, ScrollBox, Text, type DOMElement, type ScrollBoxHandle} from "@anthropic/ink";
+import {useManagedInput as useInput, useScrollInput, useEffectiveBindings, useConfigureBindings, useBindingRevision} from "../../input/runtime.js";
+import {BINDING_DEFINITIONS, InputBindingRegistry, bindingFromEvent, bindingLabel, presetSettings,
+  type BindingSettings, type BindingSpec} from "../../input/router.js";
 import {matchChord, chordLabel} from "../../input/bindings.js";
 import {configGet, configSet} from "../../backend/tools.js";
 import {notifyGeneralConfigChanged} from "../../hooks/useGeneralConfig.js";
 import {useCopy} from "../../ui/PageFrame.js";
-import type {Copy} from "../../ui/pageContract.js";
-import {colors, usePanelSize} from "../../theme/index.js";
+import {useFeedback} from "../../hooks/useFeedback.js";
+import {colors, displayWidth, usePanelSize} from "../../theme/index.js";
 import type {ConfigTabProps} from "./types.js";
 
-const LABELS: Record<string, Copy> = {
-  "execution.interrupt": {en:"Interrupt / return",zh:"中断 / 返回"},
-  "navigation.confirm": {en:"Confirm / send",zh:"确认 / 发送"},
-  "editor.newline": {en:"New line",zh:"输入换行"},
-  "navigation.tab": {en:"Next / focus",zh:"下一项 / 聚焦"},
-  "navigation.previousTab": {en:"Previous / focus",zh:"上一项 / 聚焦"},
-  "navigation.up": {en:"Up",zh:"向上"},
-  "navigation.down": {en:"Down",zh:"向下"},
-  "navigation.left": {en:"Left",zh:"向左"},
-  "navigation.right": {en:"Right",zh:"向右"},
-  "viewport.pageUp": {en:"Page up",zh:"向上翻页"},
-  "viewport.pageDown": {en:"Page down",zh:"向下翻页"},
-  "clipboard.copy": {en:"Copy selection",zh:"复制所选文字"},
-  "clipboard.paste": {en:"Paste text",zh:"粘贴文字"},
-  "editor.backspace": {en:"Delete before cursor",zh:"删除前一字符"},
-  "editor.delete": {en:"Delete after cursor",zh:"删除后一字符"},
-  "editor.start": {en:"Start of draft",zh:"草稿开头"},
-  "editor.end": {en:"End of draft",zh:"草稿末尾"},
-  "editor.previousWord": {en:"Previous word",zh:"前一词"},
-  "editor.nextWord": {en:"Next word",zh:"后一词"},
-  "editor.killToEnd": {en:"Cut to end",zh:"剪切到末尾"},
-  "editor.killToStart": {en:"Cut to start",zh:"剪切到开头"},
-  "editor.killWord": {en:"Cut previous word",zh:"剪切前一词"},
-  "editor.yank": {en:"Paste cut text",zh:"粘贴剪切文字"},
-  "editor.external": {en:"External editor",zh:"外部编辑器"},
-};
+const BindingRow = memo(function BindingRow({label, condition, width, labelWidth, selected, selectedRow}: {
+  label:string; condition:string; width:number; labelWidth:number; selected:boolean;
+  selectedRow:React.RefObject<DOMElement|null>;
+}) {
+  return <Box ref={selected?selectedRow:undefined} flexDirection="row" width={width} flexShrink={0}>
+    <Box width={labelWidth} flexShrink={0}>
+      <SelectionText selected={selected} wrap="truncate-end"  >{label}</SelectionText>
+    </Box>
+    <Box width={Math.max(1,width-labelWidth)} minWidth={0}>
+      <Text dimColor wrap="truncate-end">{condition}</Text>
+    </Box>
+  </Box>;
+});
 
-export const KeybindingsTab = memo(function KeybindingsTab({
-  client, report, onFooter, onStatusUpdate, shell, contentFocused,
-}: ConfigTabProps) {
-  const t = useCopy(), {w} = usePanelSize({widthOffset: 6});
-  const [preset, setPreset] = useState<KeyboardPreset>("standard");
-  const [draft, setDraft] = useState<KeyboardPreset>("standard");
-  const [loaded, setLoaded] = useState(false), [saving, setSaving] = useState(false);
-  const [editing, setEditing] = useState(false), [row, setRow] = useState(0);
-  const [message, setMessage] = useState("");
-  const scroll = useRef<ScrollBoxHandle>(null);
-  useScrollInput(scroll, contentFocused && row >= 2);
-  const label = (value: KeyboardPreset) => value === "portable"
-    ? t({en:"Portable",zh:"兼容方案"}) : t({en:"Standard",zh:"标准方案"});
-  const registry = new InputBindingRegistry();
-  registry.configure(presetSettings(preset));
+/** Reads the dispatcher registry. No parallel display map or invented presets. */
+export const KeybindingsTab = memo(function KeybindingsTab({client, report, onFooter, onStatusUpdate, shell, contentFocused}: ConfigTabProps) {
+  const t = useCopy(), registry = useEffectiveBindings(), configure = useConfigureBindings();
+  const {w,h} = usePanelSize({widthOffset:6}), revision = useBindingRevision();
+  const labels = useMemo(()=>BINDING_DEFINITIONS.map(item=>t(item.label)+" · "+registry.displayLabel(item.id)),[t,registry,revision]);
+  const conditions = useMemo(()=>BINDING_DEFINITIONS.map(item=>t(item.condition)),[t]);
+  const labelWidth = useMemo(()=>Math.max(1,Math.min(Math.max(...labels.map(displayWidth))+3,Math.floor(w*0.48))),[labels,w]);
+  const [settings, setSettings] = useState<BindingSettings>({version:1,overrides:{}});
+  const [loaded,setLoaded] = useState(false), [saving,setSaving] = useState(false), [row,setRow] = useState(0);
+  const [mode,setMode] = useState<"list"|"capture"|"test">("list");
+  const [sawInput,setSawInput] = useState(false);
+  const [candidate,setCandidate] = useState<BindingSpec|null>(null);
+  const feedback = useFeedback({kind: "page", id: "config/keybindings"});
+  const message = feedback.text, setMessage = feedback.show;
+  const alive = useRef(true), mutation = useRef(false), scroll = useRef<ScrollBoxHandle>(null);
+  const selectedRow = useRef<DOMElement>(null);
+  const action = BINDING_DEFINITIONS[row-2];
+  useScrollInput(scroll, contentFocused && mode === "list");
+  useLayoutEffect(()=>{
+    if(!contentFocused)return;
+    if(row<2)scroll.current?.scrollTo(0);
+    else if(selectedRow.current)scroll.current?.scrollIntoView(selectedRow.current);
+  },[row,w,h,mode,message,contentFocused,revision]);
   useEffect(() => {
-    let active = true;
-    configGet(client).then((value: any) => {
-      if (!active) return;
-      const selected = value?.keyboard_preset === "portable" ? "portable" : "standard";
-      setPreset(selected); setDraft(selected); setLoaded(true);
-    }).catch(() => {if(active)setMessage(t({en:"Could not load bindings. Reopen to retry.",zh:"无法读取绑键，请重新打开重试。"}));});
-    return () => {active = false;};
-  }, [client]);
-  useEffect(() => {report({sub: editing, fullscreen: false});}, [editing, report]);
-  useEffect(() => {onFooter({hidden:true}); return () => onFooter(null);}, [onFooter]);
-  useEffect(() => {onStatusUpdate?.(message);}, [message, onStatusUpdate]);
-  const save = useCallback(async (selected: KeyboardPreset) => {
-    if (!loaded || saving) return;
-    setSaving(true);
-    try {
-      await configSet(client, "keyboard_preset", selected);
-      setPreset(selected); setDraft(selected); setEditing(false);
+    alive.current=true;
+    configGet(client).then((value:any)=>{
+      if(!alive.current)return;
+      const next = value?.keyboard_bindings || presetSettings(value?.keyboard_preset === "portable" ? "portable" : "standard");
+      new InputBindingRegistry().configure(next);
+      setSettings(next); setLoaded(true);
+    }).catch(error=>{if(alive.current)setMessage(t({en:`Could not load bindings: ${error}`,zh:`无法读取绑键：${error}`}));});
+    return ()=>{alive.current=false;};
+  },[client,t]);
+  useEffect(()=>{report({sub:mode!=="list",fullscreen:false});},[mode,report]);
+  useEffect(()=>{onFooter({hidden:true});return ()=>onFooter(null);},[onFooter]);
+  useEffect(()=>{onStatusUpdate?.(message);},[message,onStatusUpdate]);
+  useEffect(()=>{
+    if(mode==="list" || sawInput)return;
+    const timer=setTimeout(()=>setMessage(t({en:"No key detected yet. The terminal or OS may intercept it. Esc cancels.",zh:"尚未检测到按键；终端或系统可能截获了组合键。Esc 取消。"})),5000);
+    return ()=>clearTimeout(timer);
+  },[mode,sawInput,t]);
+  const problem = (error:unknown) => {
+    const text=String(error);
+    if(text.includes("INPUT_BINDING_CONFLICT")){
+      const ids=text.split(": ").at(-1)!.split(" / ");
+      const names=ids.map(id=>BINDING_DEFINITIONS.find(d=>d.id===id)).filter(Boolean).map(d=>t(d!.label));
+      return t({en:`Key already used in an overlapping context: ${names.join(" / ")}`,zh:`此键与同时可用的动作冲突：${names.join(" / ")}`});
+    }
+    if(text.includes("INPUT_BINDING_TEXT_CONFLICT"))return t({en:"A plain character would replace normal typing. Use Ctrl, Alt or Super for a common action.",zh:"普通字符会影响正常打字；通用动作请使用 Ctrl、Alt 或 Super 组合键。"});
+    return t({en:`Could not use this binding: ${text}`,zh:`无法使用此绑键：${text}`});
+  };
+  const save = useCallback(async(next:BindingSettings)=>{
+    if(!loaded || mutation.current)return;
+    try{new InputBindingRegistry().configure(next);}catch(error){setMessage(problem(error));return;}
+    mutation.current=true;setSaving(true);
+    try{
+      await configSet(client,"keyboard_bindings",next);
+      if(alive.current){configure(next);setSettings(next);setMode("list");setCandidate(null);setMessage(t({en:"Saved; active immediately",zh:"已保存并立即生效"}));}
       notifyGeneralConfigChanged();
-      setMessage(t({en:"Saved",zh:"已保存"}));
-    } catch {
-      setMessage(t({en:"Save failed. Current bindings remain active.",zh:"保存失败，继续使用当前绑键。"}));
-    } finally {setSaving(false);}
-  }, [client, loaded, saving, t]);
-  useInput((input, key) => {
-    if (!contentFocused) return false;
-    if (saving) return;
-    if (matchChord("escape", input, key)) {
-      if (editing) {setEditing(false); setDraft(preset);}
-      else shell.leaveContent();
+    }catch(error){if(alive.current)setMessage(t({en:`Save failed; previous bindings retained: ${error}`,zh:`保存失败，保留原绑键：${error}`}));}
+    finally{mutation.current=false;if(alive.current)setSaving(false);}
+  },[client,loaded,configure,t]);
+  const cancel=()=>{setMode("list");setCandidate(null);setMessage("");};
+  // Capture before remapping, clipboard and modal navigation. Paste stays text.
+  useInput((input,key)=>{
+    if(key.escape){cancel();return;}
+    if(saving)return;
+    if(mode==="capture" && candidate && key.return && !key.ctrl && !key.meta && !key.shift && !key.super){
+      if(action)void save({version:1,overrides:{...settings.overrides,[action.id]:candidate}});
       return;
     }
-    if (!loaded || key.paste) return;
-    if (editing) {
-      if (matchChord("left", input, key) || matchChord("right", input, key))
-        setDraft(value => value === "standard" ? "portable" : "standard");
-      else if (matchChord("enterNoShift", input, key)) void save(draft);
-      return;
+    setSawInput(true);
+    const detected=bindingFromEvent({input,key});
+    if(!detected){setMessage(t({en:"This event is text/paste or an unsupported key; no binding changed.",zh:"此事件是文字、粘贴或尚不支持的键，没有修改绑键。"}));return;}
+    if(mode==="capture" && action){
+      try{new InputBindingRegistry().configure({version:1,overrides:{...settings.overrides,[action.id]:detected}});}
+      catch(error){setCandidate(null);setMessage(problem(error));return;}
     }
-    if (matchChord("up", input, key)) {if(row > 2) scroll.current?.scrollBy(-1); setRow(value => Math.max(0, value-1));}
-    else if (matchChord("down", input, key)) {if(row >= 2) scroll.current?.scrollBy(1); setRow(value => Math.min(Object.keys(INPUT_ACTIONS).length+1, value+1));}
-    else if (matchChord("enterNoShift", input, key)) {
-      if (row === 0) {setDraft(preset); setEditing(true);}
-      else if (row === 1) void save("standard");
+    setCandidate(detected);
+    setMessage(t({en:`Received ${bindingLabel(detected)}${mode==="capture"?"; Enter saves, Esc cancels":"; Esc returns"}`,
+      zh:`实际收到 ${bindingLabel(detected)}${mode==="capture"?"；Enter 保存，Esc 取消":"；Esc 返回"}`}));
+  },{isActive:contentFocused && mode!=="list",raw:true,clipboard:false,priority:20000});
+  useInput((input,key)=>{
+    if(!contentFocused || mode!=="list")return false;
+    if(saving)return;
+    if(matchChord("escape",input,key)){shell.leaveContent();return;}
+    if(!loaded || key.paste)return;
+    if(matchChord("up",input,key)){
+      if(row===0){
+        if(scroll.current && (scroll.current.getScrollTop()!==0 || scroll.current.getPendingDelta()!==0))scroll.current.scrollTo(0);
+      }else setRow(v=>Math.max(0,v-1));
+    }
+    else if(matchChord("down",input,key)){
+      if(row===BINDING_DEFINITIONS.length+1){
+        const view=scroll.current;
+        if(view && selectedRow.current && view.getScrollTop()+view.getPendingDelta()<Math.max(0,view.getScrollHeight()-view.getViewportHeight()))
+          view.scrollIntoView(selectedRow.current);
+      }else setRow(v=>Math.min(BINDING_DEFINITIONS.length+1,v+1));
+    }
+    else if(matchChord("delete",input,key) && action){const overrides={...settings.overrides};delete overrides[action.id];void save({version:1,overrides});}
+    else if(matchChord("enterNoShift",input,key)){
+      if(row===1)void save({version:1,overrides:{}});
+      else {setCandidate(null);setSawInput(false);setMessage(t({en:"Press a key to detect it. Esc cancels.",zh:"请按键进行检测；Esc 取消。"}));setMode(row===0?"test":"capture");}
     }
   });
   return <Box flexDirection="column" flexGrow={1} minHeight={0}>
-    <Text bold={contentFocused && row === 0} color={contentFocused && row === 0 ? colors.selection.row.fg : undefined}>
-      {t({en:"Binding scheme",zh:"绑键方案"})}: {loaded ? label(editing ? draft : preset) : t({en:"Loading…",zh:"读取中…"})}
-    </Text>
-    <Text bold={contentFocused && row === 1} color={contentFocused && row === 1 ? colors.selection.row.fg : undefined}>
-      {t({en:"Restore defaults",zh:"恢复默认"})}
-    </Text>
-    <Text dimColor>{editing
-      ? chordLabel("leftRight")+" "+t({en:"choose",zh:"选择"})+" · "+chordLabel("enter")+" "+t({en:"save",zh:"保存"})+" · "+chordLabel("escape")+" "+t({en:"cancel",zh:"取消"})
-      : t({en:"Portable uses Alt+Enter for new lines and Ctrl+P for previous focus.",zh:"兼容方案使用 Alt+Enter 换行、Ctrl+P 向前切换焦点。"})}</Text>
-    <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} minHeight={0}>
-      {Object.keys(INPUT_ACTIONS).map((action, index) => <Box key={action} flexDirection="row" flexShrink={0}>
-        <Box width={Math.max(8, w-18)}><Text wrap="truncate-end" bold={contentFocused && row === index+2}>{t(LABELS[action]!)}</Text></Box>
-        <Text>{registry.label(action)}</Text>
-      </Box>)}
+    <SelectionText selected={contentFocused&&row===0} highlight={false}>{t({en:"Test keyboard input",zh:"检测键盘输入"})}</SelectionText>
+    <SelectionText selected={contentFocused&&row===1} highlight={false}>{t({en:"Restore all defaults",zh:"恢复全部默认绑键"})}</SelectionText>
+    <Text dimColor>{t({en:"Select an action and confirm to rebind.",zh:"选中动作并确认以换绑。"})} {chordLabel("delete")} {t({en:"restores the selected default",zh:"恢复所选动作默认键"})}</Text>
+    <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}>
+      {BINDING_DEFINITIONS.map((item,index)=><BindingRow key={item.id} label={labels[index]} condition={conditions[index]}
+        width={w} labelWidth={labelWidth} selected={contentFocused&&row===index+2} selectedRow={selectedRow}/>)}
     </ScrollBox>
-    <Text dimColor>{t({en:"Bindings apply immediately and survive restart. The active view determines each action.",zh:"保存后立即生效，重启保留；动作含义随当前界面而定。"})}</Text>
+    {message?<Text color={colors.warning}>{message}</Text>:null}
+    <Text dimColor>{mode==="list"?chordLabel("upDown")+" "+t({en:"select",zh:"选择"})+" · "+chordLabel("enter")+" "+t({en:"open",zh:"打开"})+" · "+chordLabel("escape")+" "+t({en:"back",zh:"返回"}):t({en:"Detection shows only events delivered by this terminal. Collapsed combinations cannot be distinguished.",zh:"检测仅显示终端实际送达的键；被折叠为同一事件的组合键无法区分。"})}</Text>
   </Box>;
 });

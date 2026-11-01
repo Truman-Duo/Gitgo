@@ -196,12 +196,17 @@ class OpenAIResponsesAdapter(ProviderAdapter):
     def build_body(self, request: ProviderRequest, model_id: str) -> dict:
         instructions: list[str] = []
         inputs: list[dict] = []
+        leading_system = True
         for message in request.messages:
             role = str(message.get("role", "user"))
             state = message.get("provider_state", {}) or {}
-            if role == "system":
+            if role == "system" and leading_system:
                 instructions.append(str(message.get("content", "")))
                 continue
+            # Keep later host/task instructions at their original transcript
+            # boundary and authority. Hoisting them rewrites the prefix before
+            # the immutable catalog on every task/contract change.
+            leading_system = False
             output_items = state.get("response_output_items")
             if role == "assistant" and isinstance(output_items, list):
                 inputs.extend(output_items)
@@ -216,7 +221,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             content = str(message.get("content", ""))
             if content:
                 inputs.append({
-                    "role": "assistant" if role == "assistant" else "user",
+                    "role": role if role in {"assistant", "system", "developer"} else "user",
                     "content": content,
                 })
             if role == "assistant":

@@ -34,6 +34,35 @@ def agent_step(
     workspace_path: str = "",
     on_stream_event: callable = None,
 ) -> dict:
+    """Project known lifecycle failures through existing canonical outcomes."""
+    from .budget import TaskBudgetExceeded
+    from .llm import StreamCancelledError
+    from .runtime_outcomes import _budget_exhausted_result, _cancellation_result
+    try:
+        return _agent_step(process, llm_provider, instruction, dispatcher, workspace_path, on_stream_event)
+    except TaskBudgetExceeded as error:
+        return _budget_exhausted_result(process, process.session, error)
+    except StreamCancelledError:
+        return _cancellation_result(process, process.session)
+    except (ValueError, RuntimeError, TimeoutError) as error:
+        code = str(error).split(":", 1)[0]
+        if not code.startswith("MECHANISM_"):
+            raise
+        if process.cancel_requested or process.cancellation_event.is_set():
+            return _cancellation_result(process, process.session)
+        transition(process, ProcessStatus.FAILED)
+        return _make_result(process, process.session, "", error_code=code,
+            error_message=str(error), outcome_status=OutcomeStatus.FAILED)
+
+
+def _agent_step(
+    process: AgentProcess,
+    llm_provider: "LLMProvider",
+    instruction: str = "",
+    dispatcher: "ToolDispatcher | None" = None,
+    workspace_path: str = "",
+    on_stream_event: callable = None,
+) -> dict:
     """Run the admitted task until delivery, suspension or a bounded failure."""
     from backend.core.prompt_profiles import current_snapshot
     from .run_admission import admit_agent_run
@@ -57,7 +86,9 @@ def agent_step(
 
 
     def _apply_mailbox_at_boundary() -> int:
-        applied = _apply_pending_instructions(process, session)
+        from .mechanism_lifecycle import fence
+        with fence(process), process.session._mechanism_lock:
+            applied = _apply_pending_instructions(process, session)
         if applied:
             _emit_observation({
                 "event": "mailbox_applied",
@@ -92,7 +123,8 @@ def agent_step(
     delivery_runtime = DeliveryRuntime(process, session, loop_guard, governance.active_bus,
         emit=_emit_observation, apply_mailbox=_apply_mailbox_at_boundary,
         pause_blocked=_pause_blocked_delivery, capture_recovery=capture_recovery,
-        increment_nudge=_inc_nudge_counter, nudge_count=_get_nudge_count)
+        increment_nudge=_inc_nudge_counter, nudge_count=_get_nudge_count,
+        final_review=lambda candidate: _check_alignment(candidate, trigger="completion_after_stages"))
 
     alignment_result = _check_alignment()
     if alignment_result is not None and "alignment_repair" not in alignment_result:
@@ -102,6 +134,10 @@ def agent_step(
     # new provider turn. This preserves protocol ordering and avoids spending a
     # model step reconstructing arguments that the Host already has durably.
     if isinstance(process.pending_tool_batch, dict):
+        # A direct mode/lifecycle command may have committed while this exact
+        # batch was parked. Acknowledge its current consumers before executing
+        # the saved calls; do not spend a model turn repairing a stale view.
+        surface.synchronize()
         pending_batch = dict(process.pending_tool_batch)
         process.pending_tool_batch = None
         resumed_terminal = _execute_resumed_batch(pending_batch)
@@ -164,6 +200,11 @@ def agent_step(
             if batch_boundary.retry:
                 continue
             results, task_kind_changed = batch_boundary.results, batch_boundary.task_kind_changed
+            unavailable_tools = surface.refresh_after(results, task_kind_changed, loop_guard)
+            if unavailable_tools:
+                transition(process, ProcessStatus.FAILED)
+                return _error_result(process, "CAPABILITY_TOOL_UNAVAILABLE",
+                    "Capability references unavailable tools: " + ", ".join(unavailable_tools))
             outcome = tool_outcomes.evaluate(results, content, (time.time() - start) * 1000,
                                              window_check, governance.signals)
             if outcome.result is not None:
@@ -171,11 +212,6 @@ def agent_step(
             if not outcome.retry:
                 tool_outcomes.notify_evidence_ready()
 
-            unavailable_tools = surface.refresh_after(results, task_kind_changed, loop_guard)
-            if unavailable_tools:
-                transition(process, ProcessStatus.FAILED)
-                return _error_result(process, "CAPABILITY_TOOL_UNAVAILABLE",
-                    "Capability references unavailable tools: " + ", ".join(unavailable_tools))
             if outcome.retry:
                 continue
 
@@ -183,6 +219,13 @@ def agent_step(
             continue
 
         content = pending_answer_text(process) + content
+        staged_completion = delivery_runtime.has_registered_stages()
+        if staged_completion:
+            delivery_boundary = delivery_runtime.evaluate_text(content, duration_ms, window_check, governance.signals)
+            if delivery_boundary.result is not None:
+                return delivery_boundary.result
+            if delivery_boundary.retry:
+                continue
         # Semantic delivery readiness is separate from receipt completeness.
         # A fluent answer or a prose question cannot silently end unresolved work.
         alignment_result = _check_alignment(content)
@@ -199,11 +242,12 @@ def agent_step(
                 continue
             return alignment_result
 
-        delivery_boundary = delivery_runtime.evaluate_text(content, duration_ms, window_check, governance.signals)
-        if delivery_boundary.result is not None:
-            return delivery_boundary.result
-        if delivery_boundary.retry:
-            continue
+        if not staged_completion:
+            delivery_boundary = delivery_runtime.evaluate_text(content, duration_ms, window_check, governance.signals)
+            if delivery_boundary.result is not None:
+                return delivery_boundary.result
+            if delivery_boundary.retry:
+                continue
         _track_step(process, content[:200])
 
         # v0.42: doom_loop 检测已接入 LoopGuard.check()（通过 check_doom_loop_safe）。

@@ -93,6 +93,7 @@ export const DECRPM_STATUS = {
  * Emitted in answer to queries like DECRQM, DA1, OSC 11, etc.
  */
 export type TerminalResponse =
+  | {type: 'cellPixelSize'; width: number; height: number}
   /** DECRPM: answer to DECRQM (request DEC private mode status) */
   | { type: 'decrpm'; mode: number; status: number }
   /** DA1: primary device attributes (used as a universal sentinel) */
@@ -122,6 +123,9 @@ function parseTerminalResponse(s: string): TerminalResponse | null {
   // CSI-prefixed responses
   if (s.startsWith('\x1b[')) {
     let m: RegExpExecArray | null
+    if ((m = /^\x1b\[6;(\d+);(\d+)t$/.exec(s))) {
+      return {type: 'cellPixelSize', height: Number(m[1]), width: Number(m[2])}
+    }
 
     if ((m = DECRPM_RE.exec(s))) {
       return {

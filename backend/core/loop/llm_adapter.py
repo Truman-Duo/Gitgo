@@ -78,7 +78,9 @@ def parse_tool_calls(response: str | dict) -> list[dict]:
                 args = json.loads(args_str) if isinstance(args_str, str) else args_str
             except json.JSONDecodeError:
                 args = {"raw": args_str}
-            results.append({"name": name, "args": args, "id": tc.get("id", "")})
+            from .provider_tool_transport import decode
+            results.append(decode({"name": name, "args": args, "id": tc.get("id", "")},
+                raw_arguments=args_str if isinstance(args_str,str) else None))
         if results:
             return results
 
@@ -107,5 +109,6 @@ def _parse_xml(text: str) -> list[dict]:
             args = json.loads(args_str)
         except json.JSONDecodeError:
             args = {"raw": args_str}
-        results.append({"name": name, "args": args})
+        from .provider_tool_transport import decode
+        results.append(decode({"name": name, "args": args},raw_arguments=args_str))
     return results

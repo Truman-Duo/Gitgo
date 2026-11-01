@@ -24,7 +24,7 @@ export const HelpPanel=memo(function HelpPanel({scene,onDismiss}:Props){
   const action=standardKey(input,key);
   if(action==="back"){if(contentFocused)setContentFocused(false);else onDismiss();}
   else if(action==="left"||action==="right"){setTab(n=>Math.max(0,Math.min(1,n+(action==="left"?-1:1))));}
-  else if(action==="activate"||action==="next")setContentFocused(n=>action==="next"?!n:true);
+  else if(action==="activate"||action==="next"||action==="previous")setContentFocused(n=>action!=="activate"?!n:true);
   else if(action==="up"||action==="down"){setContentFocused(true);scroll.current?.scrollBy(action==="up"?-1:1);}
  });
  const guide=helpGuide(scene,t),commands=getKeybindings(scene,language);

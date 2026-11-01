@@ -1,5 +1,5 @@
 import emojiRegex from 'emoji-regex'
-import { eastAsianWidth } from 'get-east-asian-width'
+import { terminalCodepointWidth } from './terminalWidth.js'
 import stripAnsi from 'strip-ansi'
 import { getGraphemeSegmenter } from './utils/grapheme.js'
 
@@ -13,9 +13,8 @@ const EMOJI_REGEX = emojiRegex()
  * This is a more accurate alternative to the string-width package that correctly handles
  * characters like ⚠ (U+26A0) which string-width incorrectly reports as width 2.
  *
- * The implementation uses eastAsianWidth directly with ambiguousAsWide: false,
- * which correctly treats ambiguous-width characters as narrow (width 1) as
- * recommended by the Unicode standard for Western contexts.
+ * Unicode widths default to ambiguousAsWide: false. A classic Windows console
+ * may override symbols using Host-observed glyph widths before the first frame.
  */
 function stringWidthJavaScript(str: string): number {
   if (typeof str !== 'string' || str.length === 0) {
@@ -58,7 +57,7 @@ function stringWidthJavaScript(str: string): number {
     for (const char of str) {
       const codePoint = char.codePointAt(0)!
       if (!isZeroWidth(codePoint)) {
-        width += eastAsianWidth(codePoint, { ambiguousAsWide: false })
+        width += terminalCodepointWidth(codePoint)
       }
     }
     return width
@@ -79,7 +78,7 @@ function stringWidthJavaScript(str: string): number {
     for (const char of grapheme) {
       const codePoint = char.codePointAt(0)!
       if (!isZeroWidth(codePoint)) {
-        width += eastAsianWidth(codePoint, { ambiguousAsWide: false })
+        width += terminalCodepointWidth(codePoint)
       }
     }
   }

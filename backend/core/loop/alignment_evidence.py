@@ -8,14 +8,14 @@ from __future__ import annotations
 import hashlib
 import json
 
-CONTROL_DECISION_KINDS = frozenset({'permission', 'recovery', 'completion_exception', 'context_force_compaction'})
+CONTROL_DECISION_KINDS = frozenset({'permission', 'recovery', 'completion_exception', 'context_force_compaction', 'manual_execution', 'runtime_checkpoint'})
 
 
 def answer_digest(answer):
     return hashlib.sha256(str(answer).encode('utf-8')).hexdigest()
 
 
-def alignment_input_digest(process, *, contract_override=None):
+def alignment_input_digest(process, *, contract_override=None, boundary_subjects=None):
     task_id = process.active_task_id or process.process_id
     controls = CONTROL_DECISION_KINDS
     control_ids = {e.get('decision_id') for e in process.session.host_ledger
@@ -27,6 +27,8 @@ def alignment_input_digest(process, *, contract_override=None):
     state = context.get('alignment_runtime') or {}
     from .alignment_routing import POLICY_VERSION
     from .task_contract import semantic_contract
+    from .task_maintenance import alignment_basis
+    from backend.core.mechanism_runtime.semantic_projection import alignment_basis as harness_basis
     contract = semantic_contract(contract_override if contract_override is not None else context.get('task_contract') or {})
     updates = [{k: m.get(k) for k in ('mailbox_message_id', 'content')}
                for m in process.session.messages[state.get('message_start', len(process.session.messages)):]
@@ -34,6 +36,9 @@ def alignment_input_digest(process, *, contract_override=None):
     return hashlib.sha256(json.dumps({'events': events, 'request': state.get('request'), 'scope': state.get('scope'),
                                      'assumptions': state.get('assumptions'), 'constraints': process.task_constraints, 'updates': updates,
                                      'policy_version': POLICY_VERSION, 'contract': contract,
+                                     'boundary_subjects': boundary_subjects or [],
+                                     'task_maintenance': alignment_basis(process),
+                                     'harness_semantics': harness_basis(process),
                                      'workflow_plan': (context.get('engineering_workflow') or {}).get('plan'),
                                      }, sort_keys=True).encode()).hexdigest()
 
@@ -65,15 +70,54 @@ def source_answer(ledger, task_id, decision_id, source_node_id=''):
     return event
 
 
-def exploratory_scope(process):
+def business_answer_receipts(ledger, task_id):
+    """Project exact business replies, including legacy cards outside the DAG.
+
+    Received text remains evidence to interpret, never a confirmed value or a
+    permission. Controls, cancelled cards and other tasks stay excluded.
+    """
+    from .decision_support import SEMANTIC_DECISION_KINDS
+    requests = {e.get('decision_id'): e for e in ledger
+                if e.get('event') == 'user_decision_requested' and e.get('task_id') == task_id}
+    cancelled = {e.get('decision_id') for e in ledger
+                 if e.get('event') == 'user_decision_cancelled' and e.get('task_id') == task_id}
+    result = []
+    for event in ledger:
+        if event.get('event') != 'user_decision_received' or event.get('task_id') != task_id:
+            continue
+        request = requests.get(event.get('decision_id'), {})
+        if request.get('kind') not in SEMANTIC_DECISION_KINDS or event.get('decision_id') in cancelled:
+            continue
+        if event.get('answers'):
+            for question in request.get('questions') or []:
+                item = event['answers'].get(question.get('node_id'))
+                if item and isinstance(item.get('answer'), str):
+                    result.append({'decision_id': event['decision_id'], 'source_node_id': question['node_id'],
+                        'state_topic': question['state_topic'], 'question': question['question'], 'answer': item['answer']})
+        elif isinstance(event.get('answer'), str):
+            result.append({'decision_id': event['decision_id'], 'state_topic': request.get('state_topic', ''),
+                'question': request.get('question', ''), 'answer': event['answer']})
+    return result
+
+
+def exploratory_scope(process, *, admission=False):
     context, _ = process.read_context_snapshot()
     state = context.get('alignment_runtime') or {}
     scope = state.get('scope') or {}
     task_id = process.active_task_id or process.process_id
     if (state.get('task_id') != task_id or state.get('process_id', process.process_id if not process.parent_id else '') != process.process_id
-            or process.task_kind not in {'answer', 'plan'} or scope.get('mode') != 'exploration'):
+            or (not admission and (process.task_kind not in {'answer', 'plan'} or scope.get('admission_only')))
+            or scope.get('mode') != 'exploration'):
         return False
     source = source_answer(process.session.host_ledger, task_id, scope.get('decision_id'), scope.get('source_node_id', ''))
+    controls = CONTROL_DECISION_KINDS
+    requests = {e.get('decision_id'): e for e in process.session.host_ledger
+                if e.get('event') == 'user_decision_requested' and e.get('task_id') == task_id}
+    latest = next((e for e in reversed(process.session.host_ledger)
+                   if e.get('event') == 'user_decision_received' and e.get('task_id') == task_id
+                   and requests.get(e.get('decision_id'), {}).get('kind', e.get('kind')) not in controls), None)
+    if not latest or latest.get('decision_id') != scope.get('decision_id'):
+        return False
     return bool(source and scope.get('answer_digest') == answer_digest(source['answer'])
                 and scope.get('request') and scope['request'] == scope.get('quote') and scope['quote'] in source['answer'])
 

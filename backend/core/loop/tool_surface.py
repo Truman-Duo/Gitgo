@@ -65,8 +65,11 @@ def component_blocker(process, spec, catalog):
             'profile_id': profiles[0].profile_id,
             'reason': 'Execute the declared leaf capabilities of saved tool ' + spec.get('name', ''),
             'intended_actions': ['Invoke ' + spec.get('name', '') + ' through the Host leaf pipeline; wait for exact approval']}})
-    else:
+    elif 'escalate_to_supervisor' in catalog:
         actions.append({'action': 'escalate_to_supervisor', 'required_tools': missing})
+    else:
+        actions.append({'action': 'inspect_current_capabilities', 'required_tools': missing,
+                        'reason': 'No governing supervisor is available; use the current user decision channel if scope must change.'})
     if spec.get('execution_mode') == 'authored_host_python' and 'calculate' not in missing:
         actions.append({'action': 'author_tool', 'arguments': {'operation': 'use', 'name': spec.get('name', '')}})
     from backend.core.errors import error_payload
@@ -90,6 +93,11 @@ def _select_authorized_tools(
         return {}, ["<missing ToolRegistry>"]
 
     declared = process.tool_registry.list_all()
+    from .coordination import coordination_owner
+    if coordination_owner(getattr(process, "_manager", None), process) is None:
+        # Profile membership describes possible capabilities, not an ownership
+        # relationship. Apply the same condition to discovery and execution.
+        declared = [name for name in declared if name not in CapabilityProfiles._WORKER_COORDINATION]
     if (
         process.actor_kind == "supervisor"
         and process.capability_lease is None
@@ -101,7 +109,7 @@ def _select_authorized_tools(
         # Explicit self-execution remains available via a scoped lease.
         delegated_mode = {
             "context_open", "context_search", "artifact_read", "read_child_artifact", "workbench",
-            "decision_evidence", "declare_task_contract", "prepare_task_bundle", "delegate_task",
+            "decision_evidence", "task_mechanism", "harness_mechanism", "declare_task_contract", "prepare_task_bundle", "delegate_task",
             "delegate_task_dag", "delegate_task_bundle", "list_agents", "wait_agents",
             "send_feedback", "cancel_agent", "request_review",
             "list_coordination_events", "resolve_coordination_event",

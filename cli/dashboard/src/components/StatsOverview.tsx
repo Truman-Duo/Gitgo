@@ -1,9 +1,11 @@
+import {geometry} from "../theme/tokens.js";
+import {SelectionText} from "./Selection.js";
 import React,{useEffect,useRef,useState} from "react";
 import {Box,ScrollBox,Text,type ScrollBoxHandle} from "@anthropic/ink";
 import {useManagedInput as useInput,useScrollInput} from "../input/runtime.js";
 import type {BackendClient} from "../backend/client.js";
 import {runtimeUsage} from "../backend/tools.js";
-import {colors,truncate,padEndWidth,formatDuration,useSelectionStyle} from "../theme/index.js";
+import {colors,truncate,padEndWidth,formatDuration} from "../theme/index.js";
 import {PageHeader} from "../ui/PageHeader.js";
 import {heatCalendar,localDay,tokenTotal,moveCalendarCell} from "./usagePresentation.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
@@ -18,7 +20,7 @@ export function StatsOverview({client,cols,onDismiss,onInspect}:Props){
  const [day,setDay]=useState(localDay()),[metric,setMetric]=useState<"tokens"|"requests">("tokens");
  const [refresh,setRefresh]=useState(0);
  const scroll=useRef<ScrollBoxHandle>(null);useScrollInput(scroll,focus==="content");
- const rowStyle=useSelectionStyle(focus==="content"?"focused":"non-focused","row");
+
  useEffect(()=>{
   let alive=true;setError("");
   runtimeUsage(client).then(value=>{if(alive)setData(value);}).catch(e=>{if(alive)setError(String(e.message||e));});
@@ -33,7 +35,7 @@ export function StatsOverview({client,cols,onDismiss,onInspect}:Props){
  useInput((input,key)=>{
   const command=standardKey(input,key);
   if(command==="back"){if(focus==="header")onDismiss();else setFocus("header");return;}
-  if(command==="next"){setFocus(f=>f==="header"?"content":f==="content"?"actions":"header");return;}
+  if(command==="next"||command==="previous"){const order=["header","content","actions"] as const;setFocus(f=>order[(order.indexOf(f)+(command==="previous"?2:1))%3]);return;}
   if(focus==="header"){
    if(command==="left"||command==="right"){
     setView(v=>Math.max(0,Math.min(2,v+(command==="left"?-1:1))));
@@ -78,8 +80,8 @@ export function StatsOverview({client,cols,onDismiss,onInspect}:Props){
     <Text dimColor>{calendar[0]![0]!.date} — {localDay()} · UTC{Number(data.day_offset_minutes||0)>=0?"+":""}{Number(data.day_offset_minutes||0)/60}</Text>
     {Array.from({length:7},(_,weekday)=><Text key={weekday}>
      <Text dimColor>{t({en:["Mo","Tu","We","Th","Fr","Sa","Su"][weekday]!,zh:["一","二","三","四","五","六","日"][weekday]!})} </Text>
-     {calendar.map((week,index)=>{const cell=week[weekday]!,active=cell.date===day&&focus==="content";return <React.Fragment key={index}><Text
-      color={active?colors.selection.block.fg:colors.usage.heat[cell.level]} backgroundColor={active?colors.selection.block.bg:undefined}>{cell.future?" ":"■"}</Text><Text> </Text></React.Fragment>;})}
+     {calendar.map((week,index)=>{const cell=week[weekday]!,active=cell.date===day&&focus==="content";return <React.Fragment key={index}><SelectionText selected={active} variant="block"
+      color={colors.usage.heat[cell.level]} >{cell.future?" ":"■"}</SelectionText><Text> </Text></React.Fragment>;})}
     </Text>)}
     <Text dimColor>{t({en:"Less",zh:"少"})} {colors.usage.heat.map((color,i)=><Text color={color} key={i}>■ </Text>)} {t({en:"More · nonzero-day quartiles",zh:"多 · 非零用量日期的四分位"})}</Text>
     <Text>{day} · {amount(selectedDay)}</Text>
@@ -87,17 +89,17 @@ export function StatsOverview({client,cols,onDismiss,onInspect}:Props){
     <Text dimColor>{t({en:"USD cost is unrecorded; no billing estimate is fabricated.",zh:"尚无美元费用记录，不推算账单金额。"})}</Text>
     {data.undated_tasks?<Text dimColor>{t({en:`${data.undated_tasks} tasks have no valid date.`,zh:`${data.undated_tasks} 项任务没有有效日期。`})}</Text>:null}
    </>:view===1?<>
-    <Text dimColor>{t({en:"Enter opens the selected project's waterfall.",zh:"按 Enter 打开选中项目的逐轮瀑布图。"})}</Text>
-    {tasks.map((task:any,index:number)=><Text key={task.project+task.task_id} color={index===selected?rowStyle.fg:undefined} backgroundColor={index===selected?rowStyle.bg:undefined}>
+    <Text dimColor>{t({en:"Enter opens the selected project's waterfall.",zh:"按 Enter 打开选中项目的逐轮瀑布图。",keys:true})}</Text>
+    {tasks.map((task:any,index:number)=><SelectionText selected={index===selected} focused={focus==="content"} key={task.project+task.task_id}  >
      {padEndWidth(truncate(task.project,18),18)} {String(task.created_at||"").slice(0,10)} {tokenTotal(task).toLocaleString()} {t({en:"tokens",zh:"词元"})} · {formatDuration(Number(task.duration_ms||0))}
-    </Text>)}
-   </>:projects.map((project:any,index:number)=><Text key={project.project} color={index===selected?rowStyle.fg:undefined} backgroundColor={index===selected?rowStyle.bg:undefined}>
+    </SelectionText>)}
+   </>:projects.map((project:any,index:number)=><SelectionText selected={index===selected} focused={focus==="content"} key={project.project}  >
     {padEndWidth(truncate(project.project,22),22)} {project.error?t({en:`Unavailable: ${project.error}`,zh:`不可用：${project.error}`}):project.alias_of?t({en:`Shared with ${project.alias_of}; counted once`,zh:`与 ${project.alias_of} 共用记录，仅计一次`}):amount(project)}
-   </Text>)}
+   </SelectionText>)}
   </ScrollBox>
-  <Box gap={2}>{[t({en:`Metric: ${metricLabel}`,zh:`统计口径：${metricLabel}`}),t({en:"Refresh",zh:"刷新"})].map((label,index)=><Text key={index}
-   color={focus==="actions"&&action===index?colors.selection.block.fg:undefined}
-   backgroundColor={focus==="actions"&&action===index?colors.selection.block.bg:undefined}>{label}</Text>)}</Box>
-  <Text dimColor>{focus==="header"?t({en:"←/→ tabs · Enter browse · Esc back",zh:"←/→ 页签 · Enter 浏览 · Esc 返回"}):focus==="actions"?t({en:"←/→ actions · Enter apply · ↑ content · Esc tabs",zh:"←/→ 操作 · Enter 执行 · ↑ 内容 · Esc 页签"}):view===0?t({en:"Arrows select day · PgUp/PgDn scroll · Tab actions · Esc tabs",zh:"方向键选择日期 · PgUp/PgDn 滚动 · Tab 操作 · Esc 页签"}):t({en:"↑/↓ select · Enter project · Tab actions · Esc tabs",zh:"↑/↓ 选择 · Enter 项目 · Tab 操作 · Esc 页签"})}</Text>
+  <Box gap={geometry.actions.gap}>{[t({en:`Metric: ${metricLabel}`,zh:`统计口径：${metricLabel}`}),t({en:"Refresh",zh:"刷新"})].map((label,index)=><SelectionText selected={focus==="actions"&&action===index} variant="block" key={index}
+
+   >{label}</SelectionText>)}</Box>
+  <Text dimColor>{focus==="header"?t({en:"←/→ tabs · Enter browse · Esc back",zh:"←/→ 页签 · Enter 浏览 · Esc 返回",keys:true}):focus==="actions"?t({en:"←/→ actions · Enter apply · ↑ content · Esc tabs",zh:"←/→ 操作 · Enter 执行 · ↑ 内容 · Esc 页签",keys:true}):view===0?t({en:"Arrows select day · PgUp/PgDn scroll · Tab actions · Esc tabs",zh:"方向键选择日期 · PgUp/PgDn 滚动 · Tab 操作 · Esc 页签",keys:true}):t({en:"↑/↓ select · Enter project · Tab actions · Esc tabs",zh:"↑/↓ 选择 · Enter 项目 · Tab 操作 · Esc 页签",keys:true})}</Text>
  </PageFrame>;
 }

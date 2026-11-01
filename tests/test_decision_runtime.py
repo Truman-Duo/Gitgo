@@ -642,6 +642,8 @@ def test_cache_telemetry_distinguishes_cold_start_epoch_and_provider_miss():
     session.record_provider_usage({"input_tokens": 100}, cache_intent=intent)
     session.record_provider_usage({"input_tokens": 100}, cache_intent=intent)
     session.context_epoch += 1
+    from dataclasses import replace
+    intent = replace(intent, context_epoch=session.context_epoch)
     session.record_provider_usage({"input_tokens": 100}, cache_intent=intent)
     assert [item["miss_reason"] for item in session.cache_telemetry] == [
         "cold_start", "provider_miss_or_unreported", "context_epoch_reset",
@@ -659,18 +661,27 @@ def test_child_decision_resume_binds_its_own_session_even_from_parent_view(tmp_p
     pending = create_user_decision(child, _decision_args('Which language?'))
     child.status = ProcessStatus.AWAITING_USER
     calls = []
-    def resolve(apm, store, workspace, process_id, session_id=''):
-        calls.append((process_id, session_id))
-        raise ValueError('TEST_STOP_AFTER_IDENTITY_BOUNDARY')
-    monkeypatch.setattr('backend.core.loop.conversation_continuation.resolve_conversation_process', resolve)
+    def resume(instruction):
+        calls.append((child.process_id, child.session.session_id, instruction))
+        child.status = ProcessStatus.COMPLETED
+        return {'status': 'completed'}
+    manager.start(child.process_id, lambda: {'status': 'awaiting_user'}, resume_target=resume)
+    manager._threads[child.process_id].join(3)
+    original = manager._threads[child.process_id]
     emitted = []
     _cmd_task({'action': 'decision', 'process_id': child.process_id,
         'decision_id': pending['decision_id'], 'session_id': root.session.session_id,
         'conversation_process_id': root.process_id, 'instruction': 'Choose option 1: A'},
         SimpleNamespace(workspace_path=tmp_path_factory), SimpleNamespace(name='project'),
         {'apm': manager, 'evq': queue.Queue(), 'dispatcher': object()}, emitted.append)
-    assert calls == [(child.process_id, child.session.session_id)]
-    assert emitted[-1]['error'] == 'TEST_STOP_AFTER_IDENTITY_BOUNDARY'
+    deadline = time.monotonic() + 3
+    while (manager._threads[child.process_id] is original
+           or manager._threads[child.process_id].ident is None) and time.monotonic() < deadline:
+        time.sleep(.01)
+    manager._threads[child.process_id].join(3)
+    assert len(calls) == 1 and calls[0][:2] == (child.process_id, child.session.session_id)
+    assert 'Choose option 1: A' in calls[0][2]
+    assert emitted[-1]['result']['process_id'] == child.process_id
     assert child.session.host_ledger[-1]['event'] == 'user_decision_received'
     assert root.session.session_id != child.session.session_id
 

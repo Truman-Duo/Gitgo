@@ -107,6 +107,7 @@ export type PendingDecision = {
     arguments_preview?: string;
     approval_scope?: string;
   };
+  manual_unit?: {unit_id: string; revision: number; scope_id: string; tool_name: string; arguments: Record<string, unknown>};
   question: string;
   why_user_must_decide: string;
   options: DecisionOption[];
@@ -118,6 +119,7 @@ export type PendingDecision = {
   owner_process_id?: string;
   questions?: Array<Pick<PendingDecision, "question" | "why_user_must_decide" | "options" | "allow_free_form" | "kind" | "state_topic"> & {node_id: string}>;
   round_position?: string;
+  materials?: Array<{reference: string; summary: string; source: string; authority_granted: false}>;
 };
 
 export type ChatMessage = {

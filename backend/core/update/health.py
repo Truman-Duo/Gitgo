@@ -15,6 +15,7 @@ import uuid
 from .manifest import DataCompatibility, TARGETS
 from .validation import fields, json_object, number, reject
 from .version import Version
+from .persistence import pinned_profile
 
 
 PROBE_ROLE = "update-data-probe"
@@ -59,6 +60,7 @@ def probe_startup_host(host: Path, profile: Path, *, timeout: int = 30) -> dict:
     return _probe_host(host, profile, timeout=timeout, managed=False, startup=True)
 
 
+@pinned_profile
 def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool, startup: bool = False) -> dict:
     number(timeout, minimum=1, maximum=120)
     if (not host.is_file() or host.is_symlink() or not host.is_absolute()
@@ -120,6 +122,7 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool, start
         close_job(job)
 
 
+@pinned_profile
 def frozen_health_check(bundle: Path, profile: Path):
     """Explicit transaction driver; invoke ONLY after full candidate validation.
 
@@ -200,5 +203,37 @@ def probe_dashboard_version(bundle: Path, profile: Path, version: str):
         if proc is not None and (proc.poll() is None or getattr(proc, "_gitgo_scope_socket", None) is not None):
             terminate_tree(proc, job)
         reject("UPDATE_HEALTH_FAILED", "Candidate frontend startup failed")
+    finally:
+        close_job(job)
+
+
+def migrate_candidate_data(bundle: Path, profile: Path, plan: Path, nonce: str):
+    """Run a previously verified candidate against shadow resources only.
+
+    The caller owns the exclusive install/data barriers and checks both the
+    program tree and converted data after this process has fully retired.
+    """
+    from backend.core.process_control import spawn_managed, terminate_tree, attach_kill_job, close_job
+    from backend.core.process_output import collect_output
+    profile.mkdir(mode=0o700)
+    program = bundle / "internal/gitgo-host" / ("gitgo-host.exe" if os.name == "nt" else "gitgo-host")
+    proc, job = None, None
+    try:
+        proc = spawn_managed([str(program), "--gitgo-internal-role", "update-data-migrate", "--plan", str(plan)],
+            cwd=str(profile), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="strict", env=isolated_environment(profile),
+            macos_forkless=sys.platform == "darwin")
+        job = attach_kill_job(proc)
+        output, _, _ = collect_output(proc, timeout=120, limit=MAX_REPORT_BYTES, reject_overflow=True,
+                                     terminate=lambda: terminate_tree(proc, job))
+        report = fields(json_object(output.encode("utf-8"), MAX_REPORT_BYTES), {"schema_version", "nonce", "migration_verified"})
+        if (proc.returncode != 0 or type(report["schema_version"]) is not int or report["schema_version"] != 1
+                or report["nonce"] != nonce or report["migration_verified"] is not True
+                or cleanup_report(proc, job).get("complete") is not True):
+            reject("UPDATE_DATA_MIGRATION_FAILED", "Candidate data migration or cleanup failed")
+    except Exception:
+        if proc is not None and (proc.poll() is None or getattr(proc, "_gitgo_scope_socket", None) is not None):
+            terminate_tree(proc, job)
+        reject("UPDATE_DATA_MIGRATION_FAILED", "Data migration failed; original data retained")
     finally:
         close_job(job)

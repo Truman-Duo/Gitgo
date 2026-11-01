@@ -47,12 +47,29 @@ def _timestamp(value: str) -> float:
 
 
 def inspect_post_checkpoint_invocations(
-    workspace: str | Path, process_id: str, checkpoint_at: str, *, paths=None, state_home=None,
+    workspace: str | Path, process_id: str, checkpoint_at: str, *, paths=None, state_home=None, storage=None,
 ) -> list[dict]:
     """Find effectful invocation truth written after the durable checkpoint."""
     from backend.core.storage.invocation_journal import invocation_journal_root
     checkpoint_ts = _timestamp(checkpoint_at)
     findings: list[dict] = []
+    # Native ownership is independent of effects and checkpoint recency. A
+    # terminal/foreign task's pending tree also blocks this project's launches.
+    from backend.core.storage.native_invocations import pending_native_invocations
+    try:
+        if storage is None:
+            from backend.core.storage import StorageRuntime, get_storage
+            selected_home = state_home or getattr(paths, "state_home", None)
+            if selected_home is not None:
+                with StorageRuntime(workspace, state_home=selected_home) as reader:
+                    findings.extend(pending_native_invocations(reader))
+            else:
+                findings.extend(pending_native_invocations(get_storage(workspace)))
+        else:
+            findings.extend(pending_native_invocations(storage))
+    except Exception as exc:
+        findings.append({"code": "INVOCATION_EVIDENCE_UNAVAILABLE", "state": "unknown",
+                         "effect_state": "ambiguous", "updated_at": 0.0, "detail": type(exc).__name__})
 
     def unavailable(journal, detail):
         return {
@@ -99,12 +116,6 @@ def inspect_post_checkpoint_invocations(
         owner = str(item.get("process_id") or "")
         if owner and owner != process_id:
             continue
-        if updated_at <= checkpoint_ts:
-            continue
-        effect = str(item.get("effect") or "external")
-        from backend.core.loop.operation_policy import is_observation_effect
-        if is_observation_effect(effect):
-            continue
         effect_state = str(item.get("effect_state") or "ambiguous")
         state = str(item.get("state") or "unknown")
         cleanup = item.get("runtime_cleanup")
@@ -115,6 +126,12 @@ def inspect_post_checkpoint_invocations(
                 "effect_state": effect_state, "state": state, "journal": str(path),
                 "owner_scope": "process" if owner else "legacy_unscoped", "updated_at": updated_at,
             })
+        if updated_at <= checkpoint_ts:
+            continue
+        effect = str(item.get("effect") or "external")
+        from backend.core.loop.operation_policy import is_observation_effect
+        if is_observation_effect(effect):
+            continue
         if state == "committed" and effect_state == "committed":
             code = "EFFECT_COMMITTED_AFTER_CHECKPOINT"
         else:
@@ -227,7 +244,12 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
     pending = list(states)
     while pending:
         current = states[pending.pop()]
-        for child_id in (current.get("runtime_state") or {}).get("child_ids", []):
+        runtime = current.get("runtime_state") or {}
+        references = list(runtime.get("child_ids", []))
+        mechanism_owner_id = (runtime.get("runtime_preferences") or {}).get("mechanism_owner_id")
+        if mechanism_owner_id:
+            references.append(str(mechanism_owner_id))
+        for child_id in references:
             if child_id in states or child_id in deleted_ids:
                 continue
             try:
@@ -371,7 +393,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
         )
         findings = inspect_post_checkpoint_invocations(
             process_workspace, process_id, checkpoint_at,
-            paths=session_store._storage.paths,
+            paths=session_store._storage.paths, storage=session_store._storage,
         ) if process_id in incomplete else []
         if process_id in incomplete:
             findings.extend(inspect_worktree_recovery(durable_worktree))
@@ -397,7 +419,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             prior_recovery.get("resume_forbidden") or commit_unknown or profile_error
             or provisional_terminal or any(
                 str(item.get("code") or "").startswith("WORKTREE_")
-                or item.get("code") in {"INVOCATION_EVIDENCE_UNAVAILABLE", "NATIVE_CLEANUP_UNCONFIRMED"}
+                or item.get("code") in {"INVOCATION_EVIDENCE_UNAVAILABLE", "NATIVE_CLEANUP_UNCONFIRMED", "NATIVE_LAUNCH_UNCONFIRMED"}
                 for item in reasons
             )
         )
@@ -513,6 +535,11 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
                 "requires_manual_verification": requires_verification,
                 "resume_forbidden": resume_forbidden,
             }
+        # Component invocation journals commit independently of the process
+        # checkpoint. Even an awaiting-user checkpoint can therefore own an
+        # interrupted callback; classify it before publishing ready state.
+        from backend.core.mechanism_runtime.application import mark_restored_invocations
+        mark_restored_invocations(process, session_store._storage)
         manager.register_restored(process)
 
     # The child row is authoritative evidence that delegation existed even if

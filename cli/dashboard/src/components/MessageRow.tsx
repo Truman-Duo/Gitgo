@@ -10,6 +10,7 @@ import { AnimatedReveal } from "./AnimatedReveal.js";
 import { RoundDetails } from "./RoundDetails.js";
 import { colors, formatDuration } from "../theme/index.js";
 import { MarkdownText } from "./MarkdownText.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 type Props = {
   msg: ChatMessage;
@@ -34,6 +35,7 @@ export function MessageRow({
   onExpandedChange,
   streamSnapshot,
 }: Props) {
+  const t=useCopy();
   const [localExpanded, setLocalExpanded] = useState(false);
   const expanded = controlledExpanded ?? localExpanded;
   const setExpanded = (value: boolean) => {
@@ -110,7 +112,7 @@ export function MessageRow({
         {msg.pending ? (
           <Text dimColor color={colors.warning}>
             {" "}
-            pending
+            {t({en:"pending",zh:"等待中"})}
           </Text>
         ) : null}
       </Box>

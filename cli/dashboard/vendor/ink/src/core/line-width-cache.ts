@@ -1,13 +1,19 @@
 import { stringWidth } from './stringWidth.js'
+import {terminalWidthRevision} from './terminalWidth.js'
 
 // During streaming, text grows but completed lines are immutable.
 // Caching stringWidth per-line avoids re-measuring hundreds of
 // unchanged lines on every token (~50x reduction in stringWidth calls).
 const cache = new Map<string, number>()
+let measuredRevision = -1
 
 const MAX_CACHE_SIZE = 4096
 
 export function lineWidth(line: string): number {
+  if (measuredRevision !== terminalWidthRevision) {
+    cache.clear()
+    measuredRevision = terminalWidthRevision
+  }
   const cached = cache.get(line)
   if (cached !== undefined) return cached
 

@@ -363,12 +363,14 @@ class LLMProvider:
                    on_notice=None, before_generation_fallback=None) -> str | dict:
         """Single chat call, no retry logic."""
         from .provider_generation import reasoning_effort, rejects_reasoning_preference
+        from .provider_cache import prefix_intent
         effort = reasoning_effort(self.protocol, purpose, getattr(self, '_alignment_effort_unsupported', False))
         request = ProviderRequest(
             messages=tuple(messages), tools=tuple(tools or []),
             max_output_tokens=min(max_tokens, self.max_output_tokens),
             stream=False,
-            cache_intent=CacheIntent(mode=self.capabilities.prompt_cache),
+            cache_intent=prefix_intent(messages, tools, mode=self.capabilities.prompt_cache,
+                                      purpose=purpose or 'main'),
             reasoning_effort=effort,
         )
         body = self.adapter.build_body(request, self._model)
@@ -400,7 +402,12 @@ class LLMProvider:
                 wrapped.__cause__ = exc
                 raise wrapped
 
-        response = self._accumulate_events(self.adapter.parse_response(data))
+        try:
+            response = self._accumulate_events(self.adapter.parse_response(data))
+        except ProviderResponseIncomplete as exc:
+            exc.cache_intent = request.cache_intent.to_dict()
+            raise
+        response['cache_intent'] = request.cache_intent.to_dict()
         if tools or preserve_provider_state:
             return response
         return response["content"]

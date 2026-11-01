@@ -14,6 +14,15 @@ from .validation import reject
 
 
 def startup_probe(nonce):
+    from .persistence import private_namespace
+    root = Path(os.environ.get("TMPDIR", ""))
+    if not root.is_absolute() or root != root.resolve(strict=True):
+        reject("UPDATE_HEALTH_FAILED", "Startup probe requires a private isolated profile")
+    with private_namespace(root):
+        return _startup_probe(nonce)
+
+
+def _startup_probe(nonce):
     report = data_probe(nonce)
     root = Path(os.environ.get("TMPDIR", ""))
     if not root.is_absolute() or root != root.resolve(strict=True):

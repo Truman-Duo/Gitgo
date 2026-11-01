@@ -35,7 +35,8 @@ def runtime_cleanup_report(cleanup):
 
 def native_cleanup_pending(process):
     """One recovery authority for native calls, including service-owned producers."""
-    return any(isinstance(reason, dict) and reason.get("code") == "NATIVE_CLEANUP_UNCONFIRMED"
+    return any(isinstance(reason, dict) and reason.get("code") in {
+                   "NATIVE_CLEANUP_UNCONFIRMED", "NATIVE_LAUNCH_UNCONFIRMED", "INVOCATION_EVIDENCE_UNAVAILABLE"}
                for reason in (process.recovery or {}).get("reasons", []))
 
 
