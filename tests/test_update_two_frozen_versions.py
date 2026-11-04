@@ -219,8 +219,10 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         "launcher": {"terminal": "current", "configured": True}}))
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+    terminal_env = {**env, "TERM": "xterm-256color", "FORCE_COLOR": "3"}
+    terminal_env.pop("NO_COLOR", None)
     proc = subprocess.Popen([str(store.root / "gitgo")], stdin=slave, stdout=slave, stderr=slave,
-        env={**env, "TERM": "xterm-256color"}, start_new_session=True)
+        env=terminal_env, start_new_session=True)
     os.close(slave)
     output = bytearray()
     screen = TerminalScreen(40, 120)
