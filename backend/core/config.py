@@ -436,7 +436,10 @@ class ConfigManager:
                 # still follows the current model's record list.
                 previous = json.loads(p.read_text(encoding="utf-8"))
                 if type(previous) is dict:
-                    data = preserve_fields(previous, data)
+                    data = preserve_fields(previous, data, replace_paths={
+                        ("projects", "*", "unavailable_entry"),
+                        ("keyboard_bindings", "overrides"),
+                    })
             temp_path = p.with_name(f".{p.name}.{uuid.uuid4().hex}.tmp")
             try:
                 with open(temp_path, "w", encoding="utf-8") as handle:

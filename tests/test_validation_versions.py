@@ -37,6 +37,8 @@ def case(tmp_path_factory, monkeypatch):
     monkeypatch.setenv('GITGO_STATE_HOME', str(tmp_path / 'state'))
     monkeypatch.setenv('GITGO_CONFIG_PATH', str(tmp_path / 'config.json'))
     p, _ = _supervisor(project)
+    from backend.core.storage import get_storage
+    p.runtime_storage = get_storage(project)
     p.task_kind = 'action'
     p.tool_registry = ToolRegistry(['write_file', 'run_test', 'read_file', 'request_review'])
     catalog = build_workspace_tools(project)

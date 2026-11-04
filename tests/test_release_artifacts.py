@@ -4,11 +4,28 @@ from pathlib import Path
 import pytest
 
 from backend.version import __version__
-from scripts.release_artifacts import validate_versions, package
+from scripts.release_artifacts import validate_versions, package, ci_successor_product
 from scripts.render_product_manifest import render_manifest
 import hashlib
 import subprocess
 import zipfile
+
+
+@pytest.mark.parametrize("version", ["1.0.0-alpha.3.1","1.0.0-alpha.3.2","1.0.0-alpha.3.3","1.0.0-alpha.4","2.0.0","2.0.0-beta.4+ci"])
+@pytest.mark.parametrize("platform", ["windows","linux"])
+def test_two_version_ci_derives_a_real_successor_without_selecting_a_release(version,platform):
+    from backend.core.update.version import Version
+    baseline = {"version":version,"windows_version":"1.0.0.5","primary_command":"gitgo"}
+    candidate = ci_successor_product(baseline,platform)
+    assert Version.parse(candidate["version"]) > Version.parse(version)
+    assert tuple(map(int,candidate["windows_version"].split('.'))) > (1,0,0,5)
+    assert baseline["version"] == version and baseline["windows_version"] == "1.0.0.5"
+    assert candidate["primary_command"] == "gitgo"
+
+
+def test_ci_file_version_carries_within_windows_component_bounds():
+    value = ci_successor_product({"version":"1.0.0-alpha.3.1","windows_version":"1.0.65535.65535"},"windows")
+    assert value["windows_version"] == "1.1.0.0"
 
 
 def fixture(root: Path):

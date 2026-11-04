@@ -633,7 +633,10 @@ def test_prompt_rom_is_independent_of_task_contract(tmp_path_factory):
     task = next(item for item in process.session.messages
                 if item.get("message_type") == "compiled_task_contract")
     assert "rule A" not in rom["content"]
-    assert "rule A" in task["content"]
+    governance = next(item for item in process.session.messages
+                      if item.get("message_type") == "compiled_governance_context")
+    assert "rule A" not in task["content"]
+    assert governance["role"] == "system" and "rule A" in governance["content"]
 
 
 def test_cache_telemetry_distinguishes_cold_start_epoch_and_provider_miss():

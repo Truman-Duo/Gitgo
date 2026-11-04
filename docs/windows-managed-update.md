@@ -1,6 +1,6 @@
 # Windows 管理更新与回滚
 
-关联 [Issue 21](https://github.com/Truman-Duo/Gitgo/issues/21)。支持 Windows x64、本地 NTFS 的全新管理安装，格式为 `managed-windows-v1`、API 8/schema 6。不会接管现有 Inno 安装。配置发行公钥及渠道地址后，支持后台检查、下载，以及安全退出后的自动安装；设置保存在当前安装中。旧 API 7 启动器保留手动交接，不会通过更换 active/ 获得自动安装能力。
+关联 [Issue 21](https://github.com/Truman-Duo/Gitgo/issues/21)。当前新管理安装支持 Windows x64、本地 NTFS，格式为 `managed-windows-v1`、API 10/schema 6；更新执行委派给当前已验证程序中的更新器。不会接管现有 Inno 安装。配置发行公钥及渠道地址后，支持后台检查、下载，以及安全退出后的自动安装；设置保存在当前安装中。旧 API 7/8 启动器不会仅通过更换 active/ 获得新的更新器交接能力，Alpha 3 升级本次版本须按发行说明处理。
 
 ## 构建与安装
 

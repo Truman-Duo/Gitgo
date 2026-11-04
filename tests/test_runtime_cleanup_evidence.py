@@ -50,7 +50,7 @@ def test_pipeline_preserves_runtime_cleanup_and_never_reexecutes(tmp_path_factor
         try:
             # A new call identity must not bypass the process's retained debt.
             retry = ToolPipeline().execute({'name': 'fixture', 'args': {}}, tool, ctx, 'retry', 0)
-            assert retry.is_error and 'SANDBOX_CLEANUP_PENDING' in retry.error
+            assert retry.is_error and retry.diagnostics['code'] == 'SANDBOX_CLEANUP_PENDING'
             assert retry.receipt['effect_state'] == 'not_committed'
             assert len(calls) == 1
             assert key in _RETAINED_ADMISSIONS
@@ -245,7 +245,7 @@ def test_uncheckpointed_cleanup_debt_survives_store_reopen(tmp_path_factory, mon
             assert any(r['code'] == 'NATIVE_CLEANUP_UNCONFIRMED' for r in restored.recovery['reasons'])
             ctx.process, ctx.session = restored, restored.session
             retry = ToolPipeline().execute({'name': 'fixture', 'args': {}}, tool, ctx, 'retry')
-            assert retry.is_error and 'SANDBOX_CLEANUP_PENDING' in retry.error
+            assert retry.is_error and retry.diagnostics['code'] == 'SANDBOX_CLEANUP_PENDING'
             assert calls == ['native']
         finally:
             reopened.close()

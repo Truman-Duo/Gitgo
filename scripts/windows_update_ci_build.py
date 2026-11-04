@@ -43,11 +43,12 @@ def main():
         if evidence["source"]["dirty"] is not False:
             raise RuntimeError("Dirty build cannot be signed even in the two-version test")
     build(previous)
-    version = "1.0.0-alpha.3.windows.1"
+    from scripts.release_artifacts import ci_successor_product
     product_path = checkout / "packaging/product.json"
     product = json.loads(product_path.read_bytes())
     old_version = product["version"]
-    product.update(version=version, windows_version="1.0.0.3")
+    product = ci_successor_product(product, "windows")
+    version = product["version"]
     product_path.write_text(json.dumps(product, indent=2) + "\n", encoding="utf-8")
     frontend_path = checkout / "cli/dashboard/package.json"
     frontend = json.loads(frontend_path.read_bytes())

@@ -16,6 +16,33 @@ from backend.version import __version__
 from scripts.render_product_manifest import render_manifest
 
 
+def ci_successor_product(product: dict, platform: str) -> dict:
+    """Derive a disposable newer test bundle from the actual baseline.
+
+    This never selects a real release version or mutates the input contract.
+    """
+    from backend.core.update.version import Version
+    if platform not in {"windows", "linux"}:
+        raise ValueError("Unsupported two-version CI target")
+    previous = Version.parse(product["version"])
+    core = previous.core if previous.prerelease else (*previous.core[:2], previous.core[2] + 1)
+    pre = (*previous.prerelease, platform, "1")
+    version = ".".join(map(str, core)) + "-" + ".".join(pre)
+    if Version.parse(version) <= previous:
+        raise ValueError("CI candidate must be newer than its baseline")
+    windows = [int(part) for part in product["windows_version"].split(".")]
+    if len(windows) != 4 or any(not 0 <= part <= 65535 for part in windows):
+        raise ValueError("Invalid Windows baseline version")
+    for index in range(3, -1, -1):
+        if windows[index] < 65535:
+            windows[index] += 1
+            break
+        windows[index] = 0
+    else:
+        raise ValueError("Windows version space exhausted")
+    return {**product,"version":version,"windows_version":".".join(map(str,windows))}
+
+
 def validate_versions(root: Path) -> dict:
     product = json.loads((root / 'packaging/product.json').read_text(encoding='utf-8'))
     dashboard = json.loads((root / 'cli/dashboard/package.json').read_text(encoding='utf-8'))

@@ -546,7 +546,6 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
                         exit_code = HANDOFF_EXIT
                         automatic_handoff = True
                 except Exception as error:
-                    from .validation import UpdateError
                     code = error.code if isinstance(error, UpdateError) else "UPDATE_PREPARATION_FAILED"
                     print("Automatic update deferred: " + code, file=sys.stderr, flush=True)
             if exit_code != HANDOFF_EXIT: return int(proc.returncode)

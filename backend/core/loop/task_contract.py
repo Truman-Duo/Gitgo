@@ -297,7 +297,7 @@ def compile_routing_proposal(
                 "The user explicitly requested a new B; execution_mode must be delegate or either"
             )
         normalized["delegation_required"] = True
-        normalized.setdefault('minimum_delegated_outcomes', 1)
+        normalized['minimum_delegated_outcomes'] = max(1, int(normalized.get('minimum_delegated_outcomes', 0) or 0))
     elif normalized.get("user_requested_delegation"):
         if normalized.get("execution_mode") not in ("delegate", "either"):
             raise ValueError(
@@ -308,7 +308,7 @@ def compile_routing_proposal(
                 "A semantically explicit subprocess request requires quoted user evidence"
             )
         normalized["delegation_required"] = True
-        normalized.setdefault('minimum_delegated_outcomes', 1)
+        normalized['minimum_delegated_outcomes'] = max(1, int(normalized.get('minimum_delegated_outcomes', 0) or 0))
 
     compiled_candidate = {**candidate, **normalized}
     compiled_advice = routing_advice(compiled_candidate)

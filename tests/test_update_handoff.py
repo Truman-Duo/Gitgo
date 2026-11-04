@@ -225,7 +225,50 @@ def test_launcher_releases_leases_before_apply_and_restarts_with_no_task_replay(
         return SimpleNamespace(wait=lambda: None, returncode=0, _gitgo_cleanup={"complete": complete})
     monkeypatch.setattr(process_control, "spawn_managed", spawn)
     monkeypatch.setattr(process_control, "finish_scope", lambda _: None)
+    from backend.core.update import coordinator
+    def updater(store, program, arguments):
+        # Placeholder products are not executable. Model only the admitted
+        # worker result; the real coordinator still pins and retires its copy.
+        if arguments[:1] == ["--propose"]:
+            from backend.core.update.transaction import TransactionResult
+            assert runtime_descriptors()  # Read-only proposal pins the admitted generation.
+            return TransactionResult("idle", store._ledger()["current"]["version"], None)
+        assert not runtime_descriptors() and not arguments
+        assert program.is_file()
+        return handoff._consume_request(store, os.environ[handoff.SESSION_ENV], 75, {"complete": True})
+    monkeypatch.setattr(coordinator, "_invoke", updater)
+    if not complete:
+        # An unretired application cannot safely start another generation.
+        with pytest.raises(UpdateError, match="UPDATE_SCOPE_UNAVAILABLE"):
+            installation.bootstrap_main("managed-launch", ["--smoke-task-b64", "do-not-replay"])
+        assert len(calls) == 1 and runtime_descriptors() == ()
+        assert lab.store._ledger()["current"]["version"] == "1.0.0-alpha.2"
+        return
     assert installation.bootstrap_main("managed-launch", ["--smoke-task-b64", "do-not-replay"]) == 0
     assert len(calls) == 2 and runtime_descriptors() == ()
     assert not list((lab.store.root / "control/preparation").glob("session-*"))
     assert not list((lab.store.root / "control/preparation").glob("request-*"))
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_automatic_probe_failure_reports_original_error_without_shadowing(lab, monkeypatch, capsys, typed):
+    import sys
+    from backend.core import process_control
+    from backend.core.update import coordinator
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(lab.store.root / "bootstrap/gitgo-host/gitgo-host"))
+    calls = []
+    def spawn(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(wait=lambda:None,returncode=0,_gitgo_cleanup={"complete":True})
+    def failed(*args, **kwargs):
+        if typed: raise UpdateError("UPDATE_ENGINE_FAILED", "fixture")
+        raise RuntimeError("fixture")
+    monkeypatch.setattr(process_control,"spawn_managed",spawn)
+    monkeypatch.setattr(process_control,"finish_scope",lambda _:None)
+    monkeypatch.setattr(coordinator,"_invoke",failed)
+    assert installation.bootstrap_main("managed-launch",[]) == 0
+    expected = "UPDATE_ENGINE_FAILED" if typed else "UPDATE_PREPARATION_FAILED"
+    assert "Automatic update deferred: " + expected in capsys.readouterr().err
+    assert len(calls) == 1 and runtime_descriptors() == ()
+    assert lab.store._ledger()["current"]["version"] == "1.0.0-alpha.2"

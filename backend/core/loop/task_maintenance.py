@@ -479,10 +479,13 @@ def alignment_basis(process):
 
 
 def _dependency_parts(name):
+    from pathlib import PureWindowsPath
     from backend.core.sandbox_read import relative_parts
     from backend.core.tools.file_operations import protected_metadata_part
+    if PureWindowsPath(name).anchor:
+        raise ValueError("task dependencies require a portable relative business path")
     parts = relative_parts(name)
-    if any(protected_metadata_part(part) for part in parts):
+    if any(protected_metadata_part(part, portable=True) for part in parts):
         raise ValueError("task dependencies must be business inputs, not repository/product metadata")
     return parts
 

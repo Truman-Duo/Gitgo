@@ -71,7 +71,7 @@ def test_exact_grant_rechecks_contract_changed_during_preparation(tmp_path_facto
     tool.prepare_args = changed
     ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     result = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, ctx, 'changed')
-    assert result.is_error and result.diagnostics['code'] == 'SANDBOX_POLICY_INVALID'
+    assert result.is_error and result.diagnostics['code'] == 'TOOL_EXECUTION_CONTRACT_INVALID'
     assert not calls
     assert process.approval_grants[0]['remaining_uses'] == 1
 def test_search_authority_refuses_private_input_and_uses_effective_route(tmp_path_factory):

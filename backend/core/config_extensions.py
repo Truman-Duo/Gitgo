@@ -6,11 +6,22 @@ older or retired extensions remain stored without becoming active settings.
 from copy import deepcopy
 
 
-def preserve_fields(before, after):
+def preserve_fields(before, after, *, replace_paths=()):
+    """Retain unknown fields while allowing current owners to clear known maps.
+
+    A '*' component denotes an identified record in a list, never a guessed
+    project identity. Only explicitly declared owned values replace wholesale.
+    """
+    return _preserve(before, after, frozenset(replace_paths), ())
+
+
+def _preserve(before, after, replace_paths, path):
+    if path in replace_paths:
+        return deepcopy(after)
     if type(before) is dict and type(after) is dict:
         result = deepcopy(before)
         for key, value in after.items():
-            result[key] = preserve_fields(before.get(key), value)
+            result[key] = _preserve(before.get(key), value, replace_paths, (*path, key))
         return result
     if type(before) is list and type(after) is list:
         identity = next((key for key in ("id", "project_id", "name") if
@@ -19,5 +30,5 @@ def preserve_fields(before, after):
             and len({item[key] for item in after}) == len(after)), None)
         if identity:
             previous = {item[identity]: item for item in before}
-            return [preserve_fields(previous.get(item[identity]), item) for item in after]
+            return [_preserve(previous.get(item[identity]), item, replace_paths, (*path, "*")) for item in after]
     return deepcopy(after)

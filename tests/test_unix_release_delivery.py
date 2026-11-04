@@ -12,6 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_all_declared_unix_targets_are_accounted_for():
     assert TARGETS == {target for target in UPDATE_TARGETS if target[0] != "windows"}
 
+
+def test_package_support_metadata_covers_the_native_release_matrix():
+    from scripts.unix_release_manifest import BASELINES
+    assert set(BASELINES) == TARGETS
+    assert BASELINES[("macos", "arm64")] == "macOS 26"
+
 @pytest.mark.parametrize("target,arch", sorted(TARGETS))
 def test_release_policy_preserves_pinned_key_and_keeps_stable_separate(target, arch):
     base = json.loads((ROOT/"packaging/release-trust/windows-x86_64.json").read_bytes())
