@@ -170,7 +170,7 @@ jobs:
 
   windows-package:
     name: Windows final ZIP and frozen continuity
-    needs: [contract, privacy, python-windows, dashboard]
+    needs: [contract, privacy, dashboard]
     runs-on: windows-2022
     timeout-minutes: 35
     steps:

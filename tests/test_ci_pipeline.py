@@ -112,6 +112,12 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(any('--require-hashes -r packaging/requirements-build.lock' in step.get('run', '')
                                 for step in job['steps']))
 
+    def test_independent_build_does_not_wait_for_source_but_final_gate_requires_both(self):
+        jobs = workflow('ci.yml')['jobs']
+        self.assertEqual(set(jobs['windows-package']['needs']), {'contract', 'privacy', 'dashboard'})
+        self.assertTrue({'python-windows', 'windows-package'} <= set(jobs['gate']['needs']))
+        self.assertIn('python-windows', jobs['managed-update-windows']['needs'])
+
     def test_metadata_edits_cannot_restart_packaging_or_replace_the_product_gate(self):
         ci = workflow('ci.yml')
         self.assertNotIn('edited', ci.get('on', ci.get(True))['pull_request']['types'])
