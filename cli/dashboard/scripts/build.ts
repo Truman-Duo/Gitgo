@@ -1,6 +1,9 @@
 // scripts/build.ts
 import { build } from "bun";
 import {assertRuntimeSecurity} from "./runtime.mjs";
+import {recordBuild} from "./build-state.mjs";
+import {dirname, resolve} from "node:path";
+import {fileURLToPath} from "node:url";
 assertRuntimeSecurity();
 
 const dashboard = await build({
@@ -22,6 +25,7 @@ const inspector = await build({
 });
 
 if (dashboard.success && inspector.success) {
+  recordBuild(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
   console.log("Build OK: dist/cli.js + dist/trace.js");
   for (const log of [...dashboard.logs, ...inspector.logs]) {
     console.log(log);

@@ -265,7 +265,7 @@ def test_new_approval_cannot_bypass_debt_and_preflight_does_not_spend_it(bound_s
     process.pending_decision = None
     ctx = ExecutionContext(process, process.session, str(workspace), storage=storage)
     result = ToolPipeline().execute({'name': tool.name, 'args': {}}, tool, ctx, 'new-call')
-    assert result.is_error and 'SANDBOX_CLEANUP_PENDING' in result.error
+    assert result.is_error and result.diagnostics["code"] == "SANDBOX_CLEANUP_PENDING"
     assert grant['remaining_uses'] == 1 and process.recovery['resume_forbidden']
     # Recovery inspection and Host computation do not inherit a native-process ban.
     inspect = AgentTool('inspection_fixture', 'inspect', {}, lambda _: {'observed': True},

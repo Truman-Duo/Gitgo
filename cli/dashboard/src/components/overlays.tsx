@@ -2,6 +2,8 @@
 // 每个 overlay 一个 case。加一个新 overlay panel = 在 store 的 OverlayType 加
 // 一个枚举值 + 在此 switch 加一个 case，其余不变。
 import React from "react";
+import {ModuleHelpBoundary} from "./ModuleHelpBoundary.js";
+import {isFooterDrawer} from "../ui/overlayLayout.js";
 import type { BackendClient } from "../backend/client.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
 import type { ProjectRow } from "../hooks/useGitgoData.js";
@@ -12,6 +14,8 @@ import type { FooterConfig } from "./CommandBar.js";
 import type { DialogItem } from "./DialogSelect.js";
 import {ProcessDetailPanel} from "./ProcessDetailPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
+import {ModelPicker} from "./ModelPicker.js";
+import {EffortPicker} from "./EffortPicker.js";
 import { QuitPanel } from "./QuitPanel.js";
 import { InlineContext } from "./InlineContext.js";
 import { ConfigPanel } from "./ConfigPanel.js";
@@ -84,7 +88,18 @@ export function renderOverlay(
   overlay: { type: string; props?: Record<string, any> },
   ctx: OverlayCtx,
 ) {
+  const scopedHelp=["configPanel","createForm","exportPanel","statsOverview","statsPanel","updatePanel","runtimeMenu","runtimeContext","governancePanel","memoryPanel","trialPanel","formalPanel","lessonsPanel","runtimeToolsPanel","context","binPanel","quitConfirm","undoPanel","compactPanel","btwPanel"].includes(overlay.type);
+  return scopedHelp?<ModuleHelpBoundary inline={isFooterDrawer(overlay.type)} onFooter={ctx.setFooterOverride}>{onFooter=>renderOverlayContent(overlay,{...ctx,setFooterOverride:onFooter})}</ModuleHelpBoundary>:renderOverlayContent(overlay,ctx);
+}
+function renderOverlayContent(
+  overlay: { type: string; props?: Record<string, any> },
+  ctx: OverlayCtx,
+) {
   switch (overlay.type) {
+    case "modelPicker":
+      return <ModelPicker client={ctx.client} onFooter={ctx.setFooterOverride} onDismiss={ctx.popOverlay} onSelected={()=>{ctx.dispatch({type:"bump_refresh_key"});ctx.refresh();}}/>;
+    case "effortPicker":
+      return <EffortPicker client={ctx.client} onFooter={ctx.setFooterOverride} onDismiss={ctx.popOverlay} onSelected={()=>{ctx.dispatch({type:"bump_refresh_key"});ctx.refresh();ctx.dispatch({type:"set_cmd_result",text:ctx.language==="zh"?"思考强度已保存，将从下一次模型请求生效。":"Effort saved; applies from the next model request."});}}/>;
     case "undoPanel":
       return <UndoPanel client={ctx.client}
         project={overlay.props?.project || ctx.activeProject || ""}
@@ -92,9 +107,9 @@ export function renderOverlay(
         onDismiss={ctx.popOverlay}
         onCommitted={() => { ctx.dispatch({type: "bump_refresh_key"}); ctx.refresh(); }} />;
     case "interruptConfirm":
-      return <InterruptPanel client={ctx.client} project={overlay.props?.project || ctx.activeProject || ""}
+      return <ModuleHelpBoundary inline onFooter={ctx.setFooterOverride}>{onFooter=><InterruptPanel onFooter={onFooter} client={ctx.client} project={overlay.props?.project || ctx.activeProject || ""}
         processId={overlay.props?.processId || ""} requestId={overlay.props?.requestId || ""}
-        subtree={!!overlay.props?.subtree} onDismiss={ctx.popOverlay} />;
+        subtree={!!overlay.props?.subtree} onDismiss={ctx.popOverlay} />}</ModuleHelpBoundary>;
     case "compactPanel":
       return <CompactPanel client={ctx.client}
         project={overlay.props?.project || ctx.activeProject || ""}

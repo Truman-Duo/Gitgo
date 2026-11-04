@@ -14,7 +14,7 @@ EVENTS = (
     "session_recovery_resumed", "session_recovery_discarded", "session_recovery_blocked",
     "context_compaction_completed", "context_window_action", "governance_snapshot",
     "alignment_assessment_started", "alignment_assessment_completed", "alignment_assessment_failed",
-    "alignment_assessment_reused", "alignment_assessment_deferred", "alignment_provider_usage", "architecture_warning",
+    "alignment_assessment_reused", "alignment_assessment_deferred", "alignment_provider_usage", "auxiliary_provider_usage", "architecture_warning",
     "runtime_fact_committed",
 )
 
@@ -136,7 +136,7 @@ def project(record: dict, cas: Path) -> tuple[dict, dict, str]:
             detail_status = "ok"
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
             detail_status = str(error) if isinstance(error, DetailUnavailable) else "invalid_detail"
-    if event in {"provider_usage", "alignment_provider_usage"}:
+    if event in {"provider_usage", "alignment_provider_usage", "auxiliary_provider_usage"}:
         label("purpose", record.get("purpose") or "task")
         label("stage", record.get("stage"))
         number("duration_ms", record.get("duration_ms"))

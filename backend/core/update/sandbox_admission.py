@@ -13,7 +13,7 @@ import stat
 import sys
 from .validation import reject
 
-LEASE_HANDLES_ENV = "GITGO_SANDBOX_INSTALL_LEASE_HANDLES"
+from backend.core.installation_lease import LEASE_HANDLES_ENV
 
 
 def in_appcontainer():

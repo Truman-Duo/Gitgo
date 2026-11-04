@@ -30,7 +30,7 @@ export const updateChinese = {
   "Cached release or download is stale/changed. Select Check now.": "缓存版本或下载已过期或改变，请选择立即检查。",
   "No newer compatible release is available.": "当前没有更新的兼容版本。",
   "Package           ": "安装包      ",
-  "Signed release available. Select Download to review.": "有新的签名版本，请选择下载并确认。",
+  "Signed release available.": "有新的签名版本。",
   "Download this exact signed package? This only prepares files; it does not install or run them.": "下载此签名安装包？仅准备文件，不安装或执行。",
   "Downloaded and verified. Current program is unchanged.": "已下载并校验，当前程序尚未改变。",
   "Restart/update is unavailable here: use a supported managed launcher with complete process cleanup.": "此处无法重启更新，请使用支持完整进程清理的受管启动器。",

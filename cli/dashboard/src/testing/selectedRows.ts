@@ -12,3 +12,11 @@ export function selectedRows(ink: any): string[] {
       ? cells.map(cell => cell.char).join("") : "";
   }).filter(Boolean);
 }
+
+/** Header focus is a rendered state, independent of instructional copy. */
+export function focusedHeader(ink:any,row=0):boolean{
+ const screen=ink.frontFrame.screen;
+ const rgb=colors.selection.block.bg.replace('#','').match(/../g)!.map(p=>parseInt(p,16));
+ const code=`\x1b[48;2;${rgb.join(';')}m`;
+ return Array.from({length:screen.width},(_,x)=>cellAt(screen,x,row)).some(cell=>cell&&ink.stylePool.get(cell.styleId).some((style:any)=>style.code===code));
+}

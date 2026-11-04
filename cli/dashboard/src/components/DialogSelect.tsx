@@ -100,7 +100,7 @@ export const DialogSelect = memo(function DialogSelect({
           {title ? <Text bold color={colors.accent}>{title}</Text> : null}
           <Text dimColor>{placeholderText}</Text>
         </Box>
-        <Text dimColor>{t({en:"Esc dismiss",zh:"Esc 关闭",keys:true})}</Text>
+
       </Box>
 
       {/* Search input */}
@@ -139,7 +139,7 @@ export const DialogSelect = memo(function DialogSelect({
       ) : null}
 
       <Text dimColor>{separator(w)}</Text>
-      <Text dimColor>{t({en:"Enter select · Esc dismiss · Type to filter",zh:"Enter 选择 · Esc 关闭 · 输入筛选",keys:true})}</Text>
+
     </Box>
   );
 });

@@ -5,7 +5,7 @@ import chalk from "chalk";
 import {Box, renderSync} from "@anthropic/ink";
 import instances from "../../vendor/ink/src/core/instances.js";
 import {cellAt} from "../../vendor/ink/src/core/screen.js";
-import {selectedRows} from "../testing/selectedRows.js";
+import {selectedRows,focusedHeader} from "../testing/selectedRows.js";
 import {InputProvider} from "../input/runtime.js";
 import {LanguageContext} from "../ui/PageFrame.js";
 import {useTextInput} from "../hooks/useTextInput.js";
@@ -72,6 +72,9 @@ test("role flow is separate from Git history and returns from node evidence with
     await wait(); await io.commandStart(); await io.send("flow"); await io.send("\r");
     expect(io.text()).toContain("三角色流转"); expect(io.text()).toContain("TRIAL"); expect(io.text()).toContain("FORMAL");
     expect(io.text()).not.toContain("WORKSPACE");
+    await io.send('/help');await io.send('\r');expect(io.text()).toContain('查看已保存计划及实际处理步骤');
+    await io.send('\x1b');expect(io.text()).toContain('三角色流转');expect(io.text()).toContain('TRIAL');
+    expect(io.footer()?.hidden).toBe(true);expect(calls).toEqual(['publish.items']);
     await io.resize(40, 20);
     expect(io.viewport().scrollTop).toBe(0);
     expect(io.selected().length).toBeGreaterThan(0);
@@ -445,7 +448,7 @@ function mount(client: any, initial = "one", localState?: PublishLocalState) {
     {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
   return {
     async send(key: string) { stdin.write(key); await wait(); },
-    async commandStart() { if (this.text().includes("←/→ 栏目")) {stdin.write("\r"); await wait();} stdin.write("/"); await wait(); },
+    async commandStart() { if (focusedHeader(instances.get(stdout))) {stdin.write("\r"); await wait();} stdin.write("/"); await wait(); },
     async project(project: string) { root.rerender(<InputProvider><Fixture project={project}/></InputProvider>); await wait(); },
     async resize(width: number, height = 24) { stdout.columns = width; stdout.rows = height; stdout.emit("resize"); await wait(); },
     text() { const screen = (instances.get(stdout) as any).frontFrame.screen;
@@ -895,7 +898,7 @@ test("opening long matrix evidence starts at the plan instead of following the l
       await io.resize(width, height);
       const rows = io.text().split("\n");
       expect(rows.some(row => row.includes("本地已保存记录"))).toBe(true);
-      expect(rows.find(row => row.includes("Esc 返回事项"))?.trim()).toBe("↑/↓ 滚动 · Esc 返回事项");
+      expect(rows.some(row => row.includes("Esc 返回事项"))).toBe(false);
     }
     for (let i = 0; i < 8; i++) await io.send("\x1b[B");
     await io.send("\x1b"); await io.send("\r");

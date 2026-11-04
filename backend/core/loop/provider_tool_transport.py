@@ -18,7 +18,8 @@ GUIDANCE = (
     'The native function gitgo_call is transport framing, not a business tool or an authorization service. '
     'Use gitgo_call with {"name": exact_current_tool_name, "arguments": original_argument_object}. '
     'runtime.tool_contracts contains the exact currently callable definitions, including argument schemas. '
-    'Only keys still present in that current catalog are callable. Removed definitions are historical. '
+    'runtime.tool_contracts is a reference catalog. Only names in runtime.capability.available_tools are currently callable; '
+    'a retained description is not availability or permission. '
     'The runtime unwraps once, then runs the original tool pipeline, argument validation, capability lease, '
     'policy, manual/auto admission, sandbox, cancellation and completion rules. '
     'A call to an absent or revoked tool fails; do not infer a new capability from the stable transport function. '
@@ -33,6 +34,35 @@ def wire_tools(tools):
 def catalog(tools):
     return {str((item.get('function') or item)['name']):deepcopy(item.get('function') or item)
         for item in tools or []}
+
+
+def reference_catalog(session, tools, *, scope, behaviors=None):
+    """Retain unchanged schemas without retaining callable capabilities.
+
+    Reuses the optional presentation cache, not a new registry or authority.
+    The active surface always replaces a schema, and scope changes discard
+    prior descriptions. Inactive descriptions are bounded and never executed.
+    """
+    state = getattr(session, 'provider_context_cache', {})
+    previous = (state.get('snapshot') or {}).get('runtime.tool_contracts', {}) if state.get('scope') == scope else {}
+    live = catalog(tools)
+    for name, behavior in (behaviors or {}).items():
+        if name in live:
+            live[name]['runtime_behavior'] = deepcopy(behavior)
+    retained = {name: deepcopy(value) for name, value in previous.items() if name not in live}
+    retained = dict(list(retained.items())[-128:])
+    return {**retained, **live}
+
+
+def argument_error_guidance(tool_name, args, schema):
+    """Diagnose framing at a rejected schema boundary; never guess/unwrap it."""
+    if (isinstance(args, dict) and set(args) == {'name', 'arguments'}
+            and args['name'] == tool_name and isinstance(args['arguments'], dict)
+            and not {'name', 'arguments'}.issubset(schema.get('properties', {}))):
+        return ('The business arguments contain an extra transport envelope. Use native gitgo_call once with '
+            '{"name":"' + tool_name + '","arguments":{the business fields}}. '
+            'Do not nest another name/arguments object inside arguments. No operation was executed.')
+    return ''
 
 
 def decode(call, *, raw_arguments=None):

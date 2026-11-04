@@ -18,12 +18,17 @@ def test_review_evidence_prefix_keeps_every_fact_and_current_generation():
     second = review_description(context, payload)
     # Reuse ends before the changed candidate, preserving both the current
     # candidate and epoch. No duplicate filler or omission earns that prefix.
-    assert first.split(', "candidate":')[0] == second.split(', "candidate":')[0]
+    assert first.split(',"candidate":')[0] == second.split(',"candidate":')[0]
     restored = json.loads(second.split('\n\n', 1)[1])
     assert restored == {'instructions': payload['instructions'], 'receipts': payload['event']['receipts'],
         'candidate': 'A new completion candidate', 'task_id': 'owner',
         'instance_id': 'policy', 'epoch': 3, 'event_id': 'attempt-b'}
     assert payload['event']['receipts'][0]['receipt_id'] == 'actual-write'
+    payload['instructions'] = 'Updated review criteria; do not change the public interface.'
+    third = review_description(context, payload)
+    assert third.split('\n\n', 1)[0] == second.split('\n\n', 1)[0]
+    assert third.split(',"candidate":')[0] != second.split(',"candidate":')[0]
+    assert json.loads(third.split('\n\n', 1)[1]) == {**restored, 'instructions': payload['instructions']}
 
 
 def test_lifecycle_review_observes_saved_definition_without_claiming_activation(runtime):

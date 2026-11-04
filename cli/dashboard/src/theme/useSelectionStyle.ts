@@ -20,6 +20,7 @@ export function useSelectionStyle(
   variant: SelectionVariant,
   accentColor?: string,
 ): StyleProps {
+  if (variant === "scale") return {bg: undefined, fg: colors.scale.active, bold: true};
   // Non-focused context
   if (context === "non-focused") {
     if (variant === "row") {

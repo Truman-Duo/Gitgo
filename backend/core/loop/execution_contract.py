@@ -51,6 +51,17 @@ NATIVE_WORKSPACE_PRODUCER = ExecutionContract(ExecutionType.NATIVE_PROCESS, file
 NATIVE_FILE_READ = ExecutionContract(ExecutionType.NATIVE_PROCESS, file_action="read_existing_file")
 
 
+def verify_registration(tool, process, owner, registration):
+    """Recheck an admitted identity; this neither selects nor grants authority."""
+    contract = tool.validate_execution_contract()
+    if owner != (process.process_id, process.active_task_id or process.process_id):
+        raise ValueError("Task scope changed during invocation")
+    from .permission_broker import tool_contract_digest
+    if tool_contract_digest(tool) != registration:
+        raise ValueError("Tool identity or limits changed during invocation")
+    return contract
+
+
 def native_timeout(tool, args):
     import math
     value = float(tool.timeout)

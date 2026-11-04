@@ -3,6 +3,7 @@ import {Box, ScrollBox, Text, type ScrollBoxHandle} from "@anthropic/ink";
 import type {BackendClient} from "../backend/client.js";
 import type {FooterConfig} from "./CommandBar.js";
 import {useManagedInput} from "../input/runtime.js";
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {matchChord} from "../input/bindings.js";
 import {useCopy} from "../ui/PageFrame.js";
 import {parseUnifiedDiff} from "../utils/diff.js";
@@ -14,6 +15,7 @@ export function PublishPreviewPanel({client, project, itemId, binding, onFooter,
   onFooter: (value: FooterConfig | null) => void; onDismiss: () => void;
 }) {
   const t = useCopy(), {w} = usePanelSize({minWidth: 20, widthOffset: 4}), scroll = useRef<ScrollBoxHandle>(null);
+  const help=useLocalHelpCommand("publish.preview",onFooter);
   const [result, setResult] = useState<{text: string; truncated: boolean; base_oid: string; tree_oid: string} | null>(null), [error, setError] = useState("");
   useEffect(() => {
     let active = true; onFooter({hidden: true});
@@ -22,6 +24,7 @@ export function PublishPreviewPanel({client, project, itemId, binding, onFooter,
   }, [client, project, itemId, binding, onFooter]);
   const files = useMemo(() => parseUnifiedDiff((result?.text ?? "").replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, " ")), [result]);
   useManagedInput((text, key) => {
+    if(help.handle(text,key))return;
     if (matchChord("escape", text, key)) onDismiss();
     else if (matchChord("up", text, key)) scroll.current?.scrollBy(-1);
     else if (matchChord("down", text, key)) scroll.current?.scrollBy(1);
@@ -32,6 +35,6 @@ export function PublishPreviewPanel({client, project, itemId, binding, onFooter,
     {error ? <Text>{error}</Text> : !result ? <Text>{t({en: "Reading fixed content…", zh: "正在读取固定内容…"})}</Text> : null}
     <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}><DiffView files={files} width={w}/>
       {result?.truncated ? <Text>{t({en: "The patch reached its display limit; omitted changes are not approved by this view.", zh: "差异达到显示上限，不能据此认为省略部分已核对。"})}</Text> : null}</ScrollBox>
-    <Text dimColor>{t({en: "↑/↓ scroll · Esc back", zh: "↑/↓ 滚动 · Esc 返回"})}</Text>
+
   </Box>;
 }

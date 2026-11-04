@@ -390,7 +390,10 @@ def test_actual_agent_loop_exposes_workflow_and_streams_recovery_notices(tmp_pat
     class Provider:
         protocol = SimpleNamespace(value="openai_responses")
         capabilities = SimpleNamespace(prompt_cache="automatic")
-        context_window = 8192
+        # This scripted Provider has no summary endpoint. Keep this workflow
+        # regression clear of auto-compaction as the real tool contracts grow;
+        # small-window overflow/recovery has dedicated context tests.
+        context_window = 16384
         calls = 0
 
         def stream_events(self, *args, **kwargs):

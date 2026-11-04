@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 import React, {memo, useState, useEffect, useRef} from "react";
 import {Box, Text} from "@anthropic/ink";
@@ -29,14 +30,13 @@ export const CreateProjectPanel = memo(function CreateProjectPanel({client, defa
   const status = feedback.text, setStatus = feedback.show;
   const [saving, setSaving] = useState(false);
   const submitting = useRef(false);
-  const hint = form.editing
-    ? `${form.isChoice ? `${chordLabel("leftRight")} ${t({en: "choose", zh: "选择"})} · ` : ""}${chordLabel("enter")} ${t({en: "confirm field", zh: "暂存当前字段"})} · ${chordLabel("escape")} ${t({en: "undo field", zh: "撤销当前字段"})} · ${chordLabel("formSave")} ${t({en: "save form", zh: "保存表单"})}`
-    : `${chordLabel("upDown")} / ${chordLabel("tab")} ${t({en: "select", zh: "选择"})} · ${chordLabel("enter")} ${t({en: "edit", zh: "修改"})} · ${chordLabel("formSave")} ${t({en: "save form", zh: "保存表单"})}`;
+  const menuHelp=useLocalHelpCommand("create",onFooter,!form.editing&&!saving);
   useEffect(() => {
-    onFooter(form.editing && !form.isChoice ? {kind: "normal", cmdInput, statusText: status || hint,
+    if(menuHelp.active)return;
+    onFooter(form.editing && !form.isChoice ? {kind: "normal", cmdInput, statusText: "",
       suggestions: [], suggestionIdx: 0, cmdResult: ""} : {hidden: true});
     return () => onFooter(null);
-  }, [form.editing, form.isChoice, cmdInput.value, cmdInput.cursor, status, hint, onFooter]);
+  }, [form.editing, form.isChoice, cmdInput.value, cmdInput.cursor, onFooter,menuHelp.active]);
   const submit = async () => {
     if (submitting.current) return;
     const final = form.current;
@@ -53,7 +53,9 @@ export const CreateProjectPanel = memo(function CreateProjectPanel({client, defa
     } catch (error: any) {setStatus(String(error?.message || error));}
     finally {submitting.current = false; setSaving(false);}
   };
+
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if (saving) return;
     for (const action of resolveCreateProjectKey(form.field, input, key, form.editing)) {
       switch (action.type) {
@@ -68,7 +70,7 @@ export const CreateProjectPanel = memo(function CreateProjectPanel({client, defa
         case "text": applyTextOp(action.op, cmdInput); break;
       }
     }
-  }, {bindingContext: "form"});
+  }, {bindingContext: "form",clipboard:form.editing&&!form.isChoice&&!saving,inputTarget:form.editing?form.field:""});
   const labels = {name: t({en: "Name *", zh: "项目名称 *"}), mode: t({en: "Workspace Mode *", zh: "工作目录模式 *"}),
     workspace: t({en: "Workspace Path *", zh: "工作目录路径 *"}), release: t({en: "Release URL", zh: "发布仓库 URL"})};
   const labelWidth = fieldLabelWidth(Object.values(labels), Math.max(1, w - 10));
@@ -79,8 +81,7 @@ export const CreateProjectPanel = memo(function CreateProjectPanel({client, defa
         <SelectionText  wrap="truncate-end">{field === "mode" ? form.current.mode === "attach_existing" ? t({en: "Attach Existing", zh: "接入已有目录"}) : t({en: "Create New", zh: "创建新目录"}) : form.current[field] || "—"}</SelectionText>
       </FormFieldRow>;
     })}</Box>
-    <Text dimColor>{t({en: "Attach Existing requires an existing folder; Create New requires a missing or empty folder. Uses the configured active provider.", zh: "接入已有目录要求目录存在；创建新目录要求路径不存在或目录为空。模型沿用已配置的当前服务商。"})}</Text>
     {feedback.message ? <Box marginTop={1}><FeedbackMessage feedback={feedback.message}/></Box> : null}
-    <Box marginTop={1}><Text dimColor>{hint} · {chordLabel("escape")} {t({en: "cancel", zh: "取消"})}</Text></Box>
+    <Box marginTop={1}></Box>
   </Box>;
 });

@@ -49,7 +49,8 @@ test("stats arrows select headers first, then content; Chinese uses the same rou
  const io=terminal(<LanguageContext.Provider value="zh"><StatsOverview client={client} cols={100} onDismiss={()=>{}} onInspect={p=>opened.push(p)}/></LanguageContext.Provider>);
  try{
   await settle();await io.send("\x1b[C"); // header selects tasks, not a day.
-  expect(io.text()).toContain("按 Enter 打开选中项目");expect(opened).toHaveLength(0);
+  expect(io.frame()).toContain("最近任务");expect(opened).toHaveLength(0);
+  await io.send("\x1b[B");expect(opened).toHaveLength(0); // Arrows stay on the header.
   await io.send("\r");await io.send("\x1b[B");await io.send("\r");
   expect(opened).toEqual(["two"]);
   await io.send("r");expect(opened).toHaveLength(1);

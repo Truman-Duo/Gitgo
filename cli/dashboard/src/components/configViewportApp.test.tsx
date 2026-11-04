@@ -65,9 +65,9 @@ test("config keeps one bounded viewport through held navigation, resizing and ta
       stdout.columns = width; stdout.rows = height; stdout.emit("resize"); await wait(); await wait();
       await key("\x1b[B");
       expect(frame()).toContain(last.label.en);
-      expect(frame()).toContain("Test keyboard input");
+      expect(frame()).not.toContain("Test keyboard input");
       expect(frame()).toContain("Restore all defaults");
-      expect(frame()).toContain("Esc back");
+      expect(frame().split("\n").filter(line=>line.includes("Keybindings"))).toHaveLength(1);
       expect(viewport.scrollTop).toBe(bottom(viewport));
       expect(viewport.pendingScrollDelta || 0).toBe(0);
     }

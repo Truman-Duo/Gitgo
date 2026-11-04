@@ -145,7 +145,7 @@ test("global stats does not show queried zero totals before the query completes"
       complete: true,
     });
     await wait();
-    expect(io.text()).toContain("USD cost is unrecorded");
+    expect(io.text()).toContain("Cost unrecorded");
   } finally {
     root.unmount();
     root.cleanup();

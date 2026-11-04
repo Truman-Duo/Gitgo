@@ -113,10 +113,15 @@ def _related(raw):
         raise ValueError("related work candidates must be bounded")
     result = {}
     required = ("source", "affected", "reason", "consequence", "work", "verification", "owner")
-    for item in candidates:
-        if (not isinstance(item, dict) or set(item) - {*required, "evidence_kind"}
-                or any(not isinstance(item.get(k), str) or not item[k].strip() or len(item[k]) > 4000 for k in required)):
-            raise ValueError("related candidates need source, affected object, reason, consequence, work, verification and owner")
+    for index, item in enumerate(candidates):
+        if not isinstance(item, dict):
+            raise ValueError(f"related_review.candidates[{index}] must be an object")
+        unknown = set(item) - {*required, "evidence_kind"}
+        if unknown:
+            raise ValueError(f"related_review.candidates[{index}] unsupported fields: " + ', '.join(sorted(unknown)))
+        invalid = [k for k in required if not isinstance(item.get(k), str) or not item[k].strip() or len(item[k]) > 4000]
+        if invalid:
+            raise ValueError(f"related_review.candidates[{index}] requires bounded nonempty fields: " + ', '.join(invalid))
         if item.get("evidence_kind") not in {"observed", "declared", "inferred"}:
             raise ValueError("related candidate evidence_kind must separate observation from inference")
         identifier = "related-" + digest({k: item[k] for k in required})[:20]
@@ -160,8 +165,22 @@ def prepare_contract_state(process, contract, proposal, workflow):
         raise ValueError("maintenance proposal exceeds task control-plane budget")
     if update and (type(update.get("expected_revision")) is not int or update["expected_revision"] != state["revision"]):
         raise ValueError("TASK_MAINTENANCE_REVISION_CONFLICT: maintenance.expected_revision must be " + str(state["revision"]))
-    if set(update) - {"expected_revision", "plan", "related_review", "resolve_changes", "resolve_maintenance", "adopt_related", "related_dispositions"}:
+    if set(update) - {"expected_revision", "plan", "plan_review", "related_review", "resolve_changes", "resolve_maintenance", "adopt_related", "related_dispositions"}:
         raise ValueError("unknown maintenance update")
+    plan_review = update.get('plan_review')
+    if plan_review is not None:
+        if (not isinstance(plan_review, dict) or set(plan_review) != {'action', 'reason'}
+                or plan_review['action'] != 'retain' or not isinstance(plan_review['reason'], str)
+                or not plan_review['reason'].strip() or len(plan_review['reason']) > 4000):
+            raise ValueError('PLAN_REVIEW_INVALID: retain requires your reasoned review of the existing plan')
+        if update.get('plan') is not None:
+            raise ValueError('PLAN_REVIEW_CONFLICT: supply a revised plan or retain it, not both')
+        if not state.get('plan', {}).get('steps'):
+            raise ValueError('PLAN_REVIEW_MISSING_PLAN: declare a plan first')
+        state['plan'] = {**state['plan'], 'revision': state['plan']['revision'] + 1,
+                         'contract_revision': contract['revision']}
+        state['plan_review'] = {**deepcopy(plan_review), 'plan_revision': state['plan']['revision'],
+            'contract_revision': contract['revision'], 'maintenance_ids': list(update.get('resolve_maintenance') or [])}
     if update.get("plan") is not None:
         state["plan"] = {**_plan(update["plan"]), "revision": state.get("plan", {}).get("revision", 0) + 1,
                          "contract_revision": contract["revision"]}
@@ -232,8 +251,10 @@ def prepare_contract_state(process, contract, proposal, workflow):
                       plan_revision=state["plan"]["revision"])
     for identifier in update.get("resolve_maintenance") or []:
         item = state["maintenance_items"].get(identifier)
-        if item is None or item.get("status") != "pending" or not update.get("plan"):
-            raise ValueError("maintenance requires its actual trigger and a revised plan")
+        if item is None or item.get("status") != "pending":
+            raise ValueError("maintenance resolution requires an actual pending trigger id")
+        if not update.get("plan") and not plan_review:
+            raise ValueError("maintenance requires a revised plan or plan_review={action:retain,reason:...} when the current plan still covers the trigger")
         source = item.get("source", "")
         retained = {dep["kind"] + ":" + dep["id"] for dep in state["plan"].get("dependencies", [])}
         if source in retained and str(state.get("dependency_versions", {}).get(source, "")).startswith("unavailable:"):
@@ -242,7 +263,7 @@ def prepare_contract_state(process, contract, proposal, workflow):
     state["revision"] += 1
     state["epoch"] += 1
     pending = any(c["status"] == "pending" for c in state["changes"].values()) or any(c["status"] == "pending" for c in state["maintenance_items"].values())
-    needs_plan = enabled(definition, "task.plan") is not None and (not state["plan"] or state.get("review_requirements", {}).get("plan", False)) and not update.get("plan")
+    needs_plan = enabled(definition, "task.plan") is not None and (not state["plan"] or state.get("review_requirements", {}).get("plan", False)) and not (update.get("plan") or plan_review)
     needs_related = enabled(definition, "task.related_work") is not None and (not state.get("related", {}).get("summary") or state.get("review_requirements", {}).get("related", False)) and not update.get("related_review")
     # A changed goal/acceptance basis requires another semantic review, not a text append.
     from .task_contract import semantic_contract, get_task_contract
@@ -259,6 +280,8 @@ def prepare_contract_state(process, contract, proposal, workflow):
     previous_basis = scope_basis(previous_contract) if before and previous_contract.get("revision") else None
     basis = scope_basis(contract)
     changed = bool(previous_basis and previous_basis != basis)
+    if changed and plan_review:
+        raise ValueError('PLAN_REVIEW_SCOPE_CHANGED: changed business scope requires an explicit revised plan')
     if changed and not update.get("plan"):
         needs_plan = True
     if changed and not update.get("related_review"):
@@ -446,12 +469,8 @@ def model_context(process):
     Full audit/source records remain available through task_mechanism.status.
     This projection is ephemeral; the durable state and gates are untouched.
     """
-    current = inspect(process)
-    current.pop('consumer_projection', None)
-    # Source content already lives in user messages/decision receipts; retain
-    # the addressable identities, not repeated copies in every model turn.
-    current['state'].pop('source_receipts', None)
-    return current
+    from .model_feedback import task_view
+    return task_view(inspect(process))
 
 
 def alignment_basis(process):
@@ -483,11 +502,13 @@ def _file_dependency(root, name):
 
 def dependency_snapshot(process, state, tools):
     """Read only declared inputs; changes in unrelated sources do not replan."""
-    from .permission_broker import tool_contract_digest
+    from .permission_broker import tool_contract_digests
     from backend.core.knowledge.review import content_version
     root = Path(process.worktree_path).resolve()
     storage = getattr(process, "runtime_storage", None) or getattr(getattr(process, "_manager", None), "storage", None)
     result = {}
+    tool_ids = {dep["id"] for dep in state.get("plan", {}).get("dependencies", []) if dep["kind"] == "tool"}
+    tool_versions = tool_contract_digests({name: tools[name] for name in tool_ids if name in tools}) if tool_ids else {}
     for dep in state.get("plan", {}).get("dependencies", []):
         key = dep["kind"] + ":" + dep["id"]
         if dep["kind"] == "file":
@@ -496,7 +517,7 @@ def dependency_snapshot(process, state, tools):
             except (OSError, ValueError) as exc:
                 result[key] = "unavailable:" + type(exc).__name__
         elif dep["kind"] == "tool":
-            result[key] = tool_contract_digest(tools[dep["id"]]) if dep["id"] in tools else "missing"
+            result[key] = tool_versions.get(dep["id"], "missing")
         else:
             found = storage.get_lesson_record(dep["id"]) if storage is not None else None
             result[key] = content_version(found[1]) if found else "missing"
@@ -567,7 +588,11 @@ def observe_result(process, result):
     # Keep their original diagnostics and recovery path, without turning a
     # missing capability or internal bug into another business-scope revision.
     internal = (result.receipt.get("diagnostic_scope") == "gitgo_runtime"
-                or result.diagnostics.get("nature") in {"system", "governance"})
+                or result.diagnostics.get("nature") in {"system", "governance"}
+                or result.diagnostics.get('code') in {
+                    'INVALID_TOOL_ARGUMENTS', 'TASK_CONTRACT_REVISION_CONFLICT',
+                    'TOOL_RESULT_LOCATOR_INVALID',
+                })
     plan_failure = result.is_error and not internal
     if not diagnostic_lessons and not plan_failure:
         return

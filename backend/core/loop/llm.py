@@ -79,6 +79,8 @@ class LLMProvider:
         protocol: str = ProviderProtocol.OPENAI_CHAT.value,
         capabilities: dict | ProviderCapabilities | None = None,
         transport: HttpProviderTransport | None = None,
+        request_preferences: dict | None = None,
+        request_preferences_source=None,
     ):
         self._base = base_url.rstrip("/")
         self._key = api_key
@@ -95,6 +97,20 @@ class LLMProvider:
             )
         )
         self.transport = transport or HttpProviderTransport()
+        from .provider_preferences import validate_preferences
+        self.request_preferences = validate_preferences(request_preferences, self.protocol.value)
+        self._request_preferences_source = request_preferences_source
+
+    def _preferences_snapshot(self):
+        import copy
+        from .provider_preferences import validate_preferences
+        source = getattr(self, '_request_preferences_source', None)
+        return validate_preferences(source() if source else copy.deepcopy(self.request_preferences), self.protocol.value)
+
+    def _request_body(self, request, preferences=None):
+        from .provider_preferences import apply_preferences
+        return apply_preferences(self.adapter.build_body(request, self._model),
+                                 self._preferences_snapshot() if preferences is None else preferences, self.protocol.value)
 
     @property
     def context_window(self) -> int:
@@ -278,7 +294,8 @@ class LLMProvider:
             ),
             metadata=dict(metadata or {}),
         )
-        body = self.adapter.build_body(request, self._model)
+        preferences = self._preferences_snapshot()
+        body = self._request_body(request, preferences)
         emitted = False
         hosted_fallback_used = False
         attempt = 0
@@ -336,7 +353,7 @@ class LLMProvider:
                     )
                     request.metadata["hosted_web_search"] = False
                     hosted_fallback_used = True
-                    body = self.adapter.build_body(request, self._model)
+                    body = self._request_body(request, preferences)
                     continue
                 retryable = exc.status_code == 429 or exc.status_code >= 500
                 if not emitted and retryable and attempt + 1 < attempt_limit:
@@ -365,6 +382,9 @@ class LLMProvider:
         from .provider_generation import reasoning_effort, rejects_reasoning_preference
         from .provider_cache import prefix_intent
         effort = reasoning_effort(self.protocol, purpose, getattr(self, '_alignment_effort_unsupported', False))
+        preferences = self._preferences_snapshot()
+        if preferences.get("reasoning_effort") or {"reasoning", "reasoning_effort"} & set(preferences.get("body", {})):
+            effort = None  # Explicit user preferences never silently negotiate away.
         request = ProviderRequest(
             messages=tuple(messages), tools=tuple(tools or []),
             max_output_tokens=min(max_tokens, self.max_output_tokens),
@@ -373,7 +393,7 @@ class LLMProvider:
                                       purpose=purpose or 'main'),
             reasoning_effort=effort,
         )
-        body = self.adapter.build_body(request, self._model)
+        body = self._request_body(request, preferences)
         for preference_attempt in range(2):
             try:
                 data = self.transport.post_json(
@@ -396,7 +416,7 @@ class LLMProvider:
                             timeout = before_generation_fallback()
                         except Exception as preparation_error:
                             raise ProviderRequestPreparationFailed(preparation_error) from preparation_error
-                    body = self.adapter.build_body(replace(request, reasoning_effort=None), self._model)
+                    body = self._request_body(replace(request, reasoning_effort=None), preferences)
                     continue
                 wrapped = RuntimeError(str(exc))
                 wrapped.__cause__ = exc
@@ -439,7 +459,7 @@ class LLMProvider:
     def _accumulate_events(events) -> dict:
         content: list[str] = []
         reasoning: list[str] = []
-        tool_calls: list[dict] = []
+        tool_calls: dict[int, dict] = {}
         artifacts: list[dict] = []
         usage = None
         response_id = ""
@@ -449,22 +469,23 @@ class LLMProvider:
                 content.append(event.text)
             elif event.type == ProviderEventType.REASONING_DELTA:
                 reasoning.append(event.reasoning)
-            elif event.type == ProviderEventType.TOOL_CALL_DONE:
-                tool_calls.append({
-                    "id": event.tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": event.tool_name,
-                        "arguments": event.arguments or "{}",
-                    },
-                })
+            elif event.type in {ProviderEventType.TOOL_CALL_STARTED, ProviderEventType.TOOL_CALL_DELTA, ProviderEventType.TOOL_CALL_DONE}:
+                call = tool_calls.setdefault(max(0, event.output_index), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                if event.tool_call_id:
+                    call["id"] = event.tool_call_id
+                if event.tool_name:
+                    call["function"]["name"] = event.tool_name
+                if event.type == ProviderEventType.TOOL_CALL_DONE and event.arguments:
+                    call["function"]["arguments"] = event.arguments
+                elif event.arguments_delta:
+                    call["function"]["arguments"] += event.arguments_delta
             elif event.type == ProviderEventType.REASONING_ARTIFACT and event.artifact:
                 artifacts.append(event.artifact)
             elif event.type == ProviderEventType.USAGE and event.usage:
                 usage = event.usage.to_dict()
         response = {
             "content": "".join(content),
-            "tool_calls": tool_calls,
+            "tool_calls": list(tool_calls.values()),
             "response_id": response_id,
         }
         if reasoning:

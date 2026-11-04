@@ -8,9 +8,9 @@ import type {PublishLocalState} from "../state/publishLocalState.js";
 import {PublishOperationDraft} from "./PublishOperationDraft.js";
 import {PublishPrDetails} from "./PublishPrDetails.js";
 import {useManagedInput} from "../input/runtime.js";
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {matchChord} from "../input/bindings.js";
 import {useCopy} from "../ui/PageFrame.js";
-import {} from "../theme/index.js";
 import {useFeedback} from "../hooks/useFeedback.js";
 
 export function PublishRepositoryBrowser({client, project, items, localState, onFooter, onDismiss, onBind}: {
@@ -20,6 +20,7 @@ export function PublishRepositoryBrowser({client, project, items, localState, on
 }) {
   const t = useCopy();
   const [form, setForm] = useState(true), [initial, setInitial] = useState<Record<string, string>>({resource: "pulls"});
+  const help=useLocalHelpCommand("publish.collaboration",onFooter,!form);
   const [snapshot, setSnapshot] = useState<PublishPlatformSnapshot | null>(null), [busy, setBusy] = useState(false);
   const feedback = useFeedback({kind: "page", id: `${project}:publish/repository`}, {tone: "error"});
   const error = feedback.text, setError = feedback.show;
@@ -27,7 +28,7 @@ export function PublishRepositoryBrowser({client, project, items, localState, on
   const listing = useRef<PublishPlatformSnapshot | null>(null), listingSelection = useRef(0);
   const scroll = useRef<ScrollBoxHandle>(null), selectedRow = useRef<DOMElement>(null);
   useEffect(() => {active.current = true; return () => {active.current = false;};}, []);
-  useEffect(() => {if (!form && !detail) {onFooter({hidden: true}); return () => onFooter(null);}}, [form, detail, onFooter]);
+  useEffect(() => {if (!form && !detail && !help.active) {onFooter({hidden: true}); return () => onFooter(null);}}, [form, detail, onFooter,help.active]);
   const documents = snapshot?.document ? [snapshot.document] : snapshot?.documents ?? [];
   useLayoutEffect(() => {if (selectedRow.current) scroll.current?.scrollIntoView(selectedRow.current);}, [selected, snapshot]);
   const read = async (_operation: string, args: Record<string, any>) => {
@@ -46,6 +47,7 @@ export function PublishRepositoryBrowser({client, project, items, localState, on
     finally {if (active.current) setBusy(false);}
   };
   useManagedInput((text, key) => {
+    if(help.handle(text,key))return;
     if (matchChord("escape", text, key)) onDismiss();
     else if (matchChord("up", text, key)) setSelected(value => Math.max(0, value - 1));
     else if (matchChord("down", text, key)) setSelected(value => Math.min(documents.length, value + 1));
@@ -80,6 +82,6 @@ export function PublishRepositoryBrowser({client, project, items, localState, on
         <SelectionText selected={selected === documents.length}  >{t({en: "Read / refresh another page", zh: "读取或刷新其他页"})}</SelectionText>
       </SelectionRow>
     </ScrollBox>
-    <Text dimColor>{t({en: "↑/↓ select · Enter read exact PR · Esc back", zh: "↑/↓ 选择 · Enter 读取具体 PR · Esc 返回"})}</Text>
+
   </Box>;
 }

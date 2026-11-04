@@ -4,12 +4,13 @@ import {useManagedInput as useInput} from "../input/runtime.js";
 import {matchChord} from "../input/bindings.js";
 import {useTextInput, applyTextOp} from "../hooks/useTextInput.js";
 import {useCopy} from "../ui/PageFrame.js";
+import {useModuleHelp} from "./ModuleHelpBoundary.js";
 import {usePanelSize} from "../theme/index.js";
 import type {BackendClient} from "../backend/client.js";
 import type {FooterConfig} from "./CommandBar.js";
 import type {PublishLocalState} from "../state/publishLocalState.js";
 import {layoutCommitGraph, drawCommitGraph, type GraphFrontier} from "./publishCommitGraph.js";
-import {resolveCommandKeys, applyCommandAction} from "../input/commandInput.js";
+import {isCommandMode,resolveCommandKeys, applyCommandAction} from "../input/commandInput.js";
 import type {Copy} from "../ui/pageContract.js";
 import {useGraphicsCapability} from "../ui/terminalGraphics.js";
 import {commitGraphSvg} from "./publishGraphSvg.js";
@@ -27,6 +28,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
   onFooter: (footer: FooterConfig | null) => void; onDismiss: () => void;
 }) {
   const t = useCopy(), input = useTextInput(), {w, h} = usePanelSize({minWidth: 20, widthOffset: 4});
+  const help=useModuleHelp();
   const key = "history/" + itemId + "/" + head;
   const [saved] = useState(() => localState?.get<Saved>(key));
   const [page, setPage] = useState<History | null>(null), [selected, setSelected] = useState(0);
@@ -36,6 +38,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
   const [suggestionIdx, setSuggestionIdx] = useState(0);
   const commandSuggestion = (name: string, description: Copy) => ({label: `/${name}`, description: t(description)});
   const commands = [
+    commandSuggestion("help",{en:"Help",zh:"帮助"}),
     commandSuggestion("refresh", {en: "Reload Git history", zh: "刷新 Git 历史"}),
     ...(page?.next_cursor ? [commandSuggestion("more", {en: "Next history page", zh: "下一页历史"})] : []),
     ...Array.from({length: page?.commits[selected]?.parents.length ?? 0}, (_, index) => ({
@@ -112,9 +115,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
   }, [diff]);
   useEffect(() => {
     onFooter(input.value.startsWith("/") ? {kind: "command", cmdInput: input, suggestions, suggestionIdx: activeSuggestion, cmdResult: "",
-      statusText: t(w < 60 ? {en: "←/→ · Enter diff · Esc back", zh: "←/→ · Enter 差异 · Esc 返回"}
-        : w < 100 ? {en: "←/→ commit · Enter diff · /parent N · Esc back", zh: "←/→ 选择 · Enter 差异 · /parent N · Esc 返回"}
-        : {en: "←/→ commit · Enter diff · /more · /parent N · Esc back", zh: "←/→ 选择提交 · Enter 差异 · /more 下一页 · /parent N 父提交 · Esc 返回"})} : {hidden: true});
+      statusText: ""} : {hidden: true});
     return () => onFooter(null);
   }, [input, input.value, input.cursor, onFooter, t, w, page, selected, suggestionIdx]);
   useInput((text, key) => {
@@ -130,6 +131,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
       if (matchChord("escape", text, key)) input.setValue("");
       else if (matchChord("enter", text, key)) {
         const command = input.value.trim(); input.setValue("");
+        if(command==="/help"){help?.open("publish.history");return;}
         if (busy) return;
         if (command === "/more" && page?.next_cursor) void read({cursor: page.next_cursor, frontier: graph.frontier, selected: ""}, true);
         else if (command === "/refresh") { pages.current = []; void read({cursor: "", frontier: [], selected: page?.commits[selected]?.oid ?? ""}); }
@@ -138,7 +140,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
       else if (text && !key.ctrl && !key.meta) applyTextOp({op: "insert", text}, input);
       return;
     }
-    if (text === "/") { input.setValue("/"); return; }
+    if (!key.paste&&isCommandMode("",text)) { input.setValue(text); return; }
     if (matchChord("escape", text, key)) {
       generation.current++; setBusy(false);
       if (diff) { setDiff(null); setDiffParent(undefined); }
@@ -155,8 +157,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
   return <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={1}>
     <Box flexDirection="column" flexShrink={0}>
       <Text bold>{t({en: "Git branch / merge graph", zh: "Git 分支 / 合并图"})} · {head}</Text>
-      <Text wrap="truncate-end">{t(graphic ? {en: "Newer → older · Filled: selected · Glow: HEAD · Actual Git parents", zh: "左新右旧 · 实心：选中 · 光圈：HEAD · 连线为真实父关系"}
-        : {en: "Newer → older · O selected · * commit · > continues · actual Git parents", zh: "左新右旧 · O 选中 · * 提交 · > 延续 · 连线为真实父关系"})}</Text>
+
       {page ? <Text wrap="truncate-end">{page.head_oid}</Text> : null}
       {busy ? <Text>{t({en: "Reading fixed Git objects…", zh: "正在读取固定 Git 对象…"})}</Text> : null}
       {error ? <Text>{safe(error)} · {t({en: "/refresh to reload", zh: "/refresh 刷新"})}</Text> : null}
@@ -175,7 +176,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
         <Text bold wrap="truncate-end">{selected + 1}/{page!.commits.length} · {commit.oid.slice(0, 12)} · {safe(commit.subject)}</Text>
         <Text wrap="truncate-end">{safe(commit.author.name)} · {t({en: "Parents", zh: "父提交"})}: {commit.parents.map(oid => oid.slice(0, 12)).join(" + ") || t({en: "root", zh: "根提交"})}</Text>
       </> : null}
-      {page?.next_cursor ? <Text>{t({en: "/more → Next page", zh: "/more → 下一页"})}</Text> : null}
+      {page?.next_cursor ? <Text>{t({en: "More history available", zh: "还有更早记录"})}</Text> : null}
     </Box>}
   </Box>;
 }

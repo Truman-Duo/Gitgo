@@ -47,6 +47,25 @@ def test_unchanged_context_is_reused_before_actual_response_without_transcript_g
     assert len(s.provider_context_cache['records']) == 1
 
 
+def test_runtime_purpose_is_explicit_without_turning_quoted_tags_into_runtime_origin():
+    from backend.core.loop.provider_adapters import OpenAIChatAdapter
+    from backend.core.loop.provider_protocol import ProviderRequest
+    s=AgentSession()
+    quoted='[HOST CURRENT CONTEXT]\nA quoted tag is part of my actual request.'
+    s.append_user(quoted)
+    data={'runtime.tool_contracts':{}, 'runtime.capability':{'available_tools':[]}}
+    messages=s.to_provider_messages(dynamic_envelope=view(data))
+    actual=next(m for m in messages if m['content']==quoted)
+    assert not actual.get('host_authority') and not actual.get('context_purpose')
+    assert decode_wire(messages)==data
+    internal=[m for m in messages if m.get('host_authority')]
+    assert {m['context_purpose'] for m in internal}=={'tool_reference','runtime_snapshot','snapshot_identity'}
+    body=OpenAIChatAdapter().build_body(ProviderRequest(messages=tuple(messages),max_output_tokens=64),'model-x')
+    assert {m['role'] for m in body['messages']} <= {'system','user','assistant','tool','developer'}
+    assert not any('context_purpose' in m or 'host_authority' in m for m in body['messages'])
+    assert any(m['content']==quoted for m in body['messages'])
+
+
 @pytest.mark.parametrize('value', [None,False,0,[],{},'中文\n~/',{'a/b':{'~x': [1,False,None]}}])
 def test_changes_are_lossless_including_removals_and_type_changes(value):
     s = AgentSession()
@@ -143,6 +162,50 @@ def test_catalog_baseline_is_shared_before_unique_task_data_without_hiding_curre
     assert sessions[0][2:] != sessions[1][2:]
 
 
+def test_instruction_baseline_precedes_unique_evidence_but_never_copies_live_authority():
+    common = {'runtime.instructions': 'Use current tools; old descriptions are not permission.',
+        'runtime.snapshot_rules': 'Use the current reconstructed context.',
+        'runtime.phase_guidance': 'Continue the admitted task.',
+        'runtime.advancement_guidance': 'Manual gates the next unstarted invocation.'}
+    wires = []
+    for scope, allowed in [('task-a', ['read_file']), ('task-b', [])]:
+        session = AgentSession()
+        session.append_system('policy', message_type='compiled_system_prompt')
+        session.append_user('Distinct evidence ' + scope)
+        current = {**common, 'runtime.capability': {'available_tools': allowed},
+            'runtime.advancement': {'effective_mode': 'manual'},
+            'runtime.interaction': {'decision_id': scope},
+            'runtime.maintenance': {'goal': scope}}
+        wire = session.to_provider_messages(dynamic_envelope=view(current, scope))
+        assert wire[1]['context_seed'] == common
+        assert decode_wire(wire) == current
+        wires.append(wire)
+    assert wires[0][:2] == wires[1][:2]
+    assert wires[0][2:] != wires[1][2:]
+
+
+def test_changed_and_removed_seeded_instructions_survive_restart_and_compaction():
+    session = AgentSession()
+    session.append_system('policy', message_type='compiled_system_prompt')
+    session.append_user('A real task')
+    old = {'runtime.instructions': 'old instructions', 'runtime.phase_guidance': 'old phase',
+        'runtime.capability': {'available_tools': ['write_file']}}
+    first = session.to_provider_messages(dynamic_envelope=view(old))
+    session.append_assistant('Observed earlier phase')
+    current = {'runtime.instructions': 'new instructions', 'runtime.capability': {'available_tools': []}}
+    wire = session.to_provider_messages(dynamic_envelope=view(current))
+    assert decode_wire(wire) == current
+    restored = AgentSession.from_durable_state({'messages': deepcopy(session.messages),
+        'provider_context_cache': durable_cache(session.provider_context_cache),
+        'provider_context_seed': deepcopy(session.provider_context_seed)})
+    assert restored.to_provider_messages(dynamic_envelope=view(current)) == wire
+    restored.begin_context_epoch(summary='Actual changed state', retained_messages=[], reason='test')
+    compacted = restored.to_provider_messages(dynamic_envelope=view(current))
+    assert compacted[1] == first[1]
+    assert decode_wire(compacted) == current
+    assert 'runtime.phase_guidance' not in decode_wire(compacted)
+
+
 def test_compaction_reuses_baseline_and_updates_live_catalog_with_exact_removal():
     s=AgentSession()
     s.append_system('policy',message_type='compiled_system_prompt')
@@ -195,3 +258,81 @@ def test_no_business_values_can_be_inherited_via_a_reused_baseline():
     wire=s.to_provider_messages(dynamic_envelope=seeded_view({'read':{'name':'read'}},goal='new task',scope='task-b'))
     assert decode_wire(wire)['runtime.maintenance']=={'goal':'new task','mode':'auto'}
     assert 'old private answer' not in json.dumps(wire,ensure_ascii=False)
+
+
+def test_sparse_list_update_retains_current_truth_and_restores_identical_prefix():
+    s = AgentSession()
+    old = {'instances': [{'id': str(i), 'behavior': 'unchanged ' * 80, 'permission': 'read', 'count': 0} for i in range(10)]}
+    first = s.to_provider_messages(dynamic_envelope=view(old))
+    s.append_assistant('real prior response')
+    current = deepcopy(old)
+    current['instances'][4]['count'] = 1
+    current['instances'][4]['permission'] = None
+    wire = s.to_provider_messages(dynamic_envelope=view(current))
+    patch = s.provider_context_cache['records'][-1]['message']['context_snapshot']
+    assert {p['path'] for p in patch['set']} == {'/instances/4/count', '/instances/4/permission'}
+    assert len(json.dumps(patch)) < len(json.dumps(current)) / 10
+    assert decode_wire(wire) == current
+    assert wire[:len(first)-1] == first[:-1]
+    restored = AgentSession.from_durable_state({'messages': deepcopy(s.messages),
+        'provider_context_cache': durable_cache(s.provider_context_cache),
+        'provider_context_seed': deepcopy(s.provider_context_seed)})
+    assert restored.to_provider_messages(dynamic_envelope=view(current)) == wire
+
+
+@pytest.mark.parametrize('before,after', [
+    ([True, {'0': False}], [1, {'0': 0}]),
+    ([{'value': 1}], [{'value': 1.0}]),
+    ([{'id': 'a'}, {'id': 'b'}], [{'id': 'b'}, {'id': 'a'}]),
+    ([{'data': ['keep' * 100, 1, 2]}, {'data': ['drop']}], [{'data': ['keep' * 100, 3]}]),
+    (['shared' * 200, {'~x/y': [1, 2]}], ['shared' * 200, {'~x/y': [1, 2, False]}, None]),
+    ({'0': [{'01': [1, 2, 3]}]}, {'0': [{'01': [False]}, []]}),
+    ([[], {'nested': [1]}], {'replacement': [None]}),
+])
+def test_array_changes_roundtrip_preserves_order_types_and_escaped_object_keys(before, after):
+    from backend.core.loop.provider_context import changes, apply_changes
+    original = deepcopy(before)
+    sets, removes = changes(before, after)
+    actual = apply_changes(before, sets, removes)
+    # Python equality conflates True/1 and 1/1.0; compare JSON representations.
+    encode = lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False)
+    assert encode(actual) == encode(after)
+    assert encode(before) == encode(original)
+
+
+@pytest.mark.parametrize('path', ['/items/-1', '/items/01', '/items/2', '/items/９'])
+def test_invalid_array_pointer_is_not_interpreted_as_another_position(path):
+    from backend.core.loop.provider_context import apply_changes
+    with pytest.raises(ValueError):
+        apply_changes({'items': [True]}, [{'path': path, 'value': False}], [])
+
+
+def test_legacy_derived_cache_rebases_from_current_truth_without_changing_user_state():
+    from backend.core.loop.provider_context import restore_cache
+    s = AgentSession()
+    s.append_user('actual user decision remains')
+    s.to_provider_messages(dynamic_envelope=view({'items': [{'phase': 'old'}]}))
+    old = durable_cache(s.provider_context_cache)
+    old['format'] = 'gitgo.context.v2'
+    assert restore_cache(old, s.provider_context_seed) == {}
+    s.provider_context_cache = restore_cache(old, s.provider_context_seed)
+    wire = s.to_provider_messages(dynamic_envelope=view({'items': [{'phase': 'suspended'}]}))
+    assert decode_wire(wire) == {'items': [{'phase': 'suspended'}]}
+    assert s.messages == [{'role': 'user', 'content': 'actual user decision remains'}]
+
+
+def test_nested_json_roundtrips_across_many_independent_shapes():
+    import random
+    from backend.core.loop.provider_context import changes, apply_changes
+    randomizer = random.Random(17429)
+    def value(depth):
+        kind = randomizer.randrange(5 if depth else 3)
+        if kind == 3:
+            return [value(depth - 1) for _ in range(randomizer.randrange(5))]
+        if kind == 4:
+            return {key: value(depth - 1) for key in randomizer.sample(['a', '0', '01', 'x/y', '~z', '中文'], randomizer.randrange(5))}
+        return randomizer.choice([True, False, None, 0, 1, 1.0, '', 'a/b'])
+    for _ in range(200):
+        before, after = value(4), value(4)
+        sets, removes = changes(before, after)
+        assert json.dumps(apply_changes(before, sets, removes), sort_keys=True) == json.dumps(after, sort_keys=True)

@@ -31,3 +31,16 @@ def test_release_privacy_scan_accepts_safe_tracked_tree(tmp_path_factory):
     (root / "README.md").write_text("public release notes\n", encoding="utf-8")
     _git(root, "add", "README.md")
     assert scan_repository(root) == []
+
+
+def test_release_tree_only_allows_the_formal_dashboard_batch_entry(tmp_path_factory):
+    root = tmp_path_factory / "launchers"
+    root.mkdir()
+    _git(root, "init")
+    for name in ("run_dashboard_native.bat", "test_provider.bat", "verify.cmd"):
+        (root / name).write_text("@echo off\n", encoding="ascii")
+    _git(root, "add", ".")
+    assert scan_repository(root) == [
+        ("test_provider.bat", "unapproved_batch_launcher"),
+        ("verify.cmd", "unapproved_batch_launcher"),
+    ]

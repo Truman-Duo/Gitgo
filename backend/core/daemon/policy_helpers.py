@@ -86,7 +86,7 @@ def _runtime_llm_from_config(cfg):
     config = LLMConfigManager.load()
     active = next((p for p in config.get("providers", []) if p.get("id") == config.get("active_provider")), None)
     if active and (active.get("base_url"), active.get("api_key"), active.get("model_id")) == cfg[:3]:
-        return configured_runtime_provider(config)
+        return configured_runtime_provider(config, live_preferences=True)
     # Older embedded callers can still provide the canonical tuple resolver.
     return LLMProvider(cfg[0], cfg[1], cfg[2], protocol=cfg[3], capabilities=cfg[4])
 

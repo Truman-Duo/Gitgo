@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 
 from backend.core.loop.provider_protocol import ProviderResponseIncomplete
 from backend.core.prompt_templates import render_prompt
@@ -54,8 +55,13 @@ def summarize(signals, provider, workspace, project, *, on_notice=None, report=N
                 or requested + allowance > MAX_REQUESTED_OUTPUT):
             raise HarvestBudgetExceeded("Harvest request/time/output allowance exhausted")
         requested += allowance
-        run["attempts"].append({"max_output_tokens": allowance, "status": "started"})
+        run["attempts"].append({"max_output_tokens": allowance, "status": "started", 'usage_call_id': uuid.uuid4().hex})
         return min(45, remaining)
+
+    def notify(notice):
+        if on_notice:
+            on_notice({**notice, 'purpose': 'knowledge_harvest',
+                'usage_call_id': run['attempts'][-1]['usage_call_id'] if run['attempts'] else None})
 
     try:
         sources = {}
@@ -126,7 +132,7 @@ def summarize(signals, provider, workspace, project, *, on_notice=None, report=N
             kwargs = dict(max_tokens=token_limit, timeout=min(45, MAX_SECONDS - (time.monotonic() - started)),
                           max_retries=0, preserve_provider_state=True, purpose="knowledge_harvest")
             if routed:
-                kwargs.update(before_attempt=before_request, on_notice=on_notice)
+                kwargs.update(before_attempt=before_request, on_notice=notify)
             else:
                 kwargs["timeout"] = before_request()
                 kwargs["before_generation_fallback"] = before_request
@@ -134,6 +140,10 @@ def summarize(signals, provider, workspace, project, *, on_notice=None, report=N
                 response = provider.chat([{"role": "user", "content": prompt}], **kwargs)
             except ProviderResponseIncomplete as exc:
                 run["attempts"][-1].update(status="incomplete", reason=exc.reason, usage=exc.usage)
+                if on_notice:
+                    notify({'event': 'auxiliary_provider_usage', 'purpose': 'knowledge_harvest',
+                        'attempt': len(run['attempts']), 'usage': exc.usage, 'usage_reported': bool(exc.usage),
+                        'incomplete': True, 'cache_intent': getattr(exc, 'cache_intent', None)})
                 if (exc.reason not in {"max_output_tokens", "max_tokens", "length"}
                         or token_limit >= ceiling or len(run["attempts"]) >= MAX_REQUESTS):
                     raise
@@ -141,6 +151,11 @@ def summarize(signals, provider, workspace, project, *, on_notice=None, report=N
                 continue
             if isinstance(response, dict):
                 run["attempts"][-1]["usage"] = dict(response.get("usage") or {})
+                if on_notice:
+                    notify({'event': 'auxiliary_provider_usage', 'purpose': 'knowledge_harvest',
+                        'attempt': len(run['attempts']), 'usage': response.get('usage'),
+                        'usage_reported': bool(response.get('usage')), 'response_id': response.get('response_id'),
+                        'cache_intent': response.get('cache_intent')})
                 response = response.get("content")
             if not isinstance(response, str):
                 raise HarvestSummaryInvalid("Harvest response must contain JSON text")

@@ -144,9 +144,11 @@ def _external_workspace(path):
 
 
 def _public_provider(provider: dict) -> dict:
+    from backend.core.llm_config import LLMConfigManager
     result = {k: v for k, v in provider.items() if k not in {"api_key", "secret_ref"}}
     key = str(provider.get("api_key", ""))
     result["api_key_present"] = bool(key)
+    result["revision"] = LLMConfigManager.revision(provider)
     result["api_key_display"] = (
         key[:4] + "***" + key[-4:] if len(key) > 8 else ("***" if key else "")
     )
@@ -172,6 +174,8 @@ class ApplicationServices:
     def __init__(self, *, daemon_online: Callable[[str], bool] | None = None, prepare_deletion=None):
         self._daemon_online = daemon_online or (lambda _name: False)
         self._write_lock = threading.RLock()
+        from backend.core.provider_drafts import ProviderDrafts
+        self.provider_drafts = ProviderDrafts()
         from backend.core.update.preparation_service import UpdatePreparationService
         self.updates = UpdatePreparationService()
         from backend.core.loop.publish_queue import PublishQueue
@@ -282,6 +286,15 @@ class ApplicationServices:
             "provider.switch": self.provider_switch,
             "provider.delete": self.provider_delete,
             "provider.test": self.provider_test,
+            "provider.presets": self.provider_presets,
+            "provider.models": self.provider_models,
+            "provider.model.options": self.provider_model_options,
+            "provider.model.select": self.provider_model_select,
+            "provider.effort.options": self.provider_effort_options,
+            "provider.effort.select": self.provider_effort_select,
+            "provider.probe": self.provider_probe,
+            "provider.connection": self.provider_connection,
+            "provider.cancel": self.provider_cancel,
             "provider.failover.configure": self.provider_failover_configure,
             "project.export": self.project_export,
         }
@@ -1604,19 +1617,23 @@ class ApplicationServices:
 
     def provider_status(self) -> dict:
         from backend.core.llm_config import LLMConfigManager
+        from backend.core.provider_failover import revision
         config = LLMConfigManager.load()
         return {"providers": [_public_provider(p) for p in config.get("providers", [])],
                 "active_provider": config.get("active_provider", ""),
                 "failover_enabled": config.get("failover_enabled", False),
                 "failover_order": config.get("failover_order", []),
+                "failover_routes": config.get("failover_routes", {}),
+                "failover_revision": revision(config),
                 "circuit_breaker": config.get("circuit_breaker", {}),
                 "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
                 "health_scope": "owning_project_daemon"}
 
-    def provider_failover_configure(self, enabled: bool, order: list[str], circuit_breaker: dict | None = None) -> dict:
+    def provider_failover_configure(self, enabled: bool, order: list[str] | None = None, circuit_breaker: dict | None = None,
+                                    provider_id: str = "", expected_revision: str = "") -> dict:
         from backend.core.llm_config import LLMConfigManager
         try:
-            return LLMConfigManager.configure_failover(enabled, order, circuit_breaker)
+            return LLMConfigManager.configure_failover(enabled, order, circuit_breaker, provider_id, expected_revision)
         except (ValueError, TypeError) as exc:
             raise OperationError("INVALID_FAILOVER_CONFIG", str(exc)) from exc
 
@@ -1626,9 +1643,17 @@ class ApplicationServices:
                       protocol: str = "openai_chat",
                       context_window: int = 128000,
                       max_output_tokens: int = 4096,
-                      kind: str = "remote", auth_mode: str = "api_key") -> dict:
+                      kind: str = "remote", auth_mode: str = "api_key",
+                      expected_revision: str = "", preset_id: str = "",
+                      model_receipt: str = "", probe_receipt: str = "",
+                      context_source: str = "user", output_source: str = "user", creation_id: str = "",
+                      request_preferences: dict | None = None, models: list[dict] | None = None) -> dict:
         from backend.core.llm_config import LLMConfigManager, LLMProvider
         from backend.core.loop.provider_protocol import ProviderProtocol
+        if creation_id:
+            import re
+            if provider_id or not re.fullmatch(r"[a-f0-9]{12,32}", creation_id):
+                raise OperationError("INVALID_CREATION_ID", "Invalid new provider request identity")
         name = str(name or "").strip()
         model_id = str(model_id or "").strip()
         if not name or not base_url or not model_id:
@@ -1659,7 +1684,11 @@ class ApplicationServices:
             )
         existing = next((p for p in LLMConfigManager.get_providers()
                          if p.id == provider_id), None) if provider_id else None
+        if provider_id and existing is None:
+            raise OperationError("PROVIDER_NOT_FOUND", "Provider was deleted; refresh before saving")
         if existing and retain_api_key and auth_mode == "api_key":
+            if base_url != existing.base_url or auth_mode != existing.auth_mode:
+                raise OperationError("API_KEY_DECISION_REQUIRED", "Enter a key explicitly for the changed endpoint")
             api_key = existing.api_key
         if auth_mode == "none":
             api_key = ""
@@ -1670,25 +1699,83 @@ class ApplicationServices:
                     "Explicitly retain the existing key or provide a replacement",
                 )
             raise OperationError("MISSING_API_KEY", "api_key is required for a new provider")
-        provider = LLMProvider(id=provider_id, name=name, base_url=base_url,
+        draft = dict(base_url=base_url, api_key=api_key, model_id=model_id, protocol=protocol, kind=kind, auth_mode=auth_mode)
+        from backend.core.loop.provider_preferences import validate_preferences
+        try:
+            preferences = validate_preferences(request_preferences if request_preferences is not None else
+                                               existing.configuration.get("request_preferences", {}) if existing else {}, protocol)
+        except ValueError as exc:
+            raise OperationError(str(exc), "Check advanced request preferences; transport and task fields are protected") from None
+        try:
+            discovered = self.provider_drafts.evidence(model_receipt, {**draft, "model_id": ""}, "models")
+            probed = self.provider_drafts.evidence(probe_receipt, {**draft, "request_preferences": preferences}, "probe")
+        except ValueError as exc:
+            raise OperationError(str(exc), "Discovery or probe expired; run it again or save without it") from None
+        from backend.core.provider_profiles import profiles, apply_profile
+        previous_model = existing
+        if existing and all(getattr(existing, k) == draft[k] for k in ("base_url", "api_key", "kind", "auth_mode")):
+            previous_profile = next((p for p in profiles(existing.to_dict()) if p["model_id"] == model_id), None)
+            if previous_profile:
+                previous_model = LLMProvider.from_dict(apply_profile(existing.to_dict(), previous_profile))
+        same_identity = bool(previous_model and all(getattr(previous_model, k) == v for k, v in draft.items()))
+        configuration = dict(previous_model.configuration) if previous_model else {}
+        if configuration.get("request_preferences", {}) != preferences:
+            configuration.pop("verification", None)
+        if not same_identity:
+            for owned in ("verification", "deployment", "sources", "warnings"):
+                configuration.pop(owned, None)
+        from backend.core.provider_catalog import CATALOG_VERSION, PRESETS
+        if preset_id and preset_id not in {p["id"] for p in PRESETS}:
+            raise OperationError("INVALID_PROVIDER_PRESET", "Unknown connection preset")
+        configuration.update(preset_id=preset_id, preset_version=CATALOG_VERSION,
+                             sources={"context_window": context_source, "max_output_tokens": output_source})
+        if context_source not in {"user", "default", "discovered", "reference"} or output_source not in {"user", "default", "discovered", "reference"}:
+            raise OperationError("INVALID_PARAMETER_SOURCE", "Unknown parameter source")
+        if discovered:
+            deployment = next((m for m in discovered["models"] if m["id"] == model_id), None)
+            if deployment:
+                configuration["deployment"] = deployment
+        limits = configuration.get("deployment", {}).get("limits", {})
+        warnings = []
+        if max_output_tokens > limits.get("max_output_capacity", max_output_tokens) or context_window > limits.get("context_window", context_window):
+            warnings.append("DECLARED_LIMIT_EXCEEDED")
+        if context_source in {"discovered", "reference"} and context_window != limits.get("context_window"):
+            raise OperationError("INVALID_PARAMETER_SOURCE", "The context limit does not match its declared source")
+        configuration["warnings"] = warnings
+        configuration["request_preferences"] = preferences
+        if probed:
+            configuration["verification"] = {"checks": probed["checks"], "observations": probed["observations"],
+                                               "at": probed["capabilities"]["probed_at"]}
+        if protocol == "auto":
+            if not probed:
+                raise OperationError("PROTOCOL_PROBE_REQUIRED", "Test the automatic protocol before saving, or choose an explicit protocol")
+            protocol = probed["protocol"]
+        provider = LLMProvider(id=provider_id or creation_id, name=name, base_url=base_url,
                                api_key=api_key, model_id=model_id,
                                protocol=protocol,
                                 capabilities=(
-                                    existing.capabilities
-                                    if existing and (existing.protocol, existing.base_url, existing.model_id, existing.kind)
-                                       == (protocol, base_url, model_id, kind) else {}
+                                    probed["capabilities"] if probed else previous_model.capabilities if same_identity and previous_model.configuration.get("request_preferences", {}) == preferences else {}
                                 ),
                                 context_window=context_window,
                                 max_output_tokens=max_output_tokens,
                                 limits_source="configured",
                                 kind=kind, auth_mode=auth_mode,
+                                configuration=configuration,
                                 created_at=existing.created_at if existing else "")
-        saved = LLMConfigManager.update(provider) if existing else LLMConfigManager.add(provider)
+        from backend.core.provider_profiles import compile_profiles
+        try:
+            provider.configuration["models"] = compile_profiles(models, provider.to_dict(), existing.to_dict() if existing else None, self.provider_drafts)
+        except (ValueError, TypeError) as exc:
+            raise OperationError(str(exc) if isinstance(exc, ValueError) else "INVALID_PROVIDER_MODELS", "Check the API connection's configured models; draft retained") from None
+        try:
+            saved = LLMConfigManager.update(provider, expected_revision) if existing else LLMConfigManager.add(provider)
+        except ValueError as exc:
+            raise OperationError(str(exc), "Configuration changed elsewhere; refresh before saving") from None
         if saved is None:
             raise OperationError("UPDATE_FAILED", f"Provider '{provider_id}' could not be updated")
         return {"status": "updated" if existing else "created",
                 "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
-                "provider": _public_provider(saved.to_dict())}
+                "provider": _public_provider(next(p for p in LLMConfigManager.load()["providers"] if p["id"] == saved.id))}
 
     def provider_switch(self, provider_id: str) -> dict:
         from backend.core.llm_config import LLMConfigManager
@@ -1696,7 +1783,79 @@ class ApplicationServices:
         if provider is None:
             raise OperationError("PROVIDER_NOT_FOUND", f"Provider '{provider_id}' was not found")
         return {"status": "switched", "active_provider": provider_id,
-                "provider": _public_provider(provider.to_dict())}
+                "provider": _public_provider(next(p for p in LLMConfigManager.load()["providers"] if p["id"] == provider.id))}
+
+    def provider_model_options(self) -> dict:
+        from backend.core.llm_config import LLMConfigManager
+        from backend.core.provider_profiles import profiles
+        config = LLMConfigManager.load()
+        provider = next((p for p in config["providers"] if p["id"] == config.get("active_provider")), None)
+        if not provider:
+            return {"provider_id": "", "models": [], "model_id": ""}
+        return {"provider_id": provider["id"], "provider_name": provider["name"], "model_id": provider["model_id"],
+                "revision": LLMConfigManager.revision(provider), "models": profiles(provider)}
+
+    def provider_model_select(self, provider_id: str, model_id: str, expected_revision: str) -> dict:
+        from backend.core.llm_config import LLMConfigManager, LLMProvider
+        from backend.core.provider_profiles import profiles, apply_profile
+        with LLMConfigManager._lock:
+            config = LLMConfigManager.load()
+            provider = next((p for p in config["providers"] if p["id"] == config.get("active_provider")), None)
+            if not provider or provider["id"] != provider_id:
+                raise OperationError("ACTIVE_PROVIDER_CHANGED", "The current API changed; reopen model selection")
+            if not expected_revision:
+                raise OperationError("PROVIDER_REVISION_REQUIRED", "Reopen model selection before switching")
+            profile = next((p for p in profiles(provider) if p["model_id"] == model_id), None)
+            if not profile:
+                raise OperationError("MODEL_NOT_CONFIGURED", "This model is not configured for the current API")
+            try:
+                saved = LLMConfigManager.update(LLMProvider.from_dict(apply_profile(provider, profile)), expected_revision)
+            except ValueError as exc:
+                raise OperationError(str(exc), "API configuration changed; reopen model selection") from None
+            return {"status": "selected", "provider_id": provider_id, "model_id": saved.model_id}
+
+    def provider_effort_options(self) -> dict:
+        from backend.core.provider_effort import effort_options
+        current = self.provider_model_options()
+        profile = next((p for p in current["models"] if p["model_id"] == current["model_id"]), None)
+        return {key: value for key, value in current.items() if key != "models"} | (
+            effort_options(profile) if profile else {"levels": [], "state": "unconfigured", "effort": "", "source": ""})
+
+    def provider_effort_select(self, provider_id: str, model_id: str, effort: str, expected_revision: str) -> dict:
+        from backend.core.llm_config import LLMConfigManager, LLMProvider
+        from backend.core.provider_profiles import profiles, apply_profile
+        from backend.core.provider_effort import effort_options
+        from backend.core.loop.provider_preferences import validate_preferences
+        with LLMConfigManager._lock:
+            config = LLMConfigManager.load()
+            provider = next((p for p in config["providers"] if p["id"] == config.get("active_provider")), None)
+            if not provider or provider["id"] != provider_id or provider["model_id"] != model_id:
+                raise OperationError("ACTIVE_PROVIDER_CHANGED", "The current API or model changed; reopen effort selection")
+            if not expected_revision:
+                raise OperationError("PROVIDER_REVISION_REQUIRED", "Reopen effort selection before saving")
+            items = profiles(provider)
+            profile = next(p for p in items if p["model_id"] == model_id)
+            options = effort_options(profile)
+            if not isinstance(effort, str) or effort and effort not in options["levels"]:
+                raise OperationError("EFFORT_NOT_DECLARED", "This effort level is not declared for the current model")
+            preferences = dict(profile.get("request_preferences", {}))
+            preferences.pop("reasoning_effort", None)
+            if effort:
+                preferences["reasoning_effort"] = effort
+            try:
+                profile["request_preferences"] = validate_preferences(preferences, profile["protocol"])
+            except ValueError as exc:
+                raise OperationError(str(exc), "Check conflicting reasoning preferences in advanced configuration") from None
+            profile.pop("verification", None)
+            profile["capabilities"] = {}
+            updated = apply_profile(provider, profile)
+            updated.setdefault("configuration", {})["models"] = items
+            try:
+                saved = LLMConfigManager.update(LLMProvider.from_dict(updated), expected_revision)
+            except ValueError as exc:
+                raise OperationError(str(exc), "API configuration changed; reopen effort selection") from None
+            return {"status": "selected", "provider_id": provider_id, "model_id": saved.model_id, "effort": effort,
+                    "revision": self.provider_model_options()["revision"], "effective_from": "next_model_request"}
 
     def provider_delete(self, provider_id: str) -> dict:
         from backend.core.llm_config import LLMConfigManager
@@ -1706,33 +1865,84 @@ class ApplicationServices:
                 "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
                 "active_provider": LLMConfigManager.load().get("active_provider", "")}
 
+    def provider_presets(self) -> dict:
+        from backend.core.provider_catalog import presets
+        return presets()
+
+    def _provider_draft(self, draft: dict, require_model: bool = False) -> dict:
+        from backend.core.llm_config import LLMConfigManager
+        from backend.core.loop.provider_policy import provider_endpoint
+        from backend.core.loop.provider_protocol import ProviderProtocol
+        if not isinstance(draft, dict):
+            raise OperationError("INVALID_PROVIDER_DRAFT", "Expected connection draft")
+        existing = next((p for p in LLMConfigManager.get_providers() if p.id == draft.get("provider_id")), None)
+        if draft.get("provider_id") and existing is None:
+            raise OperationError("PROVIDER_NOT_FOUND", "Provider no longer exists")
+        key = str(draft.get("api_key", ""))
+        if existing and draft.get("retain_api_key") and not key:
+            if str(draft.get("base_url", "")).rstrip("/") != existing.base_url.rstrip("/"):
+                raise OperationError("API_KEY_DECISION_REQUIRED", "Enter a key explicitly for the changed endpoint")
+            key = existing.api_key
+        kind = str(draft.get("kind", "remote"))
+        auth = str(draft.get("auth_mode", "api_key"))
+        try:
+            base = provider_endpoint(str(draft.get("base_url", "")), kind=kind, auth_mode=auth)
+            protocol = ProviderProtocol(draft.get("protocol", "openai_chat")).value
+        except ValueError:
+            raise OperationError("INVALID_PROVIDER_CONNECTION", "Check connection URL, location, authentication and protocol") from None
+        if auth == "api_key" and not key and require_model:
+            raise OperationError("MISSING_API_KEY", "Enter a key before discovery or testing")
+        model = str(draft.get("model_id", "")).strip() if require_model else ""
+        if require_model and not model:
+            raise OperationError("MISSING_MODEL", "Select or enter a model before testing")
+        result = dict(base_url=base, api_key=key if auth == "api_key" else "", model_id=model,
+                      protocol=protocol, kind=kind, auth_mode=auth)
+        if require_model:
+            from backend.core.loop.provider_preferences import validate_preferences
+            try:
+                result["request_preferences"] = validate_preferences(draft.get("request_preferences", {}), protocol)
+            except ValueError as exc:
+                raise OperationError(str(exc), "Check advanced request preferences") from None
+        return result
+
+    def _provider_preview(self, action, draft, request_id, timeout):
+        from backend.core.loop.provider_transport import ProviderTransportCancelled
+        from backend.core.loop.llm import StreamCancelledError
+        prepared = self._provider_draft(draft, action in {"probe", "connect"})
+        try:
+            return self.provider_drafts.run(action, prepared, request_id, max(1, min(float(timeout), 60)))
+        except (ProviderTransportCancelled, StreamCancelledError):
+            raise OperationError("PROVIDER_REQUEST_CANCELLED", "Request cancelled or its total time limit expired; draft retained") from None
+        except ValueError as exc:
+            code = str(exc)
+            raise OperationError(code if code.isupper() else "PROVIDER_PREVIEW_FAILED",
+                                 "Discovery/test unavailable; check connection or enter the model manually. Draft retained") from None
+        except Exception:
+            raise OperationError("PROVIDER_PREVIEW_FAILED", "Connection test failed; check URL, protocol, credentials and model. Draft retained") from None
+
+    def provider_models(self, draft: dict, request_id: str, timeout: int = 15) -> dict:
+        return self._provider_preview("models", draft, request_id, timeout)
+
+    def provider_probe(self, draft: dict, request_id: str, timeout: int = 45) -> dict:
+        return self._provider_preview("probe", draft, request_id, timeout)
+
+    def provider_connection(self, draft: dict, request_id: str, timeout: int = 30) -> dict:
+        return self._provider_preview("connect", draft, request_id, timeout)
+
+    def provider_cancel(self, request_id: str) -> dict:
+        if not request_id or len(request_id) > 128:
+            raise OperationError("INVALID_REQUEST_ID", "Expected configuration request ID")
+        return self.provider_drafts.cancel(request_id)
+
     def provider_test(self, provider_id: str, timeout: int = 30) -> dict:
         from backend.core.llm_config import LLMConfigManager
-        from backend.core.loop.provider_probe import ProviderProbe
-        provider = next((p for p in LLMConfigManager.get_providers()
-                         if p.id == provider_id), None)
+        import uuid
+        provider = next((p for p in LLMConfigManager.get_providers() if p.id == provider_id), None)
         if provider is None:
-            raise OperationError("PROVIDER_NOT_FOUND", f"Provider '{provider_id}' was not found")
-        try:
-            result = ProviderProbe().probe(
-                base_url=provider.base_url, api_key=provider.api_key,
-                model_id=provider.model_id, protocol=provider.protocol,
-                timeout=max(1, min(int(timeout), 60)),
-                kind=provider.kind, auth_mode=provider.auth_mode,
-            )
-        except Exception as exc:
-            raise OperationError("PROVIDER_PROBE_FAILED", str(exc)) from exc
-        provider.protocol = result.protocol
-        provider.capabilities = result.capabilities.to_dict()
-        provider.capabilities["context_window"] = provider.context_window
-        provider.capabilities["max_output_tokens"] = provider.max_output_tokens
-        LLMConfigManager.update(provider)
-        probe = result.to_dict()
-        probe["capabilities"] = dict(provider.capabilities)
-        return {
-            "ok": True, "provider_id": provider_id,
-            "response": result.text, "probe": probe,
-        }
+            raise OperationError("PROVIDER_NOT_FOUND", "Provider was not found")
+        # Legacy entry point is also a preview: only provider.save commits.
+        result = self.provider_probe({**provider.to_dict(), "request_preferences": provider.configuration.get("request_preferences", {})}, uuid.uuid4().hex, timeout)
+        return {"ok": True, "provider_id": provider_id, "response": result["text"], "probe": result}
 
     def project_export(self, project: str, minimal: bool = False,
                        include_identity: bool = False, output_path: str = "",

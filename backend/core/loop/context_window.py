@@ -118,13 +118,18 @@ class ContextWindow:
 
         try:
             routed = hasattr(llm_provider, "stream_session_events")
+            import uuid
+            usage_call_id = uuid.uuid4().hex
             if task_budget is not None and not routed:
                 (reserve_call() if reserve_call is not None else task_budget.begin_provider_call(budget_process_id))
             def before_attempt(_index, _client):
+                nonlocal usage_call_id
+                usage_call_id = uuid.uuid4().hex
                 if task_budget is not None:
                     (reserve_call() if reserve_call is not None else task_budget.begin_provider_call(budget_process_id))
                 return 60
             def notify(notice):
+                notice = {**notice, 'usage_call_id': usage_call_id, 'purpose': 'context_compaction'}
                 if on_provider_notice is not None:
                     on_provider_notice(notice)
                 else:
@@ -161,6 +166,10 @@ class ContextWindow:
                         "provider_state": provider_state,
                     })
                 if summary.get("usage"):
+                    notify({'event': 'auxiliary_provider_usage', 'purpose': 'context_compaction',
+                        'usage': summary['usage'], 'usage_reported': True,
+                        'response_id': summary.get('response_id'), 'cache_intent': summary.get('cache_intent'),
+                        'context_epoch': session.context_epoch})
                     session.record_provider_usage(
                         {**summary["usage"], "purpose": "context_compaction"},
                         protocol=str(getattr(
@@ -174,6 +183,10 @@ class ContextWindow:
                         if reported_output > 0:
                             task_budget.consume_output_estimate(reported_output, budget_process_id)
                             output_accounted = True
+                else:
+                    notify({'event': 'auxiliary_provider_usage', 'purpose': 'context_compaction',
+                        'usage_reported': False, 'response_id': summary.get('response_id'),
+                        'context_epoch': session.context_epoch})
                 summary = str(summary.get("content", ""))
             if not isinstance(summary, str) or not summary.strip():
                 self.last_compaction_error = "empty_compaction_summary"
@@ -201,6 +214,9 @@ class ContextWindow:
             if isinstance(exc, (TaskBudgetExceeded, StreamCancelledError)):
                 raise
             if isinstance(exc, ProviderResponseIncomplete) and exc.usage:
+                notify({'event': 'auxiliary_provider_usage', 'purpose': 'context_compaction',
+                    'usage': exc.usage, 'usage_reported': True, 'incomplete': True,
+                    'cache_intent': getattr(exc, 'cache_intent', None), 'context_epoch': session.context_epoch})
                 session.record_provider_usage({**exc.usage, "purpose": "context_compaction", "incomplete": True},
                     protocol=str(getattr(getattr(llm_provider, "protocol", ""), "value", getattr(llm_provider, "protocol", ""))))
                 if task_budget is not None:

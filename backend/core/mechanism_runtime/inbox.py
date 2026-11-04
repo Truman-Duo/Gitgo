@@ -18,6 +18,83 @@ def discussion_event(payload):
 class Inbox:
     def __init__(self, application):
         self.app = application
+        self.prepared = {}
+
+    def _bind(self, args):
+        """Bind mechanical identities; the Agent still chooses candidates/text.
+
+        This is preparation for the existing disposition operations, not a
+        second inbox or adoption authority. Explicit legacy assertions remain
+        assertions and are never silently replaced with current values.
+        """
+        context = self.app.capability_runtime.context()
+        sources = self.app.sources(args['source_refs']) if 'source_refs' in args else context['sources']
+        selected = args.get('candidates', []) if args['operation'] == 'inbox_merge' else [{'id': args.get('candidate_id')}]
+        ids = [item['id'] for item in selected]
+        if not ids or any(not name for name in ids) or len(set(ids)) != len(ids):
+            raise ValueError('MECHANISM_CANDIDATE_SELECTION_REQUIRED')
+        instances = self.app.repo.list_instances(self.app.task, limit=100)
+        matches = [value for value in instances if (not args.get('instance_id') or value['id'] == args['instance_id'])
+            and all(name in value.get('inbox', {}) for name in ids)]
+        if len(matches) != 1:
+            raise ValueError('MECHANISM_CANDIDATE_SCOPE_REQUIRED: select candidate ids from one current-task instance; specify instance_id if ambiguous')
+        instance = matches[0]
+        items = [deepcopy(instance['inbox'][name]) for name in ids]
+        bound = {**deepcopy(args), 'instance_id': instance['id'], 'source_refs': list(sources)}
+        for requested, item in zip(selected, items):
+            revision = requested.get('revision') if args['operation'] == 'inbox_merge' else args.get('candidate_revision')
+            if revision is not None and revision != item['revision']:
+                raise ValueError('MECHANISM_CANDIDATE_REVISION_CONFLICT')
+            if item['status'] != 'candidate':
+                raise ValueError('MECHANISM_CANDIDATE_ALREADY_DISPOSED')
+        if args['operation'] == 'inbox_merge':
+            bound['candidates'] = [{'id': item['id'], 'revision': item['revision']} for item in items]
+        else:
+            bound['candidate_revision'] = items[0]['revision']
+        if args['operation'] == 'inbox_adopt':
+            self._adoption_quote(args, sources)
+            if 'contract_revision' in args and args['contract_revision'] != context['contract_revision']:
+                raise ValueError('MECHANISM_ADOPTION_CONTRACT_CHANGED')
+            bound['contract_revision'] = context['contract_revision']
+        # Counter/journal changes and other candidates do not change this
+        # proposal. A changed selected candidate, instance generation, user
+        # instruction or contract does invalidate it before any write.
+        from .capability_runtime import instance_basis
+        return {'context': context, 'bound': bound, 'sources': sources,
+            'basis': instance_basis(instance), 'items': items}
+
+    def prepare(self, args):
+        key = digest(args)
+        current = self._bind(args)
+        previous = self.prepared.get(key)
+        if previous is not None and previous != current:
+            self.prepared.pop(key, None)
+            raise ValueError('MECHANISM_CANDIDATE_PREPARED_STATE_CHANGED: inspect the changed candidate before proposing again')
+        self.prepared[key] = current
+        while len(self.prepared) > 32:
+            del self.prepared[next(iter(self.prepared))]
+        return {'kind': 'harness_candidate_disposition',
+            'request': {key: deepcopy(value) for key, value in current['bound'].items()
+                if key not in {'source_refs', 'candidate_revision', 'contract_revision'}},
+            'current_candidates': [{key: deepcopy(item.get(key)) for key in ('id', 'revision', 'status', 'text')}
+                for item in current['items']],
+            'source_evidence': {ref: {'kind': value.get('kind'), 'digest': digest(value)}
+                for ref, value in current['sources'].items()},
+            'requires_actual_user_adoption': args['operation'] == 'inbox_adopt', 'authority_granted': False}
+
+    def commit(self, args):
+        from .application import configuration_allowed
+        from backend.core.loop.mechanism_lifecycle import fence
+        if not configuration_allowed(self.app.process):
+            raise ValueError('MECHANISM_CONFIGURATION_CAPABILITY_REQUIRED')
+        previous = self.prepared.get(digest(args))
+        if previous is None:
+            raise ValueError('MECHANISM_CANDIDATE_PREPARATION_REQUIRED')
+        with fence(self.app.process):
+            if self._bind(args) != previous:
+                self.prepared.pop(digest(args), None)
+                raise ValueError('MECHANISM_CANDIDATE_PREPARED_STATE_CHANGED')
+            return self.control(previous['bound'])
 
     def discussion(self, reference, sidecar_id=None):
         from backend.core.loop.discussion_adoption import NAMESPACE
@@ -123,13 +200,18 @@ class Inbox:
             return merged
         return {"candidate": self.app.repo.mutate(self.app.task, args["instance_id"], merge), "authority_granted": False}
 
-    def adopt(self, args, sources, instance, item):
-        from backend.core.loop.task_contract import get_task_contract
+    @staticmethod
+    def _adoption_quote(args, sources):
         quote = args.get("quote")
         actual = [source.get("content") if source.get("kind") == "user_message" else
                   source.get("event", {}).get("answer") if source.get("kind") == "user_decision" else "" for source in sources.values()]
         if not isinstance(quote, str) or not quote.strip() or not any(quote in str(content or "") for content in actual):
             raise ValueError("MECHANISM_ADOPTION_ACTUAL_USER_QUOTE_REQUIRED")
+        return quote
+
+    def adopt(self, args, sources, instance, item):
+        from backend.core.loop.task_contract import get_task_contract
+        quote = self._adoption_quote(args, sources)
         key = digest({"candidate": item["id"], "revision": args["candidate_revision"], "sources": sources, "quote": quote})
         change_id = "mechanism-inbox-" + key[:24]
         current = get_task_contract(self.app.process)

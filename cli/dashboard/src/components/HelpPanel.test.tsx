@@ -7,9 +7,10 @@ import {cellAt} from "../../vendor/ink/src/core/screen.js";
 import {InputLayer,InputProvider} from "../input/runtime.js";
 import {LanguageContext} from "../ui/PageFrame.js";
 import {HelpPanel} from "./HelpPanel.js";
-import {helpGuide,helpKeys} from "../ui/helpContent.js";
+import {helpGuide,helpKeys,providerHelpGuide} from "../ui/helpContent.js";
 import {copy} from "../ui/pageContract.js";
 import {applicationBindings} from "../input/router.js";
+import {moduleHelpGuide,moduleHelpKeys} from "../ui/moduleHelp.js";
 import type {Scene} from "../state/store.js";
 const wait=()=>new Promise(r=>setTimeout(r,85));
 
@@ -31,9 +32,12 @@ test("Help owns two tabs, scrolls without moving the header, resizes and closes 
  try{
   await wait();
   expect(frame().join("\n")).toContain("向主进程描述目标");
+  stdin.write("\x1b[B");await wait();stdin.write("\t");await wait();
+  expect(frame().join("\n")).toContain("Enter 浏览");
   stdin.write("\x1b[C");await wait();
   expect(frame().join("\n")).toContain("打开命令推荐");
   expect(frame().join("\n")).not.toContain("向主进程描述目标");
+  stdin.write("\r");await wait();
   for(const [width,height] of [[46,14],[72,18],[120,30]]){
    stdout.columns=width;stdout.rows=height;stdout.emit("resize");
    root.rerender(<Fixture width={width} height={height}/>);await wait();await wait();
@@ -65,5 +69,10 @@ test("guidance covers each real scene and key labels follow configured bindings"
   const rows=helpKeys("workspace",v=>v.en);
   expect(rows.some(row=>row.keys==="Ctrl+J")).toBe(true);
   expect(helpGuide("workspace",v=>v.en).steps.join(" ")).toContain("Ctrl+J");
+  applicationBindings.configure({version:1,overrides:{"form.save":{key:"s",ctrl:true,shift:true}}});
+  expect(providerHelpGuide(v=>v.en).steps.join(" ")).toContain("Ctrl+Shift+S");
+  expect(moduleHelpGuide("publish.settings",v=>v.en).steps.join(" ")).toContain("Ctrl+Shift+S");
+  expect(moduleHelpKeys("providers",v=>v.en).some(row=>row.keys==="Ctrl+Shift+S")).toBe(true);
+  expect(providerHelpGuide(v=>v.zh).purpose).toContain("Provider 编辑器");
  }finally{applicationBindings.configure(before);}
 });

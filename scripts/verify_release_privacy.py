@@ -58,6 +58,9 @@ def scan_repository(root: Path) -> list[tuple[str, str]]:
         normalized = relative.replace("\\", "/")
         leaf = normalized.rsplit("/", 1)[-1].casefold()
         lower = normalized.casefold()
+        if lower.endswith((".bat", ".cmd")) and normalized != "run_dashboard_native.bat":
+            findings.append((normalized, "unapproved_batch_launcher"))
+            continue
         if leaf in FORBIDDEN_NAMES or any(lower.endswith(suffix) for suffix in FORBIDDEN_SUFFIXES):
             findings.append((normalized, "forbidden_release_path"))
             continue

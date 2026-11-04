@@ -56,7 +56,7 @@ def test_invalid_registration_refused_before_prepare(tmp_path_factory, change):
     else:
         name = "unregistered_alias"
     result = execute(target, context(tmp_path_factory), name)
-    assert result.is_error and result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert result.is_error and result.diagnostics["code"] == "TOOL_EXECUTION_CONTRACT_INVALID"
     assert result.receipt["effect_state"] == "not_committed"
     assert not calls
 
@@ -75,7 +75,7 @@ def test_prepare_cannot_spend_exact_grant_after_swapping_authority(tmp_path_fact
         return args
     target.prepare_args = prepare
     result = execute(target, ctx)
-    assert result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert result.diagnostics["code"] == "TOOL_EXECUTION_CONTRACT_INVALID"
     assert result.receipt["effect_state"] == "not_committed"
     assert ctx.process.approval_grants[0]["remaining_uses"] == 1
     assert not calls
@@ -88,7 +88,7 @@ def test_before_hook_cannot_change_host_callable(tmp_path_factory):
     ctx.event_bus.subscribe("ToolBeforeHooksStarted",
                             lambda event: setattr(target, "execute", lambda args: calls.append("escaped")))
     result = execute(target, ctx)
-    assert result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert result.diagnostics["code"] == "TOOL_EXECUTION_CONTRACT_INVALID"
     assert result.receipt["effect_state"] == "not_committed" and not calls
 
 
@@ -100,7 +100,7 @@ def test_before_hook_cannot_change_host_callable(tmp_path_factory):
 ])
 def test_composite_cannot_claim_compute_authority(tmp_path_factory, spec):
     result = execute(tool(composite_spec=spec), context(tmp_path_factory))
-    assert result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert result.diagnostics["code"] == "TOOL_EXECUTION_CONTRACT_INVALID"
 
 
 def test_native_direct_call_and_isolated_flag_cannot_bypass_pipeline(tmp_path_factory, monkeypatch):
@@ -136,7 +136,7 @@ def test_tool_json_cannot_supply_execution_contract():
 def test_unimplemented_named_service_refused(tmp_path_factory):
     result = execute(tool(ExecutionContract(ExecutionType.EXTERNAL_SERVICE, "test.service")),
                      context(tmp_path_factory))
-    assert result.diagnostics["code"] == "SANDBOX_POLICY_INVALID"
+    assert result.diagnostics["code"] == "TOOL_EXECUTION_CONTRACT_INVALID"
 
 
 @pytest.mark.parametrize("contract", [None, HOST_COMPUTE, data_broker("test.data")])

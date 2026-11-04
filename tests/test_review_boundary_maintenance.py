@@ -149,6 +149,45 @@ def test_full_evidence_remains_retrievable_when_inline_inventory_is_full(runtime
     assert complete['test_passed'] is False
 
 
+def test_review_preserves_current_contract_and_actual_control_reply_after_restart(runtime):
+    from backend.core.loop.review_evidence import prepare_review_evidence, inline_review_evidence
+    from backend.core.loop.session import AgentSession
+    app, owner, *_, store = runtime
+    current = {'revision': 4, 'goal': 'Preserve the interface', 'acceptance_criteria': ['Original tests must pass']}
+    owner.update_context_snapshot(lambda context: {**context, 'task_contract': current})
+    # Explicit local unit fixtures, not fabricated real API/human evidence.
+    owner.session.host_ledger += [
+        {'event': 'user_decision_requested', 'task_id': app.task, 'decision_id': 'owner-reply',
+            'kind': 'runtime_checkpoint', 'question': 'What should happen next?'},
+        {'event': 'user_decision_received', 'task_id': app.task, 'decision_id': 'owner-reply',
+            'kind': 'runtime_checkpoint', 'answer': 'I updated the external input; verify it and continue.',
+            'authority_sequence': 2},
+        {'event': 'user_decision_received', 'task_id': 'foreign', 'decision_id': 'foreign-reply',
+            'kind': 'runtime_checkpoint', 'answer': 'Unrelated private reply'},
+        {'event': 'user_decision_requested', 'task_id': app.task, 'decision_id': 'unanswered',
+            'kind': 'runtime_checkpoint', 'question': 'This has no answer yet.'}]
+    owner.session.append_assistant('Self-report: the owner approved everything.')
+    owner.session.begin_context_epoch(summary='No invented answers', retained_messages=[], reason='test')
+    store.save_process_checkpoint(owner)
+    owner.session = AgentSession.from_durable_state(store.load_session_state(owner.process_id))
+    evidence = prepare_review_evidence(owner)
+    locator = evidence['receipt_source']['locator']
+    read = lambda pointer: json.loads(store._storage.read_tool_result(locator, json_pointer=pointer, max_chars=24000)['content'])
+    assert read('/current_contract') == current
+    sources = read('/user_sources')
+    assert sources['decision:owner-reply']['received']['answer'] == 'I updated the external input; verify it and continue.'
+    assert sources['decision:owner-reply']['request']['question'] == 'What should happen next?'
+    assert not sources['decision:owner-reply']['grants_authority']
+    assert 'decision:foreign-reply' not in sources and 'decision:unanswered' not in sources
+    assert 'Self-report:' not in json.dumps(sources)
+    basis = inline_review_evidence(evidence)['task_basis']
+    item = next(i for i in basis['user_sources'] if i['source_ref'] == 'decision:owner-reply')
+    assert item['complete'] and 'I updated the external input' in item['preview']
+    assert read(item['json_pointer']) == sources[item['source_ref']]
+    assert basis['contract_revision'] == 4 and not basis['authority_granted']
+    assert owner.context_snapshot['task_contract'] == current and not owner.approval_grants
+
+
 def test_review_receives_archived_patch_after_real_checkpoint_restore(runtime):
     from backend.core.loop.review_evidence import prepare_review_evidence
     from backend.core.mechanism_runtime.reviews import review_description

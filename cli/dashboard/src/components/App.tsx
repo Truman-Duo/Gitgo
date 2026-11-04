@@ -1,4 +1,6 @@
 import {label} from "../ui/runtimeLabels.js";
+import {isFooterDrawer} from "../ui/overlayLayout.js";
+import {FooterDrawer} from "./FooterDrawer.js";
 import {copy,type Copy} from "../ui/pageContract.js";
 import {LanguageContext} from "../ui/PageFrame.js";
 import type {PublishStateStore} from "../state/publishLocalState.js";
@@ -601,7 +603,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       interruptTarget: resolveInterruptTarget(),
     };
     applyInputActions(resolveSceneKey(ctx, input, key));
-  }, { isActive: overlayStack.length === 0, bindingContext: decisionKeysActive ? "decision" : commandTriggerActive ? "scene" : "" });
+  }, { isActive: overlayStack.length === 0, bindingContext: decisionKeysActive ? "decision" : commandTriggerActive ? "scene" : "",inputTarget:`${scene}:${activeProject||""}:${draftScope}:${mode}:${rawDecision?.decision_id||""}:${decisionComposing}` });
 
   // ── Render ───────────────────────────────────────────────
   const w = Math.max(1, termCols || 80);
@@ -610,7 +612,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   // Effective footer: overlay override → auto-hide for non-footer overlays → default
   const effectiveFooterOverride = useMemo(() => {
     if (footerOverride) return footerOverride;
-    const inline = ["btwPanel", "compactPanel"].includes(
+    const inline = isFooterDrawer(
       overlayStack[overlayStack.length - 1]?.type || "",
     );
     if (overlayStack.length > 0 && !inline) {
@@ -649,12 +651,10 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   };
   const topOverlay = overlayStack[overlayStack.length - 1];
   const overlayBindingContext = ["createForm", "exportPanel"].includes(topOverlay?.type || "") ? "form" : "";
-  const inlineOverlay = ["btwPanel", "compactPanel"].includes(topOverlay?.type || "");
+  const inlineOverlay = isFooterDrawer(topOverlay?.type);
   const runtimeOwnsViewport = ["processDetail", "help", "configPanel", "runtimeMenu", "runtimeContext", "governancePanel", "lessonsPanel", "memoryPanel", "runtimeToolsPanel", "statsPanel", "statsOverview", "updatePanel", "publishPanel"].includes(topOverlay?.type || "");
   const footerDrawer = inlineOverlay
-    ? topOverlay?.type === "btwPanel"
-      ? <Box maxHeight={Math.max(8,Math.floor(h/2))} minHeight={0} flexDirection="column" flexShrink={0}><InputLayer priority={100}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer></Box>
-      : <ScrollableInputLayer>{renderOverlay(topOverlay, overlayCtx)}</ScrollableInputLayer>
+    ? <FooterDrawer terminalRows={h} viewport={topOverlay?.type==="btwPanel"?"self":"shared"}>{renderOverlay(topOverlay, overlayCtx)}</FooterDrawer>
     : null;
 
   return (
@@ -758,7 +758,8 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         contextPct={scene === "workspace" ? mainAgentContextPct : scene === "agent_detail" ? activeAgentContextPct : ""}
         cachePct={scene === "workspace" ? mainAgentCachePct : scene === "agent_detail" ? activeAgentCachePct : null}
         footerDrawer={footerDrawer}
-        editorHidden={topOverlay?.type === "btwPanel"}
+        editorHidden={topOverlay?.type==="btwPanel"}
+        editorFocused={!["effortPicker","interruptConfirm","undoPanel"].includes(topOverlay?.type || "")}
         language={generalConfig.language}
       />
     </Box>

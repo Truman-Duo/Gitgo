@@ -4,7 +4,7 @@ import type { Color } from "@anthropic/ink";
 
 export type SemanticColor = "success" | "warning" | "danger" | "accent";
 export type SelectionContext = "focused" | "non-focused";
-export type SelectionVariant = "row" | "block" | "edit-field";
+export type SelectionVariant = "row" | "block" | "edit-field" | "scale";
 export type InputMode = "NORMAL" | "COMMAND";
 export type StatusState = "error" | "warning" | "ok" | "offline" | "done";
 

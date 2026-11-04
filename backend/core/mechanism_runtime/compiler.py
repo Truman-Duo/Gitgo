@@ -43,7 +43,7 @@ def compile_program(raw, registry, *, capabilities=(), scope="task"):
     nodes, descriptors = {}, {}
 
     def add(item):
-        if not isinstance(item, dict) or set(item) - {"id", "use", "version", "parameters"}:
+        if not isinstance(item, dict) or set(item) - {"id", "use", "version", "parameters", "on"}:
             raise ValueError("MECHANISM_NODE_INVALID")
         name = identifier(item.get("id", item.get("use")))
         if name in nodes:
@@ -63,11 +63,19 @@ def compile_program(raw, registry, *, capabilities=(), scope="task"):
         boundaries = parameters.get(element["boundary_parameter"]) if element["boundary_parameter"] else element["boundaries"]
         if not isinstance(boundaries, list) or not boundaries or not set(boundaries).issubset(element["boundaries"]):
             raise ValueError("MECHANISM_BOUNDARY_INVALID")
+        if 'on' in item:
+            selected = item['on']
+            if (not isinstance(selected, list) or not selected or any(not isinstance(b, str) for b in selected)
+                    or len(set(selected)) != len(selected) or not set(selected).issubset(boundaries)):
+                raise ValueError('MECHANISM_CALL_BOUNDARY_INVALID')
+            boundaries = selected
         nodes[name] = {"id": name, "use": element["id"], "version": element["version"], "contract_digest": element["digest"],
                        "entry": element["entry"],
                        "boundaries": list(boundaries),
                        "interface": {key: deepcopy(element[key]) for key in ("configuration", "state_schema", "inputs", "outputs", "boundaries", "effect", "capabilities", "scopes")},
                        "parameters": parameters}
+        if 'on' in item:
+            nodes[name]['on'] = list(boundaries)
         descriptors[name] = element
 
     for item in items:

@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {geometry} from "../theme/tokens.js";
 import {SelectionText} from "./Selection.js";
 import {label} from "../ui/runtimeLabels.js";
@@ -143,7 +144,9 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
   }, [client, project, task, tracePage, page, traceLoading, loading]);
   const actions=[{id:0,enabled:!loading&&!traceLoading&&Boolean(tracePage.has_more||page.has_more)},{id:1,enabled:!loading&&!traceLoading}];
   const activeAction=reconcileSelection(actions,action);
+  const menuHelp=useLocalHelpCommand("trace",undefined,true);
   useInput((input,key)=>{
+    if(menuHelp.handle(input,key))return;
     const command=standardKey(input,key);
     if(command==="back"){if(actionFocus)setActionFocus(false);else onDismiss();return;}
     if((command==="next"||command==="previous")){setActionFocus(v=>!v);return;}
@@ -182,10 +185,7 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
     <PageFrame page={pages.trace}>
       <Text bold>{t({en:"Stats",zh:"用量"})} · {project} · {t({en:"Turn waterfall",zh:"逐轮瀑布图"})}</Text>
       {tasks.length ? (
-        <Text>
-          {t({en:"Turn",zh:"轮次"})} {selected + 1} / {tasks.length}
-          {page.has_more ? "+" : ""} · {t({en:"← newer / → older",zh:"← 较新 / → 较旧",keys:true})}
-        </Text>
+        <Text>{t({en:"Turn",zh:"轮次"})} {selected+1} / {tasks.length}{page.has_more?"+":""}</Text>
       ) : null}
       {error ? <Text color={colors.danger}>{error}</Text> : null}
       {loading ? (
@@ -303,7 +303,7 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
         dimColor={!actions[index]?.enabled}
 
         >{label}</SelectionText>)}</Box>
-      <Text dimColor>{actionFocus?t({en:"←/→ actions · Enter apply · Tab chart · Esc chart",zh:"←/→ 操作 · Enter 执行 · Tab 图表 · Esc 图表",keys:true}):t({en:"←/→ turn · ↑/↓ or PgUp/PgDn scroll · Tab actions · Esc back",zh:"←/→ 轮次 · ↑/↓ 或 PgUp/PgDn 滚动 · Tab 操作 · Esc 返回",keys:true})}</Text>
+
     </PageFrame>
   );
 }

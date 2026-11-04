@@ -121,6 +121,11 @@ class AlignmentReview:
             assessment_started = time.monotonic()
             _emit_observation({"event": "alignment_assessment_started", "stage": payload["stage"], 'trigger': reason})
             for attempt in range(2):
+                # Retain the exact assessor input through the existing private
+                # Trace detail channel, including bounded repair attempts.
+                # The event/UI sees identity only, never this whole payload.
+                _emit_observation({'event': 'alignment_assessment_input', 'stage': payload['stage'],
+                    'trigger': reason, 'attempt': attempt + 1}, detail=payload)
                 proposal = assessor(payload, before_attempt=before_attempt,
                                     on_notice=alignment_route_notice,
                                     cancel_event=process.cancellation_event)

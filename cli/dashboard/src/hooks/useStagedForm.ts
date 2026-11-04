@@ -11,14 +11,16 @@ export function useStagedForm<T extends Record<string, string>>(
   const [choice, setChoice] = useState("");
   const field = fields[fieldIdx]!;
   const isChoice = choices.includes(field);
-  const current = editing ? {...values, [field]: isChoice ? choice : input.value} : values;
+  const current = editing ? {...values, [field]: isChoice ? choice : input.materialize(input.value)} : values;
   const stop = () => {setEditing(false); input.setValue("");};
   return {
     values, current, field, fieldIdx, editing, isChoice, setChoice,
-    begin() {setChoice(values[field]); input.setValue(isChoice ? "" : values[field]); setEditing(true);},
+    begin(index = fieldIdx) {const next = fields[Math.max(0, Math.min(fields.length - 1, index))]!; setFieldIdx(index); setChoice(values[next]); input.setValue(choices.includes(next) ? "" : values[next]); setEditing(true);},
     confirm(next: T = current) {setValues(next); stop();},
     cancel: stop,
     move(delta: number) {if (!editing) setFieldIdx(index => Math.max(0, Math.min(fields.length - 1, index + delta)));},
     reset(next: T) {setValues(next); setFieldIdx(0); stop();},
+    patch(next: Partial<T>) {setValues(values => ({...values, ...next}));},
+    select(index: number) {setFieldIdx(Math.max(0, Math.min(fields.length - 1, index)));},
   };
 }

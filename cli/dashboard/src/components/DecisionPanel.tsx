@@ -160,19 +160,8 @@ export function DecisionPanel({
           </SelectionText>:null}
         </Box>
       </AnimatedReveal>
-      {active ? (
-        <Text dimColor>
-          {decision.round_position && !decision.round_position.startsWith("1/")
-            ? t({en:"← previous question · ",zh:"← 上一题 · ",keys:true})
-            : ""}
-          {submitting
-            ? t({en:"Submitting the reply…",zh:"正在提交答复…"})
-            : composing
-              ? t({en:"Enter send · Esc choices",zh:"Enter 发送 · Esc 返回选项",keys:true})
-              : decision.options.length > 0
-                ? t({en:"↑/↓ select · Enter choose/edit",zh:"↑/↓ 选择 · Enter 确认/输入",keys:true}) + (decision.allow_free_form ? t({en:" · {amend} amend · {discuss} discuss · Other: direct reply",zh:" · {amend} 补充 · {discuss} 讨论 · 其他：直接输入"}).replace("{amend}",applicationBindings.label("decision.conditions")).replace("{discuss}",applicationBindings.label("decision.discuss")) : "")
-                : t({en:"Type your reply · Enter send",zh:"直接输入答复 · Enter 发送",keys:true})}
-        </Text>
+      {active && submitting ? (
+        <Text dimColor>{t({en:"Submitting the reply…",zh:"正在提交答复…"})}</Text>
       ) : null}
     </Box>
   );

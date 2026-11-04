@@ -2,7 +2,7 @@
 
 ## Windows 预览包
 
-从 [Alpha 3 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 下载 Windows x64 ZIP 和对应校验文件，核对 SHA256 后完整解压。不要单独复制主 EXE 或覆盖旧安装。Alpha 3 使用独立管理安装；在解压目录打开 PowerShell，指定尚不存在的安装和命令目录，例如：
+从 [Alpha 3.1 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3.1) 下载 Windows x64 ZIP 和对应校验文件，核对 SHA256 后完整解压。不要单独复制主 EXE 或覆盖旧安装。Alpha 3 不能通过旧版 `/update` 直接升级到 3.1；本次使用独立管理安装，保留旧安装及数据备份。在解压目录打开 PowerShell，指定尚不存在的安装和命令目录，例如：
 
 ```powershell
 .\install-managed.ps1 -Root "$env:LOCALAPPDATA\GitgoPreview\install" -BinDir "$env:LOCALAPPDATA\GitgoPreview\commands"

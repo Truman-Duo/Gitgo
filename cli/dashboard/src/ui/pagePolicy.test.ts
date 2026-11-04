@@ -66,7 +66,7 @@ test("new markup, field labels and missing Chinese need no manual page registrat
  expect(ownedCopyViolations('<Text>{t({en:"Ready",zh:"已就绪"})}{providerText}</Text>',"new.tsx")).toEqual([]);
 });
 test("command descriptions and usage guidance outside components require bilingual copy",()=>{
- for(const path of ["../keybindings.ts","./helpContent.ts"]){
+ for(const path of ["../keybindings.ts","./helpContent.ts","./moduleHelp.ts","./menuHelp.ts"]){
   const source=readFileSync(new URL(path,import.meta.url),"utf8");
   expect(ownedCopyViolations(source,path)).toEqual([]);
  }

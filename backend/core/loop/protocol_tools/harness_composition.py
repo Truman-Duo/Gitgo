@@ -6,9 +6,11 @@ from backend.core.prompt_templates import load_prompt
 
 def install(ctx):
     from backend.core.mechanism_runtime.application import configuration_allowed
+    from backend.core.mechanism_runtime.capability_protocol import current_schema, validate_request, preview_request, OBSERVATIONS
+    from backend.core.mechanism_runtime.lifecycle_control import OPERATIONS as LIFECYCLE
     operations = ["catalog", "status", "preview", "preview_revision"]
     if configuration_allowed(ctx.process):
-        operations += ["publish", "publish_revision", "instantiate", "activate", "suspend", "detach", "reconcile", "require", "inbox_revise", "inbox_merge", "inbox_discard", "inbox_adopt"]
+        operations += ["apply", "revise", "use", "commit", "publish", "publish_revision", "instantiate", "activate", "suspend", "detach", "reconcile", "require", "inbox_revise", "inbox_merge", "inbox_discard", "inbox_adopt"]
     def application():
         from backend.core.mechanism_runtime.application import Application
         value = getattr(ctx.process, "_harness_application", None)
@@ -38,8 +40,42 @@ def install(ctx):
         return value
 
     def invoke(args):
+        # ToolPipeline adds private execution roots after validating public
+        # arguments. They are not capability declaration or revision inputs.
+        args = {key: value for key, value in args.items() if not key.startswith('_')}
         try:
-            return application().invoke(args)
+            validate_request(args)
+            app = application()
+            if args.get('operation') == 'preview' and 'program' not in args:
+                return preview_request(app.capability_runtime, args)
+            if args.get('operation') == 'catalog':
+                catalog = app.invoke(args)
+                latest = {}
+                for element in catalog['elements']:
+                    if element['id'] not in latest or element['version'] > latest[element['id']]['version']:
+                        latest[element['id']] = element
+                # Lifecycle entries are supplied by declaration.on. Advertising
+                # them as ordinary calls caused a real invalid authoring turn.
+                callable_elements = [item for item in latest.values() if not item['entry'] or args.get('element_id')]
+                return {'source_refs': catalog['source_refs'], 'version': catalog['version'],
+                    'available_capabilities': catalog['available_capabilities'],
+                    'lifecycle_boundaries': sorted({boundary for item in catalog['elements'] if item['entry'] for boundary in item['boundaries']}),
+                    'elements': [{key: item[key] for key in ('id', 'version', 'description', 'configuration', 'inputs', 'outputs', 'boundaries')}
+                        | {'callable': not item['entry']} for item in callable_elements], 'authority_granted': False}
+            if args.get('operation') == 'status':
+                from backend.core.mechanism_runtime.semantic_projection import describe_instances
+                current = app.invoke(args)
+                views = describe_instances(app.process, current['instances'], observations=True)
+                for view, original in zip(views, current['instances']):
+                    view['inbox'] = original.get('inbox', {})
+                return {**current, 'instances': views,
+                    'definitions': [{key: item[key] for key in ('id', 'revision', 'head_ref', 'selected_ref', 'declaration') if key in item}
+                        | ({'legacy_program': item['compiled']} if 'declaration' not in item else {}) for item in current['definitions']]}
+            if args.get('operation', '').startswith('inbox_'):
+                return app.inbox.commit(args)
+            if args.get('operation') in LIFECYCLE:
+                return app.lifecycle_control.commit(args)
+            return app.invoke(args)
         except (ValueError, TypeError, KeyError, OSError, ImportError, RuntimeError) as error:
             from backend.core.storage import StorageCommitUnknown
             return {"error": "MECHANISM_COMMIT_UNKNOWN" if isinstance(error, StorageCommitUnknown) else "MECHANISM_REQUEST_REJECTED",
@@ -48,29 +84,27 @@ def install(ctx):
                     "inspect_required" if args.get("operation") not in {"catalog", "status", "preview", "preview_revision"} else "not_committed"}
 
     def preview(args):
+        args = {key: value for key, value in args.items() if not key.startswith('_')}
+        validate_request(args)
+        if args.get('operation') in OBSERVATIONS:
+            return None
         app = application()
+        if args.get("operation") in {"apply", "revise", "use", "commit"}:
+            subject = app.capability_runtime.prepare(args)
+            # Semantic review already receives exact compiled before/after
+            # meaning and typed component contracts. The source declarations
+            # are a readable preview representation, not a second obligation.
+            return {key: value for key, value in subject.items()
+                if key not in {'declaration', 'previous_declaration'}}
         if args.get("operation") in {"publish", "publish_revision"}:
             return {"kind": "harness_composition", **app.semantic_preview(args)}
-        if args.get("operation") in {"instantiate", "activate", "suspend", "detach"}:
+        if args.get('operation') in LIFECYCLE:
+            return app.lifecycle_control.prepare(args)
+        if args.get("operation") == "instantiate":
             return app.lifecycle_preview(args)
-        if args.get('operation') == 'reconcile':
-            instance, _ = app.repo.instance(app.task, args['instance_id'])
-            return {'kind': 'harness_readonly_reconciliation', 'instance_id': args['instance_id'],
-                'current_revision': (instance or {}).get('revision'), 'effect_state': (instance or {}).get('error', {}).get('effect_state'),
-                'never_replays_effects': True, 'authority_granted': False}
         if args.get("operation", "").startswith("inbox_"):
-            app.sources(args.get("source_refs"))
-            instance, _ = app.repo.instance(app.task, args["instance_id"])
-            selected = {args["candidate_id"]} if args.get("candidate_id") else {item["id"] for item in args.get("candidates", [])}
-            candidates = [{key: item.get(key) for key in ("id", "revision", "status", "text", "source_refs")}
-                for item in (instance or {}).get("inbox", {}).values() if item["id"] in selected]
-            return {"kind": "harness_candidate_disposition", "request": args, "current_candidates": candidates,
-                    "requires_actual_user_adoption": args["operation"] == "inbox_adopt"}
-        if args.get("operation") == "require":
-            app.sources(args.get("source_refs"))
-            return {"kind": "harness_required_constraints", "request": args, "current": app.requirements.read(app.task)[0],
-                    "affects_owned_child_tasks": True, "authority_granted": False}
-        raise ValueError("MECHANISM_OBSERVATION_HAS_NO_EFFECT_BOUNDARY")
+            return app.inbox.prepare(args)
+        raise ValueError("MECHANISM_OPERATION_UNSUPPORTED")
 
     # Rebind loaded component adapters to the actual current provider before
     # a restored task can reach its first context/tool boundary.
@@ -86,17 +120,21 @@ def install(ctx):
     ctx.tools["harness_mechanism"] = AgentTool(name="harness_mechanism",
         execution_contract=data_broker("host.runtime.harness_mechanism"),
         description=load_prompt("tools/harness_mechanism") + ("" if configuration_allowed(ctx.process) else
-            "\nThis actor is read-only: only catalog, status, preview and preview_revision are available. It cannot publish, activate, suspend or otherwise change project or main-task mechanisms."),
+            "\nThis actor is read-only: catalog, status and preview are available. It cannot apply, revise, activate, suspend or otherwise change project or main-task mechanisms."),
         parameters={"type": "object", "additionalProperties": False, "properties": {
             "operation": {"enum": operations},
             "element_id": {"type": "string"}, "element_version": {"type": "integer", "minimum": 1},
+            "declaration": {"type": "object", "description": "Callable mechanism declaration: id, intent, on lifecycle boundaries, and calls with id/use/parameters plus optional inputs, when, after."},
+            "revision": {"type": "object", "description": "Named mechanism edits: intent/on replacements, calls additions or parameter/input merges keyed by each call id, and remove ids."},
             "program": {"type": "object"}, "preview_digest": {"type": "string"},
+            "preview_ref": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$",
+                "description": "Exact draft reference returned by preview. commit accepts only operation and preview_ref; no rewritten arguments or authority."},
             "changes": {"type":"array","minItems":1,"maxItems":32,"items":{"type":"object",
                 "properties":{"op":{"enum":["add","replace","remove"]},"path":{"type":"string","maxLength":512},"value":{}},
                 "required":["op","path"],"additionalProperties":False},
                 "description":"For preview_revision/publish_revision: bounded JSON Pointer edits to intent, elements or bindings of the exact expected_head. Do not rewrite the entire saved graph for a small parameter change."},
             "expected_head": {"type": ["string", "null"], "description": "Optional exact head assertion from preview. Omit to use the CAS head already bound by preview_digest. For a new definition the head is JSON null, never the string 'null'."}, "definition_id": {"type": "string"},
-            "definition_revision": {"type": "integer", "minimum": 1, "description": "For instantiate OR activate: the exact saved definition revision to select. activate upgrades a pinned instance in place when this is supplied; omission resumes its currently selected revision."}, "instance_id": {"type": "string"},
+            "definition_revision": {"type": "integer", "minimum": 1, "description": "Exact saved revision for use, preview or status. For use, omission selects the latest saved revision even after previewing an older one; pinned freezes the selection, not a previously mentioned version. Legacy activate uses it to change a pinned instance; omission there resumes its selected revision."}, "instance_id": {"type": "string"},
             "version_policy": {"enum": ["pinned", "follow_compatible"]}, "expected_revision": {"type": "integer", "minimum": 1},
             "candidate_id": {"type": "string"}, "candidate_revision": {"type": "integer", "minimum": 1},
             "text": {"type": "string", "maxLength": 16000}, "quote": {"type": "string", "maxLength": 4000},
@@ -107,7 +145,11 @@ def install(ctx):
                 "version_policy": {"enum": ["pinned", "follow_compatible"]}},
                 "required": ["definition_id", "version_policy"], "additionalProperties": False}},
             "candidates": {"type": "array", "minItems": 2, "maxItems": 8, "items": {"type": "object", "properties": {
-                "id": {"type": "string"}, "revision": {"type": "integer", "minimum": 1}}, "required": ["id", "revision"], "additionalProperties": False}},
+                "id": {"type": "string"}, "revision": {"type": "integer", "minimum": 1}}, "required": ["id"], "additionalProperties": False}},
             "source_refs": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}}},
             "required": ["operation"]}, execute=invoke, alignment_contract=preview,
         read_only=True, effect=ToolEffect.READ, idempotent=False)
+    tool = ctx.tools['harness_mechanism']
+    from backend.core.loop.model_feedback import harness_feedback
+    tool.model_result = harness_feedback
+    tool.advertised_parameters = current_schema(tool.parameters, operations)

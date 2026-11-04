@@ -18,7 +18,12 @@ from backend.core.loop.provider_protocol import deterministic_hash
 
 PROMPT_MESSAGE_TYPE = "compiled_system_prompt"
 TASK_CONTRACT_MESSAGE_TYPE = "compiled_task_contract"
-PROMPT_SCHEMA_VERSION = 8
+PROMPT_SCHEMA_VERSION = 11
+GOVERNANCE_MESSAGE_TYPE = 'compiled_governance_context'
+MIN_SPLIT_PREFIX_SCHEMA_VERSION = 6
+STABLE_SECTION_NAMES = frozenset({
+    "Behavior and delivery standard", "User collaboration protocol", "Source authority",
+})
 
 
 @dataclass(frozen=True)
@@ -89,17 +94,6 @@ class PromptCompiler:
         }.get(task_kind, (
             load_prompt('completion/default')
         ))
-
-        tool_lines = []
-        for name in sorted(tools):
-            tool = tools[name]
-            effect = getattr(tool, "effect", "read")
-            cancellation = getattr(tool, "cancellation", "cooperative")
-            effect = getattr(effect, "value", effect)
-            cancellation = getattr(cancellation, "value", cancellation)
-            tool_lines.append(f"- `{name}`: effect={effect}; cancellation={cancellation}")
-        if not tool_lines:
-            tool_lines = ["- No tools are available for this task."]
 
         safe_workspace = str(Path(workspace_path)) if workspace_path else "unspecified"
         context, _context_version = process.read_context_snapshot()
@@ -198,6 +192,7 @@ class PromptCompiler:
         )
         sections = [
             PromptSection("Base identity", identity, "host:role-contract"),
+            PromptSection("Completion protocol", completion, "host:completion-protocol"),
             PromptSection(
                 "Behavior and delivery standard",
                 (
@@ -212,7 +207,11 @@ class PromptCompiler:
             ),
             PromptSection(
                 "Capabilities",
-                "\n".join(tool_lines),
+                "The current runtime.capability.available_tools names the callable tools. "
+                "For each tool, runtime.tool_contracts contains its exact argument schema and "
+                "runtime_behavior (effect and cancellation). Retained descriptions are references, "
+                "not availability or permission; the original live registry, lease, policy and sandbox "
+                "still admit each call. Do not reconstruct or restate the capability inventory.",
                 "host:effective-tool-registry",
             ),
         ]
@@ -263,13 +262,14 @@ class PromptCompiler:
                     (
                         render_prompt(
                             'contracts/answer',
-                            completion=format(completion, ''),
-                            adaptive_route_guidance=format(adaptive_route_guidance, ''),
+                            completion='[See Completion protocol]',
+                            adaptive_route_guidance='[See Adaptive routing]',
                         )
                     ),
                     "host:task-contract",
                 ),
             ])
+            sections.append(PromptSection("Adaptive routing", adaptive_route_guidance, "host:routing-guidance"))
         else:
             sections.extend([
                 PromptSection(
@@ -288,13 +288,15 @@ class PromptCompiler:
                         render_prompt(
                             'contracts/workflow',
                             task_kind=format(task_kind, ''),
-                            completion=format(completion, ''),
-                            contract_json=format(json.dumps(contract_payload, ensure_ascii=False, separators=(',', ':')), ''),
+                            completion='[See Completion protocol]',
+                            contract_json='[See Task requirements]',
                         )
                     ),
                     "host:task-contract",
                 ),
             ])
+            sections.append(PromptSection("Task requirements",
+                json.dumps(contract_payload, ensure_ascii=False, separators=(',', ':')), "host:task-requirements"))
         if actor == "supervisor" and getattr(process, "child_ids", None):
             child_ids, contracts, reviews = process.coordination_snapshot()
             manager = getattr(process, "_manager", None)
@@ -367,16 +369,13 @@ class PromptCompiler:
             message for message in session.messages
             if message.get("message_type") != "governance_context_seed"
         ]
-        stable_names = {
-            # Only policy that is byte-stable across task admission, leases and
-            # actor routes belongs in the provider cache prefix.  Identity,
-            # role and effective capabilities all change during answer ->
-            # supervisor -> action transitions and therefore belong to the
-            # task-pinned prefix below.
-            "Behavior and delivery standard", "User collaboration protocol", "Source authority",
-        }
+        # Identity, role and effective capabilities belong in the task prefix;
+        # the shared stable-name contract also drives boundary migration.
+        stable_names = STABLE_SECTION_NAMES
         stable_sections = [item for item in sections if item.name in stable_names]
-        task_sections = [item for item in sections if item.name not in stable_names]
+        volatile_names = {'Project governance context'}
+        volatile_sections = [item for item in sections if item.name in volatile_names]
+        task_sections = [item for item in sections if item.name not in stable_names | volatile_names]
 
         def render(items: list[PromptSection]) -> str:
             return "\n\n".join(
@@ -399,7 +398,11 @@ class PromptCompiler:
                 (item.name, item.provenance, item.version) for item in sections
             ],
         })
-        if session.compiled_prompt_hash == prompt_hash:
+        latest_governance = next((message for message in reversed(session.messages)
+            if message.get('message_type') == GOVERNANCE_MESSAGE_TYPE), None)
+        governance_present = not volatile_sections or (
+            latest_governance is not None and latest_governance.get('content') == render(volatile_sections))
+        if session.compiled_prompt_hash == prompt_hash and governance_present:
             return
 
         section_hashes = {
@@ -480,9 +483,10 @@ class PromptCompiler:
             if task_delta:
                 updates.append("[HOST TASK CONTRACT UPDATE]\n" + render(task_delta))
         removed = sorted(set(previous_hashes) - set(section_hashes))
-        if removed:
+        ordinary_removed = [name for name in removed if name not in volatile_names]
+        if ordinary_removed:
             updates.append(
-                load_prompt('context/withdrawal') + ", ".join(removed)
+                load_prompt('context/withdrawal') + ", ".join(ordinary_removed)
             )
         if updates:
             session.append_host_steering(
@@ -490,5 +494,21 @@ class PromptCompiler:
                 steering_type="prompt_contract_update",
                 version=prompt_hash,
             )
+        # A changing project snapshot must not precede shared task/evidence
+        # inputs. Keep its original system authority, append at this boundary,
+        # and never rewrite already-sent history. These are the same complete
+        # compiler sections, not a cached authorization or an LLM summary.
+        volatile_delta = changed(volatile_sections)
+        if not governance_present:
+            volatile_delta = volatile_sections
+        volatile_removed = [name for name in removed if name in volatile_names]
+        if volatile_delta or volatile_removed:
+            content = render(volatile_delta)
+            if volatile_removed:
+                content += '\n\n' + load_prompt('context/withdrawal') + ', '.join(volatile_removed)
+            session.append_system(content, message_type=GOVERNANCE_MESSAGE_TYPE,
+                prompt_schema_version=PROMPT_SCHEMA_VERSION,
+                prompt_sections=[{'name': s.name, 'provenance': s.provenance, 'version': s.version}
+                    for s in volatile_delta], prompt_hash=prompt_hash)
         session.compiled_prompt_hash = prompt_hash
         session.compiled_prompt_sections = section_hashes

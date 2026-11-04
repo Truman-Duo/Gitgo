@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages} from "../ui/pageContract.js";
@@ -177,7 +178,9 @@ export function BtwPanel(props: Props) {
     }
   };
 
+  const menuHelp=useLocalHelpCommand("btw",undefined,focus!=="input"&&!confirm);
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if(confirm){
       if(key.escape)setConfirm(false);
       else if(key.leftArrow)setSourceIndex(v=>Math.max(0,v-1));
@@ -243,7 +246,7 @@ export function BtwPanel(props: Props) {
       return;
     }
     if (!key.ctrl && !key.meta && input){setFocus("input");draft.insertText(input);}
-  }, {bindingContext: "btw"});
+  }, {bindingContext: "btw",clipboard:!confirm&&(focus==="input"||focus==="body"),inputTarget:confirm?"confirmation":focus});
 
   const visibleAnswer = stream.text || answer;
   const visibleReasoning = stream.reasoning || reasoning;
@@ -259,7 +262,7 @@ export function BtwPanel(props: Props) {
   return (
     <PageFrame page={pages.discussion}>
       <Text bold color={colors.accent}>{t({en:"BTW",zh:"BTW"})}</Text>
-      {confirm?<Text color={colors.warning}>{t({en:"Confirm target: ",zh:"确认目标："})}{targetName} · {selection===3?t({en:"interrupt and append",zh:"中断并追加"}):t({en:"append at boundary",zh:"边界追加"})} · {t({en:"←/→ target · Enter confirm · Esc cancel",zh:"←/→ 目标 · Enter 确认 · Esc 取消",keys:true})}</Text>:null}
+      {confirm?<Text color={colors.warning}>{t({en:"Confirm target: ",zh:"确认目标："})}{targetName} · {selection===3?t({en:"interrupt and append",zh:"中断并追加"}):t({en:"append at boundary",zh:"边界追加"})}</Text>:null}
       <ScrollBox ref={body} flexDirection="column" height={bodyRows} flexGrow={0} flexShrink={1} minHeight={1}>
       <Box ref={content} flexDirection="column" flexShrink={0} width={width}>
       {latestQuestion?<Text dimColor>{t({en:"Question: ",zh:"问题："})}{latestQuestion}</Text>:null}
@@ -306,10 +309,7 @@ export function BtwPanel(props: Props) {
           );
         })}
       </Box>
-      <Text dimColor>{t({en:"Alt+M previous region · ",zh:"Alt+M 上一区域 · ",keys:true})}{focus==="parent"?t({en:"Parent conversation · ↑/↓ or PgUp/PgDn browse · Tab discussion · Esc close",zh:"主/子会话 · ↑/↓ 或 PgUp/PgDn 浏览 · Tab 返回讨论 · Esc 关闭",keys:true}):
-        focus==="body"?t({en:"↑/↓ scroll · type to reply · Tab switch · Esc close",zh:"↑/↓ 滚动 · 直接输入追问 · Tab 切换 · Esc 关闭",keys:true}):
-        focus==="input"?t({en:"Enter ask · ↑/↓ scroll · Tab actions · Esc close",zh:"Enter 提问 · ↑/↓ 滚动 · Tab 操作 · Esc 关闭",keys:true}):
-        t({en:"←/→ actions · Enter apply · Tab parent · Esc close",zh:"←/→ 操作 · Enter 执行 · Tab 主会话 · Esc 关闭",keys:true})}</Text>
+
     </PageFrame>
   );
 }

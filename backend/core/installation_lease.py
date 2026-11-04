@@ -11,6 +11,7 @@ import threading
 _guard = threading.RLock()
 _descriptors: dict[int, int] = {}
 _namespace_descriptors: dict[int, int] = {}
+LEASE_HANDLES_ENV = "GITGO_SANDBOX_INSTALL_LEASE_HANDLES"
 
 
 @contextmanager

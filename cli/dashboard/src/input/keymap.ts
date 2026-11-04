@@ -228,7 +228,7 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
         if (matchChord("escape", input, key)) return [];
         // Non-chat scenes have no free-text editor. Only a leading slash opens
         // the command bar; other printable keys must not create a dead buffer.
-        if (!(input === "/" && cmdVal === "")) return [];
+        if (!(input.startsWith("/") && cmdVal === "")) return [];
       }
     }
     return resolveCommandInput(ctx, input, key);

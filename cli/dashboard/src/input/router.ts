@@ -50,6 +50,7 @@ export function signature(binding: BindingSpec) {
   return `${binding.key.toLowerCase()}:${+!!binding.ctrl}:${+!!binding.shift}:${+!!binding.meta}:${+!!binding.super}`;
 }
 export function matches(event: InputEvent, binding: BindingSpec) {
+  if(event.key.paste)return false;
   return (binding.key.length === 1
     ? event.input.toLowerCase() === binding.key.toLowerCase()
     : Boolean(event.key[binding.key]))
@@ -149,5 +150,6 @@ export const applicationBindings = new InputBindingRegistry();
 
 /** Scene actions retain their existing semantic handlers after physical remapping. */
 export function isBindingAction(action: string, input: string, key: InputKey): boolean {
+  if(key.paste)return false;
   return key.bindingAction ? key.bindingAction === action : variants(action,INPUT_ACTIONS[action]).some(binding=>matches({input,key},binding));
 }

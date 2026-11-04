@@ -116,6 +116,52 @@ def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revisi
     return True
 
 
+def commit_state_batch(self: ObjectsPort, namespace: str, updates: list[dict]) -> bool:
+    """Publish related CAS heads and immutable revisions in one transaction.
+
+    Compare every head before writing any. A conflict or storage failure leaves
+    all authoritative roots unchanged; blob creation is not publication.
+    """
+    self._ensure_open()
+    if not namespace or not isinstance(updates, list) or not 1 <= len(updates) <= 8:
+        raise ValueError('bounded state publication required')
+    keys = set()
+    for update in updates:
+        if (not isinstance(update, dict) or set(update) - {'key', 'value_ref', 'expected_ref', 'revision_key'}
+                or not {'key', 'value_ref', 'expected_ref'}.issubset(update)):
+            raise ValueError('exact state publication preconditions required')
+        for key in [update['key'], *([update['revision_key']] if update.get('revision_key') else [])]:
+            if not isinstance(key, str) or not key or key in keys:
+                raise ValueError('distinct state publication keys required')
+            keys.add(key)
+        self.read_blob(update['value_ref'])
+        if update['expected_ref'] is not None and not isinstance(update['expected_ref'], str):
+            raise ValueError('invalid expected state reference')
+    self._reserve_authoritative_write(len(namespace) * len(keys) + sum(map(len, keys)) + 512 * len(updates))
+    with self._state_lock:
+        with authoritative_transaction(self._state):
+            for update in updates:
+                row = self._state.execute('SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?',
+                    (namespace, update['key'])).fetchone()
+                if (str(row[0]) if row else None) != update['expected_ref']:
+                    return False
+                if update.get('revision_key'):
+                    prior = self._state.execute('SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?',
+                        (namespace, update['revision_key'])).fetchone()
+                    if prior is not None and str(prior[0]) != update['value_ref']:
+                        raise ValueError('immutable revision key already exists')
+            now = _utc_now()
+            for update in updates:
+                if update.get('revision_key'):
+                    self._state.execute('INSERT OR IGNORE INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)',
+                        (namespace, update['revision_key'], update['value_ref'], now))
+                self._state.execute('INSERT INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?) '
+                    'ON CONFLICT(namespace,key) DO UPDATE SET value_ref=excluded.value_ref,updated_at=excluded.updated_at',
+                    (namespace, update['key'], update['value_ref'], now))
+    return True
+
+
+
 def list_state_refs(self: ObjectsPort, namespace: str, *, prefix: str,
                     after: str = "", limit: int = 50) -> list[dict]:
     """Bounded literal-prefix scan; keys can be used as continuation cursors."""
@@ -390,7 +436,7 @@ def read_tool_result(
     needle = str(query or "")
     query_match = None
     if needle:
-        found = content.casefold().find(needle.casefold())
+        found = content.casefold().find(needle.casefold(), max(0, int(offset or 0)))
         if found < 0:
             return {
                 "locator": locator,

@@ -40,7 +40,7 @@ class CompletionClaim:
                     or re.search(r"(?m)^\s*FINAL_ANSWER\s*:", response))
 
     @classmethod
-    def from_args(cls, args: dict, *, step: int) -> "CompletionClaim":
+    def from_args(cls, args: dict, *, step: int, process=None) -> "CompletionClaim":
         result = str(args.get("result", "")).strip()
         if not result:
             raise ValueError("complete_task requires a non-empty result")
@@ -50,6 +50,8 @@ class CompletionClaim:
         verification = tuple(
             dict(item) for item in verification_raw if isinstance(item, dict)
         )
+        if process is not None:
+            verification = bind_verification_receipts(process, verification)
         files = tuple(str(item) for item in (args.get("files", []) or []))
         return cls(
             result=result,
@@ -800,6 +802,43 @@ def _current_task_receipts(process) -> list[dict]:
     ]
 
 
+def bind_verification_receipts(process, verification) -> tuple[dict, ...]:
+    """Bind unambiguous test selectors to existing current receipts.
+
+    This is provenance lookup, not interpretation of the model's prose. An
+    explicit receipt is never replaced. Ambiguous, failed, stale and foreign
+    facts stay unbound and are rejected by the normal delivery evaluator.
+    The evaluator rechecks the bound receipt after any subsequent mutation.
+    """
+    from .validation_evidence import test_receipt_assessment
+    active = process.active_task_id or process.process_id
+    latest = {}
+    def visit(receipts):
+        for receipt in receipts:
+            if not isinstance(receipt, dict) or receipt.get('task_id') not in (None, '', active):
+                continue
+            if receipt.get('tool_name') == 'run_test' and receipt.get('test_id'):
+                latest[str(receipt['test_id'])] = receipt
+            visit(receipt.get('child_receipts') or [])
+    visit(_current_task_receipts(process))
+    bound = []
+    for item in verification:
+        evidence = dict(item)
+        if str(evidence.get('kind', '')).strip().casefold() == 'test' and not evidence.get('receipt_id'):
+            selected = str(evidence.get('test_id') or '')
+            candidates = ([latest[selected]] if selected in latest else []) if selected else list(latest.values())
+            # Do not make a multi-test claim appear proven by picking its sole
+            # green test. Ambiguity is decided before testing candidate status.
+            if len(candidates) == 1:
+                receipt = candidates[0]
+                if (receipt.get('receipt_id') and receipt.get('succeeded') is True
+                        and receipt.get('committed') is True and receipt.get('test_passed') is True
+                        and test_receipt_assessment(process, receipt)['state'] == 'current'):
+                    evidence.update(receipt_id=receipt['receipt_id'], test_id=receipt['test_id'])
+        bound.append(evidence)
+    return tuple(bound)
+
+
 COMPLETE_TASK_PARAMETERS = {
     "type": "object",
     "properties": {
@@ -807,7 +846,7 @@ COMPLETE_TASK_PARAMETERS = {
         "verification": {
             "type": "array",
             "items": {"type": "object"},
-            "description": "Verification records, preferably referencing host receipt_id values.",
+            "description": "Verification records. For test evidence supply kind=test and test_id; Runtime binds the current passing receipt. A sole unambiguous test may omit test_id. Explicit receipt_id values remain exact constraints; missing, failed, stale or ambiguous evidence cannot pass.",
         },
         "files": {"type": "array", "items": {"type": "string"}},
         "diff_summary": {"type": "string"},

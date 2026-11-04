@@ -1,13 +1,27 @@
 """Host decides whether a semantic assessment has new work to do."""
 from .alignment_evidence import alignment_input_digest, answer_digest
 
-POLICY_VERSION = 14
+POLICY_VERSION = 15
 REVIEW_POLICY = f'on_demand_v{POLICY_VERSION}'
 
 
 def uses_on_demand_review(state):
     """Keep persisted v2 tasks subject to the same boundary guards."""
-    return state.get('review_policy') in {'on_demand_v2', 'on_demand_v3', 'on_demand_v4', 'on_demand_v5', 'on_demand_v6', 'on_demand_v7', 'on_demand_v8', 'on_demand_v9', 'on_demand_v10', 'on_demand_v11', 'on_demand_v12', 'on_demand_v13', REVIEW_POLICY}
+    return state.get('review_policy') in {'on_demand_v2', 'on_demand_v3', 'on_demand_v4', 'on_demand_v5', 'on_demand_v6', 'on_demand_v7', 'on_demand_v8', 'on_demand_v9', 'on_demand_v10', 'on_demand_v11', 'on_demand_v12', 'on_demand_v13', 'on_demand_v14', REVIEW_POLICY}
+
+
+def requires_business_readiness(tool):
+    from .operation_policy import is_effectful_mutation
+    contract = getattr(tool, 'execution_contract', None)
+    return is_effectful_mutation(tool.effect) and not str(getattr(contract, 'broker', '')).startswith('host.runtime.')
+
+
+def business_readiness_requested(payload):
+    return any(value.get('kind') == 'business_readiness' for value in payload.get('proposed_contracts') or [])
+
+
+def configuration_subjects(payload):
+    return [value for value in payload.get('proposed_contracts') or [] if value.get('kind') != 'business_readiness']
 
 
 def admission_input_digest(process, payload):
@@ -20,9 +34,27 @@ def admission_input_digest(process, payload):
     declarations=payload.get('proposed_contracts') or []
     if any(not isinstance(value,dict) for value in declarations):
         raise ValueError('semantic boundary proposals must be objects')
+    declarations=configuration_subjects(payload)
     contracts=[value for value in declarations if not value.get('kind')]
     subjects=declarations if len(declarations)>1 or any(value.get('kind') for value in declarations) else []
     return alignment_input_digest(process,contract_override=contracts[-1] if contracts else None,boundary_subjects=subjects)
+
+
+def boundary_subject_digest(subject):
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(subject, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def admission_subject_binding(process, payload):
+    subjects = configuration_subjects(payload)
+    if not any(value.get('kind') for value in subjects):
+        return {}
+    # The same admission record owns the review. A control operation is bound
+    # to its exact typed subject and unchanged task meaning, not interpreted
+    # as a task_contract (which would discard its operation-specific fields).
+    return {'subject_digests': [boundary_subject_digest(value) for value in subjects if value.get('kind')],
+        'context_digest': alignment_input_digest(process)}
 
 
 def main_model_initial_question(process, payload):
@@ -95,6 +127,8 @@ def reuse_assessment(process, payload):
     current = admission_input_digest(process, payload)
     if ready.get("input_digest") != current or ready.get("status") != "ready":
         return ""
+    if business_readiness_requested(payload) and not ready.get('business_readiness'):
+        return ''
     if ready.get('scope') == 'observation_only' and (payload.get('stage') != 'admission' or payload.get('observation_only') is not True):
         return ''
     if payload["stage"] == "admission":

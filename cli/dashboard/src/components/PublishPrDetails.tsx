@@ -5,6 +5,7 @@ import type {PublishItem, PublishPlatformSnapshot, PlatformRecord} from "../back
 import type {FooterConfig} from "./CommandBar.js";
 import type {PublishLocalState} from "../state/publishLocalState.js";
 import {useManagedInput} from "../input/runtime.js";
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {matchChord} from "../input/bindings.js";
 import {useCopy} from "../ui/PageFrame.js";
 import {usePanelSize} from "../theme/index.js";
@@ -19,6 +20,7 @@ export function PublishPrDetails({item, snapshot, document, onFooter, onDismiss,
   onCommand: (command: string, values?: Record<string, string>) => void;
 }) {
   const t = useCopy(), {w} = usePanelSize({minWidth: 20, widthOffset: 4});
+  const help=useLocalHelpCommand("publish.pr",onFooter);
   const [scene, setScene] = useState<"summary" | "files" | "discussion" | "handle" | "diff">("summary"), [row, setRow] = useState(0), [fileIndex, setFileIndex] = useState(0);
   const key = `pr/viewed/${snapshot.id}`, [viewed, setViewed] = useState<string[]>(() => localState.get<string[]>(key) ?? []);
   const scroll = useRef<ScrollBoxHandle>(null), selected = useRef<DOMElement>(null), file = snapshot.files?.[fileIndex];
@@ -50,10 +52,11 @@ export function PublishPrDetails({item, snapshot, document, onFooter, onDismiss,
     {label: t({en: "Prepare close request", zh: "准备关闭请求"}), run: () => full ? command("/state", {state: "closed"}) : command("/remote")},
   ] : [];
   const difference = useMemo(() => !file?.patch ? [] : parseUnifiedDiff(`diff --git a/${clean(file.old_path || file.path)} b/${clean(file.path)}\n--- a/${clean(file.old_path || file.path)}\n+++ b/${clean(file.path)}\n${clean(file.patch)}`), [file]);
-  useEffect(() => {onFooter({hidden: true}); return () => onFooter(null);}, [onFooter]);
+  useEffect(() => {if(!help.active)onFooter({hidden: true}); return () => onFooter(null);}, [onFooter,help.active]);
   useEffect(() => {localState.set(key, viewed);}, [viewed, key]);
   useLayoutEffect(() => {if (selected.current) scroll.current?.scrollIntoView(selected.current); else scroll.current?.scrollTo(0);}, [scene, row, w]);
   useManagedInput((text, key) => {
+    if(help.handle(text,key))return;
     if (matchChord("escape", text, key)) {if (scene === "summary") onDismiss(); else {setScene(scene === "diff" ? "files" : "summary"); setRow(0);} return;}
     if (scene === "diff") {
       if (matchChord("up", text, key)) scroll.current?.scrollBy(-1);
@@ -78,6 +81,6 @@ export function PublishPrDetails({item, snapshot, document, onFooter, onDismiss,
       </SelectionRow>)}
       {snapshot.files_more || snapshot.comments_more || snapshot.reviews_more || snapshot.anchors_more ? <Text dimColor>{t({en: "Additional platform pages exist; refresh with the next page before treating this observation as complete.", zh: "平台还有后续页，请读取下一页后再判断信息是否完整。"})}</Text> : null}
     </ScrollBox>
-    <Text dimColor>{scene === "diff" ? t({en: "↑/↓ scroll · c prepare anchored review · Esc files", zh: "↑/↓ 滚动 · c 准备行审查 · Esc 文件列表"}) : t({en: "↑/↓ select · Enter open · Esc back", zh: "↑/↓ 选择 · Enter 打开 · Esc 返回"})}</Text>
+
   </Box>;
 }

@@ -1,5 +1,7 @@
 """task contracts protocol tools."""
 from __future__ import annotations
+from copy import deepcopy
+from backend.core.loop.model_feedback import contract_feedback
 
 from backend.core.prompt_templates import load_prompt
 from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
@@ -8,6 +10,7 @@ from backend.core.loop.capabilities import CapabilityProfiles
 from backend.core.loop.completion_protocol import CompletionClaim
 
 def install(ctx):
+    from backend.core.loop.engineering_workflow import plan_schema
     from backend.core.loop.mechanism_catalog import ELEMENTS, maintenance_schema
     from backend.core.loop.task_contract import preview_contract, validate_contract_proposal, get_task_contract, TaskContractRevisionConflict
     process = ctx.process
@@ -16,7 +19,96 @@ def install(ctx):
     tools = ctx.tools
     manager = ctx.manager
     engineering = ctx.engineering
+    def bind_arguments(args):
+        """Lower a semantic delta to the existing version-bound proposal.
+
+        Pipeline prepares this once before admission; publication receives that
+        exact full proposal, never a fresh merge after a concurrent change.
+        The same binder is used for the earlier read-only semantic preview.
+        """
+        if not isinstance(args, dict):
+            raise ValueError('task contract arguments must be an object')
+        args = deepcopy(args)
+        semantic_update = {key: args.pop(key) for key in ('plan', 'plan_review', 'related_review') if key in args}
+        if semantic_update or args.get('maintenance') is not None:
+            from backend.core.loop.task_maintenance import state_for
+            update = args.get('maintenance')
+            if update is None:
+                update = {}
+            if not isinstance(update, dict):
+                raise ValueError('maintenance must be an object')
+            for key, value in semantic_update.items():
+                if key in update and update[key] != value:
+                    raise ValueError('Conflicting task update: ' + key)
+                update[key] = value
+            update.setdefault('expected_revision', int(state_for(process).get('revision') or 0))
+            args['maintenance'] = update
+        operation = args.get('operation', 'declare')
+        if operation not in {'declare', 'revise'}:
+            raise ValueError('task contract operation must be declare or revise')
+        if operation == 'declare':
+            if 'append' in args:
+                raise ValueError('append requires operation=revise')
+            if not get_task_contract(process).get('revision'):
+                # Initial absence proposes no additional uncertainty; it does
+                # not resolve existing questions or certify semantic readiness.
+                # Existing contracts use explicit revise/retain semantics.
+                args.setdefault('uncertainties', [])
+                args.setdefault('requires_user_decision', bool(args['uncertainties']))
+                args.setdefault('delegation_required', args.get('execution_mode') == 'delegate')
+                args.setdefault('user_requested_delegation', False)
+                args.setdefault('user_request_evidence', '')
+            return bind_workflow({key: deepcopy(value) for key, value in args.items() if key != 'operation'})
+        schema = tools['declare_task_contract'].parameters
+        properties = schema['properties']
+        unknown = set(args) - set(properties) - {'operation', 'append'}
+        if unknown:
+            raise ValueError('Unsupported revision fields: ' + ', '.join(sorted(unknown)))
+        current = get_task_contract(process)
+        revision = int(current.get('revision') or 0)
+        if revision == 0:
+            raise ValueError('TASK_CONTRACT_INITIAL_DECLARATION_REQUIRED: declare the initial task before revising it')
+        expected = args.get('expected_revision', revision)
+        if type(expected) is not int or expected != revision:
+            raise TaskContractRevisionConflict('TASK_CONTRACT_REVISION_CONFLICT: reconcile the current contract before revising it')
+        edits = {key: deepcopy(value) for key, value in args.items()
+                 if key not in {'operation', 'append', 'expected_revision'}}
+        additions = args.get('append', {})
+        if not isinstance(additions, dict) or set(additions) - APPEND_FIELDS:
+            raise ValueError('append supports only: ' + ', '.join(sorted(APPEND_FIELDS)))
+        if not edits and not any(additions.values()):
+            raise ValueError('TASK_CONTRACT_CHANGE_REQUIRED: supply changed fields or appended requirements')
+        # Active workflow/mechanism omission is handled by the original compiler;
+        # do not replay an earlier maintenance transaction or private Host facts.
+        inherited = {key: deepcopy(current[key]) for key in properties if key in current
+            and key not in {'engineering_workflow', 'mechanism', 'maintenance', 'preview_digest', 'expected_revision'}}
+        for key, values in additions.items():
+            if key in edits:
+                raise ValueError('Cannot both replace and append the same field: ' + key)
+            if not isinstance(values, list):
+                raise ValueError('append.' + key + ' must be an array')
+            retained = inherited.setdefault(key, [])
+            for value in values:
+                if value not in retained:
+                    retained.append(deepcopy(value))
+        return bind_workflow({**inherited, **edits, 'expected_revision': revision})
+
+    def bind_workflow(args):
+        workflow = args.get('engineering_workflow')
+        if isinstance(workflow, dict) and 'nodes' not in workflow and 'target_files' not in workflow:
+            # Exact already-proposed deliverable paths, not prose inference.
+            files = [d['path'] for d in args.get('deliverables', []) if isinstance(d, dict)
+                and d.get('kind') == 'workspace_file' and d.get('path')]
+            if files and 'tdd' in (workflow.get('profiles') or []):
+                workflow['target_files'] = list(dict.fromkeys(files))
+        for item in args.get('deliverables', []):
+            if isinstance(item, dict):
+                item.setdefault('required', True)
+        return args
+
+    APPEND_FIELDS = {'acceptance_criteria', 'deliverables', 'uncertainties', 'required_tool_calls', 'adopt_process_ids'}
     def proposal_for(args):
+        args = bind_arguments(args)
         proposal = validate_contract_proposal(args, workspace_path or process.worktree_path)
         if process.actor_kind != "supervisor":
             from backend.core.loop.task_maintenance import state_for
@@ -44,6 +136,14 @@ def install(ctx):
             if child_id not in process.delegated_contracts or process.delegated_contracts[child_id].get("superseded_by"):
                 raise ValueError("cannot adopt a missing or superseded task contract")
         return proposal
+
+    def preview_proposal(args):
+        # Public proposal scheduling must validate the same bound arguments as
+        # Pipeline. Direct legacy application callers retain compiler defaults.
+        from backend.core.loop.tool_pipeline import _validate_args
+        bound = bind_arguments(args)
+        _validate_args(bound, tools['declare_task_contract'].parameters)
+        return preview_contract(process, proposal_for(bound))
 
     def declare_task_contract(args: dict) -> dict:
         from backend.core.loop.task_contract import (
@@ -119,8 +219,10 @@ def install(ctx):
 
     tools["declare_task_contract"] = AgentTool(
         execution_contract=data_broker("host.runtime.declare_task_contract"),
+        model_result=contract_feedback,
         name="declare_task_contract",
-        alignment_contract=lambda args: preview_contract(process, proposal_for(args)),
+        prepare_args=bind_arguments,
+        alignment_contract=preview_proposal,
         description=(
             load_prompt('tools/declare_task_contract')
         ),
@@ -140,7 +242,7 @@ def install(ctx):
                 "maintenance": maintenance_schema(),
                 "preview_digest": {"type": "string", "description": "Optional task_mechanism preview digest; rejects a changed preview before activation."},
                 "expected_revision": {"type": "integer", "minimum": 0,
-                    "description": "Required for a revision after initial declaration. Use the current contract revision; stale previews must be recomputed."},
+                    "description": "Required for a legacy full replacement; optional exact base for operation=revise, otherwise Runtime binds the current revision. Stale proposals require reconciliation."},
                 "goal": {"type": "string"},
                 "execution_mode": {
                     "type": "string",
@@ -179,7 +281,7 @@ def install(ctx):
                     "type": "array", "items": {"type": "string"},
                 },
                 "requires_user_decision": {"type": "boolean"},
-                "engineering_workflow": {"type": "object", "description": "Optional Host-enforced practice plan: profiles and evidence nodes with depends_on; use engineering_workflow status to discover supported practices."},
+                "engineering_workflow": plan_schema(),
                 "estimated_complexity": {
                     "type": "string", "enum": ["bounded", "moderate", "high"],
                 },
@@ -231,6 +333,35 @@ def install(ctx):
         idempotent=False,
     )
 
+    # One implementation and execution schema; discovery also describes the
+    # concise revision form. Old saved full declarations remain compatible.
+    contract_tool = tools['declare_task_contract']
+    advertised = deepcopy(contract_tool.parameters)
+    # The task-state consumer graph is a compatibility representation owned by
+    # the runtime. New callable lifecycle definitions use harness_mechanism;
+    # do not ask the model to duplicate one program into two different IRs.
+    for legacy in ('mechanism', 'preview_digest'):
+        advertised['properties'].pop(legacy)
+    for field in ('plan', 'plan_review', 'related_review'):
+        advertised['properties'][field] = deepcopy(maintenance_schema()['properties'][field])
+    advertised['properties']['maintenance']['required'] = []
+    advertised['properties']['maintenance']['description'] = 'Reconcile actual adopted changes and dependency failures. Runtime binds the current maintenance revision unless an exact expected_revision is supplied.'
+    required_initial = advertised.pop('required')
+    optional_initial = {'delegation_required', 'uncertainties', 'requires_user_decision',
+        'user_requested_delegation', 'user_request_evidence'}
+    required_initial = [key for key in required_initial if key not in optional_initial]
+    advertised['properties']['deliverables']['items']['required'] = ['kind']
+    advertised['properties']['uncertainties']['description'] = 'Explicit unresolved choices. On initial declare omission proposes none; it never clears existing questions. revise preserves omission. If nonempty and requires_user_decision is omitted initially, Runtime retains a decision requirement.'
+    advertised['properties'].update({
+        'operation': {'type': 'string', 'enum': ['declare', 'revise'],
+            'description': 'Default declare supplies the initial full contract. revise supplies only changed fields; omitted obligations are retained and Runtime binds the current revision.'},
+        'append': {'type': 'object', 'additionalProperties': False,
+            'description': 'With revise, append exact additional obligations without copying existing arrays. Do not also replace the same field.',
+            'properties': {key: deepcopy(contract_tool.parameters['properties'][key]) for key in sorted(APPEND_FIELDS)}}})
+    advertised['anyOf'] = [{'required': required_initial},
+        {'required': ['operation'], 'properties': {'operation': {'const': 'revise'}}}]
+    contract_tool.advertised_parameters = advertised
+
 
     def complete_supervision(args: dict) -> dict:
         result = str(args.get("result", "")).strip()
@@ -249,6 +380,7 @@ def install(ctx):
                     "diff_summary": str(args.get("diff_summary") or ""),
                 },
                 step=process.steps_used,
+                process=process,
             )
         except ValueError as exc:
             return {"accepted": False, "error": str(exc)}

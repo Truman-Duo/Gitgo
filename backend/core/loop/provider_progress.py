@@ -27,15 +27,17 @@ class ProviderProgress:
         loop_guard = self.guard
         for invalid in invalid_tool_calls:
             tool_name = str(invalid.get("name") or "unknown")
+            code = invalid.get('error_code') or 'INVALID_TOOL_ARGUMENT_JSON'
+            facts = {'invalid_transport': True} if code == 'INVALID_TOOL_TRANSPORT' else {'invalid_json': True}
             loop_guard.record_tool_result(
                 tool_name,
-                {"invalid_json": True},
+                facts,
                 True,
                 effect="read",
             )
             loop_guard.record_tool_error(
-                tool_name, "INVALID_TOOL_ARGUMENT_JSON",
-                {"invalid_json": True},
+                tool_name, code,
+                facts,
             )
 
     def _incomplete(self, response, duration_ms):
@@ -121,8 +123,15 @@ class ProviderProgress:
         names = ", ".join(sorted({
             str(item.get("name") or "unknown") for item in invalid_tool_calls
         }))
+        transport = any(item.get('error_code') == 'INVALID_TOOL_TRANSPORT' for item in invalid_tool_calls)
+        message = (('[HOST TOOL TRANSPORT ERROR] Valid JSON used the wrong call envelope. No tool was executed. '
+            'Use the native function gitgo_call with exactly {"name": "the intended available tool", '
+            '"arguments": {its business fields}}. Both name and arguments are required at the top level. '
+            'Do not call the business tool directly with the wrapper or nest the wrapper inside arguments. '
+            'Correct the envelope; keep the intended business parameters unchanged.') if transport else
+            render_prompt('recovery/tool_arguments', names=format(names, '')) + diagnostic_hint('INVALID_TOOL_ARGUMENT_JSON'))
         session.append_user(
-            render_prompt('recovery/tool_arguments', names=format(names, '')) + diagnostic_hint('INVALID_TOOL_ARGUMENT_JSON'),
+            message,
             message_type="host_tool_argument_error",
         )
         return DeliveryBoundary(retry=True)

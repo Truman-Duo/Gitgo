@@ -18,7 +18,7 @@ import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from backend.core.loop.agent_tool import AgentTool
@@ -43,6 +43,9 @@ class ToolExecution:
     idempotency_key: str = field(default="", repr=False)
     _rolled_back: bool = field(default=False, repr=False)
     _rollback_reason: str = field(default="", repr=False)
+    # Task Runtime schedules semantic work before an ordered call. Pipeline
+    # remains the authority for effects, grants and final state validation.
+    before_call: Callable | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if not self.idempotency_key:
@@ -99,12 +102,13 @@ class ToolExecution:
         # a resumable suffix when a mode revision fences a mutation mid-batch,
         # including a batch generated while the previous mode was effective.
         from .operation_policy import is_observation_effect
+        def observation(tool):
+            return (tool is not None and tool.read_only and not tool.composite_spec
+                    and tool.alignment_contract is None and is_observation_effect(tool.effect))
         groups = []
         for item in resolved:
             tool = item[2]
-            observation = tool is not None and not tool.composite_spec and is_observation_effect(tool.effect)
-            if observation and groups and all(t[2] is not None and not t[2].composite_spec
-                                              and is_observation_effect(t[2].effect) for t in groups[-1]):
+            if observation(tool) and groups and all(observation(t[2]) for t in groups[-1]):
                 groups[-1].append(item)
             else:
                 groups.append([item])
@@ -126,7 +130,9 @@ class ToolExecution:
                     if r.suspended:
                         break
                 else:
-                    r = pipeline.execute(tc, tool, self.ctx, self.execution_id, call_index)
+                    r = self.before_call(tc, tool, self.execution_id, call_index) if self.before_call else None
+                    if r is None:
+                        r = pipeline.execute(tc, tool, self.ctx, self.execution_id, call_index)
                     results.append(r)
                     if r.suspended:
                         break
@@ -366,7 +372,7 @@ class ToolExecution:
     def _extract_write_targets(self) -> list[str]:
         """Extract file paths from write tool calls' args."""
         targets = []
-        catalog = self.ctx.artifacts.get("tool_catalog") or {}
+        catalog = self.ctx.tool_catalog or {}
         for tc in self.tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})

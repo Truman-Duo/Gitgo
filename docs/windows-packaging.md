@@ -1,6 +1,6 @@
 # Windows 一键打包
 
-在源码根目录双击 `build_windows.bat`，或在 PowerShell 中运行 `.\build_windows.bat`。它沿用原有 Windows 构建器，生成 Alpha3 管理安装 ZIP、SHA256 和文件清单，内置正式公开更新策略，并运行冻结 Host/Daemon/工具冒烟及会话连续性检查。输出显示在控制台，默认位于 `dev-artifacts/windows-packaging/` 下的独立目录。
+在源码根目录运行 `powershell -NoProfile -ExecutionPolicy Bypass -File packaging/release_windows.ps1 -BuildOnly -ManagedUpdate`。它沿用原有 Windows 构建器，生成管理安装 ZIP、SHA256 和文件清单，内置正式公开更新策略，并运行冻结 Host/Daemon/工具冒烟及会话连续性检查。输出显示在控制台，默认位于 `dev-artifacts/windows-packaging/` 下的独立目录。公开源码仅保留 `run_dashboard_native.bat` 作为正式启动入口，测试和开发用 BAT 不随发布提交。
 
 日常打包使用显式的 `-BuildOnly`，不重复运行整套源码测试，也不代表正式发行验收。它不发布、安装或覆盖现有 Release。正式源码验收及签名准备仍使用同一个入口的完整模式。
 

@@ -70,13 +70,25 @@ def describe_instance(process, instance, *, observations=False):
     value['instance_id'] = instance['id']
     value['program_digest'] = instance['compiled']['digest']
     value['behavior_active'] = instance['phase'] == 'ready' or bool(instance.get('effective_ref') and instance['phase'] in {'pending_activation', 'activating'})
+    control = instance.get('user_control') or {}
+    if (instance['phase'] in {'suspended', 'detached'} and control.get('action') in {'suspend', 'detach'}
+            and control.get('origin') == 'canonical_checkpoint_choice'):
+        task = process.active_task_id or process.process_id
+        actual = next((event for event in reversed(process.session.host_ledger)
+            if event.get('event') == 'user_decision_received' and event.get('task_id') == task
+            and 'decision:' + str(event.get('decision_id')) == control.get('source_ref')), None)
+        if actual:
+            value['control_effect'] = {'scope': 'this_instance_activation_only',
+                'action': control['action'], 'source_ref': control['source_ref'],
+                'selected_label': actual.get('selected_label'), 'authority_sequence': control['authority_sequence'],
+                'instruction': 'Keep this instance inactive after the actual user control. Earlier setup/enable requests do not require reactivation. Continue the original business task under its own requirements and permissions.',
+                'business_scope_cancelled': False, 'authority_granted': False}
     if instance['phase'] not in {'saved', 'suspended', 'detached'}:
         value['program'] = semantic_program(instance['compiled'])
     if observations:
-        holds = sorted(instance.get('holds', {}).values(), key=lambda item: item.get('decision_sequence', 0))
+        from .observations import checkpoint_observations
         value['execution'] = {
-            'checkpoints': [{key: hold.get(key) for key in
-                ('unit_id', 'phase', 'epoch', 'decision_id', 'answer_id', 'hints')} for hold in holds[-8:]],
+            'checkpoints': checkpoint_observations(process, instance),
             'return_counters': deepcopy(instance.get('return_counters', {})),
             'completion_controls': completion_controls(process, instance),
             'reviews': review_observations(instance)}
@@ -125,7 +137,7 @@ def next_boundary_guidance(process, instances):
             for item in changes[:16]], 'pending_change_count': len(changes), 'partial': len(changes) > 16,
         'next_action': ('interpret_pending_changes_before_new_effect_or_completion' if changes else
             'continue_current_task_under_effective_instances'),
-        'instruction': ('Read each pending change from task_mechanism status and its real source. Interpret information/questions; '
+        'instruction': ('Use pending changes already present in current task context; inspect task_mechanism status or its source only when more detail is needed. Interpret information/questions; '
             'reconcile changed requirements with the existing contract, plan and verification. Preserve accepted obligations, '
             'inflight review generations and return counts. Do not manufacture an answer or replay a finished stage. '
             'When there are no pending changes, continue the business task; this projection requests no new setup or review.'),

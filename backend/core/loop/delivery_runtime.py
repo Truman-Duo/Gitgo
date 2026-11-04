@@ -61,8 +61,9 @@ class DeliveryRuntime:
                     return self._wait_for_stage(directive)
             if directive and directive["kind"] == "rework":
                 import json
+                from .model_feedback import rework_feedback
                 self.process.completion_claim = None
-                self.session.append_host_steering("[MECHANISM COMPLETION REVIEW]\n" + json.dumps(directive, ensure_ascii=False)
+                self.session.append_host_steering("[MECHANISM COMPLETION REVIEW]\n" + json.dumps(rework_feedback(directive, self.process), ensure_ascii=False)
                     + "\nContinue the existing execution path; all original completion obligations remain.",
                     steering_type="mechanism_completion_rework", version=event_id)
                 return DeliveryBoundary(retry=True)

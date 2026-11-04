@@ -11,9 +11,9 @@ CHORDS.leftRight={label:"←/→",match:(input,key)=>CHORDS.left.match(input,key
 // Legacy pure resolvers still use these canonical letters. Scoped live actions
 // use isBindingAction and an explicit bindingContext instead of global letters.
 for(const letter of ["l","h","r","d","x","s","v","a","p","n","e","t"]){
- CHORDS["letter"+letter.toUpperCase()]={label:letter.toUpperCase(),match:input=>input.toLowerCase()===letter};
+ CHORDS["letter"+letter.toUpperCase()]={label:letter.toUpperCase(),match:(input,key)=>!key?.paste&&input.toLowerCase()===letter};
 }
-CHORDS.shiftD={label:"Shift+D",match:(input,key)=>!!key.shift&&input.toLowerCase()==="d"};
+CHORDS.shiftD={label:"Shift+D",match:(input,key)=>!key?.paste&&!!key.shift&&input.toLowerCase()==="d"};
 export function matchChord(name:string,input:string,key:any):boolean {return CHORDS[name]?.match(input,key)||false;}
 export function chordLabel(name:string):string {
  if(name==="upDown")return chordLabel("up")+chordLabel("down");

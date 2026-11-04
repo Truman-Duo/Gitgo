@@ -47,7 +47,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
       {projects.length === 0 ? (
         <Box flexDirection="column" paddingTop={1}>
           <Text dimColor>{t({en:"No projects yet.",zh:"还没有项目。"})}</Text>
-          <Text dimColor>{t({en:"Use /create to register a workspace, then Enter to open it.",zh:"使用 /create 注册工作区，然后按 Enter 打开。",keys:true})}</Text>
+
         </Box>
       ) : null}
 

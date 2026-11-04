@@ -19,14 +19,25 @@ class ToolSurfaceRuntime:
         self.known_tools = {**self.available, **self.process.dynamic_tools, **internal}
         self.tools, unavailable = _select_authorized_tools(self.process, self.known_tools)
         if self.ctx is not None:
-            self.ctx.artifacts['tool_catalog'] = self.tools
-            self.ctx.artifacts['mechanism_dependencies'] = self.known_tools
+            from .execution_context import ToolBindings
+            self.ctx.tool_bindings = ToolBindings(self.tools, self.known_tools, self.synchronize)
         return unavailable
 
     def discovery(self, active_names, *, excluded=()):
         from .tool_surface import admission_snapshot
+        active_names = set(active_names).difference(excluded)
         known = set(self.known_tools).difference(excluded)
-        return admission_snapshot(self.process, active_names, known)
+        snapshot = admission_snapshot(self.process, active_names, known)
+        # Present each exact effect/cancellation contract beside its tool
+        # schema, through the existing reference-catalog delta mechanism.
+        # This is not a lease; the live names and original pipeline own access.
+        def value(item):
+            return getattr(item, 'value', item)
+        snapshot['tool_behaviors'] = {name: {
+            'effect': value(self.tools[name].effect),
+            'cancellation': value(self.tools[name].cancellation)}
+            for name in sorted(active_names) if name in self.tools}
+        return snapshot
 
     def refresh_prompt(self):
         from .mechanism_lifecycle import fence
@@ -37,12 +48,12 @@ class ToolSurfaceRuntime:
         _refresh_compiled_prompt(self.process.session, self.process, self.tools, self.workspace)
         from .task_maintenance import state_for
         from .mechanism_catalog import digest
-        from .permission_broker import tool_contract_digest
+        from .permission_broker import tool_contract_digests
         state = state_for(self.process)
         if state:
             self.process._mechanism_projection = {"epoch": state["epoch"],
                 "manifest_digest": (state.get("manifest") or {}).get("digest"),
-                "tool_digest": digest({name: tool_contract_digest(tool) for name, tool in self.tools.items()}),
+                "tool_digest": digest(tool_contract_digests(self.tools)),
                 "prompt_digest": digest(self.process.session.compiled_prompt_sections),
                 "consumers": ["tools", "prompt", "tool_admission", "completion", "engineering_workflow"]}
 
@@ -54,9 +65,9 @@ class ToolSurfaceRuntime:
         changed = synchronize(self.process, self.known_tools or self.tools)
         state = state_for(self.process)
         from .mechanism_catalog import digest
-        from .permission_broker import tool_contract_digest
+        from .permission_broker import tool_contract_digests
         projection = getattr(self.process, "_mechanism_projection", {})
-        rebound = state and projection.get("tool_digest") != digest({name: tool_contract_digest(tool) for name, tool in self.tools.items()})
+        rebound = state and projection.get("tool_digest") != digest(tool_contract_digests(self.tools))
         if state and (changed or rebound or projection.get("epoch") != state["epoch"]):
             self.refresh_prompt()
 

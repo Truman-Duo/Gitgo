@@ -8,7 +8,9 @@ import type {FooterConfig} from "../components/CommandBar.js";
 import {usePanelSize} from "../theme/index.js";
 import {useCopy} from "../ui/PageFrame.js";
 import {FormFieldRow, fieldLabelWidth} from "../components/FormFieldRow.js";
+import {SelectionText} from "../components/Selection.js";
 import {cycleChoiceIndex} from "../input/choice.js";
+import {useLocalHelpCommand} from "./useLocalHelpCommand.js";
 
 type Form = ReturnType<typeof usePublishForm>;
 /** A form owns one footer only while a text field is explicitly being edited. */
@@ -20,14 +22,17 @@ export function usePublishFormEditor(form: Form, {busy, onFooter, onDismiss, onS
   const t = useCopy(), {w} = usePanelSize({minWidth: 20, widthOffset: 4});
   const [editing, setEditing] = useState(false), [option, setOption] = useState<number | null>(null);
   const saving = useRef(false);
+  const help=useLocalHelpCommand("publish.settings",onFooter,isActive&&!editing&&option===null&&!saving.current);
   useEffect(() => {
+    if(help.active)return;
     onFooter(editing && isActive ? {kind: "normal", cmdInput: field === "token" ? {...input, value: "•".repeat(input.value.length)} : input,
-      statusText: t({en: "Enter confirms field · Shift+Enter newline · Esc undoes field · Ctrl+S save form", zh: "Enter 确认字段 · Shift+Enter 换行 · Esc 撤销当前字段 · Ctrl+S 保存表单", keys: true}),
+      statusText: "",
       suggestions: [], suggestionIdx: 0, cmdResult: ""} : {hidden: true});
     return () => onFooter(null);
-  }, [editing, field, input.value, input.cursor, onFooter, t, isActive]);
+  }, [editing, field, input.value, input.cursor, onFooter, t, isActive,help.active]);
   const current = () => ({...values, [field]: option !== null ? choices[field]![option]! : input.materialize()});
   useManagedInput((text, key) => {
+    if(help.handle(text,key))return;
     if (busy || saving.current) return;
     if (matchChord("formSave", text, key)) {
       if (!stale) {
@@ -70,20 +75,18 @@ export function usePublishFormEditor(form: Form, {busy, onFooter, onDismiss, onS
     else if (matchChord("end", text, key)) applyTextOp({op: "move_to_end"}, input);
     else if (key.ctrl && text === "u") input.setValue("");
     else if (text && !key.ctrl && !key.meta) applyTextOp({op: "insert", text}, input);
-  }, {isActive, bindingContext: "form"});
+  }, {isActive, bindingContext: "form",clipboard:editing&&option===null,inputTarget:editing?field:""});
   const rows = (label: (field: string) => string, start = 0, count = fields.length) => <>
     {fields.slice(start, start + count).map((name, offset) => {
       const selected = start + offset === index, active = selected && isActive;
       const value = active && option !== null ? choices[field]![option]! : selected ? input.value : values[name] ?? "";
       return <FormFieldRow key={name} label={label(name)} labelWidth={fieldLabelWidth(fields.map(label), Math.max(1, w - 10))} selected={active} editing={active && (editing || option !== null)}>
-        <Text bold={active} wrap="truncate-end">
+        <SelectionText wrap="truncate-end">
           {value ? name === "token" ? "•".repeat(value.length) : value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ") : "—"}
-        </Text>
+        </SelectionText>
       </FormFieldRow>;
     })}
-    {isActive ? <Text dimColor>{option !== null
-      ? `${chordLabel("leftRight")} ${t({en: "choose", zh: "选择"})} · ${chordLabel("enter")} ${t({en: "confirm field", zh: "确认字段"})} · ${chordLabel("formSave")} ${t({en: "save form", zh: "保存表单"})}`
-      : t({en: "↑/↓ select · Enter edit/confirm field · Ctrl+S save form · Esc back", zh: "↑/↓ 选择 · Enter 编辑/确认字段 · Ctrl+S 保存表单 · Esc 返回", keys: true})}</Text> : null}
+
   </>;
   return {editing, rows};
 }

@@ -1065,5 +1065,6 @@
         "shift": true
       }
     ]
-  }
+  },
+  {"id": "provider.models.refresh", "default": {"key": "r", "ctrl": true}, "contexts": ["form"], "label": {"en": "Refresh API models", "zh": "刷新 API 模型"}, "condition": {"en": "Provider configuration: only on a model or Add models row", "zh": "Provider 配置：仅选中模型或添加入口时生效"}, "chords": ["providerModelsRefresh"]}
 ]

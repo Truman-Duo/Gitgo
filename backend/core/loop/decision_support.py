@@ -72,9 +72,16 @@ def collect_decision_evidence(process, focus: str = "all", *, identifier: str = 
     if focus in {"all", "completion", "gates"}:
         from backend.core.loop.completion_protocol import HostCompletionEvaluator
         context, _version = process.read_context_snapshot()
+        from backend.core.mechanism_runtime.application import bound_application
+        application = bound_application(process)
+        staged = application is not None and application.has_completion_stages()
         result["outstanding_gates"] = HostCompletionEvaluator.outstanding_gates(
             process, list(context.get("signals") or []),
+            stage_entry=staged,
         )
+        result['outstanding_gates']['boundary'] = 'registered_completion_stage' if staged else 'final_delivery'
+        if staged:
+            result['outstanding_gates']['runtime_next'] = 'Submit the candidate when current gates are satisfied. Runtime runs registered review stages and final alignment before delivery; no separate self-authored alignment report is required by this query.'
     if focus in {"all", "engineering"}:
         from .engineering_workflow import EngineeringWorkflow
         result["engineering"] = EngineeringWorkflow(process).status()

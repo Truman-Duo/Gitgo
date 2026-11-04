@@ -118,11 +118,8 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
   const start = Math.max(0, Math.min(index - Math.floor(visible / 2), fields.length - visible));
   return <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
     <Text bold>{t({en: "Publish · ", zh: "Publish · "})}{mode} · {index + 1}/{fields.length}</Text>
-    {mode === "branch" ? <Text>{t({en: "retain_source / retain_work record retention; prepare_archive / prepare_delete / prepare_publish / prepare_remote_delete prepare a change. Review it, then /branch-apply.", zh: "retain_source / retain_work 记录保留；prepare_archive / prepare_delete / prepare_publish / prepare_remote_delete 准备归档、删除或发布。核对后 /branch-apply 执行。"})}</Text> : null}
-    <Text>{t(["comment", "review", "issue", "pull", "edit", "state", "comment_edit", "reply"].includes(mode)
-      ? {en: "Save the draft, review it, then explicitly /send its ID.", zh: "先保存草稿并检查内容，再明确 /send 草稿 ID。"}
-      : mode === "account" ? {en: "This account is scoped to this platform repository. The token is stored in the OS encrypted store.", zh: "账户绑定此平台仓库；令牌使用操作系统加密保存。"}
-      : {en: "Review the fixed target and inputs before saving.", zh: "保存前核对固定目标和输入。"})}</Text>
+
+
     {status || error ? <Text>{status || error}</Text> : null}
     {stale ? <Text>{t({en: "This item changed since the draft. Ctrl+R starts again; Esc keeps the draft.", zh: "事项已变化，旧草稿不能直接保存。Ctrl+R 重新填写；Esc 保留草稿返回。"})}</Text> : null}
     {localState?.error ? <Text>{t({en: "Local draft could not be saved.", zh: "本地草稿未能保存，请保留页面并重试编辑。"})}</Text> : null}

@@ -72,6 +72,7 @@ export type UseTextInputReturn = {
   deleteBack: () => void;
   deleteForward: () => void;
   moveCursor: (delta: number) => void;
+  moveCursorTo: (offset: number) => void;
   moveVisualLine: (delta: -1 | 1, width: number) => void;
   moveWord: (delta: number) => void;
   moveToStart: () => void;
@@ -197,6 +198,9 @@ export function useTextInput(initialValue = "", scopeKey = "default"): UseTextIn
       cursor: visualLineCursor(prev.value, prev.cursor, delta, rawWidth),
     }));
   }, []);
+  const moveCursorTo=useCallback((offset:number)=>{
+    setState(previous=>({...previous,cursor:Math.max(0,Math.min(previous.value.length,offset))}));
+  },[]);
 
   const moveWord = useCallback((delta: number) => {
     setState((prev) => {
@@ -296,6 +300,7 @@ export function useTextInput(initialValue = "", scopeKey = "default"): UseTextIn
       deleteBack,
       deleteForward,
       moveCursor,
+      moveCursorTo,
       moveVisualLine,
       moveWord,
       moveToStart,
@@ -308,7 +313,7 @@ export function useTextInput(initialValue = "", scopeKey = "default"): UseTextIn
       materialize,
       setExternalValue,
     }),
-    [state.value, safeCursor, insert, insertText, deleteBack, deleteForward,
+    [state.value, safeCursor, insert, insertText, deleteBack, deleteForward, moveCursorTo,
      moveCursor, moveVisualLine, moveWord, moveToStart, moveToEnd, killToEnd, killToStart,
      killWordBack, yank, setValue, materialize, setExternalValue],
   );

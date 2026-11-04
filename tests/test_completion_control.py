@@ -166,6 +166,8 @@ class TextClaims:
 
 def test_plain_text_claim_pauses_at_same_gate_instead_of_failing_or_looping(tmp_path_factory):
     p = process(tmp_path_factory)
+    p.task_description = 'Finish the existing change and verify it with the required test.'
+    p.session.append_user(p.task_description)
     provider = TextClaims()
     outcome = agent_step(p, provider, workspace_path=str(tmp_path_factory))
     assert outcome["status"] == "awaiting_user", str(outcome)

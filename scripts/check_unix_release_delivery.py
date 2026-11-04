@@ -11,6 +11,13 @@ import time
 
 TARGETS = {("macos", "arm64"), ("linux", "x86_64"), ("linux", "aarch64")}
 
+
+def validate_published_identity(manifest, commit, platform, architecture, version):
+    if (manifest.source_commit != commit or manifest.release_id != "v" + version
+        or manifest.version != version
+        or manifest.scope != ("gitgo-terminal", "preview", platform, architecture)):
+        raise ValueError("Published identity mismatch")
+
 def policy(source, target, architecture):
     if (target, architecture) not in TARGETS:
         raise ValueError("Unsupported Unix release target")
@@ -117,9 +124,8 @@ def main():
             wire=transport.fetch_bytes(channel.manifest_url,MAX_MANIFEST_BYTES)
             signature=transport.fetch_bytes(channel.signature_url,MAX_SIGNATURE_BYTES)
             manifest=parsed.verifier.verify(wire,signature)
-            if (manifest.source_commit!=a.commit or manifest.release_id!="v1.0.0-alpha.3"
-                or manifest.scope!=("gitgo-terminal","preview",a.platform,a.architecture)):
-                raise ValueError("Published identity mismatch")
+            from backend.version import __version__
+            validate_published_identity(manifest, a.commit, a.platform, a.architecture, __version__)
             archive=work/"public.tar.gz"
             with archive.open("xb") as f:
                 transport.receive(manifest.url,manifest.bytes,f,expected_size=manifest.bytes)

@@ -31,7 +31,7 @@ export function ConfirmBox({ title, danger, confirmSel }: Props) {
         <Text>     </Text>
         <SelectionText selected={confirmSel === 1} variant="block" accent="confirm-no">{t({en:"No",zh:"取消"})}</SelectionText>
       </Box>
-      <Text dimColor>{t({en:"↑/↓ select · Enter confirm · Esc cancel",zh:"↑/↓ 选择 · Enter 确认 · Esc 取消",keys:true})}</Text>
+
     </Box>
   );
 }

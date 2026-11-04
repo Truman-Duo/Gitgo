@@ -271,7 +271,7 @@ def test_mechanism_judgment_emits_actual_usage_without_losing_billing(runtime):
     provider=SimpleNamespace(chat=lambda *a,**k:{'content':'{"matches":true,"reason":"unit evidence","evidence_refs":[]}',
         'usage':usage},max_output_tokens=4096)
     app.bind_provider(provider,events.append)
-    ctx=SimpleNamespace(deadline=time.monotonic()+30,instance_id='unit-instance',epoch=1)
+    ctx=SimpleNamespace(deadline=time.monotonic()+30,instance_id='unit-instance',epoch=1,check=lambda:None)
     result=app.judge(ctx,{'criterion':'Observe','event':{},'prior_state':{}})
     event=next(e for e in events if e.get('event')=='mechanism_provider_usage')
     assert result['matches'] and result['authority_granted'] is False
@@ -348,6 +348,10 @@ def test_grill_and_main_context_share_actual_composition_and_control_versions(ru
     assert alignment_input_digest(process) != active
     inactive = assessor.payload()['harness_semantics']['instances'][0]
     assert inactive['phase'] == 'suspended' and inactive['user_control']['action'] == 'suspend'
+    assert inactive['control_effect']['scope'] == 'this_instance_activation_only'
+    assert inactive['control_effect']['selected_label'] == 'Disable this extension'
+    assert inactive['control_effect']['business_scope_cancelled'] is False
+    assert inactive['control_effect']['authority_granted'] is False
     assert inactive['program_digest'] in app.envelope() and 'program' not in inactive
 
 

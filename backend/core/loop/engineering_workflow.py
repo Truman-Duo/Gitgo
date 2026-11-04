@@ -33,6 +33,40 @@ REPORT_FIELDS = {
 }
 
 
+def plan_schema():
+    """Advertise the same practices the canonical plan compiler accepts.
+
+    This describes optional authoring inputs, not an independent validator or
+    authorization. Dependency/evidence semantics remain in compile_plan.
+    """
+    node = {"type": "object", "required": ["id", "kind"], "properties": {
+        "id": {"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},
+        "kind": {"enum":list(KINDS)}, "depends_on":{"type":"array","items":{"type":"string"}},
+        "files":{"type":"array","minItems":1,"items":{"type":"string"}},
+        "test_id":{"type":"string","minLength":1}, "passed":{"type":"boolean"},
+        "tool_name":{"enum":["run_test","exec_command"]},
+        "argv":{"type":"array","minItems":1,"items":{"type":"string"}}, "cwd":{"type":"string"},
+        "state_topic":{"type":"string","minLength":1}, "path":{"type":"string","minLength":1},
+        "format":{"enum":list(REPORT_FIELDS)}, "tools":{"type":"array","minItems":1,"items":{"type":"string"}},
+        "required":{"type":"boolean"}, "before_mutation":{"type":"boolean"}},
+        "allOf":[{"if":{"properties":{"kind":{"const":kind}}},"then":{"required":fields}}
+            for kind,fields in {'change':['files'],'check':['test_id','passed'],
+                'decision':['state_topic'],'document':['path'],'report':['format'],'observation':['tools']}.items()]}
+    return {"type": "object", "required": ["profiles"],
+        "description": "Optional practice plan. Omit to retain the current plan; {} does not disable it. Without nodes, the runtime builds the chosen practice graph from test/path inputs.",
+        "properties": {
+            "profiles": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": list(PROFILES)}},
+            "test_id":{"type":"string","description":"Actual registered test id, required for diagnosis/tdd presets."},
+            "target_files":{"type":"array","items":{"type":"string"},"description":"Exact changed paths for tdd. In a task contract, omitted paths are taken from its explicit workspace_file deliverables."},
+            "check_argv":{"type":"array","minItems":1,"items":{"type":"string"}}, "check_cwd":{"type":"string"},
+            "agent_document_path":{"type":"string"}, "glossary_path":{"type":"string"},
+            "preparation_files":{"type":"array","items":{"type":"string"}},
+            "questions":{"type":"array","items":{"type":"object","required":["id","state_topic"],
+                "properties":{"id":{"type":"string"},"state_topic":{"type":"string"},"depends_on":{"type":"array","items":{"type":"string"}}}}},
+            "nodes": {"type": "array", "minItems": 1, "maxItems": 64, "items": node,
+                "description":"Advanced exact evidence DAG. change means an actual file mutation, not configuration/setup. Prefer the preset inputs when appropriate; Runtime builds ids and edges."}}}
+
+
 def practice_plan(config: dict) -> dict:
     """Compile built-in practices into the same graph used for custom plans.
 
@@ -127,7 +161,8 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
         raw = practice_plan(raw)
     profiles = list(dict.fromkeys(raw.get("profiles") or []))
     if not profiles or any(item not in PROFILES for item in profiles):
-        raise ValueError("profiles must select supported engineering practices")
+        raise ValueError("engineering_workflow.profiles requires at least one of: " + ", ".join(PROFILES)
+            + ". Omit the optional plan to retain the current workflow; an empty object does not disable it.")
     nodes = copy.deepcopy(raw.get("nodes") or [])
     if not isinstance(nodes, list) or not 1 <= len(nodes) <= 64:
         raise ValueError("workflow requires 1..64 concrete nodes")
@@ -182,7 +217,7 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
         if kind == "change":
             files = node.get("files") or []
             if not files:
-                raise ValueError("change nodes require target files")
+                raise ValueError(f"change node '{name}' requires files=[concrete workspace paths]. change is a file mutation, not mechanism setup; use the business plan for setup or a preset with test_id/target_files.")
             node["files"] = [_path(root, item).relative_to(root).as_posix() for item in files]
     by_id = {node["id"]: node for node in nodes}
     visiting, visited = set(), set()

@@ -33,7 +33,8 @@ def check_native_recovery(ctx):
         findings = pending_native_invocations(storage)
         if findings:
             retain_native_recovery(ctx, findings)
-            raise ValueError("SANDBOX_CLEANUP_PENDING: unsettled project native evidence requires inspection")
+            from backend.core.sandbox import SandboxDenied
+            raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "Unsettled project native evidence requires inspection")
 
 
 @contextmanager

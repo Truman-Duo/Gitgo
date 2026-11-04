@@ -41,3 +41,46 @@ def test_single_ordinary_contract_still_certifies_its_committed_state(runtime):
     alignment.apply({'status':'ready','questions':[],'interpretations':[]},payload)
     p.update_context_snapshot(lambda ctx:{**ctx,'task_contract':deepcopy(proposed)})
     assert reuse_assessment(p,alignment.payload())=='unchanged_admission'
+
+
+def test_contract_readiness_cannot_release_business_before_current_prerequisites_review(runtime):
+    from backend.core.loop.tool_boundary_preview import preview_tool_boundaries
+    from backend.core.loop.tool_pipeline import ToolPipeline
+    from backend.core.loop.alignment_routing import REVIEW_POLICY
+    _, p, effects, tool, *_ = runtime
+    alignment = AlignmentRuntime(p)
+    proposed = {'goal': 'Set up requested behavior before the real operation', 'execution_mode': 'answer'}
+    alignment.apply({'status': 'ready', 'questions': [], 'interpretations': []},
+        alignment.payload(proposed_contracts=[proposed]))
+    p.update_context_snapshot(lambda ctx: {**ctx, 'task_contract': deepcopy(proposed),
+        'alignment_runtime': {**ctx['alignment_runtime'], 'review_policy': REVIEW_POLICY}})
+    call = {'name': tool.name, 'args': {'value': 'first'}}
+    boundary = preview_tool_boundaries([call], {tool.name: tool}, p)
+    assert boundary.contracts[0]['kind'] == 'business_readiness'
+    assert 'first' in boundary.contracts[0]['arguments_preview']
+    payload = alignment.payload(proposed_contracts=boundary.contracts)
+    assert reuse_assessment(p, payload) == ''
+    assert ToolPipeline._alignment_admission_error(p, tool, call['args'])[0] == 'ALIGNMENT_REVIEW_REQUIRED'
+    assert effects == [] and not p.approval_grants
+    # This fixture supplies a semantic outcome; production uses the existing
+    # assessor. It certifies readiness of task meaning, not operation authority.
+    alignment.apply({'status': 'ready', 'questions': [], 'interpretations': []}, payload)
+    assert ToolPipeline._alignment_admission_error(p, tool, call['args']) is None
+    another = preview_tool_boundaries([{'name': tool.name, 'args': {'value': 'next'}}], {tool.name: tool}, p)
+    assert reuse_assessment(p, alignment.payload(proposed_contracts=another.contracts)) == 'unchanged_admission'
+    assert effects == [] and not p.approval_grants
+    p.task_constraints.append('New actual task constraint')
+    assert reuse_assessment(p, alignment.payload(proposed_contracts=another.contracts)) == ''
+    assert ToolPipeline._alignment_admission_error(p, tool, call['args'])[0] == 'ALIGNMENT_REVIEW_REQUIRED'
+
+
+def test_runtime_control_preparation_does_not_claim_business_readiness(runtime):
+    from backend.core.loop.agent_tool import AgentTool, ToolEffect
+    from backend.core.loop.execution_contract import data_broker
+    from backend.core.loop.tool_boundary_preview import preview_tool_boundaries
+    _, p, *_ = runtime
+    control = AgentTool(name='fixture-control', description='Prepare runtime state',
+        parameters={'type': 'object', 'properties': {}}, effect=ToolEffect.PROCESS,
+        execution_contract=data_broker('host.runtime.fixture'), execute=lambda args: {})
+    boundary = preview_tool_boundaries([{'name': control.name, 'args': {}}], {control.name: control}, p)
+    assert boundary.effectful and not boundary.contracts

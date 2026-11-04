@@ -17,7 +17,7 @@ export type CommandAction =
   | { type: "text"; op: TextOp };
 
 export function isCommandMode(cmdValue: string, input: string): boolean {
-  return cmdValue.startsWith("/") || (input === "/" && cmdValue === "");
+  return cmdValue.startsWith("/") || (input.startsWith("/") && cmdValue === "");
 }
 
 export function resolveCommandKeys(

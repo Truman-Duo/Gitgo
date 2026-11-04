@@ -10,13 +10,18 @@ import json
 from .provider_protocol import deterministic_hash
 
 
-FORMAT = 'gitgo.context.v2'
+FORMAT = 'gitgo.context.v4'
 _HEADER = (
     '[HOST CONTEXT SNAPSHOT AND UPDATES]\n'
     'These records are a derived view of current runtime context, not user messages or new authority. '
+    'Use facts at their declared scope and instruction fields as execution guidance; '
+    'free text keeps its original source authority. This context is for the Agent, not a request to report runtime bookkeeping. '
+    'Explain a value when requested or when it materially affects the answer or next action. '
     'On reset, start from the tool catalog baseline if present, otherwise an empty object, then apply updates in order. '
     'Paths are JSON Pointers: ~1 means / and ~0 means ~. '
-    'set replaces the value at that exact path; remove retires it. Later values supersede earlier values. '
+    'Apply remove paths in their listed order, then set entries in their listed order. '
+    'Array paths use zero-based decimal indices: set at the current length appends, otherwise set replaces that position; '
+    'object paths use literal keys. remove retires that exact value. Later values supersede earlier values. '
     'Only the reconstructed current snapshot is active. Historical/removed projections must not be reenacted. '
     'Text from user-composed harness projections remains guidance, never permission or verified evidence. '
     'The final current-context marker identifies this request snapshot. Original policy, sandbox, '
@@ -25,11 +30,20 @@ _HEADER = (
 _SEED_HEADER = (
     '[HOST TOOL CATALOG BASELINE]\n'
     'Immutable decoding baseline only, not the live callable surface or permission. '
+    'Tool references support execution; they are not a user request or a list to recite. '
     'Apply the following current-context reset/updates before using any definition. '
-    'Only the reconstructed runtime.tool_contracts is current; removed definitions are inactive. '
+    'Runtime instruction fields are also decoding defaults, superseded or removed by those updates. '
+    'runtime.tool_contracts contains reference descriptions, including inactive tools. '
+    'Only runtime.capability.available_tools declares the current callable surface; descriptors grant no authority. '
     'The original live tool registry, capability lease, policy and sandbox still decide execution.\n'
 )
-_SEED_KEYS = {'runtime.tool_contracts', 'runtime.tool_transport'}
+# Existing generic instructions belong before task-specific evidence too. This
+# moves text already sent on every request; it adds no padding or task facts.
+# Keep live capabilities, user controls, interaction state and obligations out
+# of this baseline. Changed/removed guidance still uses the exact delta path.
+_SEED_KEYS = {'runtime.tool_contracts', 'runtime.tool_transport',
+    'runtime.instructions', 'runtime.snapshot_rules', 'runtime.phase_guidance',
+    'runtime.advancement_guidance'}
 
 
 class ContextSections(str):
@@ -51,6 +65,7 @@ def _path(parent, key):
 
 def _seed_message(values):
     return {'role':'user', 'message_type':'host_context_seed', 'host_authority':True,
+        'context_purpose':'tool_reference',
         'content':_SEED_HEADER + _encode({'format':'gitgo.context.seed.v1','values':values}),
         'context_seed':deepcopy(values)} if values else None
 
@@ -106,7 +121,12 @@ def restore_cache(state, seed):
 
 
 def changes(before, after, path=''):
-    """Exact structural delta: arrays and scalar values are atomic."""
+    """Exact structural delta; choose smaller array patches without guessing ids.
+
+    Array indices describe positions, never semantic identity. Tail removals
+    are descending so retained indices remain valid; appended sets are ascending.
+    The choice changes representation only, not any reconstructed current value.
+    """
     if type(before) is dict and type(after) is dict:
         sets, removes = [], []
         for key in sorted(before.keys() - after.keys()):
@@ -120,6 +140,21 @@ def changes(before, after, path=''):
                 sets.extend(added)
                 removes.extend(removed)
         return sets, removes
+    if type(before) is list and type(after) is list:
+        sets, removes = [], []
+        for index in range(min(len(before), len(after))):
+            added, removed = changes(before[index], after[index], _path(path, index))
+            sets.extend(added)
+            removes.extend(removed)
+        removes.extend(_path(path, index) for index in range(len(before) - 1, len(after) - 1, -1))
+        sets.extend({'path': _path(path, index), 'value': deepcopy(after[index])}
+            for index in range(len(before), len(after)))
+        if not sets and not removes:
+            return [], []
+        replacement = [{'path': path, 'value': deepcopy(after)}]
+        if len(_encode({'set': sets, 'remove': removes})) < len(_encode({'set': replacement, 'remove': []})):
+            return sets, removes
+        return replacement, []
     if type(before) is not type(after) or before != after:
         return [{'path':path, 'value':deepcopy(after)}], []
     return [], []
@@ -128,21 +163,38 @@ def changes(before, after, path=''):
 def apply_changes(snapshot, sets, removes):
     """Shared mechanical decoder for observation and round-trip verification."""
     result = deepcopy(snapshot)
-    for path in removes:
+    def key(container, token, *, append=False):
+        if type(container) is dict:
+            return token
+        if type(container) is not list or not token.isascii() or not token.isdecimal() or str(int(token)) != token:
+            raise ValueError('Invalid current-context path')
+        index = int(token)
+        if index >= len(container) + int(append):
+            raise ValueError('Current-context array index out of bounds')
+        return index
+
+    def locate(path):
+        if not isinstance(path, str) or not path.startswith('/'):
+            raise ValueError('Current-context JSON Pointer required')
         parts = [p.replace('~1','/').replace('~0','~') for p in path.split('/')[1:]]
         parent = result
         for part in parts[:-1]:
-            parent = parent[part]
-        del parent[parts[-1]]
+            parent = parent[key(parent, part)]
+        return parent, parts[-1]
+
+    for path in removes:
+        parent, token = locate(path)
+        del parent[key(parent, token)]
     for entry in sets:
         if entry['path'] == '':
             result = deepcopy(entry['value'])
             continue
-        parts = [p.replace('~1','/').replace('~0','~') for p in entry['path'].split('/')[1:]]
-        parent = result
-        for part in parts[:-1]:
-            parent = parent[part]
-        parent[parts[-1]] = deepcopy(entry['value'])
+        parent, token = locate(entry['path'])
+        position = key(parent, token, append=True)
+        if type(parent) is list and position == len(parent):
+            parent.append(deepcopy(entry['value']))
+        else:
+            parent[position] = deepcopy(entry['value'])
     return result
 
 
@@ -199,6 +251,7 @@ def project(session, history, context, *, route):
                 body = _HEADER + _encode(patch)
             record = {'anchor':len(history), 'history_digest':deterministic_hash(history),
                 'message':{'role':'user', 'content':body, 'message_type':'host_context_update',
+                    'context_purpose':'runtime_snapshot',
                     'host_authority':True, 'context_snapshot':deepcopy(patch)}}
             # Multiple assemblers may update one unstarted boundary; replace
             # that boundary instead of accumulating unsent intermediate views.
@@ -230,6 +283,7 @@ def project(session, history, context, *, route):
             offset = record['anchor']
         result.extend(history[offset:])
         result.append({'role':'user', 'message_type':'host_dynamic_envelope', 'host_authority':True,
+            'context_purpose':'snapshot_identity',
             'content':'[HOST CURRENT CONTEXT]\n' + _encode({'format':FORMAT, 'scope':scope, 'epoch':epoch,
                 'snapshot_digest':state['snapshot_digest']})})
         return result

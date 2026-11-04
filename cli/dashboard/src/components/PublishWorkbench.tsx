@@ -19,6 +19,8 @@ import {PublishPrDetails} from "./PublishPrDetails.js";
 import {PublishRepositoryBrowser} from "./PublishRepositoryBrowser.js";
 import {useFeedback} from "../hooks/useFeedback.js";
 import {FeedbackMessage} from "./FeedbackMessage.js";
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
+import {publishSuggestions} from "./publishCommands.js";
 
 type Props = React.ComponentProps<typeof PublishPanel>;
 type Commit = {oid: string; parents: string[]; subject: string};
@@ -108,18 +110,18 @@ export function PublishWorkbench(props: Props) {
   const rows: Row[] = [];
   if (tab === 0) {
     rows.push({id: "process", label: t({en: "Process Git", zh: "过程 Git"}), detail: sourceCommit ? `${sourceCommit.oid.slice(0, 8)}  ${sourceCommit.subject}` : t({en: "No local Git history available", zh: "尚无可读取的本地 Git 历史"}), run: () => setHistory({itemId: "", head: "workspace"})},
-      {id: "prepare", label: t({en: `Consolidate ${marked.length || (sourceCommit ? 1 : 0)} selected records`, zh: `整理所选 ${marked.length || (sourceCommit ? 1 : 0)} 条记录`}), detail: t({en: "Review combined changes, semantic summary and required checks before creating a local formal commit.", zh: "准备组合变更、语义摘要与必需检查，通过后再创建本地正式提交。"}), run: prepare},
+      {id: "prepare", label: t({en: `Consolidate ${marked.length || (sourceCommit ? 1 : 0)} selected records`, zh: `整理所选 ${marked.length || (sourceCommit ? 1 : 0)} 条记录`}),  run: prepare},
       {id: "formal", label: t({en: "Local formal Git", zh: "本地正式 Git"}), detail: formalCommit ? `${formalCommit.oid.slice(0, 8)}  ${formalCommit.subject}` : t({en: "No observed local formal commit yet", zh: "尚无已核对的本地正式提交"}), run: () => {if (formalCommit) setHistory({itemId: formalCommit.item_id, head: `formal_operation:${formalCommit.operation_id}`});}});
     for (const item of items.filter(i => i.plan?.destination === "formal" && i.status !== "integrated")) rows.push({id: item.id, label: item.title, detail: `${item.status} · ${item.plan?.target_role ?? "formal"} · ${item.target}`, run: () => setOperation({itemId: item.id})});
-    rows.push({id: "collaborate", label: t({en: "Continue in collaboration", zh: "进入协作"}), detail: t({en: "Publish local formal history to your responsible branch, then prepare a PR.", zh: "把本地正式历史接到自己负责的远端分支，再准备 PR。"}), run: () => {selectedId.current = formalCommit?.item_id ?? ""; setTab(1); setSub(0); setRow(0);}});
+    rows.push({id: "collaborate", label: t({en: "Continue in collaboration", zh: "进入协作"}),  run: () => {selectedId.current = formalCommit?.item_id ?? ""; setTab(1); setSub(0); setRow(0);}});
     if (workspace?.next_cursor) rows.push({id: "more-history", label: t({en: "Earlier process history", zh: "更早的过程记录"}), run: () => {setPageStack(v => [...v, cursor.current]); void read(workspace.next_cursor!);}});
     if (pageStack.length) rows.push({id: "previous-history", label: t({en: "Return to newer records", zh: "返回较新的记录"}), run: () => {const next = [...pageStack]; void read(next.pop() ?? ""); setPageStack(next);}});
     if (marked.length) rows.push({id: "clear-selection", label: t({en: "Clear source selection", zh: "清空来源选择"}), run: () => setMarked([])});
   } else if (tab === 1 && sub === 0) {
     for (const commit of semantic) rows.push({id: commit.item_id, label: `${outgoing.includes(commit.oid) ? "✓ " : ""}${commit.subject}`, detail: `${commit.oid.slice(0, 8)} · ${commit.target_ref}`, run: () => {selectedId.current = commit.item_id; setOperation({itemId: commit.item_id});}});
     if (selectedItem) rows.push(...[
-      {id: "send-branch", label: t({en: "Publish the formal branch as a series", zh: "保留正式提交序列，接到远端分支"}), detail: t({en: "Publishes the reviewed branch tip and its ancestry. Select squash below to publish a subset as one commit.", zh: "准备发布已核对的分支尖端及其历史；只发布所选子集时可在下方合并整理。"}), run: () => {const latest = semantic[0]; if (!latest) {setError("PUBLISH_ACTION_UNAVAILABLE"); return;} setOperation({command: "/branch", itemId: latest.item_id, values: {action: "prepare_publish", branch: latest.target_ref.replace(/^refs\/heads\//, "")}});}},
-      {id: "squash-outgoing", label: t({en: "Squash selected formal commits before publication", zh: "合并所选正式提交，再准备发布"}), detail: t({en: "Space marks formal commits. A new outgoing branch is checked before publication.", zh: "Space 选择正式提交；先创建并检查新的待发布分支。"}), run: () => {
+      {id: "send-branch", label: t({en: "Publish the formal branch as a series", zh: "保留正式提交序列，接到远端分支"}),  run: () => {const latest = semantic[0]; if (!latest) {setError("PUBLISH_ACTION_UNAVAILABLE"); return;} setOperation({command: "/branch", itemId: latest.item_id, values: {action: "prepare_publish", branch: latest.target_ref.replace(/^refs\/heads\//, "")}});}},
+      {id: "squash-outgoing", label: t({en: "Squash selected formal commits before publication", zh: "合并所选正式提交，再准备发布"}),  run: () => {
         const chosen = semantic.filter(commit => outgoing.length ? outgoing.includes(commit.oid) : commit.oid === semantic[0]?.oid);
         if (!chosen.length || chosen.length > 32 || !chosen.at(-1)?.parents.length) {setError("PUBLISH_INVALID_SELECTION"); return;}
         open("/formal", undefined, {target_role: "workspace", source_role: "workspace", source_ref: chosen[0]!.oid, base_oid: chosen.at(-1)!.parents[0]!,
@@ -142,16 +144,19 @@ export function PublishWorkbench(props: Props) {
   useLayoutEffect(() => {if (selectedElement.current) scroll.current?.scrollIntoView(selectedElement.current);}, [row, tab, sub, w, h]);
   useEffect(() => {local.set("workbench.view", {tab, sub, source: sourceCommit?.oid, formal: formalCommit?.oid, marked, rowId: currentRow?.id});}, [tab, sub, sourceCommit?.oid, formalCommit?.oid, marked, currentRow?.id]);
   const child = operation || history || pr || repositoryBrowser || tab === 3 && focus === "body";
+  const helpTopic=tab===0?"publish.workspace":tab===1?"publish.collaboration":tab===2?"publish.release":"publish.settings";
+  const help=useLocalHelpCommand(helpTopic,onFooter,!child,focus==="body"?{suggest:input=>publishSuggestions({item:selectedItem,more:Boolean(snapshot?.next_cursor)},input,t),run:command=>setOperation({itemId:selectedItem?.id,command})}:undefined);
   const active = items.some(item => ["queued", "running", "stopping"].includes(item.run?.state ?? "") || ["checking", "pausing", "executing"].includes(item.status));
   useEffect(() => {
     if (child || !active) return;
     const timer = setInterval(() => {void read(cursor.current);}, 1000);
     return () => clearInterval(timer);
   }, [Boolean(child), active, read]);
-  useEffect(() => {if (!child) {onFooter({hidden: true}); return () => onFooter(null);}}, [Boolean(child), onFooter]);
+  useEffect(() => {if (!child&&!help.active) {onFooter({hidden: true}); return () => onFooter(null);}}, [Boolean(child), onFooter,help.active]);
   const secondary = tab === 1 ? [t({en: "My contributions", zh: "我的提交"}), t({en: "Incoming PRs", zh: "收到的 PR"})]
     : tab === 2 ? [t({en: "Release preparation", zh: "发布准备"}), t({en: "Existing versions", zh: "已有版本"})] : [];
   useManagedInput((text, key) => {
+    if(help.handle(text,key))return;
     if (matchChord("escape", text, key)) {
       if (pr) {setPr(null); setRow(0);}
       else if (focus === "header") onDismiss();
@@ -161,17 +166,16 @@ export function PublishWorkbench(props: Props) {
     if (focus === "header") {
       const delta = matchChord("left", text, key) ? -1 : matchChord("right", text, key) ? 1 : 0;
       if (delta) {setTab(v => Math.max(0, Math.min(3, v + delta))); setSub(0); setRow(0); setPr(null);}
-      else if (matchChord("enter", text, key) || matchChord("down", text, key)) setFocus(secondary.length ? "sub" : "body");
+      else if (matchChord("enter", text, key)) setFocus(secondary.length ? "sub" : "body");
       return;
     }
     if (focus === "sub") {
       const delta = matchChord("left", text, key) ? -1 : matchChord("right", text, key) ? 1 : 0;
       if (delta) {setSub(v => Math.max(0, Math.min(secondary.length - 1, v + delta))); setRow(0);}
-      else if (matchChord("enter", text, key) || matchChord("down", text, key)) setFocus("body");
+      else if (matchChord("enter", text, key)) setFocus("body");
       else if (matchChord("up", text, key)) setFocus("header");
       return;
     }
-    if (text === "/") {setOperation({itemId: selectedItem?.id, command: "/"}); return;}
     const delta = matchChord("left", text, key) ? -1 : matchChord("right", text, key) ? 1 : 0;
     if (tab === 0 && delta && currentRow?.id === "process") setSource(commits[Math.max(0, Math.min(commits.length - 1, sourceIndex + delta))]?.oid ?? "");
     else if (tab === 0 && delta && currentRow?.id === "formal") setFormal(formalCommits[Math.max(0, Math.min(formalCommits.length - 1, formalIndex + delta))]?.oid ?? "");
@@ -216,7 +220,7 @@ export function PublishWorkbench(props: Props) {
         <Text dimColor>{t({en: "Process Git · local development history", zh: "过程 Git · 本地开发记录"})}</Text>
         {raster.image && capability.sixel ? <TerminalRaster image={raster.image} columns={w} rows={graphRows}/> : <>
           {drawCommitGraph(processGraph, sourceIndex, w, 3).map((line, i) => <Text key={`p${i}`}>{line}</Text>)}
-          <Text dimColor>{t({en: "Selected-source provenance ↓ (not Git parents)", zh: "所选来源对应 ↓（区别于 Git 父子连线）"})}</Text>
+
           {drawCommitGraph(formalGraph, formalIndex, w, 3).map((line, i) => <Text key={`f${i}`}>{line}</Text>)}
         </>}
         <Text dimColor>{t({en: "Local formal Git · observed commits only", zh: "本地正式 Git · 仅展示已核对的提交"})} · {workspace?.formal_total ?? 0}</Text>
@@ -224,13 +228,13 @@ export function PublishWorkbench(props: Props) {
         {raster.error ? <Text dimColor>{t({en: "Vector graph unavailable; using the same rail layout in text.", zh: "矢量图不可用，当前显示同一线轨布局的文字兼容视图。"})}</Text> : null}
         {marked.some(oid => !commits.some(c => c.oid === oid)) ? <Text>{t({en: "Some marked commits are outside this page. Return to that page or clear selection before consolidation.", zh: "部分选择位于其他页，请返回核对或清空选择后整理。"})}</Text> : null}
       </Box> : null}
-      {tab === 1 && sub === 0 && !pr ? <Text dimColor>{t({en: "Local formal commits → your remote branch → outgoing PR. Each write requires its own reviewed action.", zh: "本地正式提交 → 自己负责的远端分支 → 发出的 PR；每次写入分别核对并执行。"})}</Text> : null}
+
       {tab === 1 && semantic.length ? <Box flexDirection="column">
         <Text dimColor>{t({en: "Local formal Git · remote refs appear only after explicit observation", zh: "本地正式 Git · 远端引用需明确读取后核对"})}</Text>
         {raster.image && capability.sixel ? <TerminalRaster image={raster.image} columns={w} rows={graphRows}/> : drawCommitGraph(collaborationGraph, Math.min(row, semantic.length - 1), w, 3).map((line, index) => <Text key={index}>{line}</Text>)}
       </Box> : null}
-      {tab === 2 ? <Text dimColor>{t({en: "Source, checks, artifacts, tags and platform release are recorded separately; a candidate is not a published version.", zh: "来源、检查、产物、标签和平台发布分别记录；候选不作为已发布版本。"})}</Text> : null}
-      {tab === 3 ? <Text>{t({en: "Enter opens repository, account, commit, privacy/authorship and verification settings.", zh: "Enter 打开仓库、账户、提交规范、隐私署名和验证检查配置。"})}</Text> : null}
+
+
       {rows.map((entry, index) => {
         const active = index === row && focus === "body";
         return <Box ref={index === row ? selectedElement : undefined} key={entry.id} flexDirection="column" marginTop={1}>
@@ -240,8 +244,6 @@ export function PublishWorkbench(props: Props) {
       })}
       {!rows.length && tab !== 3 && !loading ? <Text dimColor>{t({en: "No saved records in this view.", zh: "此处尚无已保存记录。"})}</Text> : null}
     </ScrollBox>
-    <Text dimColor>{focus === "header" ? t({en: "←/→ pages · Enter open · Esc back", zh: "←/→ 页头 · Enter 进入 · Esc 返回"})
-      : focus === "sub" ? t({en: "←/→ section · Enter open · Esc pages", zh: "←/→ 分区 · Enter 进入 · Esc 页头"})
-      : t({en: "↑/↓ select · ←/→ graph node · Space mark · Enter open · / commands · Ctrl+R refresh · Esc back", zh: "↑/↓ 选择 · ←/→ 图节点 · Space 多选 · Enter 打开 · / 命令 · Ctrl+R 刷新 · Esc 返回"})}</Text>
+
   </Box>;
 }

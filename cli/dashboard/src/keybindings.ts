@@ -24,6 +24,8 @@ function description(def: CommandDef, language: Language) {
 }
 
 export const REGISTRY: CommandDef[] = [
+  {name:"provider.model",title:{en:"Switch between configured models of the current API",zh:"切换当前 API 已配置的模型"},category:"action",keys:[],slashName:"model",scene:["projects","workspace"]},
+  {name:"provider.effort",title:{en:"Change reasoning effort for the current model",zh:"调整当前模型的思考强度"},category:"action",keys:[],slashName:"effort",scene:["projects","workspace"]},
   {name:"process.detail",title:{en:"Selected subprocess details",zh:"子进程详情"},category:"navigation",
     keys:[],slashName:"detail",scene:["process_list","agent_detail"]},
   {name: "process.create", title: {en:"Ask A to create and supervise a new B",zh:"请主进程创建并监督子进程"}, category: "action",

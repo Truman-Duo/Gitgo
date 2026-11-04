@@ -1,4 +1,6 @@
 import React, {memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from "react";
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
+import {useModuleHelp} from "./ModuleHelpBoundary.js";
 import {Box, ScrollBox, Text, type DOMElement, type ScrollBoxHandle} from "@anthropic/ink";
 import type {BackendClient} from "../backend/client.js";
 import {archiveProject, configGet, configSet} from "../backend/tools.js";
@@ -66,6 +68,7 @@ export const BinWorkspace = memo(function BinWorkspace({
   const [editing, setEditing] = useState(false);
   const [delayDraft, setDelayDraft] = useState(10);
   const [delaySaving, setDelaySaving] = useState(false);
+  const help=useModuleHelp(),menuHelp=useLocalHelpCommand("bin",onFooter,tab==="delay"&&!editing&&!confirmation);
   const scroll=useRef<ScrollBoxHandle>(null),selectedRow=useRef<DOMElement>(null);
   useScrollInput(scroll);
   useLayoutEffect(()=>{if(selectedRow.current)scroll.current?.scrollIntoView(selectedRow.current);},[index,delayRow,tab,w,h,data,plans]);
@@ -98,8 +101,8 @@ export const BinWorkspace = memo(function BinWorkspace({
   ], [data]);
   const rows: any[] = tab === "targets" ? targets : tab === "plans" ? plans : [];
   const commands = tab === "targets"
-    ? ["/restore", "/soft-delete", "/hard-delete"]
-    : tab === "plans" ? ["/cancel", "/retry"] : [];
+    ? ["/help", "/restore", "/soft-delete", "/hard-delete"]
+    : tab === "plans" ? ["/help", "/cancel", "/retry"] : [];
   const suggestions = useMemo<Suggestion[]>(() => cmdInput.value.startsWith("/")
     ? commands.filter(command => command.slice(1).startsWith(cmdInput.value.slice(1).toLowerCase()))
       .map(label => ({label, description: "", inputMode: "execute"}))
@@ -109,14 +112,15 @@ export const BinWorkspace = memo(function BinWorkspace({
     setIndex(value => Math.max(0, Math.min(value, Math.max(0, rows.length - 1))));
   }, [rows.length]);
   useEffect(() => {
+    if(menuHelp.active)return;
     if (tab === "delay") onFooter({hidden: true});
     else onFooter({
       kind: "command", cmdInput,
-      statusText: status || t({en:`Type ${chordLabel("slash")} for commands`,zh:`输入 ${chordLabel("slash")} 查看命令`}),
+      statusText: "",
       suggestions, suggestionIdx: suggestion, cmdResult: "",
     });
     return () => onFooter(null);
-  }, [cmdInput, cmdInput.value, cmdInput.cursor, onFooter, status, suggestion, suggestions, tab, t]);
+  }, [cmdInput, cmdInput.value, cmdInput.cursor, onFooter, status, suggestion, suggestions, tab, t,menuHelp.active]);
 
   const moveTab = (delta: number) => {
     const current = TABS.findIndex(item => item.id === tab);
@@ -144,6 +148,7 @@ export const BinWorkspace = memo(function BinWorkspace({
 
   const runCommand = useCallback(async (raw: string) => {
     const command = raw.replace(/^[:/]\s*/, "").trim();
+    if(command==="help"){cmdInput.setValue("");help?.open("bin");return;}
     setStatus("");
     try {
       const selected = rows[index];
@@ -171,6 +176,7 @@ export const BinWorkspace = memo(function BinWorkspace({
   };
 
   useInput((input: string, key: any) => {
+    if(menuHelp.handle(input,key))return;
     if (confirmation) {
       if (matchChord("escape", input, key)) setConfirmation(null);
       else if (matchChord("left", input, key) || matchChord("right", input, key)) {
@@ -246,7 +252,7 @@ export const BinWorkspace = memo(function BinWorkspace({
       <Text>   </Text>
       <SelectionText selected={confirmNo} variant="block">{t({en:"Cancel",zh:"取消"})}</SelectionText>
     </Box>
-    <Text dimColor>{t({en:"←/→ select · Enter confirm · Esc cancel",zh:"←/→ 选择 · Enter 确认 · Esc 取消",keys:true})}</Text>
+
   </Box>;
 
   const visibleCount = Math.max(1, contentH);
@@ -271,9 +277,6 @@ export const BinWorkspace = memo(function BinWorkspace({
           </SelectionRow>;
         })}
     </ScrollBox>
-      <Text dimColor>{status || (tab === "delay"
-        ? editing ? t({en:"←/→ choose · Enter save",zh:"←/→ 选择 · Enter 保存",keys:true})
-          : t({en:"↑/↓ select · Enter edit",zh:"↑/↓ 选择 · Enter 编辑",keys:true})
-        : t({en:`←/→ tabs · ↑/↓ select · ${commands.join("   ")}`,zh:`←/→ 页签 · ↑/↓ 选择 · ${commands.join("   ")}`,keys:true}))} · {t({en:"Esc back",zh:"Esc 返回",keys:true})}</Text>
+    {status?<Text dimColor>{status}</Text>:null}
   </Box>;
 });

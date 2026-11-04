@@ -34,7 +34,11 @@ for(const managed of [false,true])test(`complete App /update can navigate or bro
  try{
   ink.setAltScreenActive(true);ink.onRender();await wait();await send("/");await send("update");await send("\r");
   expect(text()).toContain("软件更新");const node=scroll(ink.rootNode);expect(node).toBeDefined();
-  if(managed){await send("\x1b[B".repeat(3));await send("\r");expect(text()).toContain("Enter 保存");}
+  if(managed){
+    await send("\x1b[B".repeat(3));await send("\r");await send("\x1b[C");
+    expect(text()).toContain("开启"); // Draft changed, with no write before confirmation.
+    await send("\x1b");expect(text()).not.toContain("开启");
+  }
   else {expect(node.scrollTop).toBe(0);await send("\x1b[B".repeat(100));expect(node.scrollTop).toBe(Math.max(0,node.scrollHeight-node.scrollViewportHeight));
     expect(node.scrollTop).toBeGreaterThan(0);await send("\x1b[A".repeat(100));expect(node.scrollTop).toBe(0);}
   expect(calls.filter(name=>name.startsWith("update."))).toEqual(["update.status"]);

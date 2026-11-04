@@ -137,12 +137,21 @@ def failure_kind(error):
     return False, "request_error"
 
 
-def runtime_client(configured, *, transport=None):
+def runtime_client(configured, *, transport=None, live_preferences=False):
     endpoint = provider_endpoint(configured.base_url, kind=configured.kind, auth_mode=configured.auth_mode)
     key = configured.api_key if configured.auth_mode == "api_key" else ""
     if configured.auth_mode == "api_key" and not key:
         raise ValueError("Provider API key is unavailable")
+    def preferences_source():
+        from backend.core.llm_config import LLMConfigManager
+        current = next((p for p in LLMConfigManager.get_providers() if p.id == configured.id), None)
+        fields = ('base_url', 'api_key', 'model_id', 'protocol', 'kind', 'auth_mode', 'context_window', 'max_output_tokens')
+        if current is None or any(getattr(current, field) != getattr(configured, field) for field in fields):
+            raise ValueError("PROVIDER_PREFERENCES_ROUTE_CHANGED")
+        return current.configuration.get("request_preferences", {})
     client = LLMProvider(endpoint, key, configured.model_id,
+                       request_preferences=configured.configuration.get("request_preferences", {}),
+                       request_preferences_source=preferences_source if live_preferences else None,
                        protocol=configured.protocol, capabilities=configured.runtime_capabilities(),
                        transport=transport or (LocalProviderTransport() if configured.kind == "local" else None))
     from backend.core.tools.web_tools import provider_search_transport
@@ -165,9 +174,10 @@ class RoutedProvider:
         primary = str(config.get('active_provider') or '')
         if primary not in configured:
             raise ValueError("The active provider is missing")
-        order = [primary, *config.get('failover_order', [])]
+        from backend.core.provider_failover import normalize
+        order = [primary, *normalize(config)['failover_routes'].get(primary, [])]
         self.order = list(dict.fromkeys(order))
-        if len(self.order) > 9 or any(p not in configured for p in self.order):
+        if len(self.order) > 3 or any(p not in configured for p in self.order):
             raise ValueError("Invalid backup provider queue")
         self.providers = configured
         self.clients = {}
@@ -446,12 +456,13 @@ class RoutedProvider:
         raise ProviderRoutesUnavailable(attempts)
 
 
-def configured_runtime_provider(config=None):
+def configured_runtime_provider(config=None, *, live_preferences=None):
     from backend.core.llm_config import LLMConfigManager, LLMProvider as ConfiguredProvider
+    live = config is None if live_preferences is None else bool(live_preferences)
     config = config if config is not None else LLMConfigManager.load()
     active = next((p for p in config.get('providers', []) if p['id'] == config.get('active_provider')), None)
     if active is None:
         return None
     if config.get('failover_enabled'):
-        return RoutedProvider(config)
-    return runtime_client(ConfiguredProvider.from_dict(active))
+        return RoutedProvider(config, client_factory=lambda p: runtime_client(p, live_preferences=live))
+    return runtime_client(ConfiguredProvider.from_dict(active), live_preferences=live)

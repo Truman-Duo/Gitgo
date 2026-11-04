@@ -11,9 +11,12 @@
 // long text; we compute the wrapped cursor position via wrapText() and declare
 // it to Ink so IME sees the correct screen position. No layout transitions =
 // IME stable.
-import React, { useEffect } from "react";
-import { Text, Box, useDeclaredCursor, stringWidth, wrapText } from "@anthropic/ink";
+import React, { useEffect,useMemo } from "react";
+import { Text, Box, Ansi, useDeclaredCursor, stringWidth, wrapText } from "@anthropic/ink";
 import type { Color } from "@anthropic/ink";
+import {highlightCode} from "../theme/syntax.js";
+import type {DocumentRow} from "../input/documentLayout.js";
+import sliceAnsi from "../../vendor/ink/src/core/utils/sliceAnsi.js";
 
 type Props = {
   value: string;
@@ -24,6 +27,8 @@ type Props = {
   color?: Color;
   dimColor?: boolean;
   maxWidth?: number;
+  syntaxLanguage?: string;
+  document?:{rows:DocumentRow[];top:number;height:number;caret:{row:number;column:number}};
 };
 
 export const TextInput = function TextInput({
@@ -35,10 +40,13 @@ export const TextInput = function TextInput({
   color,
   dimColor: dim,
   maxWidth,
+  syntaxLanguage,
+  document,
 }: Props) {
   const cursor = Math.max(0, Math.min(cursorOffset, value.length));
-  const active = focus && showCursor;
-  const visible = value.length > 0;
+  const active = focus && (Boolean(document) || showCursor);
+  const visible = showCursor && (document?document.caret.row>=document.top&&document.caret.row<document.top+document.height:value.length>0);
+  const highlighted=useMemo(()=>syntaxLanguage?highlightCode(value,syntaxLanguage,false):value,[value,syntaxLanguage]);
 
   // Compute cursor (line, column) in the wrapped text layout.
   // wrapText is the same function the renderer uses, so wrapping the
@@ -56,6 +64,7 @@ export const TextInput = function TextInput({
     cursorLine = prefixLines.length - 1;
     cursorColumn = stringWidth(prefixLines[cursorLine]!);
   }
+  if(document){cursorLine=document.caret.row-document.top;cursorColumn=document.caret.column;}
 
   const cursorRef = useDeclaredCursor({
     line: cursorLine,
@@ -74,6 +83,12 @@ export const TextInput = function TextInput({
     }
   }, [active, visible]);
 
+  if(document){
+    const logical=highlighted.split("\n"),shown=document.rows.slice(document.top,document.top+document.height);
+    return <Box ref={cursorRef} flexDirection="column">{shown.map((row,index)=><Box key={index} height={1} flexShrink={0}>
+      <Ansi>{(syntaxLanguage?sliceAnsi(logical[row.line] || "",row.column,row.column+row.width):row.text) || " "}</Ansi>
+    </Box>)}</Box>;
+  }
   if (value.length === 0) {
     return (
       <Box ref={cursorRef}>
@@ -81,6 +96,10 @@ export const TextInput = function TextInput({
       </Box>
     );
   }
+
+  // Styling never enters the editable value or cursor-offset calculations.
+  // Use the same language/theme mapping as Markdown and diff code rendering.
+  if(syntaxLanguage)return <Box ref={cursorRef}><Ansi>{highlighted+(cursor===value.length?" ":"")}</Ansi></Box>;
 
   const before = value.slice(0, cursor);
   const at = value[cursor] || " ";

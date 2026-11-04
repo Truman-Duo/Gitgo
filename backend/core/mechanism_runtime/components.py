@@ -17,7 +17,8 @@ def _event(ctx, params, inputs):
 
 
 def _judge(ctx, params, inputs):
-    judgment = ctx.call("agent.judge", {"criterion": params["criterion"], "event": inputs["event"], "prior_state": ctx.state})
+    judgment = ctx.call("agent.judge", {"criterion": params["criterion"], "boundary": ctx.boundary,
+        "event": inputs["event"], "prior_state": ctx.state})
     return NodeResult({"matches": judgment["matches"], "evidence": judgment}, {"last_judgment": judgment})
 
 

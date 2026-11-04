@@ -12,6 +12,7 @@ so all projects share one provider set. Thread-safe for native/MCP transports vi
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import threading
 import uuid
@@ -41,6 +42,7 @@ class LLMProvider:
     created_at: str = ""
     kind: str = "remote"
     auth_mode: str = "api_key"
+    configuration: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.id:
@@ -73,6 +75,7 @@ class LLMProvider:
             created_at=d.get("created_at", ""),
             kind=str(d.get("kind", "remote")),
             auth_mode=str(d.get("auth_mode", "api_key")),
+            configuration=dict(d.get("configuration", {}) or {}),
         )
 
     def runtime_capabilities(self) -> dict:
@@ -86,6 +89,12 @@ class LLMConfigManager:
     """Static methods for reading/writing the global llm_config.json."""
 
     _lock = threading.RLock()
+
+    @staticmethod
+    def revision(provider: dict) -> str:
+        # Secret references change on rotation. Do not publish key hashes.
+        public = {k: v for k, v in provider.items() if k != "api_key"}
+        return hashlib.sha256(json.dumps(public, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
 
     @staticmethod
     def credential_cleanup_status() -> dict:
@@ -143,7 +152,8 @@ class LLMConfigManager:
             ref = str(provider.get("secret_ref") or "")
             provider["api_key"] = secrets.get(ref, "") if ref else str(provider.get("api_key") or "")
         result["providers"] = providers
-        return result
+        from backend.core.provider_failover import normalize
+        return normalize(result)
 
     @staticmethod
     def load() -> dict:
@@ -190,6 +200,7 @@ class LLMConfigManager:
         providers = [dict(item) for item in (config.get("providers") or [])]
         secret_updates: dict[str, str] = {}
         secret_refs: set[str] = set()
+        retained_secrets = LLMConfigManager._secret_store().read_all() if any(p.get("secret_ref") for p in providers) else {}
         for provider in providers:
             provider_id = str(provider.get("id") or "")
             if not provider_id:
@@ -200,15 +211,17 @@ class LLMConfigManager:
             if provider.get("auth_mode") == "none":
                 provider.pop("secret_ref", None)
                 continue
-            if raw_key:
+            if raw_key and retained_secrets.get(secret_ref) != raw_key:
                 # Never overwrite the credential referenced by still-durable
                 # old metadata. Keep both until the new metadata is committed.
                 secret_ref = f"provider:{provider_id}:{uuid.uuid4().hex}:api_key"
             provider["secret_ref"] = secret_ref
             secret_refs.add(secret_ref)
-            if raw_key:
+            if raw_key and secret_ref not in retained_secrets:
                 secret_updates[secret_ref] = raw_key
         config["providers"] = providers
+        from backend.core.provider_failover import normalize
+        config = normalize(config)
         path = LLMConfigManager._config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         secret_store = (
@@ -263,6 +276,14 @@ class LLMConfigManager:
         """Add a new provider. Sets it as active if it's the first one."""
         with LLMConfigManager._lock:
             config = LLMConfigManager._load_unlocked()
+            for previous in config["providers"]:
+                if previous.get("id") == provider.id:
+                    old = LLMProvider.from_dict(previous).to_dict()
+                    new = provider.to_dict()
+                    old.pop("created_at", None); new.pop("created_at", None)
+                    if old != new:
+                        raise ValueError("PROVIDER_ALREADY_CREATED")
+                    return LLMProvider.from_dict(previous)
             config["providers"].append(provider.to_dict())
             if not config.get("active_provider"):
                 config["active_provider"] = provider.id
@@ -270,13 +291,16 @@ class LLMConfigManager:
         return provider
 
     @staticmethod
-    def update(provider: LLMProvider) -> LLMProvider | None:
+    def update(provider: LLMProvider, expected_revision: str = "") -> LLMProvider | None:
         """Update an existing provider by id. Returns None if not found."""
         with LLMConfigManager._lock:
             config = LLMConfigManager._load_unlocked()
             for i, p in enumerate(config["providers"]):
                 if p.get("id") == provider.id:
-                    config["providers"][i] = provider.to_dict()
+                    if expected_revision and LLMConfigManager.revision(p) != expected_revision:
+                        raise ValueError("PROVIDER_CONFIG_CHANGED")
+                    # Preserve fields owned by newer versions during rollback.
+                    config["providers"][i] = {**p, **provider.to_dict()}
                     LLMConfigManager._save_unlocked(config)
                     return provider
         return None
@@ -295,6 +319,8 @@ class LLMConfigManager:
                 return False
 
             config["failover_order"] = [p for p in config.get("failover_order", []) if p != provider_id]
+            config["failover_routes"] = {owner: [p for p in order if p != provider_id]
+                                         for owner, order in config.get("failover_routes", {}).items() if owner != provider_id}
 
             if config.get("active_provider") == provider_id:
                 config["active_provider"] = config["providers"][0]["id"] if config["providers"] else ""
@@ -308,26 +334,34 @@ class LLMConfigManager:
             config = LLMConfigManager._load_unlocked()
             for p in config["providers"]:
                 if p.get("id") == provider_id:
+                    if config.get("active_provider") == provider_id:
+                        return LLMProvider.from_dict(p)
                     config["active_provider"] = provider_id
                     LLMConfigManager._save_unlocked(config)
                     return LLMProvider.from_dict(p)
         return None
 
     @staticmethod
-    def configure_failover(enabled: bool, order: list[str], circuit_breaker: dict | None = None) -> dict:
+    def configure_failover(enabled: bool, order: list[str] | None = None, circuit_breaker: dict | None = None,
+                           provider_id: str = "", expected_revision: str = "") -> dict:
         from backend.core.loop.provider_policy import failover_settings
-        if type(enabled) is not bool or not isinstance(order, list) or any(not isinstance(p, str) for p in order):
+        from backend.core.provider_failover import normalize, revision
+        if type(enabled) is not bool or order is not None and (not isinstance(order, list) or any(not isinstance(p, str) for p in order)):
             raise ValueError("Failover needs a boolean enabled and a list of provider IDs")
-        if len(order) > 8 or len(set(order)) != len(order):
-            raise ValueError("Select at most eight unique backup providers")
         with LLMConfigManager._lock:
             config = LLMConfigManager._load_unlocked()
-            known = {p["id"] for p in config["providers"]}
-            if set(order) - known:
-                raise ValueError("Backup queue contains an unknown provider")
-            config.update(failover_enabled=enabled, failover_order=list(order))
+            if expected_revision and expected_revision != revision(config):
+                raise ValueError("FAILOVER_CONFIG_CHANGED")
+            if order is not None:
+                owner = provider_id or config.get("active_provider", "")
+                if owner not in {p["id"] for p in config["providers"]}:
+                    raise ValueError("Backup owner is an unknown API")
+                config.setdefault("failover_routes", {})[owner] = list(order)
+            config["failover_enabled"] = enabled
+            config = normalize(config)
             if circuit_breaker is not None:
                 config["circuit_breaker"] = dict(circuit_breaker)
             config["circuit_breaker"] = failover_settings(config)
             LLMConfigManager._save_unlocked(config)
-            return {k: config[k] for k in ("failover_enabled", "failover_order", "circuit_breaker")}
+            return {**{k: config[k] for k in ("failover_enabled", "failover_order", "failover_routes", "circuit_breaker")},
+                    "failover_revision": revision(config)}

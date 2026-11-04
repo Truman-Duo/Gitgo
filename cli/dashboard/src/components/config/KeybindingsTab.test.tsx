@@ -4,7 +4,7 @@ import {PassThrough} from "node:stream";
 import {renderSync,Text} from "@anthropic/ink";
 import {KeybindingsTab} from "./KeybindingsTab.js";
 import {InputProvider,useBindingSettings,useManagedInput} from "../../input/runtime.js";
-import {applicationBindings} from "../../input/router.js";
+import {applicationBindings,BINDING_DEFINITIONS} from "../../input/router.js";
 import {useGeneralConfig} from "../../hooks/useGeneralConfig.js";
 import {useTextInput} from "../../hooks/useTextInput.js";
 import {chordLabel} from "../../input/bindings.js";
@@ -37,12 +37,12 @@ test("capture validates raw keys, preserves paste, saves atomically, reloads and
  }
  let terminal=await mount();
  try{
-  await terminal.key("\r"); // standalone detection
+  await terminal.key("\x1b[B");await terminal.key("\r"); // Capture the first action; no standalone diagnostic menu.
   await new Promise(r=>setTimeout(r,5150));expect(terminal.output()).toContain("No key detected yet");expect(writes).toHaveLength(0);
   await terminal.key("\x1b[106;9u");expect(terminal.output()).toContain("Super+J");
   await terminal.key("\x1b[106;6u");expect(terminal.output()).toContain("Ctrl+Shift+J");expect(writes).toHaveLength(0);
   await terminal.key("\x1b");
-  await terminal.key("\x1b[B");await terminal.key("\x1b[B");await terminal.key("\r"); // interrupt action
+  await terminal.key("\r"); // interrupt action
   await terminal.key("\x1b[200~pasted\x1b[201~");expect(writes).toHaveLength(0);
   await terminal.key("\x03");expect(terminal.output()).toContain("Key already used");expect(writes).toHaveLength(0);
   await terminal.key("\x18");expect(terminal.output()).toContain("Received Ctrl+X");expect(writes).toHaveLength(0);
@@ -54,13 +54,14 @@ test("capture validates raw keys, preserves paste, saves atomically, reloads and
  terminal=await mount();
  try{
   expect(applicationBindings.label("execution.interrupt")).toBe("Ctrl+X");
-  await terminal.key("\x1b[B");await terminal.key("\r");await wait();expect(stored).toEqual({version:1,overrides:{}});
+  await terminal.key("\r");await wait();expect(stored).toEqual({version:1,overrides:{}});
   expect(applicationBindings.label("execution.interrupt")).toBe("Esc");expect(writes).toHaveLength(2);
  }finally{terminal.close();}
 },15000);
 
 import {Box} from "@anthropic/ink";
 import instances from "../../../vendor/ink/src/core/instances.js";
+import {cellAt} from "../../../vendor/ink/src/core/screen.js";
 
 test("held navigation and paging stop at edges, reverse immediately, and keep selection visible after resize",async()=>{
  const stdin:any=new PassThrough();stdin.isTTY=true;stdin.setRawMode=()=>stdin;stdin.ref=()=>stdin;stdin.unref=()=>stdin;
@@ -88,6 +89,11 @@ test("held navigation and paging stop at edges, reverse immediately, and keep se
  ink.rootNode.onRender=(...args:any[])=>{schedules++;return original?.(...args);};
  try{
   await wait();
+  const screen=ink.frontFrame.screen;
+  const visible=Array.from({length:screen.height},(_,y)=>Array.from({length:screen.width},(_,x)=>cellAt(screen,x,y)?.char??' ').join('')).join('\n');
+  expect(visible).toContain(BINDING_DEFINITIONS[0]!.label.en);
+  expect(visible).toContain('Esc');
+  expect(visible).not.toContain('Lists, editors');
   const scroll=findScroll(ink.rootNode);expect(scroll.scrollViewportHeight).toBeGreaterThan(0);
   stdin.write("\x1b[B".repeat(4));await wait();expect(scroll.scrollTop).toBe(0); // visible rows do not scroll
   stdin.write("\x1b[B".repeat(100));await wait();expect(scroll.scrollTop).toBe(bottom(scroll));
@@ -102,7 +108,7 @@ test("held navigation and paging stop at edges, reverse immediately, and keep se
   stdin.write("\x1b[B");await wait();expect(scroll.scrollTop).toBe(bottom(scroll)); // paging must not strand selection
   stdin.write("\x1b[A");await wait();stdin.write("\r");await wait();
   stdin.write("\x1b[122;6u");await wait();stdin.write("\r");await wait();
-  expect(writes.at(-1).overrides["lesson.toggle"]).toEqual({key:"z",ctrl:true,shift:true});
+  expect(writes.at(-1).overrides).toEqual({[BINDING_DEFINITIONS.at(-2)!.id]:{key:"z",ctrl:true,shift:true}});
   stdin.write("\x1b[A".repeat(100));await wait();expect(scroll.scrollTop).toBe(0);
   const topBefore=schedules;
   stdin.write("\x1b[A".repeat(500));stdin.write("\x1b[5~".repeat(500));await wait();

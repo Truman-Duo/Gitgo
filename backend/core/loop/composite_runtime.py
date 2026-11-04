@@ -71,7 +71,7 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key, *, runtime_met
     from .event_bus import ToolEvent
 
     runtime_metadata = {} if runtime_metadata is None else runtime_metadata
-    catalog = ctx.artifacts.get("tool_catalog") or {}
+    catalog = ctx.tool_catalog or {}
     inputs = {k: v for k, v in args.items() if not str(k).startswith("_")}
     spec = tool.composite_spec or {}
     from .tool_surface import component_blocker

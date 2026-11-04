@@ -8,12 +8,13 @@ import {copy,type Copy} from "../ui/pageContract.js";
 import React, { memo, useState, useEffect } from "react";
 import { Box, Text, Ansi } from "@anthropic/ink";
 import { TextInput } from "./TextInput.js";
-import {SelectionText} from "./Selection.js";
+import {SuggestionRow} from "./Selection.js";
 import { isChatScene, type Scene, type Mode } from "../state/store.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
 import { colors, useColorTransition, useSuggestionStyle } from "../theme/index.js";
 import { ContextStatus } from "./ContextStatus.js";
 import { RunningBStrip } from "./RunningBStrip.js";
+import {geometry} from "../theme/tokens.js";
 import type { ProcessInfo } from "../hooks/useLoopData.js";
 
 export type Suggestion = {
@@ -28,6 +29,9 @@ export type FooterConfig =
   | {
       hidden?: false;
       kind?: "command" | "normal";
+      secret?: boolean;
+      preserveStatus?: boolean;
+      readOnly?: boolean;
       cmdInput: UseTextInputReturn;
       statusText: string;
       suggestions: Suggestion[];
@@ -55,6 +59,7 @@ type Props = {
   cachePct?: number | null;
   footerDrawer?: React.ReactNode;
   editorHidden?: boolean;
+  editorFocused?: boolean;
   language?: "en" | "zh";
 };
 
@@ -62,7 +67,7 @@ export const CommandBar = memo(function CommandBar({
   width, mode, advancement, advancementPending = false, textInput, cmdInput, cmdResult,
   statusText, suggestions, suggestionIdx, scene, footerOverride,
   runningB, runningBSelIdx, statusBarFocused, contextPct, cachePct,
-  footerDrawer, editorHidden = false,
+  footerDrawer, editorHidden = false, editorFocused = true,
   language = "en",
 }: Props) {
   const t=(value:Copy)=>copy(value,language);
@@ -78,7 +83,8 @@ export const CommandBar = memo(function CommandBar({
   // Use overlay values when overridden
   const activeCmdInput = isOverridden ? footerOverride.cmdInput : cmdInput;
   const activeCmdResult = isOverridden ? footerOverride.cmdResult : cmdResult;
-  const activeStatusText = isOverridden ? footerOverride.statusText : statusText;
+  const sceneStatus = !isOverridden || footerOverride.preserveStatus;
+  const activeStatusText = sceneStatus ? statusText : footerOverride.statusText;
   const activeSuggestions: Suggestion[] = isOverridden
     ? footerOverride.suggestions
     : suggestions;
@@ -139,9 +145,9 @@ export const CommandBar = memo(function CommandBar({
               <Text dimColor>{t({en:"Type / for commands",zh:"输入 / 打开指令"})}</Text>
             ) : isOverridden || effectiveCommand ? (
               <TextInput
-                value={activeCmdInput.value}
+                value={isOverridden && footerOverride.secret ? "•".repeat(activeCmdInput.value.length) : activeCmdInput.value}
                 cursorOffset={activeCmdInput.cursor}
-                showCursor={!projectListIdle}
+                showCursor={editorFocused&&!projectListIdle&&!(isOverridden&&footerOverride.readOnly)}
                 color={effectiveCommand ? colors.input.command.fg : undefined}
                 maxWidth={inputMaxWidth}
               />
@@ -149,7 +155,7 @@ export const CommandBar = memo(function CommandBar({
               <TextInput
                 value={textInput.value}
                 cursorOffset={textInput.cursor}
-                showCursor
+                showCursor={editorFocused}
                 maxWidth={inputMaxWidth}
               />
             )}
@@ -158,46 +164,35 @@ export const CommandBar = memo(function CommandBar({
       )}
 
       {/* Command result — below the input box */}
-      {showInput && activeCmdResult ? (
+      {showInput && !footerDrawer && activeCmdResult ? (
         <Box flexDirection="row" paddingLeft={2} marginTop={1}>
           <Text color={colors.input.result.fg}>{activeCmdResult}</Text>
         </Box>
       ) : null}
 
       {/* Suggestions — vertical list outside the box, pushes input up */}
-      {showSuggestions && (() => {
-        const maxVisible = 8;
+      {footerDrawer ? <Box flexDirection="column" paddingLeft={geometry.choice.inset} marginTop={1}>{footerDrawer}</Box> : showSuggestions && (() => {
+        const maxVisible = geometry.choice.maxVisible;
         const idx = activeSuggestionIdx % activeSuggestions.length;
         const half = Math.floor(maxVisible / 2);
         const windowStart = Math.max(0, Math.min(idx - half, Math.max(0, activeSuggestions.length - maxVisible)));
         const visibleSlice = activeSuggestions.slice(windowStart, windowStart + maxVisible);
         return (
-        <Box flexDirection="column" paddingLeft={2} marginTop={1}>
+        <Box flexDirection="column" paddingLeft={geometry.choice.inset} marginTop={1}>
           {visibleSlice.map((s, i) => {
             const actualIdx = windowStart + i;
             const active = actualIdx === idx;
             return (
-              <Box key={s.label} flexDirection="row"
-                paddingLeft={1}
-              >
-                <SelectionText selected={active} variant="suggestion"
-                  dimColor={!active}
-                >
-                  {s.label}
-                </SelectionText>
-                <Text dimColor={!active}>  {s.description}</Text>
-              </Box>
+              <SuggestionRow key={s.label} selected={active} label={s.label} description={s.description}/>
             );
           })}
         </Box>
         );
       })()}
 
-      {footerDrawer}
-
       {/* Status text */}
       <Box paddingLeft={1} paddingRight={1} marginTop={showInput ? 1 : 0}>
-        {!isOverridden && (runningB !== undefined || isChatScene(scene)) ? (
+        {sceneStatus && (runningB !== undefined || isChatScene(scene)) ? (
           <RunningBStrip statusText={activeStatusText} language={language} width={Math.max(1, width - 2)}
             advancement={isChatScene(scene) ? advancement ?? null : undefined} advancementPending={advancementPending}
             runningB={runningB ?? []} selIdx={runningBSelIdx ?? 0} focused={statusBarFocused ?? false} contextPct={contextPct ?? ""} cachePct={cachePct} />

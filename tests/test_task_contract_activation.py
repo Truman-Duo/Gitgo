@@ -45,6 +45,30 @@ def plan():
     return {"profiles": ["retrospective"], "nodes": [{"id": "retro", "kind": "report", "format": "retrospective"}]}
 
 
+def test_both_plan_entrypoints_expose_supported_inputs_without_an_extra_status_call(runtime):
+    from backend.core.loop.executor import _build_internal_tools
+    from backend.core.loop.engineering_workflow import compile_plan, PROFILES
+    from jsonschema import Draft202012Validator
+    _, process, _, root = runtime
+    tools = _build_internal_tools(process, {}, str(root), object(), SimpleNamespace(_executors={}))
+    schemas = [tools['declare_task_contract'].parameters['properties']['engineering_workflow'],
+        tools['engineering_workflow'].parameters['properties']['plan']]
+    assert schemas[0] == schemas[1]
+    schema = schemas[0]
+    assert schema['properties']['profiles']['items']['enum'] == list(PROFILES)
+    validator = Draft202012Validator(schema)
+    for valid in (plan(), {'profiles': ['tdd'], 'test_id': 'original', 'target_files': ['app.py']}):
+        validator.validate(valid)
+        assert compile_plan(valid, root)['nodes']
+    for invalid in ({}, {'nodes': plan()['nodes']}, {'profiles': ['invented_practice']}):
+        assert list(validator.iter_errors(invalid))
+        before = deepcopy(process.context_snapshot)
+        with pytest.raises(ValueError, match='engineering_workflow.profiles') as caught:
+            compile_plan(invalid, root)
+        assert all(name in str(caught.value) for name in PROFILES)
+        assert process.context_snapshot == before
+
+
 def execute(process, root, candidate, bus=None):
     context = ExecutionContext(process=process, session=process.session, workspace_path=str(root),
         event_bus=bus or EventBus(), cancellation=process.cancellation_event)
@@ -152,6 +176,124 @@ def test_protocol_revision_is_explicit_and_durable(runtime):
     changed = tool.execute(proposal(root, expected_revision=1, goal="New requirement", acceptance_criteria=["Verify the added behavior"]))
     assert changed["accepted"] and changed["activation"]["base_revision"] == 1 and not changed["authority_granted"]
     assert store.load_process_state(process.process_id)["runtime_state"]["context_snapshot"]["task_contract"]["goal"] == "New requirement"
+
+
+def revision_tool(process, root):
+    from backend.core.loop.executor import _build_internal_tools
+    return _build_internal_tools(process, {}, str(root), object(), SimpleNamespace(_executors={}))['declare_task_contract']
+
+
+def test_incremental_contract_preserves_omitted_meaning_and_uses_existing_activation(isolated_pipeline_runtime):
+    from jsonschema import Draft202012Validator
+    _, process, store, root = isolated_pipeline_runtime
+    first = publish_contract(process, proposal(root, engineering_workflow=plan(),
+        uncertainties=['A real outstanding choice'], requires_user_decision=True), store=store)
+    tool = revision_tool(process, root)
+    args = {'operation': 'revise', 'append': {'acceptance_criteria': ['Check the added behavior']}}
+    advertised = tool.to_openai_function()['function']['parameters']
+    Draft202012Validator.check_schema(advertised)
+    Draft202012Validator(advertised).validate(args)
+    preview = tool.alignment_contract(args)
+    assert get_task_contract(process) == first
+    context = ExecutionContext(process, process.session, str(root), storage=store._storage)
+    result = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, context, 'incremental')
+    assert not result.is_error, result.formatted
+    updated = get_task_contract(process)
+    assert semantic_contract(updated) == semantic_contract(preview)
+    assert updated['acceptance_criteria'] == first['acceptance_criteria'] + ['Check the added behavior']
+    for key in ('goal', 'deliverables', 'uncertainties', 'requires_user_decision', 'engineering_workflow'):
+        assert updated[key] == first[key]
+    assert updated['activation']['base_revision'] == 1 and updated['revision'] == 2
+    assert store.load_process_state(process.process_id)['runtime_state']['context_snapshot']['task_contract'] == updated
+    assert not process.approval_grants and process.capability_lease is None
+
+
+def test_incremental_binding_cannot_overwrite_revision_changed_after_preparation(isolated_pipeline_runtime):
+    _, process, store, root = isolated_pipeline_runtime
+    publish_contract(process, proposal(root), store=store)
+    tool = revision_tool(process, root)
+    args = {'operation': 'revise', 'append': {'acceptance_criteria': ['Extra test']}}
+    bus = EventBus()
+    bus.subscribe('ToolBeforeHooksStarted', lambda _event: publish_contract(process,
+        proposal(root, expected_revision=1, goal='Concurrent new requirement'), store=store))
+    context = ExecutionContext(process, process.session, str(root), event_bus=bus, storage=store._storage)
+    result = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, context, 'racing-revision')
+    assert not bus.delivery_failures
+    assert result.is_error and result.diagnostics['code'] == 'TASK_CONTRACT_REVISION_CONFLICT'
+    assert get_task_contract(process)['revision'] == 2
+    assert get_task_contract(process)['goal'] == 'Concurrent new requirement'
+    assert 'Extra test' not in get_task_contract(process)['acceptance_criteria']
+    assert result.diagnostics['next_actions'][0]['current_contract']['revision'] == 2
+
+
+@pytest.mark.parametrize('args', [
+    {'operation': 'revise'},
+    {'operation': 'revise', 'append': {'acceptance_criteria': 'not an array'}},
+    {'operation': 'revise', 'append': {'authority': ['grant']}},
+    {'operation': 'revise', 'host_requirements': {}},
+    {'operation': 'revise', 'acceptance_criteria': [], 'append': {'acceptance_criteria': ['ambiguous']}},
+    {'operation': 'revise', 'engineering_workflow': {}},
+])
+def test_invalid_incremental_arguments_do_not_commit_or_become_system_crashes(isolated_pipeline_runtime, args):
+    _, process, store, root = isolated_pipeline_runtime
+    first = publish_contract(process, proposal(root), store=store)
+    tool = revision_tool(process, root)
+    ctx = ExecutionContext(process, process.session, str(root), storage=store._storage)
+    result = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, ctx, 'invalid-delta')
+    assert result.is_error and result.diagnostics['code'] == 'INVALID_TOOL_ARGUMENTS', result.formatted
+    assert result.diagnostics['nature'] == 'business'
+    assert get_task_contract(process) == first and not process.approval_grants
+
+
+def test_incremental_contract_requires_initial_declaration_and_honors_explicit_revision(runtime):
+    _, process, store, root = runtime
+    tool = revision_tool(process, root)
+    args = {'operation': 'revise', 'goal': 'Changed goal'}
+    assert tool.execute(args)['error'] == 'INVALID_TASK_CONTRACT'
+    first = publish_contract(process, proposal(root), store=store)
+    rejected = tool.execute({**args, 'expected_revision': 0})
+    assert rejected['error'] == 'TASK_CONTRACT_REVISION_CONFLICT'
+    assert rejected['contract'] == first
+    accepted = tool.execute(args)
+    assert accepted['accepted'] and accepted['contract']['goal'] == 'Changed goal'
+    assert accepted['contract']['deliverables'] == first['deliverables']
+
+
+def test_legacy_internal_defaults_do_not_weaken_public_initial_arguments(isolated_pipeline_runtime):
+    _, process, store, root = isolated_pipeline_runtime
+    tool = revision_tool(process, root)
+    incomplete = {'goal': 'Initial task', 'execution_mode': 'self_execute'}
+    with pytest.raises(ValueError, match='delegation_required'):
+        tool.alignment_contract(incomplete)
+    ctx = ExecutionContext(process, process.session, str(root), storage=store._storage)
+    result = ToolPipeline().execute({'name': tool.name, 'args': incomplete}, tool, ctx, 'missing-initial-fields')
+    assert result.is_error and get_task_contract(process).get('revision', 0) == 0
+    # Compatibility of direct application service callers, never model admission.
+    assert tool.execute(incomplete)['accepted']
+
+
+def test_incremental_workflow_replacement_keeps_existing_scope_amendment_requirement(runtime):
+    _, process, store, root = runtime
+    first = publish_contract(process, proposal(root, engineering_workflow=plan()), store=store)
+    replacement = plan()
+    replacement['nodes'][0]['id'] = 'different_obligation'
+    tool = revision_tool(process, root)
+    with pytest.raises(ValueError, match='extended'):
+        tool.alignment_contract({'operation': 'revise', 'engineering_workflow': replacement})
+    assert get_task_contract(process) == first
+
+
+def test_incremental_worker_cannot_drop_assigned_obligations_or_acquire_delegation(runtime):
+    _, process, store, root = runtime
+    first = publish_contract(process, proposal(root), store=store)
+    process.actor_kind = 'worker'
+    process.update_context_snapshot(lambda context: {**context, 'task_maintenance': {
+        'task_id': process.active_task_id, 'allow_contract_reconciliation': True}})
+    tool = revision_tool(process, root)
+    for delta in ({'acceptance_criteria': []}, {'deliverables': []}, {'execution_mode': 'delegate'}):
+        rejected = tool.execute({'operation': 'revise', **delta})
+        assert rejected['error'] == 'INVALID_TASK_CONTRACT'
+        assert get_task_contract(process) == first
 
 
 def test_revision_between_preflight_and_admission_spends_no_permission(runtime):

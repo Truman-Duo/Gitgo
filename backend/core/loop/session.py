@@ -419,6 +419,7 @@ class AgentSession:
             "role": "user",
             "content": content,
             "message_type": "host_steering_delta",
+            "context_purpose": "runtime_update",
             "host_authority": True,
             "steering_type": steering_type,
             "steering_version": version,
@@ -793,6 +794,7 @@ class AgentSession:
             "role": "user",
             "content": f"[CONTEXT EPOCH {self.context_epoch} CHECKPOINT]\n{summary}",
             "message_type": "compact_transcript",
+            "context_purpose": "conversation_handoff",
             "context_epoch": self.context_epoch,
         }
         self.messages = (
@@ -831,9 +833,8 @@ class AgentSession:
         gated by an absolute live-context threshold so short iterative work
         keeps its natural conversational continuity and cache prefix.
         """
-        stable_allowed = {
-            "Behavior and delivery standard", "User collaboration protocol",
-        }
+        from .prompt_compiler import STABLE_SECTION_NAMES, MIN_SPLIT_PREFIX_SCHEMA_VERSION
+        stable_allowed = STABLE_SECTION_NAMES
         prompt_migration_required = False
         for message in self.messages:
             if message.get("message_type") != "compiled_system_prompt":
@@ -844,7 +845,7 @@ class AgentSession:
                 if isinstance(item, dict)
             }
             if (
-                int(message.get("prompt_schema_version") or 0) < 6
+                int(message.get("prompt_schema_version") or 0) < MIN_SPLIT_PREFIX_SCHEMA_VERSION
                 or (names and not names.issubset(stable_allowed))
             ):
                 prompt_migration_required = True
@@ -857,6 +858,8 @@ class AgentSession:
 
         public: list[dict] = []
         for message in self.messages:
+            if message.get("provider_visible") is False:
+                continue
             if str(message.get("role") or "") not in {"user", "assistant"}:
                 continue
             if str(message.get("message_type") or "") not in {"", "conversation"}:
@@ -871,10 +874,11 @@ class AgentSession:
                 "content": content[:8000],
                 "message_type": "conversation",
             })
-        retained = public[-max(0, int(retained_public_messages)):]
+        retained_count = max(0, int(retained_public_messages))
+        retained = public[-retained_count:] if retained_count else []
+        previous_result = str(checkpoint.get("response") or "").strip()[:8000]
         safe_checkpoint = {
             "previous_task_status": str(checkpoint.get("status") or "unknown"),
-            "previous_result": str(checkpoint.get("response") or "")[:8000],
             "deliverables": list(checkpoint.get("deliverables") or [])[:16],
             "child_outcomes": list(checkpoint.get("child_outcomes") or [])[:16],
             "instruction": (
@@ -883,6 +887,13 @@ class AgentSession:
                 "workspace or current Host tools before relying on them."
             ),
         }
+        # Keep the result in either dialogue or handoff, without deleting the
+        # original answer or making a semantic judgment about its wording.
+        if previous_result and not any(
+            item["role"] == "assistant" and item["content"] == previous_result
+            for item in retained
+        ):
+            safe_checkpoint["previous_result"] = previous_result
         self.begin_context_epoch(
             summary=(
                 "[HOST COMPLETED TASK BOUNDARY]\n"

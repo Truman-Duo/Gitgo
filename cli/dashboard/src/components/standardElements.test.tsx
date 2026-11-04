@@ -2,7 +2,7 @@ import React from "react";
 import {test, expect} from "bun:test";
 import chalk from "chalk";
 import {PassThrough} from "node:stream";
-import {Box, renderSync} from "@anthropic/ink";
+import {Box, Text, renderSync} from "@anthropic/ink";
 import instances from "../../vendor/ink/src/core/instances.js";
 import {cellAt} from "../../vendor/ink/src/core/screen.js";
 import {InputProvider} from "../input/runtime.js";
@@ -123,13 +123,13 @@ test("Update uses standard field colors, label-only blink and bounded selection 
       automatic_check:true,preferences,automatic_install_available:true,can_check:true,can_download:false,can_request_apply:false,
       can_request_rollback:false,rollback:null,candidate:null,pending_restart:null,apply_strategy:"immediate",blockers:[],
       automatic:{state:"not_checked",last_attempt:null,next_attempt:null,error_code:null}};}};
-  const io=mount(width=><LanguageContext.Provider value="zh"><UpdatePanel client={client} cols={width} language="zh" onDismiss={()=>{}}/></LanguageContext.Provider>,64,16);
+  const io=mount(width=><LanguageContext.Provider value="zh"><UpdatePanel client={client} cols={width} language="zh" onDismiss={()=>{}}/><Text>Reserved status</Text></LanguageContext.Provider>,64,16);
   try{
     await wait();const label=io.locate("更新渠道"),value=io.locate("预览版");
     expect(io.styles(label)).toContain("\x1b[1m");expect(io.styles(label).some(c=>c.includes("[48;"))).toBe(false);
     expect(io.locate("开启").x).toBe(value.x);
     await io.send("\x1b[B".repeat(500));expect(io.styles(io.locate("刷新本地状态"))).toContain("\x1b[48;2;42;42;42m");
-    await io.resize(40,9);expect(io.locate("刷新本地状态").y).toBeLessThan(8);
+    await io.resize(40,9);expect(io.locate("刷新本地状态").y).toBeLessThan(8);expect(io.locate("Reserved status").y).toBe(8);
     await io.send("\x1b[A".repeat(500));expect(io.styles(io.locate("更新渠道"))).toContain("\x1b[1m");
     await io.resize(64,16);await io.send("\r");const draftValue=io.locate("预览版");
     await wait(450);expect(io.line(io.locate("预览版").y)).not.toContain("更新渠道");

@@ -104,6 +104,7 @@ def _agent_step(
     from .semantic_review_coordinator import SemanticReviewCoordinator
     _check_alignment = SemanticReviewCoordinator(process, llm_provider, instruction, route,
         surface.refresh_prompt, ctx.artifacts['engineering_workflow'], _emit_observation, on_stream_event).check
+    tool_batch.check_alignment = _check_alignment
 
     def _pause_blocked_delivery(guard_result, candidate):
         from .completion_control import blocked_delivery

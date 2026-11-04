@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Callable
 
 from backend.core.loop.execution_contract import ExecutionContract, ExecutionType
+from backend.core.implementation_identity import ImplementationArtifact
 
 
 _OBJECT_SCHEMA_KEYS = {
@@ -142,13 +143,28 @@ class AgentTool:
     # Host-only preview of a control operation's prospective requirement state.
     # Dynamic definitions cannot supply this hook; it grants no permission.
     alignment_contract: Callable | None = None
+    # A protocol migration may still accept saved calls while advertising only
+    # its current signature. This changes discovery, never execution authority.
+    advertised_parameters: dict | None = None
+    # Trusted presentation only: (validated args, full data) -> model view.
+    # The full result is retained by the existing evidence store before use.
+    model_result: Callable | None = None
+    implementation_artifacts: tuple[ImplementationArtifact, ...] = ()
 
     def __post_init__(self) -> None:
         self._bound_executor = self.execute
         self._bound_execution_contract = self.execution_contract
+        if not isinstance(self.implementation_artifacts, tuple) or any(
+                not isinstance(item, ImplementationArtifact) for item in self.implementation_artifacts):
+            raise ValueError("Native implementation artifacts require trusted registrations")
+        if len({item.name for item in self.implementation_artifacts}) != len(self.implementation_artifacts):
+            raise ValueError("Duplicate native implementation artifact")
+        self._bound_implementation_artifacts = self.implementation_artifacts
         if self.execution_contract is not None and not isinstance(self.execution_contract, ExecutionContract):
             raise ValueError("Execution authority must be a Host contract object")
         self.parameters = normalize_tool_parameters(self.parameters)
+        if self.advertised_parameters is not None:
+            self.advertised_parameters = normalize_tool_parameters(self.advertised_parameters)
         # Backward-compatible normalization while ``read_only`` is migrated.
         if not self.read_only and self.effect == ToolEffect.READ:
             self.effect = ToolEffect.WORKSPACE_WRITE
@@ -173,6 +189,8 @@ class AgentTool:
             raise ValueError("Tool has no Host-declared execution contract")
         if contract is not self._bound_execution_contract or self.execute is not self._bound_executor:
             raise ValueError("Registered execution authority or callable changed")
+        if self.implementation_artifacts != self._bound_implementation_artifacts:
+            raise ValueError("Registered native implementation changed")
         if contract.kind == ExecutionType.NATIVE_PROCESS and not self.composite_spec:
             from backend.core.tools.runner import handler_bindings
             binding = handler_bindings().get(self.runner_name or self.name)
@@ -213,7 +231,7 @@ class AgentTool:
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters,
+                "parameters": self.advertised_parameters if self.advertised_parameters is not None else self.parameters,
             },
         }
 

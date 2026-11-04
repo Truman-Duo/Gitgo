@@ -19,6 +19,7 @@ import {publishCommand} from "../backend/publish.js";
 import {randomUUID} from "node:crypto";
 import {useFeedback} from "../hooks/useFeedback.js";
 import {FeedbackMessage} from "./FeedbackMessage.js";
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 
 type Props = {
   localState?: PublishLocalState; client: BackendClient; project: string; cmdInput: UseTextInputReturn;
@@ -54,8 +55,10 @@ export function PublishPanel(props: Props) {
   const read = () => {void publishGet(props.client, props.project).then(v => setData(v as Data)).catch(e => setError(String(e?.message || e)));};
   useEffect(read, [props.client, props.project]);
   useEffect(() => {props.localState?.set("settings.tab", tab);}, [tab]);
-  useEffect(() => {if (focus === "header") {props.onFooter({hidden: true}); return () => props.onFooter(null);}}, [focus, props.onFooter]);
+  const help=useLocalHelpCommand("publish.settings",props.onFooter,focus==="header");
+  useEffect(() => {if (focus === "header"&&!help.active) {props.onFooter({hidden: true}); return () => props.onFooter(null);}}, [focus, props.onFooter,help.active]);
   useManagedInput((text, key) => {
+    if(help.handle(text,key))return;
     if (matchChord("escape", text, key)) props.onDismiss();
     else if (matchChord("left", text, key)) setTab(v => Math.max(0, v - 1));
     else if (matchChord("right", text, key)) setTab(v => Math.min(tabs.length - 1, v + 1));
@@ -67,7 +70,7 @@ export function PublishPanel(props: Props) {
     {!data ? <Text dimColor>{t({en: "Reading settings…", zh: "正在读取配置…"})}</Text> : tab === 1 ?
       <AccountFields {...props} focused={focus === "body"} onDismiss={() => setFocus("header")}/> :
       <SettingFields key={tab} {...props} data={data} tab={tab} focused={focus === "body"} onDismiss={() => setFocus("header")} onSaved={value => setData(value)}/>}
-    {focus === "header" ? <Text dimColor>{t({en: "←/→ section · Enter select fields · Esc back", zh: "←/→ 分区 · Enter 选择字段 · Esc 返回"})}</Text> : null}
+
   </Box>;
 }
 
@@ -144,8 +147,8 @@ function SettingFields(props: Props & {data: Data; tab: number; focused: boolean
   const count = Math.max(1, h - 13), start = Math.max(0, Math.min(form.index - Math.floor(count / 2), form.fields.length - count));
   return <Box flexDirection="column" flexGrow={1} minHeight={0}>
     {tab === 0 ? Object.entries(data.repositories ?? {}).map(([role, path]) => <Text key={role} dimColor wrap="truncate-end">{role}: {path || "—"}</Text>) : null}
-    {tab === 3 ? <Text dimColor>{t({en: "Privacy and authorship save together. Changes invalidate earlier prepared plans.", zh: "隐私与署名一起保存；修改后已有预备计划需要重新检查。"})}</Text> : null}
-    {tab === 4 ? <Text dimColor>{t({en: "file.py | seeds | seconds; other.py | 42 | 30. Every configured check is required.", zh: "file.py | 随机种子 | 秒数; other.py | 42 | 30。所有已配置检查都必须通过。"})}</Text> : null}
+
+
     {editor.rows(name => t(labels[name]!), start, count)}
     {form.stale ? <Text>{t({en: "Settings changed. Ctrl+R reloads the current values.", zh: "配置已变化，请 Ctrl+R 重新读取当前值。"})}</Text> : null}
     <FeedbackMessage feedback={feedback.message}/>

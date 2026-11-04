@@ -112,3 +112,51 @@ def test_decoded_target_still_runs_original_pipeline_boundaries(tmp_path_factory
         result=ToolPipeline().execute(call,t,ctx,'actual-boundary')
     assert result.is_error and not executed
     assert not p.approval_grants
+
+
+def test_live_effect_contracts_share_catalog_deltas_without_stale_capability_grants(tmp_path_factory):
+    from backend.core.loop.agent_tool import AgentTool, ToolEffect, CancellationMode
+    from backend.core.loop.models import AgentProcess, RingLevel
+    from backend.core.loop.tool_surface_runtime import ToolSurfaceRuntime
+    from backend.core.loop.provider_route_runtime import ProviderRouteRuntime
+    from backend.core.loop.prompt_compiler import PromptCompiler
+    from tests.test_provider_context_projection import decode_wire
+    p = AgentProcess('metadata-surface', 'worker', RingLevel.RING_3, active_task_id='task',
+        session=AgentSession(), worktree_path=str(tmp_path_factory))
+    surface = ToolSurfaceRuntime(p, None, None, str(tmp_path_factory), None)
+    read = AgentTool('read', 'Read actual data', {}, lambda _: {}, effect=ToolEffect.READ)
+    write = AgentTool('write', 'Modify actual data', {}, lambda _: {}, effect=ToolEffect.WORKSPACE_WRITE,
+        cancellation=CancellationMode.COOPERATIVE)
+    surface.known_tools = {'read': read, 'write': write}
+    surface.tools = {'read': read}
+    route = ProviderRouteRuntime(p, p.session, None, 'route', None, lambda: None)
+    text, sections = PromptCompiler.compile(process=p, tools=surface.tools, workspace_path=str(tmp_path_factory))
+    PromptCompiler.upsert(p.session, text, sections)
+    route.prepare_envelope([tool('read')], surface.discovery(['read']))
+    first = p.session.to_provider_messages(dynamic_envelope=route.envelope)
+    initial = decode_wire(first)
+    assert initial['runtime.tool_contracts']['read']['runtime_behavior'] == {
+        'effect': read.effect.value, 'cancellation': read.cancellation.value}
+    p.session.append_assistant('Observed business result')
+    surface.tools = {'write': write}
+    text, sections = PromptCompiler.compile(process=p, tools=surface.tools, workspace_path=str(tmp_path_factory))
+    PromptCompiler.upsert(p.session, text, sections)
+    route.prepare_envelope([tool('write')], surface.discovery(['write']))
+    second = p.session.to_provider_messages(dynamic_envelope=route.envelope)
+    latest = decode_wire(second)
+    assert second[:len(first)-1] == first[:-1]
+    assert latest['runtime.capability']['available_tools'] == ['write']
+    assert latest['runtime.tool_contracts']['read'] == initial['runtime.tool_contracts']['read']
+    assert latest['runtime.tool_contracts']['write']['runtime_behavior']['effect'] == 'workspace_write'
+    # No second complete effect inventory in prompt steering; the exact
+    # changed tool remains available once through the original context map.
+    assert not [m for m in p.session.messages if m.get('message_type') == 'host_steering_delta'
+        and '## Capabilities' in m['content']]
+    assert not p.approval_grants
+    surface.tools = {}
+    route.prepare_envelope(None, surface.discovery([]))
+    p.session.append_assistant('Tool scope revoked')
+    revoked = decode_wire(p.session.to_provider_messages(dynamic_envelope=route.envelope))
+    assert revoked['runtime.capability']['available_tools'] == []
+    assert revoked['runtime.tool_contracts']['write'] == latest['runtime.tool_contracts']['write']
+    assert not surface.tools and not p.approval_grants

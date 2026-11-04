@@ -188,7 +188,7 @@ def drive_agent(pipeline, ctx, result, execution_id, runtime_metadata):
         if owner != (ctx.process.process_id, ctx.process.active_task_id):
             raise PublishError("PUBLISH_CONTEXT_UNAVAILABLE")
         name = "publish_" + operation
-        tool = (ctx.artifacts.get("tool_catalog") or {}).get(name)
+        tool = (ctx.tool_catalog or {}).get(name)
         if tool is None:
             raise PublishError("PUBLISH_AUTHORIZATION_REQUIRED")
         child = pipeline.execute({"name": name, "args": arguments}, tool, ctx,

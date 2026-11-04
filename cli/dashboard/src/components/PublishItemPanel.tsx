@@ -18,10 +18,11 @@ import {PublishHistoryPanel} from "./PublishHistoryPanel.js";
 import {PublishTaskPanel, type PublishTaskReference} from "./PublishTaskPanel.js";
 import {createPublishStateStore, type PublishLocalState} from "../state/publishLocalState.js";
 import {publishCommands, publishSuggestions} from "./publishCommands.js";
-import {resolveCommandKeys, applyCommandAction} from "../input/commandInput.js";
+import {isCommandMode,resolveCommandKeys, applyCommandAction} from "../input/commandInput.js";
 import {PublishFlowPanel} from "./PublishFlowPanel.js";
 import {PublishPreviewPanel} from "./PublishPreviewPanel.js";
 import {useFeedback} from "../hooks/useFeedback.js";
+import {useModuleHelp,ModuleHelpBoundary} from "./ModuleHelpBoundary.js";
 
 type Props = React.ComponentProps<typeof PublishPanel> & {localState?: PublishLocalState;
   initial?: {itemId?: string; command?: string; values?: Record<string, string>}; onResult?: (item?: PublishItem, effectState?: string) => void};
@@ -155,10 +156,12 @@ function plain(value: string) { return value.replace(/[\x00-\x1f\x7f-\x9f]/g, " 
 
 /** Existing revision-bound operation controller, shared by workbench actions. */
 export function PublishItemPanel(props: Props) {
-  return <PublishWorkspace key={props.project} {...props}/>;
+  const scope=useModuleHelp();
+  return scope?<PublishWorkspace key={props.project} {...props}/>:<ModuleHelpBoundary onFooter={props.onFooter}>{onFooter=><PublishWorkspace key={props.project} {...props} onFooter={onFooter}/>}</ModuleHelpBoundary>;
 }
 
 function PublishWorkspace(props: Props) {
+  const help=useModuleHelp();
   const {client, project, onFooter, onDismiss} = props;
   const t = useCopy();
   const {w, h} = usePanelSize({minWidth: 20, widthOffset: 4});
@@ -358,6 +361,7 @@ function PublishWorkspace(props: Props) {
   }, [focus, selected, nodeIndex, Boolean(snapshot), settings, draft, operationDraft, history, task]);
   const runCommand = (command: string) => {
     input.setValue("");
+    if(command==="/help"){help?.open("publish");return;}
         const name = command.split(/\s+/)[0]!.slice(1);
         if (!publishCommands(commandContext).some(row => row.name === name)) {
           setError("PUBLISH_ACTION_UNAVAILABLE"); return;
@@ -448,7 +452,7 @@ function PublishWorkspace(props: Props) {
     if (settings || draft || operationDraft || history || task || flow || preview) return;
     if (focus === "header" || !input.value.startsWith("/")) {onFooter({hidden: true}); return () => onFooter(null);}
     onFooter({kind: "command", cmdInput: input,
-      statusText: t({en: "/prepare · /formal · /run verify execute · /settings", zh: "/prepare 接手准备 · /formal 正式整理 · /run verify execute 连续执行 · /settings 设置"}),
+      statusText: "",
       suggestions, suggestionIdx: activeSuggestion, cmdResult: ""});
     return () => onFooter(null);
   }, [settings, draft, operationDraft, history, task, flow, preview, focus, input, input.value, input.cursor, onFooter, t, suggestionIdx, item, busy, snapshot]);
@@ -483,7 +487,7 @@ function PublishWorkspace(props: Props) {
       else if (text && !key.ctrl && !key.meta) applyTextOp({op: "insert", text}, input);
       return;
     }
-    if (text === "/") { input.setValue("/"); return; }
+    if (!key.paste&&isCommandMode("",text)) { input.setValue(text); return; }
     if (matchChord("escape", text, key)) {
       if (focus === "node" && flowReturn.current) {flowReturn.current = false; setFlow(true); return;}
       if (sharedPage) { setSharedPage(null); auxiliaryRequest.current++; return; }
@@ -504,7 +508,7 @@ function PublishWorkspace(props: Props) {
 
   if (preview && item) return <PublishPreviewPanel client={client} project={project} itemId={item.id} binding={item.binding ?? ""} onFooter={onFooter} onDismiss={() => {setPreview(false); if (props.initial) setFlow(true);}}/>;
   if (flow && item) return <PublishFlowPanel item={item} onFooter={onFooter} localState={localState}
-    onCommand={command => {setFlow(false); runCommand(command);}} onDismiss={() => props.initial ? onDismiss() : setFlow(false)} onOpenNode={index => {flowReturn.current = true; setNodeIndex(index); setFocus("node"); setFlow(false);}}/>;
+    onCommand={command => {if(command==="/help"){help?.open("publish.flow");return;}setFlow(false); runCommand(command);}} onDismiss={() => props.initial ? onDismiss() : setFlow(false)} onOpenNode={index => {flowReturn.current = true; setNodeIndex(index); setFocus("node"); setFlow(false);}}/>;
   if (settings) return <PublishPanel {...props} localState={localState} onDismiss={() => setFocus("header")}/>;
   if (task) return <PublishTaskPanel client={client} project={project} reference={task} onFooter={onFooter} onDismiss={() => setTask(null)}/>;
   if (history) return <PublishHistoryPanel client={client} project={project} itemId={history.itemId} head={history.head} localState={localState} onFooter={onFooter} onDismiss={() => setHistory(null)}/>;
@@ -547,7 +551,7 @@ function PublishWorkspace(props: Props) {
       {sharedPage ? <Box flexDirection="column">
         <Text bold>{t({en: "Saved shared facts", zh: "已保存的共享事实"})} · {plain(sharedPage.remote)} · {sharedPage.total}</Text>
         <Text>{sharedPage.observed_oid}</Text>
-        <Text>{t({en: "This view does not run work or grant permission. Esc returns to the local item.", zh: "浏览不执行任务或授予权限；Esc 返回本地事项。"})}</Text>
+
         {sharedPage.items.map(row => <Box key={row.id} flexDirection="column" marginTop={1}>
           <Text bold>{plain(row.title)} · {row.id}</Text>
           <Text>{t({en: "Owner / remaining work", zh: "负责人 / 剩余工作"})}: {plain(row.owner)} · {plain(row.rework)}</Text>
@@ -557,7 +561,7 @@ function PublishWorkspace(props: Props) {
           {row.task_links?.map(link => <Text key={link.id}>{t({en: "Task reference", zh: "任务引用"})}: {plain(link.linked_task_id ?? "")} · {plain(link.note ?? "")}</Text>)}
         </Box>)}
         {sharedPage.next_cursor ? <Text>{t({en: "/shared-more reads the next saved page.", zh: "/shared-more 读取下一页已保存事实。"})}</Text> : null}
-      </Box> : tab === 1 ? <Text>{t({en: "Enter to manage commit format, privacy and remotes.", zh: "Enter 管理提交格式、隐私和远端。"})}</Text>
+      </Box> : tab === 1 ? null
         : focus === "node" && item && node ? <Box ref={detailTop} flexDirection="column" paddingTop={1}>
           <Text bold>{nodeName(node.id)} · {stateName(node.status)}</Text>
           <Text>{plain(item.title)}</Text>
@@ -695,8 +699,6 @@ function PublishWorkspace(props: Props) {
           <Text dimColor>{pageStart.current + selected + 1}/{snapshot?.total ?? 0}{snapshot?.next_cursor ? t({en: " · /more for next page", zh: " · /more 下一页"}) : ""}</Text>
         </Box> : !loading && !error ? <Text>{t({en: "No saved items. /prepare pins a committed source; uncommitted changes are not included.", zh: "尚无保存事项。/prepare 固定已提交来源；未提交变更不包含在内。"})}</Text> : null}
     </ScrollBox>
-    <Box flexShrink={0}><Text dimColor wrap="wrap">{focus === "header" ? t({en: "←/→ section · Enter open · Esc back", zh: "←/→ 栏目 · Enter 进入 · Esc 返回"})
-      : focus === "node" ? t({en: "↑/↓ scroll · Esc return to item", zh: "↑/↓ 滚动 · Esc 返回事项"})
-      : t({en: "↑/↓ item · ←/→ step · Enter details · Esc header", zh: "↑/↓ 事项 · ←/→ 步骤 · Enter 详情 · Esc 页头"})}</Text></Box>
+    <Box flexShrink={0}></Box>
   </Box>;
 }

@@ -2,7 +2,7 @@ import React from "react";
 import {describe, expect, test} from "bun:test";
 import {PassThrough} from "node:stream";
 import stripAnsi from "strip-ansi";
-import {renderSync} from "@anthropic/ink";
+import {Box, renderSync} from "@anthropic/ink";
 import {InputProvider} from "../input/runtime.js";
 import type {BackendClient} from "../backend/client.js";
 import {UpdatePanel, updateSelectableRows} from "./UpdatePanel.js";
@@ -25,7 +25,7 @@ function mount(client: BackendClient, onDismiss: () => void, onUpdateExit?: () =
     if(["update.status","update.configure","update.check","update.download"].includes(args[0]))latest=value;
     return value;
   }};
-  const root = renderSync(<InputProvider><UpdatePanel language={language} client={tracked} cols={80} onDismiss={onDismiss} onUpdateExit={onUpdateExit}/></InputProvider>,
+  const root = renderSync(<InputProvider><Box flexDirection="column" width={80} height={24}><UpdatePanel language={language} client={tracked} cols={80} onDismiss={onDismiss} onUpdateExit={onUpdateExit}/></Box></InputProvider>,
     {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
   return {stdin, async select(id:number) {
     const enabled=updateSelectableRows(latest,Boolean(onUpdateExit)).filter(row=>row.enabled);
@@ -348,10 +348,10 @@ test("settings stage choices, cancel cleanly and confirm through the Host with a
   } finally {fixture.close();}
 });
 
-test("Chinese update page localizes settings, status and keyboard help", async () => {
+test("Chinese update page localizes settings and status without idle keyboard instructions", async () => {
  const fixture=mount({ready:true,close(){},async callTool(){return sample;}},()=>{},undefined,"zh");
  try{await wait();expect(fixture.text()).toContain("软件更新");expect(fixture.text()).toContain("当前版本");
- expect(fixture.text()).toContain("更新渠道");expect(fixture.text()).toContain("浏览");
+ expect(fixture.text()).toContain("更新渠道");expect(fixture.text()).not.toContain("↑/↓ 选择");
  expect(fixture.text()).not.toContain("Automatic checks");}finally{fixture.close();}
 });
 

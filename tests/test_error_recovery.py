@@ -211,6 +211,7 @@ class TestTransactionRollback:
         ctx.artifacts = {"tool_catalog": {
             write_tool.name: write_tool, read_tool.name: read_tool,
         }}
+        ctx.tool_catalog = ctx.artifacts["tool_catalog"]
         exc = ToolExecution(
             execution_id="test-4",
             ctx=ctx,
@@ -251,6 +252,7 @@ class TestTransactionRollback:
         ctx.artifacts = {"tool_catalog": {
             "write": write_tool, "edit": edit_tool, "scan": scan_tool,
         }}
+        ctx.tool_catalog = ctx.artifacts["tool_catalog"]
         exc = ToolExecution(
             execution_id="test-5",
             ctx=ctx,
@@ -283,6 +285,7 @@ class TestTransactionRollback:
             ),
         }}
 
+        ctx.tool_catalog = ctx.artifacts["tool_catalog"]
         exc = ToolExecution(
             execution_id="test-snap",
             ctx=ctx,

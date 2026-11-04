@@ -29,7 +29,10 @@ test('Bun is preferred; failed probes fall back to Node; explicit overrides fail
   assert.throws(() => selectRuntime('bun', {}, probe), /probe failed/);
   assert.throws(() => selectRuntime('other'), /Invalid runtime/);
 });
-test('real executable probes verify identity, raw mode and split UTF-8', {timeout: 20000}, () => {
+// Windows/Bun may spend additional time reaping each synchronous child even
+// after it has returned valid output. Keep the per-probe production deadline
+// and every availability assertion; budget this test for all four probes.
+test('real executable probes verify identity, raw mode and split UTF-8', {timeout: process.platform === 'win32' ? 60000 : 20000}, () => {
   const node = probeRuntime('node', process.env.GITGO_NODE || 'node');
   const bun = probeRuntime('bun', process.env.GITGO_BUN || 'bun');
   assert.equal(node.available, true, JSON.stringify(node));

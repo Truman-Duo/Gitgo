@@ -223,6 +223,8 @@ const HANDLERS: Record<string, (ctx: CommandContext, args: string[]) => Promise<
   "config.keybindings": async (ctx) => ({ resultText: "", showPanel: { overlay: "configPanel", props: { project: resolveProject(ctx), initialTab: "keybindings" } } }),
   "config.llm": async (ctx) => ({ resultText: "", showPanel: { overlay: "configPanel", props: { project: resolveProject(ctx), initialTab: "providers" } } }),
   "config.llm.default": async (ctx) => ({ resultText: "", showPanel: { overlay: "configPanel", props: { project: resolveProject(ctx), initialTab: "providers" } } }),
+  "provider.model": async () => ({resultText:"",showPanel:{overlay:"modelPicker"}}),
+  "provider.effort": async () => ({resultText:"",showPanel:{overlay:"effortPicker"}}),
   "config.bin": async () => ({ resultText: "", showPanel: { overlay: "binPanel" } }),
   "config.bin.delete_delay": async (ctx) => ({ resultText: "", showPanel: { overlay: "configPanel", props: { project: resolveProject(ctx), initialTab: "general" } } }),
 

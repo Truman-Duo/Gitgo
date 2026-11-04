@@ -11,8 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import importlib.util
-import marshal
 import threading
 from functools import wraps
 import uuid
@@ -46,62 +44,22 @@ def arguments_digest(arguments: dict) -> str:
 
 
 def _runtime_implementation_digest() -> str:
-    """Invalidate built-in approvals when source or frozen handler code changes."""
-    digest = hashlib.sha256()
-    modules = [f"backend.core.tools.{name}" for name in
-               ("catalog", "workspace_tools", "registrations", "dynamic_tools", "runner",
-                "file_operations", "file_mutation", "file_mutation_batch", "file_compat",
-                "patch_projection", "document_tools", "document_service", "workspace_projection", "web_tools")]
-    modules += ["backend.core.loop.agent_tool", "backend.core.loop.tool_wrappers", "backend.core.loop.tool_pipeline", "backend.core.loop.permission_broker",
-                "backend.core.loop.authored_runtime", "backend.core.loop.protocol_tools.dynamic_and_completion",
-                "backend.core.loop.dynamic_mount", "backend.core.loop.service_runtime", "backend.core.loop.authoring_runtime",
-                "backend.core.loop.registered_test_runtime", "backend.core.loop.test_manifest", "backend.core.loop.validation_evidence",
-                "backend.core.tools.registered_test", "backend.core.tools.sandbox_pytest", "backend.core.loop.candidate_workspace",
-                "backend.core.loop.workspace_candidate_runtime", "backend.core.loop.document_candidate_runtime", "backend.core.loop.file_candidate_runtime",
-                "backend.core.loop.promotion", "backend.core.loop.promotion_candidate", "backend.core.loop.worktree",
-                "backend.core.loop.manager", "backend.core.loop.git_execution",
-                "backend.core.loop.protocol_tools.child_review", "backend.core.knowledge.prewrite",
-                "backend.adapters.bounded_local_reader", "backend.core.dependency_graph", "backend.core.authorship", "backend.core.filesystem", "backend.core.contract", "backend.core.storage.metadata_files", "backend.core.storage.runtime", "backend.core.storage.repositories.objects", "backend.core.storage.paths", "backend.core.storage.scope",
-                "backend.core.loop.code_dossier", "backend.core.tools.contract_service", "backend.core.tools.governance_service", "backend.core.tools.memory_service",
-                "backend.core.tools.memory_restore_service", "backend.core.identity.memory_archive", "backend.core.identity.snapshot", "backend.core.sync_session.state",
-                "backend.core.sync_session.persist", "backend.core.sync_session.commit",
-                "backend.adapters.local_git_runner", "backend.core.operations.git",
-                "backend.core.knowledge.feedback", "backend.core.knowledge.harvest",
-                "backend.core.tools.knowledge_service", "backend.core.sandbox_access", "backend.core.windows_access"]
-    modules += ["backend.core.sandbox_read", "backend.core.sandbox_read_windows",
-                "backend.core.sandbox_read_plan", "backend.core.loop.read_approval",
-                "backend.core.loop.execution_contract", "backend.core.loop.process_tool_runner",
-                "backend.core.sandbox", "backend.core.sandbox_windows", "backend.core.sandbox_linux",
-                "backend.core.child_process", "backend.core.native_host_entry", "backend.core.git_transfer"]
-    modules += ["backend.core.loop.mechanism_lifecycle", "backend.core.loop.mechanisms",
-                "backend.core.loop.mechanism_catalog", "backend.core.loop.task_maintenance",
-                "backend.core.loop.task_contract", "backend.core.loop.discussion_adoption"]
-    modules += [f"backend.core.publish.{name}" for name in
-                ("service", "state", "git", "formal", "preview", "integration", "checks", "environment", "legacy",
-                 "plugins", "plugin_lifecycle", "sharing", "shared_query", "history", "history_cache", "remote_git", "collaboration", "branches",
-                 "package", "package_io", "distribution", "release_transport")]
-    modules += ["backend.core.tools.publish_service", "backend.core.tools.publish_plugins", "backend.core.tools.publish_build",
-                "backend.core.loop.publish_runtime", "backend.core.loop.publish_build_runtime", "backend.core.loop.publish_recovery",
-                "backend.core.loop.publish_queue", "backend.remote.publish_platform", "backend.remote.publish_accounts"]
-    for module_name in modules:
-        spec = importlib.util.find_spec(module_name)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Cannot identify tool implementation: {module_name}")
-        source = Path(spec.origin or "")
-        if source.is_file() and source.suffix == ".py":
-            body = source.read_bytes()
-        else:
-            code = spec.loader.get_code(module_name)
-            if code is None:
-                raise RuntimeError(f"Cannot identify frozen tool implementation: {module_name}")
-            body = marshal.dumps(code)
-        digest.update(module_name.encode())
-        digest.update(hashlib.sha256(body).digest())
-    return digest.hexdigest()
+    from backend.core.implementation_identity import runtime_implementation_digest
+    return runtime_implementation_digest()
+
+
+def tool_contract_digests(tools: dict) -> dict:
+    """One installed-code observation for one catalog comparison, not a grant."""
+    implementation = _runtime_implementation_digest()
+    return {name: _tool_contract_digest(tool, implementation) for name, tool in tools.items()}
 
 
 def tool_contract_digest(tool) -> str:
     """Bind approval to the Host definition, including authored source version."""
+    return _tool_contract_digest(tool, _runtime_implementation_digest())
+
+
+def _tool_contract_digest(tool, implementation) -> str:
     spec = dict(getattr(tool, "composite_spec", None) or {})
     contract = {
         "name": tool.name,
@@ -113,8 +71,10 @@ def tool_contract_digest(tool) -> str:
             tool.execution_contract.to_dict()
             if getattr(tool, "execution_contract", None) is not None else None
         ),
-        "runtime_implementation": _runtime_implementation_digest(),
+        "runtime_implementation": implementation,
+        "implementation_artifacts": [item.identity() for item in getattr(tool, "implementation_artifacts", ())],
         "parameters": tool.parameters,
+        "advertised_parameters": getattr(tool, "advertised_parameters", None),
         "effect": getattr(getattr(tool, "effect", ""), "value", str(getattr(tool, "effect", ""))),
         "resources": sorted(getattr(tool, "resources", None) or []),
         "version": spec.get("version"),

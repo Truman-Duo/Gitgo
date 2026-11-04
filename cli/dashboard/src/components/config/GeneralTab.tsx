@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "../Selection.js";
 import {useCopy} from "../../ui/PageFrame.js";
 import {isBindingAction, applicationBindings} from "../../input/router.js";
@@ -83,6 +84,7 @@ export const GeneralTab = memo(function GeneralTab({
   const [detectingTerminals, setDetectingTerminals] = useState(true);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [version, setVersion] = useState(t({en:"Loading…",zh:"正在读取…"}));
+  const menuHelp=useLocalHelpCommand("config",onFooter,contentFocused&&!editing&&!saving);
   useEffect(() => {
     let active = true;
     setVersion(t({en:"Loading…",zh:"正在读取…"}));
@@ -151,12 +153,13 @@ export const GeneralTab = memo(function GeneralTab({
 
   useEffect(() => { report({ sub: editing !== null, fullscreen: false }); }, [editing, report]);
   useEffect(() => {
+    if(menuHelp.active)return;
     if (editing && isTextSetting(editing)) {
-      onFooter({kind: "normal", cmdInput, statusText: t({en:"Enter save · Esc cancel",zh:"Enter 保存 · Esc 取消",keys:true}),
+      onFooter({kind: "normal", cmdInput, statusText: "",
         suggestions: [], suggestionIdx: 0, cmdResult: ""});
     } else onFooter({ hidden: true });
     return () => onFooter(null);
-  }, [onFooter, editing, cmdInput.value, cmdInput.cursor, cmdInput]);
+  }, [onFooter, editing, cmdInput.value, cmdInput.cursor, cmdInput,menuHelp.active]);
   useEffect(() => { onStatusUpdate?.(message); }, [message, onStatusUpdate]);
   useEffect(() => () => onStatusUpdate?.(""), [onStatusUpdate]);
 
@@ -191,8 +194,8 @@ export const GeneralTab = memo(function GeneralTab({
       setSaving(null);
     }
   }, [client, testSearch, settings.web_search_endpoint, onSettingSaved]);
-
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if (!contentFocused) return false;
     if (saving) return;
     if ((editing === "terminal" || ROWS[row]?.id === "terminal") && isBindingAction("terminal.rescan", input, key)) {
@@ -240,7 +243,7 @@ export const GeneralTab = memo(function GeneralTab({
     setEditing(id);
     setDraft(settings[id]);
     if (isTextSetting(id)) cmdInput.setValue(String(settings[id] || ""));
-  }, {bindingContext: contentFocused && (editing === "terminal" || (!editing && ROWS[row]?.id === "terminal")) ? "terminal" : ""});
+  }, {bindingContext: contentFocused && (editing === "terminal" || (!editing && ROWS[row]?.id === "terminal")) ? "terminal" : "",isActive:contentFocused,clipboard:Boolean(editing&&isTextSetting(editing)),inputTarget:editing||""});
 
   const valueLabel = (id: SettingId) => {
     const value = editing === id ? draft : settings[id];
@@ -281,15 +284,8 @@ export const GeneralTab = memo(function GeneralTab({
           </FormFieldRow>
         );
       })}
-      <Text dimColor>
-        {editing
-          ? isTextSetting(editing) ? t({en:"Enter save · Esc cancel",zh:"Enter 保存 · Esc 取消",keys:true}) : t({en:"←/→ choose · Enter save · Esc cancel",zh:"←/→ 选择 · Enter 保存 · Esc 取消",keys:true})
-          : contentFocused
-            ? t({en:"↑↓ select · Enter change · Esc tabs",zh:"↑↓ 选择 · Enter 修改 · Esc 页签",keys:true})
-            : t({en:"←/→ tabs · Enter open · Esc back",zh:"←/→ 页签 · Enter 打开 · Esc 返回",keys:true})}
-      </Text>
-      {ROWS[row]?.id === "terminal" && <Text dimColor>
-        {initialSetting === "terminal" ? t({en:"First launch · choose a terminal and press Enter. ",zh:"首次启动：选择终端并按 Enter。 ",keys:true}) : t({en:"Changes apply on the next launch. ",zh:"更改在下次启动时生效。 "})}{applicationBindings.label("terminal.rescan")} {t({en:"rescan",zh:"重新扫描"})}</Text>}
+
+      {ROWS[row]?.id === "terminal" && null}
       {terminalWarning && ROWS[row]?.id === "terminal" ? <Text color={colors.warning}>{terminalWarning}</Text> : null}
     </Box>
   );

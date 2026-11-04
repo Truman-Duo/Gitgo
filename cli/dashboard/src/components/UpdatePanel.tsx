@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {keyHintText} from "../input/hints.js";
 import {PageFrame} from "../ui/PageFrame.js";
 import {pages,reconcileSelection,standardKey} from "../ui/pageContract.js";
@@ -124,7 +125,9 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
     else if (row === 8 && data && data.schema_version !== 1 && data.pending_restart) setState("confirmCancelPending");
     else if (row === 9) setRetry(value => value + 1);
   };
+  const menuHelp=useLocalHelpCommand("update",undefined,editing===null);
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     const action=standardKey(input,key);
     if (editing !== null && !busy) {
       if (action === "back") {setEditing(null); return;}
@@ -187,7 +190,7 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
   </Box>;
   return <PageFrame page={pages.update} width={Math.min(w, cols)}>
     <Text bold>{t("Gitgo Software Update")}</Text>
-    <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} minHeight={0}>
+    <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}>
     {state === "loading" ? <Text>{t("Reading local update status\u2026")}</Text> : null}
     {state === "checking" ? <Text>{t("Checking publisher-signed release metadata\u2026")}</Text> : null}
     {state === "configuring" ? <Text>{t("Saving update settings\u2026")}</Text> : null}
@@ -217,15 +220,13 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
         {data.status === "stale" ? <Text color={colors.warning}>{t("Cached release or download is stale/changed. Select Check now.")}</Text> : null}
         {data.status === "up_to_date" ? <Text>{t("No newer compatible release is available.")}</Text> : null}
         {data.candidate ? <Text>{t("Package           ")}{data.candidate.release_id} · {(data.candidate.bytes / 1024 / 1024).toFixed(1)} MiB</Text> : null}
-        {data.status === "available" && state !== "confirm" ? <Text>{t("Signed release available. Select Download to review.")}</Text> : null}
+        {data.status === "available" && state !== "confirm" ? <Text>{t("Signed release available.")}</Text> : null}
         {state === "confirm" ? <Text color={colors.warning}>{t("Download this exact signed package? This only prepares files; it does not install or run them.")}</Text> : null}
         {data.status === "downloaded" ? <Text color={colors.success}>{t("Downloaded and verified. Current program is unchanged.")}</Text> : null}
         {data.status === "downloaded" && (!data.can_request_apply || !onUpdateExit) ? <Text color={colors.warning}>{t("Restart/update is unavailable here: use a supported managed launcher with complete process cleanup.")}</Text> : null}
-        {data.can_request_apply && onUpdateExit && state !== "confirmApply" ? <Text>{t("Select Restart / update to review.")}</Text> : null}
         {state === "confirmApply" ? <Text color={colors.warning}>{data.apply_strategy === "after_reboot" ? t("Close this Gitgo session and save this exact update for after you manually restart macOS? No program is replaced now. On next boot, the fixed launcher reverifies signature/package and startup health; failures preserve or restore the old program.") : t("Close this Gitgo session and attempt the selected update? The stable launcher will reverify, switch and check health; failures restore the previous program. Other running instances block replacement.")}</Text> : null}
         {data.rollback ? <Text>{t("Retained version  ")}{data.rollback.version}</Text> : null}
         {data.blockers.includes("UPDATE_REVERSE_MIGRATION_REQUIRED") ? <Text color={colors.warning}>{t("This update migrated data. Restoring the previous program requires a compatible reverse migration; current user data will not be replaced by an old snapshot.")}</Text> : null}
-        {data.can_request_rollback && onUpdateExit && state !== "confirmRollback" ? <Text>{t("Select Rollback to review the retained version.")}</Text> : null}
         {state === "confirmRollback" ? <Text color={colors.warning}>{t("Close this session and roll back? The retained program must pass startup checks; other instances block replacement. Projects, settings and databases are not rolled back. macOS requires a manual restart.")} Gitgo {data.rollback?.version}</Text> : null}
       </>}
       {row(4, t("Check now"), data.schema_version !== 1 && data.can_check)}
@@ -234,11 +235,10 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
       {row(7, t("Review rollback"), data.schema_version !== 1 && data.can_request_rollback && Boolean(onUpdateExit))}
       {row(8, t("Cancel pending restart"), data.schema_version !== 1 && Boolean(data.pending_restart))}
       {row(9, t("Refresh local status"))}
-      <Text dimColor>{t("Gitgo software only. Automatic installation waits for a clean exit; active tasks and other instances are never forcibly stopped. Rollback requires confirmation.")}</Text>
     </> : null}
     {!data && state === "error" ? row(9, t("Refresh local status")) : null}
     </ScrollBox>
-    <Text dimColor>{t(busy ? "Esc cancel and close" : editing !== null ? "←/→ choose · Enter save · Esc cancel" : state === "confirmCancelPending" ? "Enter cancel pending replacement · Esc keep it" : state === "confirmRollback" ? "Enter confirm rollback · Esc cancel" : state === "confirmApply" ? "Enter confirm restart/update · Esc cancel" : state === "confirm" ? "Enter confirm download · Esc cancel" : availableRows.filter(row=>row.enabled).length < 2 ? "Only Refresh is available · Enter refresh · Esc close · ↑/↓ browse overflow" : "↑/↓ select · Enter open · Esc close")}</Text>
+
   </PageFrame>;
 }
 

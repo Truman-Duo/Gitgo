@@ -13,7 +13,7 @@ import {roleGraphSvg} from "./publishGraphSvg.js";
 import {useSvgRaster} from "../ui/svgRaster.js";
 import {publishCommands, publishSuggestions} from "./publishCommands.js";
 import {useTextInput} from "../hooks/useTextInput.js";
-import {resolveCommandKeys, applyCommandAction} from "../input/commandInput.js";
+import {isCommandMode,resolveCommandKeys, applyCommandAction} from "../input/commandInput.js";
 
 const clean = (value: string) => value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 /** Business-role relationships only. Git parent edges belong to PublishHistoryPanel. */
@@ -30,7 +30,7 @@ export function PublishFlowPanel({item, onFooter, onDismiss, onOpenNode, onComma
   onCommand: (command: string) => void;
 }) {
   const t = useCopy(), {w, h} = usePanelSize({minWidth: 20, widthOffset: 4});
-  const commands = publishCommands({item}).filter(row => !["flow", "settings", "refresh", "more", "prepare", "formal", "combine", "account", "share", "share-refresh", "send", "platform-reconcile"].includes(row.name));
+  const commands = publishCommands({item}).filter(row => !["help", "flow", "settings", "refresh", "more", "prepare", "formal", "combine", "account", "share", "share-refresh", "send", "platform-reconcile"].includes(row.name));
   for (const draft of item.collaboration?.drafts ?? []) {
     if (draft.state === "draft" && item.allowed_actions.includes("collaborate_send")) commands.push({name: `send ${draft.id}`, title: {en: `Send draft ${draft.id}`, zh: `发送草稿 ${draft.id}`}});
     if (["sending", "unknown"].includes(draft.state) && item.allowed_actions.includes("collaborate_reconcile")) commands.push({name: `platform-reconcile ${draft.id}`, title: {en: `Reconcile draft ${draft.id}`, zh: `核对草稿 ${draft.id}`}});
@@ -54,7 +54,7 @@ export function PublishFlowPanel({item, onFooter, onDismiss, onOpenNode, onComma
     if (selectedRow.current) scroll.current?.scrollIntoView(selectedRow.current);
   }, [index, w, h, !!graphic]);
   useEffect(() => {onFooter(input.value.startsWith("/") ? {kind: "command", cmdInput: input, suggestions, suggestionIdx: activeSuggestion, cmdResult: "",
-    statusText: t({en: "↑/↓ step or action · Enter open · Esc return", zh: "↑/↓ 步骤或操作 · Enter 进入 · Esc 返回"})} : {hidden: true});
+    statusText: ""} : {hidden: true});
     return () => onFooter(null);}, [onFooter, input, input.value, input.cursor, suggestionIdx, item]);
   useEffect(() => setSuggestionIdx(0), [input.value, item.revision]);
   useEffect(() => { localState.set(`flow/${item.id}`, rows[index]?.id); }, [item.id, index, localState]);
@@ -63,10 +63,10 @@ export function PublishFlowPanel({item, onFooter, onDismiss, onOpenNode, onComma
       if (matchChord("escape", text, key)) {input.setValue(""); return;}
       for (const action of resolveCommandKeys(input.value, suggestions.length, text, key, suggestions[activeSuggestion]?.label ?? ""))
         applyCommandAction(action, {cmdInput: input, suggestionLabels: suggestions.map(row => row.label), suggestionIdx: activeSuggestion, setSuggestionIdx,
-          runCommand: onCommand});
+          runCommand: command => {input.setValue("");onCommand(command);}});
       return;
     }
-    if (text === "/") {input.setValue("/"); return;}
+    if (!key.paste&&isCommandMode("",text)) {input.setValue(text); return;}
     if (matchChord("escape", text, key)) onDismiss();
     const delta = matchChord("up", text, key) ? -1 : matchChord("down", text, key) ? 1 : 0;
     if (delta) setSelected(value => Math.max(0, Math.min(rows.length - 1, value + delta)));
@@ -82,12 +82,11 @@ export function PublishFlowPanel({item, onFooter, onDismiss, onOpenNode, onComma
     <Box flexDirection="column" flexShrink={0}>
     <Text bold>{t(graphic ? {en: "Role flow", zh: "三角色流转"} : {en: "Role flow · compatibility view", zh: "三角色流转 · 兼容视图"})}</Text>
     <Text wrap="truncate-end">{clean(item.title)} · {item.status}</Text>
-    {item.plan?.target_role === "workspace" ? <Text dimColor>{t({en: "Formal commits stay in a local Workspace branch.", zh: "正式提交保存在本地 Workspace 分支。"})}</Text> : null}
     {graphicsError ? <Text>{graphicsError}</Text> : null}
     {graphic ? <><TerminalRaster image={graphic} columns={w} rows={graphRows}/>
       <Box><Box width="33%" justifyContent="center"><Text>{t({en: "Workspace", zh: "工作区"})}</Text></Box><Box width="34%" justifyContent="center"><Text>{t({en: "Trial", zh: "试验"})}</Text></Box><Box width="33%" justifyContent="center"><Text>{t({en: "Formal", zh: "正式"})}</Text></Box></Box>
     </> : null}
-    <Text dimColor wrap="truncate-end">{t({en: "Saved plan · Transfers are not yet complete", zh: "已保存计划 · 连线不表示传输已完成"})} · {clean(item.plan?.method ?? "—")}</Text>
+    <Text dimColor wrap="truncate-end">{t({en: "Saved plan", zh: "已保存计划"})} · {clean(item.plan?.method ?? "—")}</Text>
     {flow.edges[0] ? <Text wrap="truncate-end">{clean(flow.edges[0].from.toUpperCase())} · {truncate(clean(flow.edges[0].sourceRef), Math.max(6, Math.floor(w / 3)))} @ {flow.edges[0].oid.slice(0, 8)} → {clean(flow.edges[0].to.toUpperCase())} · {clean(flow.edges[0].targetRef)}{flow.edges.length > 1 ? ` (+${flow.edges.length - 1})` : ""}</Text>
       : <Text wrap="truncate-end">{t({en: "No bound role transition. Prepare a candidate first.", zh: "尚未绑定角色流转，请先准备候选。"})}</Text>}
     </Box>

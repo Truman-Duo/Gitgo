@@ -167,6 +167,67 @@ def test_business_test_failure_still_requires_plan_reconciliation(runtime):
     assert state['maintenance_items']['failure-test-failure']['status'] == 'pending'
 
 
+def test_explicit_plan_retain_reconciles_real_failure_without_rewriting_steps(runtime):
+    from backend.core.loop.task_maintenance import observe_result
+    from backend.core.loop.tool_pipeline import ToolResult
+    from backend.core.loop.executor import _build_internal_tools
+    _, process, store, root = runtime
+    publish(runtime, raw(process))
+    observe_result(process, ToolResult(tool_name='run_test', is_error=True,
+        diagnostics={'nature': 'business', 'code': 'TEST_FAILED'}, receipt={'receipt_id': 'baseline'}))
+    before = state_for(process)
+    tool = _build_internal_tools(process, {}, str(root), object(), SimpleNamespace(_executors={}))['declare_task_contract']
+    args = {'operation': 'revise', 'plan_review': {'action': 'retain', 'reason': 'Expected baseline failure is covered by the repair and contract-test step.'},
+        'maintenance': {'resolve_maintenance': ['failure-baseline']}}
+    from jsonschema import Draft202012Validator
+    Draft202012Validator(tool.to_openai_function()['function']['parameters']).validate(args)
+    reviewed = tool.alignment_contract(args)
+    assert reviewed['maintenance_intent']['plan_review'] == args['plan_review']
+    assert state_for(process) == before  # review preparation does not clear the failure
+    result = tool.execute(args)
+    assert 'error' not in result, result
+    after = state_for(process)
+    assert after['plan']['steps'] == before['plan']['steps'] and after['plan']['dependencies'] == before['plan']['dependencies']
+    assert after['maintenance_items']['failure-baseline']['status'] == 'resolved'
+    assert after['plan_review']['reason'] == args['plan_review']['reason']
+    assert not process.approval_grants
+    saved = store.load_process_state(process.process_id)['runtime_state']['context_snapshot']['task_maintenance']
+    assert saved['plan_review'] == after['plan_review']
+
+
+@pytest.mark.parametrize('failure', ['scope', 'trigger', 'stale', 'no_plan', 'unavailable'])
+def test_plan_retain_cannot_erase_scope_dependencies_or_concurrency(runtime, failure):
+    from backend.core.loop.task_maintenance import observe_result
+    from backend.core.loop.tool_pipeline import ToolResult
+    _, process, _, root = runtime
+    deps = []
+    if failure == 'unavailable':
+        (root / 'oversized.txt').write_bytes(b'x' * 1000001)
+        deps = [{'kind': 'file', 'id': 'oversized.txt', 'affected_tools': ['unit']}]
+    publish(runtime, raw(process, dependencies=deps))
+    observe_result(process, ToolResult(tool_name='run_test', is_error=True,
+        diagnostics={'nature': 'business', 'code': 'TEST_FAILED'}, receipt={'receipt_id': 'baseline'}))
+    if failure == 'unavailable':
+        synchronize(process, surface(runtime).tools)
+    if failure == 'no_plan':
+        process.update_context_snapshot(lambda value: {**value, 'task_maintenance': {**value['task_maintenance'], 'plan': {}}})
+    before = deepcopy(process.context_snapshot)
+    state = state_for(process)
+    proposal = raw(process, revision=1, maintenance_revision=state['revision'])
+    proposal['maintenance'].pop('plan')
+    proposal['maintenance']['plan_review'] = {'action': 'retain', 'reason': 'Current plan covers the observed failure.'}
+    proposal['maintenance']['resolve_maintenance'] = list(state['maintenance_items'])
+    if failure == 'scope':
+        proposal['goal'] = 'Also change the public interface'
+    elif failure == 'trigger':
+        proposal['maintenance']['resolve_maintenance'] = ['invented']
+    elif failure == 'stale':
+        proposal['maintenance']['expected_revision'] -= 1
+    with pytest.raises(ValueError):
+        publish(runtime, proposal)
+    assert process.context_snapshot == before
+
+
 def test_declaration_reports_unfinished_reconciliation_and_its_resolution(runtime):
     from backend.core.loop.executor import _build_internal_tools
     _, process, _, root = runtime

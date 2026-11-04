@@ -4,6 +4,7 @@ import type {BackendClient} from "../backend/client.js";
 import type {ProcessInfo} from "../hooks/useLoopData.js";
 import type {ChatMessage} from "../types.js";
 import {useManagedInput as useInput} from "../input/runtime.js";
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {matchChord} from "../input/bindings.js";
 import {useCopy} from "../ui/PageFrame.js";
 import {usePanelSize} from "../theme/index.js";
@@ -19,6 +20,7 @@ export function PublishTaskPanel({client, project, reference, onFooter, onDismis
   const t = useCopy(), {w} = usePanelSize({minWidth: 20, widthOffset: 4});
   const [snapshot, setSnapshot] = useState<any>(null), [error, setError] = useState("");
   const [parent, setParent] = useState(false), [details, setDetails] = useState(false);
+  const help=useLocalHelpCommand("publish.task",onFooter,!details);
   const scroll = useRef<ScrollBoxHandle>(null);
   const processId = parent ? reference.parent_process_id : reference.process_id;
   const taskId = parent ? reference.parent_task_id : reference.linked_task_id;
@@ -34,10 +36,11 @@ export function PublishTaskPanel({client, project, reference, onFooter, onDismis
     return () => { live = false; };
   }, [client, project, processId, taskId]);
   useEffect(() => {
-    onFooter({hidden: true});
+    if(!help.active)onFooter({hidden: true});
     return () => onFooter(null);
-  }, [onFooter, t, details]);
+  }, [onFooter, t, details,help.active]);
   useInput((text, key) => {
+    if(help.handle(text,key))return;
     if (details) return;
     if (matchChord("escape", text, key)) onDismiss();
     else if (text.toLowerCase() === "d" && verified) setDetails(true);
@@ -55,7 +58,6 @@ export function PublishTaskPanel({client, project, reference, onFooter, onDismis
     </Box>
     <VirtualConversation key={processId} messages={messages} streaming={null} scrollRef={scroll} contentWidth={Math.max(12, w - 2)}
       client={client} project={project} empty={<Text>{verified ? t({en: "No conversation recorded.", zh: "暂无对话记录。"}) : ""}</Text>}/>
-    <Box flexShrink={0}><Text wrap="truncate-end">{t(w < 60 ? {en: "↑/↓ · D detail · P parent · Esc back", zh: "↑/↓ · D详情 · P父任务 · Esc返回"}
-      : {en: "↑/↓ scroll · D details · P parent/task · Esc return to Publish", zh: "↑/↓ 滚动 · D 详情 · P 父任务/关联任务 · Esc 返回 Publish"})}</Text></Box>
+    <Box flexShrink={0}></Box>
   </Box>;
 }

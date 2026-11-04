@@ -155,7 +155,7 @@ function verificationInput(): VerificationInput[] | undefined {
   const encoded = argumentValue("--smoke-input-b64");
   if (!encoded) return;
   const events = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-  const keys = new Set(["upArrow", "downArrow", "leftArrow", "rightArrow", "return", "escape"]);
+  const keys = new Set(["upArrow", "downArrow", "leftArrow", "rightArrow", "return", "escape", "ctrl"]);
   if (!Array.isArray(events) || events.length > 60 || events.some(event =>
     !Number.isInteger(event.afterMs) || event.afterMs < 0 || event.afterMs > 60000 ||
     typeof event.input !== "string" || event.input.length > 100 ||

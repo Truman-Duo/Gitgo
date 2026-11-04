@@ -1878,8 +1878,11 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             return
         if process.task_budget is not None:
             process.task_budget.resume_from_user()
+        resume_original_calls = bool(process.pending_tool_batch and (
+            pending.get("kind") in {"permission", "manual_execution", "runtime_checkpoint"}
+            or process.pending_tool_batch.get('semantic_boundary')))
         if process.parent_id:
-            instruction = ("" if pending.get("kind") in {"permission", "manual_execution", "runtime_checkpoint"} and process.pending_tool_batch
+            instruction = ("" if resume_original_calls
                            else f"[USER DECISION {decision_id}]\n{answer}\nContinue the same task under this decision.")
             apm.resume_child(process.process_id, instruction)
             emit({"event": "command_result", "cmd": "task", "result": {
@@ -1901,7 +1904,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             "capability_profile_id": process.capability_profile_id,
             "max_steps": process.max_steps,
             "instruction": (
-                "" if pending.get("kind") in {"permission", "manual_execution", "runtime_checkpoint"} and process.pending_tool_batch
+                "" if resume_original_calls
                 else f"[USER DECISION {decision_id}]\n{answer}\n"
                      "Continue the same task under this decision."
             ),

@@ -278,6 +278,22 @@ class NativeHost:
         under the selected provider instead of silently creating a new chat.
         """
         with self._daemon_lock:
+            if operation == "provider.switch":
+                from backend.core.llm_config import LLMConfigManager
+                config = LLMConfigManager.load()
+                target = str(arguments.get("provider_id", ""))
+                if target and target == config.get("active_provider"):
+                    return {**self.services.provider_switch(target), "runtime_reload": False, "retired_projects": []}
+            if operation == "provider.effort.select":
+                # Effort changes only request preferences. Managed clients read
+                # this same durable configuration at the next request boundary;
+                # do not stop daemons or cancel the request already in flight.
+                result = self.services.invoke(operation, arguments)
+                self._emit({"type": "event", "project": "", "payload": {
+                    "event": "provider_request_preferences_changed", **result,
+                    "runtime_reload": False,
+                }})
+                return {**result, "runtime_reload": False, "retired_projects": []}
             if self._root_admissions or self._active_processes or self._active_btw:
                 raise OperationError(
                     "PROVIDER_SWITCH_BUSY",
@@ -1661,7 +1677,7 @@ class NativeHost:
             )
         if operation == "provider.switch":
             return self._provider_switch(str(arguments.get("provider_id", "")))
-        if operation in {"provider.save", "provider.delete", "provider.failover.configure"}:
+        if operation in {"provider.save", "provider.delete", "provider.failover.configure", "provider.model.select", "provider.effort.select"}:
             return self._provider_change(operation, arguments)
         if operation == "lesson.harvest.resolve":
             result = self.services.invoke(operation, arguments)

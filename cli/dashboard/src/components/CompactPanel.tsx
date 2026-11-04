@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import React, { useEffect, useRef, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../input/runtime.js";
@@ -56,7 +57,9 @@ export function CompactPanel({ client, project, processId, result: initial, onDi
   }, [busy]);
 
   const decision = result?.pending_decision as PendingDecision | undefined;
+  const menuHelp=useLocalHelpCommand("compact",undefined,!busy);
   useInput((_input, key) => {
+    if(menuHelp.handle(_input,key))return;
     if (busy) return;
     if (key.escape) { onDismiss(); return; }
     if (!decision) return;
@@ -81,6 +84,5 @@ export function CompactPanel({ client, project, processId, result: initial, onDi
         ? t({en:"Compaction cancelled; conversation preserved.",zh:"压缩已取消，对话已保留。"})
         : `[${result?.error_info?.catalog_id || "CONTEXT_COMPACTION_FAILED"}] ${result?.error_info?.message || result?.error || t({en:"Compaction failed",zh:"压缩失败"})}`}
     </Text> : null}
-    <Text dimColor>{busy ? t({en:"Waiting for the current compaction attempt.",zh:"正在等待本次压缩。"}) : t({en:"Esc close",zh:"Esc 关闭",keys:true})}</Text>
   </Box>;
 }

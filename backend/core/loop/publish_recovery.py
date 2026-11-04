@@ -48,12 +48,8 @@ def read(storage, operation):
 
 
 def resource_location(recovery_id):
-    if sys.platform == "win32":
-        return {"platform": "win32", "name": "Local\\Gitgo.Publish." + recovery_id}
-    if sys.platform == "linux":
-        root = os.environ.get("GITGO_SANDBOX_CGROUP_ROOT", "")
-        return {"platform": "linux", "root": str(Path(root).resolve()) if root else ""}
-    return {"platform": sys.platform}
+    from backend.core.native_resources import recovery_location
+    return recovery_location(recovery_id)
 
 
 def retire_native(recovery_id, location):

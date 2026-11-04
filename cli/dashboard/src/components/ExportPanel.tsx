@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 import React, { memo, useEffect, useState, useRef } from "react";
 import { Box, Text } from "@anthropic/ink";
@@ -39,11 +40,12 @@ export const ExportPanel = memo(function ExportPanel({ client, project, cols, cm
     const feedback = useFeedback({kind: "page", id: `export:${project}`});
     const result = feedback.text, setResult = feedback.show;
     const submitting = useRef(false);
-    const hint = `${form.editing && form.isChoice ? `${chordLabel("leftRight")} ${t({en: "choose", zh: "选择"})} · ` : ""}${chordLabel("enter")} ${form.editing ? t({ en: "confirm field", zh: "暂存字段" }) : t({ en: "edit field", zh: "修改字段" })}${!form.editing ? ` · ${chordLabel("upDown")} / ${chordLabel("tab")} ${t({ en: "select", zh: "选择" })}` : ""} · ${chordLabel("formSave")} ${t({ en: "export", zh: "导出" })} · ${chordLabel("escape")} ${form.editing ? t({ en: "undo field", zh: "撤销当前字段" }) : t({ en: "cancel", zh: "取消" })}`;
-    useEffect(() => {
-        onFooter(form.editing && !form.isChoice && status !== "done" ? { kind: "normal", cmdInput, suggestions: [], suggestionIdx: 0, cmdResult: "", statusText: hint } : { hidden: true });
+    const menuHelp=useLocalHelpCommand("export",onFooter,!form.editing&&status!=="exporting");
+  useEffect(() => {
+    if(menuHelp.active)return;
+        onFooter(form.editing && !form.isChoice && status !== "done" ? { kind: "normal", cmdInput, suggestions: [], suggestionIdx: 0, cmdResult: "", statusText: "" } : { hidden: true });
         return () => onFooter(null);
-    }, [form.editing, form.isChoice, status, cmdInput.value, cmdInput.cursor, hint, onFooter]);
+    }, [form.editing, form.isChoice, status, cmdInput.value, cmdInput.cursor, onFooter,menuHelp.active]);
     const submit = async () => {
         if (submitting.current)
             return;
@@ -71,7 +73,9 @@ export const ExportPanel = memo(function ExportPanel({ client, project, cols, cm
             submitting.current = false;
         }
     };
-    useInput((input, key) => {
+
+  useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
         for (const action of resolveExportKey(status, form.field, input, key, form.editing)) {
             if (action.type === "dismiss")
                 onDismiss();
@@ -92,7 +96,7 @@ export const ExportPanel = memo(function ExportPanel({ client, project, cols, cm
                 form.setChoice(choices[cycleChoiceIndex(choices.indexOf(current[form.field]), action.delta, choices.length)]!);
             }
         }
-    }, { bindingContext: "form" });
+    }, { bindingContext: "form",clipboard:form.editing&&!form.isChoice&&status!=="exporting",inputTarget:form.editing?form.field:"" });
     const labels = { scope: t({ en: "Scope", zh: "范围" }), format: t({ en: "Format", zh: "格式" }), destination: t({ en: "Destination", zh: "导出路径" }) };
     return <Box flexDirection="column" padding={1} width={cols}>
     <Box marginBottom={1}><Text bold>{t({ en: "Export", zh: "导出" })} — {project}</Text></Box>
@@ -102,7 +106,7 @@ export const ExportPanel = memo(function ExportPanel({ client, project, cols, cm
       <SelectionText  wrap="truncate-end">{current[field]}</SelectionText>
     </FormFieldRow>;
         })}
-    <Box marginTop={1}><Text dimColor>{status === "done" ? `${chordLabel("enter")} / ${chordLabel("escape")} ${t({ en: "close", zh: "关闭" })}` : hint}</Text></Box>
+    <Box marginTop={1}></Box>
     {status !== "idle" ? <Box marginTop={1}><Text color={status === "error" ? colors.danger : status === "done" ? colors.success : undefined}>{status === "exporting" ? t({ en: "Exporting…", zh: "正在导出…" }) : result}</Text></Box> : null}
   </Box>;
 });

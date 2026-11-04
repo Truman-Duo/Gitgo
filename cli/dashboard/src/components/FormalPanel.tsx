@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 import {useCopy} from "../ui/PageFrame.js";
 import {applicationBindings} from "../input/router.js";
@@ -44,7 +45,9 @@ export const FormalPanel = memo(function FormalPanel({ client, project, onDismis
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  const menuHelp=useLocalHelpCommand("formal",undefined,true);
   useInput((input: string, key: any) => {
+    if(menuHelp.handle(input,key))return;
     for (const a of resolveFormalKey(!!confirm, input, key)) {
       switch (a.type) {
         case "dismiss": onDismiss(); break;
@@ -118,7 +121,7 @@ export const FormalPanel = memo(function FormalPanel({ client, project, onDismis
       )}
 
       <Box marginTop={1}>
-        <Text dimColor>{applicationBindings.label("formal.delete")} {t({en:" delete    ",zh:" 删除    "})}{applicationBindings.label("formal.dissolve")} {t({en:" dissolve    ",zh:" 解散    "})}{chordLabel("upDown")} {t({en:" select    ",zh:" 选择    "})}{chordLabel("escape")} {t({en:" back",zh:" 返回"})}</Text>
+
         <Text dimColor>{t({en:"edit message via /runtime formal edit &lt;index&gt; &lt;message&gt;",zh:"用 /runtime formal edit &lt;index&gt; &lt;message&gt; 修改提交信息"})}</Text>
       </Box>
     </Box>

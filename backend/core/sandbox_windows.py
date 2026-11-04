@@ -274,7 +274,8 @@ class WindowsSandboxProcess(subprocess.Popen):
             sid = api.preview_profile_sid(self._sandbox_policy.profile_name)
             recovery_id = self._sandbox_policy.recovery_id
             C.set_last_error(0)
-            job = api.create_job(None, "Local\\Gitgo.Publish." + recovery_id if recovery_id else None)
+            from backend.core.native_resources import windows_job_name
+            job = api.create_job(None, windows_job_name(recovery_id))
             existed = C.get_last_error() == 183
             api.check(job)
             if existed:
@@ -301,8 +302,7 @@ class WindowsSandboxProcess(subprocess.Popen):
             api.check(api.init_attrs(attributes, 3, 0, C.byref(length)))
             initialized = True
             caps = SecurityCapabilities(sid, None, 0, 0)
-            from backend.core.installation_lease import windows_sandbox_lease_handles
-            from backend.core.update.sandbox_admission import LEASE_HANDLES_ENV
+            from backend.core.installation_lease import windows_sandbox_lease_handles, LEASE_HANDLES_ENV
             lease_handles = inherited_scope.enter_context(windows_sandbox_lease_handles())
             env = {key: value for key, value in (env or {}).items() if key.upper() != LEASE_HANDLES_ENV}
             if lease_handles:

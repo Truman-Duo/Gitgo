@@ -72,7 +72,7 @@ class ToolDispatcher:
             data={"message":"Tools require a typed execution registration."})
 
     def _dispatch_registered(self, process, tool, args):
-        from backend.core.loop.execution_context import ExecutionContext
+        from backend.core.loop.execution_context import ExecutionContext, ToolBindings
         from backend.core.loop.tool_pipeline import ToolPipeline
         workspace = str(process.worktree_path or process.workspace_root or "")
         if not workspace or process.session is None:
@@ -81,7 +81,7 @@ class ToolDispatcher:
         ctx = ExecutionContext(process, process.session, workspace,
             cancellation=process.cancellation_event,
             storage=getattr(process, "runtime_storage", None) or getattr(manager, "storage", None),
-            artifacts={"tool_catalog": self._executors})
+            tool_bindings=ToolBindings(self._executors, self._executors))
         result = ToolPipeline(self._gate).execute(
             {"name": tool.name, "args": args}, tool, ctx, "dispatch-" + uuid.uuid4().hex)
         process.tool_receipts.append(result.receipt)

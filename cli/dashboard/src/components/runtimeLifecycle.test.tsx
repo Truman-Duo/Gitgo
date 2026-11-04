@@ -10,6 +10,8 @@ import {RuntimeContextPanel} from "./RuntimeContextPanel.js";
 import {governanceSections} from "./governancePresentation.js";
 import {enterProjectEffect} from "../effects/run.js";
 import type {BackendClient} from "../backend/client.js";
+import instances from "../../vendor/ink/src/core/instances.js";
+import {cellAt} from "../../vendor/ink/src/core/screen.js";
 const wait = () => new Promise(resolve => setTimeout(resolve, 80));
 function streams() {
   const stdin: any = new PassThrough();
@@ -148,10 +150,10 @@ for (const height of [24, 36, 48]) {
     const root=renderSync(<InputProvider><Fixture/></InputProvider>,{...io,patchConsole:false,exitOnCtrlC:false});
     try {
       await wait();
-      const lines=io.output().split("\n");
-      const header=lines.findLastIndex(line=>line.includes("lesson")&&line.includes("contract")&&line.includes("governance"));
-      const footer=lines.findLastIndex(line=>line.includes("Tab list/actions"));
-      expect(footer-header).toBe(height-2);
+      const screen=(instances.get(io.stdout) as any).frontFrame.screen;
+      const lines=Array.from({length:screen.height},(_,y)=>Array.from({length:screen.width},(_,x)=>cellAt(screen,x,y)?.char||" ").join(""));
+      const actions=lines.findIndex(line=>line.includes("Proposals")&&line.includes("Harvest"));
+      expect(actions).toBe(height-1);expect(lines.join("\n")).not.toContain("Tab list/actions");
     } finally {root.unmount();root.cleanup();io.stdin.destroy();io.stdout.destroy();io.stderr.destroy();}
   });
 }

@@ -5,7 +5,7 @@ import chalk from "chalk";
 import {Box, renderSync} from "@anthropic/ink";
 import instances from "../../vendor/ink/src/core/instances.js";
 import {cellAt} from "../../vendor/ink/src/core/screen.js";
-import {selectedRows} from "../testing/selectedRows.js";
+import {selectedRows,focusedHeader} from "../testing/selectedRows.js";
 import {InputProvider} from "../input/runtime.js";
 import {LanguageContext} from "../ui/PageFrame.js";
 import {useTextInput} from "../hooks/useTextInput.js";
@@ -53,7 +53,7 @@ function mount(records = data(), workspace = tree(), initialView?: unknown) {
     async repeat(value: string, count: number) {for (let index = 0; index < count; index++) {stdin.write(value); await new Promise(resolve => setTimeout(resolve, 10));} await wait();},
     async resize(w: number, h: number) {stdout.columns = w; stdout.rows = h; stdout.emit("resize"); await wait();},
     text() {const screen = (instances.get(stdout) as any).frontFrame.screen; return Array.from({length: screen.height}, (_, y) => Array.from({length: screen.width}, (_, x) => cellAt(screen, x, y)?.char || "").join("")).join("\n");},
-    selected() {return selectedRows(instances.get(stdout));},
+    selected() {return selectedRows(instances.get(stdout));},headerFocused(row=0){return focusedHeader(instances.get(stdout),row);},
     close() {root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy(); chalk.level = previousColor;},
   };
 }
@@ -66,9 +66,37 @@ test("four terminal pages browse real data with no idle editor, and held Down re
     for (let index = 0; index < 25; index++) await io.send("\x1b[B");
     expect(io.selected().some(row => row.includes("进入协作"))).toBe(true); expect(io.text()).not.toContain("› "); expect(io.calls.map(c => c.name)).toEqual(["publish.items", "publish.workspace"]);
     for (const width of [40, 80, 110]) {await io.resize(width, 24); expect(io.footer().hidden).toBe(true); expect(io.text()).toContain("进入协作");}
-    await io.send("\x1b"); expect(io.text()).toContain("←/→ 页头"); await io.send("\x1b[C"); await io.send("\r");
+    await io.send("\x1b"); expect(io.text()).not.toContain("←/→ 页头"); await io.send("\x1b[C"); await io.send("\r");
     expect(io.text()).toContain("我的提交"); expect(io.text()).toContain("收到的 PR"); expect(io.footer().hidden).toBe(true);
   } finally {io.close();}
+});
+
+test("Publish /help preserves graph selections and reading help starts no operation",async()=>{
+ const io=mount();try{
+  await wait();await io.send('\r');await io.send('\x1b[C');
+  const saved=io.local.get<any>('workbench.view');const reads=io.calls.length;
+  await io.send('/help');await io.send('\r');expect(io.text()).toContain('Publish 使用说明');expect(io.text()).toContain('Workspace');
+  expect(io.calls).toHaveLength(reads);await io.send('\x1b');expect(io.text()).toContain('过程 Git');
+  expect(io.local.get<any>('workbench.view')?.source).toBe(saved?.source);
+  expect(io.calls.some(call=>['publish.prepare','publish.execute','publish.set'].includes(call.name))).toBe(false);
+ }finally{io.close();}
+});
+
+test('Publish primary and secondary headers require Enter; Down and Tab never transfer focus',async()=>{
+ const io=mount();try{await wait();expect(io.headerFocused()).toBe(true);await io.send('\x1b[B');await io.send('\t');expect(io.headerFocused()).toBe(true);
+  await io.send('\x1b[C');await io.send('\r');expect(io.headerFocused()).toBe(false);expect(io.headerFocused(2)).toBe(true);
+  await io.send('\x1b[B');await io.send('\t');expect(io.headerFocused(2)).toBe(true);await io.send('\r');expect(io.headerFocused(2)).toBe(false);
+ }finally{io.close();}
+});
+
+test("Workbench command discovery keeps the graph and only opens the operation after explicit submission",async()=>{
+ const io=mount();try{
+  await wait();await io.send('\r');const reads=io.calls.length;
+  await io.send('/');expect(io.footer().suggestions.some((row:any)=>row.label==='/formal')).toBe(true);
+  expect(io.text()).toContain('过程 Git');expect(io.calls).toHaveLength(reads);
+  await io.send('formal');expect(io.calls).toHaveLength(reads);await io.send('\r');
+  expect(io.text()).toContain('准备本地正式整理');expect(io.calls.some(call=>call.name==='publish.prepare')).toBe(false);
+ }finally{io.close();}
 });
 
 test("source graph selection pre-fills the formal draft, while Enter never creates a commit", async () => {
@@ -85,6 +113,18 @@ test("source graph selection pre-fills the formal draft, while Enter never creat
     expect(args.target_role).toBe("workspace"); expect(args.selected_commits).toEqual([oid("a"), oid("b")]); expect(args.base_oid).toBe(oid("c"));
     expect(args.title).toBe("feat: coherent change"); expect(args.destination).toBe("formal");
   } finally {io.close();}
+});
+
+test("Publish form help retains staged fields and treats /help as literal text while editing",async()=>{
+ const io=mount(data(),tree(),{tab:3});try{
+  await wait();await io.send('\r');await io.send('\x1b[C');await io.send('\x1b[C');await io.send('\r');await io.send('\r');
+  await io.send('\x15');await io.send('/help literal prefix');expect(io.footer().kind).toBe('normal');
+  await io.send('\r');const reads=io.calls.length;await io.send('/help');await io.send('\r');
+  expect(io.text()).toContain('Publish 使用说明');expect(io.calls).toHaveLength(reads);
+  await io.send('\x1b');expect(io.text()).toContain('/help literal prefix');
+  expect(io.calls.some(call=>call.name==='publish.set')).toBe(false);await io.send('\x13');
+  expect(io.calls.find(call=>call.name==='publish.set')?.args.value.prefix).toBe('/help literal prefix');
+ }finally{io.close();}
 });
 
 test("saved source selections are never silently reduced when they move outside the visible page", async () => {

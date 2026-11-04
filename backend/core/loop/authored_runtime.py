@@ -8,7 +8,7 @@ from .operation_policy import decide_tool_operation
 
 
 def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeout, diagnostics, runtime_metadata):
-    catalog = ctx.artifacts.get("tool_catalog") or {}
+    catalog = ctx.tool_catalog or {}
     from .tool_surface import component_blocker
     blocker = component_blocker(ctx.process, spec, catalog)
     if blocker:

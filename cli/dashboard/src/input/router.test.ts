@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { InputRouter, InputBindingRegistry, presetSettings } from "./router.js";
+import { InputRouter, InputBindingRegistry, presetSettings,isBindingAction } from "./router.js";
 import { runningWorkers, agentLabel } from "../daemon/agentLabels.js";
 
 describe("central input ownership", () => {
@@ -96,4 +96,10 @@ test("original uppercase letter aliases survive until their action is rebound",(
  registry.configure({version:1,overrides:{"trial.accept":{key:"j",ctrl:true}}});
  assert.deepEqual(registry.normalize({input:"A",key:{shift:true}},"trial"),{input:"",key:{}});
  assert.deepEqual(registry.normalize({input:"A",key:{shift:true}},"scene"),{input:"A",key:{shift:true}});
+});
+
+test("literal paste cannot be interpreted as a bound action",()=>{
+ const pasted={input:"d",key:{paste:true}};
+ assert.equal(isBindingAction("formal.delete",pasted.input,pasted.key),false);
+ assert.equal(isBindingAction("formal.delete","d",{}),true);
 });

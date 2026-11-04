@@ -88,8 +88,8 @@ export const ChatPanel = memo(function ChatPanel({
         includeDescendants
         empty={(
           <Box paddingTop={1} flexDirection="column">
-            <Text dimColor>{t({en:"Type a task and press Enter. The main process supervises and delegates when needed.",zh:"输入任务并按 Enter；主进程负责监督，并在需要时委派。",keys:true})}</Text>
-            <Text dimColor>{t({en:"Use /runtime for governance data; /processlist opens every subprocess in this project.",zh:"用 /runtime 查看治理数据；/processlist 打开此项目的全部子进程。"})}</Text>
+
+
           </Box>
         )}
       />

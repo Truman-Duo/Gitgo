@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 import {label} from "../ui/runtimeLabels.js";
 import {useCopy} from "../ui/PageFrame.js";
@@ -42,7 +43,9 @@ export const RuntimeToolsPanel = memo(function RuntimeToolsPanel({client, projec
     return () => {alive.current = false; generation.current++;};
   }, [refresh]);
   useEffect(() => {scrollRef.current?.scrollTo(0);}, [detail, selected]);
+  const menuHelp=useLocalHelpCommand("tools",undefined,interactive);
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if (key.escape) {
       if (confirm) setConfirm(false);
       else if (detail) setDetail(false);
@@ -94,8 +97,6 @@ export const RuntimeToolsPanel = memo(function RuntimeToolsPanel({client, projec
       </Box>)}
     </ScrollBox>
     {status ? <Text color={colors.warning}>{status}</Text> : null}
-    <Text dimColor>{confirm ? t({en:"Enter confirm · Esc cancel",zh:"Enter 确认 · Esc 取消",keys:true})
-      : detail ? t({en:"Enter review archive/restore · Esc list",zh:"Enter 确认归档/恢复 · Esc 列表",keys:true})
-      : t({en:"↑/↓ select · Enter details · Esc tabs",zh:"↑/↓ 选择 · Enter 详情 · Esc 页签",keys:true})}</Text>
+
   </Box>;
 });

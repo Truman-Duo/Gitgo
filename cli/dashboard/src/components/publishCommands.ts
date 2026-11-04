@@ -4,6 +4,7 @@ import type {Copy} from "../ui/pageContract.js";
 
 type Definition = {name: string; title: Copy; action?: string; stable?: boolean};
 const definitions: Definition[] = [
+  {name:"help",title:{en:"Help",zh:"帮助"}},
   {name: "prepare", title: {en: "Prepare a fixed candidate", zh: "准备固定候选"}},
   {name: "formal", title: {en: "Prepare Formal integration", zh: "准备正式整理"}},
   {name: "combine", title: {en: "Combine candidates", zh: "组合多个候选"}},
@@ -43,7 +44,7 @@ export type PublishCommandContext = {item?: PublishItem; busy?: boolean; more?: 
 /** Discovery and dispatch admission share the same live backend action projection.
  * This is an interaction guard; the backend remains the authorization authority. */
 export function publishCommands(context: PublishCommandContext): Definition[] {
-  if (context.busy) return definitions.filter(row => ["pause", "refresh"].includes(row.name));
+  if (context.busy) return definitions.filter(row => ["help","pause", "refresh"].includes(row.name));
   const rows = definitions.filter(row => (!row.stable || context.item?.identity_kind === "stable_item")
     && (!row.action || context.item?.allowed_actions?.includes(row.action))
     && (row.name !== "task" || Boolean(context.item?.task_links?.length)));

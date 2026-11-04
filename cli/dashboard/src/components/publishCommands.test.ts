@@ -13,7 +13,7 @@ test("command discovery follows the selected item's actual allowed actions", () 
 });
 test("empty, running and paginated contexts expose only applicable controls", () => {
   expect(publishCommands({}).map(row => row.name)).not.toContain("history");
-  expect(publishCommands({busy: true}).map(row => row.name)).toEqual(["refresh", "pause"]);
+  expect(publishCommands({busy: true}).map(row => row.name)).toEqual(["help","refresh", "pause"]);
   expect(publishCommands({more: true, retry: true}).map(row => row.name)).toEqual(expect.arrayContaining(["more", "retry"]));
   expect(publishSuggestions({}, "", t)).toEqual([]);
 });

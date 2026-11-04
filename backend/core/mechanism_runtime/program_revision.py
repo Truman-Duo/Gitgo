@@ -21,7 +21,7 @@ def revise_program(compiled, changes, source_refs):
     bounded_json(changes)
     raw={key:deepcopy(compiled[key]) for key in ('id','intent','scope','bindings')}
     raw.update(schema_version=2,source_refs=deepcopy(source_refs),elements=[
-        {key:deepcopy(node[key]) for key in ('id','use','version','parameters')} for node in compiled['elements']])
+        {key:deepcopy(node[key]) for key in ('id','use','version','parameters','on') if key in node} for node in compiled['elements']])
     for change in changes:
         if (not isinstance(change,dict) or change.get('op') not in {'add','remove','replace'}
                 or set(change)-{'op','path','value'} or ('value' in change)!=(change['op']!='remove')):

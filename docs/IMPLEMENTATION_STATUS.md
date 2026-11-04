@@ -1,12 +1,12 @@
 # 当前功能
 
-## Alpha 3 基线
+## Alpha 3.1
 
-当前产品版本为 `1.0.0-alpha.3`，基线分支 `release/alpha3`。本期整合 Alpha 2.1、管理更新、历史缩放，以及状态一致性、过程关系、用户问题转交、Grill 与终端交互修复。`/runtime`、`/stats`、`/detail`、`/btw`、`/help` 和命令推荐使用统一交互与中英文文案契约；运行状态和权限事实仍来自现有服务，侧讨论默认只读。正式 Windows 终端已获 owner 基线确认；各平台自动验证及发布资产以 [Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 摘要为准。平台边界和发布门槛见 [Alpha 3](ALPHA_3.md)。
+当前产品版本为 `1.0.0-alpha.3.1`。本期整合任务机制维护、Publish、Provider 多模型及备用连接配置、管理更新兼容与恢复、输入安全及终端标准件修复。运行状态和权限事实仍来自现有服务，侧讨论默认只读。各平台自动验证与发行资产以 [Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3.1) 摘要为准；当前平台范围与未完成评估见 [Alpha 3.1](ALPHA_3_1.md)。
 
 以下“接续”“产品版本仍为 Alpha 2.1”及表格为 PR #35 来源候选的历史记录，已修正项目以本段及当前代码为准。
 
-维护者正在 `feat/alpha3-integration-v1` 接续 PR #35；Windows 测试适配器、工作台锁定依赖与实际验证预检、Context 连发导航及测试超时的维护范围见[已知限制](KNOWN_ISSUES.md)。下表保留 PR #35 来源候选的归因与待交接范围，不将维护源码测试视为已完成发布。
+下表保留 PR #35 来源候选的归因与当时待交接范围，不代表当前仍缺少 Darwin 文件读取或 Linux 受保护 Git 后端；这两项已进入 Alpha 3 源码。macOS 通用执行沙箱和受保护 Git 仍未实现。历史维护范围见[已知限制](KNOWN_ISSUES.md)。
 
 ## Alpha3 源码集成候选与平台边界（2026-10-22）
 

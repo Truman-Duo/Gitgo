@@ -54,6 +54,14 @@ export function standardKey(input: string, key: InputKey): StandardKey | undefin
 }
 /** Element contracts used by field/feedback components, independent of page navigation. */
 export const elementStandards = {
+  header: {activation:"enter-only",arrows:"select-without-entering",tab:"never-enter-from-header"},
+  footerDrawer: {component:"FooterDrawer",placement:"between-editor-and-status",maximum:geometry.drawer.maxHeightRatio,
+    viewport:"shared-scroll-or-explicit-self-owned",input:"preserve-editor-no-duplicate",businessState:"caller-owned"},
+  searchableChoice: {component:"SearchableChoiceScene",presentations:["content","inline"],row:"SelectionRow-or-SuggestionRow",counter:"explicit"},
+  scale: {component:"DiscreteScale",navigation:"bounded",color:"triangle-only",state:"controlled"},
+  actions: {component:"PageActions",selection:"SelectionText-block",gap:geometry.actions.gap,authorization:"caller-owned"},
+  help: {component:"ModuleHelpBoundary",input:"InputSuspension",state:"retain-original",footer:"restore-original"},
+  turnGuide: {component:"TurnGuide",geometry:"theme-single-line",color:"theme-state-aware",endpoints:"caller-owned-turn-state"},
   selection: {components: ["SelectionRow", "SelectionText", "HorizontalHeaderStrip"], leadingMarker: false,
     weight: "selected-independent-of-focus", color: "theme-only", motion: "immediate"},
   tableHeader: {component: "TableHeaderText", weight: "always-bold"},

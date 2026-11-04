@@ -17,7 +17,7 @@ def install(ctx):
     engineering = ctx.engineering
     code_dossier = ctx.code_dossier
     dossier_store = ctx.dossier_store
-    from backend.core.loop.engineering_workflow import EngineeringWorkflow
+    from backend.core.loop.engineering_workflow import EngineeringWorkflow, plan_schema
 
 
     engineering = EngineeringWorkflow(process, on_stream_event)
@@ -39,6 +39,13 @@ def install(ctx):
             "reason": {"type": "string"}, "source_ref": {"type": "string"}, "quote": {"type": "string"}},
             "required": ["operation"], "additionalProperties": False},
         execute=task_mechanism, read_only=True, effect=ToolEffect.READ, idempotent=False)
+    from backend.core.loop.model_feedback import task_feedback
+    tools['task_mechanism'].model_result = task_feedback
+    from copy import deepcopy
+    task_surface = deepcopy(tools['task_mechanism'].parameters)
+    task_surface['properties']['operation']['enum'] = ['status', 'interpret_update', 'suspend', 'resume', 'detach']
+    task_surface['properties'].pop('contract')
+    tools['task_mechanism'].advertised_parameters = task_surface
 
 
     tools["engineering_workflow"] = AgentTool(
@@ -49,7 +56,7 @@ def install(ctx):
         ),
         parameters={"type": "object", "properties": {
             "operation": {"type": "string", "enum": ["configure", "status", "ask", "ask_frontier", "revise_decision", "resolve_answer", "record", "retrospective", "propose_amendment"]},
-            "plan": {"type": "object", "description":"Top-level graph for configure/propose_amendment, not content."},
+            "plan": plan_schema(),
             "node_id": {"type": "string", "description":"Target node; canonical content may carry this identity too."},
             "decision_id": {"type": "string", "description":"Actual reply ID; canonical content may carry it too."},
             "content": {"type": "object", "description":"Interpretation or report; use the operation's documented shape."},

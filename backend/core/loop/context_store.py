@@ -129,13 +129,20 @@ class ContextObjectStore:
             "depends_on": dict(object_metadata.get("depends_on") or {}),
         }
 
-    def resolve(self, ref: str) -> ResolvedContextObject:
+    @classmethod
+    def parse_ref(cls, ref: str) -> tuple[str, str]:
         match = _REF_RE.match(str(ref))
         if not match:
             raise ValueError("context ref must be context:<namespace>/<name>@latest|sha256:<digest>")
         name, selector = match.groups()
-        name = self._validate_name(name)
+        name = cls._validate_name(name)
         selector = selector or "latest"
+        if selector != 'latest' and not re.fullmatch(r'sha256:[0-9a-f]{64}', selector):
+            raise ValueError('context selector must be latest or sha256:<64 lowercase hex digits>')
+        return name, selector
+
+    def resolve(self, ref: str) -> ResolvedContextObject:
+        name, selector = self.parse_ref(ref)
         if selector == "latest":
             digest = str(self._load_refs().get(name, {}).get("digest", ""))
             if not digest:
@@ -379,6 +386,12 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
             offset=int(args.get("offset", 0) or 0),
         )
 
+    def prepare_context_open(args: dict) -> dict:
+        # Syntax errors are correctable arguments, not execution crashes or
+        # evidence that a project assumption/plan failed. Do not access files.
+        store.parse_ref(str(args.get('ref', '')))
+        return args
+
     def context_search(args: dict) -> dict:
         return {"results": store.search(
             str(args.get("query", "")), namespace=str(args.get("namespace", "")),
@@ -437,6 +450,7 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
                             "max_chars": {"type": "integer", "minimum": 1000}},
                         "required": ["ref"]},
             execute=context_open, effect=ToolEffect.READ, idempotent=True,
+            prepare_args=prepare_context_open,
         ),
         "context_search": AgentTool(
             execution_contract=data_broker("host.context.context_search"),
@@ -468,6 +482,9 @@ def build_context_tools(process, workspace_path: str) -> dict[str, AgentTool]:
     if runtime_storage is not None:
         def tool_result_open(args: dict) -> dict:
             try:
+                args = dict(args)
+                if args.get('query') and not args.get('max_chars'):
+                    args['max_chars'] = 2400
                 from .review_evidence import read_review_evidence
                 review_page = read_review_evidence(process, args)
                 if review_page is not None:

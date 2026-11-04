@@ -1,5 +1,6 @@
-import React from "react";
-import {Box} from "@anthropic/ink";
+import React, {useLayoutEffect, useRef} from "react";
+import {Box, useTerminalSize, type DOMElement} from "@anthropic/ink";
+import {useContentViewport} from "../input/runtime.js";
 import {displayWidth} from "../theme/index.js";
 import {FieldLabel} from "./FieldLabel.js";
 import {SelectionRow} from "./Selection.js";
@@ -10,11 +11,13 @@ export function fieldLabelWidth(labels: string[], maximum = Infinity, suffix = "
 }
 
 /** No leading marker. Widths are terminal cells, shared by every field in a group. */
-export function FormFieldRow({label, selected, editing = false, disabled = false, labelWidth, suffix = ": ", highlight = true, children}: {
-  label: string; selected: boolean; editing?: boolean; disabled?: boolean; labelWidth?: number; suffix?: string; highlight?: boolean; children: React.ReactNode;
+export function FormFieldRow({label, selected, editing = false, disabled = false, muted = false, labelWidth, suffix = ": ", highlight = true, children}: {
+  label: string; selected: boolean; editing?: boolean; disabled?: boolean; muted?: boolean; labelWidth?: number; suffix?: string; highlight?: boolean; children: React.ReactNode;
 }) {
+  const viewport=useContentViewport(), row=useRef<DOMElement>(null), {columns, rows}=useTerminalSize();
+  useLayoutEffect(()=>{if(selected && row.current) viewport?.current?.scrollIntoView(row.current);},[selected,editing,labelWidth,columns,rows,viewport]);
   const gap = labelWidth === undefined ? geometry.field.gap : Math.min(geometry.field.gap, Math.max(0, labelWidth - 1));
-  return <SelectionRow selected={selected} disabled={disabled} highlight={highlight} flexShrink={0}>
+  return <SelectionRow ref={row} selected={selected} disabled={disabled} muted={muted} highlight={highlight} flexShrink={0}>
     <Box width={labelWidth === undefined ? undefined : Math.max(1, labelWidth - gap)} flexShrink={0}><FieldLabel label={label} suffix={suffix} selected={selected} editing={selected && editing && !disabled}/></Box>
     <Box width={gap} flexShrink={0}/>
     <Box flexGrow={1} minWidth={0}>{children}</Box>

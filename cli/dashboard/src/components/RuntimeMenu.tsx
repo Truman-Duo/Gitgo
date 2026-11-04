@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages} from "../ui/pageContract.js";
 import {runtimeTabs} from "./RuntimeShell.js";
@@ -62,7 +63,9 @@ export const RuntimeMenu = memo(function RuntimeMenu({
       .catch(reason => { if (alive) setContractError(String(reason?.message || reason)); });
     return () => { alive = false; };
   }, [client, project, selIdx]);
+  const menuHelp=useLocalHelpCommand("runtime",undefined,!contentFocused);
   useInput((input: string, key: any) => {
+    if(menuHelp.handle(input,key))return;
     if (contentFocused) return false;
     for (const a of resolveRuntimeMenuKey(input, key)) {
       if (a.type === "dismiss") {
@@ -89,7 +92,7 @@ export const RuntimeMenu = memo(function RuntimeMenu({
           {contractError ? <Text color={colors.danger}>{t({en:"Error: ",zh:"错误："})}{contractError}</Text>
             : contract === null ? <Text dimColor>{t({en:"Loading…",zh:"正在读取…"})}</Text>
             : <ContractTab contract={contract} width={w}/>}
-          <Text dimColor>{contentFocused ? t({en:"Esc tabs",zh:"Esc 返回页签",keys:true}) : t({en:"Enter open",zh:"Enter 打开",keys:true})}</Text>
+
         </Box>
       : activeId === "governance"
         ? <GovernancePanel client={client} project={project} cols={_cols} onDismiss={leaveContent} interactive={contentFocused}/>

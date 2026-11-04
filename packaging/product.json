@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "version": "1.0.0-alpha.3",
-  "windows_version": "1.0.0.4",
+  "version": "1.0.0-alpha.3.1",
+  "windows_version": "1.0.0.5",
   "product_id": "gitgo-terminal",
   "display_name": "Gitgo",
   "primary_command": "gitgo",

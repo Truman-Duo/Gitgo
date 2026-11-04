@@ -254,7 +254,7 @@ class ProviderResponseCollector:
                 call = decode(call, raw_arguments=p['partial_json'])
             except ValueError as error:
                 self.state.invalid_tool_calls.append({'name':p['name'],'id':p['id'],
-                    'raw':p['partial_json'],'error':str(error)})
+                    'raw':p['partial_json'],'error':str(error), 'error_code':'INVALID_TOOL_TRANSPORT'})
                 self.emit({'event':'toolcall_invalid','tool_call_id':p['id'],'tool_name':p['name'],
                     'output_index':idx,'error_code':'INVALID_TOOL_TRANSPORT'},
                     detail={'arguments_raw':p['partial_json'],'parse_error':str(error)})

@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 // src/components/QuitPanel.tsx — truthful graceful-exit panel.
 import React, { memo, useState } from "react";
@@ -22,7 +23,9 @@ export const QuitPanel = memo(function QuitPanel({ onQuit, onCancel }: Props) {
   const t=useCopy();
   const [sel, setSel] = useState(0);
 
+  const menuHelp=useLocalHelpCommand("quit",undefined,true);
   useInput((input: string, key: any) => {
+    if(menuHelp.handle(input,key))return;
     for (const a of resolveQuitKey(input, key)) {
       if (a.type === "dismiss") {
         onCancel();
@@ -66,7 +69,7 @@ export const QuitPanel = memo(function QuitPanel({ onQuit, onCancel }: Props) {
       })}
 
       <Box marginTop={1}>
-        <Text dimColor>{t({en:"↑/↓ select · Enter confirm · Esc cancel",zh:"↑/↓ 选择 · Enter 确认 · Esc 取消",keys:true})}</Text>
+
       </Box>
     </Box>
   );

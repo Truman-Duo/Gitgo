@@ -59,7 +59,7 @@ test("publish translates tabs, states, footer and local validation without chang
   await wait();const initial=io.lines().join(" ");
   expect(initial).toContain("提交规范");expect(initial).not.toContain("Commit Format");
   await io.send("\x1b[C");await io.send("\x1b[C");expect(io.lines().join(" ")).toContain("起始编号");
-  await io.send("\r");await io.send("\x1b[B");await io.send("\r");expect(footer.statusText).toContain("保存");
+  await io.send("\r");await io.send("\x1b[B");await io.send("\r");expect(footer.statusText).toBe("");
   await io.send("\x15");await io.send("-1");await io.send("\r");expect(calls.some(c=>c.operation==="publish.set")).toBe(false);
   await io.send("\x13");expect(io.lines().join(" ")).toContain("起始编号必须为非负整数");await io.send("\x1b");
   await io.send("\x1b[C");expect(io.lines().join(" ")).toContain("隐私扫描");expect(io.lines().join(" ")).toContain("清理工具共同署名");

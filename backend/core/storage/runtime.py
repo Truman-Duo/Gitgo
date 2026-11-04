@@ -667,6 +667,9 @@ class StorageRuntime:
         return _objects_repository.commit_state_revision(
             self, namespace, key, value_ref, expected_ref=expected_ref, revision_key=revision_key, related_refs=related_refs)
 
+    def commit_state_batch(self, namespace: str, updates: list[dict]) -> bool:
+        return _objects_repository.commit_state_batch(self, namespace, updates)
+
     def list_state_refs(self, namespace: str, *, prefix: str, after: str = "", limit: int = 50) -> list[dict]:
         return _objects_repository.list_state_refs(self, namespace, prefix=prefix, after=after, limit=limit)
 

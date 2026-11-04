@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 import {useCopy} from "../ui/PageFrame.js";
 import {applicationBindings} from "../input/router.js";
@@ -41,7 +42,9 @@ export const TrialPanel = memo(function TrialPanel({ client, project, onDismiss 
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  const menuHelp=useLocalHelpCommand("trial",undefined,true);
   useInput((input: string, key: any) => {
+    if(menuHelp.handle(input,key))return;
     for (const a of resolveTrialKey(!!confirm, input, key)) {
       switch (a.type) {
         case "dismiss": onDismiss(); break;
@@ -104,7 +107,7 @@ export const TrialPanel = memo(function TrialPanel({ client, project, onDismiss 
       )}
 
       <Box marginTop={1}>
-        <Text dimColor>{applicationBindings.label("trial.accept")} {t({en:" accept    ",zh:" 接受    "})}{applicationBindings.label("trial.promote")} {t({en:" promote    ",zh:" 提升    "})}{applicationBindings.label("trial.discard")} {t({en:" discard    ",zh:" 丢弃    "})}{chordLabel("upDown")} {t({en:" select    ",zh:" 选择    "})}{chordLabel("escape")} {t({en:" back",zh:" 返回"})}</Text>
+
       </Box>
     </Box>
   );

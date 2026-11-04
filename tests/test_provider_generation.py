@@ -44,6 +44,15 @@ def test_context_summary_uses_existing_auxiliary_preference_only():
     assert 'reasoning' not in transport.bodies[1]
 
 
+def test_mechanism_predicate_uses_existing_workload_negotiation_not_main_policy():
+    transport = Transport()
+    client = provider(transport)
+    client.chat([], max_retries=0, purpose='mechanism_judgment')
+    client.chat([], max_retries=0)
+    assert transport.bodies[0]['reasoning'] == {'effort': 'low'}
+    assert 'reasoning' not in transport.bodies[1]
+
+
 def test_optional_parameter_rejection_notifies_and_accounts_one_fallback():
     transport = Transport(ProviderHttpError(400, json.dumps({'error': {
         'param': 'reasoning.effort', 'code': 'unsupported_value'}}), {}))

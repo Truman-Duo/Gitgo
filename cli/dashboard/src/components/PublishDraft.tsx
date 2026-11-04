@@ -76,8 +76,7 @@ export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDi
   return <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
     <Text bold>{t(mode === "decide" ? {en: "Review the fixed candidate", zh: "审阅固定候选"} : formal ? {en: "Prepare local Formal integration", zh: "准备本地正式整理"} : mode === "plan" ? {en: "Update adoption plan", zh: "调整接手计划"}
       : {en: "Prepare a fixed candidate", zh: "准备固定候选"})}</Text>
-    <Text>{t(mode === "decide" ? {en: "A review records responsibility and intent. It does not turn failed checks into passes or execute Git.", zh: "审阅记录责任与意图，不会把失败检查改成通过，也不执行 Git。"} : formal ? {en: "Choose an existing Formal branch. Review the result, run /verify, then /execute.", zh: "填写正式分支。Ctrl+S 准备后查看结果，检查通过后再明确执行。"}
-      : {en: "Saving records the candidate and checks. Use /adopt afterward to create the branch.", zh: "保存时固定候选并记录检查；之后用 /adopt 创建工作分支。"})}</Text>
+
     {busy ? <Text>{t({en: "Preparing…", zh: "正在准备…"})}</Text> : null}
     {mode === "migrate" ? <Text>{t({en: "The old record is backed up. Supply its source and target explicitly; old sync/push flags do not verify them.",
       zh: "将备份旧记录。请明确填写来源与目标；旧同步/推送标志不作为验证结果。"})}</Text> : null}
@@ -88,8 +87,7 @@ export function PublishDraft({mode, item, busy, status, onFooter, onSubmit, onDi
     {localState?.error ? <Text>{t({en: "Local draft could not be saved. Keep this page open and retry editing.", zh: "本地草稿未能保存，请保留页面并重试编辑。"})}</Text> : null}
     {error ? <Text>{error}</Text> : null}
     {editor.rows(name => t(formal && name === "target_branch" ? {en: "Local formal branch", zh: "本地正式分支"} : labels[name]))}
-    {formal ? <Text dimColor>{t({en: "Tests: file.py | 42,7 | 30; other.py | 42 | 60. Each entry is required.",
-      zh: "测试示例：file.py | 42,7 | 30; other.py | 42 | 60。每项均需通过。"})}</Text> : null}
-    <Text dimColor>{t({en: "Changing the target invalidates existing evidence. Preparing a revision preserves earlier evidence.", zh: "更换目标后原证据失效；重新准备会保留以前的证据。"})}</Text>
+
+
   </Box>;
 }

@@ -73,7 +73,7 @@ class Repository:
             raise ValueError("MECHANISM_TASK_MISMATCH")
         return value, reference
 
-    def create_instance(self, task_id, name, definition, reference, *, policy, sources, constraints=()):
+    def instance_record(self, task_id, name, definition, reference, *, policy, sources, constraints=()):
         if policy not in {"pinned", "follow_compatible"}:
             raise ValueError("MECHANISM_VERSION_POLICY_INVALID")
         if definition.get("project_id") != self.project_id:
@@ -88,6 +88,10 @@ class Repository:
             "version_policy": policy, "phase": "saved", "revision": 1, "epoch": 0,
             "sources": deepcopy(sources), "required_constraints": list(constraints), "states": {}, "runs": {}, "active_run": None,
             "activation": None, "maintenance": {}}
+        return value
+
+    def create_instance(self, task_id, name, definition, reference, *, policy, sources, constraints=()):
+        value = self.instance_record(task_id, name, definition, reference, policy=policy, sources=sources, constraints=constraints)
         ref = self.storage.put_blob(encoded(value), media_type="application/json")
         if not self.storage.compare_state_ref(NAMESPACE, self.instance_key(task_id, name), ref, expected_ref=None):
             raise ValueError("MECHANISM_INSTANCE_EXISTS")

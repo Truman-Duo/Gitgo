@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 // src/components/ConfigPanel.tsx — thin /config shell: tab bar + active tab module.
 // Each tab (providers/bin/publish) is a self-contained module in ./config/ that
 // owns its own state, key resolver, footer, and render. Adding a tab = one file
@@ -62,13 +63,15 @@ export const ConfigPanel = memo(function ConfigPanel({
   const report = useCallback((r: TabReport) => setTabReport(r), []);
   const leaveContent = useCallback(() => setContentFocused(false), []);
 
+  const menuHelp=useLocalHelpCommand("config",onFooter,!contentFocused&&!tabReport.fullscreen);
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if (contentFocused || tabReport.fullscreen) return false;
     if (matchChord("left", input, key)) { tabPrev(); return; }
     if (matchChord("right", input, key)) { tabNext(); return; }
     if (matchChord("enter", input, key)) { setContentFocused(true); return; }
     if (matchChord("escape", input, key)) onBack();
-  });
+  },{clipboard:false});
 
   const shell: ShellControls = useMemo(
     () => ({ back: onBack, goToTab, tabPrev, tabNext, leaveContent }),

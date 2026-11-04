@@ -1,28 +1,24 @@
+import {useLocalHelpCommand} from "../../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "../Selection.js";
 import React, {memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from "react";
 import {Box, ScrollBox, Text, type DOMElement, type ScrollBoxHandle} from "@anthropic/ink";
 import {useManagedInput as useInput, useScrollInput, useEffectiveBindings, useConfigureBindings, useBindingRevision} from "../../input/runtime.js";
 import {BINDING_DEFINITIONS, InputBindingRegistry, bindingFromEvent, bindingLabel, presetSettings,
   type BindingSettings, type BindingSpec} from "../../input/router.js";
-import {matchChord, chordLabel} from "../../input/bindings.js";
+import {matchChord} from "../../input/bindings.js";
 import {configGet, configSet} from "../../backend/tools.js";
 import {notifyGeneralConfigChanged} from "../../hooks/useGeneralConfig.js";
 import {useCopy} from "../../ui/PageFrame.js";
 import {useFeedback} from "../../hooks/useFeedback.js";
-import {colors, displayWidth, usePanelSize} from "../../theme/index.js";
+import {colors, usePanelSize} from "../../theme/index.js";
 import type {ConfigTabProps} from "./types.js";
 
-const BindingRow = memo(function BindingRow({label, condition, width, labelWidth, selected, selectedRow}: {
-  label:string; condition:string; width:number; labelWidth:number; selected:boolean;
+const BindingRow = memo(function BindingRow({label, width, selected, selectedRow}: {
+  label:string; width:number; selected:boolean;
   selectedRow:React.RefObject<DOMElement|null>;
 }) {
   return <Box ref={selected?selectedRow:undefined} flexDirection="row" width={width} flexShrink={0}>
-    <Box width={labelWidth} flexShrink={0}>
-      <SelectionText selected={selected} wrap="truncate-end"  >{label}</SelectionText>
-    </Box>
-    <Box width={Math.max(1,width-labelWidth)} minWidth={0}>
-      <Text dimColor wrap="truncate-end">{condition}</Text>
-    </Box>
+    <SelectionText selected={selected} wrap="truncate-end">{label}</SelectionText>
   </Box>;
 });
 
@@ -31,24 +27,23 @@ export const KeybindingsTab = memo(function KeybindingsTab({client, report, onFo
   const t = useCopy(), registry = useEffectiveBindings(), configure = useConfigureBindings();
   const {w,h} = usePanelSize({widthOffset:6}), revision = useBindingRevision();
   const labels = useMemo(()=>BINDING_DEFINITIONS.map(item=>t(item.label)+" · "+registry.displayLabel(item.id)),[t,registry,revision]);
-  const conditions = useMemo(()=>BINDING_DEFINITIONS.map(item=>t(item.condition)),[t]);
-  const labelWidth = useMemo(()=>Math.max(1,Math.min(Math.max(...labels.map(displayWidth))+3,Math.floor(w*0.48))),[labels,w]);
   const [settings, setSettings] = useState<BindingSettings>({version:1,overrides:{}});
   const [loaded,setLoaded] = useState(false), [saving,setSaving] = useState(false), [row,setRow] = useState(0);
-  const [mode,setMode] = useState<"list"|"capture"|"test">("list");
+  const [mode,setMode] = useState<"list"|"capture">("list");
   const [sawInput,setSawInput] = useState(false);
   const [candidate,setCandidate] = useState<BindingSpec|null>(null);
   const feedback = useFeedback({kind: "page", id: "config/keybindings"});
   const message = feedback.text, setMessage = feedback.show;
   const alive = useRef(true), mutation = useRef(false), scroll = useRef<ScrollBoxHandle>(null);
   const selectedRow = useRef<DOMElement>(null);
-  const action = BINDING_DEFINITIONS[row-2];
+  const action = BINDING_DEFINITIONS[row-1];
   useScrollInput(scroll, contentFocused && mode === "list");
   useLayoutEffect(()=>{
     if(!contentFocused)return;
-    if(row<2)scroll.current?.scrollTo(0);
+    if(row===0)scroll.current?.scrollTo(0);
     else if(selectedRow.current)scroll.current?.scrollIntoView(selectedRow.current);
   },[row,w,h,mode,message,contentFocused,revision]);
+  const menuHelp=useLocalHelpCommand("keybindings",onFooter,contentFocused&&mode==="list");
   useEffect(() => {
     alive.current=true;
     configGet(client).then((value:any)=>{
@@ -60,7 +55,8 @@ export const KeybindingsTab = memo(function KeybindingsTab({client, report, onFo
     return ()=>{alive.current=false;};
   },[client,t]);
   useEffect(()=>{report({sub:mode!=="list",fullscreen:false});},[mode,report]);
-  useEffect(()=>{onFooter({hidden:true});return ()=>onFooter(null);},[onFooter]);
+  useEffect(()=>{
+    if(menuHelp.active)return;onFooter({hidden:true});return ()=>onFooter(null);},[onFooter,menuHelp.active]);
   useEffect(()=>{onStatusUpdate?.(message);},[message,onStatusUpdate]);
   useEffect(()=>{
     if(mode==="list" || sawInput)return;
@@ -105,10 +101,10 @@ export const KeybindingsTab = memo(function KeybindingsTab({client, report, onFo
       catch(error){setCandidate(null);setMessage(problem(error));return;}
     }
     setCandidate(detected);
-    setMessage(t({en:`Received ${bindingLabel(detected)}${mode==="capture"?"; Enter saves, Esc cancels":"; Esc returns"}`,
-      zh:`实际收到 ${bindingLabel(detected)}${mode==="capture"?"；Enter 保存，Esc 取消":"；Esc 返回"}`}));
+    setMessage(t({en:`Received ${bindingLabel(detected)}`,zh:`实际收到 ${bindingLabel(detected)}`}));
   },{isActive:contentFocused && mode!=="list",raw:true,clipboard:false,priority:20000});
   useInput((input,key)=>{
+    if(menuHelp.handle(input,key))return;
     if(!contentFocused || mode!=="list")return false;
     if(saving)return;
     if(matchChord("escape",input,key)){shell.leaveContent();return;}
@@ -119,27 +115,26 @@ export const KeybindingsTab = memo(function KeybindingsTab({client, report, onFo
       }else setRow(v=>Math.max(0,v-1));
     }
     else if(matchChord("down",input,key)){
-      if(row===BINDING_DEFINITIONS.length+1){
+      if(row===BINDING_DEFINITIONS.length){
         const view=scroll.current;
         if(view && selectedRow.current && view.getScrollTop()+view.getPendingDelta()<Math.max(0,view.getScrollHeight()-view.getViewportHeight()))
           view.scrollIntoView(selectedRow.current);
-      }else setRow(v=>Math.min(BINDING_DEFINITIONS.length+1,v+1));
+      }else setRow(v=>Math.min(BINDING_DEFINITIONS.length,v+1));
     }
     else if(matchChord("delete",input,key) && action){const overrides={...settings.overrides};delete overrides[action.id];void save({version:1,overrides});}
     else if(matchChord("enterNoShift",input,key)){
-      if(row===1)void save({version:1,overrides:{}});
-      else {setCandidate(null);setSawInput(false);setMessage(t({en:"Press a key to detect it. Esc cancels.",zh:"请按键进行检测；Esc 取消。"}));setMode(row===0?"test":"capture");}
+      if(row===0)void save({version:1,overrides:{}});
+      else {setCandidate(null);setSawInput(false);setMessage(t({en:"Press the replacement key. Esc cancels.",zh:"请按新的绑定键；Esc 取消。"}));setMode("capture");}
     }
   });
   return <Box flexDirection="column" flexGrow={1} minHeight={0}>
-    <SelectionText selected={contentFocused&&row===0} highlight={false}>{t({en:"Test keyboard input",zh:"检测键盘输入"})}</SelectionText>
-    <SelectionText selected={contentFocused&&row===1} highlight={false}>{t({en:"Restore all defaults",zh:"恢复全部默认绑键"})}</SelectionText>
-    <Text dimColor>{t({en:"Select an action and confirm to rebind.",zh:"选中动作并确认以换绑。"})} {chordLabel("delete")} {t({en:"restores the selected default",zh:"恢复所选动作默认键"})}</Text>
+    <SelectionText selected={contentFocused&&row===0} highlight={false}>{t({en:"Restore all defaults",zh:"恢复全部默认绑键"})}</SelectionText>
+
     <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}>
-      {BINDING_DEFINITIONS.map((item,index)=><BindingRow key={item.id} label={labels[index]} condition={conditions[index]}
-        width={w} labelWidth={labelWidth} selected={contentFocused&&row===index+2} selectedRow={selectedRow}/>)}
+      {BINDING_DEFINITIONS.map((item,index)=><BindingRow key={item.id} label={labels[index]}
+        width={w} selected={contentFocused&&row===index+1} selectedRow={selectedRow}/>)}
     </ScrollBox>
     {message?<Text color={colors.warning}>{message}</Text>:null}
-    <Text dimColor>{mode==="list"?chordLabel("upDown")+" "+t({en:"select",zh:"选择"})+" · "+chordLabel("enter")+" "+t({en:"open",zh:"打开"})+" · "+chordLabel("escape")+" "+t({en:"back",zh:"返回"}):t({en:"Detection shows only events delivered by this terminal. Collapsed combinations cannot be distinguished.",zh:"检测仅显示终端实际送达的键；被折叠为同一事件的组合键无法区分。"})}</Text>
+
   </Box>;
 });

@@ -25,6 +25,12 @@ _IGNORED_DIRS = {
     "build", "dist", "out", "target",
 }
 _MAX_OUTPUT = 200_000
+
+
+class WorkspaceScopeError(PermissionError):
+    """A pre-operation path selection escaped the Host-approved roots."""
+
+
 _DENIED_EXECUTABLES = {
     "curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "ncat", "telnet",
     "rm", "rmdir", "del", "erase", "format", "diskpart", "shutdown",
@@ -700,7 +706,7 @@ def _confined_path(workspace: Path, raw: str, *, must_exist: bool,
     resolved = path.resolve(strict=False)
     roots = [workspace, *(allowed_roots or [])]
     if not any(_is_within(resolved, root) for root in roots):
-        raise PermissionError(f"path escapes approved resource scope: {raw}")
+        raise WorkspaceScopeError(f"path escapes approved resource scope: {raw}")
     if must_exist and not resolved.exists():
         raise FileNotFoundError(str(resolved))
     return resolved

@@ -121,7 +121,10 @@ def test_stale_semantic_boundary_does_not_consume_exact_grant_or_start_effect(tm
     assert blocked.diagnostics['code'] == 'ALIGNMENT_REVIEW_REQUIRED'
     assert not calls
     assert matching_grant(process, tool.name, args, per_invocation=True)
-    runtime.apply({'status': 'ready', 'questions': [], 'interpretations': []}, runtime.payload())
+    from backend.core.loop.tool_boundary_preview import preview_tool_boundaries
+    boundary = preview_tool_boundaries([{'name': tool.name, 'args': args}], {tool.name: tool}, process)
+    runtime.apply({'status': 'ready', 'questions': [], 'interpretations': []},
+        runtime.payload(proposed_contracts=boundary.contracts))
     result = pipeline.execute({'name': tool.name, 'args': args}, tool, ctx, 'fresh')
     assert not result.is_error and len(calls) == 1
     assert matching_grant(process, tool.name, args, per_invocation=True) is None

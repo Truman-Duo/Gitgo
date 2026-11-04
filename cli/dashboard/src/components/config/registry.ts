@@ -8,6 +8,6 @@ import {KeybindingsTab} from "./KeybindingsTab.js";
 
 export const CONFIG_TABS: ConfigTabModule[] = [
   { id: "general", label: {en: "General", zh: "通用设置"}, Component: GeneralTab },
-  { id: "providers", label: {en: "Providers", zh: "模型服务商"}, Component: ProvidersTab },
+  { id: "providers", label: {en: "Providers", zh: "模型服务商"}, Component: ProvidersTab, ownsViewport: true },
   { id: "keybindings", label: {en: "Keybindings", zh: "绑键"}, Component: KeybindingsTab, ownsViewport: true },
 ];

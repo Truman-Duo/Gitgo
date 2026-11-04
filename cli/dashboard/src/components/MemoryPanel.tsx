@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {geometry} from "../theme/tokens.js";
 import {SelectionText} from "./Selection.js";
 import React,{memo,useEffect,useRef,useState,useCallback} from "react";
@@ -36,7 +37,9 @@ export const MemoryPanel=memo(function MemoryPanel({client,project,onDismiss,int
   }catch(e:any){if(alive.current)setStatus(String(e.message||e));}
   finally{mutation.current=false;if(alive.current)setBusy(false);}
  };
- useInput((input,key)=>{
+ const menuHelp=useLocalHelpCommand("memory",undefined,interactive);
+  useInput((input,key)=>{
+    if(menuHelp.handle(input,key))return;
   const command=standardKey(input,key);
   if(command==="back"){if(confirm)setConfirm(null);else onDismiss();return;}
   if(busy||loading)return;
@@ -54,7 +57,7 @@ export const MemoryPanel=memo(function MemoryPanel({client,project,onDismiss,int
  },{isActive:interactive});
  return <PageFrame page={pages.runtime}>
   <Text bold>{t({en:"Memory snapshots",zh:"记忆快照"})} · {project}</Text>
-  {confirm?<Text color={colors.warning}>{t({en:"Restore this exact snapshot?",zh:"恢复此快照？"})} {confirm.timestamp} · {t({en:"Enter confirm · Esc cancel",zh:"Enter 确认 · Esc 取消",keys:true})}</Text>:null}
+  {confirm?<Text color={colors.warning}>{t({en:"Restore this exact snapshot?",zh:"恢复此快照？"})} {confirm.timestamp}</Text>:null}
   <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} minHeight={0}>
    {loading?<Text dimColor>{t({en:"Loading snapshots…",zh:"正在读取快照…"})}</Text>:!snaps.length?<Text dimColor>{t({en:"No snapshots yet. Select Create snapshot.",zh:"尚无快照，请选择创建快照。"})}</Text>:snaps.map((sn,i)=><SelectionText selected={i===selected} focused={interactive&&focus==="list"} key={sn.timestamp+sn.source}
      >{sn.source}  {sn.timestamp.slice(0,19)}</SelectionText>)}
@@ -63,6 +66,6 @@ export const MemoryPanel=memo(function MemoryPanel({client,project,onDismiss,int
   <Box gap={geometry.actions.gap}>{[t({en:"Create snapshot",zh:"创建快照"}),t({en:"Restore selected",zh:"恢复选中快照"})].map((label,i)=><SelectionText selected={interactive&&focus==="actions"&&current===i} variant="block" key={i}
    dimColor={!rows[i]?.enabled}
    >{label}</SelectionText>)}</Box>
-  <Text dimColor>{t({en:"↑/↓ select · Tab actions/list · ←/→ action · Enter open · Esc back",zh:"↑/↓ 选择 · Tab 操作/列表 · ←/→ 操作 · Enter 打开 · Esc 返回",keys:true})}</Text>
+
  </PageFrame>;
 });

@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 import {label} from "../ui/runtimeLabels.js";
 import React, {useEffect, useRef, useState} from "react";
@@ -73,7 +74,9 @@ export function TaskMechanismsPanel({client, project, processes, onDismiss, inte
       .catch(reason => {if (alive.current) setError(String(reason?.message || reason));})
       .finally(() => {mutation.current = false; if (alive.current) {setBusy(false); setConfirm(false);}});
   };
+  const menuHelp=useLocalHelpCommand("mechanisms",undefined,interactive);
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if (matchChord("escape", input, key)) {
       if (busy) return;
       if (confirm) setConfirm(false);
@@ -158,10 +161,6 @@ export function TaskMechanismsPanel({client, project, processes, onDismiss, inte
     </ScrollBox>
     <FeedbackMessage feedback={feedback.message}/>
     {detail && actions.length ? <InlineChoiceStrip items={actions} selected={Math.min(actionIndex,actions.length-1)} width={w} interactive={interactive && !busy}/> : null}
-    <Text dimColor>{busy ? t({en:"Saving…",zh:"正在保存…"}) : confirm
-      ? t({en:"Enter confirm · Esc cancel · accepted obligations remain",zh:"Enter 确认 · Esc 取消 · 已接受的义务仍保留",keys:true})
-      : detail ? actions.length ? t({en:"↑/↓ scroll · ←/→ action · Enter select · Esc list",zh:"↑/↓ 滚动 · ←/→ 动作 · Enter 选择 · Esc 列表",keys:true})
-      : t({en:"↑/↓ scroll · Esc list · Adjust extensions in the conversation",zh:"↑/↓ 滚动 · Esc 列表 · 可在对话中调整扩展",keys:true})
-      : t({en:"↑/↓ select · Enter detail · R refresh · Esc tabs",zh:"↑/↓ 选择 · Enter 详情 · R 刷新 · Esc 页签",keys:true})}</Text>
+    {busy||confirm?<Text dimColor>{busy?t({en:"Saving…",zh:"正在保存…"}):t({en:"Accepted obligations remain",zh:"已接受的义务仍保留"})}</Text>:null}
   </Box>;
 }

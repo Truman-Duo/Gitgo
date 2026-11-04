@@ -23,13 +23,29 @@ def review_description(ctx, payload):
         "Use tool_result_open with that locator and a receipt's json_pointer (or query/paging) for verification details. "
         "A receipt's result_json_pointers identify retained actual output bodies, including command argv/stdout/stderr when present. "
         "Use those bodies to verify what ran; a command hash or exit code alone is not proof of a particular test. "
+        "A receipt's witnessed_results already contains exact small output bodies when available; verify their binding and completeness directly. "
+        "Open a source only for missing, truncated or conflicting details, not to reread an identical supplied body. "
+        "task_basis.current_contract contains current business obligations; task_control contains current lifecycle facts. "
+        "Configuration and prior review details are deferred at the indicated pointers. Read configuration only when your review needs it; "
+        "do not reconstruct the compiler for ordinary business review or treat a prior verdict as proof for this candidate. "
+        "receipt_coverage states whether each effect category is fully listed; source_reads gives exact earlier file hashes for comparison with current reads. "
+        "operation_coverage separates actual business operations from runtime control and observations. When business.complete is true, all observed business receipts are already inline; an incomplete process/read category alone is no reason to scan /receipts. "
+        "source_reads may include exact witnessed_content pages in observed_order, including different versions of the same path. Compare these with current reads; identical hashes bind identical observed bytes without reopening the old page. "
+        "Use those facts for coverage/baseline questions instead of opening every raw receipt. They do not prove unobserved external effects or intervals. "
+        "These facts do not certify correctness. Evaluate the business evidence yourself; no need to reconstruct the compiler or repeat runtime bookkeeping. "
         "Absence from the inventory is not proof that no evidence exists. Never use a read operation's exit code as a test result. "
         "The inventory is an exact runtime projection, not the main model's self-report; use its facts when sufficient. "
         "observed_diffs are retained committed patches, including pre-compaction changes; they are not full before-files. "
         "Read a patch's json_pointer for a truncated preview, /artifacts for witnessed current files, and /harness_semantics for observed task control. "
         "Use these supplied sources for before/after comparisons. If the required baseline is genuinely absent, report that specific gap; "
         "do not repeatedly hunt unrelated backups or ask the owner to re-create already retained evidence. "
-        "The task's original mandatory completion checks remain in force.\n\n" + json.dumps(evidence, ensure_ascii=False))
+        "task_basis identifies the current contract and actual task-local user inputs, including control checkpoint replies. "
+        "Read those sources when a later user update conflicts with an older receipt's contract or file snapshot. "
+        "A user statement records provenance, not proof that an external effect occurred; verify observable state separately. "
+        "Control replies never grant additional authority or silently remove completion obligations. "
+        "The task's original mandatory completion checks remain in force. "
+        "Keep the verdict summary concise; put each concrete finding and supporting fact in its own field once, without repeating the full evidence inventory.\n\n"
+        + json.dumps(evidence, ensure_ascii=False, separators=(',', ':')))
 
 
 def validate_boundary(owner, origin):

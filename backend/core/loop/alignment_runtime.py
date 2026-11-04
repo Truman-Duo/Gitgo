@@ -44,8 +44,9 @@ def assess_with_provider(provider, payload, *, before_attempt=None, on_notice=No
     # Preserve all review evidence, but put task-stable inputs before evolving
     # cards/candidates. Candidate-first or stage-first serialization throws
     # away an otherwise reusable prefix on every review.
-    stable_fields = ('original_request', 'task_constraints', 'conversation_context', 'task_maintenance', 'request',
-                     'confirmed_answers', 'historical_decisions', 'user_updates', 'scope',
+    stable_fields = ('original_request', 'task_constraints', 'request', 'scope',
+                     'task_maintenance', 'conversation_context',
+                     'confirmed_answers', 'historical_decisions', 'user_updates',
                      'questions_asked', 'working_assumptions', 'workflow')
     ordered = {key: wire_payload[key] for key in stable_fields if key in wire_payload}
     ordered.update({key: wire_payload[key] for key in sorted(wire_payload) if key not in ordered})
@@ -148,12 +149,14 @@ class AlignmentRuntime:
         requests = [e for e in self.process.session.host_ledger if e.get('event') == 'user_decision_requested'
                     and e.get('task_id') == task_id and e.get('kind') not in CONTROL_DECISION_KINDS]
         active_scope = exploratory_scope(self.process, admission=observation_only)
+        from .task_maintenance import inspect as inspect_maintenance
+        from .model_feedback import alignment_task_view
         payload = {'request': (state.get('scope') or {}).get('request') if active_scope else state['request'], 'original_request': state['request'],
                    'scope': state.get('scope'), 'stage': 'question_proposal' if proposed_questions is not None else 'delivery' if candidate else 'admission',
                    'questions_asked': requests, 'actual_answers': answers,
                    'confirmed_answers': confirmed, 'workflow': graph, 'candidate': candidate,
                    'task_constraints': self.process.task_constraints,
-                   'task_maintenance': __import__('backend.core.loop.task_maintenance', fromlist=['inspect']).inspect(self.process),
+                   'task_maintenance': alignment_task_view(inspect_maintenance(self.process)),
                    'user_updates': [m['content'] for m in self.process.session.messages[state['message_start']:]
                                     if m.get('mailbox_message_id') and m.get('message_type') == 'conversation']}
         from .decision_support import confirmed_user_state
@@ -455,9 +458,12 @@ class AlignmentRuntime:
                              'input_digest': alignment_input_digest(self.process),
                              'artifact_manifest': artifact_manifest(used_artifacts)}}})
         if status == 'ready' and payload.get('stage') != 'delivery':
-            from .alignment_routing import admission_input_digest
+            from .alignment_routing import admission_input_digest, admission_subject_binding, business_readiness_requested, configuration_subjects
             digest = admission_input_digest(self.process, payload)
+            binding = admission_subject_binding(self.process, payload)
             self.process.update_context_snapshot(lambda ctx: {**ctx, KEY: {**ctx.get(KEY, {}),
                 'admission_review': {'status': 'ready', 'input_digest': digest,
+                    'business_readiness': business_readiness_requested(payload) and not configuration_subjects(payload),
+                    **binding,
                     **({'scope': 'observation_only'} if exploration and shadow.task_kind not in {'answer', 'plan'} else {})}}})
         return {'status': status, 'reason': str(assessment.get('reason') or '')}
