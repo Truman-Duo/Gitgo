@@ -54,10 +54,13 @@ export function InputProvider({ children, settings, verificationInput, clipboard
     // A person taking over a verification window owns it from this point on.
     // Never let a later test timer type a command into their new field/scene.
     manualInput.current=true;verificationTimers.current.forEach(clearTimeout);verificationTimers.current=[];
-    router.dispatch({
+    const owner = router.dispatch({
       input,
       key: {...key, paste: Boolean(event?.keypress?.isPasted || (key as InputKey).paste)},
     });
+    // The selected application owner also consumes renderer defaults. Raw
+    // capture and rebound editor keys must not additionally suspend Unix.
+    if (owner) event?.stopImmediatePropagation?.();
   });
   return <RouterContext.Provider value={router}><BindingsContext.Provider value={bindingsContext}><ClipboardReaderContext.Provider value={clipboardReader}>{children}</ClipboardReaderContext.Provider></BindingsContext.Provider></RouterContext.Provider>;
 }

@@ -1461,7 +1461,7 @@ export default class Ink {
     dispatchHover(this.rootNode, col, row, this.hoveredNodes);
   }
 
-  dispatchKeyboardEvent(parsedKey: ParsedKey): void {
+  dispatchKeyboardEvent(parsedKey: ParsedKey): boolean {
     const target = this.focusManager.activeElement ?? this.rootNode;
     const event = new KeyboardEvent(parsedKey);
     dispatcher.dispatchDiscrete(target, event);
@@ -1475,6 +1475,7 @@ export default class Ink {
         this.focusManager.focusNext(this.rootNode);
       }
     }
+    return event.defaultPrevented || event.didStopImmediatePropagation();
   }
   /**
    * Look up the URL at (col, row) in the current front frame. Checks for
