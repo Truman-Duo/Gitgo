@@ -1,7 +1,7 @@
 """Developer observer regression; not a product semantic evaluation."""
 from pathlib import Path
 import copy,runpy,pytest
-check=runpy.run_path(str(Path(__file__).resolve().parents[1]/'dev-artifacts/verify-pinned-instance.py'))['assert_pinned_preserved']
+check=runpy.run_path(str(Path(__file__).resolve().parent/'fixtures/mechanism_extensions/verify-pinned-instance.py'))['assert_pinned_preserved']
 def record():return {'version_policy':'pinned','definition_revision':1,'epoch':1,'effective_ref':'old','phase':'ready','nodes':[],'maintenance':[]}
 def test_pinned_notice_does_not_change_effective_instance():
     old=record();new=copy.deepcopy(old)

@@ -3,7 +3,7 @@ import runpy,time
 from pathlib import Path
 import pytest
 from backend.core.mechanism_runtime.runner import Context
-observe=runpy.run_path(str(Path(__file__).resolve().parents[1]/'dev-artifacts/postfreeze-confirmed-component.py'))['observe']
+observe=runpy.run_path(str(Path(__file__).resolve().parent/'fixtures/mechanism_extensions/postfreeze-confirmed-component.py'))['observe']
 def invoke(records,*,task='task',next_offset=None,kinds=None):
     projected=[]
     ctx=Context('project','task','instance',1,'event','restored','node',{},
@@ -30,7 +30,7 @@ def test_new_registered_element_initialization_missing_service_never_becomes_rea
     from backend.core.mechanism_runtime.repository import Repository
     from backend.core.mechanism_runtime.coordinator import Coordinator
     registry=Registry();install(registry)
-    runpy.run_path(str(Path(__file__).resolve().parents[1]/'dev-artifacts/postfreeze-confirmed-component.py'))['install'](registry)
+    runpy.run_path(str(Path(__file__).resolve().parent/'fixtures/mechanism_extensions/postfreeze-confirmed-component.py'))['install'](registry)
     work=tmp_path_factory/'work';work.mkdir()
     with StorageRuntime(work,state_home=tmp_path_factory/'state') as storage:
         repo=Repository(storage);compiler=Coordinator(registry,repo,capabilities=('decision.read','context.project'))

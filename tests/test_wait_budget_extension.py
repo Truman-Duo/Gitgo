@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import runpy
 import pytest
-inspect_waits=runpy.run_path(str(Path(__file__).resolve().parents[1]/'dev-artifacts/postfreeze-wait-budget.py'))['inspect_waits']
+inspect_waits=runpy.run_path(str(Path(__file__).resolve().parent/'fixtures/mechanism_extensions/postfreeze-wait-budget.py'))['inspect_waits']
 
 def run(limit,partial=False,task='task'):
     calls=[]

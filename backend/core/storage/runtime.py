@@ -110,6 +110,22 @@ def validate_in_memory_migrations() -> None:
             connection.close()
 
 
+def open_migration_shadow(path: Path) -> sqlite3.Connection:
+    """Open an existing disposable update copy, under its owner's maintenance lease.
+
+    SQL migration selection remains with storage.upgrade; connection creation
+    and runtime validation stay in the same facade as other SQLite consumers.
+    Read-write URI mode cannot silently create a missing shadow database.
+    """
+    validate_sqlite_runtime()
+    if path.is_symlink() or path != path.resolve() or not path.is_file():
+        raise StorageBlocked("UPDATE_DATA_PATH")
+    connection = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True,
+                                 isolation_level=None, timeout=.25)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
 def open_usability_source(project_root: str | Path) -> sqlite3.Connection:
     """Open committed traces read-only without a writer runtime or migrations.
 

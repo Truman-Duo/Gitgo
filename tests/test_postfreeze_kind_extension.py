@@ -3,7 +3,7 @@ import json,runpy,time
 from pathlib import Path
 import pytest
 from backend.core.mechanism_runtime.runner import Context
-summarize=runpy.run_path(str(Path(__file__).resolve().parents[1]/'dev-artifacts/postfreeze-kinds-component.py'))['summarize']
+summarize=runpy.run_path(str(Path(__file__).resolve().parent/'fixtures/mechanism_extensions/postfreeze-kinds-component.py'))['summarize']
 def invoke(items,parameters,*,partial=False,task='task'):
     projected=[]
     ctx=Context('project','task','instance',1,'event','restored','node',{},
@@ -34,7 +34,7 @@ def test_actual_registered_component_cannot_activate_without_required_service(tm
     from backend.core.mechanism_runtime.repository import Repository
     from backend.core.mechanism_runtime.coordinator import Coordinator
     registry=Registry();install(registry)
-    runpy.run_path(str(Path(__file__).resolve().parents[1]/'dev-artifacts/postfreeze-kinds-component.py'))['install'](registry)
+    runpy.run_path(str(Path(__file__).resolve().parent/'fixtures/mechanism_extensions/postfreeze-kinds-component.py'))['install'](registry)
     work=tmp_path_factory/'work';work.mkdir()
     with StorageRuntime(work,state_home=tmp_path_factory/'state') as storage:
         repo=Repository(storage)

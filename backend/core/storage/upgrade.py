@@ -4,21 +4,17 @@ The caller holds source maintenance leases and only supplies disposable copies.
 """
 from contextlib import closing
 from pathlib import Path
-import sqlite3
 
 from .migrations import STATE_MIGRATIONS, OBSERVABILITY_MIGRATIONS
 from .models import StorageBlocked
-from .runtime import StorageRuntime
-from .support import validate_sqlite_runtime
+from .runtime import StorageRuntime, open_migration_shadow
 
 
 def migrate_shadow_database(path: Path, name: str):
-    validate_sqlite_runtime()
     catalog = {"state": STATE_MIGRATIONS, "observability": OBSERVABILITY_MIGRATIONS}
     if name not in catalog or path.is_symlink() or path != path.resolve() or not path.is_file():
         raise StorageBlocked("UPDATE_DATA_PATH")
-    with closing(sqlite3.connect(path, isolation_level=None)) as db:
-        db.row_factory = sqlite3.Row
+    with closing(open_migration_shadow(path)) as db:
         db.execute("PRAGMA foreign_keys=ON")
         if any(row[0] != "ok" for row in db.execute("PRAGMA quick_check")):
             raise StorageBlocked("UPDATE_DATA_INTEGRITY")

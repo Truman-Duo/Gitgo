@@ -4,7 +4,7 @@ import runpy
 from types import SimpleNamespace
 import pytest
 
-component=runpy.run_path(str(Path(__file__).resolve().parents[1]/'dev-artifacts/postfreeze-receipts-component.py'))
+component=runpy.run_path(str(Path(__file__).resolve().parent/'fixtures/mechanism_extensions/postfreeze-receipts-component.py'))
 
 
 def run(items,confirmed=(),state=None,*,partial=False,next_offset=None,task='t',kinds=()):
