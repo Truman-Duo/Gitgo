@@ -90,7 +90,7 @@ class PlatformGateTests(unittest.TestCase):
     def run_gate(self, changes=None):
         required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
                     'windows-package', 'managed-update-windows', 'native',
-                    'native-linux', 'unix-packages', 'managed-update-linux']
+                    'native-linux', 'unix-packages', 'managed-update-linux', 'macos-audit']
         jobs = {name: {'result': 'success'} for name in required}
         jobs['contract']['outputs'] = {'native_required': 'true'}
         for name, result in (changes or {}).items():
@@ -113,7 +113,7 @@ class PlatformGateTests(unittest.TestCase):
     def test_every_platform_requirement_fails_closed(self):
         for name in ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
                      'windows-package', 'managed-update-windows', 'native',
-                     'native-linux', 'unix-packages', 'managed-update-linux']:
+                     'native-linux', 'unix-packages', 'managed-update-linux', 'macos-audit']:
             for status in ['failure', 'cancelled', 'skipped']:
                 with self.subTest(name=name, status=status):
                     result, _ = self.run_gate({name: status})

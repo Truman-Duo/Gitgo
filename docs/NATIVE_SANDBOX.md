@@ -251,7 +251,7 @@ python -B -m pytest tests/test_native_sandbox.py tests/test_windows_sandbox_mini
 
 上述原生测试会使用自有临时工作区/运行时和临时 ACL，必须在授权的测试环境运行。
 缺少实际 Host 的 packaged 测试会跳过，不能把跳过视为通过。
-既有 `scripts/run_sandbox_acceptance.py` 先做源码回归，再构建真实 onedir Host 并运行打包测试；
+既有 `scripts/run_sandbox_acceptance.py` 默认先做完整源码回归，再构建真实 onedir Host 并运行打包测试；主 CI 已独立要求完整源码回归时，显式使用 `--source-suite boundaries` 在原生环境复验沙箱及相关权限边界，完整源码用例仍由总 gate 保留；
 Windows 增量已接入该入口。该脚本会生成测试产物，需要现有构建依赖及搜索引擎，不是只读命令或安装器。
 
 真实 OS 验证涵盖文件/网络正向对照与拒绝、环境过滤、资源限制、正常/取消/超时及 Host 强制退出后的生命周期。

@@ -8,17 +8,38 @@ from pathlib import Path
 import subprocess
 import sys
 
+def source_test_paths(root, suite):
+    if suite == 'full':
+        return ['tests']
+    if suite != 'boundaries':
+        raise ValueError('Unknown source acceptance suite')
+    selected = sorted({
+        path.relative_to(root).as_posix()
+        for pattern in ('test_*sandbox*.py', 'test_windows_owned_job.py',
+                        'test_windows_profile_lifecycle.py', 'test_read_approval.py',
+                        'test_read_execution_plan.py')
+        for path in (root / 'tests').glob(pattern)
+    })
+    if not selected:
+        raise ValueError('Native boundary source tests are missing')
+    return selected
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--storage-native-library',type=Path)
+    parser.add_argument('--source-suite', choices=('full', 'boundaries'), default='full',
+        help='Use boundaries only when the enclosing gate also requires the full source suite')
     args=parser.parse_args()
     native=None if args.storage_native_library is None else args.storage_native_library.resolve(strict=True)
     if native is not None and (sys.platform!='win32' or not native.is_file()):
         parser.error('Native storage acceptance requires an explicit Windows build')
     root = Path(__file__).resolve().parents[1]
-    # Upstream integration changes broader runtime/search/storage behavior.
-    # Validate the complete source suite in the same delegated native context.
-    subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests', '-q'],
+    # Standalone acceptance remains complete. The main pipeline separately owns
+    # one full suite per platform/architecture and repeats native-sensitive cases
+    # here, in the delegated/native environment. This is not a cached success.
+    source_tests = source_test_paths(root, args.source_suite)
+    subprocess.run([sys.executable, '-B', '-m', 'pytest', *source_tests, '-q'],
                    cwd=root, check=True)
     extra = ['--hidden-import', 'resource'] if sys.platform == 'linux' else []
     subprocess.run([sys.executable, '-m', 'PyInstaller', *extra, '--noconfirm', '--clean', '--onedir',

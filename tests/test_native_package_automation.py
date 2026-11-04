@@ -58,13 +58,16 @@ def test_required_native_and_runtime_jobs_are_in_gate():
     check = ci['jobs']['gate']['steps'][0]['run']
     for name in required: assert repr(name) in check
     native = yaml.safe_load((ROOT / '.github/workflows/linux-package.yml').read_text())
-    assert set(native['jobs']['accept']['needs']) == {'resolve', 'build'}
-    assert native['jobs']['build']['strategy']['matrix'] == native['jobs']['accept']['strategy']['matrix'] or {
-        (x['os'], x['target']) for x in native['jobs']['build']['strategy']['matrix']['include']
-    } == {(x['os'], x['target']) for x in native['jobs']['accept']['strategy']['matrix']['include']}
+    target = yaml.safe_load((ROOT / '.github/workflows/unix-target.yml').read_text())
+    assert target['jobs']['accept']['needs'] == 'build'
+    assert {x['target'] for x in native['jobs']['target']['strategy']['matrix']['include']} == {
+        'macos-arm64', 'linux-x86_64', 'linux-aarch64'}
+    assert native['jobs']['target']['uses'] == './.github/workflows/unix-target.yml'
+    assert target['jobs']['build']['runs-on'] == target['jobs']['accept']['runs-on']
 
 def test_all_external_actions_are_pinned_and_checkout_does_not_persist_credentials():
-    for name in ('ci.yml', 'linux-package.yml', 'dashboard-runtime.yml', 'linux-update.yml', 'windows-update.yml'):
+    for name in ('ci.yml', 'pr-contract.yml', 'native-sandbox.yml', 'native-acceptance.yml',
+                 'linux-package.yml', 'unix-target.yml', 'dashboard-runtime.yml', 'linux-update.yml', 'windows-update.yml'):
         workflow = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())
         for job in workflow['jobs'].values():
             for step in job.get('steps', []):
