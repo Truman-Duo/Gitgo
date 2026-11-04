@@ -1,6 +1,6 @@
 # Gitgo 版本
 
-## Alpha 3.1（2026-11-04）
+## Alpha 3.1（发布候选）
 
 产品、Dashboard 与 Native Host：`1.0.0-alpha.3.1`；Windows 文件版本：`1.0.0.5`。发布标签为 `v1.0.0-alpha.3.1`，属于 preview 渠道。版本整合在必需检查通过后合入 master；原 Alpha 3 标签与资产保留不变。平台范围、升级边界和未完成评估见 [Alpha 3.1](ALPHA_3_1.md)，确切提交、树和最终归档验证结果以 [Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3.1) 摘要为准。
 

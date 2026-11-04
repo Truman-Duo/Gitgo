@@ -43,7 +43,7 @@ Gitgo 是面向真实项目开发的终端 Agent harness，将模型、工具、
 
 1. 从 [Alpha 3.1 Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3.1) 下载 Windows x64 ZIP 和校验文件，核对后完整解压；按[安装说明](docs/INSTALL.md)建立独立管理安装，再运行生成的 `gitgo.ps1`。
 2. 首次启动在 Terminal 行用左右方向键选择检测到的终端，按 Enter 保存。
-3. 打开 `/config → Providers`，用 `/new` 选择服务商预设，填写密钥并选择模型；模型列表不可用时可手填。`/test` 测试草稿，`Ctrl+S` 保存；协议和 token 预算在 `/advanced`。需要备用路由时开启自动 failover 并设置顺序。
+3. 打开 `/config → 模型服务商`，用 `/new` 选择服务商预设，再填写连接和密钥；在“添加模型”中批量选择或手填型号，用 `Ctrl+S` 保存。模型列表和连通检查在后台进行，参数在“高级 · 配置 JSON”修改；每个 API 可配置自己的两个备用连接。
 4. 选择项目，输入任务，例如“调查这个项目的启动流程，给出问题和证据”。模型需要澄清时回答问题卡；涉及受限操作时处理审批。
 5. 在同一项目继续对话。以后可在 `/config → General` 更改终端，下次启动使用新选择。
 
@@ -64,8 +64,8 @@ run_dashboard_native.bat
 | 行为与效率对照 | 已有小样本 API 对照和后台采集；继续积累自然任务、边界与长任务数据，衡量收益和额外成本 |
 | 信号与恢复 | 持久事件已接入核心路径；继续迁移旧回调与状态通道，验证组合行为 |
 | 隐私与文档维护 | 现有规则覆盖部分凭据和私有内容；完整引用检查、公开候选审批与持续文档维护待实施 |
-| 多人、多仓库 Git 流程 | 已有任务/worktree 能力和贡献规范；workspace、trial、formal 的跨仓库生命周期自动化待实施 |
-| 平台、隔离与运行模式 | macOS/Linux、完整 OS 沙箱及模式切换另行推进，以对应平台和交互验收为准 |
+| 多人、多仓库 Git 流程 | Publish 已接入工作区整理、正式提交、PR 与发布；继续验证更多协作和恢复场景 |
+| 平台、隔离与运行模式 | AUTO/MANUAL 沿原授权边界切换；macOS 通用执行与受保护 Git 尚未实现，三平台原生模块维护继续推进 |
 | 本地模型 | 实际本地模型接入验收延期，后续单独验证 |
 
 功能和问题通过 [Issues](https://github.com/Truman-Duo/Gitgo/issues) 跟踪。表中的计划分别验收，并随实现更新 [功能状态](docs/IMPLEMENTATION_STATUS.md)。

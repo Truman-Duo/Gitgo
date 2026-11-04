@@ -45,7 +45,7 @@ macOS runner 的 Keychain 不等于用户桌面锁定/授权弹窗基线。
 包内 build-manifest.json 记录版本、目标、基线、commit/tree、工具链、依赖和文件摘要；
 验收记录独立上传，不倒写或篡改已生成包。源码失败注入覆盖未知目录、升级事务、
 原生服务删除失败和重试等；不能说所有故障都已在每个真实 OS 上注入。
-CI gate 必须等待 runtime matrix、两个 Unix 最终包和 Windows 最终 ZIP 检查；
+CI gate 必须等待 runtime matrix、三个 Unix 最终包和 Windows 最终 ZIP 检查；
 任一失败/取消/意外跳过不能得到全平台成功。Windows ZIP 还执行 unpacked frozen
 Host 和连续性检查；不能将 synthetic ZIP 单测冒充 Windows 原生执行。
 
