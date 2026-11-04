@@ -308,7 +308,11 @@ def compile_routing_proposal(
                 "A semantically explicit subprocess request requires quoted user evidence"
             )
         normalized["delegation_required"] = True
-        normalized['minimum_delegated_outcomes'] = max(1, int(normalized.get('minimum_delegated_outcomes', 0) or 0))
+        # Creation and parent completion are separate obligations. Semantic
+        # requests may explicitly make the child's result optional; omission
+        # remains strict. A preserved manual_B_creation requirement above is
+        # authoritative and cannot be weakened by a model-authored proposal.
+        normalized.setdefault("minimum_delegated_outcomes", 1)
 
     compiled_candidate = {**candidate, **normalized}
     compiled_advice = routing_advice(compiled_candidate)
