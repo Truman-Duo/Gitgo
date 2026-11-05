@@ -185,19 +185,33 @@ class NativeLibrary:
         raw = json.dumps(request, ensure_ascii=True, separators=(',', ':'), allow_nan=False).encode('ascii')
         if not 0 < len(raw) <= MAX_REQUEST:
             raise ValueError("Native request exceeds its bound")
-        output = C.create_string_buffer(RESPONSE_CAPACITY)
-        written = C.c_size_t()
-        status = self._call(raw, len(raw), output, len(output), C.byref(written))
-        if status != 0 or not 0 < written.value <= len(output):
-            self._sealed = True
-            raise NativeBoundaryError("Native call outcome is unknown; do not replay the invocation")
+        # Tree preparation opens/releases many files. Avoid allocating and
+        # zeroing 64 KiB for every small token response. Keep the same bounded,
+        # thread-local/reentrant ownership as the descriptor transport above.
+        slots = getattr(self._scratch, 'call_buffers', None)
+        if slots is None:
+            slots = self._scratch.call_buffers = []
+        slot = next((item for item in slots if not item[1]), None)
+        if slot is None:
+            slot = [C.create_string_buffer(RESPONSE_CAPACITY), False]
+            if len(slots) < 2:
+                slots.append(slot)
+        slot[1] = True
+        output, written = slot[0], C.c_size_t()
         try:
-            result = json.loads(C.string_at(output, written.value))
-            if type(result) is not dict or type(result.get('ok')) is not bool:
-                raise ValueError('Invalid response')
-        except (ValueError, TypeError) as error:
-            self._sealed = True
-            raise NativeBoundaryError("Native call response is unknown; retain recovery debt") from error
+            status = self._call(raw, len(raw), output, len(output), C.byref(written))
+            if status != 0 or not 0 < written.value <= len(output):
+                self._sealed = True
+                raise NativeBoundaryError("Native call outcome is unknown; do not replay the invocation")
+            try:
+                result = json.loads(C.string_at(output, written.value))
+                if type(result) is not dict or type(result.get('ok')) is not bool:
+                    raise ValueError('Invalid response')
+            except (ValueError, TypeError) as error:
+                self._sealed = True
+                raise NativeBoundaryError("Native call response is unknown; retain recovery debt") from error
+        finally:
+            slot[1] = False
         if not result['ok']:
             error = NativeBoundaryError(result.get('winerror', 0), result.get('error', 'native_failure'))
             error.winerror = result.get('winerror', 0)

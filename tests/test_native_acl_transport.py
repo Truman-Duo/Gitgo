@@ -1,5 +1,6 @@
 """Caller-owned scratch never crosses threads or overwrites reentrant results."""
 import ctypes as C
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import pytest
@@ -54,3 +55,35 @@ def test_write_has_no_output_and_bad_length_seals_boundary():
         native.acl(1, 1)
     with pytest.raises(NativeBoundaryError, match='sealed'):
         native.acl(1, 1)
+
+
+def test_json_call_reentrant_response_survives_buffer_reuse():
+    native = library(None)
+    def call(raw, length, output, capacity, written):
+        request = json.loads(raw)
+        response = json.dumps({'ok': True, 'value': request['token']}).encode()
+        C.memmove(output, response, len(response))
+        written._obj.value = len(response)
+        if request['token'] == 1:
+            assert native.call(op='test', token=2)['value'] == 2
+        return 0
+    native._call = call
+    assert native.call(op='test', token=1)['value'] == 1
+    assert native.call(op='test', token=1)['value'] == 1
+
+
+def test_json_call_parallel_responses_stay_on_their_caller_thread():
+    native = library(None)
+    rendezvous = threading.Barrier(2)
+    def call(raw, length, output, capacity, written):
+        response = json.dumps({'ok': True, 'value': json.loads(raw)['token']}).encode()
+        C.memmove(output, response, len(response))
+        written._obj.value = len(response)
+        rendezvous.wait(timeout=5)
+        return 0
+    native._call = call
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(native.call, op='test', token=1)
+        second = pool.submit(native.call, op='test', token=2)
+        assert first.result(timeout=5)['value'] == 1
+        assert second.result(timeout=5)['value'] == 2
