@@ -152,8 +152,8 @@ def spawn(argv, **options):
     if "startupinfo" in options: raise ValueError("Windows scope owns its handle allowlist")
     if options.pop("close_fds", True) is not True:
         raise ValueError("Windows scope requires an explicit closed handle boundary")
-    from backend.core.installation_lease import runtime_descriptors
-    retained = runtime_descriptors()
+    from backend.core.installation_lease import sharing_descriptors
+    retained = sharing_descriptors()
     if len(retained) > 16: raise ValueError("Too many retained Windows lease descriptors")
     lease_handles = [msvcrt.get_osfhandle(fd) for fd in retained]
     retry_pending_cleanup()

@@ -73,3 +73,22 @@ def test_inherited_sandbox_capability_has_metadata_but_no_contents_or_write(tmp_
                 with pytest.raises(OSError):os.write(descriptor,b"x")
             finally:os.close(descriptor)
     finally:os.close(original)
+
+
+def test_namespace_reservation_is_bound_and_does_not_become_runtime_authority(tmp_path_factory):
+    import msvcrt
+    from backend.core.installation_lease import sharing_descriptors,runtime_descriptors
+    base=tmp_path_factory/"private";win.create_private_directory(base)
+    with win.private_namespace(base):
+        assert not runtime_descriptors()
+        original=sharing_descriptors()[0]
+        expected=_native_name(msvcrt.get_osfhandle(original))
+        with pytest.raises(UpdateError,match="UPDATE_PROBE_LEASE"):
+            _matching_descriptor(duplicate(original),expected/"control/runtime.lock")
+        descriptor=_matching_descriptor(duplicate(original),expected/"control/runtime.lock",namespace=expected)
+        try:
+            assert os.path.samestat(os.fstat(descriptor),os.fstat(original))
+            assert not os.get_inheritable(descriptor)
+        finally:os.close(descriptor)
+        with pytest.raises(UpdateError,match="UPDATE_PROBE_LEASE"):
+            _matching_descriptor(duplicate(original),expected/"control/runtime.lock",namespace=expected/"unrelated")

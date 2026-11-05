@@ -183,8 +183,9 @@ def test_real_windows_bootstrap_automatically_applies_prepared_update_on_clean_e
         env=env,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=180)
     assert result.returncode==0,result.stderr
     assert "Gitgo "+old in result.stdout,result.stdout
-    assert any(json.loads(line).get("update_status") == "committed"
-               for line in result.stdout.splitlines() if line.startswith("{")),result.stdout
+    # The admitted updater generation commits the transaction without writing
+    # legacy launcher protocol output into an ordinary command's stdout.
+    assert "Automatic update deferred:" not in result.stderr,result.stderr
     assert store._ledger()["current"]["version"]==new
     boot(new)
 
@@ -282,5 +283,16 @@ print(out,flush=True)
         assert process.returncode!=0,(out,err)
         assert "UNSAFE_BODY_STARTED" not in out
         assert process.close_sandbox()["complete"]
+        # A real private directory sharing reservation is still insufficient:
+        # only the separate, validated runtime.lock can admit payload code.
+        from backend.core.update.windows_storage import private_namespace
+        with private_namespace(store.root):
+            process=sandbox_popen([str(host),"--gitgo-internal-role","python","-c",
+                "print('UNSAFE_BODY_STARTED')"],SandboxPolicy(workspace),cwd=str(workspace),env=env,
+                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8")
+            out,err,_=collect_output(process,timeout=45,limit=65536,terminate=lambda:terminate_tree(process))
+            assert process.returncode!=0,(out,err)
+            assert "UNSAFE_BODY_STARTED" not in out
+            assert process.close_sandbox()["complete"]
         assert tree_digest(store.root/"active")==before
     finally:access.close()
