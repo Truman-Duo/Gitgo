@@ -18,6 +18,8 @@ use windows_sys::Win32::{
 type Result<T> = std::result::Result<T, u32>;
 const INVALID: u32 = 87;
 const MAX_RESOURCES: usize = 4096;
+const REPARSE_DENIED: u32 = 0x20000001;
+const HARDLINK_DENIED: u32 = 0x20000002;
 
 // These types have different allocators/destructors. None is interchangeable.
 struct KernelHandle(usize);
@@ -355,7 +357,11 @@ fn launch(
 pub fn dispatch(request: Request) -> Value {
     match perform(request) {
         Ok(value) => value,
-        Err(error) => json!({"ok": false, "error": "windows_native_failure", "winerror": error}),
+        Err(error) => json!({"ok": false, "error": match error {
+            REPARSE_DENIED => "Refusing a reparse point in the configuration tree",
+            HARDLINK_DENIED => "Refusing a multiply-linked configuration file",
+            _ => "windows_native_failure"
+        }, "winerror": error}),
     }
 }
 fn perform(request: Request) -> Result<Value> {
@@ -477,11 +483,11 @@ fn perform(request: Request) -> Result<Value> {
             let owned = KernelHandle(handle as usize);
             let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
             check(unsafe { GetFileInformationByHandle(handle, &mut info) })?;
-            if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
-                    && info.nNumberOfLinks != 1)
-            {
-                return Err(INVALID);
+            if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(REPARSE_DENIED);
+            }
+            if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 && info.nNumberOfLinks != 1 {
+                return Err(HARDLINK_DENIED);
             }
             resources.files.insert(token, owned);
             Ok(json!({"ok": true, "token": token, "handle": handle as usize}))
@@ -752,4 +758,32 @@ pub fn acl(operation: u32, token: u64, input: &[u8], capacity: usize) -> Result<
         return Ok(Vec::new());
     }
     Err(INVALID)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn retirement_ranges_preserve_holes_and_compact_repeated_trees() {
+        let mut value = Resources {
+            next: 1,
+            jobs: BTreeMap::new(),
+            processes: BTreeMap::new(),
+            files: BTreeMap::new(),
+            retired_files: BTreeMap::new(),
+        };
+        for token in [5, 3, 4, 1] {
+            value.remember_file_retirement(token);
+        }
+        assert!(!value.file_retired(0));
+        assert!(!value.file_retired(2));
+        assert!(!value.file_retired(6));
+        value.remember_file_retirement(2);
+        for token in 6..100_000 {
+            value.remember_file_retirement(token);
+        }
+        assert_eq!(value.retired_files.len(), 1);
+        assert!(value.file_retired(99_999));
+        assert!(!value.file_retired(100_000));
+    }
 }

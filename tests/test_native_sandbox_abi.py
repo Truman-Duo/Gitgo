@@ -77,11 +77,18 @@ def test_job_retirement_tokens_and_cold_recovery(native):
 
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows loader pin')
-def test_loaded_image_cannot_be_replaced_or_written(native, tmp_path_factory):
+def test_loaded_image_cannot_be_replaced_or_written(native):
     image = installed_path()
+    alternate = image.with_name('pin-control-' + uuid.uuid4().hex + '.dll')
+    renamed = alternate.with_suffix('.renamed')
+    # Same-directory positive control: cross-volume rename errors or an
+    # unwritable directory cannot masquerade as a successful loader pin.
+    alternate.write_bytes(b'positive-control')
+    alternate.rename(renamed)
+    renamed.unlink()
     with pytest.raises(OSError):
         with image.open('r+b') as stream:
             stream.write(b'replace')
     with pytest.raises(OSError):
-        image.rename(tmp_path_factory / image.name)
+        image.rename(alternate)
     assert native.call(op='capabilities')['ok'] is True
