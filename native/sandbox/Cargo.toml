@@ -1,0 +1,27 @@
+[package]
+name = "gitgo-native-sandbox"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[lib]
+name = "gitgo_native_sandbox"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation", "Win32_Security", "Win32_Security_Isolation",
+  "Win32_System_JobObjects", "Win32_System_Threading",
+  "Win32_System_SystemInformation", "Win32_System_Memory",
+  "Win32_Storage_FileSystem", "Win32_Security_Authorization",
+] }
+
+[profile.release]
+panic = "unwind"
+overflow-checks = true
+lto = "thin"

@@ -1,0 +1,10 @@
+name: Rust sandbox stage 1 candidate
+on:
+  push:
+    branches: ["feat/45-rust-native-stage1"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-acceptance:
+    uses: ./.github/workflows/native-sandbox.yml

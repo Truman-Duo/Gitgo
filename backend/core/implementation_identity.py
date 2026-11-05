@@ -94,6 +94,11 @@ the actual import loader, not from a source-version label.
                 digest.update(_source_digest(Path(spec.origin)).encode())
             else:
                 raise RuntimeError("Cannot identify installed execution module: " + name)
+    if sys.platform == 'win32':
+        from backend.core.native_sandbox import implementation_identity
+        import json
+        digest.update(json.dumps(implementation_identity(), sort_keys=True,
+                                 separators=(',', ':')).encode('utf8'))
     value = digest.hexdigest()
     if getattr(sys, "frozen", False):
         _frozen_digest = value

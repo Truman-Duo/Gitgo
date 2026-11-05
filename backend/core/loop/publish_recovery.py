@@ -57,24 +57,8 @@ def retire_native(recovery_id, location):
     if location != resource_location(recovery_id):
         raise PublishError("PUBLISH_RUNTIME_ENVIRONMENT_CHANGED")
     if sys.platform == "win32":
-        import ctypes as C
-        from ctypes import wintypes as W
-        from backend.core.sandbox_windows import WindowsApi, NativeJobHandle, _PENDING_JOBS
-        for job in tuple(_PENDING_JOBS.values()):
-            if getattr(job, "recovery_id", "") == recovery_id and not job.close()["complete"]:
-                return False
-        api = WindowsApi()
-        function = api.kernel.OpenJobObjectW
-        function.argtypes, function.restype = [W.DWORD, W.BOOL, W.LPCWSTR], W.HANDLE
-        C.set_last_error(0)
-        handle = function(0x0004 | 0x0008, False, location["name"])
-        if not handle:
-            if C.get_last_error() == 2:
-                return True  # Named kernel boundary no longer exists.
-            raise C.WinError(C.get_last_error())
-        job = NativeJobHandle(handle, api)
-        job.recovery_id = recovery_id
-        return job.close()["complete"] is True
+        from backend.core.windows_sandbox_native import recover
+        return recover(recovery_id)
     if sys.platform == "linux":
         from backend.core.sandbox_linux import LinuxCgroup, _PENDING_CGROUPS
         root = Path(location["root"]).resolve(strict=True)

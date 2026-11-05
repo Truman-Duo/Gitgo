@@ -92,7 +92,7 @@ class WorkspaceAccess:
         from .windows_acl import management_lock
         from .windows_access import AccessTree
         from .sandbox_windows import WindowsApi, _PENDING_JOBS
-        if _PENDING_JOBS:
+        if any(getattr(job, 'retirement_started', True) for job in tuple(_PENDING_JOBS.values())):
             raise SandboxDenied('SANDBOX_CLEANUP_PENDING', 'Native processes are not retired; keep workspace access and recovery journal for inspection.')
         with _lock, management_lock(wait_ms=30000):
             self.payload['phase'] = 'revoking'

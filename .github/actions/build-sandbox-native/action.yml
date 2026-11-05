@@ -1,0 +1,10 @@
+name: Build sandbox native ABI
+description: Compile locked Rust code before any source or packaged execution
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        rustup toolchain install 1.90.0 --profile minimal
+        python -B scripts/build_sandbox_native.py
