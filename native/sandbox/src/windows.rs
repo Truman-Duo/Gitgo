@@ -250,6 +250,19 @@ fn create_job(name: &[u16], processes: u32, memory: u64, cpu: u32) -> Result<Ker
     Ok(handle)
 }
 
+type DeriveSid = unsafe extern "system" fn(*const u16, *mut *mut c_void) -> i32;
+fn derive_profile_sid(profile: &[u16], derive: DeriveSid) -> Result<Sid> {
+    let mut sid = Sid(null_mut());
+    let status = unsafe { derive(profile.as_ptr(), &mut sid.0) };
+    if status < 0 {
+        return Err(status as u32);
+    }
+    if sid.0.is_null() {
+        return Err(INVALID);
+    }
+    Ok(sid)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn launch(
     job: HANDLE,
@@ -306,11 +319,7 @@ fn launch(
             return Err(INVALID);
         }
     }
-    let mut sid = Sid(null_mut());
-    let status = unsafe { DeriveAppContainerSidFromAppContainerName(profile.as_ptr(), &mut sid.0) };
-    if status < 0 {
-        return Err(status as u32);
-    }
+    let sid = derive_profile_sid(&profile, DeriveAppContainerSidFromAppContainerName)?;
     let caps = SECURITY_CAPABILITIES {
         AppContainerSid: sid.0,
         Capabilities: null_mut(),
@@ -776,6 +785,17 @@ pub fn acl(operation: u32, token: u64, input: &[u8], capacity: usize) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_sid_derivation_is_propagated_without_a_fallback() {
+        unsafe extern "system" fn deny(_profile: *const u16, sid: *mut *mut c_void) -> i32 {
+            unsafe {
+                *sid = null_mut();
+            }
+            0x80070005u32 as i32
+        }
+        let result = derive_profile_sid(&wide("Gitgo.Test.Prepared").unwrap(), deny);
+        assert!(matches!(result, Err(0x80070005)));
+    }
     #[test]
     fn retirement_ranges_preserve_holes_and_compact_repeated_trees() {
         let mut value = Resources {
