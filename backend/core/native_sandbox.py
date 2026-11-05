@@ -86,6 +86,7 @@ class NativeLibrary:
     def __init__(self, path):
         self._pins = ExitStack()
         self._sealed = False
+        self._scratch = threading.local()
         path = Path(path)
         try:
             if sys.platform == 'win32':
@@ -144,17 +145,39 @@ class NativeLibrary:
             raise NativeBoundaryError('Native boundary is sealed; retain recovery debt')
         if len(raw) > MAX_REQUEST:
             raise ValueError('Native security descriptor exceeds its bound')
-        capacity = min(8 * MAX_REQUEST, max(4096, len(raw) * 16)) if operation == 3 else MAX_REQUEST
-        output, written = C.create_string_buffer(capacity), C.c_size_t()
-        status = self._acl(operation, token, raw or None, len(raw), output, len(output), C.byref(written))
-        if status:
-            if status == 5023:
+        if operation not in {1, 2, 3, 4, 5}:
+            raise ValueError('Unknown native ACL operation')
+        capacity = (min(8 * MAX_REQUEST, max(4096, len(raw) * 16)) if operation == 3
+                    else MAX_REQUEST if operation in {1, 4} else 0)
+        # A whole runtime tree needs many small descriptor reads. Reuse bounded
+        # scratch space per OS caller thread, while reserving a separate slot
+        # for reentrant calls (including Python signal handlers after FFI).
+        slots = getattr(self._scratch, 'acl_buffers', None)
+        if slots is None:
+            slots = self._scratch.acl_buffers = []
+        slot = next((item for item in slots if not item[1]), None) if capacity else None
+        if capacity:
+            if slot is None:
+                slot = [C.create_string_buffer(capacity), False]
+                if len(slots) < 2:
+                    slots.append(slot)
+            elif len(slot[0]) < capacity:
+                slot[0] = C.create_string_buffer(capacity)
+            slot[1] = True
+        output, written = slot[0] if slot is not None else None, C.c_size_t()
+        try:
+            status = self._acl(operation, token, raw or None, len(raw), output, capacity, C.byref(written))
+            if status:
+                if status == 5023:
+                    self._sealed = True
+                raise NativeBoundaryError(status, 'Native ACL operation failed; preserve recovery records')
+            if written.value > capacity:
                 self._sealed = True
-            raise NativeBoundaryError(status, 'Native ACL operation failed; preserve recovery records')
-        if written.value > capacity:
-            self._sealed = True
-            raise NativeBoundaryError('Native ACL response exceeds bounds')
-        return C.string_at(output, written.value)
+                raise NativeBoundaryError('Native ACL response exceeds bounds')
+            return C.string_at(output, written.value) if written.value else b''
+        finally:
+            if slot is not None:
+                slot[1] = False
 
     def call(self, **request):
         if self._sealed:
