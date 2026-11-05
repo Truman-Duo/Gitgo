@@ -58,7 +58,15 @@ jobs:
         run: |
           "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           python -B -m pytest tests/test_windows_security_descriptor.py tests/test_windows_security_privileges.py tests/test_windows_acl_plan.py tests/test_windows_acl_provisioning.py tests/test_windows_acl_inheritance.py tests/test_windows_acl_sacl_inheritance.py tests/test_windows_acl_management.py -q -x
+      - name: Rust Windows execution boundary preflight
+        if: runner.os == 'Windows'
+        run: >-
+          python -B -m pytest tests/test_native_sandbox.py
+          -k "windows_filesystem_escape_and_workspace_write or windows_network_loopback_is_denied or windows_cleanup_reports_confirmed_tree_exit"
+          -q -x
       - name: Build and validate native storage lifetime and journals
+        # The migrated execution boundary must run before the longer storage
+        # regressions; this does not replace either complete acceptance gate.
         if: runner.os == 'Windows'
         run: |
           $compiler = (Get-Command clang.exe -ErrorAction Stop).Source

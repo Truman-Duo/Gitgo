@@ -42,14 +42,7 @@ def main():
     if len(artifacts) != 1:
         raise SystemExit('Cargo did not emit exactly one native library for the host platform')
     source = artifacts[0].resolve(strict=True)
-    # Validate architecture, ABI and capabilities in a fresh interpreter. The
-    # build process does not keep a previous mapped DLL pinned between builds.
-    probe = subprocess.run([sys.executable, '-B', '-c',
-        'import sys; from backend.core.native_sandbox import NativeLibrary; '
-        'assert NativeLibrary(sys.argv[1]).call(op="capabilities")["abi"] == 1', str(source)],
-        cwd=ROOT, check=False)
-    if probe.returncode:
-        raise SystemExit('Compiled native library failed the actual host loader/ABI check')
+    expected_digest = hashlib.sha256(source.read_bytes()).hexdigest()
     # Do not overwrite a previously staged binary: it may be mapped/pinned.
     args.output.mkdir(parents=True, exist_ok=True)
     target = args.output / name
@@ -58,6 +51,16 @@ def main():
             raise SystemExit('Native staging already exists with different code; use a fresh checkout/output')
     else:
         shutil.copy2(source, target)
+    if hashlib.sha256(target.read_bytes()).hexdigest() != expected_digest:
+        raise SystemExit('Native staging differs from the actual Cargo artifact')
+    # Cargo legitimately hard-links its own outputs. Probe the independent
+    # staged copy, keeping the runtime's single-link rule fully intact.
+    probe = subprocess.run([sys.executable, '-B', '-c',
+        'import sys; from backend.core.native_sandbox import NativeLibrary; '
+        'assert NativeLibrary(sys.argv[1]).call(op="capabilities")["abi"] == 1', str(target.resolve(strict=True))],
+        cwd=ROOT, check=False)
+    if probe.returncode:
+        raise SystemExit('Staged native library failed the actual host loader/ABI check')
     notices = args.output / 'notices'
     notices.mkdir(exist_ok=True)
     packages = []
@@ -84,7 +87,7 @@ def main():
     shutil.copytree(rust_notices / 'licenses', notices / 'rust-1.90.0/licenses', dirs_exist_ok=True)
     (notices / 'dependencies.json').write_text(json.dumps(packages, sort_keys=True) + '\n', encoding='utf8')
     metadata = {'abi_version': 1, 'platform': sys.platform, 'name': name,
-                'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}
+                'sha256': expected_digest}
     (args.output / 'sandbox-build.json').write_text(json.dumps(metadata, sort_keys=True) + '\n', encoding='utf8')
     print('Built native sandbox ABI:', name, metadata['sha256'])
 
