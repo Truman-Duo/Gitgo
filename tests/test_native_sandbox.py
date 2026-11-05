@@ -1002,7 +1002,11 @@ def test_windows_cpu_budget_counts_descendants(native_box):
 
 def test_failed_resource_monitor_kills_started_tool(cross_platform_box, monkeypatch):
     workspace, policy, executable = cross_platform_box
-    source = ("import time;open('before-monitor-failure','w').write('ran');"
+    # Publish readiness only after the entire marker is closed. Existence of
+    # a newly opened file alone can race its first write on a real runner.
+    source = ("import os,time;from pathlib import Path;"
+              "Path('before-monitor-failure.pending').write_text('ran');"
+              "os.replace('before-monitor-failure.pending','before-monitor-failure');"
               "time.sleep(1);open('after-monitor-failure','w').write('escaped')")
     def fail_start(_):
         deadline = time.monotonic() + 3

@@ -67,6 +67,7 @@ jobs:
           for attempt in range(3):
               result = max(result, int(pytest.main([
                   'tests/test_windows_profile_lifecycle.py',
+                  'tests/test_native_sandbox.py::test_failed_resource_monitor_kills_started_tool',
                   'tests/test_publish_distribution.py::test_real_native_build_pause_waits_for_retirement_and_does_not_publish',
                   'tests/test_publish_queue.py::test_real_native_background_run_checks_environment_then_integrates',
                   '-vv', '-s', '--durations=10'])))
