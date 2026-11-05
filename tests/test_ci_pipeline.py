@@ -101,14 +101,14 @@ class PipelineTests(unittest.TestCase):
         def runtime(job, name, key):
             return next(step['with'][key] for step in job['steps']
                         if step.get('uses', '').startswith(name + '@'))
-        for name in ('python-windows', 'dashboard'):
+        for name in ('python-windows-shards', 'dashboard'):
             job = jobs[name]
             self.assertEqual(job['runs-on'], frozen['runs-on'])
             for action, key in [('actions/setup-python', 'python-version'),
                                 ('actions/setup-node', 'node-version'),
                                 ('oven-sh/setup-bun', 'bun-version')]:
                 self.assertEqual(runtime(job, action, key), runtime(frozen, action, key))
-        for job in (jobs['python-windows'], frozen):
+        for job in (jobs['python-windows-shards'], frozen):
             self.assertTrue(any('--require-hashes -r packaging/requirements-build.lock' in step.get('run', '')
                                 for step in job['steps']))
 
@@ -117,6 +117,18 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(set(jobs['windows-package']['needs']), {'contract', 'privacy', 'dashboard'})
         self.assertTrue({'python-windows', 'windows-package'} <= set(jobs['gate']['needs']))
         self.assertIn('python-windows', jobs['managed-update-windows']['needs'])
+
+    def test_full_source_output_requires_every_shard_and_a_complete_coverage_join(self):
+        jobs = workflow('ci.yml')['jobs']
+        pieces = jobs['python-windows-shards']
+        self.assertEqual(pieces['strategy']['matrix']['shard'], [0, 1, 2, 3])
+        self.assertFalse(pieces['strategy']['fail-fast'])
+        run = next(step['run'] for step in pieces['steps'] if step.get('name') == 'Full Python suite')
+        self.assertIn('-p scripts.ci_source_shards tests -q', run)
+        self.assertIn('--source-shard-count 4', run)
+        self.assertIn('python-windows-shards', jobs['python-windows']['needs'])
+        verified = next(step for step in jobs['python-windows']['steps'] if step.get('id') == 'verified')
+        self.assertIn('scripts/ci_source_shards.py --reports incoming --count 4', verified['run'])
 
     def test_metadata_edits_cannot_restart_packaging_or_replace_the_product_gate(self):
         ci = workflow('ci.yml')

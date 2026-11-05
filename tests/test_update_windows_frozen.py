@@ -12,6 +12,7 @@ import subprocess
 import pytest
 
 from backend.core.update import handoff
+from backend.core.update.bootstrap_contract import WINDOWS_API
 from backend.core.update.tree import tree_digest
 from backend.core.update.installation import open_managed
 from backend.core.update.persistence import lock_file
@@ -160,7 +161,7 @@ except Exception as error:
             "installer_error": safe_errors[-4096:], "stderr_bytes": len(diagnostic_errors),
             "role_exit": role_proc.returncode, "role_output": role_output.strip(),
             "cleanup": proc._gitgo_cleanup}))
-    assert open_managed(root).registration["bootstrap_api"] == 8
+    assert open_managed(root).registration["bootstrap_api"] == WINDOWS_API
     command = bin_dir / "gitgo.ps1"
     assert command.read_bytes().startswith(b"\xef\xbb\xbf")
     launch = subprocess.run([shell, "-NoProfile", "-File", str(command), "--version"], env=env,

@@ -44,6 +44,7 @@ jobs:
         run: |
           python3 -I -B candidate/tests/test_ci_pr_contract.py
           python3 -I -B candidate/tests/test_ci_pipeline.py
+          python3 -I -B candidate/tests/test_ci_source_shards.py
       - name: Verify PR version, declared boundaries, and upstream ancestry
         id: contract
         working-directory: candidate
