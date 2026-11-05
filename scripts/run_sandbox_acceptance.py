@@ -35,6 +35,8 @@ def main():
     if native is not None and (sys.platform!='win32' or not native.is_file()):
         parser.error('Native storage acceptance requires an explicit Windows build')
     root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
     from backend.core.native_sandbox import get_native
     get_native().call(op='capabilities')  # Build explicitly before the delegated/native scope.
     # Standalone acceptance remains complete. The main pipeline separately owns

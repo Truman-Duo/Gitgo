@@ -77,11 +77,11 @@ def test_job_retirement_tokens_and_cold_recovery(native):
 
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows loader pin')
-def test_loaded_image_cannot_be_replaced_or_written(native, tmp_path):
+def test_loaded_image_cannot_be_replaced_or_written(native, tmp_path_factory):
     image = installed_path()
     with pytest.raises(OSError):
         with image.open('r+b') as stream:
             stream.write(b'replace')
     with pytest.raises(OSError):
-        image.rename(tmp_path / image.name)
+        image.rename(tmp_path_factory / image.name)
     assert native.call(op='capabilities')['ok'] is True
