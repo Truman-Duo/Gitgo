@@ -14,7 +14,9 @@ sys.path.insert(0, str(ROOT))
 from scripts.release_artifacts import source_identity, validate_versions
 from scripts.render_product_manifest import render_manifest
 
-BASELINES = {('macos', 'arm64'): 'macOS 15', ('linux', 'x86_64'): 'Ubuntu 24.04 / glibc 2.39'}
+BASELINES = {('macos', 'arm64'): 'macOS 26',
+             ('linux', 'x86_64'): 'Ubuntu 24.04 / glibc 2.39',
+             ('linux', 'aarch64'): 'Ubuntu 24.04 ARM64 / glibc 2.39'}
 
 def inventory(stage):
     files = []

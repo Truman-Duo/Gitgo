@@ -366,6 +366,7 @@ def test_provider_mode_uses_hosted_search_and_returns_grounded_answer(monkeypatc
     configured = SimpleNamespace(
         id="provider-1", base_url="https://provider.invalid", api_key="secret",
         model_id="model", protocol="openai_responses", max_output_tokens=4096,
+        configuration={},
         runtime_capabilities=lambda: {"hosted_web_search": True},
     )
     monkeypatch.setattr(

@@ -19,8 +19,14 @@ from .validation import reject
 CONFIG_MODULES = (
     "backend.core.config", "backend.core.migrate", "backend.core.storage.paths",
     "backend.core.storage.runtime",
+    "backend.core.config_extensions",
+    "backend.core.storage.repositories.objects", "backend.core.sync_session.state",
 )
 PROVIDER_MODULES = ("backend.core.llm_config", "backend.core.secret_store")
+# Optional product features may introduce an application-level codec inside
+# the same SQLite/CAS schema. Its addition/removal/change must trigger data
+# rehearsal too. This is a compiled ownership catalogue, not project imports.
+OPTIONAL_STATE_CODECS = ("backend.core.publish.state",)
 
 
 def _canonical_code(code: CodeType, module: str) -> dict:
@@ -61,10 +67,17 @@ def _canonical_code(code: CodeType, module: str) -> dict:
             "exceptiontable": code.co_exceptiontable.hex()}
 
 
-def code_evidence(modules: tuple[str, ...]) -> bytes:
+def code_evidence(modules: tuple[str, ...], *, optional: tuple[str, ...] = ()) -> bytes:
     fingerprints = {}
-    for name in modules:
-        spec = importlib.util.find_spec(name)
+    for name in (*modules, *optional):
+        try: spec = importlib.util.find_spec(name)
+        except ModuleNotFoundError as error:
+            if name not in optional or error.name not in {".".join(name.split(".")[:n]) for n in range(1, len(name.split(".")))}:
+                raise
+            spec = None
+        if spec is None and name in optional:
+            fingerprints[name] = None
+            continue
         loader = getattr(spec, "loader", None)
         if loader is None or not hasattr(loader, "get_code"):
             reject("UPDATE_RUNTIME_CONTRACT", "Runtime writer code cannot be inspected")
@@ -92,7 +105,7 @@ def runtime_evidence() -> tuple[dict, dict[str, bytes]]:
             evidence[f"update-evidence/{name}-{item.version}.sql"] = data
             histories[name + "_migrations"].append({"version": item.version,
                                                      "sha256": hashlib.sha256(data).hexdigest()})
-    evidence["update-evidence/config.json"] = code_evidence(CONFIG_MODULES)
+    evidence["update-evidence/config.json"] = code_evidence(CONFIG_MODULES, optional=OPTIONAL_STATE_CODECS)
     evidence["update-evidence/provider.json"] = code_evidence(PROVIDER_MODULES)
     # Bind schema version declarations from the same compiled code as writers.
     from backend.core.config import Config

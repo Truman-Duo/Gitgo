@@ -2,10 +2,9 @@ name: Gitgo CI
 
 on:
   pull_request:
-    branches: [master]
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [master]
+    branches: [master, 'feat/**']
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -23,51 +22,7 @@ concurrency:
 
 jobs:
   contract:
-    name: PR contract and upstream alignment
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    outputs:
-      native_required: ${{ steps.contract.outputs.native_required }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          path: candidate
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
-          path: upstream
-          persist-credentials: false
-      - name: Verify gate regressions
-        run: python3 -I -B candidate/tests/test_ci_pr_contract.py
-      - name: Verify PR version, declared boundaries, and upstream ancestry
-        id: contract
-        working-directory: candidate
-        run: python3 -I -B scripts/check_pr_contract.py --root . --base-root ../upstream
-      - name: Record tested candidate and integration tree
-        working-directory: candidate
-        env:
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PR_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-        run: |
-          python3 -I -B - <<'PY'
-          import json, os, subprocess
-          from pathlib import Path
-          def git(*args):
-              return subprocess.check_output(['git', *args], text=True).strip()
-          evidence = {'event': os.environ['GITHUB_EVENT_NAME'], 'head': os.environ.get('PR_HEAD'),
-              'observed_base': os.environ.get('PR_BASE'), 'tested_commit': git('rev-parse', 'HEAD'),
-              'tested_tree': git('rev-parse', 'HEAD^{tree}'), 'run_id': os.environ['GITHUB_RUN_ID'],
-              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'formal_terminal_verified': False}
-          Path('ci-evidence.json').write_text(json.dumps(evidence, indent=2), encoding='utf-8')
-          PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ci-candidate-evidence
-          path: candidate/ci-evidence.json
-          if-no-files-found: error
-          retention-days: 14
+    uses: ./.github/workflows/pr-contract.yml
 
   privacy:
     name: Tracked-file privacy boundary
@@ -79,9 +34,14 @@ jobs:
           persist-credentials: false
       - run: python3 -B scripts/verify_release_privacy.py --root .
 
-  python-windows:
-    name: Windows source regression
-    runs-on: windows-latest
+  python-windows-shards:
+    name: Windows source shard ${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    needs: [contract, privacy]
+    runs-on: windows-2022
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -89,12 +49,15 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: '3.14'
+          python-version: '3.14.7'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.1'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.2'
+          bun-version: '1.4.4'
       - name: Install test dependencies
-        run: python -m pip install -r requirements-portable.txt pytest
+        run: python -m pip install --require-hashes -r packaging/requirements-build.lock
       - name: Prepare canonical test temporary directory
         run: |
           @'
@@ -117,70 +80,129 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           python --version
+      - name: Collect expected complete source suite before execution
+        run: >-
+          python -B -m pytest -p scripts.ci_source_shards tests --collect-only -q --rootdir .
+          --source-shard-count 4 --source-shard-index ${{ matrix.shard }}
+          --source-shard-report dev-artifacts/ci-source/collection-probe.json
       - name: Full Python suite
-        run: python -B -m pytest tests -q --junitxml=ci-tests.xml
+        run: >-
+          python -B -m pytest -p scripts.ci_source_shards tests -q --rootdir . --junitxml=ci-tests.xml
+          --source-shard-count 4 --source-shard-index ${{ matrix.shard }}
+          --source-shard-report dev-artifacts/ci-source/source-shard.json
+          --source-collection-expected dev-artifacts/ci-source/collection-probe.json
+      - name: Reject test mutations of tracked source
+        run: |
+          git diff --exit-code HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: windows-source-results
-          path: ci-tests.xml
+          name: windows-source-results-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            ci-tests.xml
+            dev-artifacts/ci-source/source-shard.json
           if-no-files-found: warn
           retention-days: 14
 
+  python-windows:
+    name: Windows source regression
+    needs: [contract, privacy, python-windows-shards]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.verified.outputs.commit }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: windows-source-results-*
+          path: incoming
+      - id: verified
+        name: Require complete disjoint execution of every collected test
+        run: |
+          python3 -B scripts/ci_source_shards.py --reports incoming --count 4
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   dashboard:
     name: Dashboard tests and production build
-    runs-on: windows-latest
+    needs: [contract, privacy]
+    runs-on: windows-2022
     timeout-minutes: 12
+    outputs:
+      commit: ${{ steps.verified.outputs.commit }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '24.15.0'
+          node-version: '24.22.1'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.2'
+          bun-version: '1.4.4'
       - working-directory: cli/dashboard
         run: bun install --frozen-lockfile
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: '3.14'
+          python-version: '3.14.7'
       - name: Sparse full-frame overwrite regression
         run: python -B -c "from tests.test_terminal_screen import assert_renderer_full_paint; assert_renderer_full_paint('bun')"
       - working-directory: cli/dashboard
         run: bun test
       - working-directory: cli/dashboard
         run: bun run build
+      - id: verified
+        name: Record successful exact-source Dashboard regression
+        run: |
+          git diff --exit-code HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "commit=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
 
   native:
-    needs: contract
+    needs: [contract, privacy]
     if: needs.contract.outputs.native_required == 'true'
     uses: ./.github/workflows/native-acceptance.yml
     with:
       os: windows-latest
 
   native-linux:
-    needs: contract
+    needs: [contract, privacy]
     if: needs.contract.outputs.native_required == 'true'
     uses: ./.github/workflows/native-acceptance.yml
     with:
       os: ubuntu-22.04
 
   runtime:
+    needs: [contract, privacy]
     uses: ./.github/workflows/dashboard-runtime.yml
 
   unix-packages:
+    needs: [contract, privacy, dashboard]
     uses: ./.github/workflows/linux-package.yml
 
   managed-update-windows:
+    needs: [contract, privacy, python-windows, dashboard]
     uses: ./.github/workflows/windows-update.yml
+    with:
+      source_verified_commit: ${{ needs.python-windows.outputs.commit }}
+      dashboard_verified_commit: ${{ needs.dashboard.outputs.commit }}
 
   managed-update-linux:
+    needs: [contract, privacy]
     uses: ./.github/workflows/linux-update.yml
+
+  macos-audit:
+    needs: [contract, privacy]
+    uses: ./.github/workflows/native-sandbox.yml
+    with:
+      audit_only: true
 
   windows-package:
     name: Windows final ZIP and frozen continuity
+    needs: [contract, privacy, dashboard]
     runs-on: windows-2022
     timeout-minutes: 35
     steps:
@@ -192,7 +214,7 @@ jobs:
           python-version: '3.14.7'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.2'
+          bun-version: '1.4.4'
       - run: python -m pip install --require-hashes -r packaging/requirements-build.lock
       - run: python -B scripts/provision_ci_sqlite.py
       - run: python -B scripts/provision_ci_ripgrep.py
@@ -232,7 +254,7 @@ jobs:
 
   gate:
     name: CI gate
-    needs: [contract, privacy, python-windows, dashboard, native, native-linux, runtime, unix-packages, windows-package, managed-update-windows, managed-update-linux]
+    needs: [contract, privacy, python-windows, dashboard, native, native-linux, runtime, unix-packages, windows-package, managed-update-windows, managed-update-linux, macos-audit]
     if: always()
     runs-on: ubuntu-22.04
     timeout-minutes: 2
@@ -246,7 +268,7 @@ jobs:
           jobs = json.loads(os.environ['RESULTS'])
           required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
                       'windows-package', 'managed-update-windows', 'unix-packages',
-                      'managed-update-linux']
+                      'managed-update-linux', 'macos-audit']
           summary = ['## Alpha3 platform gate', '', 'All release targets must pass:']
           for name in [*required, 'native', 'native-linux']:
               summary.append('- ' + name + ': ' + jobs[name]['result'])

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import sys
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -14,8 +15,8 @@ from mcp.client.stdio import stdio_client
 async def smoke(project: str) -> dict:
     repository = Path(__file__).resolve().parents[1]
     params = StdioServerParameters(
-        command="cmd.exe",
-        args=["/d", "/c", str(repository / "run_mcp_control.bat")],
+        command=sys.executable,
+        args=["-u", str(repository / "mcp_control_server.py")],
         cwd=str(repository),
     )
     async with stdio_client(params) as (read, write):

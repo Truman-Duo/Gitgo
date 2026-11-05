@@ -35,6 +35,13 @@ class ContractTests(unittest.TestCase):
     def test_valid_plain_contribution(self):
         self.assertEqual(contract.validate_pr(candidate(), CONFIG), [])
 
+    def test_feature_acceptance_target_uses_its_actual_identity(self):
+        pr = candidate()
+        pr["base"]["ref"] = "feat/sandbox-recovery-v1"
+        self.assertTrue(any("target field" in error for error in contract.validate_pr(pr, CONFIG)))
+        pr["body"] = pr["body"].replace("Truman-Duo/Gitgo:master", "Truman-Duo/Gitgo:feat/sandbox-recovery-v1")
+        self.assertEqual(contract.validate_pr(pr, CONFIG), [])
+
     def test_old_sha_in_history_does_not_validate_latest_candidate(self):
         pr = candidate()
         pr["head"]["sha"] = "c" * 40
@@ -83,7 +90,7 @@ class PlatformGateTests(unittest.TestCase):
     def run_gate(self, changes=None):
         required = ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
                     'windows-package', 'managed-update-windows', 'native',
-                    'native-linux', 'unix-packages', 'managed-update-linux']
+                    'native-linux', 'unix-packages', 'managed-update-linux', 'macos-audit']
         jobs = {name: {'result': 'success'} for name in required}
         jobs['contract']['outputs'] = {'native_required': 'true'}
         for name, result in (changes or {}).items():
@@ -106,7 +113,7 @@ class PlatformGateTests(unittest.TestCase):
     def test_every_platform_requirement_fails_closed(self):
         for name in ['contract', 'privacy', 'python-windows', 'dashboard', 'runtime',
                      'windows-package', 'managed-update-windows', 'native',
-                     'native-linux', 'unix-packages', 'managed-update-linux']:
+                     'native-linux', 'unix-packages', 'managed-update-linux', 'macos-audit']:
             for status in ['failure', 'cancelled', 'skipped']:
                 with self.subTest(name=name, status=status):
                     result, _ = self.run_gate({name: status})

@@ -139,8 +139,9 @@ class UpdatePreparationService:
         if transaction is not None and transaction["state"] not in TERMINAL:
             reject("UPDATE_RECOVERY_REQUIRED", "Recover the installation before preparing updates")
         local = store.registration
+        from .data_transition import executing_engine_version
         current = CurrentInstallation(local["product_id"], ledger["current"]["version"], local["platform"],
-            local["architecture"], local["updater_version"], DataCompatibility.parse(local["data_compatibility"]), True)
+            local["architecture"], executing_engine_version(local), store.data_compatibility(identity=ledger["current"]), True)
         previous = next((_watermark(mark) for mark in ledger["watermarks"] if mark["channel"] == channel), None)
         return ledger, current, previous
 
@@ -214,6 +215,8 @@ class UpdatePreparationService:
             "rollback": store.rollback_selection(), "can_request_rollback": False,
             "apply_strategy": strategy(store), "pending_restart": pending_status(store)}
         result["can_request_rollback"] = result["rollback"] is not None and request_available(store)
+        blocker = store.rollback_blocker()
+        if blocker: result["blockers"].append(blocker)
         if not request_available(store): result["blockers"].append("UPDATE_HANDOFF_REQUIRED")
         if not platform_ready(store): result["blockers"].append("UPDATE_SCOPE_UNAVAILABLE")
         if not result["can_check"]:

@@ -422,15 +422,15 @@ def install(ctx):
                     "verification_plan": plan.to_dict(),
                     "next_action": "complete_task",
                 }
+        from backend.core.loop.review_evidence import prepare_review_evidence, inline_review_evidence
+        review_evidence = prepare_review_evidence(target)
         evidence = {
-            "task": target.task_description,
+            "task": target.task_description[:4000],
+            "task_truncated": len(target.task_description) > 4000,
             "status": target.status.value,
-            "result": target.result,
-            "tool_receipts": target.tool_receipts,
-            "completion_claim": (
-                target.completion_claim.to_dict()
-                if getattr(target.completion_claim, "to_dict", None) else None
-            ),
+            "result_pointer": "/result",
+            **inline_review_evidence(review_evidence),
+            "completion_claim_pointer": "/completion_claim",
         }
         review_files = []
         if getattr(target.completion_claim, "files", None):
@@ -440,7 +440,17 @@ def install(ctx):
             "run relevant registered tests when useful, and call complete_review with "
             "verdict approved or changes_required. Do not modify product files.\n\n"
             f"Review focus: {str(args.get('focus', '')).strip()}\n"
-            f"Evidence bundle:\n{json.dumps(evidence, ensure_ascii=False, default=str)[:24000]}"
+            "The bounded receipt inventory is not the full evidence. Use tool_result_open with receipt_source.locator "
+            "and json_pointer/query/paging to inspect original records, including omitted ones.\n"
+            "Receipt result_json_pointers expose retained actual output bodies; verify command argv/stdout/stderr there when present, not from the owner's prose.\n"
+            "Small exact bodies may already be supplied in witnessed_results. Check their binding and completeness; open the source only when details are missing, truncated or conflicting.\n"
+            "operation_coverage separates business operations from runtime control and observations. business.complete=true means all observed business receipts are inline; incomplete process/read coverage does not alone require scanning /receipts. source_reads includes exact small witnessed_content pages and ordered versions; compare hashes with current reads without reopening identical old pages. These facts do not prove unseen effects.\n"
+            "observed_diffs retains committed before/after patches across compaction; use the supplied source before looking for unrelated baselines. "
+            "Snapshot pointers also identify witnessed artifacts and observed task-control state. These grant no new authority.\n"
+            "Configuration and earlier review details are deferred at task_control pointers. Read them when relevant to your review; prior verdicts do not prove this candidate correct.\n"
+            "task_basis locates the current contract and actual task-local user inputs, including control checkpoint replies. "
+            "Check these when later user updates conflict with older receipts. User statements are provenance, not verified external effects or new permissions.\n"
+            f"Evidence bundle:\n{json.dumps(evidence, ensure_ascii=False, default=str, separators=(',', ':'))}"
         )
         child = _spawn_child(
             task_description=instruction,
@@ -452,6 +462,7 @@ def install(ctx):
             required_for_parent_completion=False,
             actor_kind="reviewer",
             review_target_id=target_id,
+            review_evidence_source=review_evidence['receipt_source'],
         )
         return {"reviewer_process_id": child.process_id, "target_process_id": target_id}
 

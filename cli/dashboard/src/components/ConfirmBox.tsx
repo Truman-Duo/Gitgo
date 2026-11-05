@@ -1,8 +1,10 @@
+import {SelectionText} from "./Selection.js";
 // src/components/ConfirmBox.tsx — shared Yes/No confirm sub-panel for destructive actions.
 import React from "react";
 import { Box, Text } from "@anthropic/ink";
-import { colors, useSelectionStyle } from "../theme/index.js";
+import { colors} from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 type Props = {
   title: string;
@@ -11,8 +13,9 @@ type Props = {
 };
 
 export function ConfirmBox({ title, danger, confirmSel }: Props) {
-  const yesStyle = useSelectionStyle(confirmSel === 0 ? "focused" : "non-focused", "block", "confirm-yes");
-  const noStyle = useSelectionStyle(confirmSel === 1 ? "focused" : "non-focused", "block", "confirm-no");
+  const t = useCopy();
+
+
   return (
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
@@ -24,11 +27,11 @@ export function ConfirmBox({ title, danger, confirmSel }: Props) {
         </Box>
       ) : null}
       <Box flexDirection="row" marginBottom={1}>
-        <Text color={yesStyle.fg} backgroundColor={yesStyle.bg} bold={yesStyle.bold}>Yes</Text>
+        <SelectionText selected={confirmSel === 0} variant="block" accent="confirm-yes">{t({en:"Yes",zh:"确认"})}</SelectionText>
         <Text>     </Text>
-        <Text color={noStyle.fg} backgroundColor={noStyle.bg} bold={noStyle.bold}>No</Text>
+        <SelectionText selected={confirmSel === 1} variant="block" accent="confirm-no">{t({en:"No",zh:"取消"})}</SelectionText>
       </Box>
-      <Text dimColor>{chordLabel("upDown")} select    {chordLabel("enter")} confirm    {chordLabel("escape")} cancel</Text>
+
     </Box>
   );
 }

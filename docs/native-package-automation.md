@@ -6,7 +6,7 @@ CLI：`gh workflow run linux-package.yml --ref <workflow-branch> -f ref=<commit-
 工作流须先存在于仓库默认分支才出现在手动运行列表；合入前通过 PR 的 Gitgo CI
 调用相同 reusable workflow 验证，不为此向主线直接推送。fork 首次运行仍可能需要维护者批准。
 
-ref 只解析一次，两个平台和独立验收 worker 都 checkout 解析所得的完整 SHA。
+ref 只解析一次，各平台和独立验收 worker 都 checkout 解析所得的完整 SHA。
 PR CI 构建的是 GitHub 测试合并 commit，不应把它混同贡献分支 head。
 成功运行的 Artifacts 有 `native-<target>-<commit>` 与 `acceptance-<target>-<commit>`；
 下载前确认完整 SHA，解压 artifact ZIP 后才是发行 tar.gz 和校验文件。
@@ -14,19 +14,17 @@ PR CI 构建的是 GitHub 测试合并 commit，不应把它混同贡献分支 h
 
 ## 当前支持声明
 
-自动候选目标为 macOS 15 ARM64 和 Ubuntu 24.04 x86_64（glibc 2.39 基线）。
-这是构建/验收目标列表，不是当前 daemon 的全平台可用声明。Alpha3 组合已在真实
-macOS 构建后冒烟中观察到 `DAEMON_START_FAILED / GOVERNANCE_STATE_UNAVAILABLE`：
-继承的稳定文件读取没有 Darwin 后端，连新工作区的治理会话初始化也被拒绝。
-Linux 受保护工作树/晋升/正式 Git 后端同样尚未实现；独立更新/存储/进程清理仍需验证。
-仅由构建锁安装依赖时还存在工作台 `nbformat` 闭包缺失，源码失败已证实，冻结包
-工作台风险尚未独立实测。来源、操作范围和后续责任见 [Alpha3 复审交接](ALPHA_3_REVIEW_HANDOFF.md)。
-本机脚本中的 macOS Intel/Linux ARM 是实验能力，**没有声明已支持或已验收**。
+自动候选目标为 macOS 26 ARM64、Ubuntu 24.04 x86_64 和 Ubuntu 24.04 ARM64（Linux glibc 2.39 基线）。
+这是原生构建与验收目标列表，不代表各平台已有等价沙箱。Darwin 安全读取与
+Linux 受保护 Git 已接入，仍须通过相同候选的原生检查；macOS 通用工具沙箱与
+受保护 Git 后端尚未实现，相关操作明确拒绝。更早候选的读取、工作台依赖缺失
+记录见 [Alpha3 复审交接](ALPHA_3_REVIEW_HANDOFF.md)，不能当作当前失败结论。
+macOS Intel 尚未加入该矩阵，没有声明已支持或已验收。
 不承诺旧 macOS、旧 glibc、musl 发行版。每个新架构须增加独立原生 build/accept matrix，
 不能只改文件名，也不能用跨编译结果替代原生执行。runner 标签固定但系统镜像会由
 GitHub 更新；这不是逐字节可复现或离线构建声明。
 
-Python 3.14.7、PyInstaller 6.22.3、Bun 1.4.2 固定；Python 全部依赖使用
+Python 3.14.7、PyInstaller 6.22.3、Bun 1.4.4 固定；Python 全部依赖使用
 `packaging/requirements-build.lock` 的精确版本与 PyPI 官方资产 SHA-256。
 Bun frozen lockfile、Actions 完整 SHA、SQLite 3.53.4 官方 SHA3-256 和
 ripgrep 15.2.0 官方 SHA-256/完整通知固定。Python/Bun 安装资产由固定 setup
@@ -47,7 +45,7 @@ macOS runner 的 Keychain 不等于用户桌面锁定/授权弹窗基线。
 包内 build-manifest.json 记录版本、目标、基线、commit/tree、工具链、依赖和文件摘要；
 验收记录独立上传，不倒写或篡改已生成包。源码失败注入覆盖未知目录、升级事务、
 原生服务删除失败和重试等；不能说所有故障都已在每个真实 OS 上注入。
-CI gate 必须等待 runtime matrix、两个 Unix 最终包和 Windows 最终 ZIP 检查；
+CI gate 必须等待 runtime matrix、三个 Unix 最终包和 Windows 最终 ZIP 检查；
 任一失败/取消/意外跳过不能得到全平台成功。Windows ZIP 还执行 unpacked frozen
 Host 和连续性检查；不能将 synthetic ZIP 单测冒充 Windows 原生执行。
 

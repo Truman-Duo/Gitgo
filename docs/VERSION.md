@@ -1,5 +1,11 @@
 # Gitgo 版本
 
+## Alpha 3.1（发布候选）
+
+产品、Dashboard 与 Native Host：`1.0.0-alpha.3.1`；Windows 文件版本：`1.0.0.5`。发布标签为 `v1.0.0-alpha.3.1`，属于 preview 渠道。版本整合在必需检查通过后合入 master；原 Alpha 3 标签与资产保留不变。平台范围、升级边界和未完成评估见 [Alpha 3.1](ALPHA_3_1.md)，确切提交、树和最终归档验证结果以 [Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3.1) 摘要为准。
+
+本期整合任务机制维护、Publish、Provider 多模型/备用配置，以及更新兼容、沙箱准入边界和终端标准件修复。Alpha 3 旧更新器不能直接完成本次升级，采用独立管理安装；后续真实版本间的更新与回滚仍需按实际差异验收。
+
 ## Alpha 3 基线（2026-10-24）
 
 产品、Dashboard 与 Native Host：`1.0.0-alpha.3`；Windows 文件版本：`1.0.0.4`。独立分支 `release/alpha3`，发布标签 `v1.0.0-alpha.3`，属于 preview 渠道。owner 已确认正式终端试用版本为本次基线；所有必需 CI 通过后发布。[Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3) 的验证摘要和包内 `build-manifest.json` 记录确切源码身份及校验值。

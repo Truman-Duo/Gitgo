@@ -40,11 +40,16 @@ def _refresh_compiled_prompt(
     text = _build_system_message_for_llm(process, text)
     PromptCompiler.upsert(session, text, sections)
     tool_wire = build_tools_json(tools_dict) if tools_dict else []
+    from .provider_tool_transport import wire_tools, catalog
     session.context_inventory = {
         "tool_count": len(tool_wire),
         "tool_schema_tokens": max(0, len(json.dumps(
-            tool_wire, ensure_ascii=False, sort_keys=True, default=str,
+            wire_tools(tool_wire) or [], ensure_ascii=False, sort_keys=True, default=str,
         )) // 4),
+        # Until first assembly, account for the catalog that will be sent as
+        # context. Afterwards its actual update text is counted once there.
+        'pending_tool_catalog_tokens':len(json.dumps(catalog(tool_wire),ensure_ascii=False,
+            sort_keys=True,separators=(',',':'))) // 4,
     }
 
 

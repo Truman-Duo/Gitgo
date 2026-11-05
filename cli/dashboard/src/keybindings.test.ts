@@ -7,6 +7,21 @@ function names(scene: Parameters<typeof getKeybindings>[0]): string[] {
 }
 
 describe('scene-owned command registry', () => {
+  test('/model and /effort belong only to projects and the main conversation',async()=>{
+    const ctx:any={client:{callTool:async()=>{throw Error('must not call backend');}},projects:[],sel:0};
+    for(const scene of ['projects','workspace'] as const){
+      expect(getCommands(scene).map(item=>item.label)).toContain('/model');
+      expect(getCommands(scene).map(item=>item.label)).toContain('/effort');
+      expect((await executeCommand('/effort',{...ctx,scene})).showPanel?.overlay).toBe('effortPicker');
+      expect((await executeCommand('/model',{...ctx,scene})).showPanel?.overlay).toBe('modelPicker');
+    }
+    for(const scene of ['process_list','agent_detail'] as const){
+      expect(getCommands(scene).map(item=>item.label)).not.toContain('/model');
+      expect(getCommands(scene).map(item=>item.label)).not.toContain('/effort');
+      expect((await executeCommand('/effort',{...ctx,scene})).showPanel).toBeUndefined();
+      expect((await executeCommand('/model',{...ctx,scene})).showPanel).toBeUndefined();
+    }
+  });
   test('/update belongs only to the project-list homepage, including manual dispatch', async () => {
     const ctx: any = {client: {callTool: async () => {throw new Error('must not call backend');}},
       projects: [], sel: 0, activeProject: null, refresh: async () => {}};

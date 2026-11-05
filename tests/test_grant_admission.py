@@ -176,6 +176,6 @@ def test_pipeline_admission_resolution_error_is_visible_before_consumption(tmp_p
     ctx.event_bus.subscribe('ToolBeforeHooksStarted',
         lambda _: monkeypatch.setattr(permission_broker, '_select_external_resources', unavailable))
     result = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, ctx, 'unavailable')
-    assert result.is_error and result.diagnostics['code'] == 'SANDBOX_POLICY_INVALID'
+    assert result.is_error and result.diagnostics['code'] == 'TOOL_AUTHORIZATION_INVALID'
     assert result.receipt['effect_state'] == 'not_committed'
     assert not calls and grant['remaining_uses'] == 1

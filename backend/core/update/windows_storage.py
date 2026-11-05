@@ -7,6 +7,7 @@ MoveFileExW WRITE_THROUGH, files are flushed, and recovery retains both trees.
 This does not claim universal physical power-loss durability.
 """
 from contextlib import contextmanager
+from contextvars import ContextVar
 import ctypes as C
 from functools import lru_cache
 import os
@@ -23,6 +24,12 @@ TRUSTED = {"S-1-5-18", "S-1-5-32-544"}  # OS/admin authority, not ordinary group
 TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 MUTATE = 0x40000000 | 0x10000000 | 0x000D0156
 REPLACE_CHILD = 0x40000000 | 0x10000000 | 0x000C0040
+_NAMESPACES = ContextVar("gitgo_update_namespaces", default=())
+_DIRECTORY_HANDLES = ContextVar("gitgo_update_directory_handles", default=())
+
+
+def pinned_directory(path):
+    return next((handle for node, handle in _DIRECTORY_HANDLES.get() if node == path), None)
 
 
 def supported():
@@ -156,6 +163,11 @@ def validate_acl(handle, *, private=True, program=False):
 def opened(path, *, write=False, private=True, program=False, share=3):
     if not isinstance(path, Path) or not path.is_absolute():
         reject("UPDATE_CONTROL_INVALID", "Windows path must be explicit and absolute")
+    retained = pinned_directory(path) if not write and share == 3 else None
+    if retained is not None:
+        validate_acl(retained, private=private, program=program)
+        yield retained
+        return
     # OPEN_REPARSE_POINT opens the node itself; validate attributes before use.
     access = 0x80020000 | (0x40000000 if write else 0)
     handle = api()["CreateFileW"](str(path), access, share, None, 3, 0x02200000, None)
@@ -239,8 +251,86 @@ def open_file(path, *, write=False, create=False, share=3, program=False):
 
 
 def validate_staging(path):
+    # The operation may hold a real no-delete handle chain. In that case a
+    # foreign-writable ancestor cannot replace the private boundary while we
+    # use its path. All descendants still require private owner-controlled ACLs.
+    pinned = next((root for root in _NAMESPACES.get() if path == root or path.is_relative_to(root)), None)
+    if pinned is not None:
+        current = path
+        while True:
+            with opened(current): pass
+            if current == pinned: return
+            current = current.parent
     for parent in (path, *path.parents):
         with opened(parent, private=parent == path): pass
+
+
+@contextmanager
+def _retain_namespace_handle(handle):
+    """Let existing process guardians retain this exact sharing reservation."""
+    import msvcrt
+    kernel = C.WinDLL("kernel32", use_last_error=True)
+    duplicate = kernel.DuplicateHandle
+    duplicate.argtypes = [HANDLE, HANDLE, HANDLE, PTR, U32, C.c_int, U32]
+    duplicate.restype = C.c_int
+    copied = HANDLE()
+    _check(duplicate(api()["GetCurrentProcess"](), handle, api()["GetCurrentProcess"](), C.byref(copied), 0, False, 2))
+    try:
+        descriptor = msvcrt.open_osfhandle(copied.value, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        api()["CloseHandle"](copied.value)
+        raise
+    try:
+        from backend.core.installation_lease import retain_descriptor
+        with retain_descriptor(descriptor, namespace=True): yield
+    finally: os.close(descriptor)
+
+
+@contextmanager
+def private_namespace(path):
+    """Pin every lexical ancestor and the private root until the operation ends.
+
+    No ACL is changed or foreign principal trusted. Ancestor DACLs are not a
+    grant to mutate the private root; no-delete sharing blocks namespace swaps.
+    The root itself MUST retain the strict private ACL and local NTFS identity.
+    """
+    path = Path(path)
+    if not path.is_absolute() or path != path.resolve(strict=True):
+        reject("UPDATE_CONTROL_INVALID", "Private namespace must be canonical")
+    if any(path == root or path.is_relative_to(root) for root in _NAMESPACES.get()):
+        validate_staging(path)
+        yield
+        return
+    held = []
+    nodes = []
+    try:
+        for node in reversed((path, *path.parents)):
+            handle = api()["CreateFileW"](str(node), 0x80020000, 3, None, 3, 0x02200000, None)
+            if handle == C.c_void_p(-1).value: raise C.WinError(C.get_last_error())
+            held.append(handle)
+            nodes.append((node, handle))
+            tags = C.create_string_buffer(8)
+            _check(api()["GetFileInformationByHandleEx"](handle, 9, tags, 8))
+            attributes, _ = struct.unpack("<II", tags.raw)
+            if not attributes & 0x10 or attributes & (0x400 | 0x40):
+                reject("UPDATE_REPARSE_INVALID", "Private namespace path is redirected or not a directory")
+            filesystem = C.create_unicode_buffer(32)
+            _check(api()["GetVolumeInformationByHandleW"](handle, None, 0, None, None, None, filesystem, 32))
+            if filesystem.value != "NTFS":
+                reject("UPDATE_FILESYSTEM_UNSUPPORTED", "Private update namespace requires local NTFS")
+            if node == path: validate_acl(handle)
+        token = _NAMESPACES.set((*_NAMESPACES.get(), path))
+        handles_token = _DIRECTORY_HANDLES.set((*_DIRECTORY_HANDLES.get(), *nodes))
+        try:
+            # Retain the leaf sharing reservation through the existing process
+            # guardian. NTFS also refuses ancestor rename while this private
+            # descendant directory has a no-delete handle (native regression).
+            with _retain_namespace_handle(held[-1]): yield
+        finally:
+            _DIRECTORY_HANDLES.reset(handles_token)
+            _NAMESPACES.reset(token)
+    finally:
+        for handle in reversed(held): api()["CloseHandle"](handle)
 
 
 def reject_alternate_streams(path):
@@ -296,6 +386,54 @@ def durable_copy(source, target):
 def copy_tree(source, target):
     import shutil
     return shutil.copytree(source, target, symlinks=False, copy_function=durable_copy)
+
+
+def rename_owned_directory(source, target, expected, *, callback=None):
+    """Rename the SAME validated directory object; no path check/use gap.
+
+    Used only by the explicit bootstrap repair after all application leases
+    retire. The DELETE-capable handle denies other delete sharing while the
+    rename is made through that handle. No replacement or volume crossing.
+    """
+    source, target = Path(source), Path(target)
+    if target.exists() or target.is_symlink():
+        reject("UPDATE_REPAIR_REQUIRED", "Directory rename target is occupied")
+    handle = api()["CreateFileW"](str(source), 0x80030000, 3, None, 3, 0x02200000, None)
+    if handle == C.c_void_p(-1).value: raise C.WinError(C.get_last_error())
+    try:
+        validate_acl(handle)
+        tags = C.create_string_buffer(8)
+        _check(api()["GetFileInformationByHandleEx"](handle, 9, tags, 8))
+        attributes, _ = struct.unpack("<II", tags.raw)
+        if not attributes & 0x10 or attributes & (0x400 | 0x40) or handle_identity(handle) != expected:
+            reject("UPDATE_REPAIR_REQUIRED", "Directory rename source identity changed")
+        from contextlib import nullcontext
+        retained_parent = pinned_directory(target.parent)
+        with (nullcontext(retained_parent) if retained_parent is not None else opened(target.parent)) as parent:
+            if handle_identity(parent)["device"] != expected["device"]:
+                reject("UPDATE_REPAIR_REQUIRED", "Directory rename cannot cross volumes")
+            class RenameInformation(C.Structure):
+                _fields_ = [("replace", U32), ("root", HANDLE), ("length", U32), ("name", C.c_wchar * 1)]
+            encoded = str(target).encode("utf-16-le")
+            raw = C.create_string_buffer(max(C.sizeof(RenameInformation), RenameInformation.name.offset + len(encoded) + 2))
+            header = RenameInformation.from_buffer(raw)
+            header.replace = 0; header.root = None; header.length = len(encoded)
+            C.memmove(C.addressof(raw) + RenameInformation.name.offset, encoded, len(encoded))
+            setter = C.WinDLL("kernel32", use_last_error=True).SetFileInformationByHandle
+            setter.argtypes = [HANDLE, C.c_int, PTR, U32]; setter.restype = C.c_int
+            _check(setter(handle, 3, raw, len(raw)))
+        with opened(target, share=7) as renamed:
+            if handle_identity(renamed) != expected:
+                reject("UPDATE_REPAIR_REQUIRED", "Renamed directory identity changed")
+        if callback is not None:
+            token = _NAMESPACES.set((*_NAMESPACES.get(), target))
+            handles_token = _DIRECTORY_HANDLES.set((*_DIRECTORY_HANDLES.get(), (target, handle)))
+            try:
+                with _retain_namespace_handle(handle): return callback()
+            finally:
+                _DIRECTORY_HANDLES.reset(handles_token)
+                _NAMESPACES.reset(token)
+    finally: api()["CloseHandle"](handle)
 
 
 @contextmanager

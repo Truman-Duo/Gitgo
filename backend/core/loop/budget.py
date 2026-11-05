@@ -289,7 +289,17 @@ class TaskTreeBudget:
             requested_output = max(1, int(request.get("output_tokens", output_default) or output_default))
             available_calls = self._available_for_new_lease_locked("provider_calls", purpose)
             available_output = self._available_for_new_lease_locked("output_tokens", purpose)
-            if requested_calls > available_calls or requested_output > available_output:
+            # Defaults are preferred shares, not a minimum purchase size. An
+            # otherwise usable remainder must not become stranded after earlier
+            # children release their unused escrow. Explicit requests retain
+            # their exact admission constraint; no pool, usage or root floor
+            # changes, and an exhausted pool still rejects admission.
+            if not request.get("provider_calls"):
+                requested_calls = min(requested_calls, available_calls)
+            if not request.get("output_tokens"):
+                requested_output = min(requested_output, available_output)
+            if (requested_calls < 1 or requested_output < 1
+                    or requested_calls > available_calls or requested_output > available_output):
                 raise TaskBudgetExceeded(
                     "TASK_TREE_CHILD_ESCROW_UNAVAILABLE",
                     f"requested child allocation exceeds the uncommitted task-tree budget; available provider_calls={available_calls}, output_tokens={available_output}; root coordination floor is protected",

@@ -12,6 +12,8 @@ class TerminalScreen:
     def __init__(self, rows=40, columns=120):
         self.rows, self.columns = rows, columns
         self.lines = [[" "] * columns for _ in range(rows)]
+        self.highlights = [[False] * columns for _ in range(rows)]
+        self.background = self.inverse = False
         self.row = self.column = 0
         self.saved = (0, 0)
         self.scrollback = []
@@ -23,6 +25,13 @@ class TerminalScreen:
     def transcript(self):
         """Include bounded lines actually scrolled off during fullscreen writes."""
         return "\n".join(self.scrollback + [self.text()])
+
+    def highlighted_line(self):
+        """Read a visible selection block, not merely colored foreground text."""
+        for line, styles in zip(self.lines, self.highlights):
+            if any(active and char.strip() for char, active in zip(line, styles)):
+                return "".join(line).strip()
+        return None
 
     def forget_history(self):
         """Forget prior-stage scrollback, keeping the real visible VT canvas.
@@ -37,6 +46,7 @@ class TerminalScreen:
             self.scrollback.append("".join(self.lines.pop(0)).rstrip())
             self.scrollback = self.scrollback[-80:]
             self.lines.append([" "] * self.columns); self.row -= 1
+            self.highlights.pop(0); self.highlights.append([False] * self.columns)
 
     def _csi(self, params, command):
         private = params.startswith("?")
@@ -45,9 +55,25 @@ class TerminalScreen:
         if private:
             if command == "h" and 1049 in values:
                 self.lines = [[" "] * self.columns for _ in range(self.rows)]
+                self.highlights = [[False] * self.columns for _ in range(self.rows)]
                 self.row = self.column = 0
             return
-        if command == "A": self.row = max(0, self.row - n)
+        if command == "m":
+            index = 0
+            while index < len(values):
+                code = values[index]
+                if code == 0: self.background = self.inverse = False
+                elif code == 7: self.inverse = True
+                elif code == 27: self.inverse = False
+                elif code == 49: self.background = False
+                elif 40 <= code <= 47 or 100 <= code <= 107: self.background = True
+                elif code in (38, 48) and index + 1 < len(values):
+                    width = 2 if values[index + 1] == 5 else 4 if values[index + 1] == 2 else 0
+                    if width and index + width < len(values):
+                        if code == 48: self.background = True
+                        index += width
+                index += 1
+        elif command == "A": self.row = max(0, self.row - n)
         elif command == "B": self.row = min(self.rows - 1, self.row + n)
         elif command == "C": self.column = min(self.columns - 1, self.column + n)
         elif command == "D": self.column = max(0, self.column - n)
@@ -61,24 +87,38 @@ class TerminalScreen:
             start, end = ((0, self.columns) if values[0] == 2 else
                           (0, self.column + 1) if values[0] == 1 else (self.column, self.columns))
             self.lines[self.row][start:end] = [" "] * (end - start)
+            self.highlights[self.row][start:end] = [self.background or self.inverse] * (end - start)
         elif command == "J":
-            if values[0] in (2, 3): self.lines = [[" "] * self.columns for _ in range(self.rows)]
+            if values[0] in (2, 3):
+                self.lines = [[" "] * self.columns for _ in range(self.rows)]
+                self.highlights = [[self.background or self.inverse] * self.columns for _ in range(self.rows)]
             elif values[0] == 1:
-                for row in range(self.row): self.lines[row] = [" "] * self.columns
+                for row in range(self.row):
+                    self.lines[row] = [" "] * self.columns
+                    self.highlights[row] = [self.background or self.inverse] * self.columns
                 self.lines[self.row][:self.column + 1] = [" "] * (self.column + 1)
+                self.highlights[self.row][:self.column + 1] = [self.background or self.inverse] * (self.column + 1)
             else:
                 self.lines[self.row][self.column:] = [" "] * (self.columns - self.column)
-                for row in range(self.row + 1, self.rows): self.lines[row] = [" "] * self.columns
+                self.highlights[self.row][self.column:] = [self.background or self.inverse] * (self.columns - self.column)
+                for row in range(self.row + 1, self.rows):
+                    self.lines[row] = [" "] * self.columns
+                    self.highlights[row] = [self.background or self.inverse] * self.columns
         elif command == "s": self.saved = (self.row, self.column)
         elif command == "u": self.row, self.column = self.saved
         elif command in ("S", "T"):
             for _ in range(min(n, self.rows)):
-                if command == "S": self.lines.pop(0); self.lines.append([" "] * self.columns)
-                else: self.lines.pop(); self.lines.insert(0, [" "] * self.columns)
+                if command == "S":
+                    self.lines.pop(0); self.lines.append([" "] * self.columns)
+                    self.highlights.pop(0); self.highlights.append([False] * self.columns)
+                else:
+                    self.lines.pop(); self.lines.insert(0, [" "] * self.columns)
+                    self.highlights.pop(); self.highlights.insert(0, [False] * self.columns)
         elif command == "X":
             end = min(self.columns, self.column + n)
             self.lines[self.row][self.column:end] = [" "] * (end - self.column)
-        # SGR, cursor visibility and terminal queries do not change text cells.
+            self.highlights[self.row][self.column:end] = [self.background or self.inverse] * (end - self.column)
+        # Cursor visibility and terminal queries do not change display cells.
 
     def feed(self, chunk):
         self.buffer += self.decoder.decode(chunk)
@@ -103,7 +143,9 @@ class TerminalScreen:
             elif char == "\t": self.column = min(self.columns - 1, (self.column // 8 + 1) * 8)
             elif ord(char) >= 32:
                 if self.column >= self.columns: self.column = 0; self.row += 1; self._scroll()
-                self.lines[self.row][self.column] = char; self.column += 1
+                self.lines[self.row][self.column] = char
+                self.highlights[self.row][self.column] = self.background or self.inverse
+                self.column += 1
         if len(self.buffer) > 1024: raise ValueError("Unbounded terminal control sequence")
 
 def settle_screen(screen, pump, *, quiet_seconds=.25, maximum_seconds=2):
@@ -132,7 +174,7 @@ def activate_menu_item(screen, label, send, pump, *, maximum_rows=12, timeout=15
     seen = []
 
     def selected():
-        return next((line.lstrip()[2:].strip() for line in screen.text().splitlines()
+        return screen.highlighted_line() or next((line.lstrip()[2:].strip() for line in screen.text().splitlines()
                      if line.lstrip().startswith("› ")), None)
 
     def diagnostic():
@@ -150,7 +192,6 @@ def activate_menu_item(screen, label, send, pump, *, maximum_rows=12, timeout=15
     # A matching text fragment may arrive before the rest of the same repaint
     # and its input-owner commit. Drain to a bounded stable display before keys.
     settle_screen(screen, pump, maximum_seconds=min(2, max(0, deadline - time.monotonic())))
-    advance_until(lambda: selected() is not None)
     for _ in range(maximum_rows):
         current = selected()
         seen.append(current)
@@ -158,5 +199,11 @@ def activate_menu_item(screen, label, send, pump, *, maximum_rows=12, timeout=15
             send("\r")
             return
         send("\x1b[B")
-        advance_until(lambda: selected() is not None and selected() != current)
+        if current is None:
+            # Form fields deliberately have no selection background. Walk
+            # them through the real input path until an action block is visible.
+            settle_screen(screen, pump, maximum_seconds=min(2, max(0, deadline - time.monotonic())))
+            assert time.monotonic() < deadline, "Menu selection did not advance: " + diagnostic()
+        else:
+            advance_until(lambda: selected() is not None and selected() != current)
     raise AssertionError("Enabled menu item is unavailable: " + diagnostic())

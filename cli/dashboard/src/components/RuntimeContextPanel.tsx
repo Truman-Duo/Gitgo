@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {label} from "../ui/runtimeLabels.js";
 import {useCopy} from "../ui/PageFrame.js";
 import React, {memo, useMemo, useRef, useState, useEffect} from "react";
@@ -31,7 +32,9 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
   const count=t({en:"Process",zh:"进程"})+" "+(selected?index+1:0)+"/"+rows.length;
   useEffect(() => { scrollRef.current?.scrollTo(0); }, [selected?.session_id,selected?.process_id]);
 
+  const menuHelp=useLocalHelpCommand("context",undefined,interactive);
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if (matchChord("escape", input, key)) {
       onDismiss();
       return;
@@ -125,7 +128,7 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
         </Box>
       </Box>}
     </ScrollBox>
-    <Box flexShrink={0}><Text dimColor>{t({en:"←/→ process · ↑/↓ scroll · Esc back",zh:"←/→ 进程 · ↑/↓ 滚动 · Esc 返回"})}</Text></Box>
+    <Box flexShrink={0}></Box>
   </Box>;
 });
 

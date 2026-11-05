@@ -116,6 +116,25 @@ def test_shared_lease_is_retained_until_job_is_empty(tmp_path_factory):
     with win.lock_file(lock): pass
 
 
+def test_namespace_is_retained_by_owned_job_after_parent_context_closes(tmp_path_factory):
+    from backend.core.update import windows_storage as win
+    private=tmp_path_factory/"private";win.create_private_directory(private)
+    process=None
+    try:
+        with win.private_namespace(private):
+            process=spawn_managed([sys.executable,"-c","import time;time.sleep(60)"],
+                stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        # The original namespace context has retired; only the actual owned
+        # supervisor/guardian keeps this sharing reservation alive.
+        with pytest.raises(OSError):os.rename(private,private.with_name("replaced"))
+    finally:
+        if process is not None:terminate_tree(process)
+    assert process._gitgo_cleanup["complete"]
+    moved=private.with_name("retired")
+    os.rename(private,moved)
+    assert moved.is_dir()
+
+
 @pytest.mark.parametrize("leased", [False, True])
 @pytest.mark.parametrize("failure_at", ["write", "flush", "close"])
 def test_post_launch_pipe_failure_cleans_payload_and_guardian(

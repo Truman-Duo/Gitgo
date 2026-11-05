@@ -191,12 +191,19 @@ def fixture_entry(monkeypatch, case, *, fault=0, diagnostic=False):
 
 
 def finish(launch, *, cancel=False):
-    deadline = time.monotonic()+45
+    # The production worker owns a 60-second execution deadline. A shorter
+    # observer deadline can abandon a still-valid owner before it can finish
+    # or enter native retirement. Allow its actual deadline plus the same
+    # bounded cleanup grace used by these lifecycle fixtures.
+    deadline = (launch._deadline or time.monotonic()) + 15
     while True:
         result = launch.poll(cancel=cancel)
         if result is not None:
             return result
-        assert time.monotonic()<deadline
+        assert time.monotonic()<deadline, {
+            "mode":launch._mode,"worker_deadline":launch._deadline,
+            "native_retired":launch._native_retired,"parent_closed":launch._parent_closed,
+        }
         time.sleep(.01)
 
 

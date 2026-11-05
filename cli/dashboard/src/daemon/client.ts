@@ -41,7 +41,7 @@ export class DaemonClient {
 
     process.stderr.write(`[daemon] Starting daemon for '${this.projectName}'...\n`);
 
-    // Use python -c (like daemon.bat) to avoid -m gitgo module lookup
+    // Use python -c to avoid -m gitgo module lookup
     // which depends on the directory being named "gitgo"
     const pythonCode = [
       "import sys",

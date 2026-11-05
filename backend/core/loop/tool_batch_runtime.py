@@ -28,6 +28,66 @@ class ToolBatchRuntime:
         self.process, self.session, self.get_tools = process, session, get_tools
         self.loop_guard, self.ctx = loop_guard, ctx
         self.workspace_path, self.turn_wall_started, self.emit = workspace_path, turn_wall_started, emit
+        self.check_alignment = None
+
+    def review_call(self, call, tool, execution_id, call_index):
+        """Reassess changed serial boundaries without asking the main model to replay.
+
+        The existing coordinator owns reuse, budget, cancellation and decisions.
+        A result stops the untouched suffix; no certificate or grant is minted
+        here, and Pipeline still checks the exact subject immediately before use.
+        """
+        if self.check_alignment is None or self.ctx.is_cancelled() or self.process.cancel_requested:
+            return None
+        from .tool_boundary_preview import preview_tool_boundaries
+        from .tool_pipeline import ToolResult
+        boundary = preview_tool_boundaries([call], {tool.name: tool}, self.process)
+        if not boundary.contracts and not boundary.effectful:
+            return None
+        outcome = self.check_alignment(trigger='contract' if any(c.get('kind') != 'business_readiness' for c in boundary.contracts) else 'execution',
+            proposed_contracts=boundary.contracts or None, observation_only=False)
+        if outcome is None:
+            return None
+        self.ctx.artifacts['alignment_boundary_pause'] = outcome
+        return ToolResult(tool_name=tool.name, execution_id=execution_id, call_index=call_index, suspended=True)
+
+    def finish_alignment_boundary(self, calls, index, execution_id, outcome, *, denied_index=None):
+        """Keep the already committed prefix; park only a real pending decision."""
+        from .loop_bookkeeping import _inc_nudge_counter, _get_nudge_count
+        from copy import deepcopy
+        decision = self.process.pending_decision
+        if outcome.get('status') == 'awaiting_user' and isinstance(decision, dict):
+            self.process.pending_tool_batch = {'execution_id': execution_id,
+                'tool_calls': deepcopy(calls[index:]), 'permission_call_index': 0,
+                'decision_id': decision['decision_id'], 'semantic_boundary': True}
+            if denied_index is not None:
+                # Preserve an already received denial beyond this semantic
+                # pause. The new answer cannot turn it into authorization.
+                self.process.pending_tool_batch['prior_permission_denial'] = denied_index - index
+            store = getattr(getattr(self.process, '_manager', None), 'session_store', None)
+            if store is None:
+                raise ValueError('ALIGNMENT_CONTINUATION_STORE_REQUIRED')
+            store.save_process_checkpoint(self.process)
+            return outcome
+        # A rejection, exhausted budget or cancellation never replays effects.
+        # Pair every unstarted provider call before adding repair guidance.
+        errors = [_host_tool_error_result(tool_name=call['name'], execution_id=execution_id,
+            call_index=position, error_name='TOOL_NOT_STARTED',
+            details={'execution_state': 'not_started', 'reason': 'semantic_boundary_not_admitted'},
+            next_actions=[{'action': 'reconcile_current_requirements'}])
+            for position, call in enumerate(calls) if position >= index]
+        self.commit_results(calls, errors, rolled_back=False)
+        if 'alignment_repair' not in outcome:
+            return outcome
+        _inc_nudge_counter(self.process, 'alignment_boundary_repair')
+        if _get_nudge_count(self.process, 'alignment_boundary_repair') >= 3:
+            transition(self.process, ProcessStatus.FAILED)
+            return _make_result(self.process, self.session, '需求边界仍未满足，后续操作没有执行。',
+                error_code='ALIGNMENT_BOUNDARY_REJECTED', error_message=outcome['alignment_repair'][:600],
+                outcome_status=OutcomeStatus.FAILED)
+        self.session.append_user('[HOST REQUIREMENT CHECK] ' + outcome['alignment_repair'],
+            message_type='host_alignment_repair')
+        return outcome
 
     @property
     def tools_dict(self):
@@ -61,6 +121,8 @@ class ToolBatchRuntime:
                 referenced_files=ref_files,
             )
             self.process.tool_receipts.append(dict(r.receipt or {}))
+            from .task_maintenance import observe_result
+            observe_result(self.process, r)
             from .loop_bookkeeping import capture_lesson_outcome
             capture_lesson_outcome(self.process, r, self.workspace_path,
                                    rolled_back=rolled_back, on_event=self.emit)
@@ -101,7 +163,7 @@ class ToolBatchRuntime:
             from backend.core.loop.operation_policy import is_effectful_mutation
             if not r.is_error and is_effectful_mutation(effect):
                 self.process.successful_actions += 1
-                if self.process.parent_id:
+                if (self.process.parent_id and not getattr(self.process, "_manager", None).has_continuation(self.process.process_id)):
                     try:
                         from backend.core.loop.coordination import observe_interface_changes
                         manager = getattr(self.process, "_manager", None)
@@ -146,6 +208,10 @@ class ToolBatchRuntime:
             tool = self.tools_dict.get(str(call.get("name") or ""))
             if tool is None:
                 continue
+            from .task_maintenance import guard
+            from .operation_policy import is_effectful_mutation
+            if is_effectful_mutation(tool.effect) and guard(self.process, tool.name):
+                continue  # Pipeline reports stale scope before asking for new authority.
             from .composite_runtime import call_key
             key = call_key(call, execution_id, call_index)
             if key in self.process.runtime_preferences.get("composite_continuations", {}):
@@ -194,27 +260,82 @@ class ToolBatchRuntime:
         return result
 
 
-    def pause_nested_results(self, calls, results, execution_id):
+    def pause_nested_results(self, calls, results, execution_id, *, denied_index=None):
         suspended = next((r for r in results if r.suspended), None)
         if suspended is None:
             return None
         index = int(suspended.call_index)
-        self.commit_results(calls, [r for r in results if int(r.call_index) < index], rolled_back=False)
+        prefix = [r for r in results if int(r.call_index) < index]
+        self.commit_results(calls, prefix, rolled_back=False)
+        alignment_pause = self.ctx.artifacts.pop('alignment_boundary_pause', None)
+        if alignment_pause is not None:
+            _apply_host_task_transitions(self.process, prefix)
+            return self.finish_alignment_boundary(calls, index, execution_id, alignment_pause,
+                                                   denied_index=denied_index)
+        mechanism_pause = self.ctx.artifacts.pop("mechanism_pause", None)
+        if mechanism_pause is not None:
+            decision = self.process.pending_decision
+            if decision is None or decision["decision_id"] != mechanism_pause["decision_id"]:
+                raise ValueError("MECHANISM_CHECKPOINT_QUESTION_CHANGED")
+            self.process.pending_tool_batch = {"execution_id": execution_id, "tool_calls": calls[index:],
+                "permission_call_index": 0, "decision_id": decision["decision_id"], "harness_checkpoint": mechanism_pause}
+            transition(self.process, ProcessStatus.AWAITING_USER)
+            store = getattr(getattr(self.process, "_manager", None), "session_store", None)
+            if store is None:
+                raise ValueError("MECHANISM_CHECKPOINT_STORE_REQUIRED")
+            store.save_process_checkpoint(self.process)
+            self.emit({"event": "decision_required", "decision": dict(decision)})
+            from .decision_support import format_decision_request
+            result = _make_result(self.process, self.session, format_decision_request(decision), outcome_status=OutcomeStatus.AWAITING_USER)
+            self.process.result = result
+            return result
+        unit = self.ctx.artifacts.pop("advancement_pause", None)
+        if unit is not None:
+            from .mechanisms import snapshot, publish_manual_decision
+            from .mechanism_lifecycle import fence
+            with fence(self.process):
+                current = snapshot(self.process)
+                unit["revision"] = current["revision"]
+                decision = publish_manual_decision(self.process, unit)
+                if self.process.parent_id:
+                    # A child must re-enter its worktree/access/resource
+                    # lifecycle. The root chat runner is not that boundary.
+                    self.process.runtime_preferences["mechanism_resume_blocked"] = "CHILD_CONTINUATION_UNAVAILABLE"
+                self.process.pending_tool_batch = {
+                    "execution_id": execution_id, "tool_calls": calls[index:],
+                    "permission_call_index": 0, "decision_id": decision["decision_id"],
+                    "manual_unit": unit,
+                    "nested_permission": bool(self.process.runtime_preferences.get("composite_continuations")),
+                }
+                transition(self.process, ProcessStatus.AWAITING_USER)
+                manager = getattr(self.process, "_manager", None)
+                store = getattr(manager, "session_store", None)
+                if store is None:
+                    raise ValueError("MANUAL_UNIT_CHECKPOINT_UNAVAILABLE")
+                store.save_process_checkpoint(self.process)
+            self.emit({"event": "decision_required", "decision": decision})
+            from .decision_support import format_decision_request
+            result = _make_result(self.process, self.session, format_decision_request(decision),
+                                  outcome_status=OutcomeStatus.AWAITING_USER)
+            self.process.result = result
+            return result
         permission = self.ctx.artifacts.pop("nested_permission")
         return self.suspend_for_permission(calls[index:], execution_id, 0,
             permission["tool"], permission["arguments"], nested=True)
 
 
-    def execute_approved_segment(self, calls: list[dict], execution_id: str):
+    def execute_approved_segment(self, calls: list[dict], execution_id: str, *, following_calls=(), denied_index=None):
         """Execute and commit a permission-complete ordered batch segment."""
         if not calls:
             return []
-        execution = ToolExecution(execution_id=execution_id, ctx=self.ctx, tool_calls=calls)
+        execution = ToolExecution(execution_id=execution_id, ctx=self.ctx, tool_calls=calls,
+                                  before_call=self.review_call)
         execution.begin()
         results = execution.execute_batch(self.tools_dict)
         if not execution._rolled_back:
             execution.commit()
-        paused = self.pause_nested_results(calls, results, execution_id)
+        paused = self.pause_nested_results(calls + list(following_calls), results, execution_id,
+                                           denied_index=denied_index)
         if paused is not None:
             return paused
         returned = {int(item.call_index) for item in results}
@@ -238,7 +359,39 @@ class ToolBatchRuntime:
         calls = [dict(item) for item in list(batch.get("tool_calls") or [])]
         execution_id = str(batch.get("execution_id") or "permission-resume")
         action = str(batch.get("decision_action") or "")
-        if action == "deny":
+        prior_denial = batch.get('prior_permission_denial')
+        if prior_denial is not None:
+            batch = {**batch, 'permission_call_index': int(prior_denial)}
+            action = 'deny'
+        checkpoint = batch.get('harness_checkpoint')
+        if checkpoint:
+            from backend.core.mechanism_runtime.application import bound_application
+            from .mechanisms import unit_identity
+            from .tool_pipeline import ToolResult
+            app = bound_application(self.process)
+            if app is None or not checkpoint.get('unit_id') or not calls:
+                raise ValueError('MECHANISM_CHECKPOINT_RESUME_UNAVAILABLE')
+            unit = checkpoint['unit_id']
+            # A canonical prediction/control reply is consumed independently
+            # of subsequent permission/lease checks. It grants no authority.
+            pause = app.interactions.admit(unit)
+            if pause:
+                self.ctx.artifacts['mechanism_pause'] = pause
+                return self.pause_nested_results(calls, [ToolResult(tool_name=calls[0]['name'], execution_id=execution_id,
+                    call_index=0, suspended=True)], execution_id)
+            tool = self.tools_dict.get(str(calls[0].get('name') or ''))
+            current_unit = unit_identity(self.process, tool, calls[0].get('args') or {}, execution_id, 0,
+                str(calls[0].get('id') or '')) if tool else None
+            if current_unit != unit:
+                app.interactions.retire_unstarted(unit, 'invocation_changed_before_resume')
+                errors = [_host_tool_error_result(tool_name=str(call.get('name') or 'unknown'), execution_id=execution_id,
+                    call_index=index, error_name='TOOL_NOT_STARTED',
+                    details={'execution_state': 'not_started', 'checkpoint_state': 'superseded',
+                        'reason': 'The pending invocation or its task/tool contract changed. Repropose it; an old prediction cannot authorize the changed call.'},
+                    next_actions=[{'action': 'repropose_current_invocation'}]) for index, call in enumerate(calls)]
+                self.commit_results(calls, errors, rolled_back=False)
+                return None
+        if action == "deny" and (not batch.get('semantic_boundary') or prior_denial is not None):
             if batch.get("nested_permission"):
                 from .composite_runtime import discard
                 discard(self.process, execution_id)
@@ -246,17 +399,18 @@ class ToolBatchRuntime:
                 max(0, int(batch.get("permission_call_index") or 0)),
                 max(0, len(calls) - 1),
             )
-            prefix_result = self.execute_approved_segment(calls[:denied_index], execution_id)
+            prefix_result = self.execute_approved_segment(calls[:denied_index], execution_id,
+                following_calls=calls[denied_index:], denied_index=denied_index)
             if isinstance(prefix_result, dict):
-                return prefix_result
+                return None if 'alignment_repair' in prefix_result else prefix_result
             denied_call = calls[denied_index:denied_index + 1]
             if denied_call:
                 denied = _host_tool_error_result(
                     tool_name=str(denied_call[0].get("name") or "unknown"),
                     execution_id=execution_id,
                     call_index=0,
-                    error_name="TOOL_PERMISSION_DENIED",
-                    details={"execution_state": "not_started", "user_decision": "deny"},
+                    error_name="TOOL_NOT_STARTED" if batch.get("manual_unit") else "TOOL_PERMISSION_DENIED",
+                    details={"execution_state": "not_started", "user_decision": "skip" if batch.get("manual_unit") else "deny"},
                     next_actions=[{"action": "change_strategy"}],
                 )
                 self.commit_results(denied_call, [denied], rolled_back=False)
@@ -269,15 +423,20 @@ class ToolBatchRuntime:
             missing_index, tool, public_args = missing
             # Calls before the next approval boundary are already authorized;
             # commit them now, then pause before the first unapproved effect.
-            prefix_result = self.execute_approved_segment(calls[:missing_index], execution_id)
+            prefix_result = self.execute_approved_segment(calls[:missing_index], execution_id,
+                following_calls=calls[missing_index:])
             if isinstance(prefix_result, dict):
-                return prefix_result
+                return None if 'alignment_repair' in prefix_result else prefix_result
             remaining = calls[missing_index:]
             return self.suspend_for_permission(
                 remaining, execution_id, 0, tool, public_args,
             )
         segment_result = self.execute_approved_segment(calls, execution_id)
-        return segment_result if isinstance(segment_result, dict) else None
+        if checkpoint and isinstance(segment_result, list) and segment_result:
+            first = segment_result[0]
+            if not first.suspended and (not first.allowed or (first.data or {}).get('execution_state') == 'not_started'):
+                app.interactions.retire_unstarted(checkpoint['unit_id'], 'call_rejected_before_effect_admission')
+        return segment_result if isinstance(segment_result, dict) and 'alignment_repair' not in segment_result else None
 
 
     def execute_live_batch(self, tool_calls):
@@ -305,6 +464,7 @@ class ToolBatchRuntime:
                 execution_id=execution_id,
                 ctx=ctx,
                 tool_calls=filtered_calls,
+                before_call=self.review_call,
             )
             execution.begin()
             executed_results = execution.execute_batch(tools_dict)
@@ -319,7 +479,8 @@ class ToolBatchRuntime:
         rolled_back = bool(execution and execution._rolled_back)
         nested_pause = _pause_nested_results(tool_calls, results, execution_id)
         if nested_pause is not None:
-            return LiveBatchResult(result=nested_pause)
+            return (LiveBatchResult(retry=True) if 'alignment_repair' in nested_pause
+                    else LiveBatchResult(result=nested_pause))
         returned_indexes = {int(result.call_index) for result in results}
         # A crash can cancel calls that were already emitted by the
         # provider but never started. They still require explicit outputs.

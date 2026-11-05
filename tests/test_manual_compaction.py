@@ -51,6 +51,58 @@ def test_three_failures_park_without_mutation_or_hidden_retries():
     assert session.context_epoch == 0
 
 
+def test_summary_budget_respects_configured_ceiling_and_auxiliary_workload():
+    class SummaryProvider:
+        max_output_tokens = 8192
+        supports_generation_purpose = True
+        def chat(self, messages, **kwargs):
+            self.kwargs = kwargs
+            return 'The accepted goal, real decisions and outstanding checks.'
+    provider = SummaryProvider()
+    assert compact(session_with_history(), provider)['status'] == 'completed'
+    assert provider.kwargs['max_tokens'] == provider.max_output_tokens
+    assert provider.kwargs['purpose'] == 'context_compaction'
+    assert provider.kwargs['max_retries'] == 0
+    provider.max_output_tokens = 1024
+    assert compact(session_with_history(), provider)['status'] == 'completed'
+    assert provider.kwargs['max_tokens'] == 1024
+
+
+def test_reasoning_summary_uses_configured_budget_and_accounts_invisible_paid_output():
+    from types import SimpleNamespace
+    charged, usage = [], []
+    budget = SimpleNamespace(begin_provider_call=lambda *a: None,
+        record_provider_usage=lambda value: usage.append(value),
+        consume_output_estimate=lambda count, process: charged.append((count, process)),
+        consume_output=lambda *a: (_ for _ in ()).throw(AssertionError('Do not double-charge visible text')))
+    class Provider:
+        max_output_tokens = 8192
+        def chat(self, messages, **kwargs):
+            assert kwargs['max_tokens'] == 8192
+            return {'content': 'A short factual summary after internal reasoning.',
+                'usage': {'output_tokens': 5100, 'reasoning_tokens': 5000}}
+    session = session_with_history()
+    assert ContextWindow().compact(session, Provider(), task_budget=budget, budget_process_id='unit-summary')
+    assert charged == [(5100, 'unit-summary')] and len(usage) == 1
+    assert session.provider_usage[-1]['purpose'] == 'context_compaction'
+    assert session.context_epoch == 1
+
+
+def test_incomplete_summary_retains_paid_usage_and_keeps_original_epoch():
+    from backend.core.loop.provider_protocol import ProviderResponseIncomplete
+    class IncompleteProvider:
+        max_output_tokens = 8192
+        def chat(self, messages, **kwargs):
+            raise ProviderResponseIncomplete('max_output_tokens', {'output_tokens': 4096, 'reasoning_tokens': 4096})
+    session = session_with_history()
+    before = deepcopy(session.messages)
+    result = compact(session, IncompleteProvider())
+    assert result['status'] == 'failed' and result['attempt'] == 1
+    assert session.context_epoch == 0 and session.messages == before
+    assert session.provider_usage[-1]['output_tokens'] == 4096
+    assert session.provider_usage[-1]['incomplete'] is True
+
+
 def test_approval_survives_sqlite_checkpoint_and_force_needs_no_provider(tmp_path_factory):
     tmp_path = tmp_path_factory
     workspace = tmp_path / "workspace"

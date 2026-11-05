@@ -18,6 +18,7 @@ import type {
 } from "../state/store.js";
 import { isChatScene } from "../state/store.js";
 import type { Suggestion } from "../components/CommandBar.js";
+import {isBindingAction} from "./router.js";
 import { matchChord } from "./bindings.js";
 
 // ── Text buffer ops (drive useTextInput methods) ──────────
@@ -227,7 +228,7 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
         if (matchChord("escape", input, key)) return [];
         // Non-chat scenes have no free-text editor. Only a leading slash opens
         // the command bar; other printable keys must not create a dead buffer.
-        if (!(input === "/" && cmdVal === "")) return [];
+        if (!(input.startsWith("/") && cmdVal === "")) return [];
       }
     }
     return resolveCommandInput(ctx, input, key);
@@ -284,7 +285,7 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
           }),
         ];
       }
-      if (ctx.decisionAllowFreeForm && matchChord("letterA", input, key)) {
+      if (ctx.decisionAllowFreeForm && isBindingAction("decision.conditions", input, key)) {
         const index = Math.min(ctx.decisionSelection, count - 1);
         return [
           text("text", { op: "set_value", text: index < ctx.decisionOptionLabels.length ? `Choose option ${index + 1}: ${ctx.decisionOptionLabels[index]}; conditions: ` : "" }),
@@ -292,7 +293,7 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
           state({ type: "set_decision_composing", composing: true }),
         ];
       }
-      if (ctx.decisionAllowFreeForm && matchChord("letterD", input, key)) {
+      if (ctx.decisionAllowFreeForm && isBindingAction("decision.discuss", input, key)) {
         return [
           text("text", { op: "set_value", text: ctx.decisionSelection < ctx.decisionOptionLabels.length ? "Discuss option "+(ctx.decisionSelection+1)+": "+ctx.decisionOptionLabels[ctx.decisionSelection]+"; concern: " : "" }),
           state({ type: "set_chat_input_focused", focused: true }),
@@ -330,10 +331,10 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
     if (matchChord("tab", input, key)) {
       return [];
     }
-    if (matchChord("shiftEnter", input, key)) return [state({ type: "set_chat_input_focused", focused: true })];
-  }
-  if (ctx.scene === "agent_detail") {
-    if (matchChord("shiftTab", input, key)) return [state({ type: "set_chat_input_focused", focused: !ctx.chatInputFocused })];
+    if (matchChord("shiftEnter", input, key)) return [
+      state({ type: "set_chat_input_focused", focused: true }),
+      text("text", {op: "insert", text: "\n"}),
+    ];
   }
 
   // P5.5: Chat scroll (unfocused only — typing keeps the cursor keys)
@@ -508,19 +509,6 @@ export function resolveCommandInput(ctx: InputContext, input: string, key: any):
       return [
         text("cmd", { op: "set_value", text: ctx.cmdHistory[nextIdx] }),
         state({ type: "set_cmd_history_idx", index: nextIdx }),
-      ];
-    }
-    return [];
-  }
-
-  if (matchChord("tabAny", input, key) && suggestionsActive) {
-    const s = suggestions[suggestionIdx % suggestions.length];
-    if (s) {
-      let value = suggestionValue(ctx, s, cmdBuf, true);
-      if (s.inputMode === "fill") value = value.trimEnd() + " ";
-      return [
-        text("cmd", { op: "set_value", text: value }),
-        state({ type: "set_suggestion_idx", index: suggestionIdx + 1 }),
       ];
     }
     return [];

@@ -10,6 +10,7 @@ from backend.core.config import ConfigManager
 from backend.core.operations import push_to_backup, sync_to_backup
 
 from backend.core.sync_session.models import SessionStage
+from backend.core.publish.legacy import legacy_mutation
 
 
 class SyncPushMixin:
@@ -40,6 +41,7 @@ class SyncPushMixin:
         self.on_log("已应用 /publish 中配置的发布远端")
         return True
 
+    @legacy_mutation
     def step_sync(self, formal_index: Optional[int] = None) -> bool:
         """同步到备份仓库。formal_index=None → 找第一个未 synced 的。"""
         self.stage = SessionStage.SYNCING
@@ -229,6 +231,7 @@ class SyncPushMixin:
             self.on_log("同步失败")
         return success
 
+    @legacy_mutation
     def step_push(self, skip_scan: bool = False) -> tuple[bool, list[dict]]:
         """推送到远程仓库（批量推送所有 synced+unpushed 的 formal commit）。
 

@@ -69,6 +69,17 @@ def test_actual_reply_is_interpreted_with_delivery_without_disabling_boundary_re
     assert review_reason(process, payload, 'contract') == 'declared_task_boundary'
 
 
+def test_confirmed_answers_and_updates_do_not_trigger_review_on_ordinary_reads():
+    process, runtime = ready_process()
+    payload = {**runtime.payload(), 'confirmed_answers': [{'node_id': 'q', 'answer': 'Known fact'}],
+        'user_updates': ['Apply the related consumer too']}
+    assert review_reason(process, payload) == ''
+    assert review_reason(process, payload, 'contract') == 'declared_task_boundary'
+    assert review_reason(process, payload, 'execution') == 'effect_boundary'
+    assert review_reason(process, payload, 'question_proposal') == 'question_necessity'
+    assert review_reason(process, {**payload, 'stage': 'delivery', 'candidate': 'Plan'}) == 'actual_answer_dependencies'
+
+
 def test_main_agent_owns_first_ordinary_question_but_not_declared_dependency_review():
     process, runtime = ready_process()
     process.actor_kind = 'supervisor'

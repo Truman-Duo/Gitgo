@@ -183,6 +183,29 @@ def _governing_root(manager, process):
     return current
 
 
+def coordination_owner(manager, process):
+    """Resolve the existing ownership graph; a standalone worker has no owner."""
+    if manager is None or process is None:
+        return None
+    owner = _governing_root(manager, process)
+    if (owner is None or owner.process_id == process.process_id
+            or getattr(owner, "parent_id", None)
+            or getattr(owner, "actor_kind", None) != "supervisor"):
+        return None
+    return owner
+
+
+class CoordinationOwnerUnavailable(ValueError):
+    """Ownership changed or no supervisor ever owned this worker."""
+
+
+def ownership_error():
+    from backend.core.errors import error_payload
+    return {"accepted": False, **error_payload("COORDINATION_OWNER_UNAVAILABLE",
+                details={"fault_domain": "gitgo_runtime", "component": "coordination"}),
+            "authority_granted": False}
+
+
 def _append_projection(process, event: dict, *, block: bool = False) -> None:
     event_id = str(event.get("coordination_event_id") or "")
 
@@ -257,9 +280,9 @@ def publish_coordination_event(
     block_affected: bool = False,
 ) -> dict:
     """Record once and route through Host-owned owner/dependency relations."""
-    owner = _governing_root(manager, source)
-    if owner is None or owner.process_id == source.process_id:
-        raise ValueError("coordination events require a worker owned by a supervisor")
+    owner = coordination_owner(manager, source)
+    if owner is None:
+        raise CoordinationOwnerUnavailable("coordination events require a worker owned by a supervisor")
     allowed_children = {item.process_id for item in manager.children_of(owner.process_id)}
     interface_refs = list(dict.fromkeys(
         str(item) for item in (affected_interfaces or []) if str(item)
@@ -379,8 +402,8 @@ def observe_interface_changes(
         ]
     if not declared:
         return {"observed": [], "events": [], "reason": "no_declared_output_interfaces"}
-    owner = _governing_root(manager, source)
-    if owner is None or owner.process_id == source.process_id:
+    owner = coordination_owner(manager, source)
+    if owner is None:
         return {"observed": [], "events": [], "reason": "no_supervisor_owner"}
 
     observed = [_inspect_interface(workspace_path, str(ref)) for ref in declared]

@@ -78,6 +78,11 @@ class AgentSession:
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     display_name: str = ""
     worker_sequence: int = 0
+    # Conversation-scoped mechanisms survive terminal process successors.
+    mechanism_instances: dict = field(default_factory=dict, repr=False)
+    mechanism_activation_blocked: bool = False
+    authority_sequence: int = 0
+    _mechanism_lock: object = field(default_factory=threading.RLock, repr=False)
     messages: list[dict] = field(default_factory=list)
     # Provider state may include raw reasoning_content. By product decision it
     # is persisted as plaintext session data, but remains a low-authority record
@@ -106,6 +111,10 @@ class AgentSession:
     stable_prefix_hash: str = ""
     last_cache_intent_key: str = ""
     last_cache_context_epoch: int = -1
+    provider_tool_order: list[str] = field(default_factory=list, repr=False)
+    # Derived Provider presentation only; reset on scope/route/epoch change.
+    provider_context_cache: dict = field(default_factory=dict, repr=False)
+    provider_context_seed: dict = field(default_factory=dict, repr=False)
     manual_compact_requested: bool = False
     force_compact_requested: bool = False
     context_abort_requested: bool = False
@@ -125,9 +134,11 @@ class AgentSession:
             for key, value in dict(state.get("provider_state") or {}).items()
             if isinstance(value, dict)
         }
+        session.mechanism_instances = dict(state.get("mechanism_instances") or {})
+        session.mechanism_activation_blocked = bool(state.get("mechanism_activation_blocked", False))
         for name in (
             "context_epoch", "model_context_limit", "steering_sequence",
-            "last_cache_context_epoch", "worker_sequence",
+            "last_cache_context_epoch", "worker_sequence", "authority_sequence",
         ):
             if name in state:
                 setattr(session, name, int(state[name] or 0))
@@ -162,16 +173,18 @@ class AgentSession:
         )
         for name in (
             "context_memo", "host_ledger", "provider_usage",
-            "cache_telemetry", "context_inventory", "epoch_archive",
+            "cache_telemetry", "context_inventory", "epoch_archive", "provider_tool_order", "provider_context_cache", "provider_context_seed",
         ):
             if name not in state:
                 continue
             value = state[name]
             setattr(
                 session, name,
-                dict(value) if name in {"context_memo", "context_inventory"}
+                dict(value or {}) if name in {"context_memo", "context_inventory", "provider_context_cache", "provider_context_seed"}
                 else list(value or []),
             )
+        from .provider_context import restore_cache
+        session.provider_context_cache = restore_cache(session.provider_context_cache,session.provider_context_seed)
         return session
 
     @staticmethod
@@ -406,6 +419,7 @@ class AgentSession:
             "role": "user",
             "content": content,
             "message_type": "host_steering_delta",
+            "context_purpose": "runtime_update",
             "host_authority": True,
             "steering_type": steering_type,
             "steering_version": version,
@@ -449,7 +463,15 @@ class AgentSession:
         total += sum(len(json.dumps(
             state, ensure_ascii=False, sort_keys=True, default=str,
         )) for state in self.provider_state.values())
+        total += self._projected_context_characters()
         return max(1, total // 4)
+
+    def _projected_context_characters(self) -> int:
+        state = self.provider_context_cache
+        if state.get('epoch') != self.context_epoch:
+            return 0
+        return sum(len(r['message']['content']) for r in state.get('records', [])) + len(
+            (state.get('seed_message') or {}).get('content',''))
 
     def context_breakdown(self) -> dict:
         """Return the canonical approximate token ownership by prompt/history area."""
@@ -493,6 +515,9 @@ class AgentSession:
             state, ensure_ascii=False, sort_keys=True, default=str,
         )) for state in self.provider_state.values()) // 4
         add("Provider continuation", provider_tokens)
+        add("Runtime context updates", self._projected_context_characters() // 4)
+        if not self.provider_context_cache.get('records') or self.provider_context_cache.get('epoch') != self.context_epoch:
+            add('Pending tool catalog', int(self.context_inventory.get('pending_tool_catalog_tokens',0) or 0))
         add("Tool schemas", int(self.context_inventory.get("tool_schema_tokens", 0) or 0))
         total = max(1, sum(sections.values()))
         return {
@@ -610,12 +635,17 @@ class AgentSession:
         guidance does not invalidate the reusable prompt/history prefix or
         pollute later conversation recall.
         """
+        from .provider_history import complete_transactions
+        history, states = complete_transactions(_mark_legacy_unicode_chain(self.messages), self.provider_state,
+            self.epoch_archive, self._provider_call_ids)
         result = []
-        excluded_call_ids = self._excluded_provider_call_ids(provider_route)
+        excluded_call_ids = {call_id for state in states.values()
+            if provider_route and state.get('provider_route') != provider_route
+            for call_id in self._provider_call_ids(state)}
         # Re-evaluate at each Provider boundary as well as restore time.  This
         # also repairs a daemon that kept a pre-fix session alive while a new
         # Dashboard executable connected to it.
-        for message in _mark_legacy_unicode_chain(self.messages):
+        for message in _mark_legacy_unicode_chain(history):
             if message.get("provider_visible") is False:
                 continue
             if (
@@ -625,7 +655,7 @@ class AgentSession:
                 continue
             wire = dict(message)
             state_id = message.get("provider_state_id", "")
-            state = self.provider_state.get(state_id, {})
+            state = states.get(state_id, {})
             state_matches = bool(state) and (
                 not provider_route or state.get("provider_route") == provider_route
             )
@@ -637,6 +667,9 @@ class AgentSession:
                     continue
             result.append(wire)
         result = self._ordered_tool_transactions(result)
+        from .provider_context import ContextSections, project
+        if isinstance(dynamic_envelope, ContextSections):
+            return project(self, result, dynamic_envelope, route=provider_route)
         if dynamic_envelope.strip():
             result.append({
                 "role": "user",
@@ -652,25 +685,19 @@ class AgentSession:
             for item in self.messages
             if item.get("message_type") == "compiled_system_prompt"
         ]
-        stable_hash = deterministic_hash(stable_messages)
-        tool_hash = deterministic_hash(tools or [])
-        self.stable_prefix_hash = stable_hash
-        return CacheIntent(
-            mode=mode,
-            stable_prefix_key=deterministic_hash({
-                "stable": stable_hash,
-                "tools": tool_hash,
-            }),
-            context_epoch=self.context_epoch,
-            stable_prefix_hash=stable_hash,
-            tool_schema_hash=tool_hash,
-            prompt_schema_hash=self.compiled_prompt_hash,
-        )
+        from .provider_cache import prefix_intent
+        intent = prefix_intent(stable_messages, tools, mode=mode,
+            epoch=self.context_epoch, prompt_hash=self.compiled_prompt_hash)
+        self.stable_prefix_hash = intent.stable_prefix_hash
+        return intent
 
     def record_provider_usage(
         self, usage: dict, *, protocol: str = "", cache_intent: CacheIntent | None = None,
     ) -> None:
         record = {"protocol": protocol, **dict(usage or {})}
+        purpose = record.get("purpose", "main")
+        previous = next((item.get("cache_intent") for item in reversed(self.provider_usage)
+                         if item.get("purpose", "main") == purpose and item.get("cache_intent")), None)
         if cache_intent is not None:
             record["cache_intent"] = cache_intent.to_dict()
         self.provider_usage.append(record)
@@ -680,13 +707,13 @@ class AgentSession:
         if cache_intent is None or cache_intent.mode == "unsupported":
             miss_reason = "unsupported_or_untracked"
             eligible = False
-        elif not self.last_cache_intent_key:
+        elif not previous:
             miss_reason = "cold_start"
             eligible = False
-        elif self.last_cache_intent_key != intent_key:
+        elif previous.get("stable_prefix_key") != intent_key or previous.get("tool_schema_hash") != cache_intent.tool_schema_hash:
             miss_reason = "route_or_tool_schema_changed"
             eligible = False
-        elif self.last_cache_context_epoch != self.context_epoch:
+        elif previous.get("context_epoch") != cache_intent.context_epoch:
             miss_reason = "context_epoch_reset"
             eligible = False
         elif cache_read > 0:
@@ -696,15 +723,16 @@ class AgentSession:
             miss_reason = "provider_miss_or_unreported"
             eligible = True
         self.cache_telemetry.append({
-            "context_epoch": self.context_epoch,
-            "stable_prefix_hash": self.stable_prefix_hash,
+            "purpose": purpose,
+            "context_epoch": cache_intent.context_epoch if cache_intent else self.context_epoch,
+            "stable_prefix_hash": cache_intent.stable_prefix_hash if cache_intent else "",
             "cache_read_tokens": cache_read,
             "cache_write_tokens": int(record.get("cache_write_tokens", 0) or 0),
             "input_tokens": input_tokens,
             "eligible_for_reuse": eligible,
             "miss_reason": miss_reason,
         })
-        if cache_intent is not None:
+        if cache_intent is not None and purpose == "main":
             self.last_cache_intent_key = intent_key
             self.last_cache_context_epoch = self.context_epoch
 
@@ -745,6 +773,9 @@ class AgentSession:
         checkpoint_after_retained: bool = False,
     ) -> None:
         """Perform one auditable low-frequency GC and start a new append-only epoch."""
+        from .provider_history import complete_transactions
+        retained_messages, retained_states = complete_transactions(retained_messages, self.provider_state,
+            [*self.epoch_archive, {'messages': self.messages, 'provider_state': self.provider_state}], self._provider_call_ids)
         self.epoch_archive.append({
             "epoch": self.context_epoch,
             "reason": reason,
@@ -752,6 +783,7 @@ class AgentSession:
             "provider_state": dict(self.provider_state),
         })
         self.context_epoch += 1
+        self.provider_context_cache = {}
         prefix = [
             item for item in self.messages
             if item.get("message_type") in {
@@ -762,6 +794,7 @@ class AgentSession:
             "role": "user",
             "content": f"[CONTEXT EPOCH {self.context_epoch} CHECKPOINT]\n{summary}",
             "message_type": "compact_transcript",
+            "context_purpose": "conversation_handoff",
             "context_epoch": self.context_epoch,
         }
         self.messages = (
@@ -774,7 +807,7 @@ class AgentSession:
             if item.get("provider_state_id")
         }
         self.provider_state = {
-            key: value for key, value in self.provider_state.items()
+            key: value for key, value in retained_states.items()
             if key in active_state_ids
         }
         self.context_flags.clear()
@@ -800,9 +833,8 @@ class AgentSession:
         gated by an absolute live-context threshold so short iterative work
         keeps its natural conversational continuity and cache prefix.
         """
-        stable_allowed = {
-            "Behavior and delivery standard", "User collaboration protocol",
-        }
+        from .prompt_compiler import STABLE_SECTION_NAMES, MIN_SPLIT_PREFIX_SCHEMA_VERSION
+        stable_allowed = STABLE_SECTION_NAMES
         prompt_migration_required = False
         for message in self.messages:
             if message.get("message_type") != "compiled_system_prompt":
@@ -813,7 +845,7 @@ class AgentSession:
                 if isinstance(item, dict)
             }
             if (
-                int(message.get("prompt_schema_version") or 0) < 6
+                int(message.get("prompt_schema_version") or 0) < MIN_SPLIT_PREFIX_SCHEMA_VERSION
                 or (names and not names.issubset(stable_allowed))
             ):
                 prompt_migration_required = True
@@ -826,6 +858,8 @@ class AgentSession:
 
         public: list[dict] = []
         for message in self.messages:
+            if message.get("provider_visible") is False:
+                continue
             if str(message.get("role") or "") not in {"user", "assistant"}:
                 continue
             if str(message.get("message_type") or "") not in {"", "conversation"}:
@@ -840,10 +874,11 @@ class AgentSession:
                 "content": content[:8000],
                 "message_type": "conversation",
             })
-        retained = public[-max(0, int(retained_public_messages)):]
+        retained_count = max(0, int(retained_public_messages))
+        retained = public[-retained_count:] if retained_count else []
+        previous_result = str(checkpoint.get("response") or "").strip()[:8000]
         safe_checkpoint = {
             "previous_task_status": str(checkpoint.get("status") or "unknown"),
-            "previous_result": str(checkpoint.get("response") or "")[:8000],
             "deliverables": list(checkpoint.get("deliverables") or [])[:16],
             "child_outcomes": list(checkpoint.get("child_outcomes") or [])[:16],
             "instruction": (
@@ -852,6 +887,13 @@ class AgentSession:
                 "workspace or current Host tools before relying on them."
             ),
         }
+        # Keep the result in either dialogue or handoff, without deleting the
+        # original answer or making a semantic judgment about its wording.
+        if previous_result and not any(
+            item["role"] == "assistant" and item["content"] == previous_result
+            for item in retained
+        ):
+            safe_checkpoint["previous_result"] = previous_result
         self.begin_context_epoch(
             summary=(
                 "[HOST COMPLETED TASK BOUNDARY]\n"
@@ -923,6 +965,11 @@ class AgentSession:
         self, *, dynamic_envelope: str = "", provider_route: str = "",
     ) -> list[dict]:
         """转换为 OpenAI API 兼容的 messages 格式。"""
+        from .provider_context import ContextSections
+        if isinstance(dynamic_envelope, ContextSections):
+            from .provider_adapters import OpenAIChatAdapter
+            return [OpenAIChatAdapter._chat_message(item) for item in self.to_provider_messages(
+                dynamic_envelope=dynamic_envelope, provider_route=provider_route)]
         result = []
         excluded_call_ids = self._excluded_provider_call_ids(provider_route)
         for message in self.messages:

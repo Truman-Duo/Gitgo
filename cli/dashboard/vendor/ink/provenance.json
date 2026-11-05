@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "package": "@anthropic/ink",
+  "declared_version": "1.0.0",
+  "license_status": "unverified",
+  "redistribution_permission_verified": false,
+  "upstream_revision": null,
+  "first_import": {
+    "commit": "93567475100dc7083d5c83b85439819445efdb5f",
+    "tree": "15d0368eca12f9101c218135470a660f206417c6",
+    "package_json_blob": "aec1f4eebff9757407413e5e2a2f5e06675d0789"
+  },
+  "product_baseline": {
+    "commit": "03a573c396ce65676b07c7ca142dbfdfae65a583",
+    "tree": "82c289725ea9e6b1819db0af9b2b6759a6fbc33b"
+  },
+  "evidence": "PROVENANCE.md",
+  "checked_on": "2026-10-27"
+}

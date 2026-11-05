@@ -6,15 +6,16 @@ import { Box, Text, ScrollBox } from "@anthropic/ink";
 import type {DOMElement, ScrollBoxHandle} from "@anthropic/ink";
 import type { LoopData, ProcessInfo } from "../hooks/useLoopData.js";
 import {
+  colors,
   usePanelSize,
   statusDot,
-  useSelectionStyle,
   processStatusToDot,
   truncate,
   padEndWidth,
 } from "../theme/index.js";
 import { useScrollInput } from "../input/runtime.js";
 import { agentLabel } from "../daemon/agentLabels.js";
+import {SelectionRow, SelectionText, TableHeaderText} from "./Selection.js";
 
 type Props = {
   project: string;
@@ -187,7 +188,7 @@ export const ProcessList = memo(function ProcessList({
   }, [processes]);
   useLayoutEffect(() => {
     const saved = listViewports.get(project);
-    if (restoreViewport.current && saved?.selected === flatList[selIdx]?.process_id && saved.width === w)
+    if (restoreViewport.current && saved && saved.selected === flatList[selIdx]?.process_id && saved.width === w)
       scrollRef.current?.scrollTo(saved.top);
     else if (selectedRow.current) scrollRef.current?.scrollIntoView(selectedRow.current);
     restoreViewport.current = false;
@@ -240,9 +241,9 @@ export const ProcessList = memo(function ProcessList({
   return (
     <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
       <Text bold>{t({en:"Subprocesses",zh:"子进程"})} · {project}</Text>
-      <Text dimColor>
+      <TableHeaderText dimColor>
         {padEndWidth(t({en:"Process",zh:"进程"}),nameWidth)} {padEndWidth(t({en:"Status",zh:"状态"}),statusWidth)} {t({en:"Prerequisites",zh:"前置依赖"})}
-      </Text>
+      </TableHeaderText>
       <ScrollBox
         ref={scrollRef}
         flexDirection="column"
@@ -253,10 +254,6 @@ export const ProcessList = memo(function ProcessList({
         {flatList.map((process, index) => {
           const dot = statusDot(processStatusToDot(process.status));
           const active = index === selIdx;
-          const style = useSelectionStyle(
-            active ? "focused" : "non-focused",
-            "row",
-          );
           const deps = dependencies(process);
           const previous = flatList[index - 1];
           const title = `${process.tree_prefix || ""}${process.process_id.slice(0, 6)} ${agentLabel(process)}`;
@@ -267,12 +264,8 @@ export const ProcessList = memo(function ProcessList({
                   {t({en:"Main process / task",zh:"主进程 / 任务"})} {String(process.owner_group).slice(0, 8)}
                 </Text>
               ) : null}
-              <Box ref={active ? selectedRow : undefined} flexDirection="row">
-                <Text
-                  backgroundColor={style.bg}
-                  color={style.fg}
-                  bold={style.bold}
-                >
+              <SelectionRow selected={active} ref={active ? selectedRow : undefined} flexDirection="row">
+                <SelectionText>
                   <Text color={dot.color}>● </Text>
                   {padEndWidth(
                     truncate(title, nameWidth - 2),
@@ -292,14 +285,14 @@ export const ProcessList = memo(function ProcessList({
                             ", ",
                           )}${deps.length > 2 ? ` +${deps.length - 2}` : ""}`
                       : "—"}
-                </Text>
-              </Box>
+                </SelectionText>
+              </SelectionRow>
             </React.Fragment>
           );
         })}
       </ScrollBox>
       {recoveryAvailable.length ? (
-        <Text color="#d29922">
+        <Text color={colors.warning}>
           {t({en:`${recoveryAvailable.length} recovery candidates; explicit resume required.`,zh:`${recoveryAvailable.length} 项待恢复，须明确确认后恢复。`})}
         </Text>
       ) : null}

@@ -6,9 +6,12 @@ const report = (event: unknown) => process.stderr.write(JSON.stringify(event) + 
 function Probe() {
   const {columns, rows} = useTerminalSize();
   useLayoutEffect(() => {report({size: [columns, rows]});}, [columns, rows]);
-  useInput((input, key) => {if (key.super && input === 'c') report({cmdCopy: true});});
+  useInput((input, key) => {
+    if (key.super && input === 'c') report({cmdCopy: true});
+    if (key.shift && key.return) report({shiftEnter: true});
+  });
   useManagedInput((input, key) => report({input, ctrl: !!key.ctrl, shift: !!key.shift,
-    enter: !!key.return, paste: !!key.paste}));
+    enter: !!key.return, newline: !!key.newline, paste: !!key.paste}));
   return <Text>Gitgo terminal probe</Text>;
 }
 const renderer = renderSync(<InputProvider><Probe /></InputProvider>, {exitOnCtrlC: false, patchConsole: false});

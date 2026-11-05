@@ -94,7 +94,7 @@ export type TraceLifecycleEvent = {
     "provider_response_incomplete" | "provider_usage" |
     "provider_capability_fallback" |
     "provider_route_activated" | "provider_route_selected" | "provider_route_failed" | "provider_route_skipped" |
-    "provider_configuration_changed" |
+    "provider_configuration_changed" | "provider_request_preferences_changed" |
     "governance_snapshot" | "context_window_action" |
     "context_compaction_completed" | "completion_gate" | "agent_started" |
     "agent_terminal" | "agent_complete" | "task_bundle_delegated" |

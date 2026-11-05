@@ -13,7 +13,7 @@ import stat
 import sys
 from .validation import reject
 
-LEASE_HANDLES_ENV = "GITGO_SANDBOX_INSTALL_LEASE_HANDLES"
+from backend.core.installation_lease import LEASE_HANDLES_ENV
 
 
 def in_appcontainer():
@@ -35,17 +35,24 @@ def _native_name(handle):
     return Path("\\\\?\\GLOBALROOT"+name.value)
 
 
-def _matching_descriptor(handle_value, expected):
+def _matching_descriptor(handle_value, expected, *, namespace=None):
     import msvcrt
     from .windows_storage import validate_acl
     descriptor=msvcrt.open_osfhandle(handle_value,os.O_RDONLY|os.O_BINARY)
     try:
         info=os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+        directory=stat.S_ISDIR(info.st_mode)
+        if directory:
+            if namespace is None:
+                reject("UPDATE_PROBE_LEASE","A namespace reservation cannot authorize a runtime")
+            target=namespace
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink==1:
+            target=expected
+        else:
             reject("UPDATE_PROBE_LEASE","Managed lease is not an ordinary lock object")
         handle=msvcrt.get_osfhandle(descriptor)
         validate_acl(handle)  # private control policy, never program RX policy
-        if str(_native_name(handle)).casefold()!=str(expected).casefold():
+        if str(_native_name(handle)).casefold()!=str(target).casefold():
             reject("UPDATE_PROBE_LEASE","Inherited lease belongs to another installation")
         os.set_inheritable(descriptor,False)
         return descriptor
@@ -79,8 +86,13 @@ def inherited_sandbox_runtime(role):
         reject("UPDATE_PROBE_LEASE","Restricted managed payload lacks an inherited lease")
     from backend.core.installation_lease import retain_descriptor
     with ExitStack() as scope:
+        runtime=False
         for value in values:
-            descriptor=_matching_descriptor(int(value),expected)
+            descriptor=_matching_descriptor(int(value),expected,namespace=image.parents[3])
             scope.callback(os.close,descriptor)
-            scope.enter_context(retain_descriptor(descriptor))
+            namespace=stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            scope.enter_context(retain_descriptor(descriptor,namespace=namespace))
+            runtime=runtime or not namespace
+        if not runtime:
+            reject("UPDATE_PROBE_LEASE","Namespace reservations do not supply a runtime lease")
         yield True

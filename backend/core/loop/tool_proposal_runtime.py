@@ -17,9 +17,10 @@ class ToolProposalRuntime:
         # A tool boundary makes prior public text commentary, not an
         # uninterrupted deliverable. A subsequent answer must stand alone.
         clear_answer_fragments(process)
+        from .decision_support import SEMANTIC_DECISION_KINDS
         question_calls = [tc for tc in tool_calls
             if (tc['name'] == 'request_user_decision'
-                and tc.get('args', {}).get('kind', 'clarification') in {'clarification', 'preference', 'direction', 'choice'})
+                and tc.get('args', {}).get('kind', 'clarification') in SEMANTIC_DECISION_KINDS)
             or (tc['name'] == 'engineering_workflow' and tc.get('args', {}).get('operation') == 'ask_semantic')]
         if question_calls:
             alignment_result = _check_alignment(proposed_questions=[
@@ -46,7 +47,10 @@ class ToolProposalRuntime:
                                     message_type='host_alignment_repair')
                 return DeliveryBoundary(retry=True)
         completion_call = next((tc for tc in tool_calls if tc['name'] in {'complete_task', 'complete_supervision'}), None)
-        if completion_call:
+        from backend.core.mechanism_runtime.application import bound_application
+        composition = bound_application(process)
+        staged_completion = composition is not None and composition.has_completion_stages()
+        if completion_call and not staged_completion:
             proposed = str(completion_call.get('args', {}).get('result') or content)
             alignment_result = _check_alignment(proposed, trigger='completion_claim',
                 proposed_files=completion_call.get('args', {}).get('files') or [])
@@ -66,13 +70,17 @@ class ToolProposalRuntime:
                 session.append_user('[HOST REQUIREMENT CHECK] ' + alignment_result['alignment_repair'],
                                     message_type='host_alignment_repair')
                 return DeliveryBoundary(retry=True)
+        # A registered completion stage must run before final semantic delivery
+        # review can demand its result. Existing admission, tool policy and
+        # mandatory completion checks still run; DeliveryRuntime reviews the
+        # candidate with the actual stage evidence before closing the task.
         # Non-trivial intent is already compiled by declare_task_contract.
         # Review its genuine boundary, not every preceding conversation.
-        from .tool_boundary_preview import preview_tool_boundaries
-        boundary = preview_tool_boundaries(tool_calls, tools_dict)
+        from .tool_boundary_preview import preview_tool_boundaries, initial_execution_calls
+        boundary = preview_tool_boundaries(initial_execution_calls(tool_calls, tools_dict), tools_dict, process)
         declarations, effectful = boundary.contracts, boundary.effectful
-        alignment_result = _check_alignment(trigger='contract' if declarations else 'execution' if effectful else 'admission',
-            proposed_contracts=declarations or None) if not question_calls and (not completion_call or declarations or effectful) else None
+        alignment_result = _check_alignment(trigger='contract' if any(c.get('kind') != 'business_readiness' for c in declarations) else 'execution' if effectful else 'admission',
+            proposed_contracts=declarations or None, observation_only=boundary.observation_only) if not question_calls and (not completion_call or declarations or effectful) else None
         if alignment_result is not None:
             for tc in tool_calls:
                 session.append_tool_result('Host requirement boundary prevented this batch; no tool executed.',

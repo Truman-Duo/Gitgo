@@ -124,7 +124,7 @@ type Props = {
   readonly onCursorDeclaration?: CursorDeclarationSetter;
   // Dispatch a keyboard event through the DOM tree. Called for each
   // parsed key alongside the legacy EventEmitter path.
-  readonly dispatchKeyboardEvent: (parsedKey: ParsedKey) => void;
+  readonly dispatchKeyboardEvent: (parsedKey: ParsedKey) => boolean | void;
 };
 
 // Multi-click detection thresholds. 500ms is the macOS default; a small
@@ -511,10 +511,11 @@ export default class App extends PureComponent<Props, State> {
     // Store the exact raw mode count to restore it properly
     const rawModeCountBeforeSuspend = this.rawModeEnabledCount;
 
-    // Completely disable raw mode before suspending
-    while (this.rawModeEnabledCount > 0) {
-      this.handleSetRawMode(false);
-    }
+    // Suspension retires the terminal mode, not a React input subscription.
+    // The normal decrement path preserves active listeners and would restore
+    // this count forever. Save the owners above, then disable exactly once.
+    this.rawModeEnabledCount = 0;
+    this.disableRawMode();
 
     // Show cursor, disable focus reporting, and disable mouse tracking
     // before suspending. DISABLE_MOUSE_TRACKING is a no-op if tracking
@@ -618,19 +619,21 @@ function processKeysInBatch(app: App, items: ParsedInput[], _unused1: undefined,
       setTerminalFocused(true);
     }
 
-    // Handle Ctrl+Z (suspend) using parsed key to support both raw (\x1a) and
-    // CSI u format (\x1b[122;5u) from Kitty keyboard protocol terminals
-    if (item.name === 'z' && item.ctrl && SUPPORTS_SUSPEND) {
-      app.handleSuspend();
-      continue;
-    }
-
     app.handleInput(sequence);
     const event = new InputEvent(item);
     app.internal_eventEmitter.emit('input', event);
 
-    // Also dispatch through the DOM tree so onKeyDown handlers fire.
-    app.props.dispatchKeyboardEvent(item);
+    // One input owner wins. Legacy/router consumption prevents both DOM
+    // redispatch and terminal defaults; otherwise DOM handlers may consume it.
+    const handled = event.didStopImmediatePropagation();
+    const domHandled = !handled && app.props.dispatchKeyboardEvent(item);
+    // Unix suspension is a fallback for an exact, unclaimed Ctrl+Z, never a
+    // pre-dispatch interception of raw capture, undo or modified Z bindings.
+    if (!handled && !domHandled && SUPPORTS_SUSPEND && item.name === 'z'
+        && item.ctrl && !item.shift && !item.meta && !item.option
+        && !item.super && !item.fn && !item.isPasted) {
+      app.handleSuspend();
+    }
   }
 }
 

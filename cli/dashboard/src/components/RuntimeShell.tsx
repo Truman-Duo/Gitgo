@@ -12,11 +12,12 @@ export const RUNTIME_TABS = [
   { id: "memory" },
   { id: "context" },
   { id: "tools" },
+  { id: "mechanisms" },
 ] as const;
 
 export function runtimeTabs(t:(value:Copy)=>string) {
  const labels=[t({en:"lesson",zh:"经验"}),t({en:"contract",zh:"契约"}),t({en:"governance",zh:"治理"}),
-  t({en:"memory",zh:"记忆"}),t({en:"context",zh:"上下文"}),t({en:"actions",zh:"自定义动作"})];
+  t({en:"memory",zh:"记忆"}),t({en:"context",zh:"上下文"}),t({en:"actions",zh:"自定义动作"}),t({en:"mechanisms",zh:"任务机制"})];
  return RUNTIME_TABS.map((item,index)=>({...item,label:labels[index]!}));
 }
 export function RuntimeChildShell({ tab, children }: { tab: string; children: ReactNode }) {

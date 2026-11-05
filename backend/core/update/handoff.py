@@ -36,7 +36,7 @@ def _session(store, nonce):
 def platform_ready(store):
     if sys.platform == "linux" and store.registration["platform"] == "linux": return True
     if (sys.platform == "win32" and store.registration["platform"] == "windows"
-            and store.registration.get("bootstrap_api") in (7, 8)):
+            and store.registration.get("bootstrap_api") in (7, 8, 10)):
         from .windows_storage import supported
         from backend.core.windows_job import _api
         try: return supported() and _api() is not None
@@ -51,7 +51,7 @@ def platform_ready(store):
 def strategy(store):
     # An older immutable bootstrap must not gain a capability it cannot run.
     return ("after_reboot" if sys.platform == "darwin" and store.registration["platform"] == "macos"
-            and store.registration.get("bootstrap_api") in (6, 9) else "immediate")
+            and store.registration.get("bootstrap_api") in (6, 9, 11) else "immediate")
 
 
 def request_available(store):

@@ -17,7 +17,7 @@ export type CommandAction =
   | { type: "text"; op: TextOp };
 
 export function isCommandMode(cmdValue: string, input: string): boolean {
-  return cmdValue.startsWith("/") || (input === "/" && cmdValue === "");
+  return cmdValue.startsWith("/") || (input.startsWith("/") && cmdValue === "");
 }
 
 export function resolveCommandKeys(
@@ -43,7 +43,6 @@ export function resolveCommandKeys(
   }
   if (matchChord("up", input, key) && suggestionCount > 0) return [{ type: "suggestionUp" }];
   if (matchChord("down", input, key) && suggestionCount > 0) return [{ type: "suggestionDown" }];
-  if (matchChord("tabAny", input, key) && suggestionCount > 0) return [{ type: "suggestionTab" }];
   if (matchChord("backspace", input, key)) return [{ type: "text", op: { op: "delete_back" } }];
   if (matchChord("delete", input, key)) return [{ type: "text", op: { op: "delete_forward" } }];
   if (matchChord("left", input, key)) return [{ type: "text", op: { op: "move_cursor", delta: -1 } }];

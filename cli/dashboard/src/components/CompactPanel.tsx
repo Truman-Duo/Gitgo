@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import React, { useEffect, useRef, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../input/runtime.js";
@@ -6,11 +7,13 @@ import type { PendingDecision } from "../types.js";
 import { manualCompact } from "../backend/tools.js";
 import { DecisionPanel } from "./DecisionPanel.js";
 import { colors } from "../theme/index.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 /** Host maintenance choices use the existing decision UI, not another LLM turn. */
 export function CompactPanel({ client, project, processId, result: initial, onDismiss }: {
   client: BackendClient; project: string; processId: string; result: any; onDismiss: () => void;
 }) {
+  const t=useCopy();
   const [result, setResult] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [selection, setSelection] = useState(0);
@@ -54,7 +57,9 @@ export function CompactPanel({ client, project, processId, result: initial, onDi
   }, [busy]);
 
   const decision = result?.pending_decision as PendingDecision | undefined;
+  const menuHelp=useLocalHelpCommand("compact",undefined,!busy);
   useInput((_input, key) => {
+    if(menuHelp.handle(_input,key))return;
     if (busy) return;
     if (key.escape) { onDismiss(); return; }
     if (!decision) return;
@@ -66,19 +71,18 @@ export function CompactPanel({ client, project, processId, result: initial, onDi
   });
 
   return <Box flexDirection="column" paddingLeft={1} paddingRight={1}>
-    <Text bold>Context compaction</Text>
-    {busy ? <Text dimColor>Compacting… {decision ? "user-approved reset" : `attempt ${Number(result?.attempt || 0) + 1}/3`} · {elapsed}s</Text> : null}
-    {error ? <Text color={colors.danger}>[COMPACTION_REQUEST_FAILED] {error}</Text> : null}
+    <Text bold>{t({en:"Context compaction",zh:"上下文压缩"})}</Text>
+    {busy ? <Text dimColor>{t({en:"Compacting…",zh:"正在压缩…"})} {decision ? t({en:"user-approved reset",zh:"用户已批准重置"}) : t({en:`attempt ${Number(result?.attempt || 0) + 1}/3`,zh:`第 ${Number(result?.attempt || 0) + 1}/3 次尝试`})} · {elapsed}s</Text> : null}
+    {error ? <Text color={colors.danger}>{t({en:"[COMPACTION_REQUEST_FAILED] ",zh:"[COMPACTION_REQUEST_FAILED] "})}{error}</Text> : null}
     {decision ? <DecisionPanel decision={decision} selectedIndex={selection} composing={false} submitting={busy} /> : null}
     {!busy && !decision ? <Text color={result?.status === "failed" ? colors.danger : undefined}>
       {result?.status === "completed"
         ? result?.changed === false && result?.reason === "not_enough_foldable_history"
-          ? "Context is already compact; there is not enough foldable history yet."
-          : "Context compacted"
+          ? t({en:"Context is already compact; there is not enough foldable history yet.",zh:"上下文已经精简，暂无足够历史可继续压缩。"})
+          : t({en:"Context compacted",zh:"上下文已压缩"})
         : result?.status === "cancelled"
-        ? "Compaction cancelled; conversation preserved."
-        : `[${result?.error_info?.catalog_id || "CONTEXT_COMPACTION_FAILED"}] ${result?.error_info?.message || result?.error || "Compaction failed"}`}
+        ? t({en:"Compaction cancelled; conversation preserved.",zh:"压缩已取消，对话已保留。"})
+        : `[${result?.error_info?.catalog_id || "CONTEXT_COMPACTION_FAILED"}] ${result?.error_info?.message || result?.error || t({en:"Compaction failed",zh:"压缩失败"})}`}
     </Text> : null}
-    <Text dimColor>{busy ? "Waiting for the current compaction attempt." : "Esc close"}</Text>
   </Box>;
 }

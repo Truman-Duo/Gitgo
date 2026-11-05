@@ -22,6 +22,33 @@ def test_explicit_required_tests_cannot_disappear_on_task_reclassification(tmp_p
     assert any(g["kind"] == "test_evidence" and g["degradable_by_explicit_user_decision"] for g in evaluation.gates)
 
 
+@pytest.mark.parametrize('task_kind', ['answer', 'plan', 'action', 'supervisor', 'review'])
+def test_hotplug_required_outputs_do_not_disappear_with_initial_task_type(tmp_path_factory, task_kind):
+    p = process(tmp_path_factory)
+    p.task_kind = task_kind
+    p.required_test_ids = []
+    p.update_context_snapshot(lambda s: {**s, 'task_contract': {
+        'deliverables': [{'kind': 'workspace_file', 'path': 'new_test.py', 'required': True}]}})
+    result = HostCompletionEvaluator.evaluate(p, 'Plan updated, waiting for the first write')
+    assert not result.allowed
+    assert any('new_test.py' in reason for reason in result.reasons)
+
+
+def test_hotplug_implementation_cannot_finish_before_first_receipt(tmp_path_factory):
+    p = process(tmp_path_factory)
+    p.task_kind = 'answer'
+    p.required_test_ids = []
+    p.tool_receipts = []
+    (tmp_path_factory/'feature.py').write_text('old behavior', encoding='utf-8')
+    from backend.core.loop.task_contract import publish_contract, validate_contract_proposal
+    publish_contract(p, validate_contract_proposal({'goal': 'Implement the feature', 'execution_mode': 'self_execute',
+        'deliverables': [{'kind':'workspace_file','path':'feature.py','required':True}],
+        'acceptance_criteria':['The changed feature works']},str(tmp_path_factory)))
+    result = HostCompletionEvaluator.evaluate(p, 'Stopped before the first write')
+    assert not result.allowed and any('request_self_execute' in reason for reason in result.reasons)
+    assert p.capability_lease is None and p.approval_grants == []
+
+
 def process(root):
     p = AgentProcess(process_id="completion-worker", role="worker", ring_level=RingLevel.RING_3,
         actor_kind="worker", task_kind="action", active_task_id="completion-task",
@@ -139,6 +166,8 @@ class TextClaims:
 
 def test_plain_text_claim_pauses_at_same_gate_instead_of_failing_or_looping(tmp_path_factory):
     p = process(tmp_path_factory)
+    p.task_description = 'Finish the existing change and verify it with the required test.'
+    p.session.append_user(p.task_description)
     provider = TextClaims()
     outcome = agent_step(p, provider, workspace_path=str(tmp_path_factory))
     assert outcome["status"] == "awaiting_user", str(outcome)

@@ -1,3 +1,5 @@
+import {SelectionText} from "./Selection.js";
+import {applicationBindings} from "../input/router.js";
 import {useCopy} from "../ui/PageFrame.js";
 import React, { useState } from "react";
 import { Box, Text } from "@anthropic/ink";
@@ -35,6 +37,7 @@ export function DecisionPanel({
   };
   const showOptions = active || expanded;
   const permission = decision.kind === "permission";
+  const manual = decision.kind === "manual_execution";
   return (
     <Box
       flexDirection="column"
@@ -48,7 +51,7 @@ export function DecisionPanel({
       <Box onClick={toggle}>
         <Text bold>
           {active
-            ? decision.kind === "permission"
+            ? manual ? t({en:"Manual · next step",zh:"Manual · 下一步"}) : decision.kind === "permission"
               ? t({en:"Permission required",zh:"需要授权"})
               : t({en:"Information requested",zh:"需要补充信息"})
             : answer
@@ -60,7 +63,7 @@ export function DecisionPanel({
       <AnimatedReveal expanded={showOptions}>
         <Text bold>
           {decision.round_position ? `${decision.round_position} · ` : ""}
-          {decision.question}
+          {manual ? t({en:"Run the next work unit?",zh:"执行下一步工作？"}) : decision.question}
         </Text>
         {decision.questions &&
         decision.questions.length > 1 &&
@@ -70,11 +73,20 @@ export function DecisionPanel({
             ))
           : null}
         {answer ? <Text>{formatAnswer(answer)}</Text> : null}
+        {decision.materials?.length ? <Box flexDirection="column" marginTop={1}>
+          <Text dimColor>{t({en:"Supplementary material",zh:"补充材料"})}</Text>
+          {decision.materials.map(material => <Text key={material.reference}>{material.summary}</Text>)}
+        </Box> : null}
 
         <Text dimColor>
-          {permission ? t({en:"Why approval is needed",zh:"为何需要授权"}) : t({en:"Information needed",zh:"需要补充的信息"})}:{" "}
-          {decision.why_user_must_decide}
+          {permission ? t({en:"Why approval is needed",zh:"为何需要授权"}) : manual ? t({en:"Advancement",zh:"推进方式"}) : t({en:"Information needed",zh:"需要补充的信息"})}:{" "}
+          {manual ? t({en:"Manual pauses before this step; tool and sandbox permissions still apply.",zh:"Manual 在本步前等待确认；工具权限与沙箱限制仍然生效。"}) : decision.why_user_must_decide}
         </Text>
+        {manual && decision.manual_unit ? <Box flexDirection="column">
+          <Text>{decision.manual_unit.tool_name}</Text>
+          <Text dimColor>{JSON.stringify(decision.manual_unit.arguments, null, 2).slice(0, 1200)}
+            {JSON.stringify(decision.manual_unit.arguments, null, 2).length > 1200 ? "…" : ""}</Text>
+        </Box> : null}
         {decision.permission_request ? (
           <Box flexDirection="column">
             <Text>{t({en:"Purpose: ",zh:"用途："})}{decision.permission_request.purpose}</Text>
@@ -99,20 +111,17 @@ export function DecisionPanel({
         <Box flexDirection="column" marginTop={1}>
           {decision.options.map((option, index) => {
             const selected = active && index === selectedIndex;
-            const bg = selected ? colors.selection.block.bg : undefined;
-            const fg = selected ? colors.selection.block.fg : undefined;
             return (
               <Box
                 key={`${decision.decision_id}:${option.label}`}
                 flexDirection="column"
                 marginBottom={1}
               >
-                <Text color={fg} backgroundColor={bg} bold={selected}>
-                  {selected ? "› " : "  "}
-                  {index + 1}. {option.label}
+                <SelectionText selected={selected} variant="block">
+                  {index + 1}. {active && index<9 && applicationBindings.label("decision.option"+(index+1))!==String(index+1) ? "["+applicationBindings.label("decision.option"+(index+1))+"] " : ""}{manual ? index === 0 ? t({en:"Run once",zh:"执行这一步"}) : t({en:"Skip this invocation",zh:"跳过本次调用"}) : option.label}
                   {option.recommended ? t({en:" · recommended",zh:" · 建议"}) : ""}
-                </Text>
-                {permission ? (
+                </SelectionText>
+                {manual ? null : permission ? (
                   <>
                     <Text> {t({en:"Effect: ",zh:"行为："})}{option.immediate_effect}</Text>
                     <Text dimColor> {t({en:"Then: ",zh:"后续："})}{option.downstream_effect}</Text>
@@ -144,26 +153,15 @@ export function DecisionPanel({
               </Box>
             );
           })}
-          {active&&decision.allow_free_form?<Text
-            backgroundColor={selectedIndex===decision.options.length?colors.selection.block.bg:undefined}
-            color={selectedIndex===decision.options.length?colors.selection.block.fg:undefined}>
-            {selectedIndex===decision.options.length?"› ":"  "}{t({en:"Other / direct reply",zh:"其他 / 直接输入"})}
-          </Text>:null}
+          {active&&decision.allow_free_form?<SelectionText selected={selectedIndex===decision.options.length} variant="block"
+
+            >
+            {t({en:"Other / direct reply",zh:"其他 / 直接输入"})}
+          </SelectionText>:null}
         </Box>
       </AnimatedReveal>
-      {active ? (
-        <Text dimColor>
-          {decision.round_position && !decision.round_position.startsWith("1/")
-            ? t({en:"← previous question · ",zh:"← 上一题 · "})
-            : ""}
-          {submitting
-            ? t({en:"Submitting the reply…",zh:"正在提交答复…"})
-            : composing
-              ? t({en:"Enter send · Esc choices",zh:"Enter 发送 · Esc 返回选项"})
-              : decision.options.length > 0
-                ? t({en:"↑/↓ select · Enter choose/edit",zh:"↑/↓ 选择 · Enter 确认/输入"}) + (decision.allow_free_form ? t({en:" · A amend · D discuss · Other: direct reply",zh:" · A 补充 · D 讨论 · 其他：直接输入"}) : "")
-                : t({en:"Type your reply · Enter send",zh:"直接输入答复 · Enter 发送"})}
-        </Text>
+      {active && submitting ? (
+        <Text dimColor>{t({en:"Submitting the reply…",zh:"正在提交答复…"})}</Text>
       ) : null}
     </Box>
   );

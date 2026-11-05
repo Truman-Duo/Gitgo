@@ -1,3 +1,4 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 // src/components/InlineContext.tsx — v4 blueprint inline-context: tabbed Contract/Lessons/Events
 // Opened via /context command, replaces screen content, Esc to dismiss
 import React, { memo, useState, useEffect } from "react";
@@ -46,7 +47,9 @@ export const InlineContext = memo(function InlineContext({
     }
   }, [activeTab, project, client, contract, lessons, events.length]);
 
+  const menuHelp=useLocalHelpCommand("context",undefined,true);
   useInput((input: string, key: any) => {
+    if(menuHelp.handle(input,key))return;
     for (const a of resolveInlineContextKey(input, key)) {
       if (a.type === "dismiss") {
         onDismiss();

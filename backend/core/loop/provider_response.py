@@ -167,7 +167,8 @@ class ProviderResponseCollector:
                     "partial_json": "",
                     "done": False,
                 }
-                if self.on_stream_event:
+                from .provider_tool_transport import CALL
+                if self.on_stream_event and event.tool_name != CALL:
                     self.on_stream_event({
                         "event": "toolcall_start",
                         "process_id": self.process.process_id,
@@ -192,7 +193,8 @@ class ProviderResponseCollector:
                         channel=self.budget_stream_prefix + f"tool-{idx}",
                     )
                 self.state.pending_tool_calls[idx]["partial_json"] += args_fragment
-                if self.on_stream_event:
+                from .provider_tool_transport import CALL
+                if self.on_stream_event and self.state.pending_tool_calls[idx]['name'] != CALL:
                     self.on_stream_event({
                         "event": "toolcall_delta",
                         "process_id": self.process.process_id,
@@ -242,14 +244,31 @@ class ProviderResponseCollector:
                     "error": "tool arguments must decode to an object",
                 })
                 continue
-            self.state.tool_calls.append({
+            call = {
                 "name": p["name"],
                 "id": p["id"],
                 "args": args,
-            })
+            }
+            from .provider_tool_transport import decode
+            try:
+                call = decode(call, raw_arguments=p['partial_json'])
+            except ValueError as error:
+                self.state.invalid_tool_calls.append({'name':p['name'],'id':p['id'],
+                    'raw':p['partial_json'],'error':str(error), 'error_code':'INVALID_TOOL_TRANSPORT'})
+                self.emit({'event':'toolcall_invalid','tool_call_id':p['id'],'tool_name':p['name'],
+                    'output_index':idx,'error_code':'INVALID_TOOL_TRANSPORT'},
+                    detail={'arguments_raw':p['partial_json'],'parse_error':str(error)})
+                continue
+            self.state.tool_calls.append(call)
+            if call.get('_provider_wire_call') and self.on_stream_event:
+                self.on_stream_event({'event':'toolcall_start','process_id':self.process.process_id,
+                    'tool_call_id':p['id'],'tool_name':call['name']})
+                self.on_stream_event({'event':'toolcall_delta','process_id':self.process.process_id,
+                    'tool_call_id':p['id'],'delta':json.dumps(call['args'],ensure_ascii=False)})
             self.emit({
                 "event": "toolcall_done",
                 "tool_call_id": p["id"],
-                "tool_name": p["name"],
+                "tool_name": call["name"],
                 "output_index": idx,
-            }, detail={"arguments": args, "arguments_raw": p["partial_json"]})
+            }, detail={"arguments": call['args'], "arguments_raw": p["partial_json"],
+                'provider_wire_call':call.get('_provider_wire_call')})

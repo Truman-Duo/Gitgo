@@ -144,9 +144,11 @@ def _external_workspace(path):
 
 
 def _public_provider(provider: dict) -> dict:
+    from backend.core.llm_config import LLMConfigManager
     result = {k: v for k, v in provider.items() if k not in {"api_key", "secret_ref"}}
     key = str(provider.get("api_key", ""))
     result["api_key_present"] = bool(key)
+    result["revision"] = LLMConfigManager.revision(provider)
     result["api_key_display"] = (
         key[:4] + "***" + key[-4:] if len(key) > 8 else ("***" if key else "")
     )
@@ -172,8 +174,12 @@ class ApplicationServices:
     def __init__(self, *, daemon_online: Callable[[str], bool] | None = None, prepare_deletion=None):
         self._daemon_online = daemon_online or (lambda _name: False)
         self._write_lock = threading.RLock()
+        from backend.core.provider_drafts import ProviderDrafts
+        self.provider_drafts = ProviderDrafts()
         from backend.core.update.preparation_service import UpdatePreparationService
         self.updates = UpdatePreparationService()
+        from backend.core.loop.publish_queue import PublishQueue
+        self.publish_runtime = PublishQueue()
         from .deletion import DeletionService
         self.deletion = DeletionService(prepare_runtime=prepare_deletion)
         self._operations: dict[str, Callable[..., Any]] = {
@@ -208,6 +214,42 @@ class ApplicationServices:
             "config.web_search.test": self.config_web_search_test,
             "publish.get": self.publish_get,
             "publish.set": self.publish_set,
+            "publish.items": self.publish_items,
+            "publish.item": self.publish_item,
+            "publish.task": self.publish_task,
+            "publish.shared.items": self.publish_shared_items,
+            "publish.history": self.publish_history,
+            "publish.workspace": self.publish_workspace,
+            "publish.diff": self.publish_diff,
+            "publish.preview_diff": self.publish_preview_diff,
+            "publish.platform_read": self.publish_platform_read,
+            "publish.prepare": lambda project, **args: self.publish_command("prepare", project, args),
+            "publish.plan.update": lambda project, **args: self.publish_command("plan", project, args),
+            "publish.adopt": lambda project, **args: self.publish_command("adopt", project, args),
+            "publish.reconcile": lambda project, **args: self.publish_command("reconcile", project, args),
+            "publish.verify": lambda project, **args: self.publish_command("verify", project, args),
+            "publish.execute": lambda project, **args: self.publish_command("execute", project, args),
+            "publish.pause": lambda project, **args: self.publish_command("pause", project, args),
+            "publish.resume": lambda project, **args: self.publish_command("resume", project, args),
+            "publish.run": lambda project, **args: self.publish_command("run", project, args),
+            "publish.migrate": lambda project, **args: self.publish_command("migrate", project, args),
+            "publish.decide": lambda project, **args: self.publish_command("decide", project, args),
+            "publish.share": lambda project, **args: self.publish_command("share", project, args),
+            "publish.share.publish": lambda project, **args: self.publish_command("share_publish", project, args),
+            "publish.collaborate": lambda project, **args: self.publish_command("collaborate", project, args),
+            "publish.collaborate.send": lambda project, **args: self.publish_command("collaborate_send", project, args),
+            "publish.account.save": self.publish_account_save,
+            "publish.link_task": lambda project, **args: self.publish_command("link_task", project, args),
+            "publish.package": lambda project, **args: self.publish_command("package", project, args),
+            "publish.export": lambda project, **args: self.publish_command("export", project, args),
+            "publish.tag": lambda project, **args: self.publish_command("tag", project, args),
+            "publish.release": lambda project, **args: self.publish_command("release", project, args),
+            "publish.import_package": lambda project, **args: self.publish_command("import_package", project, args),
+            "publish.distribution_reconcile": lambda project, **args: self.publish_command("distribution_reconcile", project, args),
+            "publish.download": lambda project, **args: self.publish_command("download", project, args),
+            "publish.branch": lambda project, **args: self.publish_command("branch", project, args),
+            "publish.branch.apply": lambda project, **args: self.publish_command("branch_apply", project, args),
+            "publish.operation": self.publish_operation,
             "lesson.list": self.lesson_list,
             "lesson.search": self.lesson_search,
             "lesson.verify": self.lesson_verify,
@@ -244,6 +286,15 @@ class ApplicationServices:
             "provider.switch": self.provider_switch,
             "provider.delete": self.provider_delete,
             "provider.test": self.provider_test,
+            "provider.presets": self.provider_presets,
+            "provider.models": self.provider_models,
+            "provider.model.options": self.provider_model_options,
+            "provider.model.select": self.provider_model_select,
+            "provider.effort.options": self.provider_effort_options,
+            "provider.effort.select": self.provider_effort_select,
+            "provider.probe": self.provider_probe,
+            "provider.connection": self.provider_connection,
+            "provider.cancel": self.provider_cancel,
             "provider.failover.configure": self.provider_failover_configure,
             "project.export": self.project_export,
         }
@@ -401,13 +452,27 @@ class ApplicationServices:
             )
         with self._write_lock:
             cfg = ConfigManager.load()
-            if any(p.name.lower() == clean_name.lower() for p in cfg.projects):
-                raise OperationError("DUPLICATE_NAME", f"Project '{clean_name}' already exists")
+            for existing in cfg.projects:
+                if existing.name.lower() == clean_name.lower():
+                    hint = (" It is archived; restore it from Bin or choose a different name."
+                            if existing.archived else " Choose a different project name.")
+                    raise OperationError(
+                        "DUPLICATE_NAME", f"Project '{existing.name}' already exists.{hint}",
+                        details={"existing_project": existing.name,
+                                 "archived": existing.archived,
+                                 "workspace": existing.workspace_path},
+                    )
             for existing in cfg.projects:
                 if existing.workspace_path and Path(existing.workspace_path).resolve(strict=False) == workspace:
+                    hint = (" It is archived; archiving keeps the workspace registered. "
+                            "Restore it from Bin or choose a different folder."
+                            if existing.archived else " Open that project or choose a different folder.")
                     raise OperationError(
                         "WORKSPACE_ALREADY_REGISTERED",
-                        f"Workspace is already registered as project '{existing.name}'",
+                        f"Workspace is already registered as project '{existing.name}'.{hint}",
+                        details={"existing_project": existing.name,
+                                 "archived": existing.archived,
+                                 "workspace": str(workspace)},
                     )
 
             created = False
@@ -598,6 +663,7 @@ class ApplicationServices:
         if not key:
             return {"safety": cfg.safety, "language": cfg.language,
                     "verbose": cfg.verbose, "diff_layout": cfg.diff_layout, "auto_compact": cfg.auto_compact,
+                    "keyboard_preset": cfg.keyboard_preset, "keyboard_bindings": cfg.keyboard_bindings,
                     "agent_routing": cfg.agent_routing,
                     "prompt_profile": cfg.prompt_profile,
                     "prompt_profiles": list_profiles(),
@@ -619,9 +685,14 @@ class ApplicationServices:
                 raise OperationError("INVALID_KEY", f"Invalid config key: {key}")
         return {"key": key, "value": value}
 
-    def config_terminals(self) -> dict:
-        from backend.core.terminal_launcher import terminal_inventory
-        return terminal_inventory(ConfigManager.load().launcher)
+    def config_terminals(self, startup=False, attached=False) -> dict:
+        if type(startup) is not bool or type(attached) is not bool:
+            raise OperationError("INVALID_VALUE", "Terminal startup flags must be booleans")
+        from backend.core.terminal_launcher import terminal_inventory, startup_terminal_inventory
+        from backend.core.terminal_metrics import console_display_metrics
+        launcher = ConfigManager.load().launcher
+        inventory = startup_terminal_inventory(launcher, attached=attached) if startup else terminal_inventory(launcher)
+        return {**inventory, "display_metrics": console_display_metrics()}
 
     def config_set(self, key: str, value: Any) -> dict:
         with self._write_lock:
@@ -646,6 +717,21 @@ class ApplicationServices:
                 cfg.diff_layout = value
             elif key == "auto_compact":
                 cfg.auto_compact = bool(value)
+            elif key == "keyboard_preset":
+                if not isinstance(value, str) or value not in ("standard", "portable"):
+                    raise OperationError("INVALID_VALUE", "keyboard_preset must be 'standard' or 'portable'")
+                cfg.keyboard_preset = value
+                cfg.keyboard_bindings = {"version": 1, "overrides": ({
+                    "editor.newline": {"key": "return", "meta": True},
+                    "navigation.previousTab": {"key": "p", "ctrl": True},
+                } if value == "portable" else {})}
+            elif key == "keyboard_bindings":
+                from backend.core.keyboard_bindings import validate_keyboard_bindings
+                try:
+                    value = validate_keyboard_bindings(value)
+                except ValueError as exc:
+                    raise OperationError("INVALID_VALUE", str(exc)) from exc
+                cfg.keyboard_bindings = value
             elif key == "agent_routing":
                 if value not in ("owner", "fresh"):
                     raise OperationError("INVALID_VALUE", "agent_routing must be 'owner' or 'fresh'")
@@ -774,25 +860,198 @@ class ApplicationServices:
             "engine": cfg.web_search_engine,
         }
 
+    @staticmethod
+    def _publish_project(project):
+        # An explicit config path suppresses implicit legacy import/movement.
+        path = ConfigManager.find_config()
+        cfg = ConfigManager.load(path, strict=True) if path is not None else None
+        proj = next((item for item in cfg.projects if item.name == project), None) if cfg else None
+        if proj is None:
+            raise OperationError("PROJECT_NOT_FOUND", "Project was not found")
+        if not proj.workspace_path:
+            raise OperationError("PUBLISH_WORKSPACE_UNCONFIGURED", "Publish requires an explicit workspace")
+        _external_workspace(proj.workspace_path)
+        return proj
+
+    def publish_items(self, project: str, limit: int = 50, cursor: str = "") -> dict:
+        from backend.core.storage import StorageDatabaseError
+        from .publish import list_items, PublishQueryError
+        proj = self._publish_project(project)
+        try:
+            return list_items(proj, limit=limit, cursor=cursor)
+        except PublishQueryError as exc:
+            raise OperationError(exc.code, "Refresh the Publish list or check query arguments") from exc
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError) as exc:
+            raise OperationError("PUBLISH_STATE_UNAVAILABLE", "Saved Publish records could not be verified") from exc
+
+    def publish_item(self, project: str, item_id: str) -> dict:
+        from backend.core.storage import StorageDatabaseError
+        from backend.core.publish.state import read_ledger, find_item, projection, PublishError
+        proj = self._publish_project(project)
+        try:
+            ledger, reference = read_ledger(proj.workspace_path)
+            return {"project": project, "item": projection(find_item(ledger, item_id), reference)}
+        except PublishError as exc:
+            raise OperationError(exc.code, "Publish item could not be read") from exc
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError) as exc:
+            raise OperationError("PUBLISH_STATE_UNAVAILABLE", "Saved Publish records could not be verified") from exc
+
+    def publish_task(self, project: str, process_id: str, task_id: str) -> dict:
+        from backend.core.storage.runtime import read_existing_task_view
+        from backend.core.storage import StorageDatabaseError, StorageBlocked
+        if any(not isinstance(value, str) or not 1 <= len(value) <= 160 or any(ord(char) < 32 for char in value)
+               for value in (process_id, task_id)):
+            raise OperationError("PUBLISH_TASK_NOT_FOUND", "Select an existing task reference")
+        proj = self._publish_project(project)
+        try:
+            result = read_existing_task_view(proj.workspace_path, process_id, task_id)
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError, StorageBlocked) as exc:
+            raise OperationError("PUBLISH_STATE_UNAVAILABLE", "Saved task could not be verified") from exc
+        if result is None:
+            raise OperationError("PUBLISH_TASK_NOT_FOUND", "The exact task is no longer available")
+        return {"project": project, **result}
+
+    def publish_command(self, operation, project, arguments):
+        from backend.core.storage import StorageDatabaseError
+        from backend.core.tools.publish_service import invoke_local_publish
+        from backend.core.publish.state import PublishError
+        proj = self._publish_project(project)
+        try:
+            return invoke_local_publish(proj, operation, arguments, queue=self.publish_runtime, operator_authorized=True)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Publish command could not proceed") from exc
+        except (OSError, ValueError, RuntimeError, StorageDatabaseError) as exc:
+            code = "PUBLISH_REQUEST_CONFLICT" if str(exc) == "COMMAND_IDENTITY_CONFLICT" else "PUBLISH_OPERATION_UNCERTAIN"
+            raise OperationError(code, "Read the saved item before retrying this request") from exc
+
+    def publish_shared_items(self, project, item_id, observation_id="", limit=20, cursor=""):
+        from backend.core.publish.shared_query import shared_items
+        from backend.core.publish.state import PublishError
+        proj = self._publish_project(project)
+        try:
+            return shared_items(proj, item_id=item_id, observation_id=observation_id, limit=limit, cursor=cursor)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Read an explicit saved shared observation") from exc
+
+    def publish_history(self, project, item_id, head="candidate", limit=50, cursor=""):
+        from backend.core.publish.history import history_page
+        from backend.core.publish.state import PublishError
+        try:
+            return history_page(self._publish_project(project), item_id=item_id, head=head, limit=limit, cursor=cursor)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Fixed Git history could not be read") from exc
+
+    def publish_workspace(self, project, limit=50, cursor=""):
+        from backend.core.publish.history import workspace_page
+        from backend.core.publish.state import PublishError
+        try:
+            return workspace_page(self._publish_project(project), limit=limit, cursor=cursor)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Workspace Git history could not be read") from exc
+
+    def publish_diff(self, project, item_id, base_oid, head_oid="", head="candidate", limit_bytes=262144, snapshot_id=""):
+        from backend.core.publish.history import diff_view
+        from backend.core.publish.state import PublishError
+        try:
+            return diff_view(self._publish_project(project), item_id=item_id, base_oid=base_oid, head_oid=head_oid,
+                head=head, limit_bytes=limit_bytes, snapshot_id=snapshot_id)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Fixed Git difference could not be read") from exc
+
+    def publish_preview_diff(self, project, item_id, binding=""):
+        from backend.core.publish.history import preview_diff
+        from backend.core.publish.state import PublishError
+        try:
+            return preview_diff(self._publish_project(project), item_id=item_id, binding=binding)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Prepared result difference could not be read") from exc
+
+    def publish_platform_read(self, project, target, resource, page=1):
+        """Repository browsing needs no local candidate, ledger or Git mutation."""
+        self._publish_project(project)
+        from backend.remote.publish_platform import PlatformTarget, PlatformClient, PlatformError
+        from backend.remote.publish_accounts import resolve_secret
+        from backend.core.publish.state import digest
+        from backend.core.storage.redaction import redact_for_persistence
+        if type(page) is not int or not 1 <= page <= 20:
+            raise OperationError("PUBLISH_PLATFORM_PAGE_INVALID", "Page must be between 1 and 20")
+        try:
+            parsed = PlatformTarget.parse(target)
+            with PlatformClient(parsed, resolve_secret(parsed)) as client:
+                snapshot = redact_for_persistence(client.snapshot(resource, page))
+            return {**snapshot, "schema_version": 1, "read_only": True, "target": parsed.descriptor(),
+                    "id": digest({"target": parsed.descriptor(), "snapshot": snapshot}), "binding": "read_only"}
+        except PlatformError as exc:
+            raise OperationError(exc.code, "Repository platform observation could not be read") from exc
+
+    def publish_operation(self, project, item_id, operation_id):
+        from backend.core.tools.publish_service import build_publish_tools
+        from backend.core.publish.state import PublishError
+        proj = self._publish_project(project)
+        tool = build_publish_tools(proj)["publish_operation"]
+        try:
+            return tool.execute(tool.prepare_args({"item_id": item_id, "operation_id": operation_id}))
+        except PublishError as exc:
+            raise OperationError(exc.code, "Publish operation could not be read") from exc
+
     def publish_get(self, project: str) -> dict:
         _cfg, proj = _project(project)
         remote = proj.release.remote.url if proj.release.remote else ""
         return {
             "project": proj.name,
             "commit_format": dict(proj.commit_format or {}),
+            "checks": proj.publish_checks,
             "privacy": dict(proj.outbound_policy or {}),
+            "authorship": dict(proj.authorship or {}),
+            "repositories": {"workspace": proj.workspace_path, "trial": proj.trial_path or "", "formal": proj.backup_path or ""},
             "remote_url": str(remote or ""),
             "stages": {"trial_configured": bool(proj.trial_path),
                        "release_configured": bool(remote or proj.backup_path)},
         }
 
-    def publish_set(self, project: str, section: str, value: Any) -> dict:
+    def publish_account_save(self, project: str, target: dict, token: str, request_id: str) -> dict:
+        # Native credential settings intentionally bypass command argument
+        # receipts, exactly as provider credentials do. No Agent tool exposes it.
+        self._publish_project(project)
+        from backend.remote.publish_accounts import provision_secret
+        from backend.remote.publish_platform import PlatformError
+        try:
+            result = provision_secret(target, token)
+        except PlatformError as exc:
+            raise OperationError(exc.code, "Publish account could not be saved") from exc
+        return {**result, "request_id": request_id, "operation_id": "account-settings", "effect_state": "committed"}
+
+    def publish_set(self, project: str, section: str, value: Any, expected_value: Any = None) -> dict:
         from backend.core.config import normalize_outbound_policy
         from backend.models import RemoteTarget
         clean_section = str(section or "").strip().lower()
         with self._write_lock:
             cfg, proj = _project(project)
-            if clean_section == "privacy":
+            current = {"privacy": dict(proj.outbound_policy or {}), "commit_format": dict(proj.commit_format or {}),
+                "privacy_authorship": {"privacy": dict(proj.outbound_policy or {}), "authorship": dict(proj.authorship or {})},
+                "checks": proj.publish_checks, "remote_url": str(proj.release.remote.url or "") if proj.release.remote else ""}
+            if expected_value is not None and expected_value != current.get(clean_section):
+                raise OperationError("PUBLISH_SETTINGS_CHANGED", "Settings changed; reload before saving this draft")
+            if clean_section == "privacy_authorship":
+                if not isinstance(value, dict) or set(value) != {"privacy", "authorship"}:
+                    raise OperationError("INVALID_OUTBOUND_POLICY", "Expected privacy and authorship")
+                try:
+                    policy = normalize_outbound_policy(value["privacy"])
+                except (TypeError, ValueError) as exc:
+                    raise OperationError("INVALID_OUTBOUND_POLICY", str(exc)) from exc
+                authorship = value["authorship"]
+                if (not isinstance(authorship, dict) or authorship.get("mode") not in {"mixed", "clean"}
+                        or any(type(authorship.get(key)) is not bool for key in ("strip_commit_coauthors", "strip_code_comments"))):
+                    raise OperationError("INVALID_AUTHORSHIP_POLICY", "Invalid authorship settings")
+                policy["version"] = int((proj.outbound_policy or {}).get("version", 0) or 0) + 1
+                proj.outbound_policy = policy
+                proj.force_exclude = list(policy["exclude_paths"])
+                proj.security_scan = {key: policy[key] for key in ("enabled", "severity_threshold", "ignored_rules", "extra_patterns")}
+                proj.authorship = {**dict(proj.authorship or {}), **authorship,
+                    "exclude_tool_configs": list(policy["exclude_paths"]),
+                    "privacy": {"level": policy["content_level"], "deep_scan": policy["deep_scan"]}}
+                result = {"privacy": policy, "authorship": proj.authorship}
+            elif clean_section == "privacy":
                 try:
                     policy = normalize_outbound_policy(value)
                 except (TypeError, ValueError) as exc:
@@ -825,6 +1084,14 @@ class ApplicationServices:
                     raise OperationError("INVALID_COMMIT_FORMAT", f"Unsupported fields: {', '.join(unknown)}")
                 result = {**dict(proj.commit_format or {}), **value}
                 proj.commit_format = result
+            elif clean_section == "checks":
+                from backend.core.publish.checks import normalize
+                from backend.core.publish.state import PublishError
+                try:
+                    result = normalize(value)
+                except PublishError as exc:
+                    raise OperationError(exc.code, "Invalid Publish check policy") from exc
+                proj.publish_checks = result
             elif clean_section == "remote_url":
                 remote_url = str(value or "").strip()
                 if remote_url:
@@ -850,7 +1117,7 @@ class ApplicationServices:
                 proj.release.remote.url = remote_url
                 result = remote_url
             else:
-                raise OperationError("INVALID_PUBLISH_SECTION", "section must be privacy, commit_format or remote_url")
+                raise OperationError("INVALID_PUBLISH_SECTION", "section must be privacy, commit_format, checks or remote_url")
             ConfigManager.save(cfg)
         return {"ok": True, "project": project, "section": clean_section, "value": result}
 
@@ -971,12 +1238,14 @@ class ApplicationServices:
             if not lessons:
                 resolve_harvest_proposal(
                     project,
-                    stage_harvest_proposal(project, [signal_id], [])["proposal_id"],
+                    stage_harvest_proposal(project, [signal_id], [], summary_report=summary_report)["proposal_id"],
                     accepted=False,
                 )
                 raise OperationError(
                     "LESSON_NOT_ACTIONABLE",
                     "The observation did not contain a reusable, testable lesson.",
+                    details={"classifications": summary_report.get("classifications", []),
+                             "scope": "project_knowledge_only"},
                 )
             proposal = stage_harvest_proposal(project, [signal_id], lessons, summary_report=summary_report)
         return {
@@ -1348,19 +1617,23 @@ class ApplicationServices:
 
     def provider_status(self) -> dict:
         from backend.core.llm_config import LLMConfigManager
+        from backend.core.provider_failover import revision
         config = LLMConfigManager.load()
         return {"providers": [_public_provider(p) for p in config.get("providers", [])],
                 "active_provider": config.get("active_provider", ""),
                 "failover_enabled": config.get("failover_enabled", False),
                 "failover_order": config.get("failover_order", []),
+                "failover_routes": config.get("failover_routes", {}),
+                "failover_revision": revision(config),
                 "circuit_breaker": config.get("circuit_breaker", {}),
                 "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
                 "health_scope": "owning_project_daemon"}
 
-    def provider_failover_configure(self, enabled: bool, order: list[str], circuit_breaker: dict | None = None) -> dict:
+    def provider_failover_configure(self, enabled: bool, order: list[str] | None = None, circuit_breaker: dict | None = None,
+                                    provider_id: str = "", expected_revision: str = "") -> dict:
         from backend.core.llm_config import LLMConfigManager
         try:
-            return LLMConfigManager.configure_failover(enabled, order, circuit_breaker)
+            return LLMConfigManager.configure_failover(enabled, order, circuit_breaker, provider_id, expected_revision)
         except (ValueError, TypeError) as exc:
             raise OperationError("INVALID_FAILOVER_CONFIG", str(exc)) from exc
 
@@ -1370,9 +1643,17 @@ class ApplicationServices:
                       protocol: str = "openai_chat",
                       context_window: int = 128000,
                       max_output_tokens: int = 4096,
-                      kind: str = "remote", auth_mode: str = "api_key") -> dict:
+                      kind: str = "remote", auth_mode: str = "api_key",
+                      expected_revision: str = "", preset_id: str = "",
+                      model_receipt: str = "", probe_receipt: str = "",
+                      context_source: str = "user", output_source: str = "user", creation_id: str = "",
+                      request_preferences: dict | None = None, models: list[dict] | None = None) -> dict:
         from backend.core.llm_config import LLMConfigManager, LLMProvider
         from backend.core.loop.provider_protocol import ProviderProtocol
+        if creation_id:
+            import re
+            if provider_id or not re.fullmatch(r"[a-f0-9]{12,32}", creation_id):
+                raise OperationError("INVALID_CREATION_ID", "Invalid new provider request identity")
         name = str(name or "").strip()
         model_id = str(model_id or "").strip()
         if not name or not base_url or not model_id:
@@ -1403,7 +1684,11 @@ class ApplicationServices:
             )
         existing = next((p for p in LLMConfigManager.get_providers()
                          if p.id == provider_id), None) if provider_id else None
+        if provider_id and existing is None:
+            raise OperationError("PROVIDER_NOT_FOUND", "Provider was deleted; refresh before saving")
         if existing and retain_api_key and auth_mode == "api_key":
+            if base_url != existing.base_url or auth_mode != existing.auth_mode:
+                raise OperationError("API_KEY_DECISION_REQUIRED", "Enter a key explicitly for the changed endpoint")
             api_key = existing.api_key
         if auth_mode == "none":
             api_key = ""
@@ -1414,25 +1699,83 @@ class ApplicationServices:
                     "Explicitly retain the existing key or provide a replacement",
                 )
             raise OperationError("MISSING_API_KEY", "api_key is required for a new provider")
-        provider = LLMProvider(id=provider_id, name=name, base_url=base_url,
+        draft = dict(base_url=base_url, api_key=api_key, model_id=model_id, protocol=protocol, kind=kind, auth_mode=auth_mode)
+        from backend.core.loop.provider_preferences import validate_preferences
+        try:
+            preferences = validate_preferences(request_preferences if request_preferences is not None else
+                                               existing.configuration.get("request_preferences", {}) if existing else {}, protocol)
+        except ValueError as exc:
+            raise OperationError(str(exc), "Check advanced request preferences; transport and task fields are protected") from None
+        try:
+            discovered = self.provider_drafts.evidence(model_receipt, {**draft, "model_id": ""}, "models")
+            probed = self.provider_drafts.evidence(probe_receipt, {**draft, "request_preferences": preferences}, "probe")
+        except ValueError as exc:
+            raise OperationError(str(exc), "Discovery or probe expired; run it again or save without it") from None
+        from backend.core.provider_profiles import profiles, apply_profile
+        previous_model = existing
+        if existing and all(getattr(existing, k) == draft[k] for k in ("base_url", "api_key", "kind", "auth_mode")):
+            previous_profile = next((p for p in profiles(existing.to_dict()) if p["model_id"] == model_id), None)
+            if previous_profile:
+                previous_model = LLMProvider.from_dict(apply_profile(existing.to_dict(), previous_profile))
+        same_identity = bool(previous_model and all(getattr(previous_model, k) == v for k, v in draft.items()))
+        configuration = dict(previous_model.configuration) if previous_model else {}
+        if configuration.get("request_preferences", {}) != preferences:
+            configuration.pop("verification", None)
+        if not same_identity:
+            for owned in ("verification", "deployment", "sources", "warnings"):
+                configuration.pop(owned, None)
+        from backend.core.provider_catalog import CATALOG_VERSION, PRESETS
+        if preset_id and preset_id not in {p["id"] for p in PRESETS}:
+            raise OperationError("INVALID_PROVIDER_PRESET", "Unknown connection preset")
+        configuration.update(preset_id=preset_id, preset_version=CATALOG_VERSION,
+                             sources={"context_window": context_source, "max_output_tokens": output_source})
+        if context_source not in {"user", "default", "discovered", "reference"} or output_source not in {"user", "default", "discovered", "reference"}:
+            raise OperationError("INVALID_PARAMETER_SOURCE", "Unknown parameter source")
+        if discovered:
+            deployment = next((m for m in discovered["models"] if m["id"] == model_id), None)
+            if deployment:
+                configuration["deployment"] = deployment
+        limits = configuration.get("deployment", {}).get("limits", {})
+        warnings = []
+        if max_output_tokens > limits.get("max_output_capacity", max_output_tokens) or context_window > limits.get("context_window", context_window):
+            warnings.append("DECLARED_LIMIT_EXCEEDED")
+        if context_source in {"discovered", "reference"} and context_window != limits.get("context_window"):
+            raise OperationError("INVALID_PARAMETER_SOURCE", "The context limit does not match its declared source")
+        configuration["warnings"] = warnings
+        configuration["request_preferences"] = preferences
+        if probed:
+            configuration["verification"] = {"checks": probed["checks"], "observations": probed["observations"],
+                                               "at": probed["capabilities"]["probed_at"]}
+        if protocol == "auto":
+            if not probed:
+                raise OperationError("PROTOCOL_PROBE_REQUIRED", "Test the automatic protocol before saving, or choose an explicit protocol")
+            protocol = probed["protocol"]
+        provider = LLMProvider(id=provider_id or creation_id, name=name, base_url=base_url,
                                api_key=api_key, model_id=model_id,
                                protocol=protocol,
                                 capabilities=(
-                                    existing.capabilities
-                                    if existing and (existing.protocol, existing.base_url, existing.model_id, existing.kind)
-                                       == (protocol, base_url, model_id, kind) else {}
+                                    probed["capabilities"] if probed else previous_model.capabilities if same_identity and previous_model.configuration.get("request_preferences", {}) == preferences else {}
                                 ),
                                 context_window=context_window,
                                 max_output_tokens=max_output_tokens,
                                 limits_source="configured",
                                 kind=kind, auth_mode=auth_mode,
+                                configuration=configuration,
                                 created_at=existing.created_at if existing else "")
-        saved = LLMConfigManager.update(provider) if existing else LLMConfigManager.add(provider)
+        from backend.core.provider_profiles import compile_profiles
+        try:
+            provider.configuration["models"] = compile_profiles(models, provider.to_dict(), existing.to_dict() if existing else None, self.provider_drafts)
+        except (ValueError, TypeError) as exc:
+            raise OperationError(str(exc) if isinstance(exc, ValueError) else "INVALID_PROVIDER_MODELS", "Check the API connection's configured models; draft retained") from None
+        try:
+            saved = LLMConfigManager.update(provider, expected_revision) if existing else LLMConfigManager.add(provider)
+        except ValueError as exc:
+            raise OperationError(str(exc), "Configuration changed elsewhere; refresh before saving") from None
         if saved is None:
             raise OperationError("UPDATE_FAILED", f"Provider '{provider_id}' could not be updated")
         return {"status": "updated" if existing else "created",
                 "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
-                "provider": _public_provider(saved.to_dict())}
+                "provider": _public_provider(next(p for p in LLMConfigManager.load()["providers"] if p["id"] == saved.id))}
 
     def provider_switch(self, provider_id: str) -> dict:
         from backend.core.llm_config import LLMConfigManager
@@ -1440,7 +1783,79 @@ class ApplicationServices:
         if provider is None:
             raise OperationError("PROVIDER_NOT_FOUND", f"Provider '{provider_id}' was not found")
         return {"status": "switched", "active_provider": provider_id,
-                "provider": _public_provider(provider.to_dict())}
+                "provider": _public_provider(next(p for p in LLMConfigManager.load()["providers"] if p["id"] == provider.id))}
+
+    def provider_model_options(self) -> dict:
+        from backend.core.llm_config import LLMConfigManager
+        from backend.core.provider_profiles import profiles
+        config = LLMConfigManager.load()
+        provider = next((p for p in config["providers"] if p["id"] == config.get("active_provider")), None)
+        if not provider:
+            return {"provider_id": "", "models": [], "model_id": ""}
+        return {"provider_id": provider["id"], "provider_name": provider["name"], "model_id": provider["model_id"],
+                "revision": LLMConfigManager.revision(provider), "models": profiles(provider)}
+
+    def provider_model_select(self, provider_id: str, model_id: str, expected_revision: str) -> dict:
+        from backend.core.llm_config import LLMConfigManager, LLMProvider
+        from backend.core.provider_profiles import profiles, apply_profile
+        with LLMConfigManager._lock:
+            config = LLMConfigManager.load()
+            provider = next((p for p in config["providers"] if p["id"] == config.get("active_provider")), None)
+            if not provider or provider["id"] != provider_id:
+                raise OperationError("ACTIVE_PROVIDER_CHANGED", "The current API changed; reopen model selection")
+            if not expected_revision:
+                raise OperationError("PROVIDER_REVISION_REQUIRED", "Reopen model selection before switching")
+            profile = next((p for p in profiles(provider) if p["model_id"] == model_id), None)
+            if not profile:
+                raise OperationError("MODEL_NOT_CONFIGURED", "This model is not configured for the current API")
+            try:
+                saved = LLMConfigManager.update(LLMProvider.from_dict(apply_profile(provider, profile)), expected_revision)
+            except ValueError as exc:
+                raise OperationError(str(exc), "API configuration changed; reopen model selection") from None
+            return {"status": "selected", "provider_id": provider_id, "model_id": saved.model_id}
+
+    def provider_effort_options(self) -> dict:
+        from backend.core.provider_effort import effort_options
+        current = self.provider_model_options()
+        profile = next((p for p in current["models"] if p["model_id"] == current["model_id"]), None)
+        return {key: value for key, value in current.items() if key != "models"} | (
+            effort_options(profile) if profile else {"levels": [], "state": "unconfigured", "effort": "", "source": ""})
+
+    def provider_effort_select(self, provider_id: str, model_id: str, effort: str, expected_revision: str) -> dict:
+        from backend.core.llm_config import LLMConfigManager, LLMProvider
+        from backend.core.provider_profiles import profiles, apply_profile
+        from backend.core.provider_effort import effort_options
+        from backend.core.loop.provider_preferences import validate_preferences
+        with LLMConfigManager._lock:
+            config = LLMConfigManager.load()
+            provider = next((p for p in config["providers"] if p["id"] == config.get("active_provider")), None)
+            if not provider or provider["id"] != provider_id or provider["model_id"] != model_id:
+                raise OperationError("ACTIVE_PROVIDER_CHANGED", "The current API or model changed; reopen effort selection")
+            if not expected_revision:
+                raise OperationError("PROVIDER_REVISION_REQUIRED", "Reopen effort selection before saving")
+            items = profiles(provider)
+            profile = next(p for p in items if p["model_id"] == model_id)
+            options = effort_options(profile)
+            if not isinstance(effort, str) or effort and effort not in options["levels"]:
+                raise OperationError("EFFORT_NOT_DECLARED", "This effort level is not declared for the current model")
+            preferences = dict(profile.get("request_preferences", {}))
+            preferences.pop("reasoning_effort", None)
+            if effort:
+                preferences["reasoning_effort"] = effort
+            try:
+                profile["request_preferences"] = validate_preferences(preferences, profile["protocol"])
+            except ValueError as exc:
+                raise OperationError(str(exc), "Check conflicting reasoning preferences in advanced configuration") from None
+            profile.pop("verification", None)
+            profile["capabilities"] = {}
+            updated = apply_profile(provider, profile)
+            updated.setdefault("configuration", {})["models"] = items
+            try:
+                saved = LLMConfigManager.update(LLMProvider.from_dict(updated), expected_revision)
+            except ValueError as exc:
+                raise OperationError(str(exc), "API configuration changed; reopen effort selection") from None
+            return {"status": "selected", "provider_id": provider_id, "model_id": saved.model_id, "effort": effort,
+                    "revision": self.provider_model_options()["revision"], "effective_from": "next_model_request"}
 
     def provider_delete(self, provider_id: str) -> dict:
         from backend.core.llm_config import LLMConfigManager
@@ -1450,33 +1865,84 @@ class ApplicationServices:
                 "credential_cleanup": LLMConfigManager.credential_cleanup_status(),
                 "active_provider": LLMConfigManager.load().get("active_provider", "")}
 
+    def provider_presets(self) -> dict:
+        from backend.core.provider_catalog import presets
+        return presets()
+
+    def _provider_draft(self, draft: dict, require_model: bool = False) -> dict:
+        from backend.core.llm_config import LLMConfigManager
+        from backend.core.loop.provider_policy import provider_endpoint
+        from backend.core.loop.provider_protocol import ProviderProtocol
+        if not isinstance(draft, dict):
+            raise OperationError("INVALID_PROVIDER_DRAFT", "Expected connection draft")
+        existing = next((p for p in LLMConfigManager.get_providers() if p.id == draft.get("provider_id")), None)
+        if draft.get("provider_id") and existing is None:
+            raise OperationError("PROVIDER_NOT_FOUND", "Provider no longer exists")
+        key = str(draft.get("api_key", ""))
+        if existing and draft.get("retain_api_key") and not key:
+            if str(draft.get("base_url", "")).rstrip("/") != existing.base_url.rstrip("/"):
+                raise OperationError("API_KEY_DECISION_REQUIRED", "Enter a key explicitly for the changed endpoint")
+            key = existing.api_key
+        kind = str(draft.get("kind", "remote"))
+        auth = str(draft.get("auth_mode", "api_key"))
+        try:
+            base = provider_endpoint(str(draft.get("base_url", "")), kind=kind, auth_mode=auth)
+            protocol = ProviderProtocol(draft.get("protocol", "openai_chat")).value
+        except ValueError:
+            raise OperationError("INVALID_PROVIDER_CONNECTION", "Check connection URL, location, authentication and protocol") from None
+        if auth == "api_key" and not key and require_model:
+            raise OperationError("MISSING_API_KEY", "Enter a key before discovery or testing")
+        model = str(draft.get("model_id", "")).strip() if require_model else ""
+        if require_model and not model:
+            raise OperationError("MISSING_MODEL", "Select or enter a model before testing")
+        result = dict(base_url=base, api_key=key if auth == "api_key" else "", model_id=model,
+                      protocol=protocol, kind=kind, auth_mode=auth)
+        if require_model:
+            from backend.core.loop.provider_preferences import validate_preferences
+            try:
+                result["request_preferences"] = validate_preferences(draft.get("request_preferences", {}), protocol)
+            except ValueError as exc:
+                raise OperationError(str(exc), "Check advanced request preferences") from None
+        return result
+
+    def _provider_preview(self, action, draft, request_id, timeout):
+        from backend.core.loop.provider_transport import ProviderTransportCancelled
+        from backend.core.loop.llm import StreamCancelledError
+        prepared = self._provider_draft(draft, action in {"probe", "connect"})
+        try:
+            return self.provider_drafts.run(action, prepared, request_id, max(1, min(float(timeout), 60)))
+        except (ProviderTransportCancelled, StreamCancelledError):
+            raise OperationError("PROVIDER_REQUEST_CANCELLED", "Request cancelled or its total time limit expired; draft retained") from None
+        except ValueError as exc:
+            code = str(exc)
+            raise OperationError(code if code.isupper() else "PROVIDER_PREVIEW_FAILED",
+                                 "Discovery/test unavailable; check connection or enter the model manually. Draft retained") from None
+        except Exception:
+            raise OperationError("PROVIDER_PREVIEW_FAILED", "Connection test failed; check URL, protocol, credentials and model. Draft retained") from None
+
+    def provider_models(self, draft: dict, request_id: str, timeout: int = 15) -> dict:
+        return self._provider_preview("models", draft, request_id, timeout)
+
+    def provider_probe(self, draft: dict, request_id: str, timeout: int = 45) -> dict:
+        return self._provider_preview("probe", draft, request_id, timeout)
+
+    def provider_connection(self, draft: dict, request_id: str, timeout: int = 30) -> dict:
+        return self._provider_preview("connect", draft, request_id, timeout)
+
+    def provider_cancel(self, request_id: str) -> dict:
+        if not request_id or len(request_id) > 128:
+            raise OperationError("INVALID_REQUEST_ID", "Expected configuration request ID")
+        return self.provider_drafts.cancel(request_id)
+
     def provider_test(self, provider_id: str, timeout: int = 30) -> dict:
         from backend.core.llm_config import LLMConfigManager
-        from backend.core.loop.provider_probe import ProviderProbe
-        provider = next((p for p in LLMConfigManager.get_providers()
-                         if p.id == provider_id), None)
+        import uuid
+        provider = next((p for p in LLMConfigManager.get_providers() if p.id == provider_id), None)
         if provider is None:
-            raise OperationError("PROVIDER_NOT_FOUND", f"Provider '{provider_id}' was not found")
-        try:
-            result = ProviderProbe().probe(
-                base_url=provider.base_url, api_key=provider.api_key,
-                model_id=provider.model_id, protocol=provider.protocol,
-                timeout=max(1, min(int(timeout), 60)),
-                kind=provider.kind, auth_mode=provider.auth_mode,
-            )
-        except Exception as exc:
-            raise OperationError("PROVIDER_PROBE_FAILED", str(exc)) from exc
-        provider.protocol = result.protocol
-        provider.capabilities = result.capabilities.to_dict()
-        provider.capabilities["context_window"] = provider.context_window
-        provider.capabilities["max_output_tokens"] = provider.max_output_tokens
-        LLMConfigManager.update(provider)
-        probe = result.to_dict()
-        probe["capabilities"] = dict(provider.capabilities)
-        return {
-            "ok": True, "provider_id": provider_id,
-            "response": result.text, "probe": probe,
-        }
+            raise OperationError("PROVIDER_NOT_FOUND", "Provider was not found")
+        # Legacy entry point is also a preview: only provider.save commits.
+        result = self.provider_probe({**provider.to_dict(), "request_preferences": provider.configuration.get("request_preferences", {})}, uuid.uuid4().hex, timeout)
+        return {"ok": True, "provider_id": provider_id, "response": result["text"], "probe": result}
 
     def project_export(self, project: str, minimal: bool = False,
                        include_identity: bool = False, output_path: str = "",

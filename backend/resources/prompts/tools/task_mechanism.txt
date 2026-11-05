@@ -1,0 +1,36 @@
+Inspect the current task's contract/maintenance revisions, source_refs, adopted BTW changes, plan phase and known dependency invalidations. This control-plane tool grants no capabilities or permissions. For a non-trivial task, discover necessary related work from actual project evidence (affected flows, subprocesses, interactions and delivery conditions), not a generic checklist. Separate observed/declared/inferred candidates; explain source, consequence, work, owner and verification. A proposal is not completed work.
+
+Create, preview and change callable lifecycle mechanisms through harness_mechanism. The task-state definition in status is a runtime compatibility projection, not another program to author or copy into the task contract. Read-only discussion about a possible future mechanism remains a proposal unless the user requests activation.
+
+Update goal/deliverables/acceptance/uncertainties, the actionable plan and related_review together through declare_task_contract when relevant evidence changes. Runtime binds revisions and runs the existing validation and atomic activation. Resolve pending adopted changes by their actual ids and link existing workflow question ids; do not answer questions or grant permissions on the user's behalf. A discussion or mailbox text append alone does not resolve a change. Keep unresolved choices in the existing request_user_decision/engineering_workflow path.
+
+maintenance.plan has summary, steps [{id,goal,depends_on,tools,resources,verification}] and optional dependencies [{kind:file|tool|lesson,id,affected_tools}]. Steps describe intended work, never self-asserted completion. maintenance.related_review has summary and candidates [{source,affected,reason,consequence,work,verification,owner,evidence_kind:observed|declared|inferred}]. maintenance.resolve_changes has [{id,reason,contract_fields:[goal|deliverables|acceptance_criteria|uncertainties|engineering_workflow],question_ids:[]}]. maintenance.resolve_maintenance lists actual trigger ids; adopt_related lists proposed candidate ids. Use actual current revisions from status. If no extra work is warranted, record the evidence-based reason with an empty candidate list. Do not repeat investigation or completed effects merely to refresh a plan.
+
+Suspend/resume/detach require expected_revision of the maintenance state. Suspension preserves work and evidence and blocks new effects/completion; it does not cancel the LLM. Detach cannot discard unresolved obligations, pending adopted changes or engineering gates. Scope replacement continues to use the existing explicit scope-amendment decision.
+
+advancement.user_control records the user's actual mode switch and causal authority_sequence. It supersedes earlier message preferences for mode only. Keep that effective mode when reconciling the plan; do not restore an older pinned mode, ask the user to re-confirm the switch, or treat the switch as a permission grant.
+Manual pauses the actual submitted tool invocation before its effect. Continue
+preparing work and call the intended tool through the normal pipeline to reach
+that boundary; do not replace execution with a final answer saying you await
+Manual or manufacture a semantic/recovery question about the same mode.
+Keep advancement history and completed-step commentary out of goal and acceptance
+criteria. Those describe the user's requested behavior, not the current runtime
+mode. Any revision of these scope fields, including a paraphrase, needs a plan and
+related_review in the same maintenance update. Read maintenance_status in the
+declaration receipt: accepted means persisted, not necessarily ready for effects.
+If related review is outstanding, supply its evidence-based summary and candidates
+(empty if none are needed); resolve_maintenance alone does not satisfy that review.
+
+Likewise, a persisted lifecycle_control records a direct user suspend/resume.
+Do not resume a user-suspended mechanism on your own. A later natural-language
+resume must supply source_ref and an exact quote from newer actual user evidence.
+
+Ordinary user feedback is first a pending update to interpret. If it changes scope, reconcile it via declare_task_contract with a plan and acceptance criteria. If it only supplies information or asks for status, use interpret_update with change_id, expected_revision, disposition information/question and a concrete reason; this records your fallible semantic interpretation, which remains visible to Grill. This shortcut cannot acknowledge an explicitly adopted BTW requirement. Never turn discussion-only material into an execution requirement without the user's adoption.
+
+Reject an unaccepted related-work idea with related_dispositions [{id,action:reject,reason}].
+Withdrawing accepted work is a different state: related_dispositions action=withdraw or
+resolve_changes disposition=withdraw requires a revised plan and source_ref/quote from
+newer actual user evidence. Grill assesses whether that quote authorizes the withdrawal;
+the reference itself is not semantic proof. Existing engineering scope-amendment gates remain.
+An adopted candidate's execution projection refers to the containing task's actual
+receipts/outcome; proposal/adoption alone never assert that its business work is done.

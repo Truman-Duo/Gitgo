@@ -11,10 +11,12 @@ import { colors } from "../theme/index.js";
 import {cachedTrace, cacheTrace, traceCacheKey} from "../chat/traceCache.js";
 import { timelineFromTrace } from "../chat/turnTimeline.js";
 import { TurnTimeline } from "./TurnTimeline.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 function EventDetail({ detailRef, client, project }: {
   detailRef: string; client: BackendClient; project: string;
 }) {
+  const t=useCopy();
   const [expanded, setExpanded] = useState(false);
   const [body, setBody] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -24,17 +26,17 @@ function EventDetail({ detailRef, client, project }: {
     setError("");
     void runtimeTrace(client, project, { action: "detail", ref: detailRef })
       .then((result: any) => {
-        if (alive) setBody(JSON.stringify(result.detail, null, 2) ?? "No saved detail");
+        if (alive) setBody(JSON.stringify(result.detail, null, 2) ?? t({en:"No saved detail",zh:"没有保存的详情"}));
       })
       .catch((err: unknown) => { if (alive) setError(String(err)); });
     return () => { alive = false; };
-  }, [expanded, body, detailRef, client, project]);
+  }, [expanded, body, detailRef, client, project, t]);
   return <Box flexDirection="column">
     <Box onClick={() => setExpanded(value => !value)}>
-      <Text dimColor>{expanded ? "▾ Hide detail" : "▸ Open detail"}</Text>
+      <Text dimColor>{expanded ? t({en:"▾ Hide detail",zh:"▾ 收起详情"}) : t({en:"▸ Open detail",zh:"▸ 展开详情"})}</Text>
     </Box>
     {expanded ? <Text color={error ? colors.danger : undefined} dimColor={!error}>
-      {error || body || "Loading detail…"}
+      {error || body || t({en:"Loading detail…",zh:"正在读取详情…"})}
     </Text> : null}
   </Box>;
 }
@@ -43,6 +45,7 @@ export function RoundDetails({ message, client, project, verbose, width, include
   message: ChatMessage; client?: BackendClient; project?: string;
   verbose: boolean; width: number; includeDescendants?: boolean; readTrace?: boolean;
 }) {
+  const t=useCopy();
   const cacheKey = traceCacheKey(project || "", message.trace_id || "", message.process_id || "", includeDescendants, message.status);
   const terminal = ["completed", "failed", "cancelled", "timed_out", "degraded"].includes(message.status || "");
   const [trace, setTrace] = useState<{ events: TraceRecord[]; truncated: boolean } | null>(
@@ -106,21 +109,21 @@ export function RoundDetails({ message, client, project, verbose, width, include
   }) : {...fallback, providerUsage: message.provider_usage};
 
   if (!canRead || error) return <Box flexDirection="column">
-    {error ? <Text color={colors.danger}>[TRACE_READ_FAILED] {error}</Text> : null}
+    {error ? <Text color={colors.danger}>{t({en:"[TRACE_READ_FAILED] ",zh:"[TRACE_READ_FAILED] "})}{error}</Text> : null}
     <TurnTimeline {...fallback} verbose={verbose} width={width} preview/>
     {fallbackActivity.length === 0
-      ? <Text dimColor>No saved trajectory is available.</Text> : null}
+      ? <Text dimColor>{t({en:"No saved trajectory is available.",zh:"没有已保存的轨迹。"})}</Text> : null}
   </Box>;
 
   return <Box flexDirection="column">
-    {!trace && !error ? <Text dimColor>Loading trajectory…</Text> : null}
+    {!trace && !error ? <Text dimColor>{t({en:"Loading trajectory…",zh:"正在读取轨迹…"})}</Text> : null}
     <TurnTimeline {...model} verbose={verbose} width={width} preview
       renderDetail={(detailRef, key) => <EventDetail key={key}
         detailRef={detailRef} client={client!} project={project!}/>}/>
     {trace && trace.events.length === 0
-      ? <Text dimColor>No events are available for this agent; older traces may have expired.</Text> : null}
+      ? <Text dimColor>{t({en:"No events are available for this agent; older traces may have expired.",zh:"此进程没有可读取事件，早期轨迹可能已过期。"})}</Text> : null}
     {trace?.truncated ? <Text color={colors.warning}>
-      Trajectory exceeds 50,000 raw events; open /stats for the remaining trace.
+      {t({en:"Trajectory exceeds 50,000 raw events; open /stats for the remaining trace.",zh:"轨迹超过 50,000 条原始事件，请通过 /stats 查看其余记录。"})}
     </Text> : null}
   </Box>;
 }

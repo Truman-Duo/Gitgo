@@ -17,10 +17,35 @@ def install(ctx):
     engineering = ctx.engineering
     code_dossier = ctx.code_dossier
     dossier_store = ctx.dossier_store
-    from backend.core.loop.engineering_workflow import EngineeringWorkflow
+    from backend.core.loop.engineering_workflow import EngineeringWorkflow, plan_schema
 
 
     engineering = EngineeringWorkflow(process, on_stream_event)
+
+    def task_mechanism(args):
+        from backend.core.loop.task_maintenance import invoke
+        try:
+            return invoke(process, args)
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            return {"error": "TASK_MECHANISM_UPDATE_REJECTED", "detail": str(exc), "authority_granted": False}
+
+    tools["task_mechanism"] = AgentTool(
+        execution_contract=data_broker("host.runtime.task_mechanism"), name="task_mechanism",
+        description=load_prompt('tools/task_mechanism'),
+        parameters={"type": "object", "properties": {
+            "operation": {"type": "string", "enum": ["catalog", "status", "preview", "interpret_update", "suspend", "resume", "detach"]},
+            "expected_revision": {"type": "integer", "minimum": 0}, "contract": {"type": "object"},
+            "change_id": {"type": "string"}, "disposition": {"type": "string", "enum": ["information", "question", "scope_change"]},
+            "reason": {"type": "string"}, "source_ref": {"type": "string"}, "quote": {"type": "string"}},
+            "required": ["operation"], "additionalProperties": False},
+        execute=task_mechanism, read_only=True, effect=ToolEffect.READ, idempotent=False)
+    from backend.core.loop.model_feedback import task_feedback
+    tools['task_mechanism'].model_result = task_feedback
+    from copy import deepcopy
+    task_surface = deepcopy(tools['task_mechanism'].parameters)
+    task_surface['properties']['operation']['enum'] = ['status', 'interpret_update', 'suspend', 'resume', 'detach']
+    task_surface['properties'].pop('contract')
+    tools['task_mechanism'].advertised_parameters = task_surface
 
 
     tools["engineering_workflow"] = AgentTool(
@@ -31,9 +56,11 @@ def install(ctx):
         ),
         parameters={"type": "object", "properties": {
             "operation": {"type": "string", "enum": ["configure", "status", "ask", "ask_frontier", "revise_decision", "resolve_answer", "record", "retrospective", "propose_amendment"]},
-            "plan": {"type": "object"}, "node_id": {"type": "string"},
-            "decision_id": {"type": "string"},
-            "content": {"type": "object"}, "request": {"type": "object"}, "reason": {"type": "string"},
+            "plan": plan_schema(),
+            "node_id": {"type": "string", "description":"Target node; canonical content may carry this identity too."},
+            "decision_id": {"type": "string", "description":"Actual reply ID; canonical content may carry it too."},
+            "content": {"type": "object", "description":"Interpretation or report; use the operation's documented shape."},
+            "request": {"type": "object"}, "reason": {"type": "string"},
         }, "required": []},
         execute=engineering.invoke, read_only=True, effect=ToolEffect.READ,
         idempotent=False,
@@ -498,10 +525,14 @@ def install(ctx):
     manager = getattr(process, "_manager", None)
 
 
-    if process.actor_kind in {"worker", "reviewer"}:
+    from backend.core.loop.coordination import (
+        coordination_owner, CoordinationOwnerUnavailable, ownership_error,
+    )
+    if (process.actor_kind in {"worker", "reviewer"}
+            and coordination_owner(manager, process) is not None):
         def publish_interface_update(args: dict) -> dict:
-            if manager is None:
-                return {"accepted": False, "error": "AgentProcessManager is unavailable"}
+            if coordination_owner(manager, process) is None:
+                return ownership_error()
             from backend.core.loop.coordination import observe_interface_changes
             try:
                 result = observe_interface_changes(
@@ -514,6 +545,8 @@ def install(ctx):
                         str(item) for item in list(args.get("interfaces") or [])
                     ],
                 )
+            except CoordinationOwnerUnavailable:
+                return ownership_error()
             except (OSError, ValueError) as exc:
                 return {"accepted": False, "error": str(exc)}
             if on_stream_event is not None:
@@ -551,8 +584,8 @@ def install(ctx):
         )
 
         def escalate_to_supervisor(args: dict) -> dict:
-            if manager is None:
-                return {"accepted": False, "error": "AgentProcessManager is unavailable"}
+            if coordination_owner(manager, process) is None:
+                return ownership_error()
             from backend.core.loop.coordination import publish_coordination_event
             try:
                 event = publish_coordination_event(
@@ -572,6 +605,8 @@ def install(ctx):
                     requires_supervisor_action=True,
                     block_affected=str(args.get("kind") or "") == "dependency_change",
                 )
+            except CoordinationOwnerUnavailable:
+                return ownership_error()
             except ValueError as exc:
                 return {"accepted": False, "error": str(exc)}
             if on_stream_event is not None:

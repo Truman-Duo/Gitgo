@@ -390,22 +390,28 @@ def test_actual_agent_loop_exposes_workflow_and_streams_recovery_notices(tmp_pat
     class Provider:
         protocol = SimpleNamespace(value="openai_responses")
         capabilities = SimpleNamespace(prompt_cache="automatic")
-        context_window = 8192
+        # This scripted Provider has no summary endpoint. Keep this workflow
+        # regression clear of auto-compaction as the real tool contracts grow;
+        # small-window overflow/recovery has dedicated context tests.
+        context_window = 16384
         calls = 0
 
-        def stream_events(self, *_args, **kwargs):
+        def stream_events(self, *args, **kwargs):
             self.calls += 1
-            assert any(t.get("name") == "engineering_workflow" or t.get("function", {}).get("name") == "engineering_workflow" for t in kwargs["tools"])
+            from backend.core.loop.provider_tool_transport import CALL
+            from backend.core.loop.provider_context import decode_records
+            assert kwargs['tools'][0]['function']['name'] == CALL
+            assert 'engineering_workflow' in decode_records(args[0])['runtime.tool_contracts']
             operations = [{"operation": "configure", "plan": {"profiles": ["retrospective"]}},
                           {"operation": "record", "node_id": "unknown"},
                           {"operation": "record", "node_id": "retro"}]
             if self.calls <= len(operations):
                 id = f"workflow-{self.calls}"
                 yield ProviderEvent(ProviderEventType.TOOL_CALL_STARTED, tool_call_id=id,
-                                    tool_name="engineering_workflow", output_index=0)
+                                    tool_name=CALL, output_index=0)
                 yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id=id,
-                                    tool_name="engineering_workflow", output_index=0,
-                                    arguments=json.dumps(operations[self.calls - 1]))
+                                    tool_name=CALL, output_index=0,
+                                    arguments=json.dumps({'name':'engineering_workflow','arguments':operations[self.calls - 1]}))
             else:
                 yield ProviderEvent(ProviderEventType.TEXT_DELTA, text="Retrospective recorded.\nTASK_COMPLETE")
             yield ProviderEvent(ProviderEventType.RESPONSE_COMPLETED)

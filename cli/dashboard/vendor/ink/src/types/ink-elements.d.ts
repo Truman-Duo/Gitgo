@@ -12,6 +12,7 @@ declare global {
   namespace JSX {
     interface IntrinsicElements {
       'ink-box': {
+        terminalRaster?: import('../core/raster.js').Raster
         ref?: Ref<DOMElement>
         tabIndex?: number
         autoFocus?: boolean

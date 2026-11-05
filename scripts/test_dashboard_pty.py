@@ -60,9 +60,12 @@ def run(runtime, command, native=False):
             assert {"ready": True} in events
             assert {"cmdCopy": True} in events
             assert any(e.get("ctrl") and e.get("input") == "g" for e in events)
-            assert any(e.get("shift") and e.get("enter") for e in events)
+            assert {"shiftEnter": True} in events, events
+            # Managed input applies the real binding registry: Shift+Enter is
+            # the editor newline action, rather than an unmodified Enter.
+            assert any(e.get("newline") and e.get("input") == "\n" for e in events), events
             assert any(e.get("paste") and e.get("input") == "中文\n𠮷" for e in events)
-            assert "".join(e.get("input", "") for e in events if not e.get("paste") and not e.get("ctrl") and not e.get("enter")) == "输入𠮷", events
+            assert "".join(e.get("input", "") for e in events if not e.get("paste") and not e.get("ctrl") and not e.get("enter") and not e.get("newline")) == "输入𠮷", events
             assert {"size": [80, 30]} in events, events
         else:
             assert b"Native host mode" in stderr, stderr.decode()

@@ -83,6 +83,17 @@ class AgentMailbox:
     def enqueue_instruction(self, content: str) -> MailboxMessage:
         return self._enqueue(content, kind="user_instruction")
 
+    def retract_uncommitted(self, message_id: str) -> None:
+        """Rollback one unacknowledged enqueue while the runtime boundary is fenced."""
+        with self._lock:
+            message = self._messages.get(message_id)
+            if message is None:
+                return
+            if message.status != "accepted" or message not in self._pending:
+                raise RuntimeError("mailbox entry was consumed before its admission committed")
+            self._pending.remove(message)
+            del self._messages[message_id]
+
     def enqueue_governance_update(self, content: str) -> MailboxMessage:
         return self._enqueue(content, kind="governance_update")
 

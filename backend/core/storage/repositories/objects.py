@@ -62,20 +62,28 @@ def compare_state_ref(self: ObjectsPort, namespace: str, key: str,
 
 def commit_state_revision(self: ObjectsPort, namespace: str, key: str,
                           value_ref: str, *, expected_ref: str | None,
-                          revision_key: str) -> bool:
+                          revision_key: str, related_refs: tuple[str, ...] = ()) -> bool:
     """Retain an immutable revision and advance its expected head atomically."""
     if not revision_key or key == revision_key:
         raise ValueError("distinct head and revision keys are required")
     return _publish_state_head(self, namespace, key, value_ref,
-                               expected_ref=expected_ref, revision_key=revision_key)
+                               expected_ref=expected_ref, revision_key=revision_key, related_refs=related_refs)
 
 
-def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revision_key=None):
+def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revision_key=None, related_refs=()):
     self._ensure_open()
     if not namespace or not key:
         raise ValueError("namespace and key are required")
     self.read_blob(value_ref)
-    self._reserve_authoritative_write(len(namespace) + len(key) + len(revision_key or "") + 2 * len(value_ref))
+    if not isinstance(related_refs, tuple) or len(related_refs) > 65536:
+        raise ValueError("bounded immutable state closure required")
+    digests = set()
+    for reference in related_refs:
+        if (not isinstance(reference, str) or not reference.startswith('sha256:') or len(reference) != 71
+                or any(c not in '0123456789abcdef' for c in reference[7:])):
+            raise ValueError("exact state closure reference required")
+        digests.add(reference[7:])
+    self._reserve_authoritative_write(len(namespace) + len(key) + len(revision_key or "") + 2 * len(value_ref) + 256 * len(digests))
     with self._state_lock:
         with authoritative_transaction(self._state):
             row = self._state.execute(
@@ -84,6 +92,9 @@ def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revisi
             current = str(row[0]) if row else None
             if current != expected_ref:
                 return False
+            for digest in digests:
+                if self._state.execute('SELECT 1 FROM objects WHERE digest=?', (digest,)).fetchone() is None:
+                    raise ValueError("state closure object is not registered")
             now = _utc_now()
             if revision_key is not None:
                 prior = self._state.execute(
@@ -94,11 +105,61 @@ def _publish_state_head(self, namespace, key, value_ref, *, expected_ref, revisi
                 self._state.execute(
                     "INSERT OR IGNORE INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)",
                     (namespace, revision_key, value_ref, now))
+            for digest in digests:
+                self._state.execute(
+                    'INSERT OR IGNORE INTO object_refs(owner_type,owner_id,field_name,digest,created_at) VALUES(?,?,?,?,?)',
+                    ('state_revision', value_ref, 'closure/' + digest, digest, now))
             self._state.execute(
                 "INSERT INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?) "
                 "ON CONFLICT(namespace,key) DO UPDATE SET value_ref=excluded.value_ref,updated_at=excluded.updated_at",
                 (namespace, key, value_ref, now))
     return True
+
+
+def commit_state_batch(self: ObjectsPort, namespace: str, updates: list[dict]) -> bool:
+    """Publish related CAS heads and immutable revisions in one transaction.
+
+    Compare every head before writing any. A conflict or storage failure leaves
+    all authoritative roots unchanged; blob creation is not publication.
+    """
+    self._ensure_open()
+    if not namespace or not isinstance(updates, list) or not 1 <= len(updates) <= 8:
+        raise ValueError('bounded state publication required')
+    keys = set()
+    for update in updates:
+        if (not isinstance(update, dict) or set(update) - {'key', 'value_ref', 'expected_ref', 'revision_key'}
+                or not {'key', 'value_ref', 'expected_ref'}.issubset(update)):
+            raise ValueError('exact state publication preconditions required')
+        for key in [update['key'], *([update['revision_key']] if update.get('revision_key') else [])]:
+            if not isinstance(key, str) or not key or key in keys:
+                raise ValueError('distinct state publication keys required')
+            keys.add(key)
+        self.read_blob(update['value_ref'])
+        if update['expected_ref'] is not None and not isinstance(update['expected_ref'], str):
+            raise ValueError('invalid expected state reference')
+    self._reserve_authoritative_write(len(namespace) * len(keys) + sum(map(len, keys)) + 512 * len(updates))
+    with self._state_lock:
+        with authoritative_transaction(self._state):
+            for update in updates:
+                row = self._state.execute('SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?',
+                    (namespace, update['key'])).fetchone()
+                if (str(row[0]) if row else None) != update['expected_ref']:
+                    return False
+                if update.get('revision_key'):
+                    prior = self._state.execute('SELECT value_ref FROM storage_kv WHERE namespace=? AND key=?',
+                        (namespace, update['revision_key'])).fetchone()
+                    if prior is not None and str(prior[0]) != update['value_ref']:
+                        raise ValueError('immutable revision key already exists')
+            now = _utc_now()
+            for update in updates:
+                if update.get('revision_key'):
+                    self._state.execute('INSERT OR IGNORE INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)',
+                        (namespace, update['revision_key'], update['value_ref'], now))
+                self._state.execute('INSERT INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?) '
+                    'ON CONFLICT(namespace,key) DO UPDATE SET value_ref=excluded.value_ref,updated_at=excluded.updated_at',
+                    (namespace, update['key'], update['value_ref'], now))
+    return True
+
 
 
 def list_state_refs(self: ObjectsPort, namespace: str, *, prefix: str,
@@ -133,7 +194,9 @@ def _write_blob_file(
             if health.total_bytes + len(data) > self.policy.total_max_bytes:
                 raise StorageBlocked("project_storage_capacity_exceeded")
             target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(target.name + f".{uuid.uuid4().hex}.tmp")
+            # A sibling temporary needs uniqueness, not the full 62-character
+            # content hash again. Keep it inside Windows' supported path budget.
+            temporary = target.with_name(f".{uuid.uuid4().hex}.tmp")
             try:
                 with temporary.open("xb") as handle:
                     handle.write(data)
@@ -252,7 +315,7 @@ def _restore_canonical_blob(self: ObjectsPort, digest: str) -> bytes | None:
         if target.exists():
             return target.read_bytes()
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(target.name + f".{uuid.uuid4().hex}.repair.tmp")
+        temporary = target.with_name(f".{uuid.uuid4().hex}.repair.tmp")
         try:
             with temporary.open("xb") as handle:
                 handle.write(data)
@@ -373,7 +436,7 @@ def read_tool_result(
     needle = str(query or "")
     query_match = None
     if needle:
-        found = content.casefold().find(needle.casefold())
+        found = content.casefold().find(needle.casefold(), max(0, int(offset or 0)))
         if found < 0:
             return {
                 "locator": locator,

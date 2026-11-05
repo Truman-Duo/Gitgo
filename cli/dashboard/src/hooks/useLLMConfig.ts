@@ -1,7 +1,7 @@
 // src/hooks/useLLMConfig.ts
 // Fetch and manage LLM provider configuration through native application services.
 
-import { useState, useCallback } from "react";
+import { useState, useCallback,useRef } from "react";
 import type { BackendClient } from "../backend/client.js";
 import { useAsyncPoll } from "./useAsyncPoll.js";
 import { llmStatus, llmSave, llmSwitch, llmDelete, llmFailoverConfigure, loopStatus } from "../backend/tools.js";
@@ -23,6 +23,8 @@ export type LLMProvider = {
   created_at: string;
   kind?: "remote" | "local";
   auth_mode?: "api_key" | "none";
+  revision?: string;
+  configuration?: Record<string, any>;
 };
 
 export type LLMConfigState = {
@@ -39,10 +41,13 @@ export function useLLMConfig(client: BackendClient | null, project = "") {
   const [activeProvider, setActiveProvider] = useState("");
   const [failoverEnabled, setFailoverEnabled] = useState(false);
   const [failoverOrder, setFailoverOrder] = useState<string[]>([]);
+  const [failoverRoutes,setFailoverRoutes]=useState<Record<string,string[]>>({});
+  const [failoverRevision,setFailoverRevision]=useState("");
   const [health, setHealth] = useState<Record<string, {breaker_state: string; failures: number | null}>>({});
   const { loading, error, run, setError } = useAsyncPoll(true);
+  const switching=useRef(false);
 
-  const fetchStatus = useCallback(async () => {
+  const fetchStatus = useCallback(async ({background=false}={}) => {
     if (!client) return;
     await run(async () => {
       const result: any = await llmStatus(client);
@@ -51,13 +56,15 @@ export function useLLMConfig(client: BackendClient | null, project = "") {
       setActiveProvider(result?.active_provider || "");
       setFailoverEnabled(Boolean(result?.failover_enabled));
       setFailoverOrder(result?.failover_order || []);
+      setFailoverRoutes(result?.failover_routes || (result?.active_provider?{[result.active_provider]:result?.failover_order || []}:{}));
+      setFailoverRevision(result?.failover_revision || "");
       setError(result?.credential_cleanup?.pending
         ? "Configuration saved; old credential cleanup pending. Retry the operation or uninstall cleanup." : null);
       if (project) {
         const status: any = await loopStatus(client, project);
         setHealth(Object.fromEntries((status?.providers || []).map((p: any) => [p.id, p])));
       }
-    });
+    },{loading:!background});
   }, [client, project, run, setError]);
 
   const saveProvider = useCallback(async (p: LLMProvider) => {
@@ -86,16 +93,20 @@ export function useLLMConfig(client: BackendClient | null, project = "") {
 
   const switchProvider = useCallback(async (providerId: string) => {
     if (!client) return false;
+    if(providerId===activeProvider)return true;
+    if(switching.current)return false;
+    switching.current=true;
     try {
       const result: any = await llmSwitch(client, providerId);
       if (result?.error) { setError(result.error); return false; }
-      await fetchStatus();
+      setActiveProvider(result.active_provider||providerId);
+      await fetchStatus({background:true});
       return true;
     } catch (e: any) {
       setError(e.message);
       return false;
-    }
-  }, [client, fetchStatus, setError]);
+    }finally{switching.current=false;}
+  }, [client,activeProvider, fetchStatus, setError]);
 
   const deleteProvider = useCallback(async (providerId: string) => {
     if (!client) return false;
@@ -110,10 +121,10 @@ export function useLLMConfig(client: BackendClient | null, project = "") {
     }
   }, [client, fetchStatus, setError]);
 
-  const configureFailover = useCallback(async (enabled: boolean, order: string[]) => {
+  const configureFailover = useCallback(async (enabled: boolean, order?: string[],providerId?:string,revision?:string) => {
     if (!client) return false;
     try {
-      const result: any = await llmFailoverConfigure(client, enabled, order);
+      const result: any = await llmFailoverConfigure(client, enabled, order,providerId,revision);
       if (result?.error) { setError(result.error); return false; }
       await fetchStatus();
       return true;
@@ -123,7 +134,7 @@ export function useLLMConfig(client: BackendClient | null, project = "") {
   return {
     providers,
     activeProvider,
-    failoverEnabled, failoverOrder, configureFailover, health,
+    failoverEnabled, failoverOrder, failoverRoutes,failoverRevision,configureFailover, health,
     loading,
     error,
     fetchStatus,

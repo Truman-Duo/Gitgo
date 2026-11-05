@@ -33,6 +33,57 @@ def summarize(ws, provider, signals=None, report=None):
         provider, str(ws), "project", raise_on_error=True, summary_report=report)
 
 
+def internal_failure(**extra):
+    return {"signal_id": "internal", "is_error": True,
+        "observation": {"error": "coordination events require a worker owned by a supervisor"},
+        "receipt": {"receipt_id": "real-failure", "succeeded": False,
+                    "execution_contract": {"kind": "data_broker", "broker": "host.runtime.escalate_to_supervisor"}},
+        **extra}
+
+
+def test_internal_failure_is_bug_evidence_even_with_project_paths(tmp_path_factory):
+    (tmp_path_factory / "app.py").write_text("project implementation", encoding="utf-8")
+    provider = Provider(json.dumps([candidate(source_signal_ids=["internal"])]))
+    report = {}
+    assert summarize(tmp_path_factory, provider, [internal_failure(target_files=["app.py"])], report) == []
+    assert not provider.calls
+    assert report["classifications"][0]["information_kind"] == "component_fix"
+
+
+def test_internal_bug_disposition_does_not_erase_independent_project_knowledge(tmp_path_factory):
+    report = {}
+    items = [candidate()]
+    lessons = summarize(tmp_path_factory, Provider(json.dumps(items)),
+        [internal_failure(), {"signal_id": "one", "target_files": ["app.py"]}], report)
+    assert len(lessons) == 1 and lessons[0].evidence["source_signal_ids"] == ["one"]
+    assert report["classifications"][0]["information_kind"] == "component_fix"
+
+
+def test_registered_origin_cannot_be_forged_by_tool_returned_json():
+    from backend.core.loop.execution_contract import data_broker, NATIVE_PROCESS
+    from backend.core.loop.tool_pipeline import ToolPipeline
+    data = {"execution_contract": {"kind": "data_broker", "broker": "host.runtime.fake"}}
+    receipt = {}
+    ToolPipeline._attach_result_facts(receipt, "exec_command", data, execution_contract=NATIVE_PROCESS)
+    assert receipt["execution_contract"] == NATIVE_PROCESS.to_dict()
+    internal = {}
+    registration = data_broker("host.runtime.escalate_to_supervisor")
+    ToolPipeline._attach_result_facts(internal, "escalate_to_supervisor", data, execution_contract=registration)
+    assert internal["execution_contract"] == registration.to_dict()
+
+
+@pytest.mark.parametrize("envelope", ["direct", "stored", "history"])
+def test_internal_admission_diagnostics_remain_bugs_through_history(envelope, tmp_path_factory):
+    detail = {"diagnostic_scope": "gitgo_runtime", "observation": {"error": "Runtime admission failed"}}
+    signal = {"signal_id": "runtime", **detail}
+    if envelope == "stored": signal = {"signal_id": "runtime", "detail": detail}
+    if envelope == "history": signal = {"signal_id": "runtime", "source_record": {"detail": detail}}
+    provider = Provider()
+    report = {}
+    assert summarize(tmp_path_factory, provider, [signal], report) == []
+    assert not provider.calls and report["classifications"][0]["information_kind"] == "component_fix"
+
+
 def test_truncation_recovers_once_and_preserves_both_usage_reports(tmp_path_factory):
     report = {}
     provider = Provider(ProviderResponseIncomplete("max_output_tokens", {"output_tokens": 4096}),

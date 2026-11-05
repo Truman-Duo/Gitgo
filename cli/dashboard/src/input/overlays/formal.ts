@@ -1,3 +1,4 @@
+import {isBindingAction} from "../router.js";
 // src/input/overlays/formal.ts — FormalPanel key→action resolution.
 import { matchChord } from "../bindings.js";
 
@@ -21,7 +22,7 @@ export function resolveFormalKey(confirm: boolean, input: string, key: any): For
   if (matchChord("escape", input, key)) return [{ type: "dismiss" }];
   if (matchChord("up", input, key)) return [{ type: "move", delta: -1 }];
   if (matchChord("down", input, key)) return [{ type: "move", delta: 1 }];
-  if (matchChord("letterD", input, key)) return [{ type: "delete" }];
-  if (matchChord("letterX", input, key)) return [{ type: "dissolve" }];
+  if (isBindingAction("formal.delete", input, key)) return [{ type: "delete" }];
+  if (isBindingAction("formal.dissolve", input, key)) return [{ type: "dissolve" }];
   return [];
 }

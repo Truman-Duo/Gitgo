@@ -19,6 +19,14 @@ if TYPE_CHECKING:
     from backend.core.loop.event_bus import EventBus
 
 
+@dataclass(frozen=True)
+class ToolBindings:
+    """Runtime-owned tool consumers; discovery/refresh never confers authority."""
+    catalog: dict
+    dependencies: dict
+    synchronize: Callable | None = None
+
+
 @dataclass
 class ExecutionContext:
     """工具运行时环境——存活整个 agent_step 调用。
@@ -41,6 +49,19 @@ class ExecutionContext:
     # Project-owned SQLite/CAS runtime. Optional only for isolated component
     # tests and compatibility callers; production daemon contexts always bind it.
     storage: object | None = None
+    tool_bindings: ToolBindings | None = None
+
+    @property
+    def tool_catalog(self):
+        return self.tool_bindings.catalog if self.tool_bindings is not None else self.artifacts.get("tool_catalog", {})
+
+    @property
+    def tool_dependencies(self):
+        return self.tool_bindings.dependencies if self.tool_bindings is not None else self.artifacts.get("mechanism_dependencies", {})
+
+    def synchronize_tools(self):
+        if self.tool_bindings is not None and self.tool_bindings.synchronize is not None:
+            self.tool_bindings.synchronize()
 
     def is_cancelled(self) -> bool:
         return self.cancellation.is_set()

@@ -16,8 +16,8 @@ export const createProject = (c: BackendClient, p: {
   llm_provider?: string;
 }) => c.callTool("project.create", p);
 export const publishGet = (c: BackendClient, project: string) => c.callTool("publish.get", {project});
-export const publishSet = (c: BackendClient, project: string, section: string, value: unknown) =>
-  c.callTool("publish.set", {project, section, value});
+export const publishSet = (c: BackendClient, project: string, section: string, value: unknown, expectedValue?: unknown) =>
+  c.callTool("publish.set", {project, section, value, ...(expectedValue !== undefined ? {expected_value: expectedValue} : {})});
 export const listArchivedProjects = (c: BackendClient) => c.callTool("project.list_archived");
 export const enterProject = (c: BackendClient, name: string) => c.callTool("project.enter", {name});
 export const archiveProject = (c: BackendClient, name: string) => c.callTool("project.archive", { name });
@@ -62,6 +62,8 @@ export const formalEditMessage = (c: BackendClient, project: string, index: numb
 export const formalDelete = (c: BackendClient, project: string, index: number) => c.callTool("formal.delete", { project, index });
 export const formalDissolve = (c: BackendClient, project: string, index: number) => c.callTool("formal.dissolve", { project, index });
 export const loopStatus = (c: BackendClient, project: string) => c.callTool("runtime.status", { project });
+export const taskMechanism = (c: BackendClient, project: string, processId: string, args: Record<string, unknown> = {}) =>
+  c.callTool("runtime.mechanism", {project, process_id: processId, ...args});
 export const runtimeSummaries = (c: BackendClient) => c.callTool("runtime.summaries");
 export const runtimeUsage = (
   c: BackendClient, project = "", limit = 100, cursor = "",
@@ -97,6 +99,11 @@ export const cancelBtw = (
 export const saveBtwNote = (
   c: BackendClient, project: string, sidecarId: string, note: string,
 ) => c.callTool("runtime.btw.note", { project, sidecar_id: sidecarId, note });
+export const adoptBtw = (
+  c: BackendClient, project: string, processId: string, taskId: string, expectedRevision: number,
+  sidecarId: string, discussionRef: string, mode: "boundary" | "interrupt",
+) => c.callTool("runtime.btw.adopt", { project, process_id: processId, task_id: taskId,
+  expected_revision: expectedRevision, sidecar_id: sidecarId, discussion_ref: discussionRef, mode }, 330);
 export const sendRuntimeFeedback = (
   c: BackendClient, project: string, processId: string, message: string,
   onEvent?: (event: Record<string, any>) => void,
@@ -119,6 +126,8 @@ export const discardRecovery = (
 ) => c.callTool("runtime.recovery.discard", { project, process_id: processId, reason });
 export const configGet = (c: BackendClient) => c.callTool("config.get");
 export const detectTerminals = (c: BackendClient) => c.callTool("config.terminals", {}, 15);
+export const startupTerminals = (c: BackendClient, attached: boolean) =>
+  c.callTool("config.terminals", {startup: true, attached}, 15);
 export const configSet = (c: BackendClient, key: string, value: any) => c.callTool("config.set", { key, value });
 export const testWebSearchConfig = (c: BackendClient) => c.callTool("config.web_search.test", {}, 35);
 export const templateList = (c: BackendClient) => c.callTool("template.list");
@@ -126,8 +135,18 @@ export const templateAdd = (c: BackendClient, p: { name: string; description: st
 export const templateEdit = (c: BackendClient, name: string, description: string) => c.callTool("template.edit", { name, description });
 export const templateDelete = (c: BackendClient, name: string) => c.callTool("template.delete", { name });
 export const llmStatus = (c: BackendClient) => c.callTool("provider.status");
-export const llmSave = (c: BackendClient, p: { id?: string; name: string; base_url: string; api_key: string; model_id: string; protocol: string; context_window: number; max_output_tokens: number; retain_api_key?: boolean; kind?: "local" | "remote"; auth_mode?: "none" | "api_key" }) => c.callTool("provider.save", { provider_id: p.id || "", name: p.name, base_url: p.base_url, api_key: p.api_key, model_id: p.model_id, protocol: p.protocol, context_window: p.context_window, max_output_tokens: p.max_output_tokens, retain_api_key: p.retain_api_key || false, kind: p.kind || "remote", auth_mode: p.auth_mode || "api_key" });
-export const llmFailoverConfigure = (c: BackendClient, enabled: boolean, order: string[]) => c.callTool("provider.failover.configure", {enabled, order});
+export type ProviderSave = {id?: string; name: string; base_url: string; api_key: string; model_id: string; protocol: string; context_window: number; max_output_tokens: number; retain_api_key?: boolean; kind?: "local" | "remote"; auth_mode?: "none" | "api_key"; expected_revision?: string; preset_id?: string; model_receipt?: string; probe_receipt?: string; context_source?: string; output_source?: string; creation_id?:string; request_preferences?:{reasoning_effort?:string;body?:Record<string,unknown>}; models?:Record<string,unknown>[]};
+export const llmSave = (c: BackendClient, p: ProviderSave) => {const {id, ...draft} = p; return c.callTool("provider.save", {...draft, provider_id: id || "", retain_api_key: p.retain_api_key || false, kind: p.kind || "remote", auth_mode: p.auth_mode || "api_key"});};
+export const llmPresets = (c: BackendClient) => c.callTool("provider.presets");
+export const llmModels = (c: BackendClient, draft: Record<string, unknown>, requestId: string) => c.callTool("provider.models", {draft, request_id: requestId}, 35);
+export const llmProbe = (c: BackendClient, draft: Record<string, unknown>, requestId: string) => c.callTool("provider.probe", {draft, request_id: requestId}, 65);
+export const llmConnection = (c: BackendClient, draft: Record<string, unknown>, requestId: string) => c.callTool("provider.connection", {draft, request_id: requestId}, 40);
+export const llmCancel = (c: BackendClient, requestId: string) => c.callTool("provider.cancel", {request_id: requestId});
+export const llmModelOptions = (c: BackendClient) => c.callTool("provider.model.options");
+export const llmEffortOptions = (c: BackendClient) => c.callTool("provider.effort.options");
+export const llmEffortSelect = (c: BackendClient, providerId:string, modelId:string, effort:string, revision:string) => c.callTool("provider.effort.select", {provider_id:providerId,model_id:modelId,effort,expected_revision:revision});
+export const llmModelSelect = (c: BackendClient, providerId:string, modelId:string, revision:string) => c.callTool("provider.model.select", {provider_id:providerId,model_id:modelId,expected_revision:revision});
+export const llmFailoverConfigure = (c: BackendClient, enabled: boolean, order?: string[], providerId?:string, revision?:string) => c.callTool("provider.failover.configure", {enabled,...(order!==undefined?{order}:{}),...(providerId?{provider_id:providerId}:{}),...(revision?{expected_revision:revision}:{})});
 export const llmSwitch = (c: BackendClient, providerId: string) => c.callTool("provider.switch", { provider_id: providerId });
 export const llmDelete = (c: BackendClient, providerId: string) => c.callTool("provider.delete", { provider_id: providerId });
 export const llmTest = (c: BackendClient, providerId: string) => c.callTool("provider.test", { provider_id: providerId }, 70);

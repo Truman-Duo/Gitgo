@@ -272,8 +272,15 @@ class WindowsSandboxProcess(subprocess.Popen):
             # registry key (ERROR_KEY_DELETED), before any child even starts.
             # Derive the same deterministic SID; this grants no ACLs/capabilities.
             sid = api.preview_profile_sid(self._sandbox_policy.profile_name)
-            job = api.create_job(None, None)  # not inheritable
+            recovery_id = self._sandbox_policy.recovery_id
+            C.set_last_error(0)
+            from backend.core.native_resources import windows_job_name
+            job = api.create_job(None, windows_job_name(recovery_id))
+            existed = C.get_last_error() == 183
             api.check(job)
+            if existed:
+                # Never adopt an existing boundary into a replacement launch.
+                raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "Native recovery identity is still owned")
             limits = ExtendedLimits()
             # KILL_ON_JOB_CLOSE, ACTIVE_PROCESS, JOB_MEMORY, JOB_TIME.
             # No BREAKAWAY flags: every descendant remains in this job.
@@ -295,8 +302,7 @@ class WindowsSandboxProcess(subprocess.Popen):
             api.check(api.init_attrs(attributes, 3, 0, C.byref(length)))
             initialized = True
             caps = SecurityCapabilities(sid, None, 0, 0)
-            from backend.core.installation_lease import windows_sandbox_lease_handles
-            from backend.core.update.sandbox_admission import LEASE_HANDLES_ENV
+            from backend.core.installation_lease import windows_sandbox_lease_handles, LEASE_HANDLES_ENV
             lease_handles = inherited_scope.enter_context(windows_sandbox_lease_handles())
             env = {key: value for key, value in (env or {}).items() if key.upper() != LEASE_HANDLES_ENV}
             if lease_handles:
@@ -335,6 +341,7 @@ class WindowsSandboxProcess(subprocess.Popen):
             self._handle = Handle(info.process)
             self.pid = info.pid
             self._gitgo_job_handle = NativeJobHandle(job, api)
+            self._gitgo_job_handle.recovery_id = recovery_id
             self._sandbox_job = self._gitgo_job_handle
             job = None
             api.close(info.thread)

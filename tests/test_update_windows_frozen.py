@@ -12,6 +12,7 @@ import subprocess
 import pytest
 
 from backend.core.update import handoff
+from backend.core.update.bootstrap_contract import WINDOWS_API
 from backend.core.update.tree import tree_digest
 from backend.core.update.installation import open_managed
 from backend.core.update.persistence import lock_file
@@ -160,7 +161,7 @@ except Exception as error:
             "installer_error": safe_errors[-4096:], "stderr_bytes": len(diagnostic_errors),
             "role_exit": role_proc.returncode, "role_output": role_output.strip(),
             "cleanup": proc._gitgo_cleanup}))
-    assert open_managed(root).registration["bootstrap_api"] == 8
+    assert open_managed(root).registration["bootstrap_api"] == WINDOWS_API
     command = bin_dir / "gitgo.ps1"
     assert command.read_bytes().startswith(b"\xef\xbb\xbf")
     launch = subprocess.run([shell, "-NoProfile", "-File", str(command), "--version"], env=env,
@@ -182,8 +183,9 @@ def test_real_windows_bootstrap_automatically_applies_prepared_update_on_clean_e
         env=env,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=180)
     assert result.returncode==0,result.stderr
     assert "Gitgo "+old in result.stdout,result.stdout
-    assert any(json.loads(line).get("update_status") == "committed"
-               for line in result.stdout.splitlines() if line.startswith("{")),result.stdout
+    # The admitted updater generation commits the transaction without writing
+    # legacy launcher protocol output into an ordinary command's stdout.
+    assert "Automatic update deferred:" not in result.stderr,result.stderr
     assert store._ledger()["current"]["version"]==new
     boot(new)
 
@@ -281,5 +283,16 @@ print(out,flush=True)
         assert process.returncode!=0,(out,err)
         assert "UNSAFE_BODY_STARTED" not in out
         assert process.close_sandbox()["complete"]
+        # A real private directory sharing reservation is still insufficient:
+        # only the separate, validated runtime.lock can admit payload code.
+        from backend.core.update.windows_storage import private_namespace
+        with private_namespace(store.root):
+            process=sandbox_popen([str(host),"--gitgo-internal-role","python","-c",
+                "print('UNSAFE_BODY_STARTED')"],SandboxPolicy(workspace),cwd=str(workspace),env=env,
+                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8")
+            out,err,_=collect_output(process,timeout=45,limit=65536,terminate=lambda:terminate_tree(process))
+            assert process.returncode!=0,(out,err)
+            assert "UNSAFE_BODY_STARTED" not in out
+            assert process.close_sandbox()["complete"]
         assert tree_digest(store.root/"active")==before
     finally:access.close()

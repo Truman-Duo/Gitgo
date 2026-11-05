@@ -1,3 +1,7 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
+import {SelectionText} from "./Selection.js";
+import {useCopy} from "../ui/PageFrame.js";
+import {applicationBindings} from "../input/router.js";
 // src/components/FormalPanel.tsx — /runtime formal: formal commits + delete/dissolve
 import React, { memo, useState, useEffect, useCallback } from "react";
 import { Box, Text } from "@anthropic/ink";
@@ -22,6 +26,7 @@ type Props = {
 };
 
 export const FormalPanel = memo(function FormalPanel({ client, project, onDismiss }: Props) {
+  const t=useCopy();
   const [items, setItems] = useState<Formal[]>([]);
   const [sel, setSel] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -40,7 +45,9 @@ export const FormalPanel = memo(function FormalPanel({ client, project, onDismis
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  const menuHelp=useLocalHelpCommand("formal",undefined,true);
   useInput((input: string, key: any) => {
+    if(menuHelp.handle(input,key))return;
     for (const a of resolveFormalKey(!!confirm, input, key)) {
       switch (a.type) {
         case "dismiss": onDismiss(); break;
@@ -68,7 +75,7 @@ export const FormalPanel = memo(function FormalPanel({ client, project, onDismis
           break;
       }
     }
-  });
+  }, {bindingContext: confirm ? "" : "formal"});
 
   const { w } = usePanelSize({ minWidth: 40 });
 
@@ -84,27 +91,27 @@ export const FormalPanel = memo(function FormalPanel({ client, project, onDismis
     );
   }
 
-  if (loading) return <Box padding={1}><Text dimColor>Loading formal commits...</Text></Box>;
+  if (loading) return <Box padding={1}><Text dimColor>{t({en:"Loading formal commits...",zh:"正在读取正式提交…"})}</Text></Box>;
 
   return (
     <Box flexDirection="column" padding={1} width={w}>
       <Box marginBottom={1}>
-        <Text bold>Formal Commits: {project}</Text>
-        <Text dimColor>    {items.length} commits</Text>
+        <Text bold>{t({en:"Formal Commits: ",zh:"正式提交： "})}{project}</Text>
+        <Text dimColor>    {items.length} {t({en:" commits",zh:" 项提交"})}</Text>
       </Box>
       {status ? <Text dimColor>{status}</Text> : null}
 
       {items.length === 0 ? (
-        <Text dimColor>No formal commits.</Text>
+        <Text dimColor>{t({en:"No formal commits.",zh:"尚无正式提交。"})}</Text>
       ) : (
         items.map((it, i) => {
           const active = i === sel;
           const syncLabel = it.pushed ? "pushed" : it.synced ? "synced" : "local";
           return (
             <Box key={it.index} flexDirection="row">
-              <Text color={active ? colors.selection.row.fg : undefined} bold={active}>
+              <SelectionText selected={active}  >
                 [{it.prefix}-{it.number}]  {syncLabel}
-              </Text>
+              </SelectionText>
               {active && (
                 <Text dimColor>  {it.message.slice(0, Math.max(10, w - 32))}</Text>
               )}
@@ -114,8 +121,8 @@ export const FormalPanel = memo(function FormalPanel({ client, project, onDismis
       )}
 
       <Box marginTop={1}>
-        <Text dimColor>{chordLabel("letterD")} delete    {chordLabel("letterX")} dissolve    {chordLabel("upDown")} select    {chordLabel("escape")} back</Text>
-        <Text dimColor>edit message via /runtime formal edit &lt;index&gt; &lt;message&gt;</Text>
+
+        <Text dimColor>{t({en:"edit message via /runtime formal edit &lt;index&gt; &lt;message&gt;",zh:"用 /runtime formal edit &lt;index&gt; &lt;message&gt; 修改提交信息"})}</Text>
       </Box>
     </Box>
   );

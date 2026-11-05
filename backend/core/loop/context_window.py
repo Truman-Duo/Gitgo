@@ -118,28 +118,40 @@ class ContextWindow:
 
         try:
             routed = hasattr(llm_provider, "stream_session_events")
+            import uuid
+            usage_call_id = uuid.uuid4().hex
             if task_budget is not None and not routed:
                 (reserve_call() if reserve_call is not None else task_budget.begin_provider_call(budget_process_id))
             def before_attempt(_index, _client):
+                nonlocal usage_call_id
+                usage_call_id = uuid.uuid4().hex
                 if task_budget is not None:
                     (reserve_call() if reserve_call is not None else task_budget.begin_provider_call(budget_process_id))
                 return 60
             def notify(notice):
+                notice = {**notice, 'usage_call_id': usage_call_id, 'purpose': 'context_compaction'}
                 if on_provider_notice is not None:
                     on_provider_notice(notice)
                 else:
                     session.host_ledger.append(notice)
             summary = llm_provider.chat(
                 [{"role": "user", "content": compact_prompt}],
-                max_tokens=min(2048, int(getattr(
+                # Hidden reasoning shares the output allowance. Respect the
+                # configured ceiling with a bounded summary budget instead of
+                # always truncating reasoning-capable providers at 2048.
+                max_tokens=min(16384, max(1, int(getattr(
                     llm_provider, "max_output_tokens", 2048,
-                ))),
+                )))),
                 timeout=60, preserve_provider_state=True,
                 cancel_event=cancel_event,
                 max_retries=0,
+                **({"purpose": "context_compaction"} if getattr(llm_provider, "supports_generation_purpose", False) else {}),
                 **({"before_attempt": before_attempt, "on_notice": notify}
                    if routed else {}),
+                **({"before_generation_fallback": lambda: before_attempt(1, llm_provider), "on_notice": notify}
+                   if not routed and getattr(llm_provider, "supports_generation_purpose", False) else {}),
             )
+            output_accounted = False
             if isinstance(summary, dict):
                 provider_state = {
                     key: summary[key] for key in (
@@ -154,20 +166,32 @@ class ContextWindow:
                         "provider_state": provider_state,
                     })
                 if summary.get("usage"):
-                    if task_budget is not None:
-                        task_budget.record_provider_usage(summary["usage"])
+                    notify({'event': 'auxiliary_provider_usage', 'purpose': 'context_compaction',
+                        'usage': summary['usage'], 'usage_reported': True,
+                        'response_id': summary.get('response_id'), 'cache_intent': summary.get('cache_intent'),
+                        'context_epoch': session.context_epoch})
                     session.record_provider_usage(
-                        summary["usage"],
+                        {**summary["usage"], "purpose": "context_compaction"},
                         protocol=str(getattr(
                             getattr(llm_provider, "protocol", ""), "value",
                             getattr(llm_provider, "protocol", ""),
                         )),
                     )
+                    if task_budget is not None:
+                        task_budget.record_provider_usage(summary["usage"])
+                        reported_output = int(summary["usage"].get("output_tokens", 0))
+                        if reported_output > 0:
+                            task_budget.consume_output_estimate(reported_output, budget_process_id)
+                            output_accounted = True
+                else:
+                    notify({'event': 'auxiliary_provider_usage', 'purpose': 'context_compaction',
+                        'usage_reported': False, 'response_id': summary.get('response_id'),
+                        'context_epoch': session.context_epoch})
                 summary = str(summary.get("content", ""))
             if not isinstance(summary, str) or not summary.strip():
                 self.last_compaction_error = "empty_compaction_summary"
                 return False
-            if task_budget is not None:
+            if task_budget is not None and not output_accounted:
                 task_budget.consume_output(str(summary), budget_process_id)
 
             # 保留不可压缩前缀 + 摘要 + 最近 3 条
@@ -186,8 +210,18 @@ class ContextWindow:
         except Exception as exc:
             from backend.core.loop.budget import TaskBudgetExceeded
             from backend.core.loop.llm import StreamCancelledError
+            from backend.core.loop.provider_protocol import ProviderResponseIncomplete
             if isinstance(exc, (TaskBudgetExceeded, StreamCancelledError)):
                 raise
+            if isinstance(exc, ProviderResponseIncomplete) and exc.usage:
+                notify({'event': 'auxiliary_provider_usage', 'purpose': 'context_compaction',
+                    'usage': exc.usage, 'usage_reported': True, 'incomplete': True,
+                    'cache_intent': getattr(exc, 'cache_intent', None), 'context_epoch': session.context_epoch})
+                session.record_provider_usage({**exc.usage, "purpose": "context_compaction", "incomplete": True},
+                    protocol=str(getattr(getattr(llm_provider, "protocol", ""), "value", getattr(llm_provider, "protocol", ""))))
+                if task_budget is not None:
+                    task_budget.record_provider_usage(exc.usage)
+                    task_budget.consume_output_estimate(int(exc.usage.get("output_tokens", 0)), budget_process_id)
             self.last_compaction_error = f"{type(exc).__name__}: {exc}"[:500]
             return False
 

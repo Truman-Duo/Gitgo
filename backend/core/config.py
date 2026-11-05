@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from backend.models import FileAccessKind, RepoNode, SyncStatus
+from backend.core.keyboard_bindings import validate_keyboard_bindings
 from backend.core.migrate import migrate_config_dict, needs_migration
 
 DEFAULT_FORCE_EXCLUDE = [
@@ -138,6 +139,7 @@ class ProjectConfig:
     integrity: dict = field(default_factory=lambda: dict(DEFAULT_INTEGRITY_CONFIG))
     authorship: dict = field(default_factory=lambda: dict(DEFAULT_AUTHORSHIP_CONFIG))
     outbound_policy: dict = field(default_factory=default_outbound_policy)
+    publish_checks: list = field(default_factory=list)
     archived: bool = False
     pending_hard_delete_at: str = ""  # ISO timestamp, empty = no pending delete
     unavailable_entry: dict = field(default_factory=dict)  # first failed entry, bound to workspace
@@ -230,10 +232,21 @@ class ProjectConfig:
             integrity=d.get("integrity", dict(DEFAULT_INTEGRITY_CONFIG)),
             authorship=authorship,
             outbound_policy=outbound,
+            publish_checks=d.get("publish_checks", []),
             archived=d.get("archived", False),
             pending_hard_delete_at=d.get("pending_hard_delete_at", ""),
             unavailable_entry=dict(d.get("unavailable_entry") or {}),
         )
+
+
+def _keyboard_settings(data: dict) -> dict:
+    value = data.get("keyboard_bindings")
+    if value is None:
+        value = {"version": 1, "overrides": ({
+            "editor.newline": {"key": "return", "meta": True},
+            "navigation.previousTab": {"key": "p", "ctrl": True},
+        } if data.get("keyboard_preset") == "portable" else {})}
+    return validate_keyboard_bindings(value)
 
 
 @dataclass
@@ -244,6 +257,8 @@ class Config:
     language: str = "en"  # UI copy only; commands/protocol identifiers stay stable
     verbose: bool = False
     diff_layout: str = "split"
+    keyboard_preset: str = "standard"  # legacy preset compatibility
+    keyboard_bindings: dict = field(default_factory=lambda: {"version": 1, "overrides": {}})
     auto_compact: bool = True
     agent_routing: str = "owner"
     prompt_profile: str = "default"
@@ -270,6 +285,8 @@ class Config:
                 language=d.get("language", "en"),
                 verbose=bool(d.get("verbose", False)),
                 diff_layout="unified" if d.get("diff_layout") == "unified" else "split",
+                keyboard_preset="portable" if d.get("keyboard_preset") == "portable" else "standard",
+                keyboard_bindings=_keyboard_settings(d),
                 auto_compact=bool(d.get("auto_compact", True)),
                 agent_routing="fresh" if d.get("agent_routing") == "fresh" else "owner",
                 prompt_profile=d.get("prompt_profile", "default"),
@@ -295,6 +312,8 @@ class Config:
             language=d.get("language", "en"),
             verbose=bool(d.get("verbose", False)),
             diff_layout="unified" if d.get("diff_layout") == "unified" else "split",
+            keyboard_preset="portable" if d.get("keyboard_preset") == "portable" else "standard",
+            keyboard_bindings=_keyboard_settings(d),
             auto_compact=bool(d.get("auto_compact", True)),
             agent_routing="fresh" if d.get("agent_routing") == "fresh" else "owner",
             prompt_profile=d.get("prompt_profile", "default"),
@@ -410,6 +429,17 @@ class ConfigManager:
             config.schema_version = max(1, int(config.schema_version or 1))
             config.revision = max(0, int(config.revision or 0)) + 1
             data = _serialize_config(config)
+            if p.exists():
+                from .config_extensions import preserve_fields
+                # Removing a feature must not make the next settings save
+                # silently erase its configuration. Explicit project removal
+                # still follows the current model's record list.
+                previous = json.loads(p.read_text(encoding="utf-8"))
+                if type(previous) is dict:
+                    data = preserve_fields(previous, data, replace_paths={
+                        ("projects", "*", "unavailable_entry"),
+                        ("keyboard_bindings", "overrides"),
+                    })
             temp_path = p.with_name(f".{p.name}.{uuid.uuid4().hex}.tmp")
             try:
                 with open(temp_path, "w", encoding="utf-8") as handle:

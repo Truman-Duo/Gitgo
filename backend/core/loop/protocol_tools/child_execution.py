@@ -41,6 +41,8 @@ def install(ctx):
         actor_kind: str = "worker",
         review_target_id: str = "",
         budget_request: dict | None = None,
+        retained_boundary: dict | None = None,
+        review_evidence_source: dict | None = None,
     ):
         if manager is None:
             raise RuntimeError("AgentProcessManager is unavailable")
@@ -59,6 +61,18 @@ def install(ctx):
             raise PermissionError(
                 f"profile {profile_id} is not valid for {actor_kind}"
             )
+        if retained_boundary is not None:
+            if actor_kind != "reviewer" or profile_id != "review.independent" or review_target_id != process.process_id:
+                raise ValueError("RETAINED_REVIEW_BOUNDARY_INVALID")
+            from backend.core.mechanism_runtime.reviews import validate_boundary
+            validate_boundary(process, retained_boundary)
+        if review_evidence_source is not None:
+            target = manager.get(review_target_id)
+            if (actor_kind != 'reviewer' or profile_id != 'review.independent' or target is None
+                    or (target is not process and _owned_child(review_target_id) is None)
+                    or review_evidence_source.get('owner_process_id') != target.process_id
+                    or review_evidence_source.get('owner_task_id') != (target.active_task_id or target.process_id)):
+                raise ValueError('REVIEW_EVIDENCE_SCOPE_MISMATCH')
         previous_contract = None
         continuation = None
         resume_partial = False
@@ -290,6 +304,10 @@ def install(ctx):
             if name:
                 child.session.display_name = name
         child.review_target_id = review_target_id
+        if review_evidence_source is not None:
+            child.runtime_preferences['review_evidence_source'] = dict(review_evidence_source)
+        if retained_boundary is not None:
+            child.runtime_preferences["retained_review_boundary"] = dict(retained_boundary)
         contract = {
             "task_kind": task_kind,
             "acceptance_criteria": list(acceptance_criteria),
@@ -326,7 +344,7 @@ def install(ctx):
             enriched["actor_kind"] = child.actor_kind
             on_stream_event(enriched)
 
-        def run_child():
+        def run_child(*, resuming=False, instruction=""):
             execution_workspace = workspace_path or process.worktree_path
             lifecycle_stage = "start"
             emit_child_event({
@@ -351,7 +369,7 @@ def install(ctx):
                     isolated_code_action
                     or (actor_kind == "reviewer" and review_has_snapshot)
                 ):
-                    execution_workspace = manager.materialize_process_worktree(
+                    execution_workspace = manager.resume_process_worktree(child) if resuming else manager.materialize_process_worktree(
                         child, review_target_id=review_target_id,
                         continue_process_id=continue_process_id if resume_partial else "",
                     )
@@ -412,7 +430,7 @@ def install(ctx):
                 result = _run_agent_step(
                     process=child,
                     llm_provider=llm_provider,
-                    instruction=task_description,
+                    instruction=instruction if resuming else task_description,
                     dispatcher=dispatcher,
                     workspace_path=execution_workspace,
                     on_stream_event=emit_child_event,
@@ -515,7 +533,8 @@ def install(ctx):
                             result.clear(); result.update(failure)
                         child.result = failure
                         emit_child_event({"event": "worktree_cleanup_failed", "reason": str(cleanup_exc)})
-                if actor_kind == "reviewer" and child.worktree.get("isolated"):
+                if (actor_kind == "reviewer" and child.worktree.get("isolated")
+                        and child.status != ProcessStatus.AWAITING_USER):
                     try:
                         manager.dispose_process_worktree(child, keep_ref=False)
                     except Exception as cleanup_exc:
@@ -558,6 +577,7 @@ def install(ctx):
             resources=claims,
             resource_mode=resource_mode,
             on_terminal=publish_terminal,
+            resume_target=lambda instruction: run_child(resuming=True, instruction=instruction),
         )
         return child
 

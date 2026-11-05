@@ -1,15 +1,29 @@
 import {spawnSync} from 'node:child_process';
 
-export const minimumVersions = {bun: [1, 3, 0], node: [22, 0, 0]};
+// Reviewed security floors; unreviewed Node release lines are not selected.
+export const minimumVersions = {bun: [1, 4, 4], node: [22, 23, 4]};
+export const nodeSecurityFloors = {22: [22, 23, 4], 24: [24, 22, 1], 26: [26, 12, 1]};
+export function runtimeRequirement(runtime) {
+  return runtime === 'node'
+    ? 'Node 22 >=22.23.4, 24 >=24.22.1, or 26 >=26.12.1 (stable)'
+    : 'Bun >=1.4.4 (stable)';
+}
 export function supportedVersion(runtime, version) {
+  if (!/^v?\d+\.\d+\.\d+$/.test(String(version))) return false;
   const parts = String(version).replace(/^v/, '').split('.').map(Number);
-  if (parts.length < 3 || parts.slice(0, 3).some(n => !Number.isInteger(n))) return false;
-  const minimum = minimumVersions[runtime];
+  const minimum = runtime === 'node' ? nodeSecurityFloors[parts[0]] : minimumVersions[runtime];
   if (!minimum) return false;
   for (let i = 0; i < 3; i++) {
     if (parts[i] !== minimum[i]) return parts[i] > minimum[i];
   }
-  return !String(version).includes('-');
+  return true;
+}
+
+export function assertRuntimeSecurity(versions = process.versions) {
+  const runtime = versions.bun ? 'bun' : 'node';
+  if (!supportedVersion(runtime, versions.bun || versions.node)) {
+    throw new Error('Unsupported runtime: requires ' + runtimeRequirement(runtime));
+  }
 }
 
 // Probe the executable, not just its filename: overrides may point at another
@@ -27,7 +41,7 @@ export function probeRuntime(runtime, executable) {
     if (result.error || result.status !== 0) throw result.error || new Error(result.stderr || `exit ${result.status}`);
     const data = JSON.parse(result.stdout.trim());
     if (data.runtime !== runtime || !supportedVersion(runtime, data.version) || !data.raw || !data.unicode) {
-      throw new Error(`requires ${runtime} >= ${minimumVersions[runtime].join('.')} with raw-mode and UTF-8 support`);
+      throw new Error(`requires ${runtimeRequirement(runtime)} with raw-mode and UTF-8 support`);
     }
     return {runtime, executable, available: true, ...data};
   } catch (error) {

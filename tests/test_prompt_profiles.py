@@ -73,8 +73,8 @@ def test_stable_roles_and_protocol_do_not_follow_instance_edits(instance_workspa
     edit_instance(instance_workspace, "writing_style", "Different style.")
     choose("workbench")
     assert {name: stable_text(name) for name in stable} == stable
-    assert render_prompt("identity/answer", model_id="actual-model").endswith(
-        "Never hide an available identifier or guess an inaccessible vendor or version detail.")
+    assert render_prompt("identity/answer", model_id="actual-model").rstrip().endswith(
+        "A supplier's deployment/version is a separate fact that requires its own evidence when requested.")
 
 
 @pytest.mark.parametrize("change", ["missing", "undeclared"])

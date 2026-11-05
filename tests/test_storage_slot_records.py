@@ -132,7 +132,8 @@ def test_worker_intent_requires_selected_runtime_lease():
     with pytest.raises(framing.JournalUnknown):reservation().with_event(value)
 
 
-@pytest.mark.parametrize('field,value',[('generation',str(uuid.uuid4())),('manifest','e'*64),('epoch',2)])
+@pytest.mark.parametrize('field,value',[('generation',str(uuid.uuid4())),('manifest','e'*64),('epoch',2)],
+                         ids=['generation', 'manifest', 'epoch'])
 def test_selected_runtime_cannot_change_between_intent_and_creation(field,value):
     view=initial();state=view.head.state;intent=event()
     view,_=applied(view,state.with_event(intent))

@@ -55,7 +55,7 @@ def managed(tmp_path_factory, monkeypatch, signing):
 def test_registration_uses_windows_only_bootstrap_and_schema(managed):
     store, _, _ = managed
     assert store.registration["schema_version"] == 6
-    assert store.registration["bootstrap_api"] == 8
+    assert store.registration["bootstrap_api"] == 10
     assert store.registration["simulation"] is False
     assert store.registration["updates_enabled"] is False
     assert (store.root / "bootstrap/gitgo-host/gitgo-host.exe").is_file()

@@ -64,6 +64,26 @@ def test_oversized_tool_result_uses_cas_locator_and_pages_without_recursion(tmp_
         storage.close()
 
 
+def test_structured_result_keeps_all_fields_when_only_indentation_exceeds_budget(tmp_path_factory):
+    from backend.core.dispatch.truncation import MAX_OUTPUT_CHARS
+    data = {'components': [{'id': 'component-' + str(i), 'configuration': {'type': 'object',
+        'properties': {'mode': {'enum': ['first','second']}}}, 'inputs': [{'name': 'event', 'type': 'record'}],
+        'outputs': [{'name': 'receipt', 'type': 'record'}]} for i in range(100)]}
+    assert len(json.dumps(data, ensure_ascii=False, separators=(',', ':'))) < MAX_OUTPUT_CHARS
+    assert len(json.dumps(data, ensure_ascii=False, indent=2)) > MAX_OUTPUT_CHARS
+    storage = StorageRuntime(tmp_path_factory)
+    try:
+        process = _process()
+        tool = AgentTool(execution_contract=data_broker('test.fixture'), name='structured_result', description='fixture',
+            parameters={'type': 'object', 'properties': {}}, execute=lambda _: data, effect=ToolEffect.READ)
+        result = ToolPipeline().execute({'name': tool.name, 'args': {}}, tool,
+            ExecutionContext(process, process.session, str(tmp_path_factory), storage=storage), 'execution', 0)
+        assert not result.truncated and not result.spill
+        assert json.loads(result.formatted.split('\n', 1)[1]) == data
+    finally:
+        storage.close()
+
+
 def test_tool_result_can_be_narrowed_by_pointer_and_query(tmp_path_factory):
     storage = StorageRuntime(tmp_path_factory)
     try:

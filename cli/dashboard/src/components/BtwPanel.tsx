@@ -1,3 +1,5 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
+import {SelectionText} from "./Selection.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages} from "../ui/pageContract.js";
 
@@ -7,11 +9,12 @@ import { Box, ScrollBox, Text, measureElement, type DOMElement, type ScrollBoxHa
 import { useManagedInput as useInput } from "../input/runtime.js";
 import type { BackendClient } from "../backend/client.js";
 import {
-  btwAsk, cancelBtw, saveBtwNote, sendRuntimeFeedback, stopProcess, type LessonProposalRef,
+  btwAsk, cancelBtw, saveBtwNote, adoptBtw, type LessonProposalRef,
 } from "../backend/tools.js";
 import { initStreamState, reduceStreamEvent, type StreamState } from "../daemon/streamReducer.js";
 import type { StreamEvent } from "../daemon/streamEvents.js";
 import {scrollViewport} from "../input/scrollViewport.js";
+import {isBindingAction} from "../input/router.js";
 import { useTextInput } from "../hooks/useTextInput.js";
 import { colors } from "../theme/index.js";
 import { TextInput } from "./TextInput.js";
@@ -69,6 +72,7 @@ export function BtwPanel(props: Props) {
   const [answer, setAnswer] = useState(props.answer);
   const [reasoning, setReasoning] = useState(props.reasoning || "");
   const [sidecarId, setSidecarId] = useState(props.sidecarId);
+  const [discussionRef, setDiscussionRef] = useState("");
   const [history, setHistory] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
   const historyRef = useRef(history);
   const [stream, setStream] = useState<StreamState>(() => initStreamState());
@@ -116,6 +120,7 @@ export function BtwPanel(props: Props) {
       setAnswer(next);
       setReasoning(String(value?.reasoning_content || ""));
       setSidecarId(String(value?.sidecar_id || sidecarId));
+      setDiscussionRef(String(value?.discussion_ref || ""));
       setHistory((old) => [
         ...old,
         { role: "user", content: clean },
@@ -145,14 +150,15 @@ export function BtwPanel(props: Props) {
       } else if (selection === 1) {
         await saveBtwNote(props.client, props.project, sidecarId, applyText);
       } else if (selection === 2 && targetId) {
-        await sendRuntimeFeedback(props.client, props.project, targetId, applyText);
+        await adoptBtw(props.client, props.project, targetId, target?.active_task_id || "",
+          target?.task_contract_revision ?? 0, sidecarId, discussionRef, "boundary");
       } else if (selection === 2) {
-        props.onApply(applyText);
+        throw new Error(t({en:"Select a live target task before adopting this discussion.",zh:"请先选择仍在进行的目标任务，再纳入讨论。"}));
       } else if (selection === 3) {
         if(targetId){
-          await stopProcess(props.client,props.project,targetId);
-          await sendRuntimeFeedback(props.client,props.project,targetId,applyText);
-        }else props.onApply(applyText);
+          await adoptBtw(props.client, props.project, targetId, target?.active_task_id || "",
+            target?.task_contract_revision ?? 0, sidecarId, discussionRef, "interrupt");
+        }else throw new Error(t({en:"Select a live target task first.",zh:"请先选择仍在进行的目标任务。"}));
       }
       if(alive.current)props.onDismiss();
     })().catch((caught: any) => {
@@ -160,7 +166,7 @@ export function BtwPanel(props: Props) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setBusy(false);
     });
-  }, [answer, stream.text, selection, props, sidecarId, latestQuestion, confirm, targetId]);
+  }, [answer, stream.text, selection, props, sidecarId, latestQuestion, confirm, targetId, target, discussionRef, t]);
 
   const scrollDiscussion=(delta:number)=>{
     if(delta<0){
@@ -172,7 +178,9 @@ export function BtwPanel(props: Props) {
     }
   };
 
+  const menuHelp=useLocalHelpCommand("btw",undefined,focus!=="input"&&!confirm);
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if(confirm){
       if(key.escape)setConfirm(false);
       else if(key.leftArrow)setSourceIndex(v=>Math.max(0,v-1));
@@ -185,10 +193,10 @@ export function BtwPanel(props: Props) {
       props.onDismiss();
       return;
     }
-    if (key.tab) {
+    if (key.tab || isBindingAction("btw.previousRegion", input, key)) {
       setFocus(value => {
         const regions:typeof focus[]=props.lessonProposal?["body","input","choices"]:["body","input","choices",...(props.onBrowseParent?["parent" as const]:[])];
-        return regions[(regions.indexOf(value)+1)%regions.length]!;
+        return regions[(regions.indexOf(value)+(key.tab?1:-1)+regions.length)%regions.length]!;
       });
       return;
     }
@@ -238,7 +246,7 @@ export function BtwPanel(props: Props) {
       return;
     }
     if (!key.ctrl && !key.meta && input){setFocus("input");draft.insertText(input);}
-  });
+  }, {bindingContext: "btw",clipboard:!confirm&&(focus==="input"||focus==="body"),inputTarget:confirm?"confirmation":focus});
 
   const visibleAnswer = stream.text || answer;
   const visibleReasoning = stream.reasoning || reasoning;
@@ -253,8 +261,8 @@ export function BtwPanel(props: Props) {
 
   return (
     <PageFrame page={pages.discussion}>
-      <Text bold color={colors.accent}>{t({en:"BTW · isolated, read-only",zh:"BTW · 独立只读讨论"})}</Text>
-      {confirm?<Text color={colors.warning}>{t({en:"Confirm target: ",zh:"确认目标："})}{targetName} · {selection===3?t({en:"interrupt and append",zh:"中断并追加"}):t({en:"append at boundary",zh:"边界追加"})} · {t({en:"←/→ target · Enter confirm · Esc cancel",zh:"←/→ 目标 · Enter 确认 · Esc 取消"})}</Text>:null}
+      <Text bold color={colors.accent}>{t({en:"BTW",zh:"BTW"})}</Text>
+      {confirm?<Text color={colors.warning}>{t({en:"Confirm target: ",zh:"确认目标："})}{targetName} · {selection===3?t({en:"interrupt and append",zh:"中断并追加"}):t({en:"append at boundary",zh:"边界追加"})}</Text>:null}
       <ScrollBox ref={body} flexDirection="column" height={bodyRows} flexGrow={0} flexShrink={1} minHeight={1}>
       <Box ref={content} flexDirection="column" flexShrink={0} width={width}>
       {latestQuestion?<Text dimColor>{t({en:"Question: ",zh:"问题："})}{latestQuestion}</Text>:null}
@@ -280,7 +288,7 @@ export function BtwPanel(props: Props) {
 
       </Box></ScrollBox>
       <Box flexShrink={0} flexDirection="row">
-        <Text color={focus === "input" ? colors.accent : undefined}>▸ </Text>
+        <Text color={focus === "input" ? colors.accent : undefined}>{colors.input.normal.glyph}</Text>
         <TextInput
           value={draft.value}
           cursorOffset={draft.cursor}
@@ -294,17 +302,14 @@ export function BtwPanel(props: Props) {
         {choices.map((choice, index) => {
           const active = focus === "choices" && index === selection;
           return (
-            <Text key={choice} bold={active}
-              color={active ? colors.selection.block.fg : undefined}
-              backgroundColor={active ? colors.selection.block.bg : undefined}
-              dimColor={!active}>{` ${choice} `}</Text>
+            <SelectionText selected={active} variant="block" key={choice}
+
+
+              dimColor={!active}>{` ${choice} `}</SelectionText>
           );
         })}
       </Box>
-      <Text dimColor>{focus==="parent"?t({en:"Parent conversation · ↑/↓ or PgUp/PgDn browse · Tab discussion · Esc close",zh:"主/子会话 · ↑/↓ 或 PgUp/PgDn 浏览 · Tab 返回讨论 · Esc 关闭"}):
-        focus==="body"?t({en:"↑/↓ scroll · type to reply · Tab switch · Esc close",zh:"↑/↓ 滚动 · 直接输入追问 · Tab 切换 · Esc 关闭"}):
-        focus==="input"?t({en:"Enter ask · ↑/↓ scroll · Tab actions · Esc close",zh:"Enter 提问 · ↑/↓ 滚动 · Tab 操作 · Esc 关闭"}):
-        t({en:"←/→ actions · Enter apply · Tab parent · Esc close",zh:"←/→ 操作 · Enter 执行 · Tab 主会话 · Esc 关闭"})}</Text>
+
     </PageFrame>
   );
 }

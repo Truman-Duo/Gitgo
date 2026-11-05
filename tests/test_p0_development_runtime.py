@@ -1215,8 +1215,10 @@ def test_supervisor_delegates_and_independent_reviewer_approves(
     tmp_path_factory: Path, monkeypatch,
 ):
     from backend.core.loop import executor as executor_module
+    from backend.core.storage import get_storage
 
     manager = AgentProcessManager(max_concurrency=3)
+    manager.storage = get_storage(tmp_path_factory)
     supervisor = manager.fork(
         parent_id=None, role="supervisor",
         tool_registry=ToolRegistry(CapabilityProfiles.resolve_tools("supervisor.control")),

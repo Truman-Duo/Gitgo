@@ -1,3 +1,6 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
+import {geometry} from "../theme/tokens.js";
+import {SelectionText} from "./Selection.js";
 import {label} from "../ui/runtimeLabels.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages,standardKey,moveSelection,reconcileSelection} from "../ui/pageContract.js";
@@ -141,10 +144,12 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
   }, [client, project, task, tracePage, page, traceLoading, loading]);
   const actions=[{id:0,enabled:!loading&&!traceLoading&&Boolean(tracePage.has_more||page.has_more)},{id:1,enabled:!loading&&!traceLoading}];
   const activeAction=reconcileSelection(actions,action);
+  const menuHelp=useLocalHelpCommand("trace",undefined,true);
   useInput((input,key)=>{
+    if(menuHelp.handle(input,key))return;
     const command=standardKey(input,key);
     if(command==="back"){if(actionFocus)setActionFocus(false);else onDismiss();return;}
-    if(command==="next"){setActionFocus(v=>!v);return;}
+    if((command==="next"||command==="previous")){setActionFocus(v=>!v);return;}
     if(actionFocus){
       if(command==="left"||command==="right")setAction(v=>moveSelection(actions,v,command==="left"?-1:1)??v);
       else if(command==="up")setActionFocus(false);
@@ -159,7 +164,7 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
     else if(command==="up")scroll.current?.scrollBy(-1);
     else if(command==="down")scroll.current?.scrollBy(1);
   });
-  const rows = useMemo(() => waterfallRows(events), [events]);
+  const rows = useMemo(() => waterfallRows(events, t), [events, t]);
   const multipleProcesses = new Set(rows.map((row) => row.process)).size > 1;
   const showProcess = multipleProcesses && cols >= 88;
   const callWidth = cols < 72 ? 16 : 20;
@@ -180,10 +185,7 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
     <PageFrame page={pages.trace}>
       <Text bold>{t({en:"Stats",zh:"用量"})} · {project} · {t({en:"Turn waterfall",zh:"逐轮瀑布图"})}</Text>
       {tasks.length ? (
-        <Text>
-          {t({en:"Turn",zh:"轮次"})} {selected + 1} / {tasks.length}
-          {page.has_more ? "+" : ""} · {t({en:"← newer / → older",zh:"← 较新 / → 较旧"})}
-        </Text>
+        <Text>{t({en:"Turn",zh:"轮次"})} {selected+1} / {tasks.length}{page.has_more?"+":""}</Text>
       ) : null}
       {error ? <Text color={colors.danger}>{error}</Text> : null}
       {loading ? (
@@ -297,11 +299,11 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
       </ScrollBox>
       <Text dimColor>{t({en:"▰ model · ▪ tool · — unrecorded · shared timeline per turn",zh:"▰ 模型 · ▪ 工具 · — 未记录 · 同轮共用时间轴"})}</Text>
       <Text dimColor>{events.length} {t({en:"retained events",zh:"条保留事件"})}{tracePage.has_more?t({en:" · partial trace",zh:" · 执行记录尚未载全"}):""} · {tasks.length} {t({en:"loaded tasks",zh:"项已载入任务"})}{page.has_more?t({en:" · older tasks available",zh:" · 还有更早任务"}):""}</Text>
-      <Box gap={2}>{[t({en:"Load more",zh:"加载更多"}),t({en:"Refresh",zh:"刷新"})].map((label,index)=><Text key={index}
+      <Box gap={geometry.actions.gap}>{[t({en:"Load more",zh:"加载更多"}),t({en:"Refresh",zh:"刷新"})].map((label,index)=><SelectionText selected={actionFocus&&activeAction===index} variant="block" key={index}
         dimColor={!actions[index]?.enabled}
-        color={actionFocus&&activeAction===index?colors.selection.block.fg:undefined}
-        backgroundColor={actionFocus&&activeAction===index?colors.selection.block.bg:undefined}>{label}</Text>)}</Box>
-      <Text dimColor>{actionFocus?t({en:"←/→ actions · Enter apply · Tab chart · Esc chart",zh:"←/→ 操作 · Enter 执行 · Tab 图表 · Esc 图表"}):t({en:"←/→ turn · ↑/↓ or PgUp/PgDn scroll · Tab actions · Esc back",zh:"←/→ 轮次 · ↑/↓ 或 PgUp/PgDn 滚动 · Tab 操作 · Esc 返回"})}</Text>
+
+        >{label}</SelectionText>)}</Box>
+
     </PageFrame>
   );
 }

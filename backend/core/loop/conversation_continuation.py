@@ -6,7 +6,8 @@ required for interrupted work; a missing historical identity never starts anew.
 from .models import ProcessStatus
 
 
-def resolve_conversation_process(manager, store, workspace, process_id, session_id=""):
+def inspect_conversation_process(manager, store, workspace, process_id, session_id=""):
+    """Restore identity for observation only; never claim continuation."""
     if not process_id:
         raise ValueError("CONTINUATION_STATE_UNAVAILABLE: process identity required")
     if store is not None and process_id in store.deleted_process_ids():
@@ -18,11 +19,16 @@ def resolve_conversation_process(manager, store, workspace, process_id, session_
         process = manager.get(process_id)
     if process is None or (session_id and process.session.session_id != session_id):
         raise ValueError("CONTINUATION_STATE_UNAVAILABLE: conversation checkpoint missing or changed")
+    if process.parent_id and manager.get(process.parent_id) is None:
+        raise ValueError("CONTINUATION_STATE_UNAVAILABLE: supervisor checkpoint missing")
+    return process
+
+
+def resolve_conversation_process(manager, store, workspace, process_id, session_id=""):
+    process = inspect_conversation_process(manager, store, workspace, process_id, session_id)
     if process.status in {ProcessStatus.RECOVERY_REVIEW_REQUIRED, ProcessStatus.RESUME_AVAILABLE,
                           ProcessStatus.RECOVERING}:
         raise ValueError("CONTINUATION_RECOVERY_REQUIRED: inspect and explicitly resume interrupted work")
-    if process.parent_id and manager.get(process.parent_id) is None:
-        raise ValueError("CONTINUATION_STATE_UNAVAILABLE: supervisor checkpoint missing")
     return process
 
 def bounded_continuation_tools(profile_tools, *, contract=None, issued_tools=None):

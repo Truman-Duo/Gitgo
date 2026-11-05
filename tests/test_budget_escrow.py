@@ -137,9 +137,18 @@ def test_failed_production_review_cannot_reserve_an_unbounded_replacement():
     budget.release_process("reviewer-1", status="failed")
 
     budget.reserve_agent()
+    # A default may use the actual remainder, never refill the original ten
+    # calls or borrow the root's protected work pool.
+    second = budget.register_process('reviewer-2', parent_id='root', actor_kind='reviewer', max_steps=12)
+    assert second['reserved_provider_calls'] == 5
+    for _ in range(5):
+        budget.begin_provider_call('reviewer-2')
+    with pytest.raises(TaskBudgetExceeded):
+        budget.begin_provider_call('reviewer-2')
+    budget.release_process('reviewer-2', status='failed')
     with pytest.raises(TaskBudgetExceeded, match="uncommitted task-tree budget"):
         budget.register_process(
-            "reviewer-2", parent_id="root", actor_kind="reviewer", max_steps=12,
+            "reviewer-3", parent_id="root", actor_kind="reviewer", max_steps=12,
         )
 
 
@@ -173,3 +182,37 @@ def test_question_pause_retains_original_escrow_and_usage_across_restore():
     assert released['refunded_provider_calls'] == 0
     assert released['refunded_output_tokens'] == 1900
     assert restored.release_process('child', status='completed') == released
+
+
+def test_implicit_review_allocation_uses_remaining_pool_without_expanding_or_resetting_it():
+    budget = TaskTreeBudget.create('remaining-review', {'max_agents': 8, 'max_provider_calls': 240,
+        'max_output_tokens': 262144, 'max_seconds': 900, 'verification_reserve_ratio': .15})
+    budget.register_process('root', parent_id=None, actor_kind='supervisor', max_steps=100)
+    for i, (calls, output) in enumerate([(7, 4603), (4, 4061), (6, 5377), (7, 10159)]):
+        pid = f'reviewer-{i}'
+        budget.reserve_agent()
+        budget.register_process(pid, parent_id='root', actor_kind='reviewer', max_steps=14)
+        for _ in range(calls):
+            budget.begin_provider_call(pid)
+        budget.consume_output_estimate(output, pid)
+        budget.release_process(pid, status='completed')
+    before = budget.snapshot()
+    # An explicit request is a real admission constraint; never shrink it.
+    with pytest.raises(TaskBudgetExceeded, match='uncommitted task-tree budget'):
+        budget.register_process('explicit', parent_id='root', actor_kind='reviewer', max_steps=14,
+            request={'output_tokens': 16384})
+    assert budget.snapshot()['process_leases'] == before['process_leases']
+    assert budget.snapshot()['used']['by_purpose'] == before['used']['by_purpose']
+    lease = budget.register_process('next', parent_id='root', actor_kind='reviewer', max_steps=14)
+    assert lease['reserved_provider_calls'] == 10
+    assert lease['reserved_output_tokens'] == 15122
+    assert budget.snapshot()['limits'] == before['limits']
+    assert budget.snapshot()['used']['by_purpose'] == before['used']['by_purpose']
+    restored = TaskTreeBudget.from_snapshot(budget.snapshot())
+    assert restored.decision_card('next')['current_process']['reserved_output_tokens'] == 15122
+    restored.consume_output_estimate(15122, 'next')
+    with pytest.raises(TaskBudgetExceeded):
+        restored.consume_output_estimate(1, 'next')
+    restored.release_process('next', status='completed')
+    with pytest.raises(TaskBudgetExceeded, match='uncommitted task-tree budget'):
+        restored.register_process('exhausted', parent_id='root', actor_kind='reviewer', max_steps=14)

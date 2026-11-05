@@ -1,5 +1,6 @@
 // src/main.tsx
 import React from "react";
+import {configureTerminalWidths} from "../vendor/ink/src/core/terminalWidth.js";
 import {createInterface} from "node:readline";
 import { renderSync, AlternateScreen, Box, useTerminalSize } from "@anthropic/ink";
 import { NativeHostClient, type BackendClient } from "./backend/client.js";
@@ -12,7 +13,8 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { resolvePythonRuntime } from "./backend/pythonRuntime.js";
 import { resolveProjectRoot } from "./runtime/paths.js";
 import { spawn } from "node:child_process";
-import { probeRuntime } from "../scripts/runtime.mjs";
+import { probeRuntime, assertRuntimeSecurity } from "../scripts/runtime.mjs";
+import {configureTerminalGraphics} from "./ui/terminalGraphics.js";
 import {
   acceptTerminalHandoff,
   currentFrontendOrigin,
@@ -23,17 +25,18 @@ import {
   ensureWindowsUtf8Console,
   relaunchInConfiguredTerminal,
   shouldRelaunchInConfiguredTerminal,
-  windowsParentProcessName,
 } from "./backend/terminalLauncher.js";
-import { detectTerminals } from "./backend/tools.js";
+import { detectTerminals, startupTerminals } from "./backend/tools.js";
 import { registerLaunchSession } from "./backend/launchSession.js";
 import packageInfo from "../package.json";
 import {managedRoot, acquireManagedAdmission} from "./backend/managedAdmission.js";
+import {profilePublishStateStore} from "./state/publishLocalState.js";
 
 if (process.argv.includes("--version")) {
   process.stdout.write(`Gitgo ${packageInfo.version}\n`);
   process.exit(0);
 }
+assertRuntimeSecurity();
 
 // Before launch-session/profile/terminal reads or writes. This also covers a
 // direct active binary and the Node companion, not only the public wrapper.
@@ -152,7 +155,7 @@ function verificationInput(): VerificationInput[] | undefined {
   const encoded = argumentValue("--smoke-input-b64");
   if (!encoded) return;
   const events = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-  const keys = new Set(["upArrow", "downArrow", "leftArrow", "rightArrow", "return", "escape"]);
+  const keys = new Set(["upArrow", "downArrow", "leftArrow", "rightArrow", "return", "escape", "ctrl"]);
   if (!Array.isArray(events) || events.length > 60 || events.some(event =>
     !Number.isInteger(event.afterMs) || event.afterMs < 0 || event.afterMs > 60000 ||
     typeof event.input !== "string" || event.input.length > 100 ||
@@ -163,6 +166,7 @@ function verificationInput(): VerificationInput[] | undefined {
 }
 
 async function main() {
+  configureTerminalGraphics(USE_ALT_SCREEN);
   const requestedRuntime = argumentValue("--runtime") || process.env.GITGO_DASHBOARD_RUNTIME || "auto";
   if (!["auto", "bun", "node"].includes(requestedRuntime)) throw new Error("Runtime must be auto, bun, or node");
   // Native releases keep the embedded Bun fast path. Their companion bundle
@@ -201,7 +205,7 @@ async function main() {
   let startupNotice = "";
   if (!useMock) {
     try {
-      terminals = await detectTerminals(client) as TerminalInventory;
+      terminals = await startupTerminals(client, process.argv.includes("--attached")) as TerminalInventory;
       startupNotice = (terminals.warnings || []).join(" ");
     } catch {
       startupNotice = "Terminal detection unavailable; continuing here. Retry in /config → General.";
@@ -209,7 +213,7 @@ async function main() {
   }
   if (terminals?.configured && shouldRelaunchInConfiguredTerminal({
     compiled: COMPILED, platform: process.platform, argv: process.argv,
-    parentProcessName: windowsParentProcessName(), config: launcherFromInventory(terminals),
+    config: launcherFromInventory(terminals),
   })) {
     process.stderr.write("[gitgo-dashboard] Opening configured terminal…\n");
     const handoff = client instanceof NativeHostClient
@@ -250,10 +254,12 @@ async function main() {
     }
     return {completed: handoff.launched, message: handoff.message};
   };
+  configureTerminalWidths(terminals?.display_metrics?.kind === "windows_console" ? terminals.display_metrics.codepoint_widths : undefined);
   renderer = renderSync(
     <ScreenWrapper>
       <InputProvider verificationInput={verificationInput()}><App
         client={client}
+        publishState={profilePublishStateStore()}
         refreshSec={REFRESH_SEC}
         startupSmokeTask={startupSmokeTask()}
         startupTerminalSetup={!useMock && (!terminals || !terminals.configured)}

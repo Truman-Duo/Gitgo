@@ -25,6 +25,12 @@ _IGNORED_DIRS = {
     "build", "dist", "out", "target",
 }
 _MAX_OUTPUT = 200_000
+
+
+class WorkspaceScopeError(PermissionError):
+    """A pre-operation path selection escaped the Host-approved roots."""
+
+
 _DENIED_EXECUTABLES = {
     "curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "ncat", "telnet",
     "rm", "rmdir", "del", "erase", "format", "diskpart", "shutdown",
@@ -187,6 +193,14 @@ def _project_edit(args: dict):
         content = raw.decode("utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         return {"error": "READ_ERROR", "detail": str(exc)}
+    # read_file exposes logical lines joined by LF. For a uniformly CRLF
+    # file, align that text view to the existing style before exact matching.
+    # Mixed line endings retain byte-exact anchor semantics; do not guess.
+    crlf = content.count('\r\n')
+    if crlf and content.count('\n') == crlf and content.count('\r') == crlf:
+        if '\r' not in old:
+            old = old.replace('\n', '\r\n')
+        new = new.replace('\r\n', '\n').replace('\n', '\r\n')
     count = content.count(old)
     replace_all = bool(args.get("replace_all", False))
     if count == 0:
@@ -692,7 +706,7 @@ def _confined_path(workspace: Path, raw: str, *, must_exist: bool,
     resolved = path.resolve(strict=False)
     roots = [workspace, *(allowed_roots or [])]
     if not any(_is_within(resolved, root) for root in roots):
-        raise PermissionError(f"path escapes approved resource scope: {raw}")
+        raise WorkspaceScopeError(f"path escapes approved resource scope: {raw}")
     if must_exist and not resolved.exists():
         raise FileNotFoundError(str(resolved))
     return resolved

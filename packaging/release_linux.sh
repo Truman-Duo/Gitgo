@@ -45,7 +45,7 @@ done < <(git log --no-merges --format=%s "$BASE_REF..HEAD")
 (
   cd cli/dashboard
   "$BUN_BIN" test
-  "$BUN_BIN" run build
+  "$BUN_BIN" scripts/build.ts
 )
 if [ "$VERIFY_ONLY" -eq 0 ]; then
   "$SCRIPT_DIR/build_linux.sh" --python "$PYTHON_BIN" --bun "$BUN_BIN" "${BUILD_ARGS[@]}"

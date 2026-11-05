@@ -14,10 +14,10 @@ def checker_covers(operation, tools):
 PROTECTED_METADATA_PARTS = frozenset({".git", ".gitgo"})
 
 
-def protected_metadata_part(value):
+def protected_metadata_part(value, *, portable=False):
     import os
     name = str(value)
-    if os.name == "nt":
+    if portable or os.name == "nt":
         # Win32 ignores trailing spaces/dots and interprets ':' as a stream.
         name = name.split(":", 1)[0].rstrip(" .")
     return name.casefold() in PROTECTED_METADATA_PARTS

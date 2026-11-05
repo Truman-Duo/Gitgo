@@ -1,0 +1,1070 @@
+[
+  {
+    "id": "execution.interrupt",
+    "default": {
+      "key": "escape"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Interrupt / return",
+      "zh": "中断 / 返回"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [
+      "escape"
+    ],
+    "hintTokens": [
+      "Esc",
+      "Escape"
+    ]
+  },
+  {
+    "id": "navigation.confirm",
+    "default": {
+      "key": "return"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Confirm / send",
+      "zh": "确认 / 发送"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [
+      "enter",
+      "enterNoShift"
+    ],
+    "hintTokens": [
+      "Enter"
+    ]
+  },
+  {
+    "id": "form.save",
+    "default": {"key": "s", "ctrl": true},
+    "contexts": ["form"],
+    "label": {"en": "Save form", "zh": "保存表单"},
+    "condition": {"en": "Project, provider and export forms; submits all staged fields", "zh": "创建项目、服务商、导出表单；提交全部暂存字段"},
+    "chords": ["formSave"],
+    "hintTokens": ["Ctrl+S"]
+  },
+  {
+    "id": "editor.newline",
+    "default": {
+      "key": "return",
+      "shift": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "New line",
+      "zh": "输入换行"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "shiftEnter"
+    ],
+    "hintTokens": [
+      "Shift+Enter"
+    ]
+  },
+  {
+    "id": "navigation.tab",
+    "default": {
+      "key": "tab"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Next / focus",
+      "zh": "下一项 / 聚焦"
+    },
+    "condition": {
+      "en": "Forms: next field; workspace: worker strip; process list: return; BTW: next region",
+      "zh": "表单下一字段；主对话子进程条；子进程列表返回；BTW下一区域"
+    },
+    "chords": [
+      "tab",
+      "tabAny"
+    ],
+    "hintTokens": [
+      "Tab"
+    ]
+  },
+  {
+    "id": "navigation.previousTab",
+    "default": {
+      "key": "tab",
+      "shift": true
+    },
+    "contexts": [
+      "form"
+    ],
+    "label": {
+      "en": "Previous field",
+      "zh": "上一字段"
+    },
+    "condition": {
+      "en": "Forms: previous field",
+      "zh": "表单上一字段"
+    },
+    "chords": [
+      "shiftTab"
+    ],
+    "hintTokens": [
+      "Shift+Tab"
+    ]
+  },
+  {
+    "id": "advancement.toggle",
+    "default": {"key": "tab", "shift": true},
+    "contexts": ["task"],
+    "label": {"en": "Auto / Manual", "zh": "Auto / Manual"},
+    "condition": {"en": "Task conversation; switch advancement at invocation admission", "zh": "任务对话；在工具执行边界切换推进方式"},
+    "chords": ["toggleAdvancement"]
+  },
+  {
+    "id": "btw.previousRegion",
+    "default": {"key": "m", "meta": true},
+    "contexts": ["btw"],
+    "label": {"en": "BTW: previous region", "zh": "BTW：上一个区域"},
+    "condition": {"en": "Read-only side discussion", "zh": "只读侧讨论面板"},
+    "chords": ["btwPreviousRegion"],
+    "hintTokens": ["Alt+M"]
+  },
+  {
+    "id": "navigation.up",
+    "default": {
+      "key": "upArrow"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Up",
+      "zh": "向上"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [
+      "up"
+    ],
+    "hintTokens": [
+      "↑"
+    ]
+  },
+  {
+    "id": "navigation.down",
+    "default": {
+      "key": "downArrow"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Down",
+      "zh": "向下"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [
+      "down"
+    ],
+    "hintTokens": [
+      "↓"
+    ]
+  },
+  {
+    "id": "navigation.left",
+    "default": {
+      "key": "leftArrow"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Left",
+      "zh": "向左"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [
+      "left"
+    ],
+    "hintTokens": [
+      "←"
+    ]
+  },
+  {
+    "id": "navigation.right",
+    "default": {
+      "key": "rightArrow"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Right",
+      "zh": "向右"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [
+      "right"
+    ],
+    "hintTokens": [
+      "→"
+    ]
+  },
+  {
+    "id": "viewport.pageUp",
+    "default": {
+      "key": "pageUp"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Page up",
+      "zh": "向上翻页"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [
+      "pageUp"
+    ],
+    "hintTokens": [
+      "PgUp",
+      "PageUp"
+    ]
+  },
+  {
+    "id": "viewport.pageDown",
+    "default": {
+      "key": "pageDown"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Page down",
+      "zh": "向下翻页"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [
+      "pageDown"
+    ],
+    "hintTokens": [
+      "PgDn",
+      "PageDown"
+    ]
+  },
+  {
+    "id": "clipboard.copy",
+    "default": {
+      "key": "c",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Copy selection",
+      "zh": "复制所选文字"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [],
+    "hintTokens": [
+      "Ctrl+C"
+    ]
+  },
+  {
+    "id": "clipboard.paste",
+    "default": {
+      "key": "v",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Paste text",
+      "zh": "粘贴文字"
+    },
+    "condition": {
+      "en": "Lists, editors and panels; meaning follows focus",
+      "zh": "列表、编辑器与面板；作用取决于焦点"
+    },
+    "chords": [],
+    "hintTokens": [
+      "Ctrl+V"
+    ]
+  },
+  {
+    "id": "editor.backspace",
+    "default": {
+      "key": "backspace"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Delete before cursor",
+      "zh": "删除前一字符"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "backspace"
+    ],
+    "hintTokens": [
+      "Backspace"
+    ]
+  },
+  {
+    "id": "editor.delete",
+    "default": {
+      "key": "delete"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Delete after cursor",
+      "zh": "删除后一字符"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "delete"
+    ],
+    "hintTokens": [
+      "Delete",
+      "Del"
+    ]
+  },
+  {
+    "id": "editor.start",
+    "default": {
+      "key": "home"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Start of draft",
+      "zh": "草稿开头"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "home"
+    ],
+    "hintTokens": [
+      "Home"
+    ]
+  },
+  {
+    "id": "editor.end",
+    "default": {
+      "key": "end"
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "End of draft",
+      "zh": "草稿末尾"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "end"
+    ],
+    "hintTokens": [
+      "End"
+    ]
+  },
+  {
+    "id": "editor.previousWord",
+    "default": {
+      "key": "leftArrow",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Previous word",
+      "zh": "前一词"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "ctrlLeft"
+    ],
+    "hintTokens": [
+      "Ctrl+Left",
+      "Ctrl+←"
+    ]
+  },
+  {
+    "id": "editor.nextWord",
+    "default": {
+      "key": "rightArrow",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Next word",
+      "zh": "后一词"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "ctrlRight"
+    ],
+    "hintTokens": [
+      "Ctrl+Right",
+      "Ctrl+→"
+    ]
+  },
+  {
+    "id": "editor.killToEnd",
+    "default": {
+      "key": "k",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Cut to end",
+      "zh": "剪切到末尾"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "ctrlK"
+    ],
+    "hintTokens": [
+      "Ctrl+K"
+    ]
+  },
+  {
+    "id": "editor.killToStart",
+    "default": {
+      "key": "u",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Cut to start",
+      "zh": "剪切到开头"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "ctrlU"
+    ],
+    "hintTokens": [
+      "Ctrl+U"
+    ]
+  },
+  {
+    "id": "editor.killWord",
+    "default": {
+      "key": "w",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Cut previous word",
+      "zh": "剪切前一词"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "ctrlW"
+    ],
+    "hintTokens": [
+      "Ctrl+W"
+    ]
+  },
+  {
+    "id": "editor.yank",
+    "default": {
+      "key": "y",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Paste cut text",
+      "zh": "粘贴剪切文字"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "ctrlY"
+    ],
+    "hintTokens": [
+      "Ctrl+Y"
+    ]
+  },
+  {
+    "id": "editor.external",
+    "default": {
+      "key": "g",
+      "ctrl": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "External editor",
+      "zh": "外部编辑器"
+    },
+    "condition": {
+      "en": "Focused editor; external editor only in conversations",
+      "zh": "输入编辑时；外部编辑器仅用于对话"
+    },
+    "chords": [
+      "ctrlG"
+    ],
+    "hintTokens": [
+      "Ctrl+G"
+    ]
+  },
+  {
+    "id": "editor.previousWordAlt",
+    "default": {
+      "key": "b",
+      "meta": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Previous word (alternate)",
+      "zh": "前一词（替代键）"
+    },
+    "condition": {
+      "en": "*",
+      "zh": "*"
+    },
+    "chords": [
+      "altB"
+    ],
+    "hintTokens": [
+      "Alt+B"
+    ],
+    "aliases": [
+      {
+        "key": "b",
+        "meta": true,
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "editor.nextWordAlt",
+    "default": {
+      "key": "f",
+      "meta": true
+    },
+    "contexts": [
+      "*"
+    ],
+    "label": {
+      "en": "Next word (alternate)",
+      "zh": "后一词（替代键）"
+    },
+    "condition": {
+      "en": "*",
+      "zh": "*"
+    },
+    "chords": [
+      "altF"
+    ],
+    "hintTokens": [
+      "Alt+F"
+    ],
+    "aliases": [
+      {
+        "key": "f",
+        "meta": true,
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "command.open",
+    "default": {
+      "key": "/"
+    },
+    "contexts": [
+      "scene",
+      "decision"
+    ],
+    "label": {
+      "en": "Open command suggestions",
+      "zh": "打开命令推荐"
+    },
+    "condition": {
+      "en": "Empty scene editor, or decision selection; commands still start with /",
+      "zh": "场景输入为空或决策选项聚焦时；命令文本仍以 / 开头"
+    },
+    "chords": [
+      "slash"
+    ],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.conditions",
+    "default": {
+      "key": "a"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Add conditions to selected option",
+      "zh": "为所选选项补充条件"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": [],
+    "aliases": [
+      {
+        "key": "a",
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "decision.discuss",
+    "default": {
+      "key": "d"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Discuss selected option",
+      "zh": "讨论所选选项"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": [],
+    "aliases": [
+      {
+        "key": "d",
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "decision.option1",
+    "default": {
+      "key": "1"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 1",
+      "zh": "选择选项 1"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.option2",
+    "default": {
+      "key": "2"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 2",
+      "zh": "选择选项 2"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.option3",
+    "default": {
+      "key": "3"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 3",
+      "zh": "选择选项 3"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.option4",
+    "default": {
+      "key": "4"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 4",
+      "zh": "选择选项 4"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.option5",
+    "default": {
+      "key": "5"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 5",
+      "zh": "选择选项 5"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.option6",
+    "default": {
+      "key": "6"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 6",
+      "zh": "选择选项 6"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.option7",
+    "default": {
+      "key": "7"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 7",
+      "zh": "选择选项 7"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.option8",
+    "default": {
+      "key": "8"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 8",
+      "zh": "选择选项 8"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "decision.option9",
+    "default": {
+      "key": "9"
+    },
+    "contexts": [
+      "decision"
+    ],
+    "label": {
+      "en": "Select option 9",
+      "zh": "选择选项 9"
+    },
+    "condition": {
+      "en": "Decision selection, outside text editing",
+      "zh": "决策选项聚焦且未编辑文字时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "trial.accept",
+    "default": {
+      "key": "a"
+    },
+    "contexts": [
+      "trial"
+    ],
+    "label": {
+      "en": "Accept",
+      "zh": "接受"
+    },
+    "condition": {
+      "en": "Trial changes list, before confirmation",
+      "zh": "试验变更列表，进入确认前"
+    },
+    "chords": [],
+    "hintTokens": [],
+    "aliases": [
+      {
+        "key": "a",
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "trial.promote",
+    "default": {
+      "key": "p"
+    },
+    "contexts": [
+      "trial"
+    ],
+    "label": {
+      "en": "Promote",
+      "zh": "提升"
+    },
+    "condition": {
+      "en": "Trial changes list, before confirmation",
+      "zh": "试验变更列表，进入确认前"
+    },
+    "chords": [],
+    "hintTokens": [],
+    "aliases": [
+      {
+        "key": "p",
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "trial.discard",
+    "default": {
+      "key": "d"
+    },
+    "contexts": [
+      "trial"
+    ],
+    "label": {
+      "en": "Discard",
+      "zh": "丢弃"
+    },
+    "condition": {
+      "en": "Trial changes list, before confirmation",
+      "zh": "试验变更列表，进入确认前"
+    },
+    "chords": [],
+    "hintTokens": [],
+    "aliases": [
+      {
+        "key": "d",
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "formal.delete",
+    "default": {
+      "key": "d"
+    },
+    "contexts": [
+      "formal"
+    ],
+    "label": {
+      "en": "Delete formal change",
+      "zh": "删除正式变更"
+    },
+    "condition": {
+      "en": "Formal changes list, before confirmation",
+      "zh": "正式变更列表，进入确认前"
+    },
+    "chords": [],
+    "hintTokens": [],
+    "aliases": [
+      {
+        "key": "d",
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "formal.dissolve",
+    "default": {
+      "key": "x"
+    },
+    "contexts": [
+      "formal"
+    ],
+    "label": {
+      "en": "Dissolve formal change",
+      "zh": "解散正式变更"
+    },
+    "condition": {
+      "en": "Formal changes list, before confirmation",
+      "zh": "正式变更列表，进入确认前"
+    },
+    "chords": [],
+    "hintTokens": [],
+    "aliases": [
+      {
+        "key": "x",
+        "shift": true
+      }
+    ]
+  },
+  {
+    "id": "lesson.toggle",
+    "default": {
+      "key": " "
+    },
+    "contexts": [
+      "lesson-review"
+    ],
+    "label": {
+      "en": "Toggle accept / discard",
+      "zh": "切换接受／丢弃"
+    },
+    "condition": {
+      "en": "Knowledge proposal candidates, list focused",
+      "zh": "经验提案候选列表聚焦时"
+    },
+    "chords": [],
+    "hintTokens": []
+  },
+  {
+    "id": "terminal.rescan",
+    "default": {
+      "key": "r"
+    },
+    "contexts": [
+      "terminal"
+    ],
+    "label": {
+      "en": "Rescan terminals",
+      "zh": "重新扫描终端"
+    },
+    "condition": {
+      "en": "Terminal selection in general settings",
+      "zh": "常规设置的终端选择项聚焦时"
+    },
+    "chords": [],
+    "hintTokens": [],
+    "aliases": [
+      {
+        "key": "r",
+        "shift": true
+      }
+    ]
+  },
+  {"id": "provider.models.refresh", "default": {"key": "r", "ctrl": true}, "contexts": ["form"], "label": {"en": "Refresh API models", "zh": "刷新 API 模型"}, "condition": {"en": "Provider configuration: only on a model or Add models row", "zh": "Provider 配置：仅选中模型或添加入口时生效"}, "chords": ["providerModelsRefresh"]}
+]

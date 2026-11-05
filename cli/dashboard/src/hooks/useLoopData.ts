@@ -6,11 +6,17 @@ import type { BackendClient } from "../backend/client.js";
 import type { ChatMessage } from "../types.js";
 import type { PendingDecision } from "../types.js";
 import { usePoll } from "./usePoll.js";
+import type {Advancement} from "./useAdvancement.js";
 import { loopStatus } from "../backend/tools.js";
 import { publishProcessStreamEvent } from "../daemon/processStreams.js";
 import type { StreamEvent } from "../daemon/streamEvents.js";
 
 export type ProcessInfo = {
+  harness_mechanisms?: Array<{id:string;phase:string;epoch:number;revision:number;
+    completion?: {return_counters:Record<string,number>;reviews:Array<{reviewer_process_id:string;epoch:number;phase:string;verdict?:string}>}}>;
+  task_contract_revision?: number;
+  task_maintenance?: {task_id?: string; revision?: number; epoch?: number; phase?: string; changes?: Record<string, unknown>};
+  advancement?: Advancement;
   state_revision?: number;
   archived?: boolean;
   display_name?: string;

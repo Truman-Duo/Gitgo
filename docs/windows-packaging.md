@@ -1,6 +1,6 @@
 # Windows 一键打包
 
-在源码根目录双击 `build_windows.bat`，或在 PowerShell 中运行 `.\build_windows.bat`。它沿用原有 Windows 构建器，生成 Alpha3 管理安装 ZIP、SHA256 和文件清单，内置正式公开更新策略，并运行冻结 Host/Daemon/工具冒烟及会话连续性检查。输出显示在控制台，默认位于 `dev-artifacts/windows-packaging/` 下的独立目录。
+在源码根目录运行 `powershell -NoProfile -ExecutionPolicy Bypass -File packaging/release_windows.ps1 -BuildOnly -ManagedUpdate`。它沿用原有 Windows 构建器，生成管理安装 ZIP、SHA256 和文件清单，内置正式公开更新策略，并运行冻结 Host/Daemon/工具冒烟及会话连续性检查。输出显示在控制台，默认位于 `dev-artifacts/windows-packaging/` 下的独立目录。公开源码仅保留 `run_dashboard_native.bat` 作为正式启动入口，测试和开发用 BAT 不随发布提交。
 
 日常打包使用显式的 `-BuildOnly`，不重复运行整套源码测试，也不代表正式发行验收。它不发布、安装或覆盖现有 Release。正式源码验收及签名准备仍使用同一个入口的完整模式。
 
@@ -30,6 +30,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/release_windows.ps
 
 完整模式先执行源码与 Dashboard 测试，再构建并验证实际冻结包的原生边界。`-VerifyOnly` 只做源码验收，不构建安装包。
 
-正式签名准备再显式加 `-Sign -SigningKey <仓库外的私钥文件> -KeyId <已固定的公钥ID> -Channel preview -Sequence <渠道序号>`。私钥不进入源码或包；签名不能与快速打包、只验证、dirty 构建或普通安装混用。本地设置文件不能开启这些模式。
+正式签名准备再显式加 `-Sign -SigningKey <仓库外的私钥文件> -KeyId <已固定的公钥ID> -Channel preview -Sequence <渠道序号> -BaselineManifest <上一基线清单> -BaselineSignature <上一基线签名>`。检查以已发布旧版的更新能力为起点；缺少数据迁移或升级器过渡路径时拒绝准备发行资产。旧版固定启动器需要一次性修复入口时，额外显式传 `-UpgradeRoute legacy-repair`，并另行交付可信修复入口及验收，不能称为旧版直接自动更新。仅首次建立某个渠道/平台的发行使用 `-InitialRelease`，不能借此跳过已有用户的升级检查。私钥不进入源码或包；签名不能与快速打包、只验证、dirty 构建或普通安装混用。本地设置文件不能开启这些模式。
 
 签名文件位于归档目录的 `signed-release/`；工具只准备本地文件。正式发布还要核对同一候选的 CI、版本与渠道、实际 API/终端验收及上传后下载结果。已经发布的同版本归档保持不变；续签沿用原归档并递增渠道序号，不重新打包覆盖。参见[更新验证](update-discovery.md)。

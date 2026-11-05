@@ -1,9 +1,12 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
+import {geometry} from "../theme/tokens.js";
+import {SelectionText} from "./Selection.js";
 import React,{memo,useEffect,useRef,useState,useCallback} from "react";
 import {Box,ScrollBox,Text,type ScrollBoxHandle} from "@anthropic/ink";
 import {useManagedInput as useInput,useScrollInput} from "../input/runtime.js";
 import type {BackendClient} from "../backend/client.js";
 import {memoryList,memorySnapshot,memoryRestore} from "../backend/tools.js";
-import {colors,useSelectionStyle} from "../theme/index.js";
+import {colors} from "../theme/index.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages,standardKey,moveSelection,reconcileSelection} from "../ui/pageContract.js";
 type Snapshot={source:string;timestamp:string;path:string;is_dir:boolean};
@@ -16,7 +19,7 @@ export const MemoryPanel=memo(function MemoryPanel({client,project,onDismiss,int
  const rows=[{id:0,enabled:!busy},{id:1,enabled:!busy&&Boolean(snaps[selected])}];
  const current=reconcileSelection(rows,action)??0;
  useScrollInput(scroll,interactive);
- const style=useSelectionStyle(interactive&&focus==="list"?"focused":"non-focused","row");
+
  const refresh=useCallback(async()=>{
   const seq=++generation.current;
   try {const result:any=await memoryList(client,project);if(alive.current&&seq===generation.current){
@@ -34,12 +37,14 @@ export const MemoryPanel=memo(function MemoryPanel({client,project,onDismiss,int
   }catch(e:any){if(alive.current)setStatus(String(e.message||e));}
   finally{mutation.current=false;if(alive.current)setBusy(false);}
  };
- useInput((input,key)=>{
+ const menuHelp=useLocalHelpCommand("memory",undefined,interactive);
+  useInput((input,key)=>{
+    if(menuHelp.handle(input,key))return;
   const command=standardKey(input,key);
   if(command==="back"){if(confirm)setConfirm(null);else onDismiss();return;}
   if(busy||loading)return;
   if(confirm){if(command==="activate"){const saved=confirm;setConfirm(null);void perform("restore",saved);}return;}
-  if(command==="next"){setFocus(v=>v==="list"?"actions":"list");return;}
+  if((command==="next"||command==="previous")){setFocus(v=>v==="list"?"actions":"list");return;}
   if(focus==="actions"){
    if(command==="left"||command==="right")setAction(v=>moveSelection(rows,v,command==="left"?-1:1)??v);
    else if(command==="up")setFocus("list");
@@ -52,15 +57,15 @@ export const MemoryPanel=memo(function MemoryPanel({client,project,onDismiss,int
  },{isActive:interactive});
  return <PageFrame page={pages.runtime}>
   <Text bold>{t({en:"Memory snapshots",zh:"记忆快照"})} · {project}</Text>
-  {confirm?<Text color={colors.warning}>{t({en:"Restore this exact snapshot?",zh:"恢复此快照？"})} {confirm.timestamp} · {t({en:"Enter confirm · Esc cancel",zh:"Enter 确认 · Esc 取消"})}</Text>:null}
+  {confirm?<Text color={colors.warning}>{t({en:"Restore this exact snapshot?",zh:"恢复此快照？"})} {confirm.timestamp}</Text>:null}
   <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} minHeight={0}>
-   {loading?<Text dimColor>{t({en:"Loading snapshots…",zh:"正在读取快照…"})}</Text>:!snaps.length?<Text dimColor>{t({en:"No snapshots yet. Select Create snapshot.",zh:"尚无快照，请选择创建快照。"})}</Text>:snaps.map((sn,i)=><Text key={sn.timestamp+sn.source}
-    color={i===selected?style.fg:undefined} backgroundColor={i===selected?style.bg:undefined}>{sn.source}  {sn.timestamp.slice(0,19)}</Text>)}
+   {loading?<Text dimColor>{t({en:"Loading snapshots…",zh:"正在读取快照…"})}</Text>:!snaps.length?<Text dimColor>{t({en:"No snapshots yet. Select Create snapshot.",zh:"尚无快照，请选择创建快照。"})}</Text>:snaps.map((sn,i)=><SelectionText selected={i===selected} focused={interactive&&focus==="list"} key={sn.timestamp+sn.source}
+     >{sn.source}  {sn.timestamp.slice(0,19)}</SelectionText>)}
   </ScrollBox>
   {status?<Text color={colors.warning}>{status}</Text>:null}
-  <Box gap={2}>{[t({en:"Create snapshot",zh:"创建快照"}),t({en:"Restore selected",zh:"恢复选中快照"})].map((label,i)=><Text key={i}
-   dimColor={!rows[i]?.enabled} color={interactive&&focus==="actions"&&current===i?colors.selection.block.fg:undefined}
-   backgroundColor={interactive&&focus==="actions"&&current===i?colors.selection.block.bg:undefined}>{label}</Text>)}</Box>
-  <Text dimColor>{t({en:"↑/↓ select · Tab actions/list · ←/→ action · Enter open · Esc back",zh:"↑/↓ 选择 · Tab 操作/列表 · ←/→ 操作 · Enter 打开 · Esc 返回"})}</Text>
+  <Box gap={geometry.actions.gap}>{[t({en:"Create snapshot",zh:"创建快照"}),t({en:"Restore selected",zh:"恢复选中快照"})].map((label,i)=><SelectionText selected={interactive&&focus==="actions"&&current===i} variant="block" key={i}
+   dimColor={!rows[i]?.enabled}
+   >{label}</SelectionText>)}</Box>
+
  </PageFrame>;
 });

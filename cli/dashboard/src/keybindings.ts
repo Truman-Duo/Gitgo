@@ -24,6 +24,8 @@ function description(def: CommandDef, language: Language) {
 }
 
 export const REGISTRY: CommandDef[] = [
+  {name:"provider.model",title:{en:"Switch between configured models of the current API",zh:"切换当前 API 已配置的模型"},category:"action",keys:[],slashName:"model",scene:["projects","workspace"]},
+  {name:"provider.effort",title:{en:"Change reasoning effort for the current model",zh:"调整当前模型的思考强度"},category:"action",keys:[],slashName:"effort",scene:["projects","workspace"]},
   {name:"process.detail",title:{en:"Selected subprocess details",zh:"子进程详情"},category:"navigation",
     keys:[],slashName:"detail",scene:["process_list","agent_detail"]},
   {name: "process.create", title: {en:"Ask A to create and supervise a new B",zh:"请主进程创建并监督子进程"}, category: "action",
@@ -118,6 +120,8 @@ export const REGISTRY: CommandDef[] = [
         keys: [],
         slashName: "general",
       },
+      {name: "config.keybindings", title: {en: "Keybindings", zh: "绑键"}, category: "system",
+        keys: [], slashName: "keybindings", slashAliases: ["keys"]},
       {
         name: "config.llm",
         title: {en:"Providers",zh:"模型服务商"},
@@ -137,7 +141,7 @@ export const REGISTRY: CommandDef[] = [
         slashName: "bin",
         hidden: true,
         children: [
-          { name: "config.bin.delete_delay", title: {en:"Delete Delay",zh:"删除延迟"}, category: "system", keys: [], slashName: "delete_delay" },
+          { name: "config.bin.delete_delay", title: {en:"Delete Delay",zh:"删除延迟",keys:true}, category: "system", keys: [], slashName: "delete_delay" },
         ],
       },
     ],
@@ -296,7 +300,7 @@ export const REGISTRY: CommandDef[] = [
         children: [
           { name: "runtime.formal.list", title: {en:"List formal commits",zh:"浏览正式提交"}, category: "action", keys: [], slashName: "list" },
           { name: "runtime.formal.edit", title: {en:"Edit commit message",zh:"编辑提交说明"}, category: "action", keys: [], slashName: "edit" },
-          { name: "runtime.formal.delete", title: {en:"Delete formal commit",zh:"删除正式提交"}, category: "action", keys: [], slashName: "delete" },
+          { name: "runtime.formal.delete", title: {en:"Delete formal commit",zh:"删除正式提交",keys:true}, category: "action", keys: [], slashName: "delete" },
           { name: "runtime.formal.dissolve", title: {en:"Dissolve formal commit",zh:"解除正式提交"}, category: "action", keys: [], slashName: "dissolve" },
         ],
       },

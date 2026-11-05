@@ -53,6 +53,32 @@ def test_daemon_start_rejects_process_exit_before_started(monkeypatch):
     assert spawn["kwargs"]["cwd"] == str(client._project_root)
 
 
+def test_task_mechanism_application_routes_exact_task_and_revision(monkeypatch):
+    host = NativeHost(stdout=io.StringIO())
+    calls = []
+    client = SimpleNamespace(send_command=lambda command, **kwargs: calls.append(command) or {"state": {"revision": 9}})
+    monkeypatch.setattr(host, "_get_daemon", lambda *a, **k: client)
+    try:
+        value = host._dispatch({"operation": "runtime.mechanism", "arguments": {
+            "project": "demo", "process_id": "p", "task_id": "t", "action": "suspend", "expected_revision": 8}})
+        assert value["state"]["revision"] == 9
+        assert calls == [{"cmd": "mechanism", "task_operation": "suspend", "process_id": "p", "task_id": "t",
+                          "expected_revision": 8, "contract": None}]
+    finally:
+        host.close()
+
+
+def test_btw_adoption_error_does_not_report_transport_success(monkeypatch):
+    host = NativeHost(stdout=io.StringIO())
+    monkeypatch.setattr(host, "_get_daemon", lambda *a, **k: SimpleNamespace(
+        send_command=lambda command, **kwargs: {"error": "ADOPTION_TARGET_CHANGED"}))
+    try:
+        with pytest.raises(OperationError, match="ADOPTION_TARGET_CHANGED"):
+            host._runtime_btw_adopt("demo", {"process_id": "p", "task_id": "t", "expected_revision": 2})
+    finally:
+        host.close()
+
+
 def test_daemon_disconnect_reports_exit_code_and_stderr_tail(monkeypatch):
     client = DaemonClient("diagnostic-test")
     client._process = SimpleNamespace(poll=lambda: 23)
@@ -210,7 +236,8 @@ def test_daemon_terminal_correlation_precedes_slow_observer():
     assert not reader.is_alive()
 
 
-def test_send_task_reconciles_durable_terminal_state_when_event_is_missed(monkeypatch):
+@pytest.mark.parametrize('settled_question', [False, True])
+def test_send_task_reconciles_durable_terminal_state_when_event_is_missed(monkeypatch, settled_question):
     client = DaemonClient("terminal-reconciliation")
     client.TASK_RESULT_POLL_SECONDS = 0.001
     task_id = "durable-task"
@@ -218,8 +245,8 @@ def test_send_task_reconciles_durable_terminal_state_when_event_is_missed(monkey
     outcome = TaskOutcome(
         task_id=task_id,
         process_id=process_id,
-        status=OutcomeStatus.COMPLETED,
-        process_status="completed",
+        status=OutcomeStatus.AWAITING_USER if settled_question else OutcomeStatus.COMPLETED,
+        process_status="awaiting_user" if settled_question else "completed",
         response="finished",
         llm_used=True,
     ).to_dict()
@@ -244,7 +271,8 @@ def test_send_task_reconciles_durable_terminal_state_when_event_is_missed(monkey
             "process_id": process_id,
             "session_id": "session-1",
             "status": "completed",
-            "terminal": True,
+            "terminal": not settled_question,
+            "turn_settled": settled_question,
             "outcome": outcome,
         }
 
@@ -260,6 +288,23 @@ def test_send_task_reconciles_durable_terminal_state_when_event_is_missed(monkey
     assert observed == [result]
     assert task_id not in client._agent_events
     assert task_id not in client._agent_data
+
+
+@pytest.mark.parametrize('finalized', [False, True])
+def test_task_result_exposes_parked_child_only_after_lifecycle_barrier(finalized):
+    from backend.core.daemon.dispatch import _cmd_task_result
+    from backend.core.loop.models import ProcessStatus
+    outcome = TaskOutcome(task_id='child-task',process_id='child',status=OutcomeStatus.AWAITING_USER,
+        process_status='awaiting_user',response='Real pending question',llm_used=True).to_dict()
+    child = SimpleNamespace(active_task_id='child-task',process_id='child',status=ProcessStatus.AWAITING_USER,
+        lifecycle_finalized=finalized,result=outcome,session=SimpleNamespace(session_id='child-session'))
+    events=[]
+    _cmd_task_result({'process_id':'child','task_id':'child-task'},None,None,
+        {'apm':SimpleNamespace(get=lambda _id:child)},events.append)
+    result=events[-1]['result']
+    assert result['terminal'] is False
+    assert result['turn_settled'] is finalized
+    assert result['outcome']==(outcome if finalized else None)
 
 
 def test_immediate_daemon_event_flushes_pending_protocol_events(monkeypatch):
@@ -622,6 +667,7 @@ def test_native_host_binds_host_search_configuration_to_task_preferences():
     assert request_started_at.endswith("+00:00")
     assert preferences.pop("frontend_origin") == host.frontend_origin
     assert preferences == {
+        "task_maintenance_enabled": True,
         "auto_compact": True,
         "agent_routing": "owner",
         "web_search_mode": "auto",
@@ -1236,7 +1282,8 @@ def test_unavailable_dpapi_backend_refuses_without_plaintext_fallback(tmp_path_f
     assert not path.exists()
 
 
-def test_routed_child_decision_never_inherits_or_replaces_project_root_cursor():
+@pytest.mark.parametrize('action', ['decision', 'resume'])
+def test_routed_child_control_never_inherits_or_replaces_project_root_cursor(action):
     class ChildDaemon(FakeDaemon):
         def send_task(self, command, timeout=300, on_ack=None):
             self.last_task = dict(command)
@@ -1251,8 +1298,8 @@ def test_routed_child_decision_never_inherits_or_replaces_project_root_cursor():
     host._sessions['demo'] = 'root-session'
     host._conversation_processes['demo'] = 'root'
     try:
-        result = host._runtime_chat('child-reply', {'project': 'demo', 'process_id': 'child',
-            'task_id': 'child-task', 'decision_id': 'actual-child-decision', 'message': 'Chinese'}, action='decision')
+        result = host._runtime_chat('child-control', {'project': 'demo', 'process_id': 'child',
+            'task_id': 'child-task', 'decision_id': 'actual-child-decision', 'message': 'Chinese'}, action=action)
         assert result['session_id'] == 'child-session'
         assert host._sessions['demo'] == 'root-session'
         assert host._conversation_processes['demo'] == 'root'

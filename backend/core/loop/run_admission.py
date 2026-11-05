@@ -69,7 +69,8 @@ def _create_tool_context(process, surface, observations, workspace):
     ctx = ExecutionContext(process=process, session=process.session, workspace_path=workspace,
         event_bus=bus, cancellation=process.cancellation_event, storage=process.bound_storage)
     surface.ctx = ctx
-    ctx.artifacts['tool_catalog'] = surface.tools
+    from .execution_context import ToolBindings
+    ctx.tool_bindings = ToolBindings(surface.tools, surface.known_tools, surface.synchronize)
     frontend = observations.publish if observations.frontend is not None else None
     ctx.artifacts['engineering_workflow'] = EngineeringWorkflow(process, frontend)
     transcript = TaskTranscriptBuilder(task_id=process.process_id)
@@ -104,7 +105,6 @@ def admit_agent_run(process, provider, instruction, dispatcher, workspace, front
         return RunAdmission(result=_error_result(process, 'CAPABILITY_TOOL_UNAVAILABLE',
             'Capability references unavailable tools: ' + ', '.join(unavailable)))
     ctx = _create_tool_context(process, surface, observations, workspace)
-    surface.refresh_prompt()
     session.model_context_limit = max(1024, int(getattr(provider, 'context_window', 128000)))
     route = ProviderRouteRuntime(process, session, provider, provider_route,
         ContextWindow(session.model_context_limit), surface.refresh_prompt)
@@ -118,6 +118,11 @@ def admit_agent_run(process, provider, instruction, dispatcher, workspace, front
     elif not session.messages:
         transition(process, ProcessStatus.FAILED)
         return RunAdmission(result=_error_result(process, 'EMPTY_INSTRUCTION', 'Agent task has no instruction'))
+    # Seed the actual task/evidence before appending live governance. The
+    # compiler still inserts stable/task policy prefixes at the front. During
+    # continuation it appends changes after the new input without rewriting
+    # already-sent history; the policy's system authority is unchanged.
+    surface.refresh_prompt()
     governance = GovernanceRuntime(process, session, workspace, observations.publish)
     ctx.tool_authorizer = governance.authorize
     return RunAdmission(services=RunServices(surface, ctx, LoopGuard(), route, governance, observations, started))

@@ -19,7 +19,7 @@ class SemanticReviewCoordinator:
             reserve_provider_call(process, self.emit)
         return _provider_idle_timeout(process)
 
-    def check(self, candidate='', proposed_questions=None, *, trigger='admission', proposed_contracts=None, proposed_files=None):
+    def check(self, candidate='', proposed_questions=None, *, trigger='admission', proposed_contracts=None, proposed_files=None, observation_only=False):
         process, session = self.process, self.process.session
         initial_route = self.route.route
         hooks = AlignmentReviewHooks(emit=self.emit, frontend_emit=self.frontend, notice=self.workflow.notice,
@@ -29,4 +29,4 @@ class SemanticReviewCoordinator:
             cancellation=lambda: _cancellation_result(process, session),
             budget_exhausted=lambda error: _budget_exhausted_result(process, session, error))
         return AlignmentReview(process, self.provider, hooks).check(self.instruction, candidate, proposed_questions,
-            trigger=trigger, proposed_contracts=proposed_contracts, proposed_files=proposed_files)
+            trigger=trigger, proposed_contracts=proposed_contracts, proposed_files=proposed_files, observation_only=observation_only)

@@ -91,13 +91,21 @@ class CapabilityProfiles:
         "contract_get_changed_symbols", "lesson_search", "lesson_list",
         "privacy_scan", "read_file", "list_files", "search_text", "document_open",
         "web_search", "web_fetch",
-        "workbench", "lesson_checker", "decision_evidence", "capability_status",
+        "workbench", "lesson_checker", "decision_evidence", "capability_status", "task_mechanism", "harness_mechanism",
         "acknowledge_governance_signal",
         "code_dossier",
+        "publish_items", "publish_item", "publish_operation", "publish_shared_items", "publish_history", "publish_diff",
     ) + _CONTEXT
     _OPERATE = _OBSERVE + (
         "formalize", "lesson_discard", "lesson_verify", "lesson_harvest",
         "memory_snapshot", "memory_restore", "lesson_promote", "run_test",
+        "publish_prepare", "publish_plan", "publish_adopt", "publish_reconcile",
+        "publish_verify", "publish_execute",
+        "publish_pause", "publish_resume", "publish_run", "publish_migrate", "publish_decide",
+        "publish_share", "publish_share_publish",
+        "publish_collaborate", "publish_collaborate_send",
+        "publish_link_task", "publish_package", "publish_export", "publish_tag", "publish_release", "publish_import_package", "publish_distribution_reconcile",
+        "publish_download", "publish_branch", "publish_branch_apply",
     )
     _DEVELOPMENT = _OBSERVE + (
         "edit_file", "write_file", "delete_file", "document_create", "apply_patch", "exec_command", "shell_script", "run_test",

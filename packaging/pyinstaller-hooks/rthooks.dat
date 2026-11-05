@@ -1,0 +1,4 @@
+{
+    'setuptools': ['gitgo_setuptools.py'],
+    'traitlets': ['gitgo_traitlets.py'],
+}

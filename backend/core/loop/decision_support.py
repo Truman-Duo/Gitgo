@@ -19,11 +19,14 @@ from backend.core.workbench.calculation import safe_calculate
 
 DECISION_KINDS = {
     "clarification", "preference", "direction", "verification",
-    "choice", "permission", "recovery", "checkpoint",
+    "choice", "permission", "recovery", "checkpoint", "runtime_checkpoint",
 }
 STATEFUL_DECISION_KINDS = {
-    "preference", "direction", "verification", "checkpoint",
+    "preference", "direction", "verification", "checkpoint", "runtime_checkpoint",
 }
+SEMANTIC_DECISION_KINDS = frozenset({
+    "clarification", "preference", "direction", "verification", "choice", "checkpoint",
+})
 
 
 def _decision_position(process) -> dict:
@@ -69,9 +72,16 @@ def collect_decision_evidence(process, focus: str = "all", *, identifier: str = 
     if focus in {"all", "completion", "gates"}:
         from backend.core.loop.completion_protocol import HostCompletionEvaluator
         context, _version = process.read_context_snapshot()
+        from backend.core.mechanism_runtime.application import bound_application
+        application = bound_application(process)
+        staged = application is not None and application.has_completion_stages()
         result["outstanding_gates"] = HostCompletionEvaluator.outstanding_gates(
             process, list(context.get("signals") or []),
+            stage_entry=staged,
         )
+        result['outstanding_gates']['boundary'] = 'registered_completion_stage' if staged else 'final_delivery'
+        if staged:
+            result['outstanding_gates']['runtime_next'] = 'Submit the candidate when current gates are satisfied. Runtime runs registered review stages and final alignment before delivery; no separate self-authored alignment report is required by this query.'
     if focus in {"all", "engineering"}:
         from .engineering_workflow import EngineeringWorkflow
         result["engineering"] = EngineeringWorkflow(process).status()
@@ -124,8 +134,8 @@ def collect_decision_evidence(process, focus: str = "all", *, identifier: str = 
     return result
 
 
-def create_user_decision(process, args: dict) -> dict:
-    """Validate and publish one durable Agent-to-user decision request."""
+def prepare_user_decision(process, args: dict) -> dict:
+    """Validate a request without publishing it or changing task state."""
     kind = str(args.get("kind") or "choice").strip()
     if kind not in DECISION_KINDS:
         raise ValueError("kind must be one of: " + ", ".join(sorted(DECISION_KINDS)))
@@ -134,7 +144,7 @@ def create_user_decision(process, args: dict) -> dict:
     if not question or not why:
         raise ValueError("question and why_user_must_decide are required")
     raw_options = args.get("options", []) or []
-    compact = kind == "clarification"
+    compact = kind in {"clarification", "runtime_checkpoint"}
     if not isinstance(raw_options, list) or not (0 <= len(raw_options) <= 3 if compact else 2 <= len(raw_options) <= 3):
         raise ValueError(
             "request_user_decision requires 2..3 business options; use the Host "
@@ -222,6 +232,12 @@ def create_user_decision(process, args: dict) -> dict:
             if len({o["label"] for o in choices}) != len(choices) or sum(bool(o.get("recommended")) for o in choices) > 1:
                 raise ValueError("round options must be unique with at most one recommendation")
         request["questions"] = questions
+    return request
+
+
+def create_user_decision(process, args: dict) -> dict:
+    """Validate and publish one durable Agent-to-user decision request."""
+    request = prepare_user_decision(process, args)
     from backend.core.loop.question_broker import route_question
     request = route_question(process, request)
     if isinstance(args.get("permission_request"), dict):
@@ -247,8 +263,24 @@ def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> l
         if item.get("event") == "user_decision_requested" and item.get("decision_id")
     }
     latest: dict[str, dict] = {}
+    retired = set()
+    cancelled = {e.get('decision_id') for e in ledger if e.get('event') == 'user_decision_cancelled'}
     for event in ledger:
+        if event.get('event') == 'user_decision_requested':
+            from .alignment_evidence import CONTROL_DECISION_KINDS
+            if event.get('decision_id') not in cancelled and event.get('kind') not in CONTROL_DECISION_KINDS:
+                for item in [event, *(event.get('questions') or [])]:
+                    previous = item.get('supersedes_decision_id')
+                    topic = item.get('state_topic')
+                    old = requests.get(str(previous or ''), {})
+                    if (previous and topic and old.get('task_id') == event.get('task_id')
+                            and latest.get(topic, {}).get('decision_id') == previous):
+                        retired.add((event.get('task_id'), previous, topic))
+                        latest.pop(topic, None)
+            continue
         if event.get('event') == 'user_decision_interpreted':
+            if (event.get('task_id'), event.get('decision_id'), event.get('state_topic')) in retired:
+                continue
             topic = event.get('state_topic')
             source = source_answer(ledger, event.get('task_id'), event.get('decision_id'), event.get('source_node_id', ''))
             resolution = resolved_answer(ledger, source, topic) if source else None
@@ -256,7 +288,8 @@ def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> l
                 latest[topic] = {'topic': topic, 'kind': source.get('kind', 'clarification'),
                     'value': resolution['value'], 'disposition': resolution['disposition'],
                     'conditions': source['answer'], 'decision_id': source['decision_id'],
-                    'confirmed_at': source.get('created_at', ''), 'supersedes_decision_id': ''}
+                    'confirmed_at': source.get('created_at', ''),
+                    'supersedes_decision_id': requests.get(source['decision_id'], {}).get('supersedes_decision_id', '')}
             elif topic:
                 latest.pop(topic, None)
             continue
@@ -264,6 +297,8 @@ def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> l
             continue
         request = requests.get(str(event.get("decision_id") or ""), {})
         for item in request.get("questions") or []:
+            if (event.get('task_id'), event.get('decision_id'), item['state_topic']) in retired:
+                continue
             response = (event.get("answers") or {}).get(item["node_id"])
             resolution = resolved_answer(ledger, {**event, **(response or {}), 'kind': item.get('kind', 'clarification')}, item['state_topic']) if response else None
             if resolution:
@@ -282,6 +317,8 @@ def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> l
             continue
         topic = str(request.get("state_topic") or "").strip()
         if not topic:
+            continue
+        if (event.get('task_id'), event.get('decision_id'), topic) in retired:
             continue
         resolution = resolved_answer(ledger, {**event, 'kind': kind}, topic)
         if not resolution:

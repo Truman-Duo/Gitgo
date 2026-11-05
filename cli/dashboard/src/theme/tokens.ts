@@ -3,9 +3,34 @@
 
 import chalk from "chalk";
 import type { Color } from "@anthropic/ink";
+import {lerpColor} from "./color.js";
+
+// Dracula standard palette: https://spec.draculatheme.com/
+const dracula = {
+  background: "#282a36", foreground: "#f8f8f2", selection: "#44475a",
+  comment: "#6272a4", red: "#ff5555", orange: "#ffb86c", yellow: "#f1fa8c",
+  green: "#50fa7b", purple: "#bd93f9", cyan: "#8be9fd", pink: "#ff79c6",
+} as const;
 
 // ── Semantic colors ──────────────────────────────────────────
+const normalInputPrompt = "› ";
+const commandGreen = "#208b4e";
+const terminalSurface = "#0c0c0c";
+const suggestionTintStrength = 0.3;
+// Existing cell geometry shared by pages and their standard controls.
+export const geometry = {
+  page: {paddingX: 1, paddingTop: 1}, field: {gap: 2}, actions: {gap: 2},
+  header: {padding: 1, minimumSlot: 5}, row: {minHeight: 1},
+  scale: {preferredWidth: 64}, choice: {maxVisible: 8, inset: 2, rowInset: 1},
+  drawer: {maxHeightRatio: 0.5},
+  turnGuide: {borderStyle: "single", top: "┌", bottom: "└"},
+} as const;
 export const colors = {
+  scale: {active: "#fdbc2b"},
+  form: {blinkMs: 500},
+  feedback: {infoMs: 4000, successMs: 4000, warningMs: 6000, errorMs: 8000},
+  syntax: dracula,
+  graph: {lanes: ["#98c379", "#c678dd", "#e5c07b", "#56b6c2", "#61afef", "#e06c75"], selected: "#f0f0f0", inactive: "#606060", background: terminalSurface},
   success: "#3fb950",
   successBadge: "#1a3d1a",
   successBg: "#0d1a0d",
@@ -73,24 +98,33 @@ export const colors = {
 
   // ── Text input / command bar ───────────────────────────────
   input: {
+    advancement: {
+      auto: "#fdbc2b",
+      manual: "#c9d1d9",
+      unavailable: "#6e7681",
+    },
     normal: {
-      prompt: chalk.cyan.bold("▸ "), // ▸
-      border: "#58a6ff",
-      badge: chalk.bgHex("#58a6ff").black.bold(" NORMAL "),
+      glyph: normalInputPrompt,
+      prompt: chalk.cyan.bold(normalInputPrompt),
+      border: "#0071db",
+      badge: chalk.bgHex("#0071db").white.bold(" NORMAL "),
     },
     command: {
       prompt: chalk.green.bold("/ "),
       bg: "#0d1a0d",
       fg: "#f0f0f0",
-      border: "#3fb950",
-      badge: chalk.bgGreen.black.bold(" COMMAND "),
+      border: commandGreen,
+      badge: chalk.bgHex(commandGreen).black.bold(" COMMAND "),
     },
     result: { fg: "#d29922" },
   },
 
   // ── Suggestion list ────────────────────────────────────────
   suggestion: {
-    active: { fg: "#3fb950", bg: "#1a3d1a" },
+    // Terminal cells use RGB, not per-cell alpha. Keep the original subdued
+    // mask appearance by mixing the command hue into the dark surface.
+    tintStrength: suggestionTintStrength,
+    active: { fg: commandGreen, bg: lerpColor(terminalSurface,commandGreen,suggestionTintStrength) },
   },
 
   // ── Status dots (3-state + offline) ────────────────────────
@@ -114,8 +148,9 @@ export const colors = {
     userBg: "#262626",   // 用户提示词灰底块
     userFg: "#f0f0f0",
     assistantFg: "#f0f0f0",
+    emphasis: "#cba87f",
     reasoningFg: "#a8a8a8",
-    turnGuide: "#737373", // quieter than reasoning text, still visible on the dark canvas
+    turnGuide: "#5f5f5f", // subdued guide, distinct from the dark canvas
     gutter: "#6e7681",   // assistant/tool 行首 gutter 标记
     userMarker: "#a8a8a8", // 用户消息行首指针 ❯ 标记
   },
@@ -184,12 +219,13 @@ export const colors = {
 
   // ── Diff (side-by-side / unified) ─────────────────────────
   diff: {
-    added: "#3fb950",
-    removed: "#f85149",
+    bg: dracula.background,
+    added: dracula.green,
+    removed: dracula.red,
     addedBg: "#12261e",
     removedBg: "#2d1a1a",
-    lineNumber: "#6e7681",
-    frame: "#6e7681",
+    lineNumber: dracula.comment,
+    frame: dracula.comment,
   },
 } as const;
 

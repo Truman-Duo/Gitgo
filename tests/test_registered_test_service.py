@@ -64,6 +64,20 @@ def test_service_discards_test_files_and_only_parent_records_manifest(tmp_path_f
     assert TestManifest.load(ws).evaluate_required(["unit:sample"])[0]
 
 
+def test_completed_failing_test_is_known_failure_and_keeps_required_gate_closed(tmp_path_factory, monkeypatch):
+    ws = tmp_path_factory
+    (ws / 'test_sample.py').write_text('def test_failure(): assert False\n', encoding='utf8')
+    protocol(monkeypatch, output={'seed_results': [
+        {'seed': seed, 'exit_code': 1, 'duration_ms': 1.0, 'output_tail': 'AssertionError'} for seed in (11, 22)]})
+    _, result = call(ws)
+    assert result.is_error and result.diagnostics['code'] == 'TEST_FAILED'
+    assert result.receipt['test_completed'] and result.receipt['test_passed'] is False
+    assert result.receipt['execution_state'] == 'completed'
+    assert result.receipt['effect_state'] == result.receipt['evidence_state'] == 'committed'
+    assert result.receipt['runtime_cleanup']['complete']
+    assert not TestManifest.load(ws).evaluate_required(['unit:sample'])[0]
+
+
 def test_private_source_rewrite_cannot_claim_current_validation(tmp_path_factory, monkeypatch):
     ws = tmp_path_factory
     (ws / "test_sample.py").write_text("def test_bad(): assert False\n", encoding="utf8")

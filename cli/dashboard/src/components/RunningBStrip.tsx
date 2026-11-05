@@ -1,3 +1,4 @@
+import {SelectionText} from "./Selection.js";
 import React from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { ProcessInfo } from "../hooks/useLoopData.js";
@@ -12,6 +13,8 @@ type Props = {
   language?: "en" | "zh";
   runningB: ProcessInfo[]; selIdx: number; focused: boolean;
   contextPct?: string; cachePct?: number | null; width: number; statusText?:string;
+  advancement?: "auto" | "manual" | null;
+  advancementPending?: boolean;
 };
 
 function fitAgents(runningB: ProcessInfo[], selected: number, width: number, zh: boolean) {
@@ -42,9 +45,17 @@ function fitAgents(runningB: ProcessInfo[], selected: number, width: number, zh:
   return {items: runningB.slice(start, end), left: start > 0, right: end < runningB.length, start};
 }
 
-export function RunningBStrip({ runningB, selIdx, focused, contextPct, cachePct, width, language = "en",statusText="" }: Props) {
+export function RunningBStrip({ runningB, selIdx, focused, contextPct, cachePct, width, language = "en",statusText="",
+  advancement, advancementPending = false }: Props) {
+  const showMode = advancement !== undefined;
+  const statusLabel = showMode ? (advancement === "auto" ? "AUTO" : advancement === "manual" ? "MANUAL" : "…")
+    + (advancementPending ? " …" : "") : statusText;
+  const statusColor = showMode ? colors.input.advancement[advancement ?? "unavailable"] : undefined;
   const leftWidth=Math.min(width,displayWidth("● "+(contextPct||"0%")));
-  const statusWidth=statusText?Math.min(displayWidth(statusText),Math.max(0,Math.floor((width-leftWidth)/3))):0;
+  // Reserve the same slot for AUTO/MANUAL and pending acknowledgement, so
+  // worker selection never jumps left/right when only the mode changes.
+  const statusWidth=showMode?Math.min(8,Math.max(0,width-leftWidth-3)):
+    statusText?Math.min(displayWidth(statusText),Math.max(0,Math.floor((width-leftWidth)/3))):0;
   const middleWidth=Math.max(0,width-leftWidth-(statusWidth?statusWidth+3:0)-3);
   const selected=selIdx%Math.max(1,runningB.length);
   const fitted=fitAgents(runningB,selected,middleWidth,language==="zh");
@@ -53,19 +64,23 @@ export function RunningBStrip({ runningB, selIdx, focused, contextPct, cachePct,
   const boundedLabel=(p:ProcessInfo)=>{
     const state=language==="zh"?(p.status==="running"?"工作中":p.status==="awaiting_user"?"待答复":"等待")
       :(p.status==="running"?"working":p.status==="awaiting_user"?"awaiting input":"waiting");
-    return truncate(agentLabel(p),Math.max(1,labelWidth-displayWidth(state)-3))+" · "+state;
+    const name=agentLabel(p);
+    const nameWidth=Math.min(displayWidth(name),Math.max(1,Math.floor(labelWidth/2),labelWidth-displayWidth(state)-3));
+    const label=truncate(name,nameWidth);
+    const stateWidth=labelWidth-displayWidth(label)-3;
+    return stateWidth>0?label+" · "+truncate(state,stateWidth):label;
   };
   return <Box flexDirection="row" flexWrap="nowrap" width={Math.max(1,width)} overflow="hidden">
     <Box width={leftWidth} flexShrink={0}><ContextStatus contextPct={contextPct||"0%"} cachePct={cachePct}/></Box>
-    {statusWidth?<><Text dimColor> · </Text><Box width={statusWidth} flexShrink={0}><Text dimColor wrap="truncate-end">{statusText}</Text></Box></>:null}
+    {statusWidth?<><Text dimColor> · </Text><Box width={statusWidth} flexShrink={0}><Text dimColor={!showMode} color={statusColor} wrap="truncate-end">{statusLabel}</Text></Box></>:null}
     {fitted.items.length?<Text dimColor> · </Text>:null}
     <Box width={middleWidth} flexDirection="row" overflow="hidden">
       {fitted.left?<Text dimColor>... </Text>:null}
       {fitted.items.map((p,index)=>{
         const active=focused&&fitted.start+index===selected;
         return <React.Fragment key={p.process_id}>{index>0?<Text dimColor> · </Text>:null}
-          <Text color={active?colors.selection.row.fg:undefined}
-            backgroundColor={active?colors.selection.row.bg:undefined} bold={active}>{boundedLabel(p)}</Text>
+          <SelectionText selected={active}
+             >{boundedLabel(p)}</SelectionText>
         </React.Fragment>;
       })}
       {fitted.right?<Text dimColor> ...</Text>:null}

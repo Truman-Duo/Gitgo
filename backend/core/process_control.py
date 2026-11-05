@@ -122,8 +122,8 @@ def spawn_managed(argv, **kwargs):
     if sys.platform == "win32":
         from backend.core.windows_job import spawn
         return spawn(argv, **kwargs)
-    from backend.core.installation_lease import runtime_descriptors
-    retained = tuple(sorted(set(kwargs.pop("pass_fds", ())) | set(runtime_descriptors())))
+    from backend.core.installation_lease import sharing_descriptors
+    retained = tuple(sorted(set(kwargs.pop("pass_fds", ())) | set(sharing_descriptors())))
     if len(retained) > 16 or any(type(fd) is not int or fd < 3 for fd in retained):
         raise ValueError("Invalid owned child descriptors")
     for fd in retained:

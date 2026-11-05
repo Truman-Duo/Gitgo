@@ -437,6 +437,7 @@ def _provider_hosted_search(args: dict) -> dict:
             configured.base_url, configured.api_key, configured.model_id,
             protocol=configured.protocol,
             capabilities=configured.runtime_capabilities(),
+            request_preferences=configured.configuration.get("request_preferences", {}),
         )
         search_schema = [{
             "type": "function",

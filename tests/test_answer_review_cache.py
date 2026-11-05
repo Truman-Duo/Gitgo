@@ -96,6 +96,17 @@ def test_cache_without_original_interpretation_is_not_evidence(tmp_path_factory)
     assert process.context_snapshot == before
 
 
+@pytest.mark.parametrize('change',['contract_subject','question_subject','stage'])
+def test_new_proposed_boundary_cannot_reuse_an_old_partial_judgment(tmp_path_factory,change):
+    process,runtime,second,_=cached_partial(tmp_path_factory)
+    receive(process,second)
+    payload=runtime.payload()
+    if change=='contract_subject':payload['proposed_contracts']=[{'kind':'harness_composition','compiled':{'digest':'a-different-program'}}]
+    elif change=='question_subject':payload['proposed_questions']=[{'question':'A different proposed question'}]
+    else:payload['stage']='question_proposal'
+    assert reuse_unresolved(process,payload,runtime) is None
+
+
 def test_cache_without_original_user_receipt_is_not_evidence(tmp_path_factory):
     process, runtime, second, _node = cached_partial(tmp_path_factory)
     receive(process, second)

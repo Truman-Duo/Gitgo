@@ -23,6 +23,7 @@ from typing import Callable
 from dataclasses import dataclass
 from backend.core.loop.execution_contract import ExecutionContract, ExecutionType
 from backend.core.protocol_io import dump_protocol_json, write_utf8_line
+from backend.core.tools.workspace_tools import WorkspaceScopeError
 
 
 # ── Tool Registry ──────────────────────────────────────────
@@ -124,6 +125,14 @@ def main() -> None:
         if not isinstance(result, dict):
             result = {"result": result}
         _emit_success(result)
+    except WorkspaceScopeError as exc:
+        from backend.core.errors import error_payload
+        _emit_success({**error_payload('RESOURCE_SCOPE_APPROVAL_REQUIRED', message=str(exc), next_actions=[
+            {'action': 'use_authorized_scope',
+             'effect': 'Use the current workspace or explicitly granted roots. For review history use the supplied evidence locator; do not search parent directories.'},
+            {'action': 'request_permission',
+             'effect': 'If the task actually requires another resource, request an exact grant through the existing permission flow.'}]),
+            'effect_state': 'not_committed', 'execution_state': 'not_started'})
     except Exception as exc:
         tb = traceback.format_exc()
         sys.stderr.write(tb)

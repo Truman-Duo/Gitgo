@@ -154,11 +154,14 @@ def resolve_ripgrep():
     configured = os.environ.get("GITGO_RIPGREP_PATH")
     if configured:
         return available(Path(configured))
-    if getattr(sys, "frozen", False):
-        bundled = Path(sys.executable).resolve().parent / ("rg.exe" if os.name == "nt" else "rg")
-        selected = available(bundled)
-        if selected:
-            return selected
+    # Source deployments also use a dedicated, Host-owned Python runtime.
+    # Its sibling engine inherits existing runtime access; a developer PATH
+    # executable may be invisible inside the actual tool sandbox. Never grant
+    # the whole PATH directory or search a writable project for an engine.
+    bundled = Path(sys.executable).resolve().parent / ("rg.exe" if os.name == "nt" else "rg")
+    selected = available(bundled)
+    if selected:
+        return selected
     # Never search cwd or relative PATH entries for an engine.
     for raw in os.environ.get("PATH", "").split(os.pathsep):
         directory = Path(raw.strip('"'))

@@ -33,6 +33,40 @@ REPORT_FIELDS = {
 }
 
 
+def plan_schema():
+    """Advertise the same practices the canonical plan compiler accepts.
+
+    This describes optional authoring inputs, not an independent validator or
+    authorization. Dependency/evidence semantics remain in compile_plan.
+    """
+    node = {"type": "object", "required": ["id", "kind"], "properties": {
+        "id": {"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},
+        "kind": {"enum":list(KINDS)}, "depends_on":{"type":"array","items":{"type":"string"}},
+        "files":{"type":"array","minItems":1,"items":{"type":"string"}},
+        "test_id":{"type":"string","minLength":1}, "passed":{"type":"boolean"},
+        "tool_name":{"enum":["run_test","exec_command"]},
+        "argv":{"type":"array","minItems":1,"items":{"type":"string"}}, "cwd":{"type":"string"},
+        "state_topic":{"type":"string","minLength":1}, "path":{"type":"string","minLength":1},
+        "format":{"enum":list(REPORT_FIELDS)}, "tools":{"type":"array","minItems":1,"items":{"type":"string"}},
+        "required":{"type":"boolean"}, "before_mutation":{"type":"boolean"}},
+        "allOf":[{"if":{"properties":{"kind":{"const":kind}}},"then":{"required":fields}}
+            for kind,fields in {'change':['files'],'check':['test_id','passed'],
+                'decision':['state_topic'],'document':['path'],'report':['format'],'observation':['tools']}.items()]}
+    return {"type": "object", "required": ["profiles"],
+        "description": "Optional practice plan. Omit to retain the current plan; {} does not disable it. Without nodes, the runtime builds the chosen practice graph from test/path inputs.",
+        "properties": {
+            "profiles": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": list(PROFILES)}},
+            "test_id":{"type":"string","description":"Actual registered test id, required for diagnosis/tdd presets."},
+            "target_files":{"type":"array","items":{"type":"string"},"description":"Exact changed paths for tdd. In a task contract, omitted paths are taken from its explicit workspace_file deliverables."},
+            "check_argv":{"type":"array","minItems":1,"items":{"type":"string"}}, "check_cwd":{"type":"string"},
+            "agent_document_path":{"type":"string"}, "glossary_path":{"type":"string"},
+            "preparation_files":{"type":"array","items":{"type":"string"}},
+            "questions":{"type":"array","items":{"type":"object","required":["id","state_topic"],
+                "properties":{"id":{"type":"string"},"state_topic":{"type":"string"},"depends_on":{"type":"array","items":{"type":"string"}}}}},
+            "nodes": {"type": "array", "minItems": 1, "maxItems": 64, "items": node,
+                "description":"Advanced exact evidence DAG. change means an actual file mutation, not configuration/setup. Prefer the preset inputs when appropriate; Runtime builds ids and edges."}}}
+
+
 def practice_plan(config: dict) -> dict:
     """Compile built-in practices into the same graph used for custom plans.
 
@@ -117,15 +151,18 @@ def _path(root: Path, raw: str) -> Path:
 
 def compile_plan(raw: dict, root: str | Path) -> dict:
     """Validate the entire proposal before publishing any part of it."""
-    if not isinstance(raw, dict) or raw.get("schema_version", 1) != 1:
-        raise ValueError("unsupported engineering workflow schema")
+    if not isinstance(raw, dict):
+        raise ValueError("configure requires a top-level plan object; content is not the plan parameter")
+    if raw.get("schema_version", 1) != 1:
+        raise ValueError("unsupported engineering workflow schema_version; expected 1")
     if len(json.dumps(raw, ensure_ascii=False).encode("utf-8")) > 64_000:
         raise ValueError("engineering workflow exceeds 64KB")
     if "nodes" not in raw:
         raw = practice_plan(raw)
     profiles = list(dict.fromkeys(raw.get("profiles") or []))
     if not profiles or any(item not in PROFILES for item in profiles):
-        raise ValueError("profiles must select supported engineering practices")
+        raise ValueError("engineering_workflow.profiles requires at least one of: " + ", ".join(PROFILES)
+            + ". Omit the optional plan to retain the current workflow; an empty object does not disable it.")
     nodes = copy.deepcopy(raw.get("nodes") or [])
     if not isinstance(nodes, list) or not 1 <= len(nodes) <= 64:
         raise ValueError("workflow requires 1..64 concrete nodes")
@@ -180,7 +217,7 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
         if kind == "change":
             files = node.get("files") or []
             if not files:
-                raise ValueError("change nodes require target files")
+                raise ValueError(f"change node '{name}' requires files=[concrete workspace paths]. change is a file mutation, not mechanism setup; use the business plan for setup or a preset with test_id/target_files.")
             node["files"] = [_path(root, item).relative_to(root).as_posix() for item in files]
     by_id = {node["id"]: node for node in nodes}
     visiting, visited = set(), set()
@@ -631,7 +668,8 @@ class EngineeringWorkflow:
     def ask_semantic(self, request):
         """Default questions use the same DAG, without a separate skill API."""
         kind = request.get("kind", "choice")
-        if kind not in {"clarification", "preference", "direction", "verification", "choice"}:
+        from .decision_support import SEMANTIC_DECISION_KINDS
+        if kind not in SEMANTIC_DECISION_KINDS:
             from .decision_support import create_user_decision
             return create_user_decision(self.process, request)
         topic = str(request.get("state_topic") or "").strip()
@@ -664,11 +702,48 @@ class EngineeringWorkflow:
         return result
 
     def resolve_answer(self, node_id, decision_id, content):
+        if not isinstance(content,dict):
+            raise ValueError('resolve_answer requires an interpretation content object')
+        def identity(outer,key):
+            inner=content.get(key)
+            outer_present=outer is not None and outer != ''
+            inner_present=inner is not None and inner != ''
+            if outer_present and inner_present and outer != inner:
+                raise ValueError('conflicting '+key+' in arguments and canonical interpretation content; no decision changed')
+            value=outer if outer_present else inner
+            if not isinstance(value,str) or not value.strip():
+                raise ValueError('resolve_answer requires '+key+' in arguments or canonical interpretation content')
+            return value
+        # The auxiliary assessor already uses this canonical record shape.
+        # Normalize its identity once; all original current-task/source and
+        # quote checks below still run. No semantic choice is inferred here.
+        node_id=identity(node_id,'node_id')
+        decision_id=identity(decision_id,'decision_id')
         state = self._load()
         node = next((n for n in state.get('plan', {}).get('nodes', []) if n['id'] == node_id and n['kind'] == 'decision'), None)
-        if node is None or (state.get('requests', {}).get(node_id) not in {None, decision_id}):
+        requested = state.get('requests', {}).get(node_id)
+        if node is None:
             raise ValueError('interpretation must bind the current question of this task')
+        later_source = None
+        if requested not in {None, decision_id}:
+            # A later real business reply can volunteer an answer to a still
+            # unresolved facet. Confirmed values retain the explicit revision
+            # path; stale/control receipts gain no business authority here.
+            from .alignment_evidence import business_answer_receipts
+            receipts = business_answer_receipts(self.process.session.host_ledger, task_id(self.process))
+            source_id = content.get('source_node_id', '')
+            later_source = next((a for a in receipts if a['decision_id'] == decision_id
+                and a.get('source_node_id', '') == source_id), None)
+            order = {e.get('decision_id'): i for i, e in enumerate(self.process.session.host_ledger)
+                     if e.get('event') == 'user_decision_requested' and e.get('task_id') == task_id(self.process)}
+            if (node_id in state.get('records', {}) or not later_source or not receipts
+                    or receipts[-1]['decision_id'] != decision_id
+                    or order.get(decision_id, -1) <= order.get(requested, len(self.process.session.host_ledger))):
+                raise ValueError('interpretation must bind the current question of this task or a newer actual business reply to an unresolved facet')
         answer = next((a for a in reversed(self._answers(node)) if a.get('decision_id') == decision_id), None)
+        if answer is None and later_source:
+            from .alignment_evidence import source_answer
+            answer = source_answer(self.process.session.host_ledger, task_id(self.process), decision_id, content.get('source_node_id', ''))
         if answer is None and not state.get('requests', {}).get(node_id):
             from .alignment_evidence import source_answer, answer_digest
             answer = source_answer(self.process.session.host_ledger, task_id(self.process), decision_id, content.get('source_node_id', ''))

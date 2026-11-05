@@ -1,3 +1,4 @@
+import {useCopy} from "../ui/PageFrame.js";
 import {scrollViewport} from "../input/scrollViewport.js";
 // src/components/ChatPanel.tsx — Scene 2 left pane: message list + tool cards
 import React, { memo, useEffect, useRef } from "react";
@@ -48,6 +49,7 @@ export const ChatPanel = memo(function ChatPanel({
   verbose = false,
   inputActive = true,
 }: Props) {
+  const t=useCopy();
   const { w: terminalWidth } = usePanelSize({ minWidth: 30 });
   const width = Math.max(1, Math.min(terminalWidth, cols));
   const contentWidth = Math.max(1, width - 4);
@@ -68,7 +70,7 @@ export const ChatPanel = memo(function ChatPanel({
   return (
     <Box flexDirection="column" width={width} paddingLeft={1} flexGrow={1}>
       <Box flexShrink={0}>
-        <Text bold>Chat — {project || "Main process"}</Text>
+        <Text bold>{t({en:"Chat — ",zh:"对话 — "})}{project || t({en:"Main process",zh:"主进程"})}</Text>
       </Box>
 
       <VirtualConversation
@@ -86,8 +88,8 @@ export const ChatPanel = memo(function ChatPanel({
         includeDescendants
         empty={(
           <Box paddingTop={1} flexDirection="column">
-            <Text dimColor>Type a task and press Enter. The main process supervises and delegates when needed.</Text>
-            <Text dimColor>Use /runtime for governance data; /processlist opens every subprocess in this project.</Text>
+
+
           </Box>
         )}
       />

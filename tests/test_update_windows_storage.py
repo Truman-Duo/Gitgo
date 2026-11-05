@@ -29,13 +29,24 @@ def test_private_root_and_file_use_same_stable_volume(private):
         assert identity["device"] == win.filesystem_identity(private)["device"]
         assert identity["inode"] > 0
     finally: os.close(fd)
-    win.validate_staging(private)
+    with win.private_namespace(private): win.validate_staging(private)
 
 
 def test_python_private_directory_owner_rights_are_bound_to_trusted_owner(private):
     path = private / "python-private"
     path.mkdir(mode=0o700)
-    win.validate_staging(path)
+    with win.private_namespace(path): win.validate_staging(path)
+
+
+def test_private_namespace_pins_real_root_and_ancestors_until_retirement(private):
+    child = private / "child"; win.create_private_directory(child)
+    with win.private_namespace(private):
+        win.validate_staging(child)
+        with pytest.raises(OSError): os.rename(private, private.with_name("moved-private"))
+        with pytest.raises(OSError): os.rename(private.parent, private.parent.with_name("moved-parent"))
+    renamed = private / "renamed-child"
+    os.rename(child, renamed)
+    assert renamed.is_dir()
 
 
 def test_multiple_shared_locks_block_exclusive_in_another_process(private):
@@ -77,6 +88,8 @@ def test_dacl_grant_to_everyone_is_not_a_private_installation(private):
         capture_output=True, timeout=20)
     assert result.returncode == 0
     with pytest.raises(UpdateError, match="UPDATE_ACL_INVALID"): win.filesystem_identity(private)
+    with pytest.raises(UpdateError, match="UPDATE_ACL_INVALID"):
+        with win.private_namespace(private): pytest.fail("Foreign write rights were accepted")
 
 
 def test_junction_is_rejected_even_when_destination_is_owned(private):
@@ -99,3 +112,31 @@ def test_write_through_move_and_existing_destination_rejection(private):
     assert source.read_bytes() == b"one" and destination.read_bytes() == b"two"
     win.move(source, destination, replace=True)
     assert not source.exists() and destination.read_bytes() == b"one"
+
+
+def test_owned_directory_rename_holds_identity_through_initialization(private):
+    from backend.core.installation_lease import runtime_descriptors, sharing_descriptors
+    source, target = private / "source", private / "target"
+    win.create_private_directory(source)
+    identity = win.filesystem_identity(source)
+    def initialize():
+        assert win.filesystem_identity(target) == identity
+        assert runtime_descriptors() == () and sharing_descriptors()
+        (target / "initialized").write_bytes(b"complete")
+        with pytest.raises(OSError): os.rename(target, private / "stolen")
+        with pytest.raises(OSError): os.rename(private, private.with_name("stolen-parent"))
+        return "initialized"
+    with win.private_namespace(private):
+        assert win.rename_owned_directory(source, target, identity, callback=initialize) == "initialized"
+    assert not source.exists() and (target / "initialized").read_bytes() == b"complete"
+    assert sharing_descriptors() == ()
+
+
+def test_owned_directory_rename_rejects_unrelated_source_and_occupied_target(private):
+    source, target = private / "source", private / "target"
+    for path in (source, target): win.create_private_directory(path)
+    identity = win.filesystem_identity(source)
+    with pytest.raises(UpdateError): win.rename_owned_directory(source, target, identity)
+    with pytest.raises(UpdateError):
+        win.rename_owned_directory(source, private / "free", {**identity, "inode": identity["inode"] + 1})
+    assert source.is_dir() and target.is_dir() and not (private / "free").exists()

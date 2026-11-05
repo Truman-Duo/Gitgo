@@ -57,12 +57,12 @@ test("publish translates tabs, states, footer and local validation without chang
  const io=mount(<Fixture/>);
  try{
   await wait();const initial=io.lines().join(" ");
-  expect(initial).toContain("提交格式");expect(initial).toContain("起始编号");expect(initial).not.toContain("Commit Format");
-  await io.send("\x1b[B");await io.send("\r");expect(footer.statusText).toContain("保存");
-  await io.send("\x7f");await io.send("-1");await io.send("\r");
-  expect(io.lines().join(" ")).toContain("起始编号必须为非负整数");await io.send("\x1b");
-  await io.send("\x1b[C");expect(io.lines().join(" ")).toContain("隐私扫描");expect(io.lines().join(" ")).toContain("开启");
-  await io.send("\x1b[C");expect(io.lines().join(" ")).toContain("未配置发布仓库");
+  expect(initial).toContain("提交规范");expect(initial).not.toContain("Commit Format");
+  await io.send("\x1b[C");await io.send("\x1b[C");expect(io.lines().join(" ")).toContain("起始编号");
+  await io.send("\r");await io.send("\x1b[B");await io.send("\r");expect(footer.statusText).toBe("");
+  await io.send("\x15");await io.send("-1");await io.send("\r");expect(calls.some(c=>c.operation==="publish.set")).toBe(false);
+  await io.send("\x13");expect(io.lines().join(" ")).toContain("起始编号必须为非负整数");await io.send("\x1b");
+  await io.send("\x1b[C");expect(io.lines().join(" ")).toContain("隐私扫描");expect(io.lines().join(" ")).toContain("清理工具共同署名");
   expect(calls.some(c=>c.operation==="publish.set")).toBe(false);
  }finally{io.close();}
 });
@@ -72,4 +72,29 @@ test("context follows the latest execution of each durable A/B conversation",()=
  const next:any={...old,process_id:"new-a",created_at:"3"};
  const child:any={process_id:"b",session_id:"b",actor_kind:"worker",parent_id:"old-a",created_at:"2"};
  expect(contextSessions([old,child,next]).map(p=>p.process_id)).toEqual(["new-a","b"]);
+});
+
+test("project check settings edit targets, seeds and limits without starting checks",async()=>{
+ const calls:any[]=[];let checks:any[]=[];
+ const client:any={async callTool(operation:string,args:any){
+  calls.push({operation,args});
+  if(operation==="publish.get")return {commit_format:{},privacy:{},remote_url:"",checks};
+  if(operation==="history.list")return [];
+  if(operation==="publish.set"){checks=args.value;return {ok:true};}
+  throw Error("Unexpected execution");
+ }};
+ function Fixture(){const input=useTextInput();return <LanguageContext.Provider value="zh">
+  <PublishPanel client={client} project="p" cmdInput={input} onFooter={()=>{}} onDismiss={()=>{}} onOpenTrial={()=>{}} onOpenFormal={()=>{}}/>
+ </LanguageContext.Provider>;}
+ const io=mount(<Fixture/>);
+ try{
+  await wait();for(let i=0;i<4;i++)await io.send("\x1b[C");
+  expect(io.lines().join(" ")).toContain("必需检查");
+  await io.send("\r");await io.send("\r");await io.send("tests/a.py | 42,7 | 20; tests/b.py | 11 | 30");await io.send("\r");
+  expect(calls.some(c=>c.operation==="publish.set")).toBe(false);await io.send("\x13");await wait();
+  expect(calls.find(c=>c.operation==="publish.set").args).toEqual({project:"p",section:"checks",expected_value:[],value:[
+   {target:"tests/a.py",seeds:[42,7],timeout:20},{target:"tests/b.py",seeds:[11],timeout:30}]});
+  expect(io.lines().join(" ")).toContain("tests/a.py");
+  expect(calls.some(c=>c.operation==="publish.verify")).toBe(false);
+ }finally{io.close();}
 });

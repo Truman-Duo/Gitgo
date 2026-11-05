@@ -21,6 +21,10 @@ class RegisteredTestRuntime(FileCandidateRuntime):
             return {**error_payload(exc.code, message=str(exc)), "effect_state": "not_committed"}
         if self.phase == "record":
             self.phase = "recorded"
+            # The parent has durably recorded real seed results. A red test is
+            # a completed execution with failed business verification, not an
+            # unknown invocation. Earlier failures never reach this branch.
+            result = {**result, "execution_state": "completed"}
         return result
 
     def before_record(self):
@@ -31,6 +35,7 @@ class RegisteredTestRuntime(FileCandidateRuntime):
     def execute_seeds(self, workspace, args, validation):
         self.phase = "execute"
         producer = WorkspaceCandidateRuntime(self.pipeline, self.ctx, self.registration, self.owner, self.tool)
+        producer.lifecycle = getattr(self, "lifecycle", None)
         diagnostics = {}
         try:
             record = producer.preview("run_test", args, self.timeout, trusted_arguments={}, copy_inputs=True, diagnostics=diagnostics,

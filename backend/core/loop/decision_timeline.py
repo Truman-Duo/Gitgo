@@ -6,6 +6,7 @@ def decision_timeline(ledger: list[dict]) -> list[dict]:
     requests: dict[str, dict] = {}
     answers: dict[str, dict] = {}
     cancellations: dict[str, dict] = {}
+    materials: dict[str, list] = {}
     for event in ledger:
         identity = str(event.get("decision_id") or "")
         if not identity:
@@ -16,6 +17,9 @@ def decision_timeline(ledger: list[dict]) -> list[dict]:
             answers[identity] = event
         elif event.get("event") == "user_decision_cancelled":
             cancellations[identity] = event
+        elif event.get("event") == "user_decision_material_attached":
+            materials.setdefault(identity, []).append({key: event.get(key) for key in
+                ('reference', 'summary', 'source', 'authority_granted')})
     cards = []
     for identity, request in requests.items():
         answer = answers.get(identity)
@@ -25,8 +29,10 @@ def decision_timeline(ledger: list[dict]) -> list[dict]:
             "options", "allow_free_form", "created_at", "decision_sequence", "context_epoch",
             "kind", "state_topic", "supersedes_decision_id", "permission_request",
             "source_process_id", "source_actor_kind", "source_display_name",
-            "owner_process_id", "questions",
+            "owner_process_id", "questions", "manual_unit",
         )}
+        if materials.get(identity):
+            public_request['materials'] = materials[identity]
         cards.append({
             "message_id": f"decision:{identity}", "turn_id": str(request.get("task_id") or ""),
             "role": "assistant", "kind": "decision", "visibility": "public", "final": True,

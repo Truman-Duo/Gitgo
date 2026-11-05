@@ -1,8 +1,9 @@
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {existsSync} from 'node:fs';
 import {dirname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {selectRuntime} from './runtime.mjs';
+import {selectRuntime, probeRuntime} from './runtime.mjs';
+import {currentBuild} from './build-state.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -26,6 +27,13 @@ try {
     console.log(JSON.stringify(diagnostic, null, 2));
   } else {
     const bundle = resolve(root, 'dist', `${entry}.js`);
+    if (!currentBuild(root) || !existsSync(bundle)) {
+      const bun = probes.find(probe => probe.runtime === 'bun' && probe.available) || probeRuntime('bun', process.env.GITGO_BUN || 'bun');
+      if (!bun.available) throw new Error('Dashboard source changed; a supported Bun is required to rebuild before launch.');
+      console.error('[gitgo-dashboard] Rebuilding changed Dashboard source…');
+      const result = spawnSync(bun.executable, ['run', 'scripts/build.ts'], {cwd: root, env: process.env, stdio: 'inherit'});
+      if (result.error || result.status !== 0 || !currentBuild(root)) throw new Error('Dashboard rebuild failed; refusing to launch an outdated bundle.');
+    }
     if (!existsSync(bundle)) throw new Error('Dashboard bundle missing. Run bun run build first (build tools require Bun).');
     console.error(`[gitgo-dashboard] ${selected.runtime} ${selected.version} (${selected.executable})`);
     for (const probe of probes.filter(p => !p.available)) console.error(`[gitgo-dashboard] ${probe.runtime} unavailable: ${probe.reason}`);

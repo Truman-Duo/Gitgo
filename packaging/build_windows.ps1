@@ -45,6 +45,8 @@ if (-not $Python -or -not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $Bun -PathType Leaf)) {
     throw "Bun runtime not found: $Bun"
 }
+& $Bun (Join-Path $root "cli\dashboard\scripts\check-runtime.mjs")
+if ($LASTEXITCODE -ne 0) { throw "Build runtime failed the security version check" }
 & $Python -B (Join-Path $root "scripts\release_artifacts.py") --check
 if ($LASTEXITCODE -ne 0) { throw "Product versions do not agree" }
 if ((Test-Path -LiteralPath $stage) -and (Get-ChildItem -LiteralPath $stage -Force | Select-Object -First 1)) {
@@ -114,6 +116,7 @@ Push-Location (Join-Path $root "cli\dashboard")
 try {
     & $Bun test src\input\runtime.test.tsx src\backend\client.test.ts `
         src\backend\terminalLauncher.test.ts src\components\config\GeneralTab.test.tsx `
+        src\components\config\KeybindingsTab.test.tsx `
         src\components\promptRepaint.test.tsx
     if ($LASTEXITCODE -ne 0) {
         throw "Dashboard Unicode/input integrity release gate failed"
@@ -131,7 +134,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Dashboard compilation failed" }
     Push-Location (Join-Path $root "cli\dashboard")
     try {
-        & $Bun run build
+        & $Bun scripts/build.ts
         if ($LASTEXITCODE -ne 0) { throw "Dashboard portable bundle failed" }
     } finally { Pop-Location }
     $dashboardScripts = Join-Path $stage "dashboard\scripts"
@@ -164,12 +167,14 @@ $pyInstallerArguments = @(
     # Tools are registered/imported dynamically and approval digests cover their
     # implementations even before first use. Match native acceptance packaging.
     "--paths", $root, "--collect-submodules", "backend",
+    "--additional-hooks-dir", (Join-Path $root "packaging\pyinstaller-hooks"),
     "--hidden-import", "backend.core.tools.registrations",
     "--distpath", $internal,
     "--workpath", (Join-Path $root "build\terminal-host"),
     "--specpath", (Join-Path $root "build\terminal-host"),
     "--version-file", $versionFile,
     "--add-data", "$terminalReferences;backend/resources/terminal_provenance",
+    "--add-data", "$(Join-Path $root 'backend/resources/keyboard');backend/resources/keyboard",
     "--add-data", "$promptResources;backend/resources/prompts",
     (Join-Path $root "backend\core\native_host_entry.py")
 )
@@ -189,6 +194,10 @@ if ($ManagedUpdate) {
 if ($LASTEXITCODE -ne 0) { throw "Product manifest rendering failed" }
 
 $packagedHost = Join-Path $internal "gitgo-host\gitgo-host.exe"
+$sourceNotices = Join-Path $stage 'source-notices'
+New-Item -ItemType Directory -Path $sourceNotices | Out-Null
+Copy-Item -LiteralPath (Join-Path $root 'LICENSE.md') -Destination (Join-Path $sourceNotices 'Gitgo-LICENSE.md')
+Copy-Item -LiteralPath (Join-Path $root 'cli\dashboard\vendor\ink\PROVENANCE.md'), (Join-Path $root 'cli\dashboard\vendor\ink\provenance.json') -Destination $sourceNotices
 $reportedVersion = & (Join-Path $stage "$($product.primary_command).exe") --version
 if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne "Gitgo $($product.version)") {
     throw "Packaged Dashboard reports an unexpected product version"

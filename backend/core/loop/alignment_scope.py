@@ -25,8 +25,11 @@ def validate_request_frame(assessment, payload):
         # provider facade requires this field before its result can be applied.
         return None
     sources = user_sources(payload)
+    if isinstance(frame,dict) and not source_quote(frame.get('source_quote'), sources):
+        raise ValueError('request_frame.source_quote must be an exact substring of request, original_request, user_updates, '
+                         'actual_answers[].answer or confirmed_answers[].answer. Copy the original user text directly; '
+                         'task_maintenance, historical_decisions and your paraphrases are not quotation sources')
     if (not isinstance(frame, dict) or frame.get('kind') not in {'conversation', 'deliverable'}
-            or not source_quote(frame.get('source_quote'), sources)
             or not isinstance(frame.get('outcome'), str) or not frame['outcome'].strip()
             or len(frame['outcome']) > 1000):
         raise ValueError('request_frame must describe the current outcome and quote actual user input')

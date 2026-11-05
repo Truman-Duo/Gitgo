@@ -39,6 +39,66 @@ def test_received_text_is_not_confirmed_or_completion_evidence(tmp_path_factory)
     assert not HostCompletionEvaluator.evaluate(p, 'A beautiful itinerary').allowed
 
 
+def test_admission_can_gather_evidence_before_declared_question_without_resolving_it(tmp_path_factory):
+    p = process(tmp_path_factory)
+    w = EngineeringWorkflow(p)
+    w.configure({'profiles': ['alignment'], 'nodes': [{'id': 'fixed', 'kind': 'decision',
+        'state_topic': 'purpose', 'before_mutation': True,
+        'request': {'kind': 'clarification', 'question': 'Purpose?',
+                    'why_user_must_decide': 'Changes the requested outcome', 'options': []}}]})
+    runtime = AlignmentRuntime(p)
+    payload = runtime.payload('Investigate before asking the declared choice')
+    before = copy.deepcopy(w._load())
+    result = runtime.apply({'status': 'ready', 'questions': [], 'interpretations': []}, payload)
+    assert result['status'] == 'ready'
+    assert w._load()['records'] == before['records'] == {}
+    assert w.status()['question_frontier'] == ['fixed'] and not w.status()['complete']
+    assert not p.pending_decision and not confirmed_user_state(p.session.host_ledger)
+    assert not HostCompletionEvaluator.evaluate(p, 'Claimed final delivery').allowed
+    with pytest.raises(ValueError, match='discard unresolved'):
+        runtime.apply({'status': 'ready', 'questions': [], 'interpretations': []},
+                      runtime.payload(candidate='Claimed final delivery'))
+    # Publishing the real card restores the existing strict readiness rule.
+    w.ask_frontier()
+    with pytest.raises(ValueError, match='discard unresolved'):
+        runtime.apply({'status': 'ready', 'questions': [], 'interpretations': []}, runtime.payload())
+
+
+def test_question_assessment_cannot_accept_a_card_and_simultaneously_discard_its_input(tmp_path_factory):
+    p = process(tmp_path_factory)
+    runtime = AlignmentRuntime(p)
+    question = {'kind': 'clarification', 'question': 'When should implementation start?',
+        'why_user_must_decide': 'The user explicitly reserved the scheduling decision', 'options': []}
+    payload = runtime.payload('Align the plan, then ask the scheduling question', proposed_questions=[question])
+    before = copy.deepcopy(p.context_snapshot)
+    accepted = {**question, 'proposal_index': 0, 'state_topic': 'implementation-time', 'tier': 'foundational'}
+    with pytest.raises(ValueError, match='cannot both accept questions'):
+        runtime.apply({'status': 'ready', 'questions': [accepted], 'interpretations': []}, payload)
+    assert p.context_snapshot == before and not p.pending_decision
+    result = runtime.apply({'status': 'needs_input', 'questions': [accepted], 'interpretations': []}, payload)
+    assert result['decision']['questions'][0]['question'] == question['question']
+    assert not confirmed_user_state(p.session.host_ledger)
+
+
+def test_new_assessor_clarification_accepts_compact_labels_but_no_authority_actions(tmp_path_factory):
+    from backend.core.loop.alignment_question import question_request
+    question = {'question': 'Which visible prefix?', 'why_user_must_decide': 'Changes the output',
+        'options': ['Keep prefix', 'Amount only']}
+    p = process(tmp_path_factory)
+    runtime = AlignmentRuntime(p)
+    result = runtime.apply({'status': 'needs_input', 'interpretations': [], 'questions': [{**question,
+        'state_topic': 'prefix', 'tier': 'refinement'}]}, runtime.payload())
+    assert [o['label'] for o in result['decision']['questions'][0]['options']] == question['options']
+    assert not any(o.get('action') for o in result['decision']['questions'][0]['options'])
+    assert question_request({'proposal_index': 0}, {'stage': 'question_proposal',
+        'proposed_questions': [question]})['options'] == question['options']
+    other = process(tmp_path_factory)
+    with pytest.raises(ValueError, match='authority action'):
+        AlignmentRuntime(other).apply({'status': 'needs_input', 'interpretations': [], 'questions': [{**question,
+            'state_topic': 'prefix', 'options': [{'label': 'Grant', 'action': 'approve'}]}]},
+            AlignmentRuntime(other).payload())
+
+
 def test_direct_model_question_retains_origin_for_source_bound_exploratory_delivery(tmp_path_factory):
     p = process(tmp_path_factory)
     p.task_kind = 'answer'
@@ -191,6 +251,21 @@ def test_ambiguous_volunteered_source_is_not_guessed(tmp_path_factory):
     with pytest.raises(ValueError, match='actual user receipt'):
         EngineeringWorkflow(p).resolve_answer(roles, request['decision_id'],
             {'disposition': 'confirmed', 'value': 'Employees', 'quote': 'Users are'})
+
+
+def test_unknown_question_dependency_reports_legal_topics_without_mutation(tmp_path_factory):
+    p = process(tmp_path_factory)
+    runtime = AlignmentRuntime(p)
+    payload = runtime.payload()
+    before = copy.deepcopy(p.context_snapshot)
+    assessment = {'status': 'needs_input', 'interpretations': [], 'questions': [
+        {'state_topic': 'priority', 'question': 'Which priority?', 'why_user_must_decide': 'User owns priority',
+         'depends_on_topics': ['already completed setup operation']}]}
+    with pytest.raises(ValueError, match='QUESTION_DEPENDENCY_UNKNOWN.*available'):
+        runtime.apply(assessment, payload)
+    assert p.context_snapshot == before and not p.pending_decision
+    assessment['questions'][0]['depends_on_topics'] = []
+    assert runtime.apply(assessment, payload)['status'] == 'needs_input'
 
 
 def elicited(p, tier='refinement'):
@@ -497,7 +572,11 @@ def test_reviewed_contract_preview_matches_actual_publication_without_repeated_r
     assert p.context_snapshot['task_contract']['goal'] == proposal['goal']
 
 
-def test_invalid_contract_is_reported_without_paid_semantic_review(tmp_path_factory):
+@pytest.mark.parametrize('arguments', [
+    '{"goal":"Explain the supplied design","execution_mode":"invalid"}',
+    '{"goal":"Explain the supplied design","execution_mode":"answer"}',
+])
+def test_invalid_contract_is_reported_without_paid_semantic_review(tmp_path_factory, arguments):
     from backend.core.loop.executor import agent_step
     from backend.core.loop.provider_protocol import ProviderEvent, ProviderEventType
     from backend.core.loop.outcome import TaskOutcome, OutcomeStatus
@@ -518,7 +597,7 @@ def test_invalid_contract_is_reported_without_paid_semantic_review(tmp_path_fact
                     tool_name='declare_task_contract', output_index=0)
                 yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id='invalid',
                     tool_name='declare_task_contract', output_index=0,
-                    arguments='{"goal":"Explain the supplied design","execution_mode":"invalid"}')
+                    arguments=arguments)
             else:
                 yield ProviderEvent(ProviderEventType.TEXT_DELTA, text='The supplied design.')
             yield ProviderEvent(ProviderEventType.RESPONSE_COMPLETED)
@@ -925,6 +1004,72 @@ def test_stage_confusion_uses_existing_bounded_compiler_recovery(tmp_path_factor
     assert 'only valid at delivery' in calls[1]['host_validation_error']
     assert [e['status'] for e in events if e['event'] == 'alignment_assessment_completed'] == ['ready']
     assert any(e['event'] == 'alignment_assessment_rejected' for e in events)
+
+
+def test_invalid_assessor_proposal_returns_to_author_without_acceptance_or_state_loss(tmp_path_factory,monkeypatch):
+    from types import SimpleNamespace
+    from backend.core.loop.alignment_review import AlignmentReview,AlignmentReviewHooks
+    p=process(tmp_path_factory)
+    AlignmentRuntime(p).payload('Inspect and report')
+    before=copy.deepcopy((p.context_snapshot,p.session.host_ledger,p.pending_decision,p.status))
+    events=[]; calls=[]
+    def assess(payload,**kwargs):
+        calls.append(payload)
+        if len(calls)==1:return {'schema_error':'provider_response_incomplete','incomplete_reason':'max_output_tokens'}
+        return {'status':'needs_input','interpretations':[],'questions':[]}
+    def reject(*args):raise ValueError('do not repeat a resolved question; use explicit revision when intent changes')
+    monkeypatch.setattr(AlignmentRuntime,'apply',reject)
+    noop=lambda *a,**k:None
+    hooks=AlignmentReviewHooks(emit=lambda e,**kw:events.append(e),frontend_emit=None,notice=noop,
+        refresh_prompt=noop,before_attempt=noop,route_notice=noop,result=noop,cancellation=noop,budget_exhausted=noop)
+    result=AlignmentReview(p,SimpleNamespace(assess_alignment=assess),hooks).check(
+        'Inspect and report',trigger='contract',proposed_contracts=[{'goal':'Inspect and report'}])
+    assert 'alignment_repair' in result and 'no tool' in result['alignment_repair']
+    assert len(calls)==2 and calls[1]['provider_output_recovery']
+    from backend.core.loop.alignment_routing import REVIEW_POLICY
+    expected_context=copy.deepcopy(before[0])
+    expected_context['alignment_runtime']['review_policy']=REVIEW_POLICY
+    assert (p.context_snapshot,p.session.host_ledger,p.pending_decision,p.status)==(expected_context,*before[1:])
+    assert any(e['event']=='alignment_proposal_repair_required' for e in events)
+    assert not any(e['event']=='alignment_assessment_completed' for e in events)
+
+
+def test_missing_assessor_output_still_fails_instead_of_becoming_readiness(tmp_path_factory):
+    from types import SimpleNamespace
+    from backend.core.loop.alignment_review import AlignmentReview,AlignmentReviewHooks
+    p=process(tmp_path_factory)
+    calls=[]; events=[]
+    def assess(payload,**kwargs):
+        calls.append(payload)
+        return {'schema_error':'provider_response_incomplete','incomplete_reason':'max_output_tokens'}
+    noop=lambda *a,**k:None
+    hooks=AlignmentReviewHooks(emit=lambda e,**kw:events.append(e),frontend_emit=None,notice=noop,
+        refresh_prompt=noop,before_attempt=noop,route_notice=noop,
+        result=lambda *a,**k:{'error_code':k.get('error_code')},cancellation=noop,budget_exhausted=noop)
+    result=AlignmentReview(p,SimpleNamespace(assess_alignment=assess),hooks).check(
+        'Inspect and report',trigger='contract',proposed_contracts=[{'goal':'Inspect and report'}])
+    assert len(calls)==2 and result['error_code']=='ALIGNMENT_REVIEW_FAILED'
+    assert p.status.value=='failed' and not p.pending_decision
+    assert not any(e['event']=='alignment_proposal_repair_required' for e in events)
+
+
+def test_malformed_original_question_returns_to_author_before_paid_semantic_review(tmp_path_factory):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from backend.core.loop.alignment_review import AlignmentReview
+    p = process(tmp_path_factory)
+    before = deepcopy((p.context_snapshot, p.session.host_ledger, p.status))
+    request = {'kind': 'choice', 'question': 'Keep the prefix?',
+               'why_user_must_decide': 'Product preference',
+               'options': [{'label': label, 'principle': label, 'immediate_effect': label,
+                            'downstream_effect': label, 'reversibility': 'Can change later'}
+                           for label in ['Keep', 'Remove']]}
+    # Neither provider nor hooks are needed to reject a structural input error.
+    result = AlignmentReview(p, SimpleNamespace(), None).check(
+        'Choose prefix', proposed_questions=[request], trigger='question_proposal')
+    assert 'risks' in result['alignment_repair']
+    assert p.pending_decision is None
+    assert (p.context_snapshot, p.session.host_ledger, p.status) == before
 
 
 def test_review_selected_question_preserves_options_and_is_a_real_broker_card(tmp_path_factory):

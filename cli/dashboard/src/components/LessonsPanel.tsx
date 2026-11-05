@@ -1,3 +1,6 @@
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
+import {SelectionText} from "./Selection.js";
+import {isBindingAction, applicationBindings} from "../input/router.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages,standardKey,moveSelection,reconcileSelection} from "../ui/pageContract.js";
 import {PageActions} from "../ui/PageActions.js";
@@ -7,7 +10,7 @@ import {useManagedInput as useInput, useScrollInput} from "../input/runtime.js";
 import type {BackendClient} from "../backend/client.js";
 import {lessonHarvestPreview, lessonHarvestResolve, lessonHarvestList, lessonHarvestContext, lessonList, lessonSearch, lessonVerify} from "../backend/tools.js";
 import {resolveLessonsKey} from "../input/overlays/lessons.js";
-import {colors, usePanelSize, useSelectionStyle} from "../theme/index.js";
+import {colors, usePanelSize} from "../theme/index.js";
 import {LessonsTab} from "./LessonsTab.js";
 import {BtwPanel} from "./BtwPanel.js";
 import type {UseTextInputReturn} from "../hooks/useTextInput.js";
@@ -58,6 +61,7 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
         setStatus(String(error?.message || error)); setLoading(false);
       });
   }, [client, project]);
+  const menuHelp=useLocalHelpCommand("lessons",onFooter,interactive&&!["harvest","edit","search","discuss"].includes(mode));
   useEffect(() => {
     mounted.current = true;
     const unsubscribe = client.subscribeEvents?.(event => {
@@ -67,15 +71,16 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
     return () => { mounted.current = false; refreshSequence.current++; unsubscribe?.(); };
   }, [client, project, refresh]);
   useEffect(() => {
+    if(menuHelp.active)return;
     if (!onFooter) return;
     if (!cmdInput || !["harvest", "edit"].includes(mode)) {
       onFooter({hidden: true}); return () => onFooter(null);
     }
     onFooter({kind: "normal", cmdInput, suggestions: [], suggestionIdx: 0, cmdResult: "",
-      statusText: mode === "edit" ? t({en:"Editing ",zh:"正在编辑 "}) + t(FIELD_LABELS[EDIT_FIELDS[fieldIndex]!]) + t({en:" · Tab next field · Enter keep draft · Esc cancel",zh:" · Tab 下一字段 · Enter 保留草稿 · Esc 取消"})
-        : t({en:"Enter analyze · Esc cancel",zh:"Enter 分析 · Esc 取消"})});
+      statusText: mode === "edit" ? t({en:"Editing ",zh:"正在编辑 "}) + t(FIELD_LABELS[EDIT_FIELDS[fieldIndex]!])
+        : t({en:"Enter analyze · Esc cancel",zh:"Enter 分析 · Esc 取消",keys:true})});
     return () => onFooter(null);
-  }, [mode, fieldIndex, cmdInput, cmdInput?.value, cmdInput?.cursor, onFooter]);
+  }, [mode, fieldIndex, cmdInput, cmdInput?.value, cmdInput?.cursor, onFooter,menuHelp.active]);
   useEffect(() => {
     if (initialQuery?.trim()) void lessonSearch(client, project, initialQuery.trim())
       .then((r: any) => setSearchResults(Array.isArray(r) ? r : r?.lessons || []))
@@ -121,13 +126,14 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
   const menu=mode==="confirm"?reviewActions:listActions;
   const activeAction=reconcileSelection(menu,actionIndex);
   useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
     if (mode === "harvest" || mode === "edit") {
       if (busy) return;
       if (key.escape) { cmdInput?.setValue(""); setMode(mode === "edit" ? "confirm" : "list"); return; }
       if (mode === "edit" && key.tab) {
         const revised = keepField();
         if (revised && cmdInput) {
-          const next = (fieldIndex + 1) % EDIT_FIELDS.length;
+          const next = (fieldIndex + (key.shift ? EDIT_FIELDS.length-1 : 1)) % EDIT_FIELDS.length;
           setFieldIndex(next); cmdInput.setValue(fieldValue(revised, EDIT_FIELDS[next]!));
         }
         return;
@@ -161,14 +167,14 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
         else onDismiss();
         return;
       }
-      if(command==="next"){setActionsFocused(v=>!v);return;}
+      if((command==="next"||command==="previous")){setActionsFocused(v=>!v);return;}
       if(!actionsFocused){
         if(command==="up"||command==="down"){
           const delta=command==="up"?-1:1;
           if(mode==="confirm")setCandidateIndex(v=>Math.max(0,Math.min(reviews.length-1,v+delta)));
           else setSel(v=>Math.max(0,Math.min((lessons?.pending?.length||1)-1,v+delta)));
           scrollRef.current?.scrollTo(0);
-        }else if(input===" "&&mode==="confirm"&&!key.paste&&!key.ctrl&&!key.meta)
+        }else if(isBindingAction("lesson.toggle",input,key)&&mode==="confirm"&&!key.paste)
           setReviews(current=>current.map((item,index)=>index===candidateIndex?{...item,action:item.action==="accept"?"discard":"accept"}:item));
         else if(command==="activate")setActionsFocused(true);
         return;
@@ -214,7 +220,7 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
       else if (action.type === "searchBackspace") setQuery(value => value.slice(0, -1));
       else if (action.type === "searchInsert") setQuery(value => value + action.text);
     }
-  }, {isActive: interactive && mode !== "discuss"});
+  }, {isActive: interactive && mode !== "discuss", bindingContext: mode === "confirm" && !actionsFocused ? "lesson-review" : ""});
 
   if (mode === "discuss" && proposal) return <BtwPanel client={client} project={project} processId="" cols={w}
     question={t({en:"Discuss this knowledge candidate: what do its sources actually support, what should change in its conditions, rule, validation or limitations?",zh:"讨论此知识候选：来源实际支持哪些内容？适用条件、规则、验证或限制应如何调整？"})}
@@ -226,7 +232,7 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
   if (mode === "edit") return <PageFrame page={pages.lessons} width={w}>
     <Text bold>{t({en:"Edit candidate ",zh:"编辑候选 "})}{candidateIndex + 1} · {t(FIELD_LABELS[EDIT_FIELDS[fieldIndex]!])}</Text>
     <Text dimColor>{t({en:"Use the NormalBar below. Draft changes are saved only after you submit the proposal.",zh:"在下方输入框编辑草稿，提交提案后才保存。"})}</Text>
-    <Text dimColor>{t({en:"Tab moves through trigger, rule, type, conditions, validation, novelty and limitations.",zh:"Tab 切换触发条件、规则、类型、适用条件、验证、新颖性和限制。"})}</Text>{statusRow}
+    {statusRow}
   </PageFrame>;
   if (mode === "harvest") return <PageFrame page={pages.lessons} width={w}>
     <Text bold>{t({en:"Harvest a lesson · ",zh:"提炼经验 · "})}{project}</Text>
@@ -236,8 +242,8 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
   if (mode === "confirm" && current) return <PageFrame page={pages.lessons} width={w}>
     <Text bold>{t({en:"Review knowledge proposal · ",zh:"审阅知识提案 · "})}{candidateIndex + 1}/{reviews.length}</Text>
     <Box gap={1}>{reviews.map((item, index) => {
-      const style = useSelectionStyle(index === candidateIndex ? "focused" : "non-focused", "block");
-      return <Text key={index} color={style.fg} backgroundColor={style.bg}> {item.action === "accept" ? "+" : "−"} {index + 1} </Text>;
+
+      return <SelectionText selected={index === candidateIndex} variant="block" key={index}  > {item.action === "accept" ? "+" : "−"} {index + 1} </SelectionText>;
     })}</Box>
     <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1} minHeight={0}>
       <Text bold>{current.trigger}</Text><Text>{current.rule}</Text>
@@ -249,7 +255,7 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
     </ScrollBox>
     {busy ? <Text dimColor>{t({en:"Working…",zh:"正在处理…"})}</Text> : null}{statusRow}
     <PageActions items={reviewActions} selected={activeAction} focused={interactive&&actionsFocused}/>
-    <Text dimColor>{t({en:"↑/↓ candidate · Space include/exclude · Tab actions · ←/→ action · Enter open · Esc back",zh:"↑/↓ 候选 · 空格纳入/排除 · Tab 操作 · ←/→ 操作 · Enter 打开 · Esc 返回"})}</Text>
+
   </PageFrame>;
   if (mode === "evidence") return <PageFrame page={pages.lessons} width={w}>
     <Text bold>{t({en:"Candidate sources · read-only excerpts",zh:"候选来源 · 只读摘录"})}</Text>
@@ -265,13 +271,13 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
         <Text>{source.excerpt}</Text>{source.truncated ? <Text dimColor>{t({en:"Excerpt truncated.",zh:"摘录已截断。"})}</Text> : null}
       </Box>)}
       {evidence?.sources_partial ? <Text dimColor>{t({en:"More sources exist beyond this bounded view.",zh:"此视图范围外还有其他来源。"})}</Text> : null}
-    </ScrollBox><Text dimColor>{t({en:"PgUp/PgDn scroll · Esc return to review",zh:"PgUp/PgDn 滚动 · Esc 返回审阅"})}</Text>
+    </ScrollBox>
   </PageFrame>;
   if (mode === "search") return <PageFrame page={pages.lessons} width={w}>
     <Text bold>{t({en:"Lesson search · ",zh:"搜索经验 · "})}{project}</Text><Text>{t({en:"query: ",zh:"查询："})}{query || "_"}</Text>
     <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1} minHeight={0}>
       {searchResults?.map((item: any, index: number) => <Text key={index}>{item.rule || item.trigger}</Text>)}
-    </ScrollBox>{statusRow}<Text dimColor>{t({en:"Enter search · Esc back",zh:"Enter 搜索 · Esc 返回"})}</Text>
+    </ScrollBox>{statusRow}
   </PageFrame>;
   if (loading) return <Box padding={1}><Text dimColor>{t({en:"Loading lessons…",zh:"正在读取经验…"})}</Text></Box>;
   const selected = lessons?.pending?.[sel];
@@ -286,6 +292,6 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
       {selected ? <Text>{selected.rule}</Text> : null}
     </ScrollBox>{statusRow}
     <PageActions items={listActions} selected={activeAction} focused={interactive&&actionsFocused}/>
-    <Text dimColor>{t({en:"Tab list/actions · ←/→ action · ↑/↓ select · Enter open · Esc back",zh:"Tab 列表/操作 · ←/→ 操作 · ↑/↓ 选择 · Enter 打开 · Esc 返回"})}</Text>
+
   </PageFrame>;
 });

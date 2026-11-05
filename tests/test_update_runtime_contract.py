@@ -49,6 +49,19 @@ def test_code_provenance_is_normalized_but_code_change_is_not():
     assert encode(_canonical_code(original, "writer")) != encode(_canonical_code(changed, "writer"))
 
 
+def test_optional_application_codec_addition_removal_and_change_are_evidence(monkeypatch):
+    name = "compiled.optional.codec"
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _: None)
+    absent = code_evidence((), optional=(name,))
+    assert json.loads(absent)["modules"][name] is None
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _: SimpleNamespace(
+        loader=SimpleNamespace(get_code=lambda _: compile("FORMAT = 1", "fixture", "exec"))))
+    first = code_evidence((), optional=(name,))
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _: SimpleNamespace(
+        loader=SimpleNamespace(get_code=lambda _: compile("FORMAT = 2", "fixture", "exec"))))
+    assert absent != first != code_evidence((), optional=(name,))
+
+
 def test_uninspectable_writer_is_refused(monkeypatch):
     monkeypatch.setattr(importlib.util, "find_spec", lambda _: SimpleNamespace(loader=object()))
     with pytest.raises(UpdateError, match="UPDATE_RUNTIME_CONTRACT"):

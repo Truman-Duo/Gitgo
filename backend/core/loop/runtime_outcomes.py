@@ -128,6 +128,7 @@ def _make_result(process: AgentProcess, session: "AgentSession",
     task_receipts = list(process.tool_receipts)[int(
         getattr(process, "_turn_tool_receipts_start", 0) or 0
     ):]
+    from backend.core.mechanism_runtime.application import projection
     wire = TaskOutcome(
         task_id=process.active_task_id or process.process_id,
         process_id=process.process_id,
@@ -178,6 +179,9 @@ def _make_result(process: AgentProcess, session: "AgentSession",
                 process.task_budget.snapshot() if process.task_budget is not None else None
             ),
             "delegated_outcomes": _delegated_outcome_metadata(process),
+            "completion_stages": [{key: item[key] for key in
+                ('id', 'definition_id', 'definition_revision', 'epoch', 'phase', 'effective_ref', 'completion')}
+                for item in projection(process) if item['completion']['reviews']],
             "timing": {
                 "request_started_at": request_started_at,
                 "agent_elapsed_ms": round(agent_duration_ms, 3),

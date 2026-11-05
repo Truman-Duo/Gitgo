@@ -1,131 +1,112 @@
-import React, { memo, useEffect, useState } from "react";
+import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
+import {SelectionText} from "./Selection.js";
+import React, { memo, useEffect, useState, useRef } from "react";
 import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../input/runtime.js";
 import type { BackendClient } from "../backend/client.js";
 import { resolveExportKey } from "../input/overlays/export.js";
-import { colors, useSelectionStyle } from "../theme/index.js";
+import { colors } from "../theme/index.js";
 import { exportData } from "../backend/tools.js";
 import { chordLabel } from "../input/bindings.js";
 import { applyTextOp, type UseTextInputReturn } from "../hooks/useTextInput.js";
+import { useStagedForm } from "../hooks/useStagedForm.js";
+import { FormFieldRow, fieldLabelWidth } from "./FormFieldRow.js";
+import {cycleChoiceIndex} from "../input/choice.js";
 import type { FooterConfig } from "./CommandBar.js";
-
+import { useCopy } from "../ui/PageFrame.js";
+import {useFeedback} from "../hooks/useFeedback.js";
 type Props = {
-  client: BackendClient;
-  project: string;
-  cols: number;
-  cmdInput: UseTextInputReturn;
-  onFooter: (config: FooterConfig | null) => void;
-  onDismiss: () => void;
+    client: BackendClient;
+    project: string;
+    cols: number;
+    cmdInput: UseTextInputReturn;
+    onFooter: (config: FooterConfig | null) => void;
+    onDismiss: () => void;
 };
-
 const FIELDS = ["scope", "format", "destination"] as const;
-type Field = typeof FIELDS[number];
-const SCOPES = ["Minimal", "Full"] as const;
-const FORMATS = ["json", "yaml", "markdown"] as const;
-
-export const ExportPanel = memo(function ExportPanel({
-  client, project, cols, cmdInput, onFooter, onDismiss,
-}: Props) {
-  const [fieldIndex, setFieldIndex] = useState(0);
-  const [scopeIndex, setScopeIndex] = useState(0);
-  const [formatIndex, setFormatIndex] = useState(0);
-  const [destination, setDestination] = useState(`.gitgo/exports/${project}-minimal.json`);
-  const [status, setStatus] = useState<"idle" | "exporting" | "done" | "error">("idle");
-  const [result, setResult] = useState("");
-  const field = FIELDS[fieldIndex]!;
-
+const SCOPES = ["Minimal", "Full"];
+const FORMATS = ["json", "yaml", "markdown"];
+export const ExportPanel = memo(function ExportPanel({ client, project, cols, cmdInput, onFooter, onDismiss }: Props) {
+    const t = useCopy();
+    const defaultPath = (values: {
+        scope: string;
+        format: string;
+    }) => `.gitgo/exports/${project}-${values.scope.toLowerCase()}.${values.format === "markdown" ? "md" : values.format}`;
+    const form = useStagedForm({ scope: "Minimal", format: "json", destination: defaultPath({ scope: "Minimal", format: "json" }) }, FIELDS, ["scope", "format"], cmdInput);
+    const current = { ...form.current };
+    if (!(form.editing && form.field === "destination") && form.values.destination === defaultPath(form.values))
+        current.destination = defaultPath(current);
+    const [status, setExportState] = useState<"idle" | "exporting" | "done" | "error">("idle");
+    const feedback = useFeedback({kind: "page", id: `export:${project}`});
+    const result = feedback.text, setResult = feedback.show;
+    const submitting = useRef(false);
+    const menuHelp=useLocalHelpCommand("export",onFooter,!form.editing&&status!=="exporting");
   useEffect(() => {
-    if (field === "destination" && status !== "done") cmdInput.setValue(destination);
-    else cmdInput.setValue("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fieldIndex]);
+    if(menuHelp.active)return;
+        onFooter(form.editing && !form.isChoice && status !== "done" ? { kind: "normal", cmdInput, suggestions: [], suggestionIdx: 0, cmdResult: "", statusText: "" } : { hidden: true });
+        return () => onFooter(null);
+    }, [form.editing, form.isChoice, status, cmdInput.value, cmdInput.cursor, onFooter,menuHelp.active]);
+    const submit = async () => {
+        if (submitting.current)
+            return;
+        const outputPath = current.destination.trim();
+        if (!outputPath) {
+            setResult(t({ en: "Destination is required", zh: "请填写导出路径" }));
+            setExportState("error");
+            return;
+        }
+        submitting.current = true;
+        setExportState("exporting");
+        try {
+            const value: any = await exportData(client, project, { minimal: current.scope === "Minimal", output_path: outputPath, output_format: current.format as "json" | "yaml" | "markdown" });
+            if (value?.error || value?.ok === false)
+                throw new Error(String(value.message || value.error || "Export failed"));
+            setResult(`${value.path}   ${value.size} bytes   sha256 ${String(value.sha256 || "").slice(0, 12)}`);
+            setExportState("done");
+            form.cancel();
+        }
+        catch (error: any) {
+            setResult(String(error?.message || error));
+            setExportState("error");
+        }
+        finally {
+            submitting.current = false;
+        }
+    };
 
-  useEffect(() => {
-    if (field !== "destination" || status === "done") {
-      onFooter({ hidden: true });
-      return () => onFooter(null);
-    }
-    onFooter({
-      kind: "normal", cmdInput, suggestions: [], suggestionIdx: 0, cmdResult: "",
-      statusText: `${chordLabel("enter")} export   ${chordLabel("escape")} cancel`,
-    });
-    return () => onFooter(null);
-  }, [field, status, cmdInput, cmdInput.value, cmdInput.cursor, onFooter]);
-
-  const cycle = (delta: number) => {
-    if (field === "scope") {
-      const next = Math.max(0, Math.min(SCOPES.length - 1, scopeIndex + delta));
-      setScopeIndex(next);
-      const suffix = FORMATS[formatIndex] === "markdown" ? "md" : FORMATS[formatIndex];
-      setDestination(`.gitgo/exports/${project}-${next === 0 ? "minimal" : "full"}.${suffix}`);
-    } else if (field === "format") {
-      const next = Math.max(0, Math.min(FORMATS.length - 1, formatIndex + delta));
-      setFormatIndex(next);
-      const suffix = FORMATS[next] === "markdown" ? "md" : FORMATS[next];
-      setDestination(previous => previous.replace(/\.[^.\\/]+$/, `.${suffix}`));
-    }
-  };
-
-  const submit = () => {
-    const outputPath = (field === "destination" ? cmdInput.value : destination).trim();
-    if (!outputPath) { setResult("Destination is required"); setStatus("error"); return; }
-    setDestination(outputPath);
-    setStatus("exporting");
-    exportData(client, project, {
-      minimal: scopeIndex === 0,
-      output_path: outputPath,
-      output_format: FORMATS[formatIndex],
-    }).then((value: any) => {
-      setResult(`${value.path}   ${value.size} bytes   sha256 ${String(value.sha256 || "").slice(0, 12)}`);
-      setStatus("done");
-    }).catch((error: any) => {
-      setResult(String(error?.message || error));
-      setStatus("error");
-    });
-  };
-
-  useInput((input: string, key: any) => {
-    for (const action of resolveExportKey(status, field, input, key)) {
-      if (action.type === "dismiss") onDismiss();
-      else if (action.type === "moveField") {
-        if (field === "destination") setDestination(cmdInput.value);
-        setFieldIndex(value => Math.max(0, Math.min(FIELDS.length - 1, value + action.delta)));
-      } else if (action.type === "cycle") cycle(action.delta);
-      else if (action.type === "text") applyTextOp(action.op, cmdInput);
-      else if (action.type === "confirm") {
-        if (fieldIndex < FIELDS.length - 1) setFieldIndex(value => value + 1);
-        else submit();
-      }
-    }
-  });
-
-  const values: Record<Field, string> = {
-    scope: SCOPES[scopeIndex],
-    format: FORMATS[formatIndex],
-    destination: field === "destination" ? "" : destination,
-  };
-
-  return <Box flexDirection="column" padding={1} width={cols}>
-    <Box marginBottom={1}><Text bold>Export — {project}</Text></Box>
-    {FIELDS.map((item, index) => {
-      const active = index === fieldIndex;
-      const style = useSelectionStyle(active ? "focused" : "non-focused", "row");
-      return <Box key={item}>
-        <Text color={style.fg} backgroundColor={style.bg} bold={style.bold}>
-          {(item[0]!.toUpperCase() + item.slice(1)).padEnd(18)}
-        </Text>
-        <Text dimColor={!active} backgroundColor={style.bg}> {values[item] || " "}</Text>
-      </Box>;
-    })}
-    <Box marginTop={1}>
-      <Text
-        color={status === "error" ? colors.danger : status === "done" ? colors.success : undefined}
-        dimColor={status === "idle"}
-      >
-        {status === "idle"
-          ? `${chordLabel("leftRight")} change   ${chordLabel("upDown")} field   ${chordLabel("enter")} next`
-          : status === "exporting" ? "Exporting…" : result}
-      </Text>
-    </Box>
+  useInput((input, key) => {
+    if(menuHelp.handle(input,key))return;
+        for (const action of resolveExportKey(status, form.field, input, key, form.editing)) {
+            if (action.type === "dismiss")
+                onDismiss();
+            else if (action.type === "moveField")
+                form.move(action.delta);
+            else if (action.type === "beginEdit")
+                form.begin();
+            else if (action.type === "confirm")
+                form.confirm(current);
+            else if (action.type === "cancelEdit")
+                form.cancel();
+            else if (action.type === "submit")
+                void submit();
+            else if (action.type === "text")
+                applyTextOp(action.op, cmdInput);
+            else if (action.type === "cycle") {
+                const choices = form.field === "scope" ? SCOPES : FORMATS;
+                form.setChoice(choices[cycleChoiceIndex(choices.indexOf(current[form.field]), action.delta, choices.length)]!);
+            }
+        }
+    }, { bindingContext: "form",clipboard:form.editing&&!form.isChoice&&status!=="exporting",inputTarget:form.editing?form.field:"" });
+    const labels = { scope: t({ en: "Scope", zh: "范围" }), format: t({ en: "Format", zh: "格式" }), destination: t({ en: "Destination", zh: "导出路径" }) };
+    return <Box flexDirection="column" padding={1} width={cols}>
+    <Box marginBottom={1}><Text bold>{t({ en: "Export", zh: "导出" })} — {project}</Text></Box>
+    {FIELDS.map(field => {
+            const active = form.field === field;
+            return <FormFieldRow key={field} label={labels[field]} labelWidth={fieldLabelWidth(Object.values(labels), Math.max(1, cols - 12))} selected={active} editing={active && form.editing}>
+      <SelectionText  wrap="truncate-end">{current[field]}</SelectionText>
+    </FormFieldRow>;
+        })}
+    <Box marginTop={1}></Box>
+    {status !== "idle" ? <Box marginTop={1}><Text color={status === "error" ? colors.danger : status === "done" ? colors.success : undefined}>{status === "exporting" ? t({ en: "Exporting…", zh: "正在导出…" }) : result}</Text></Box> : null}
   </Box>;
 });

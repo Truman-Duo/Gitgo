@@ -42,6 +42,40 @@ from backend.core.loop.session import AgentSession
 from backend.core.loop.tools import ToolRegistry
 
 
+@pytest.mark.parametrize('kind', ['answer', 'supervisor'])
+def test_prompt_data_updates_do_not_resend_unchanged_completion_rules(kind):
+    import json
+    from copy import deepcopy
+    process = AgentRuntimeFactory.create(RuntimeSpec(role='supervisor', actor_kind='supervisor',
+        capability_profile_id='supervisor.control', ring_level=RingLevel.RING_0,
+        tool_registry=ToolRegistry([]), max_steps=5, task_kind=kind))
+    process.update_context_snapshot(lambda c: {**c, 'task_contract': {'revision': 1, 'goal': 'Keep API',
+        'execution_mode': 'answer', 'acceptance_criteria': ['original tests'], 'requires_user_decision': False}})
+    def compile_into():
+        text, sections = PromptCompiler.compile(process=process, tools={}, workspace_path='C:/fixture')
+        PromptCompiler.upsert(process.session, text, sections)
+        return {s.name: s.content for s in sections}
+    first = compile_into()
+    history = deepcopy(process.session.messages)
+    process.update_context_snapshot(lambda c: {**c, 'task_contract': {**c['task_contract'], 'revision': 2,
+        'execution_mode': 'self_execute', 'acceptance_criteria': ['new required check'], 'requires_user_decision': True}})
+    latest = compile_into()
+    assert process.session.messages[:len(history)] == history
+    delta = '\n'.join(m['content'] for m in process.session.messages[len(history):])
+    assert first['Completion protocol'] == latest['Completion protocol']
+    assert first['Completion protocol'] not in delta
+    if kind == 'answer':
+        assert latest['Adaptive routing'] in delta and first['Interaction contract'] == latest['Interaction contract']
+        assert first['Interaction contract'] not in delta
+    else:
+        requirements = json.loads(latest['Task requirements'])
+        assert requirements['acceptance_criteria'] == ['new required check'] and requirements['requires_user_decision']
+        assert latest['Task requirements'] in delta and first['Task contract'] not in delta
+    messages = deepcopy(process.session.messages)
+    compile_into()
+    assert process.session.messages == messages
+
+
 def _request(messages, *, tools=(), protocol_cache="automatic", metadata=None):
     return ProviderRequest(
         messages=tuple(messages), tools=tuple(tools), max_output_tokens=256,
@@ -555,10 +589,59 @@ def test_prompt_update_is_append_only_and_date_is_host_only():
     )
     PromptCompiler.upsert(session, text2, sections2)
     assert session.messages[0] == original
-    assert session.messages[-1]["message_type"] == "host_steering_delta"
+    assert session.messages[-1]["message_type"] == "compiled_governance_context"
+    assert session.messages[-1]["role"] == "system"
     assert "v2" in session.messages[-1]["content"]
     assert "date=" not in text1
     assert session.host_ledger[0]["timestamp"]
+
+
+def test_governance_is_complete_after_shared_evidence_and_survives_compaction():
+    from copy import deepcopy
+    from backend.core.loop.provider_adapters import OpenAIResponsesAdapter
+    from backend.core.loop.provider_protocol import ProviderRequest
+
+    def compile_into(session, governance):
+        sections = [
+            PromptSection("Behavior and delivery standard", "same policy", "host:policy"),
+            PromptSection("Task contract", "same review task", "host:task"),
+        ]
+        if governance:
+            sections.append(PromptSection("Project governance context", governance, "host:governance"))
+        text = "\n\n".join(f"## {item.name}\n{item.content}" for item in sections)
+        PromptCompiler.upsert(session, text, sections)
+
+    sessions = [AgentSession(), AgentSession()]
+    for session, value in zip(sessions, ['snapshot one; full restrictions', 'snapshot two; revoked writes']):
+        session.append_user('same original task and complete review evidence')
+        compile_into(session, value)
+    adapter = OpenAIResponsesAdapter()
+    wires = [adapter.build_body(ProviderRequest(messages=tuple(s.messages), tools=()), 'test') for s in sessions]
+    assert wires[0]['instructions'] == wires[1]['instructions']
+    assert wires[0]['input'][:-1] == wires[1]['input'][:-1]
+    assert wires[0]['input'][-1] != wires[1]['input'][-1]
+    assert all(w['input'][-1]['role'] == 'system' for w in wires)
+
+    session = sessions[0]
+    session.append_assistant('actual prior response')
+    sent = deepcopy(session.messages)
+    compile_into(session, 'current restrictions; writes revoked')
+    assert session.messages[:-1] == sent
+    assert session.messages[-1]['content'] == '## Project governance context\ncurrent restrictions; writes revoked'
+    assert session.messages[-1]['role'] == 'system'
+    current = deepcopy(session.messages[-1])
+    session.begin_context_epoch(summary='checkpoint', retained_messages=[], reason='test')
+    assert current not in session.messages
+    compile_into(session, 'current restrictions; writes revoked')
+    assert session.messages[-1] == current
+    restored = AgentSession.from_durable_state({key: deepcopy(getattr(session, key)) for key in (
+        'session_id', 'messages', 'context_epoch', 'compiled_prompt_hash', 'compiled_prompt_sections')})
+    compile_into(restored, 'current restrictions; writes revoked')
+    assert restored.messages == session.messages
+    compile_into(restored, '')
+    assert restored.messages[-1]['role'] == 'system'
+    assert 'Project governance context' in restored.messages[-1]['content']
+    assert 'writes revoked' not in restored.messages[-1]['content']
 
 
 def test_prompt_rom_update_contains_only_changed_sections():
@@ -584,6 +667,36 @@ def test_prompt_rom_update_contains_only_changed_sections():
     assert "## Capabilities\nread_file, web_search" in delta
     assert "stable identity" not in delta
     assert "current rule" not in delta
+
+
+def test_actual_agent_admission_places_governance_after_task_evidence():
+    from copy import deepcopy
+    from backend.core.loop.run_admission import admit_agent_run
+    requests = []
+    instruction = 'The shared task with its original evidence.'
+    class Provider:
+        protocol = SimpleNamespace(value='openai_responses')
+        capabilities = SimpleNamespace(prompt_cache='automatic')
+        context_window = 16384
+    for brief in ('Complete snapshot one', 'Complete snapshot two, writes revoked'):
+        process = AgentRuntimeFactory.create(RuntimeSpec(
+            role='worker', actor_kind='worker', capability_profile_id='text.only',
+            ring_level=RingLevel.RING_3, tool_registry=ToolRegistry([]), max_steps=3,
+            task_kind='review', task_id='prompt-order'))
+        process.replace_context_snapshot({'brief': brief})
+        admission = admit_agent_run(process, Provider(), instruction, SimpleNamespace(_executors={}), '', None)
+        assert admission.result is None
+        requests.append(deepcopy(process.session.to_provider_messages()))
+        actual = requests[-1]
+        task_index = next(i for i, m in enumerate(actual) if m.get('content') == instruction)
+        governance_index = next(i for i, m in enumerate(actual) if m.get('message_type') == 'compiled_governance_context')
+        assert task_index < governance_index
+        assert actual[governance_index]['role'] == 'system'
+        assert brief in actual[governance_index]['content']
+    wires = [OpenAIResponsesAdapter().build_body(_request(ms), 'test')['input'] for ms in requests]
+    task_indices = [next(i for i, m in enumerate(wire) if m.get('content') == instruction) for wire in wires]
+    assert task_indices[0] == task_indices[1]
+    assert wires[0][:task_indices[0] + 1] == wires[1][:task_indices[1] + 1]
 
 
 def test_dynamic_role_and_capabilities_are_task_pinned_not_stable_rom():
@@ -658,7 +771,8 @@ def test_compaction_creates_auditable_epoch_instead_of_editing_old_log():
     assert old_state_id not in session.provider_state
     assert session.messages[0]["content"] == "stable"
     assert session.messages[1]["message_type"] == "compact_transcript"
-    assert session.host_ledger[-1]["provider_state"]["reasoning_content"] == (
+    compact_state = next(e for e in reversed(session.host_ledger) if e.get('event') == 'context_compaction_provider_state')
+    assert compact_state["provider_state"]["reasoning_content"] == (
         "raw compact reasoning"
     )
 
@@ -762,6 +876,61 @@ def test_completed_task_boundary_preserves_small_iterative_session():
     ) is False
     assert session.messages == before
     assert session.context_epoch == 0
+
+
+def test_current_compiler_prefix_does_not_force_short_task_boundary_compaction():
+    process = AgentRuntimeFactory.create(RuntimeSpec(
+        role="supervisor", actor_kind="supervisor", task_kind="answer",
+        capability_profile_id="supervisor.control", ring_level=RingLevel.RING_0,
+        tool_registry=ToolRegistry([]), max_steps=5,
+    ))
+    text, sections = PromptCompiler.compile(process=process, tools={}, workspace_path="fixture")
+    session = process.session
+    PromptCompiler.upsert(session, text, sections)
+    session.append_user("A brief follow-up")
+    session.append_assistant("A verified result")
+    before = list(session.messages)
+    assert not session.compact_completed_task_boundary(
+        checkpoint={"status":"completed", "response":"A verified result"},
+        token_threshold=64_000,
+    )
+    assert session.messages == before
+    assert session.context_epoch == 0
+
+
+@pytest.mark.parametrize("retained_count", [0, 1, 8])
+def test_task_boundary_result_is_present_once_and_zero_tail_really_retains_none(retained_count):
+    import json
+    session = AgentSession()
+    session.append_system("legacy policy",message_type="compiled_system_prompt")
+    session.append_user("The actual request")
+    session.append_assistant("The actual conclusion; the check has not run.")
+    assert session.compact_completed_task_boundary(
+        checkpoint={"status":"completed", "response":"The actual conclusion; the check has not run."},
+        token_threshold=1024, retained_public_messages=retained_count,
+    )
+    dialogue=[m for m in session.messages if m.get("message_type")=="conversation"]
+    checkpoint=session.messages[-1]["content"]
+    data=json.loads(checkpoint[checkpoint.index("{"):])
+    texts=[m["content"] for m in dialogue if m["role"]=="assistant"]
+    if data.get("previous_result"):
+        texts.append(data["previous_result"])
+    assert texts.count("The actual conclusion; the check has not run.")==1
+    assert len(dialogue)==min(retained_count,2)
+    assert session.epoch_archive[0]["messages"][-1]["content"]==texts[0]
+
+
+def test_task_boundary_does_not_restore_a_quarantined_provider_reply():
+    session=AgentSession()
+    session.append_system("legacy policy",message_type="compiled_system_prompt")
+    session.append_user("actual request")
+    session.messages.append({"role":"assistant","content":"failed partial reply", "provider_visible":False})
+    session.append_assistant("verified recovery")
+    assert session.compact_completed_task_boundary(
+        checkpoint={"status":"completed","response":"verified recovery"},
+    )
+    assert not any(m.get("content")=="failed partial reply" for m in session.messages)
+    assert any(m.get("content")=="failed partial reply" for m in session.epoch_archive[0]["messages"])
 
 
 def test_three_overflow_compaction_failures_pause_for_force_decision():
@@ -892,8 +1061,11 @@ def test_prompt_cache_key_reuses_stable_prefix_across_sessions_and_epochs():
     assert left.cache_intent([], mode="automatic").stable_prefix_key == (
         right.cache_intent([], mode="automatic").stable_prefix_key
     )
-    assert left.cache_intent([{"name": "x"}], mode="automatic").stable_prefix_key != (
+    assert left.cache_intent([{"name": "x"}], mode="automatic").stable_prefix_key == (
         right.cache_intent([], mode="automatic").stable_prefix_key
+    )
+    assert left.cache_intent([{"name": "x"}], mode="automatic").tool_schema_hash != (
+        right.cache_intent([], mode="automatic").tool_schema_hash
     )
 
 
@@ -1328,9 +1500,10 @@ def test_live_turn_seals_legacy_dangling_responses_call_before_request():
 class _ProbeTransport:
     def post_json(self, url, body, headers, **_kwargs):
         assert url.endswith("/responses")
+        tool = next((item for item in body.get("input", []) if item.get("type") == "function_call_output"), None)
         return {
             "id": "resp-sync", "output": [{"type": "message", "content": [
-                {"type": "output_text", "text": "pong"},
+                {"type": "output_text", "text": tool["output"] if tool else "pong"},
             ]}], "usage": {"input_tokens": 4, "output_tokens": 1},
         }
 
@@ -1372,10 +1545,10 @@ def test_explicit_probe_resolves_auto_once_and_returns_manifest():
     assert result.protocol == "openai_responses"
     assert result.capabilities.streaming is True
     assert result.capabilities.tools is True
-    assert result.capabilities.hosted_web_search is True
-    assert result.capabilities.probe_version == 2
-    assert "tool_call_observed" in result.observations
-    assert "hosted_web_search_observed" in result.observations
+    assert result.capabilities.hosted_web_search is False
+    assert result.checks["hosted_web_search"] == "unknown"
+    assert result.capabilities.probe_version == 3
+    assert "tool_roundtrip_verified" in result.observations
 
 
 def test_auto_hosted_search_fallback_is_visible_and_learned_for_the_provider():

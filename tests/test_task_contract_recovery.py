@@ -133,6 +133,46 @@ def test_btw_scope_can_read_selected_a_and_multiple_b_without_peer_chat(tmp_path
     )
 
 
+def test_btw_snapshot_excludes_host_steering_and_keeps_current_question(tmp_path_factory):
+    from backend.core.loop.decision_support import create_user_decision
+    process, _ = _supervisor(tmp_path_factory)
+    manager = SimpleNamespace(get=lambda pid: process if pid == process.process_id else None)
+    process.session.append_user('Inspect only the existing public interface')
+    process.session.append_host_steering('internal runtime details ' * 4000, steering_type='task_contract')
+    question = create_user_decision(process, {'kind':'clarification','question':'Which interface should be observed?',
+        'why_user_must_decide':'The user owns this choice','options':[
+            {'label':'List interface','description':'Inspect the list signature'},
+            {'label':'Get interface','description':'Inspect the get signature'}],'allow_free_form':True})
+    before = list(process.session.host_ledger)
+    snapshot = _btw_parent_snapshot(manager, process.process_id, max_chars=20)
+    assert snapshot['pending_question']['decision_id'] == question['decision_id']
+    assert snapshot['pending_question']['answer_state'] == 'not_received'
+    assert snapshot['pending_question']['task_id'] == process.active_task_id
+    assert 'internal runtime details' not in str(snapshot)
+    assert snapshot['truncated'] is True
+    assert process.session.host_ledger == before and process.pending_decision['decision_id'] == question['decision_id']
+
+
+def test_btw_cold_snapshot_retains_same_question_without_restoring_executor(tmp_path_factory):
+    from backend.core.loop.manager import SessionStore
+    from backend.core.loop.decision_support import create_user_decision
+    process, _ = _supervisor(tmp_path_factory)
+    question = create_user_decision(process, {'kind':'clarification','question':'Which existing interface?',
+        'why_user_must_decide':'The user owns this choice','options':[
+            {'label':'List interface','description':'Inspect the list signature'},
+            {'label':'Get interface','description':'Inspect the get signature'}],'allow_free_form':True})
+    store = SessionStore(str(tmp_path_factory), state_home=tmp_path_factory/'state')
+    cold = AgentProcessManager()
+    try:
+        store.save_process_checkpoint(process)
+        snapshot = _btw_parent_snapshot(cold, process.process_id, store=store)
+        assert snapshot['pending_question']['decision_id'] == question['decision_id']
+        assert snapshot['pending_question']['answer_state'] == 'not_received'
+        assert cold.list_processes() == []
+    finally:
+        store.close()
+
+
 def test_host_routes_worker_coordination_to_a_and_affected_b(tmp_path_factory):
     manager = AgentProcessManager()
     root = manager.fork(

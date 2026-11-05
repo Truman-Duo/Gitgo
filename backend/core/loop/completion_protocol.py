@@ -40,7 +40,7 @@ class CompletionClaim:
                     or re.search(r"(?m)^\s*FINAL_ANSWER\s*:", response))
 
     @classmethod
-    def from_args(cls, args: dict, *, step: int) -> "CompletionClaim":
+    def from_args(cls, args: dict, *, step: int, process=None) -> "CompletionClaim":
         result = str(args.get("result", "")).strip()
         if not result:
             raise ValueError("complete_task requires a non-empty result")
@@ -50,6 +50,8 @@ class CompletionClaim:
         verification = tuple(
             dict(item) for item in verification_raw if isinstance(item, dict)
         )
+        if process is not None:
+            verification = bind_verification_receipts(process, verification)
         files = tuple(str(item) for item in (args.get("files", []) or []))
         return cls(
             result=result,
@@ -212,7 +214,7 @@ class HostCompletionEvaluator:
     """Non-agent hard gates. Neither A nor B can override these checks."""
 
     @classmethod
-    def outstanding_gates(cls, process, signals: list | None = None, harness_result=None, candidate=None) -> dict:
+    def outstanding_gates(cls, process, signals: list | None = None, harness_result=None, candidate=None, *, stage_entry=False) -> dict:
         """Project the authoritative evaluator into an actionable checklist.
 
         This is a read model over :meth:`evaluate`, not another completion
@@ -226,7 +228,8 @@ class HostCompletionEvaluator:
             or str((review_claim or {}).get("summary", ""))
             or "Host completion readiness probe"
         )
-        evaluation = cls.evaluate(process, probe if candidate is None else candidate, signals)
+        evaluator = cls.evaluate_stage_entry if stage_entry else cls.evaluate
+        evaluation = evaluator(process, probe if candidate is None else candidate, signals)
         if harness_result is None and signals:
             from .harness.completion import CompletionGuard
             harness_result = CompletionGuard().on_signals(signals, process)
@@ -250,9 +253,46 @@ class HostCompletionEvaluator:
 
     @classmethod
     def evaluate(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
+        return cls._evaluate(process, response, signals, final_semantic_review=True)
+
+    @classmethod
+    def evaluate_stage_entry(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
+        """Admit a registered completion stage, never terminal delivery.
+
+        All existing evidence, task, permission and workflow gates are shared.
+        Only the final semantic certificate waits for the stage's real result.
+        The normal evaluator is still required under the final delivery fence.
+        """
+        from backend.core.mechanism_runtime.application import bound_application
+        application = bound_application(process)
+        if application is None or not application.has_completion_stages():
+            raise ValueError("MECHANISM_COMPLETION_STAGE_NOT_REGISTERED")
+        return cls._evaluate(process, response, signals, final_semantic_review=False)
+
+    @classmethod
+    def _evaluate(cls, process, response: str, signals, *, final_semantic_review):
         from .completion_gates import CompletionReasons
         reasons = CompletionReasons()
+        from backend.core.mechanism_runtime.semantic_projection import unsettled_checkpoints
+        for pending in unsettled_checkpoints(process):
+            reasons.append('Registered checkpoint remains unsettled: ' + pending['instance_id'] + '/' + pending['unit_id']
+                + ' (' + pending['phase'] + '); consume the canonical reply and settle or explicitly retire its exact invocation.')
         context, _ = process.read_context_snapshot() if getattr(process, 'read_context_snapshot', None) else ({}, 0)
+        contract = context.get('task_contract') or {}
+        # Accepted outputs survive plan/answer/action transitions. A process's
+        # initial type is not permission to finish an amended implementation
+        # contract before its first write (which promotes the runtime type).
+        cls._evaluate_required_deliverables(process, contract, reasons)
+        if (getattr(process, 'task_kind', '') != TaskKind.ACTION.value
+                and (contract.get('routing_compilation') or {}).get('next_action') == 'request_self_execute'
+                and not HostCompletionEvidence.collect(process).action_receipt_ids):
+            reasons.append('The current contract requires execution, but no successful committed effectful receipt exists; '
+                           'use request_self_execute for the declared work and continue under the current advancement mode.')
+        if getattr(process, "read_context_snapshot", None):
+            from .task_maintenance import guard
+            maintenance = guard(process)
+            if maintenance:
+                reasons.append(maintenance[1], code=maintenance[0])
         from .coordination import pending_source_interface_decisions
         pending_interfaces = pending_source_interface_decisions(process)
         if pending_interfaces:
@@ -262,13 +302,13 @@ class HostCompletionEvaluator:
         alignment = context.get('alignment_runtime') or {}
         review_required = True
         from .alignment_routing import uses_on_demand_review
-        if (uses_on_demand_review(alignment)
+        if (final_semantic_review and uses_on_demand_review(alignment)
                 and alignment.get('task_id') == (process.active_task_id or process.process_id)
                 and alignment.get('process_id') == process.process_id):
             from .alignment_routing import review_reason
             from .alignment_runtime import AlignmentRuntime
             review_required = bool(review_reason(process, AlignmentRuntime(process).payload(candidate=response)))
-        if (alignment.get('enforced') and alignment.get('task_id') == (process.active_task_id or process.process_id)
+        if (final_semantic_review and alignment.get('enforced') and alignment.get('task_id') == (process.active_task_id or process.process_id)
                 and alignment.get('process_id', process.process_id if not process.parent_id else '') == process.process_id):
             from .alignment_evidence import alignment_input_digest, answer_digest
             delivery = alignment.get('delivery') or {}
@@ -359,6 +399,9 @@ class HostCompletionEvaluator:
                 else list(getattr(process, "child_ids", []) or [])
             )
             for child_id in child_ids:
+                contract = process.delegated_contracts.get(child_id, {})
+                if contract.get('required_for_parent_completion') is False or contract.get('superseded_by'):
+                    continue
                 child = manager.get(child_id) if manager else None
                 if child is not None and child.status.value in {
                     "running", "waiting", "cancelling", "awaiting_user",
@@ -390,6 +433,11 @@ class HostCompletionEvaluator:
         required_minimum = int(
             root_contract.get("minimum_delegated_outcomes", 0) or 0
         )
+        if root_contract.get('delegation_required') and required_minimum == 0 and not any(
+            not contract.get('superseded_by') and manager is not None and manager.get(child_id) is not None
+            for child_id, contract in contracts.items()
+        ):
+            reasons.append('[GITGO-E6101 REQUIRED_DELEGATION_UNSATISFIED] task requires an actual delegated agent; none exists')
         approved_required = 0
         for child_id, contract in contracts.items():
             if not contract.get("required_for_parent_completion", True):
@@ -463,7 +511,6 @@ class HostCompletionEvaluator:
                 f"task contract requires {required_minimum} approved delegated "
                 f"outcome(s), Host observed {approved_required}"
             )
-        cls._evaluate_required_deliverables(process, root_contract, reasons)
 
     @staticmethod
     def _missing_required_deliverables(process, contract: dict) -> list[str]:
@@ -755,6 +802,43 @@ def _current_task_receipts(process) -> list[dict]:
     ]
 
 
+def bind_verification_receipts(process, verification) -> tuple[dict, ...]:
+    """Bind unambiguous test selectors to existing current receipts.
+
+    This is provenance lookup, not interpretation of the model's prose. An
+    explicit receipt is never replaced. Ambiguous, failed, stale and foreign
+    facts stay unbound and are rejected by the normal delivery evaluator.
+    The evaluator rechecks the bound receipt after any subsequent mutation.
+    """
+    from .validation_evidence import test_receipt_assessment
+    active = process.active_task_id or process.process_id
+    latest = {}
+    def visit(receipts):
+        for receipt in receipts:
+            if not isinstance(receipt, dict) or receipt.get('task_id') not in (None, '', active):
+                continue
+            if receipt.get('tool_name') == 'run_test' and receipt.get('test_id'):
+                latest[str(receipt['test_id'])] = receipt
+            visit(receipt.get('child_receipts') or [])
+    visit(_current_task_receipts(process))
+    bound = []
+    for item in verification:
+        evidence = dict(item)
+        if str(evidence.get('kind', '')).strip().casefold() == 'test' and not evidence.get('receipt_id'):
+            selected = str(evidence.get('test_id') or '')
+            candidates = ([latest[selected]] if selected in latest else []) if selected else list(latest.values())
+            # Do not make a multi-test claim appear proven by picking its sole
+            # green test. Ambiguity is decided before testing candidate status.
+            if len(candidates) == 1:
+                receipt = candidates[0]
+                if (receipt.get('receipt_id') and receipt.get('succeeded') is True
+                        and receipt.get('committed') is True and receipt.get('test_passed') is True
+                        and test_receipt_assessment(process, receipt)['state'] == 'current'):
+                    evidence.update(receipt_id=receipt['receipt_id'], test_id=receipt['test_id'])
+        bound.append(evidence)
+    return tuple(bound)
+
+
 COMPLETE_TASK_PARAMETERS = {
     "type": "object",
     "properties": {
@@ -762,7 +846,7 @@ COMPLETE_TASK_PARAMETERS = {
         "verification": {
             "type": "array",
             "items": {"type": "object"},
-            "description": "Verification records, preferably referencing host receipt_id values.",
+            "description": "Verification records. For test evidence supply kind=test and test_id; Runtime binds the current passing receipt. A sole unambiguous test may omit test_id. Explicit receipt_id values remain exact constraints; missing, failed, stale or ambiguous evidence cannot pass.",
         },
         "files": {"type": "array", "items": {"type": "string"}},
         "diff_summary": {"type": "string"},

@@ -5,6 +5,7 @@ from backend.core.prompt_templates import load_prompt
 from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.loop.agent_tool import AgentTool, ApprovalMode, CancellationMode, ToolEffect
 from backend.core.loop.completion_protocol import COMPLETE_TASK_PARAMETERS, CompletionClaim
+from backend.core.loop.model_feedback import completion_feedback
 
 def install(ctx):
     process = ctx.process
@@ -429,6 +430,7 @@ def install(ctx):
 
         tools["complete_review"] = AgentTool(
             execution_contract=data_broker("host.runtime.complete_review"),
+            model_result=completion_feedback,
             name="complete_review",
             description=load_prompt('tools/complete_review'),
             parameters={
@@ -449,7 +451,7 @@ def install(ctx):
 
     def complete_task(args: dict) -> dict:
         try:
-            claim = CompletionClaim.from_args(args, step=process.steps_used)
+            claim = CompletionClaim.from_args(args, step=process.steps_used, process=process)
         except ValueError as exc:
             return {"error": str(exc), "accepted": False}
         process.completion_claim = claim
@@ -458,6 +460,7 @@ def install(ctx):
 
     tools["complete_task"] = AgentTool(
         execution_contract=data_broker("host.runtime.complete_task"),
+        model_result=completion_feedback,
         name="complete_task",
         description=(
             load_prompt('tools/complete_task')

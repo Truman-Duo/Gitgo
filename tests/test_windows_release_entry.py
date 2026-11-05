@@ -26,6 +26,8 @@ def invoke(*arguments):
     (["-Sign", "-AllowDirty", "-ManagedUpdate"], "Signing requires a clean managed release"),
     (["-Sign"], "Signing requires a clean managed release"),
     (["-ManagedUpdate", "-BuildInstaller"], "Managed releases use the complete ZIP"),
+    (["-Sign", "-ManagedUpdate"], "Update signing requires the previous published manifest and signature"),
+    (["-InitialRelease", "-BaselineManifest", "placeholder"], "Choose an initial release or a previous published baseline"),
 ])
 def test_release_modes_do_not_sign_unvalidated_or_mismatched_packages(arguments, message):
     result = invoke(*arguments)

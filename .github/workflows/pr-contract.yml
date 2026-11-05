@@ -1,0 +1,74 @@
+name: PR metadata contract
+on:
+  pull_request:
+    types: [edited]
+  workflow_call:
+    outputs:
+      native_required:
+        value: ${{ jobs.contract.outputs.native_required }}
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+concurrency:
+  group: pr-contract-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  contract:
+    name: PR contract and upstream alignment
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      native_required: ${{ steps.contract.outputs.native_required }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: upstream
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.14.7'
+      - name: Install only the pinned workflow parser
+        run: python3 -m pip install --require-hashes --no-deps -r candidate/packaging/requirements-ci.lock
+      - name: Check Actions schema, expressions and reusable workflow contracts
+        working-directory: candidate
+        run: python3 -B scripts/check_workflow_syntax.py
+      - name: Verify gate and scheduling regressions before expensive jobs
+        run: |
+          python3 -I -B candidate/tests/test_ci_pr_contract.py
+          python3 -I -B candidate/tests/test_ci_pipeline.py
+          python3 -I -B candidate/tests/test_ci_source_shards.py
+      - name: Verify PR version, declared boundaries, and upstream ancestry
+        id: contract
+        working-directory: candidate
+        run: python3 -I -B scripts/check_pr_contract.py --root . --base-root ../upstream
+      - name: Record tested candidate and integration tree
+        working-directory: candidate
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          evidence = {'event': os.environ['GITHUB_EVENT_NAME'], 'head': os.environ.get('PR_HEAD'),
+              'observed_base': os.environ.get('PR_BASE'), 'tested_commit': git('rev-parse', 'HEAD'),
+              'tested_tree': git('rev-parse', 'HEAD^{tree}'), 'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'formal_terminal_verified': False}
+          Path('ci-evidence.json').write_text(json.dumps(evidence, indent=2), encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-candidate-evidence
+          path: candidate/ci-evidence.json
+          if-no-files-found: error
+          retention-days: 14

@@ -114,6 +114,16 @@ def test_client_error_does_not_try_backup_or_damage_health(server):
     assert runtime.status()[0]['failures'] == 0
 
 
+def test_failover_uses_each_connections_own_request_preferences(server):
+    url,calls,_=server
+    raw=config(url)
+    for provider,temperature in zip(raw['providers'],(0.2,0.8)):
+        provider['configuration']={'request_preferences':{'body':{'temperature':temperature}}}
+    runtime=RoutedProvider(raw,registry=BreakerRegistry())
+    assert ''.join(e.text for e in runtime.stream_session_events(AgentSession()))=='pong'
+    assert [(call['route'],call['body']['temperature']) for call in calls]==[('main',0.2),('backup',0.8)]
+
+
 def test_effective_route_survives_new_worker_and_failed_recovery_probe(server):
     url, _, mode = server
     runtime = RoutedProvider(config(url), registry=BreakerRegistry())
@@ -294,11 +304,14 @@ def test_local_keyless_provider_and_backup_queue_roundtrip(tmp_path_factory, mon
     p = created['provider']
     assert not p['api_key_present'] and p['base_url'].startswith('http://127.0.0.1:')
     assert LLMConfigManager.get_active().auth_mode == 'none'
-    service.provider_failover_configure(True, [p['id']])
-    assert service.provider_status()['failover_order'] == [p['id']]
+    backup=service.provider_save(name='Local backup',model_id='local',base_url='http://localhost:11435/v1',kind='local',auth_mode='none')['provider']
+    service.provider_failover_configure(True, [backup['id']])
+    assert service.provider_status()['failover_order'] == [backup['id']]
+    with pytest.raises(OperationError):
+        service.provider_failover_configure(True, [p['id']])
     with pytest.raises(OperationError):
         service.provider_failover_configure(True, ['unknown'])
-    service.provider_delete(p['id'])
+    service.provider_delete(backup['id'])
     assert service.provider_status()['failover_order'] == []
 
 
@@ -317,6 +330,20 @@ def test_sync_rate_limit_immediately_fails_over_and_counts_each_attempt(server):
     assert len(charged) == 2
     assert [c['route'] for c in calls] == ['main', 'backup']
     assert any(n['event'] == 'provider_route_failed' and n['reason'] == 'HTTP_429' for n in notices)
+
+
+def test_per_primary_backup_queue_is_used_by_real_http_attempts_without_recursive_chaining(server):
+    url,calls,mode=server
+    raw=config(url)
+    raw['providers'].append({'id':'other','name':'other','base_url':url+'/other','api_key':'','model_id':'other','kind':'local','auth_mode':'none'})
+    raw['failover_routes']={'main':['backup'],'backup':['other'],'other':['main','backup']}
+    mode['main']=mode['backup']='fail';mode['other']='success'
+    with pytest.raises(ProviderRoutesUnavailable):
+        RoutedProvider(raw,registry=BreakerRegistry()).chat([{'role':'user','content':'ping'}])
+    assert [call['route'] for call in calls]==['main','backup']
+    calls.clear();raw['active_provider']='backup'
+    assert RoutedProvider(raw,registry=BreakerRegistry()).chat([{'role':'user','content':'ping'}])=='pong'
+    assert [call['route'] for call in calls]==['backup','other']
 
 
 def test_sync_session_switch_filters_foreign_state(server):

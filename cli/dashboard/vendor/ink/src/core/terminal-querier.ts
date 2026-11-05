@@ -43,6 +43,9 @@ type OscResponse = Extract<TerminalResponse, { type: 'osc' }>
 type XtversionResponse = Extract<TerminalResponse, { type: 'xtversion' }>
 
 // -- Query builders --
+export function cellPixelSize(): TerminalQuery<Extract<TerminalResponse, {type: 'cellPixelSize'}>> {
+  return {request: csi('16t'), match: (r): r is Extract<TerminalResponse, {type: 'cellPixelSize'}> => r.type === 'cellPixelSize'}
+}
 
 /** DECRQM: request DEC private mode status (CSI ? mode $ p).
  *  Terminal replies with DECRPM (CSI ? mode ; status $ y) or ignores. */

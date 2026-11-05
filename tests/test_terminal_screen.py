@@ -54,12 +54,50 @@ def test_menu_driver_uses_visible_selection_and_waits_for_new_frames():
 
 def test_menu_driver_does_not_move_when_target_is_already_selected():
     from tests.terminal_screen import activate_menu_item
-    screen = TerminalScreen(2, 80)
-    screen.feed("› Review rollback".encode())
+    for line in ("› Review rollback", "\x1b[48;2;42;42;42mReview rollback\x1b[0m"):
+        screen = TerminalScreen(2, 80)
+        screen.feed(line.encode())
+        calls = []
+        activate_menu_item(screen, "Review rollback", calls.append,
+                           lambda: None)
+        assert calls == ["\r"]
+
+
+def test_selection_blocks_follow_sgr_repaint_and_erasure_without_selecting_foreground():
+    screen = TerminalScreen(3, 50)
+    screen.feed(b"\x1b[31mStatus\x1b[0m\r\n\x1b[48;2;40;40;40mCheck now\x1b[49m")
+    assert screen.highlighted_line() == "Check now"
+    screen.feed(b"\x1b[2;1H\x1b[2KCheck now\r\n\x1b[7mReview rollback\x1b[27m")
+    assert screen.highlighted_line() == "Review rollback"
+    screen.feed(b"\x1b[2J\x1b[HNo selection")
+    assert screen.highlighted_line() is None
+
+
+def test_menu_driver_walks_unhighlighted_fields_then_uses_the_real_selection_block():
+    from tests.terminal_screen import activate_menu_item
+    screen = TerminalScreen(5, 60)
+    labels = ["Channel preview", "Automatic checks ON", "Check now", "Review restart / update"]
+    index = 0
+    pending = False
     calls = []
-    activate_menu_item(screen, "Review rollback", calls.append,
-                       lambda: None)
-    assert calls == ["\r"]
+    def paint():
+        screen.feed(b"\x1b[0m\x1b[2J\x1b[H\x1b[1mSoftware Update\x1b[22m\r\n")
+        for number, label in enumerate(labels):
+            screen.feed((("\x1b[48;5;236m" if index == number and number >= 2 else "")
+                         + label + "\x1b[0m\r\n").encode())
+    def send(value):
+        nonlocal pending
+        calls.append(value)
+        if value == "\x1b[B": pending = True
+    def pump():
+        nonlocal pending, index
+        if pending:
+            index += 1
+            pending = False
+            paint()
+    paint()
+    activate_menu_item(screen, labels[-1], send, pump)
+    assert calls == ["\x1b[B"] * 3 + ["\r"]
 
 def test_navigation_barrier_drops_old_scrollback_and_keeps_incremental_repaint_state():
     screen = TerminalScreen(2, 50)

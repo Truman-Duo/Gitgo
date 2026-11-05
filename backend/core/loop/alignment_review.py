@@ -30,14 +30,24 @@ class AlignmentReview:
     def __init__(self, process, provider, hooks):
         self.process, self.provider, self.hooks = process, provider, hooks
 
-    def check(self, instruction, candidate="", proposed_questions=None, *, trigger='admission', proposed_contracts=None, proposed_files=None):
+    def check(self, instruction, candidate="", proposed_questions=None, *, trigger='admission', proposed_contracts=None, proposed_files=None, observation_only=False):
         try:
-            return self._check(instruction, candidate, proposed_questions, trigger=trigger, proposed_contracts=proposed_contracts, proposed_files=proposed_files)
+            return self._check(instruction, candidate, proposed_questions, trigger=trigger, proposed_contracts=proposed_contracts, proposed_files=proposed_files, observation_only=observation_only)
         except Exception as exc:
             return self.failure(exc)
 
-    def _check(self, instruction, candidate, proposed_questions, *, trigger, proposed_contracts, proposed_files):
+    def _check(self, instruction, candidate, proposed_questions, *, trigger, proposed_contracts, proposed_files, observation_only):
         process, llm_provider, hooks = self.process, self.provider, self.hooks
+        if proposed_questions is not None:
+            from .decision_support import prepare_user_decision
+            try:
+                for question in proposed_questions:
+                    prepare_user_decision(process, question)
+            except (ValueError, TypeError, AttributeError) as invalid:
+                # Original tool input must be repaired by its author. An
+                # assessor selecting that proposal cannot repair its schema.
+                return {"alignment_repair": "Invalid question input: " + str(invalid)
+                        + ". Correct the original request_user_decision arguments before proposing it again."}
         session = process.session
         _emit_observation = hooks.emit
         on_stream_event = hooks.frontend_emit
@@ -55,7 +65,9 @@ class AlignmentReview:
         if candidate:
             from backend.core.loop.completion_protocol import CompletionClaim
             candidate = CompletionClaim.from_response(candidate, step=process.steps_used).result
-        payload = runtime.payload(instruction, candidate, proposed_questions, proposed_contracts, proposed_files)
+        payload = runtime.payload(instruction, candidate, proposed_questions, proposed_contracts, proposed_files,
+            observation_only=not candidate and (proposed_questions is not None or observation_only))
+        payload['trigger'] = trigger
         for notice in payload.get('artifact_notices', []):
             hooks.notice('DELIVERY_ARTIFACT_UNAVAILABLE', '交付文件未能作为完整文本证据核验；保留正文检查。', detail=notice)
         from .alignment_routing import review_reason, REVIEW_POLICY
@@ -109,16 +121,25 @@ class AlignmentReview:
             assessment_started = time.monotonic()
             _emit_observation({"event": "alignment_assessment_started", "stage": payload["stage"], 'trigger': reason})
             for attempt in range(2):
+                # Retain the exact assessor input through the existing private
+                # Trace detail channel, including bounded repair attempts.
+                # The event/UI sees identity only, never this whole payload.
+                _emit_observation({'event': 'alignment_assessment_input', 'stage': payload['stage'],
+                    'trigger': reason, 'attempt': attempt + 1}, detail=payload)
                 proposal = assessor(payload, before_attempt=before_attempt,
                                     on_notice=alignment_route_notice,
                                     cancel_event=process.cancellation_event)
                 process.steps_used += 1
                 usage = proposal.pop("_provider_usage", None) if isinstance(proposal, dict) else None
+                cache_data = proposal.pop('_provider_cache_intent', None) if isinstance(proposal, dict) else None
                 if usage:
+                    from .provider_protocol import CacheIntent
                     protocol = getattr(llm_provider, 'protocol', 'unknown')
-                    session.record_provider_usage({**usage, 'purpose': 'alignment'}, protocol=str(getattr(protocol, 'value', protocol)))
+                    session.record_provider_usage({**usage, 'purpose': 'alignment'}, protocol=str(getattr(protocol, 'value', protocol)),
+                        cache_intent=CacheIntent(**cache_data) if cache_data else None)
                     _emit_observation({"event": "alignment_provider_usage", "purpose": "alignment", "stage": payload["stage"],
                         "usage": {k: v for k, v in usage.items() if k != "raw"},
+                        "cache_intent": cache_data,
                         "duration_ms": (time.monotonic() - assessment_started) * 1000})
                     if process.task_budget:
                         process.task_budget.record_provider_usage(usage)
@@ -135,12 +156,29 @@ class AlignmentReview:
                     _emit_observation({"event": "alignment_assessment_rejected", "attempt": attempt + 1,
                                        "reason": str(invalid)[:300]})
                     if attempt:
+                        # A structurally returned but invalid semantic proposal
+                        # rejects this tool batch. Let its initiating Agent
+                        # repair it through the existing bounded proposal loop;
+                        # do not turn an assessor's bad question identity into
+                        # a terminal failure of the user's whole task.
+                        # Missing/incomplete Provider output remains a review
+                        # failure, never implicit readiness or another retry.
+                        if (isinstance(invalid, ValueError) and not proposal.get('schema_error')
+                                and (proposed_questions is not None or proposed_contracts is not None)):
+                            _emit_observation({'event':'alignment_proposal_repair_required',
+                                'stage':payload['stage'],'reason':str(invalid)[:400]})
+                            return {'alignment_repair': 'The semantic review did not validate this proposal; no tool in the batch may execute. '
+                                + str(invalid)[:400] + '. Inspect the current decision identities and actual answers. '
+                                'Correct or withdraw the proposed scope/question using those facts; preserve accepted requirements. '
+                                'Do not treat this rejection as readiness, permission or a user answer.'}
                         raise
                     # One compiler-style recovery, retaining source inputs and
                     # requirements. Invalid proposals never become user facts.
                     payload = {**payload, "host_validation_error": str(invalid)[:300], "rejected_proposal": proposal,
                                "provider_output_recovery": proposal.get("schema_error") == "provider_response_incomplete"
                                and proposal.get("incomplete_reason") == "max_output_tokens"}
+                    if getattr(invalid, 'validation_details', None):
+                        payload['host_validation_details'] = invalid.validation_details
             _emit_observation({"event": "alignment_assessment_completed", "stage": payload["stage"],
                                "status": outcome["status"], "duration_ms": (time.monotonic() - assessment_started) * 1000}, detail=proposal)
             hooks.refresh_prompt()

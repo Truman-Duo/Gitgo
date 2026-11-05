@@ -18,10 +18,22 @@ def question_request(question, payload):
                 raise ValueError('selected question proposal must be an object')
     # The chosen proposal's labels and option consequences are user interaction
     # data, not authority. The existing broker validates the complete request.
-    return {
+    options = copy.deepcopy(source.get('options') or [])
+    if source is question and source.get('kind', 'clarification') == 'clarification' and isinstance(options, list):
+        # New assessor clarifications may encode plain labels compactly. Never
+        # invent consequences/actions or rewrite a selected original proposal.
+        options = [{'label': item} if isinstance(item, str) and item.strip() else item for item in options]
+    request = {
         'kind': source.get('kind', 'clarification'),
         'question': source['question'],
         'why_user_must_decide': source['why_user_must_decide'],
-        'options': copy.deepcopy(source.get('options') or []),
+        'options': options,
         'allow_free_form': bool(source.get('allow_free_form', True)),
     }
+    previous = source.get('supersedes_decision_id')
+    selected_previous = question.get('supersedes_decision_id')
+    if previous and selected_previous and previous != selected_previous:
+        raise ValueError('selected question revision targets a different previous decision')
+    if previous or selected_previous:
+        request['supersedes_decision_id'] = previous or selected_previous
+    return request

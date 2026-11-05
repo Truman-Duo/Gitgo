@@ -111,6 +111,7 @@ def _find_next_number(
     *,
     git_runner: GitRunner | None = None,
     workspace_path: str = "",
+    revision: str | None = None,
 ) -> int:
     """从本地计数器或备份仓库的 commit 历史中确定下一个可用编号。
 
@@ -128,7 +129,16 @@ def _find_next_number(
         git_runner = LocalGitRunner(Path(backup_path).resolve())
     if not git_runner.is_git_repo():
         return max(0, local_n + 1)
-    lines = git_runner.log(grep=f"\\[{prefix}-\\d+\\]", fmt="%s", max_count=50)
+    # Git's default grep syntax is BRE, not Python's \d/+ syntax.
+    pattern = rf"\[{re.escape(prefix)}-[0-9][0-9]*\]"
+    if revision is None:
+        lines = git_runner.log(grep=pattern, fmt="%s", max_count=50)
+    else:
+        result = git_runner.run(["log", "--format=%s", "--max-count=50", "--grep=" + pattern,
+                                 "--end-of-options", revision, "--"], timeout=30)
+        if result.returncode:
+            raise ValueError("COMMIT_NUMBER_HISTORY_UNAVAILABLE")
+        lines = result.stdout.splitlines()
     max_n = -1
     pat = re.compile(rf"\[{prefix}-(\d+)\]")
     for line in lines:
@@ -139,7 +149,7 @@ def _find_next_number(
                 max_n = n
     repo_max = max_n + 1 if max_n >= 0 else 0
     next_n = max(repo_max, local_n + 1)
-    return min(next_n, 9999)
+    return next_n
 
 
 def build_commit_template(
@@ -148,6 +158,8 @@ def build_commit_template(
     *,
     template_name: str | None = None,
     git_runner: GitRunner | None = None,
+    number: int | None = None,
+    require_template: bool = False,
 ) -> str:
     """根据选中的 commit 生成正式 commit message 模板。
 
@@ -164,6 +176,8 @@ def build_commit_template(
     tpl_name = template_name or project.commit_format.get("template_name", "default")
     template = TemplateManager.get_template(tpl_name)
     if template is None:
+        if require_template:
+            raise ValueError("COMMIT_TEMPLATE_UNAVAILABLE")
         template = _BUILTIN_DEFAULT
 
     # 有效前缀（模板可覆盖）
@@ -184,8 +198,10 @@ def build_commit_template(
         if len(agg_subject) > 50:
             agg_subject = agg_subject[:47] + "..."
 
-    max_n = _find_next_number(project.backup_path, effective_prefix, git_runner=git_runner)
-    n = max(max_n, number_start)
+    n = number
+    if n is None:
+        max_n = _find_next_number(project.backup_path, effective_prefix, git_runner=git_runner)
+        n = max(max_n, number_start)
 
     # 格式变量
     commit_lines = []

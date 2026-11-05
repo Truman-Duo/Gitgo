@@ -22,7 +22,7 @@ from .contracts import verify_bundle_contract, _metadata
 from .health import probe_managed_host
 from .bootstrap_contract import CURRENT_API, SUPPORTED_APIS
 from .manifest import DataCompatibility
-from .persistence import filesystem_identity, descriptor_identity, validate_device, sync_directory, read_control, open_readonly
+from .persistence import filesystem_identity, descriptor_identity, validate_device, sync_directory, read_control, open_readonly, pinned_initialization
 from .staging import _staging_parent
 from .transaction import InstallationStore, TransactionResult, _initialize_store, TERMINAL
 from .tree import inventory, tree_digest, sync_tree
@@ -135,7 +135,8 @@ def _file_digest(path):
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def initialize_managed(root: Path, seed: Path, *, protected_paths: tuple[Path, ...]) -> ManagedStore:
+@pinned_initialization
+def initialize_managed(root: Path, seed: Path, *, protected_paths: tuple[Path, ...], _repair=None) -> ManagedStore:
     """New local installation only; validate package and actual bootstrap API."""
     if not _ownership_supported():
         reject("UPDATE_TRANSACTION_PLATFORM", "Managed installation ownership adapter is unavailable")
@@ -181,9 +182,10 @@ def initialize_managed(root: Path, seed: Path, *, protected_paths: tuple[Path, .
                 reject("UPDATE_INSTALL_INVALID", "Initial frozen runtime differs from package evidence")
             if inventory(private_seed) != before:
                 reject("UPDATE_INSTALL_INVALID", "Initial runtime changed its package")
+            from .data_transition import ENGINE_VERSION
             current = CurrentInstallation(product["product_id"], product["version"], product["platform"],
-                product["architecture"], "0.1.0", compatibility, True)
-            return _initialize_store(root, private_seed, current, protected_paths=protected_paths, store_type=ManagedStore)
+                product["architecture"], ENGINE_VERSION, compatibility, True)
+            return _initialize_store(root, private_seed, current, protected_paths=protected_paths, store_type=ManagedStore, repair=_repair)
     except UpdateError:
         raise
     except Exception:
@@ -407,6 +409,8 @@ def installed_runtime(role: str | None):
     if physical is None:
         yield; return
     root, position = physical
+    if (root / "control/repair-pending.json").exists():
+        reject("UPDATE_BOOTSTRAP_REPAIR_REQUIRED", "Complete or recover the confirmed updater replacement before launching")
     if os.name == "nt" and position == "active":
         from .sandbox_admission import inherited_sandbox_runtime
         with inherited_sandbox_runtime(role) as admitted:
@@ -420,7 +424,7 @@ def installed_runtime(role: str | None):
         yield; return
     # Probe candidate code only while an inherited, locally pinned exclusive
     # descriptor protects the CHECK_NEW state; environment alone is not enough.
-    if role in {"update-data-probe", "managed-capabilities", "update-startup-probe"}:
+    if role in {"update-data-probe", "managed-capabilities", "update-startup-probe", "update-data-migrate"}:
         ledger = store._ledger()
         if ledger["transaction"] is not None and ledger["transaction"]["state"] == "CHECK_NEW":
             if os.name == "nt":
@@ -469,6 +473,13 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
     if physical is None or physical[1] != "bootstrap":
         reject("UPDATE_BOOTSTRAP_ROLE", "Managed lifecycle requires the stable installed bootstrap")
     store = open_managed(physical[0])
+    from .bootstrap_contract import ENGINE_DELEGATION_APIS
+    delegated = store.registration["bootstrap_api"] in ENGINE_DELEGATION_APIS
+    if delegated:
+        from .coordinator import recover_if_pending
+        recovered_engine = recover_if_pending(store)
+        if recovered_engine is not None and recovered_engine.status not in {"idle", "committed", "rolled_back"}:
+            reject("UPDATE_RECOVERY_REQUIRED", "Updater generation must recover before application launch")
     pending = store._ledger()["transaction"]
     if role == "managed-recover" or (pending is not None and pending["state"] not in TERMINAL):
         result = store.recover()
@@ -482,8 +493,13 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
     from .handoff import launch_session, consume_request, SESSION_ENV, HANDOFF_EXIT
     from .handoff import strategy
     if strategy(store) == "after_reboot":
-        from .deferred import consume_after_reboot
-        deferred = consume_after_reboot(store)
+        if delegated:
+            from .coordinator import dispatch
+            import uuid
+            deferred = dispatch(store, uuid.uuid4().hex, 0, {"complete": True}, deferred=True)
+        else:
+            from .deferred import consume_after_reboot
+            deferred = consume_after_reboot(store)
         if deferred is not None:
             from backend.core.protocol_io import dump_protocol_json
             print(dump_protocol_json({"update_status": deferred.status, "version": deferred.version,
@@ -509,6 +525,16 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             exit_code = proc.returncode
             automatic_handoff = False
             if exit_code == 0 and nonce is not None and getattr(proc, "_gitgo_cleanup", {}).get("complete") is True:
+                if delegated:
+                    from .coordinator import dispatch
+                    try:
+                        result = dispatch(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None), automatic=True)
+                        if result.status not in {"idle", "committed", "up_to_date", "disabled"}:
+                            print("Automatic update deferred: " + (result.error_code or result.status), file=sys.stderr, flush=True)
+                    except Exception as error:
+                        code = error.code if isinstance(error, UpdateError) else "UPDATE_PREPARATION_FAILED"
+                        print("Automatic update deferred: " + code, file=sys.stderr, flush=True)
+                    return 0
                 # Ordinary quit can apply a previously verified package when
                 # installation preferences authorize it. Never cancel a task
                 # or convert a crash into automatic replacement.
@@ -520,13 +546,16 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
                         exit_code = HANDOFF_EXIT
                         automatic_handoff = True
                 except Exception as error:
-                    from .validation import UpdateError
                     code = error.code if isinstance(error, UpdateError) else "UPDATE_PREPARATION_FAILED"
                     print("Automatic update deferred: " + code, file=sys.stderr, flush=True)
             if exit_code != HANDOFF_EXIT: return int(proc.returncode)
             if nonce is None:
                 reject("UPDATE_HANDOFF_STALE", "This launch has no update handoff session")
-            result = consume_request(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None))
+            if delegated:
+                from .coordinator import dispatch
+                result = dispatch(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None))
+            else:
+                result = consume_request(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None))
             if result is None: return 2
             from backend.core.protocol_io import dump_protocol_json
             print(dump_protocol_json({"update_status": result.status, "version": result.version,

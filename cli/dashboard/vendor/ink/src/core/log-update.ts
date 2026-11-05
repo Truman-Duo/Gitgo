@@ -1,8 +1,8 @@
 import {
   type AnsiCode,
   ansiCodesToString,
-  diffAnsiCodes,
 } from '@alcalzone/ansi-tokenize'
+import {diffAnsiCodes} from './ansi-style-diff.js'
 /** Debug logger — no-op placeholder until proper logger injection is added */
 const logForDebugging = (_message: string) => {}
 import type { Diff, FlickerReason, Frame } from './frame.js'

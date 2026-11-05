@@ -167,6 +167,7 @@ def test_stream_stops_early_and_rejects_oversized_record(tmp_path_factory, monke
 
 
 def test_workspace_executable_is_not_implicitly_selected(tmp_path_factory, monkeypatch):
+    monkeypatch.setattr(sys, 'executable', str(tmp_path_factory / 'runtime' / 'python.exe'))
     monkeypatch.delenv("GITGO_RIPGREP_PATH", raising=False)
     monkeypatch.setenv("PATH", "." + os.pathsep + "relative-bin")
     monkeypatch.chdir(tmp_path_factory)
@@ -213,14 +214,15 @@ def test_summary_exposes_partial_and_fallback_without_opening_details():
     assert compact_tool_summary("search_text", {"matches": [], "partial": True, "degraded": True}) == "0 matches · partial · fallback"
 
 
-def test_frozen_runtime_prefers_its_bundled_engine_over_path(tmp_path_factory, monkeypatch):
+@pytest.mark.parametrize('frozen', [True, False])
+def test_runtime_prefers_its_bundled_engine_over_path(tmp_path_factory, monkeypatch, frozen):
     root = tmp_path_factory
     engine = root / ("rg.exe" if os.name == "nt" else "rg")
     engine.write_bytes(b"bundled engine identity")
     # A packaged POSIX engine must be executable to qualify for selection.
     engine.chmod(0o700)
     monkeypatch.delenv("GITGO_RIPGREP_PATH", raising=False)
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     monkeypatch.setattr(sys, "executable", str(root / "gitgo-host.exe"))
     assert adapter.resolve_ripgrep() == str(engine)
 
@@ -408,6 +410,7 @@ def test_search_stdin_is_private_eof_without_null_device(tmp_path_factory, monke
 
 @pytest.mark.parametrize("configured", [False, True])
 def test_denied_engine_probe_uses_existing_honest_unavailable_path(tmp_path_factory, monkeypatch, configured):
+    monkeypatch.setattr(sys, 'executable', str(tmp_path_factory / 'runtime' / 'python.exe'))
     root=tmp_path_factory
     (root/"input.txt").write_text("sample")
     engine=root/"denied"/("rg.exe" if os.name=="nt" else "rg")

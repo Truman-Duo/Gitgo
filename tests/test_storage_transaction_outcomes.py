@@ -250,7 +250,8 @@ def test_unknown_checkpoint_blocks_decision_instead_of_republishing_card(tmp_pat
 
 def test_session_store_blocks_process_and_retains_old_revision_on_unknown():
     process = AgentProcess('proc', 'worker', RingLevel.RING_3)
-    process.session = SimpleNamespace()
+    from backend.core.loop.session import AgentSession
+    process.session = AgentSession()
     store = SessionStore.__new__(SessionStore)
     def lost(active, *, lifecycle_finalized=None):
         raise StorageCommitUnknown('commit')

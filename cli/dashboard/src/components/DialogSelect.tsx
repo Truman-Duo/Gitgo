@@ -1,3 +1,4 @@
+import {SelectionRow, SelectionText} from "./Selection.js";
 // src/components/DialogSelect.tsx — Generic fuzzy-search selection panel
 // Used by: which-key (? key), command palette (/ key)
 // Owns keyboard input while the parent suppresses global overlay shortcuts.
@@ -7,8 +8,9 @@ import { Box, Text } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../input/runtime.js";
 import { useTextInput, applyTextOp } from "../hooks/useTextInput.js";
 import { resolveDialogSelectKey } from "../input/overlays/dialogSelect.js";
-import { colors, usePanelSize, separator, placeholderChar, useSelectionStyle } from "../theme/index.js";
+import { colors, usePanelSize, separator, placeholderChar} from "../theme/index.js";
 import { chordLabel } from "../input/bindings.js";
+import {useCopy} from "../ui/PageFrame.js";
 
 export type DialogItem = {
   id: string;
@@ -30,10 +32,12 @@ export const DialogSelect = memo(function DialogSelect({
   items,
   onSelect,
   onDismiss,
-  placeholder = "Type to filter...",
+  placeholder,
   title,
-  height,
-}: Props) {
+  height}: Props) {
+  const t=useCopy();
+  const placeholderText=placeholder || t({en:"Type to filter…",zh:"输入以筛选…"});
+  const other=t({en:"Other",zh:"其他"});
   const query = useTextInput("");
   const { contentH, w } = usePanelSize({ minHeight: height, headerRows: 8, widthOffset: 2 });
   const [selIdx, setSelIdx] = useState(0);
@@ -53,7 +57,7 @@ export const DialogSelect = memo(function DialogSelect({
   let start = windowStart();
   let visible = filtered.slice(start, start + maxVisible);
   // Category headings consume terminal rows as well as the result items.
-  while (visible.length > 1 && visible.length + new Set(visible.map(item => item.category || "Other")).size > contentH) {
+  while (visible.length > 1 && visible.length + new Set(visible.map(item => item.category || other)).size > contentH) {
     maxVisible -= 1; start = windowStart();
     visible = filtered.slice(start, start + maxVisible);
   }
@@ -62,12 +66,12 @@ export const DialogSelect = memo(function DialogSelect({
   const grouped = useMemo(() => {
     const map = new Map<string, DialogItem[]>();
     for (const item of visible) {
-      const cat = item.category || "Other";
+      const cat = item.category || other;
       if (!map.has(cat)) map.set(cat, []);
       map.get(cat)!.push(item);
     }
     return [...map.entries()];
-  }, [visible]);
+  }, [visible, other]);
 
   // Keyboard: own useInput (global handler suppressed when overlay is open)
   useInput((input: string, key: any) => {
@@ -94,14 +98,14 @@ export const DialogSelect = memo(function DialogSelect({
       <Box flexDirection="row" justifyContent="space-between">
         <Box flexDirection="row" gap={1}>
           {title ? <Text bold color={colors.accent}>{title}</Text> : null}
-          <Text dimColor>{placeholder}</Text>
+          <Text dimColor>{placeholderText}</Text>
         </Box>
-        <Text dimColor>[{chordLabel("escape")}] dismiss</Text>
+
       </Box>
 
       {/* Search input */}
       <Box flexDirection="row">
-        <Text color={colors.success}>{"> "}</Text>
+        <Text color={colors.success}>{colors.input.normal.glyph}</Text>
         <Text>{query.value || " "}</Text>
         {query.value.length === 0 ? <Text dimColor>{placeholderChar(true)}</Text> : null}
       </Box>
@@ -111,7 +115,7 @@ export const DialogSelect = memo(function DialogSelect({
       {/* Grouped results */}
       {grouped.length === 0 ? (
         <Box paddingTop={1}>
-          <Text dimColor>No matches</Text>
+          <Text dimColor>{t({en:"No matches",zh:"无匹配项"})}</Text>
         </Box>
       ) : (
         grouped.map(([category, catItems]) => (
@@ -119,11 +123,11 @@ export const DialogSelect = memo(function DialogSelect({
             {contentH > 1 ? <Text dimColor bold>{category}</Text> : null}
             {catItems.map((item) => {
               const selected = item.id === filtered[activeIndex]?.id;
-              const style = useSelectionStyle(selected ? "focused" : "non-focused", "row");
-              return <Box key={item.id} flexDirection="row" justifyContent="space-between" paddingLeft={2} backgroundColor={style.bg}>
-                <Text color={style.fg} backgroundColor={style.bg} bold={style.bold}>{item.title}</Text>
-                {item.hint ? <Text dimColor>{item.hint}</Text> : null}
-              </Box>;
+
+              return <SelectionRow selected={selected} key={item.id} flexDirection="row" justifyContent="space-between" paddingLeft={2} >
+                <SelectionText selected={selected}   >{item.title}</SelectionText>
+                {item.hint ? <SelectionText dimColor>{item.hint}</SelectionText> : null}
+              </SelectionRow>;
             })}
           </Box>
         ))
@@ -131,11 +135,11 @@ export const DialogSelect = memo(function DialogSelect({
 
       {/* More indicator */}
       {filtered.length > visible.length ? (
-        <Text dimColor>  ... {filtered.length - visible.length} more results</Text>
+        <Text dimColor>{t({en:`… ${filtered.length - visible.length} more results`,zh:`… 还有 ${filtered.length - visible.length} 项`})}</Text>
       ) : null}
 
       <Text dimColor>{separator(w)}</Text>
-      <Text dimColor>[{chordLabel("enter")}] Select  [{chordLabel("escape")}] Dismiss  Type to filter</Text>
+
     </Box>
   );
 });

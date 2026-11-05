@@ -24,6 +24,7 @@ from typing import Iterable
 
 
 GRAPH_VERSION = 2
+ANALYSIS_VERSION = 1
 GRAPH_FILE = "dependency_graph.v2.json"
 FEEDBACK_FILE = "dependency_feedback.json"
 OBSERVATION_FILE = "dependency_observations.jsonl"
@@ -110,6 +111,8 @@ class DependencyGraph:
         self.edges: dict[tuple[str, str], DependencyEdge] = {}
         self.file_fingerprints: dict[str, str] = {}
         self.aux_fingerprints: dict[str, str] = {}
+        self.signal_limits: dict[str, int] = {}
+        self.analysis_version = ANALYSIS_VERSION
         self.generated_at = datetime.now().isoformat()
 
     def add_edge(
@@ -176,10 +179,12 @@ class DependencyGraph:
     def to_dict(self) -> dict:
         return {
             "version": GRAPH_VERSION,
+            "analysis_version": self.analysis_version,
             "generated_at": self.generated_at,
             "workspace": str(self.workspace_path),
             "file_fingerprints": self.file_fingerprints,
             "aux_fingerprints": self.aux_fingerprints,
+            "signal_limits": self.signal_limits,
             "edges": [
                 self.edges[key].to_dict()
                 for key in sorted(self.edges)
@@ -192,6 +197,8 @@ class DependencyGraph:
         graph.generated_at = str(data.get("generated_at", ""))
         graph.file_fingerprints = dict(data.get("file_fingerprints", {}))
         graph.aux_fingerprints = dict(data.get("aux_fingerprints", {}))
+        graph.signal_limits = dict(data.get("signal_limits", {}))
+        graph.analysis_version = data.get("analysis_version", 0)
         for raw in data.get("edges", []):
             edge = DependencyEdge(
                 dependent=_normalise_rel(raw.get("dependent", "")),
@@ -213,6 +220,9 @@ class DependencyGraph:
 
 def build_dependency_graph(workspace_path: Path) -> DependencyGraph:
     workspace = workspace_path.resolve()
+    from backend.core.storage.metadata_files import read_metadata_bytes, MetadataFileChanged
+    previous = read_metadata_bytes(workspace, GRAPH_FILE, max_bytes=16*1024*1024)
+    base_digest = hashlib.sha256(previous).hexdigest() if previous is not None else ""
     graph = DependencyGraph(workspace)
     from backend.adapters.bounded_local_reader import BoundedLocalReader
     reader = BoundedLocalReader(workspace, ignored=_IGNORED_PARTS)
@@ -252,7 +262,13 @@ def build_dependency_graph(workspace_path: Path) -> DependencyGraph:
     _add_observation_edges(graph)
     _apply_feedback(graph)
     graph.aux_fingerprints = _aux_fingerprints(workspace)
-    _save_graph(graph)
+    try:
+        _save_graph(graph, expected_sha256=base_digest)
+    except MetadataFileChanged:
+        # Another builder published since we observed the cache. Return this
+        # call's observed graph without replacing that newer cache generation.
+        # A subsequent load still checks its fingerprints against real inputs.
+        pass
     return graph
 
 
@@ -268,7 +284,7 @@ def load_dependency_graph(
     if not rebuild and path.exists():
         try:
             data = _metadata_json(workspace, GRAPH_FILE)
-            if data.get("version") == GRAPH_VERSION:
+            if data.get("version") == GRAPH_VERSION and data.get("analysis_version") == ANALYSIS_VERSION:
                 graph = DependencyGraph.from_dict(workspace, data)
                 # Read-side shortcuts such as a bounded code dossier must not
                 # turn a five-file query into a synchronous whole-repository
@@ -517,6 +533,7 @@ def _resolve_reference(
 
 def _add_symbol_edges(graph: DependencyGraph, contents: dict[str, str]) -> None:
     definitions: dict[str, set[str]] = {}
+    references: dict[str, set[str]] = {}
     definition_patterns = [
         r"\b(?:def|class|function|interface|type|struct|enum|trait|fn)\s+([A-Za-z_]\w{2,})",
         r"\b(?:const|let|var)\s+([A-Za-z_]\w{2,})\s*=",
@@ -525,10 +542,19 @@ def _add_symbol_edges(graph: DependencyGraph, contents: dict[str, str]) -> None:
         for pattern in definition_patterns:
             for name in re.findall(pattern, content):
                 definitions.setdefault(name, set()).add(rel)
+    for rel, content in contents.items():
+        for name in set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content)) & definitions.keys():
+            references.setdefault(name, set()).add(rel)
     usable = {
         name: files for name, files in definitions.items()
         if len(files) <= _MAX_SYMBOL_FANOUT
+        and len(references.get(name, ())) <= _MAX_SYMBOL_FANOUT
     }
+    # Lexical words such as 'data' or 'value' can have few definitions but
+    # thousands of unrelated occurrences. They are not resolved references;
+    # bound both ends of this weak signal. Explicit imports, test subjects,
+    # confirmed feedback and other evidence keep their separate paths.
+    graph.signal_limits["ignored_high_fanout_symbols"] = len(definitions) - len(usable)
     for rel, content in contents.items():
         words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
         for name in words & usable.keys():
@@ -706,17 +732,28 @@ def _apply_feedback(graph: DependencyGraph) -> None:
         )
 
 
-def _save_graph(graph: DependencyGraph) -> None:
-    _atomic_json_write(graph.workspace_path / ".gitgo" / GRAPH_FILE, graph.to_dict())
+def _save_graph(graph: DependencyGraph, *, expected_sha256=None) -> None:
+    data = graph.to_dict()
+    # Keep the existing v2 reader and public query shape. The persisted form
+    # omits only values that the reader already reconstructs exactly.
+    for edge in data["edges"]:
+        edge.pop("confidence")  # Derived from the retained evidence.
+        if not edge["dismissed"]: edge.pop("dismissed")
+        if not edge["dismissal_reason"]: edge.pop("dismissal_reason")
+        for item in edge["evidence"]:
+            if item["count"] == 1: item.pop("count")
+            if not item["detail"]: item.pop("detail")
+    _atomic_json_write(graph.workspace_path / ".gitgo" / GRAPH_FILE, data,
+                       expected_sha256=expected_sha256, lock_timeout=5)
 
 
-def _atomic_json_write(path: Path, data: dict, *, expected_sha256=None) -> None:
+def _atomic_json_write(path: Path, data: dict, *, expected_sha256=None, lock_timeout=0) -> None:
     from backend.core.storage.metadata_files import write_metadata_bytes
     if path.parent.name != ".gitgo":
         raise ValueError("Only fixed project metadata is writable here")
     write_metadata_bytes(path.parent.parent, path.name,
                          json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf8"),
-                         expected_sha256=expected_sha256, max_bytes=16*1024*1024)
+                         expected_sha256=expected_sha256, max_bytes=16*1024*1024, lock_timeout=lock_timeout)
 
 
 def _aux_fingerprints(workspace: Path) -> dict[str, str]:

@@ -71,7 +71,7 @@ def test_exact_grant_rechecks_contract_changed_during_preparation(tmp_path_facto
     tool.prepare_args = changed
     ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(tmp_path_factory), event_bus=EventBus())
     result = ToolPipeline().execute({'name': tool.name, 'args': args}, tool, ctx, 'changed')
-    assert result.is_error and result.diagnostics['code'] == 'SANDBOX_POLICY_INVALID'
+    assert result.is_error and result.diagnostics['code'] == 'TOOL_EXECUTION_CONTRACT_INVALID'
     assert not calls
     assert process.approval_grants[0]['remaining_uses'] == 1
 def test_search_authority_refuses_private_input_and_uses_effective_route(tmp_path_factory):
@@ -121,7 +121,10 @@ def test_stale_semantic_boundary_does_not_consume_exact_grant_or_start_effect(tm
     assert blocked.diagnostics['code'] == 'ALIGNMENT_REVIEW_REQUIRED'
     assert not calls
     assert matching_grant(process, tool.name, args, per_invocation=True)
-    runtime.apply({'status': 'ready', 'questions': [], 'interpretations': []}, runtime.payload())
+    from backend.core.loop.tool_boundary_preview import preview_tool_boundaries
+    boundary = preview_tool_boundaries([{'name': tool.name, 'args': args}], {tool.name: tool}, process)
+    runtime.apply({'status': 'ready', 'questions': [], 'interpretations': []},
+        runtime.payload(proposed_contracts=boundary.contracts))
     result = pipeline.execute({'name': tool.name, 'args': args}, tool, ctx, 'fresh')
     assert not result.is_error and len(calls) == 1
     assert matching_grant(process, tool.name, args, per_invocation=True) is None

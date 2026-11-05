@@ -417,10 +417,10 @@ class PromptAndReasoningStateTests(unittest.TestCase):
             governance_brief="high level rule",
         )
         self.assertEqual([s.name for s in sections], [
-            "Base identity", "Behavior and delivery standard",
+            "Base identity", "Completion protocol", "Behavior and delivery standard",
             "Role and authority", "Capabilities",
             "Source authority", "User collaboration protocol",
-            "Runtime environment", "Interaction contract",
+            "Runtime environment", "Interaction contract", "Adaptive routing",
         ])
         self.assertNotIn("high level rule", text)
         self.assertIn("A greeting should receive a brief greeting", text)
@@ -556,14 +556,15 @@ class PromptAndReasoningStateTests(unittest.TestCase):
         }])
         wire = process.session.to_provider_messages(dynamic_envelope=envelope)
 
-        self.assertIn("request_self_execute", wire[-1]["content"])
-        self.assertIn("supersedes earlier conversation claims", wire[-1]["content"])
-        self.assertIn("lease: not-active", wire[-1]["content"])
+        from tests.test_provider_context_projection import decode_wire
+        current = decode_wire(wire)
+        self.assertEqual(current['runtime.capability']['available_tools'], ['request_self_execute'])
+        self.assertEqual(current['runtime.capability']['next_host_action'], 'request_self_execute')
+        self.assertEqual(current['runtime.capability']['lease'], 'not-active')
+        self.assertIn("supersedes earlier conversation claims", current['runtime.snapshot_rules'])
         self.assertEqual(wire[-1]["message_type"], "host_dynamic_envelope")
-        self.assertEqual(
-            wire[-2]["content"],
-            "I cannot write files because no execution tools exist.",
-        )
+        self.assertTrue(any(m['role'] == 'assistant' and m['content'] ==
+            'I cannot write files because no execution tools exist.' for m in wire))
 
     def test_pre_contract_snapshot_explains_admission_is_not_final_capability(self):
         process = AgentRuntimeFactory.create(RuntimeSpec(

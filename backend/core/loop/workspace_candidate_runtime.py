@@ -139,7 +139,7 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
 
     def preview(self, handler, inputs, timeout, *, trusted_arguments, copy_inputs, diagnostics, input_names=()):
         """Disposable native execution; never stores or publishes output files."""
-        if handler not in {"authored_python", "authored_privileged_python", "authored_host_python", "run_test"} or any(
+        if handler not in {"authored_python", "authored_privileged_python", "authored_host_python", "run_test", "run_publish_plugins", "run_publish_build"} or any(
                 k not in {"_dynamic_spec", "_host_results"} for k in trusted_arguments):
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "Unknown private self-test contract")
         self.trusted_arguments = json.loads(_encode(trusted_arguments))
@@ -162,6 +162,8 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
         metadata = {"owner": self.owner, "registration": self.registration}
         self.last_render = {"producer": "native_workspace", "launch_state": "not_started", "cleanup": {"complete": True}, "access_retired": False}
         access, retired = None, False
+        lifecycle = getattr(self, "lifecycle", None)
+        recovery_id = lifecycle("allocated", stage, {}) if lifecycle else ""
         try:
             before.materialize(stage)
             # No script rewriting. Only the declared cwd gets a relative mapping;
@@ -180,6 +182,10 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                 raise SandboxDenied("TOOL_CANCELLED", "Task changed or cancelled before producer launch")
             actual = {**command_args, **self.trusted_arguments, "_workspace": str(stage)}
             invocation = NativeInvocation.compile(handler, actual, timeout, owner=self.owner, registration=self.registration)
+            if lifecycle:
+                from dataclasses import replace
+                invocation = replace(invocation, policy=replace(invocation.policy, recovery_id=recovery_id))
+                lifecycle("launching", stage, {})
             try:
                 result = self.pipeline._execute_isolated(handler, actual, timeout, cancellation_event=self.ctx.cancellation,
                     diagnostics=diagnostics, runtime_metadata=metadata, native_invocation=invocation)
@@ -193,15 +199,21 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                 self.last_render["cleanup"] = cleanup
             if metadata.get("launch_state") in {"started", "unknown"} and (cleanup or {}).get("complete") is not True:
                 self.last_render["cleanup"] = {"complete": False, "mode": "unconfirmed"}
+                if lifecycle:
+                    lifecycle("cleanup_pending", stage, self.last_render)
                 raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "Retain private execution view until native retirement is confirmed")
             if access is not None:
                 try:
                     access.close()
                 except Exception as exc:
                     self.last_render["cleanup"] = {"complete": False, "mode": "access_retirement_failed"}
+                    if lifecycle:
+                        lifecycle("cleanup_pending", stage, self.last_render)
                     raise SandboxDenied("SANDBOX_CLEANUP_PENDING", str(exc)) from exc
             retired = True
             self.last_render["access_retired"] = True
+            if lifecycle:
+                lifecycle("retired", stage, self.last_render)
             # Failed launches retain no formal effects; remove the view only after
             # native/access retirement. Successful output is captured below.
             if "result" not in locals() and retired:
@@ -210,6 +222,7 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
             if metadata.get("launch_state") != "started" or metadata.get("exit_code") != 0:
                 raise SandboxDenied("SANDBOX_EXECUTION_FAILED", "Native launch and protocol exit were not confirmed")
             if not self.collect_outputs:
+                preview_outputs = getattr(self, "capture_preview_outputs", lambda stage: {})(stage)
                 observed = {}
                 if self.input_names:
                     from backend.core.sandbox_read import ReadRoot
@@ -221,7 +234,8 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                     except (OSError, ValueError, RuntimeError) as exc:
                         raise SandboxDenied("FILE_CHANGED", "Private validation inputs are unavailable after execution") from exc
                 return {"result": result, "producer": self.last_render,
-                    "versions": before.versions, "directories": before.directories, "input_versions_after": observed}
+                    "versions": before.versions, "directories": before.directories, "input_versions_after": observed,
+                    "preview_outputs": preview_outputs}
             after = capture(stage, output=True)
             batch = project(root, before, after, operation=self.tool.name)
             original_bytes = {name: raw for name, raw, _ in before.files}

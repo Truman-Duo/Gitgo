@@ -69,6 +69,7 @@ def _capture_completion_recovery(process: AgentProcess, on_event=None) -> None:
             "completion_recovery",
             {
                 "trigger": process.task_description[:240],
+                "diagnostic_scope": "gitgo_runtime",
                 "task_id": process.active_task_id or process.process_id,
                 "rejections": list(process.completion_rejections),
                 "resolved_at_step": process.steps_used,
@@ -149,6 +150,8 @@ def capture_lesson_outcome(process, result, workspace_path, *, rolled_back=False
                     return
                 data = result.data if isinstance(result.data, dict) else {}
                 capture_signal("execution_failure" if failed else "execution_followup", {
+                    **({"diagnostic_scope": "gitgo_runtime"}
+                       if result.is_error and (result.diagnostics or {}).get("nature") in {"system", "governance"} else {}),
                     "task_context": task_context,
                     "process_id": process.process_id,
                     "failure_relations": relations,

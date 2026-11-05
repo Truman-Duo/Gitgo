@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,35 @@ logger = logging.getLogger("gitgo.harness.registry")
 
 # 内置插件注册表（name → class）
 _BUILTIN: dict[str, type["HarnessPlugin"]] = {}
+_COMPONENT_DIRECTORY = None
+_COMPONENT_LOCK = threading.RLock()
+
+
+def get_component_registry():
+    """Versioned composition interfaces within the existing Harness registry.
+
+    Governance observers retain their existing SignalBus contract. Typed
+    lifecycle components use this one shared directory and the normal runtime
+    services; neither registration path creates permissions or a task executor.
+    Only trusted developer code registers implementations. User tools accept
+    JSON configuration of already registered interfaces, never module paths.
+    """
+    global _COMPONENT_DIRECTORY
+    with _COMPONENT_LOCK:
+        if _COMPONENT_DIRECTORY is None:
+            from backend.core.mechanism_runtime.registry import Registry
+            from backend.core.mechanism_runtime.components import install
+            candidate = Registry()
+            install(candidate)
+            _COMPONENT_DIRECTORY = candidate
+        return _COMPONENT_DIRECTORY
+
+
+def register_component(element, *, dispose=None):
+    """Register once and return an awaited, invocation-safe retirement handle."""
+    if not isinstance(element.description, str) or not element.description.strip():
+        raise ValueError("MECHANISM_DESCRIPTION_REQUIRED")
+    return get_component_registry().register(element, dispose=dispose)
 
 
 def _discover_builtins() -> dict[str, type["HarnessPlugin"]]:

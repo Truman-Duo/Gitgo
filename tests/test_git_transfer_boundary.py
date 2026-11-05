@@ -87,6 +87,37 @@ def test_operator_identity_remains_available_for_local_commits(case):
     assert git(repo, "log", "-1", "--format=%an <%ae>") == "Operator <operator@gitgo.invalid>"
 
 
+def test_named_fetch_transfers_a_new_pack_without_an_empty_pack_hook(case):
+    repo, remote, root, _ = case
+    runner = LocalGitRunner(repo)
+    add_remote(repo, remote)
+    assert runner.push()[0]
+    writer = root / "writer"
+    git(root, "clone", str(remote), str(writer))
+    (writer / "new-object.txt").write_text("new object requiring a pack\n", encoding="utf8")
+    git(writer, "add", "new-object.txt"); git(writer, "commit", "-m", "new remote object")
+    git(writer, "push")
+    oid = git(writer, "rev-parse", "HEAD")
+    success, error = runner.fetch()
+    assert success, error
+    assert git(repo, "show", oid + ":new-object.txt") == "new object requiring a pack"
+
+
+def test_fixed_local_import_rejects_source_programs_and_extra_refspecs(case):
+    repo, remote, root, _ = case
+    runner = LocalGitRunner(repo)
+    add_remote(repo, remote)
+    assert runner.push()[0]
+    oid = runner.rev_parse()
+    args = ["fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+            "--no-auto-maintenance", str(remote), oid]
+    assert runner.run([*args, "HEAD:refs/heads/unwanted"]).returncode == 126
+    command, marker = program(root, "pack-hook")
+    git(remote, "config", "uploadpack.packObjectsHook", command)
+    assert runner.run(args).returncode == 126
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("where,name", [("client", "pre-push"), ("client", "reference-transaction"), ("server", "pre-receive"), ("server", "post-receive")])
 def test_repository_hooks_are_rejected_without_executing_or_publishing(case, where, name):
     repo, remote, root, config = case

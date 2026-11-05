@@ -11,6 +11,7 @@ export type ExecutableIdentity = {verified: boolean; files: {path: string; sha25
   directories?: {path: string; files: string[]}[]};
 export type TerminalOption = {id: string; label: string; available: boolean; command: string; args: string[]; identity?: ExecutableIdentity};
 export type TerminalInventory = {
+  display_metrics?: {kind: string; font: string; codepoint_widths: Record<string, number>} | null;
   platform: string; options: TerminalOption[]; selected: string; configured: boolean;
   effective: TerminalOption; warnings: string[];
 };
@@ -112,7 +113,7 @@ export function shouldRelaunchInConfiguredTerminal(options: {
   compiled: boolean;
   platform: NodeJS.Platform;
   argv: string[];
-  parentProcessName: string;
+  parentProcessName?: string;
   config: TerminalLauncherConfig;
 }): boolean {
   if (!options.compiled || options.platform !== "win32") return false;
