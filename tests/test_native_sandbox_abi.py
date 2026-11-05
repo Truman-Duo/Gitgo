@@ -54,6 +54,14 @@ def test_posix_abi_never_exposes_unisolated_execution(native):
 
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows Job ownership')
+def test_low_level_anonymous_job_preserves_existing_contract(native):
+    job = native.call(op='job_create', recovery_id='', processes=4, memory=128*1024*1024, cpu_seconds=5)['token']
+    assert native.call(op='job_retire', token=job)['complete'] is True
+    with pytest.raises(NativeBoundaryError):
+        native.call(op='job_recover', recovery_id='')
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows Job ownership')
 def test_job_retirement_tokens_and_cold_recovery(native):
     recovery = uuid.uuid4().hex
     request = dict(op='job_create', recovery_id=recovery, processes=8, memory=256*1024*1024, cpu_seconds=10)

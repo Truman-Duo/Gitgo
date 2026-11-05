@@ -66,11 +66,24 @@ def test_required_native_and_runtime_jobs_are_in_gate():
     assert target['jobs']['build']['runs-on'] == target['jobs']['accept']['runs-on']
 
 def test_all_external_actions_are_pinned_and_checkout_does_not_persist_credentials():
+    def action_steps(steps, seen):
+        for step in steps:
+            action = step.get('uses', '')
+            if action.startswith('./'):
+                local = (ROOT / action).resolve()
+                assert local.is_relative_to(ROOT / '.github/actions'), action
+                metadata = local / 'action.yml'
+                assert metadata.is_file() and metadata not in seen, action
+                definition = yaml.safe_load(metadata.read_text())
+                assert definition['runs']['using'] == 'composite'
+                yield from action_steps(definition['runs']['steps'], seen | {metadata})
+            else:
+                yield step
     for name in ('ci.yml', 'pr-contract.yml', 'native-sandbox.yml', 'native-acceptance.yml',
                  'linux-package.yml', 'unix-target.yml', 'dashboard-runtime.yml', 'linux-update.yml', 'windows-update.yml'):
         workflow = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())
         for job in workflow['jobs'].values():
-            for step in job.get('steps', []):
+            for step in action_steps(job.get('steps', []), set()):
                 action = step.get('uses', '')
                 if not action: continue
                 assert re.fullmatch(r'[^@]+@[0-9a-f]{40}', action), action

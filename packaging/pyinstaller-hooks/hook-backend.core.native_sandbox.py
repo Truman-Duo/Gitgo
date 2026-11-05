@@ -9,3 +9,7 @@ image = root / 'backend/native_runtime' / name
 if not image.is_file():
     raise RuntimeError('Build the Rust sandbox module before packaging the Host')
 binaries = [(str(image), 'backend/native_runtime')]
+notices = image.parent / 'notices'
+if not (notices / 'dependencies.json').is_file():
+    raise RuntimeError('Rust dependency notices are missing from native staging')
+datas = [(str(notices), 'backend/native_runtime/notices')]

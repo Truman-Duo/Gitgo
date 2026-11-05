@@ -195,7 +195,16 @@ fn create_job(name: &[u16], processes: u32, memory: u64, cpu: u32) -> Result<Ker
     unsafe {
         SetLastError(0);
     }
-    let raw = unsafe { CreateJobObjectW(null(), name.as_ptr()) };
+    let raw = unsafe {
+        CreateJobObjectW(
+            null(),
+            if name.is_empty() {
+                null()
+            } else {
+                name.as_ptr()
+            },
+        )
+    };
     let error = unsafe { GetLastError() };
     if raw.is_null() {
         return Err(error);
@@ -373,7 +382,11 @@ fn perform(request: Request) -> Result<Value> {
             memory,
             cpu_seconds,
         } => {
-            let name = job_name(&recovery_id)?;
+            let name = if recovery_id.is_empty() {
+                Vec::new()
+            } else {
+                job_name(&recovery_id)?
+            };
             let token = resources.token()?;
             let handle = create_job(&name, processes, memory, cpu_seconds)?;
             resources.jobs.insert(

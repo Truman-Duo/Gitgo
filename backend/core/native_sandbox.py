@@ -144,7 +144,7 @@ class NativeLibrary:
             raise NativeBoundaryError('Native boundary is sealed; retain recovery debt')
         if len(raw) > MAX_REQUEST:
             raise ValueError('Native security descriptor exceeds its bound')
-        capacity = 8 * MAX_REQUEST if operation == 3 else MAX_REQUEST
+        capacity = min(8 * MAX_REQUEST, max(4096, len(raw) * 16)) if operation == 3 else MAX_REQUEST
         output, written = C.create_string_buffer(capacity), C.c_size_t()
         status = self._acl(operation, token, raw or None, len(raw), output, len(output), C.byref(written))
         if status:
@@ -154,7 +154,7 @@ class NativeLibrary:
         if written.value > capacity:
             self._sealed = True
             raise NativeBoundaryError('Native ACL response exceeds bounds')
-        return output.raw[:written.value]
+        return C.string_at(output, written.value)
 
     def call(self, **request):
         if self._sealed:
@@ -169,7 +169,7 @@ class NativeLibrary:
             self._sealed = True
             raise NativeBoundaryError("Native call outcome is unknown; do not replay the invocation")
         try:
-            result = json.loads(output.raw[:written.value])
+            result = json.loads(C.string_at(output, written.value))
             if type(result) is not dict or type(result.get('ok')) is not bool:
                 raise ValueError('Invalid response')
         except (ValueError, TypeError) as error:
