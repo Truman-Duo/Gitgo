@@ -126,6 +126,7 @@ class PipelineTests(unittest.TestCase):
         run = next(step['run'] for step in pieces['steps'] if step.get('name') == 'Full Python suite')
         self.assertIn('-p scripts.ci_source_shards tests -q', run)
         self.assertIn('--source-shard-count 4', run)
+        self.assertIn('--source-collection-expected dev-artifacts/ci-source/collection-probe.json', run)
         self.assertIn('python-windows-shards', jobs['python-windows']['needs'])
         verified = next(step for step in jobs['python-windows']['steps'] if step.get('id') == 'verified')
         self.assertIn('scripts/ci_source_shards.py --reports incoming --count 4', verified['run'])

@@ -80,11 +80,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           python --version
+      - name: Collect expected complete source suite before execution
+        run: >-
+          python -B -m pytest -p scripts.ci_source_shards tests --collect-only -q --rootdir .
+          --source-shard-count 4 --source-shard-index ${{ matrix.shard }}
+          --source-shard-report dev-artifacts/ci-source/collection-probe.json
       - name: Full Python suite
         run: >-
-          python -B -m pytest -p scripts.ci_source_shards tests -q --junitxml=ci-tests.xml
+          python -B -m pytest -p scripts.ci_source_shards tests -q --rootdir . --junitxml=ci-tests.xml
           --source-shard-count 4 --source-shard-index ${{ matrix.shard }}
           --source-shard-report dev-artifacts/ci-source/source-shard.json
+          --source-collection-expected dev-artifacts/ci-source/collection-probe.json
       - name: Reject test mutations of tracked source
         run: |
           git diff --exit-code HEAD

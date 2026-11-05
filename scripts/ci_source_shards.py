@@ -35,6 +35,7 @@ def pytest_addoption(parser):
     parser.addoption('--source-shard-count', type=int, default=1)
     parser.addoption('--source-shard-index', type=int, default=0)
     parser.addoption('--source-shard-report')
+    parser.addoption('--source-collection-expected')
 
 
 def pytest_sessionstart(session):
@@ -47,6 +48,8 @@ def pytest_collection_modifyitems(config, items):
     count, index = config.getoption('--source-shard-count'), config.getoption('--source-shard-index')
     if not 0 <= index < count or config.args != ['tests'] or config.option.keyword or config.option.markexpr:
         raise ValueError('Source shards require the unfiltered tests directory')
+    if Path(config.rootpath).resolve() != Path(config.invocation_params.dir).resolve():
+        raise ValueError('Source shards require an explicit repository rootdir')
     all_ids = sorted(item.nodeid for item in items)
     plan = assignment(all_ids, count)
     selected = [item for item in items if plan[item.nodeid.split('::', 1)[0]] == index]
@@ -54,14 +57,25 @@ def pytest_collection_modifyitems(config, items):
     directory = config.invocation_params.dir
     git = lambda *args: subprocess.check_output(['git', *args], cwd=directory, text=True).strip()
     lock = Path(directory) / 'packaging/requirements-build.lock'
-    _RUN = {'schema_version': 1, 'count': count, 'index': index,
+    metadata = {'schema_version': 1, 'count': count, 'index': index,
         'commit': git('rev-parse', 'HEAD'), 'tree': git('rev-parse', 'HEAD^{tree}'),
         'run_id': os.environ.get('GITHUB_RUN_ID', 'local'),
         'attempt': int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')),
         'environment': {'platform': sys.platform, 'python': list(sys.version_info[:3]),
             'pytest': importlib.metadata.version('pytest'),
             'build_lock': hashlib.sha256(lock.read_bytes()).hexdigest()},
-        'collected': all_ids, 'selected': sorted(item.nodeid for item in selected), 'executed': set()}
+        'collected': all_ids, 'selected': sorted(item.nodeid for item in selected), 'executed': set(),
+        'collect_only': bool(config.option.collectonly)}
+    _RUN = metadata
+    expected_path = config.getoption('--source-collection-expected')
+    if expected_path:
+        prior = json.loads(Path(expected_path).read_bytes())
+        keys = ('schema_version', 'count', 'index', 'commit', 'tree', 'run_id', 'environment', 'collected')
+        differences = [key for key in keys if prior.get(key) != metadata[key]]
+        if prior.get('collect_only') is not True or prior.get('exit_code') != 0 or prior.get('executed') != []:
+            differences.append('probe-state')
+        if differences:
+            raise ValueError('Source collection changed before execution: ' + ', '.join(differences))
     config.hook.pytest_deselected(items=removed)
     items[:] = selected
 
@@ -104,10 +118,15 @@ def verify(records, *, commit, tree, run_id, count):
     seen = []
     for index, record in sorted(latest.items()):
         expected = sorted(node for node in all_ids if plan[node.split('::', 1)[0]] == index)
-        if (record.get('exit_code') != 0 or record['collected'] != all_ids
-                or record['environment'] != baseline['environment']
-                or record['selected'] != expected or record['executed'] != expected):
-            raise ValueError('Source shard failed or coverage differs')
+        differences = [name for name, matches in {
+            'exit': record.get('exit_code') == 0,
+            'collection': record['collected'] == all_ids,
+            'environment': record['environment'] == baseline['environment'],
+            'selection': record['selected'] == expected,
+            'execution': record['executed'] == expected,
+        }.items() if not matches]
+        if differences:
+            raise ValueError(f'Source shard {index} failed admission: ' + ', '.join(differences))
         seen.extend(record['executed'])
     if sorted(seen) != all_ids:
         raise ValueError('Incomplete or duplicated full-source coverage')

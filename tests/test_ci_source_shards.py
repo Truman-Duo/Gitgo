@@ -88,14 +88,37 @@ class SourceShardTests(unittest.TestCase):
             records = []
             for index in range(3):
                 report = root / f'reports/{index}/source-shard.json'
-                result = subprocess.run([sys.executable, '-B', '-m', 'pytest', '-p',
-                    'scripts.ci_source_shards', 'tests', '-q', '--source-shard-count', '3',
-                    '--source-shard-index', str(index), '--source-shard-report', str(report)],
+                command = [sys.executable, '-B', '-m', 'pytest', '-p',
+                    'scripts.ci_source_shards', 'tests', '-q', '--rootdir', '.', '--source-shard-count', '3',
+                    '--source-shard-index', str(index)]
+                probe = root / f'reports/{index}/collection-probe.json'
+                result = subprocess.run([*command, '--collect-only', '--source-shard-report', str(probe)],
+                    cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run([*command, '--source-shard-report', str(report),
+                    '--source-collection-expected', str(probe)],
                     cwd=root, env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 records.append(json.loads(report.read_bytes()))
             self.assertEqual(shards.verify(records, commit=git('rev-parse', 'HEAD'),
                 tree=git('rev-parse', 'HEAD^{tree}'), run_id='fixture', count=3)['executed'], 4)
+            # Random data remains valid; using it as a collection ID must stop
+            # before any selected test body runs, rather than after the suite.
+            (root / 'tests/test_a.py').write_text('import pytest,uuid\nfrom pathlib import Path\n'
+                '@pytest.mark.parametrize("value",[str(uuid.uuid4())])\n'
+                'def test_first(value): Path("should-not-run").touch()\n'
+                'def test_second(): assert True\n')
+            command = [sys.executable, '-B', '-m', 'pytest', '-p', 'scripts.ci_source_shards',
+                       'tests', '-q', '--rootdir', '.', '--source-shard-count', '3', '--source-shard-index', '0']
+            probe = root / 'unstable-probe.json'
+            first = subprocess.run([*command, '--collect-only', '--source-shard-report', str(probe)],
+                cwd=root, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            second = subprocess.run([*command, '--source-collection-expected', str(probe)],
+                cwd=root, env=env, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn('Source collection changed before execution', second.stdout + second.stderr)
+            self.assertFalse((root / 'should-not-run').exists())
 
 
 if __name__ == '__main__':

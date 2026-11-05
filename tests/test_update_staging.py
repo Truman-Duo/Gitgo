@@ -151,7 +151,8 @@ def test_up_to_date_does_not_download_or_create_staging(signing, locations):
     assert not list(locations[0].iterdir())
 
 
-@pytest.mark.parametrize("delivered", [b"short", tar_bytes() + b"extra", b"x" * len(tar_bytes())])
+@pytest.mark.parametrize("delivered", [b"short", tar_bytes() + b"extra", b"x" * len(tar_bytes())],
+                         ids=['short', 'trailing', 'hash-damage'])
 def test_size_and_hash_damage_never_leave_usable_staging(signing, locations, delivered):
     with pytest.raises(UpdateError):
         pipeline(signing, locations, delivered=delivered)
@@ -267,7 +268,7 @@ def test_archive_resource_limits_are_enforced(signing, locations, limits):
     assert not list(locations[0].iterdir())
 
 
-@pytest.mark.parametrize("broken", [b"not an archive", tar_bytes()[:-3]])
+@pytest.mark.parametrize("broken", [b"not an archive", tar_bytes()[:-3]], ids=['invalid-format', 'truncated'])
 def test_even_correctly_signed_broken_archive_is_not_accepted(signing, locations, broken):
     with pytest.raises(UpdateError, match="UPDATE_ARCHIVE_INVALID"):
         pipeline(signing, locations, broken)
@@ -503,7 +504,8 @@ def test_nonsticky_writable_ancestor_cannot_swap_private_parent(signing, locatio
     assert not list(private.iterdir())
 
 
-@pytest.mark.parametrize("suffix", [b"extra", gzip.compress(b"another member")])
+@pytest.mark.parametrize("suffix", [b"extra", gzip.compress(b"another member")],
+                         ids=['trailing-bytes', 'second-gzip-member'])
 def test_concatenated_gzip_or_trailing_bytes_are_not_hidden(signing, locations, suffix):
     with pytest.raises(UpdateError, match="UPDATE_ARCHIVE_INVALID"):
         pipeline(signing, locations, tar_bytes() + suffix)
