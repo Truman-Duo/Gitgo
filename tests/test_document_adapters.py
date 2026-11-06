@@ -153,7 +153,8 @@ def test_doc_converter_receives_private_eof(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(document_limits, 'check_converter', lambda *args: None)
     def convert(argv, **kwargs):
         assert kwargs['stdin'] == subprocess.DEVNULL
-        assert argv == [str(converter), str(path)]
+        assert argv[0] == str(converter) and Path(argv[1]) != path
+        assert Path(argv[1]).read_bytes() == path.read_bytes()
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(document_tools.subprocess, 'Popen', convert)
     monkeypatch.setattr('backend.core.process_control.attach_kill_job', lambda _: None)

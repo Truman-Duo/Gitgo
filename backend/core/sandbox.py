@@ -25,10 +25,8 @@ class SandboxDenied(RuntimeError):
                 "effect_state": getattr(self, "effect_state", "not_committed")}
         return {
             **error_payload(self.code, message=str(self), next_actions=[
-                {"action": "configure_native_sandbox",
-                 "effect": "Provision the documented runtime/workspace sandbox access; never retry unsandboxed."},
-                {"action": "request_permission",
-                 "effect": "Request an exact tool/resource grant if additional access is needed. Approval does not disable isolation."},
+                {"action": "inspect_native_execution",
+                 "effect": "Use the recorded preparation, launch and cleanup facts. Internal runtime failures are Gitgo bugs, not user goal choices. Request permission only when the actual resource scope requires it; never retry unsandboxed."},
             ]),
             "effect_state": getattr(self, "effect_state", "not_committed"),
         }
@@ -70,6 +68,9 @@ class SandboxPolicy:
     cpu_seconds: int = 120
     # Optional Host-owned identity for a durable producer's recovery boundary.
     recovery_id: str = ""
+    # Trusted per-invocation native read view, never inferred from tool JSON.
+    read_roots: tuple[Path, ...] = ()
+    metadata_roots: tuple[Path, ...] = ()
 
     def __post_init__(self):
         try:
@@ -80,6 +81,17 @@ class SandboxPolicy:
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "A concrete workspace directory is required.")
         validate_runtime_separation(root, trusted_runtime_roots())
         object.__setattr__(self, "workspace", root)
+        readonly = []
+        for raw in self.read_roots:
+            path = Path(raw).absolute()
+            if path == Path(path.anchor) or '..' in path.parts or path == root or path.is_relative_to(root):
+                raise SandboxDenied("SANDBOX_POLICY_INVALID", "Invalid native read scope")
+            path.stat()
+            readonly.append(path)
+        object.__setattr__(self, 'read_roots', tuple(dict.fromkeys(readonly)))
+        object.__setattr__(self, 'metadata_roots', tuple(dict.fromkeys(Path(p).absolute() for p in self.metadata_roots)))
+        if any(not p.is_dir() or p == Path(p.anchor) for p in self.metadata_roots):
+            raise SandboxDenied('SANDBOX_POLICY_INVALID', 'Invalid native metadata scope')
         import re
         if self.recovery_id and not re.fullmatch(r"[0-9a-f]{32}", self.recovery_id):
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "Invalid native recovery identity")
@@ -135,6 +147,11 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
         for root in trusted_runtime_roots():
             if not any(root.is_relative_to(Path(tree)) for tree in ("/usr", "/bin", "/lib", "/lib64")):
                 command += ["--ro-bind", str(root), str(root)]
+        for root in sorted(policy.metadata_roots, key=lambda p: (len(p.parts), str(p))):
+            if not any(root == r or root.is_relative_to(r) for r in (*trusted_runtime_roots(), *policy.read_roots)):
+                command += ['--dir', str(root)]
+        for root in policy.read_roots:
+            command += ["--ro-bind", str(root), str(root)]
         cgroup = LinuxCgroup(policy)
         command += ["--dir", "/run",
                     "--bind", str(cgroup.path / "cgroup.procs"), "/run/gitgo-cgroup.procs",

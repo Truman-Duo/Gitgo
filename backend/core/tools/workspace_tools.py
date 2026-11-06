@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -76,6 +77,11 @@ def read_file(args: dict) -> dict:
         return _read_failure("FILE_NOT_FOUND", label)
     except IsADirectoryError:
         return _read_failure("IS_DIRECTORY", label)
+    except PermissionError as exc:
+        from backend.core.sandbox_read import ReadBoundaryError
+        if isinstance(exc, ReadBoundaryError):
+            return _read_failure("READ_ERROR", label, detail=str(exc))
+        return _read_failure("READ_ACCESS_DENIED", label, detail=str(exc))
     except OSError as exc:
         return _read_failure("READ_ERROR", label, detail=str(exc))
     if b"\x00" in raw[:8192]:
@@ -124,21 +130,36 @@ def list_files(args: dict) -> dict:
     workspace = _workspace(args)
     root = _confined_path(workspace, args.get("path", "."), must_exist=False,
                           allowed_roots=_allowed_roots(args))
-    if not root.exists():
+    try:
+        mode = root.stat().st_mode
+    except FileNotFoundError:
         return {
             "files": [], "count": 0, "truncated": False, "exists": False,
             "path": _rel(workspace, root),
         }
-    if not root.is_dir():
-        return {"error": "NOT_A_DIRECTORY", "path": _rel(workspace, root)}
+    except PermissionError as exc:
+        return _read_failure("READ_ACCESS_DENIED", _rel(workspace, root), detail=str(exc))
+    except OSError as exc:
+        return _read_failure("READ_ERROR", _rel(workspace, root), detail=str(exc))
+    if not stat.S_ISDIR(mode):
+        return _read_failure("NOT_A_DIRECTORY", _rel(workspace, root))
     from .workspace_search import search
     return search(args, workspace, root, _IGNORED_DIRS, listing=True)
 
 
 def search_text(args: dict) -> dict:
     workspace = _workspace(args)
-    root = _confined_path(workspace, args.get("path", "."), must_exist=True,
-                          allowed_roots=_allowed_roots(args))
+    try:
+        root = _confined_path(workspace, args.get("path", "."), must_exist=True,
+                              allowed_roots=_allowed_roots(args))
+    except FileNotFoundError:
+        return _read_failure("FILE_NOT_FOUND", str(args.get("path", ".")))
+    except WorkspaceScopeError:
+        raise
+    except PermissionError as exc:
+        return _read_failure("READ_ACCESS_DENIED", str(args.get("path", ".")), detail=str(exc))
+    except OSError as exc:
+        return _read_failure("READ_ERROR", str(args.get("path", ".")), detail=str(exc))
     from .workspace_search import search
     return search(args, workspace, root, _IGNORED_DIRS)
 
@@ -707,8 +728,9 @@ def _confined_path(workspace: Path, raw: str, *, must_exist: bool,
     roots = [workspace, *(allowed_roots or [])]
     if not any(_is_within(resolved, root) for root in roots):
         raise WorkspaceScopeError(f"path escapes approved resource scope: {raw}")
-    if must_exist and not resolved.exists():
-        raise FileNotFoundError(str(resolved))
+    if must_exist:
+        # exists() suppresses OS errors on Python 3.14, including access denial.
+        resolved.stat()
     return resolved
 
 

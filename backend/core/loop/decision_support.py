@@ -144,8 +144,9 @@ def prepare_user_decision(process, args: dict) -> dict:
     if not question or not why:
         raise ValueError("question and why_user_must_decide are required")
     raw_options = args.get("options", []) or []
-    compact = kind in {"clarification", "runtime_checkpoint"}
-    if not isinstance(raw_options, list) or not (0 <= len(raw_options) <= 3 if compact else 2 <= len(raw_options) <= 3):
+    compact = kind in SEMANTIC_DECISION_KINDS or kind == 'runtime_checkpoint'
+    open_question = kind in {'clarification', 'runtime_checkpoint'}
+    if not isinstance(raw_options, list) or not (0 <= len(raw_options) <= 3 if open_question else 2 <= len(raw_options) <= 3):
         raise ValueError(
             "request_user_decision requires 2..3 business options; use the Host "
             "free-form Discuss/Amend affordance instead of adding a defer option"
@@ -176,7 +177,7 @@ def prepare_user_decision(process, args: dict) -> dict:
             raise ValueError("decision option labels must be unique")
         labels.add(option["label"])
         option["recommended"] = bool(raw.get("recommended", False))
-        if raw.get("action") and compact:
+        if raw.get("action") and kind in {'clarification', 'runtime_checkpoint'}:
             raise ValueError("clarifications cannot carry authority actions")
         if raw.get("action"):
             option["action"] = str(raw.get("action"))
@@ -480,30 +481,29 @@ def create_completion_exception_decision(process, gate_status: dict) -> dict:
     return {"status": "awaiting_user", **request}
 
 
-def format_decision_request(request: dict) -> str:
+def format_decision_request(request: dict, *, details: bool = False) -> str:
     if request.get("questions"):
-        return "\n\n".join(f"{i + 1}. " + format_decision_request(q) for i, q in enumerate(request["questions"]))
-    lines = [
-        str(request.get("question", "")),
-        "",
-        "为什么需要你决定：" + str(request.get("why_user_must_decide", "")),
-        "",
-    ]
+        return "\n\n".join(f"{i + 1}. " + format_decision_request(q, details=details) for i, q in enumerate(request["questions"]))
+    lines = [str(request.get("question", ""))]
+    reason = str(request.get("why_user_must_decide") or "").strip()
+    if reason:
+        lines.append(reason)
+    permission = request.get("permission_request") or {}
+    for title, field in (("用途", "purpose"), ("目标", "resource")):
+        if permission.get(field):
+            lines.append(f"{title}：{permission[field]}")
     for index, option in enumerate(request.get("options", []) or [], start=1):
         marker = "（建议）" if option.get("recommended") else ""
-        if request.get("kind") == "clarification":
-            lines.append(f"{index}. {option.get('label', '')}{marker}：{option.get('description') or option.get('immediate_effect') or ''}")
-            continue
-        lines.extend([
-            f"{index}. {option.get('label', '')}{marker}",
-            f"   原理：{option.get('principle', '')}",
-            f"   立即效果：{option.get('immediate_effect', '')}",
-            f"   后续影响：{option.get('downstream_effect', '')}",
-            f"   风险：{option.get('risks', '')}",
-            f"   可逆性：{option.get('reversibility', '')}",
-        ])
-    if request.get("allow_free_form", True):
-        lines.extend(["", "你也可以直接说明自己的选择或补充条件。"])
+        effect = option.get('description') or option.get('immediate_effect') or ''
+        lines.append(f"{index}. {option.get('label', '')}{marker}" + (f"：{effect}" if effect else ""))
+        # Risks remain visible; full rationale and audit fields are available
+        # from the same record, without repeating five fields per option.
+        fields = (("风险", "risks"),)
+        if details:
+            fields += (("依据", "principle"), ("后续", "downstream_effect"), ("可逆性", "reversibility"))
+        for title, field in fields:
+            if option.get(field):
+                lines.append(f"   {title}：{option[field]}")
     return "\n".join(lines).strip()
 
 

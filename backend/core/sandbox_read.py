@@ -196,10 +196,10 @@ class ReadRoot:
     def pin(self, relative: str) -> PinnedObject:
         return self._open(relative, metadata_only=True)
 
-    def open(self, relative: str) -> PinnedRead:
-        return self._open(relative, metadata_only=False)
+    def open(self, relative: str, *, allow_leaf_mount=False) -> PinnedRead:
+        return self._open(relative, metadata_only=False, allow_leaf_mount=allow_leaf_mount)
 
-    def _open(self, relative: str, *, metadata_only: bool):
+    def _open(self, relative: str, *, metadata_only: bool, allow_leaf_mount=False):
         if self._closed:
             raise ValueError('Read root is closed')
         parts = relative_parts(relative)
@@ -210,7 +210,8 @@ class ReadRoot:
                 # I/O. BENEATH + NO_XDEV + NO_SYMLINKS is enforced by the kernel
                 # for the whole lookup, including concurrent rename races.
                 pinned = _linux_openat2(self._handle, '/'.join(parts),
-                    os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW, 0x08 | 0x01 | 0x04 | 0x02)
+                    os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0x08 | (0 if allow_leaf_mount else 0x01) | 0x04 | 0x02)
                 owners.callback(os.close, pinned)
                 info = os.fstat(pinned)
                 if stat.S_ISDIR(info.st_mode):

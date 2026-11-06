@@ -17,7 +17,7 @@ def source_test_paths(root, suite):
         path.relative_to(root).as_posix()
         for pattern in ('test_*sandbox*.py', 'test_windows_owned_job.py',
                         'test_windows_profile_lifecycle.py', 'test_read_approval.py',
-                        'test_read_execution_plan.py')
+                        'test_read_execution_plan.py', 'test_native_read_*.py')
         for path in (root / 'tests').glob(pattern)
     })
     if not selected:

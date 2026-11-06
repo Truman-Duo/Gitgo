@@ -1,5 +1,7 @@
 # 原生构建与发布要求
 
+维护者可通过[发布总控](release-controller.md)准备、恢复并交付完整目标矩阵的发行包。
+
 Gitgo 的 Windows 产品包包含 Dashboard 与内部 Native Host，必须一起构建、校验和分发。源码合入不等于二进制已经发布。
 
 ## 构建环境

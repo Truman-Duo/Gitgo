@@ -1,4 +1,4 @@
-"""Bind same-run upstream test outputs to this checkout, never to an old green run.
+"""Bind Dashboard reuse to this checkout and declare source-suite ownership.
 
 GitHub job dependencies provide the successful execution. These checks bind that
 output to the exact checked-out commit; they are not independent attestations.
@@ -20,12 +20,16 @@ def required(value, head):
 
 def main():
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-    decisions = {name: required(os.environ.get(name.upper() + '_VERIFIED_COMMIT', ''), head)
-                 for name in ('source', 'dashboard')}
+    delegated = os.environ.get('SOURCE_SUITE_BY_CALLER', 'false')
+    if delegated not in ('true', 'false'):
+        raise ValueError('Source-suite delegation must be an explicit boolean')
+    decisions = {'source': delegated != 'true',
+                 'dashboard': required(os.environ.get('DASHBOARD_VERIFIED_COMMIT', ''), head)}
     with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as stream:
         for name, run in decisions.items():
             stream.write(f'{name}={str(run).lower()}\n')
-    print('Exact-checkout prerequisites checked; missing upstream suites will run here.')
+    print('Dashboard identity checked; source suite is delegated to the caller final gate.'
+          if delegated == 'true' else 'Missing upstream suites will run here.')
 
 
 if __name__ == '__main__':

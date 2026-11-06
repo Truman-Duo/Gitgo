@@ -27,7 +27,7 @@ class ExecutionContract:
     def __post_init__(self):
         if not isinstance(self.kind, ExecutionType) or type(self.version) is not int or self.version != 1:
             raise ValueError("Unknown execution contract type/version")
-        if self.file_action not in {"", "read_existing_file", "produce_workspace"}:
+        if self.file_action not in {"", "read_existing_file", "read_resource", "produce_workspace"}:
             raise ValueError("Unknown file action")
         if self.file_action and self.kind != ExecutionType.NATIVE_PROCESS:
             raise ValueError("File actions require the native helper")
@@ -49,6 +49,7 @@ HOST_COMPUTE = ExecutionContract(ExecutionType.HOST_COMPUTE)
 NATIVE_PROCESS = ExecutionContract(ExecutionType.NATIVE_PROCESS)
 NATIVE_WORKSPACE_PRODUCER = ExecutionContract(ExecutionType.NATIVE_PROCESS, file_action="produce_workspace")
 NATIVE_FILE_READ = ExecutionContract(ExecutionType.NATIVE_PROCESS, file_action="read_existing_file")
+NATIVE_RESOURCE_READ = ExecutionContract(ExecutionType.NATIVE_PROCESS, file_action="read_resource")
 
 
 def verify_registration(tool, process, owner, registration):
@@ -121,6 +122,8 @@ class NativeInvocation:
         from dataclasses import asdict
         policy = asdict(self.policy)
         policy['workspace'] = str(policy['workspace'])
+        policy['read_roots'] = [str(path) for path in policy.get('read_roots', ())]
+        policy['metadata_roots'] = [str(path) for path in policy.get('metadata_roots', ())]
         return hashlib.sha256(self.encode(dict(handler=self.handler,
             arguments=self.arguments.decode('utf8'), timeout=self.timeout,
             policy=policy, owner=self.owner, registration=self.registration))).hexdigest()

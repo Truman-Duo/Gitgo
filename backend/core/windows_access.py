@@ -22,7 +22,9 @@ class AccessTree(SecurityTree):
     ancestor_access = 0x200A0
     privilege_context = staticmethod(nullcontext)
 
-    def __init__(self, roots, *, writable=True, shallow=(), metadata=()):
+    def __init__(self, roots, *, writable=True, shallow=(), metadata=(), readonly=(), execute=()):
+        self.readonly = tuple(Path(p) for p in readonly)
+        self.execute = tuple(Path(p) for p in execute)
         self.metadata = {str(Path(p)) for p in metadata}
         self.shallow = {str(Path(p)) for p in shallow} | self.metadata
         super().__init__(roots, writable=writable)
@@ -43,7 +45,11 @@ class AccessTree(SecurityTree):
         sid = _profile_sid(principal)
         import base64
         for index, record in enumerate(planned):
-            if record["path"] not in self.metadata:
+            metadata = record["path"] in self.metadata
+            readonly = any(Path(record['path']) == p or Path(record['path']).is_relative_to(p) for p in self.readonly)
+            if any(Path(record['path']) == p or Path(record['path']).is_relative_to(p) for p in self.execute):
+                readonly = False
+            if not metadata and not readonly:
                 continue
             descriptor = self.record_descriptor(record)
             entries = []
@@ -51,7 +57,8 @@ class AccessTree(SecurityTree):
                 if ace[8:] == sid:
                     # SYNCHRONIZE | READ_ATTRIBUTES | TRAVERSE only. No list,
                     # data, write, security modification or inherited grant.
-                    ace = struct.pack("<BBHI", 0, 0, 8 + len(sid), 0x1000A0) + sid
+                    mask = 0x1000A0 if metadata else 0x120089
+                    ace = struct.pack("<BBHI", 0, 0 if metadata else ace[1], 8 + len(sid), mask) + sid
                 entries.append(ace)
             raw = replace(descriptor, dacl=_acl(descriptor.dacl[0], entries)).to_bytes()
             self._validated(raw)
@@ -80,7 +87,7 @@ class AccessTree(SecurityTree):
                 if sid not in ace:
                     kept.append(ace)
                 elif (ace[0] != 0 or ace[8:] != sid or ace[1] not in {0,3,16,19}
-                        or struct.unpack_from('<I', ace, 4)[0] not in {0x1200A9,0x1301BF,0x1000A0}):
+                        or struct.unpack_from('<I', ace, 4)[0] not in {0x1200A9,0x1301BF,0x1000A0,0x120089}):
                     raise ValueError('Sandbox principal has an unsupported ACE; retain recovery record')
             changed = replace(descriptor, dacl=_acl(descriptor.dacl[0], kept))
             import base64

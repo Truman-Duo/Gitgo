@@ -103,6 +103,45 @@ def plan_agent_checkpoint(
         message_objects.append((sequence, message, message_object, reasoning_object))
 
     task_id = str(snapshot.get("task_id", "")).strip()
+    # User input belongs to its durable task, independently of the Provider's
+    # bounded working transcript. Keep it in the existing task contract/CAS
+    # transaction, rather than treating the current messages table as history.
+    with self._state_lock:
+        prior_messages = {int(row["sequence"]): dict(row) for row in self._state.execute(
+            "SELECT sequence, task_id, content_ref FROM messages WHERE session_id=?", (session_id,))}
+        prior_task = self._state.execute("SELECT contract_ref FROM tasks WHERE task_id=?", (task_id,)).fetchone() if task_id else None
+    message_tasks = {}
+    inputs = []
+    old_contract = {}
+    if prior_task is not None and prior_task['contract_ref']:
+        old_contract = self._read_json_blob(str(prior_task['contract_ref']), repair=False)
+        inputs = list(old_contract.get('conversation_inputs') or [])
+    from .presentation import _is_public_user_message
+    for sequence, message, _, _ in message_objects:
+        owner = str(message.get('turn_id') or task_id)
+        prior = prior_messages.get(sequence)
+        if not message.get('turn_id') and prior and prior['task_id']:
+            old = self._read_json_blob(str(prior['content_ref']), repair=False)
+            same_identity = (message.get('message_id') == old.get('message_id')
+                             if message.get('message_id') or old.get('message_id') else
+                             all(old.get(k) == message.get(k) for k in ('role', 'content')))
+            if same_identity:
+                owner = str(prior['task_id'])
+        message_tasks[sequence] = owner
+        if task_id and owner == task_id and _is_public_user_message(message):
+            identity = str(message.get('message_id') or hashlib.sha256(f'{session_id}:{sequence}'.encode()).hexdigest())
+            if not any(item['message_id'] == identity for item in inputs):
+                inputs.append({**message, 'message_id': identity, 'turn_id': task_id,
+                               'timestamp': str(message.get('timestamp') or now)})
+    if task_id and not inputs:
+        description = str(old_contract.get('task_description') or snapshot.get('task_description') or '')
+        epochs = (snapshot.get('session_metadata') or {}).get('epoch_archive') or []
+        original = next((m for epoch in epochs for m in epoch.get('messages', [])
+                         if _is_public_user_message(m) and (m.get('turn_id') == task_id
+                         or not m.get('turn_id') and description and m.get('content') == description)), None)
+        if original is not None:
+            inputs.append({**original, 'message_id': str(original.get('message_id') or f'archived-input:{task_id}'),
+                           'turn_id': task_id, 'timestamp': str(original.get('timestamp') or now)})
     contract_object = None
     outcome_object = None
     if task_id:
@@ -111,6 +150,7 @@ def plan_agent_checkpoint(
             "task_kind": snapshot.get("task_kind", ""),
             "required_test_ids": list(snapshot.get("required_test_ids") or []),
             "capability_profile_id": snapshot.get("capability_profile_id", ""),
+            **({"conversation_inputs": inputs} if inputs or not old_contract or 'conversation_inputs' in old_contract else {}),
         })
         if snapshot.get("result") is not None:
             outcome_object = prepare(snapshot.get("result"))
@@ -316,18 +356,8 @@ def plan_agent_checkpoint(
     # Provider annotations can change the CAS reference of an old message.
     # Preserve its turn when the actual message remains the same, rather than
     # moving retained user history into the currently executing task.
-    with self._state_lock:
-        prior_messages = {int(row["sequence"]): dict(row) for row in self._state.execute(
-            "SELECT sequence, task_id, content_ref FROM messages WHERE session_id=?", (session_id,))}
     for sequence, message, message_object, reasoning_object in message_objects:
-        message_task_id = task_id
-        prior = prior_messages.get(sequence)
-        if prior and prior["task_id"] and prior["content_ref"] != message_object["ref"]:
-            old_message = self._read_json_blob(str(prior["content_ref"]))
-            if isinstance(old_message, dict) and all(
-                old_message.get(key) == message.get(key) for key in ("role", "content")
-            ):
-                message_task_id = str(prior["task_id"])
+        message_task_id = message_tasks[sequence]
         message_id = hashlib.sha256(
             f"{session_id}:{sequence}".encode("utf-8")
         ).hexdigest()
@@ -337,6 +367,8 @@ def plan_agent_checkpoint(
                    content_ref, reasoning_ref, created_at
                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(session_id, sequence) DO UPDATE SET
+                   created_at=CASE WHEN messages.task_id IS excluded.task_id
+                       THEN messages.created_at ELSE excluded.created_at END,
                    task_id=CASE
                        WHEN messages.content_ref=excluded.content_ref
                        THEN messages.task_id ELSE excluded.task_id END,
