@@ -116,7 +116,7 @@ def execute_child(proc, args, executable, preexec_fn, close_fds, pass_fds,
         proc._sandbox_job = job
         proc._gitgo_job_handle = job
         from backend.core.native_sandbox import pin_windows_runtime_images, IMAGE_PINS_ENV
-        images = pin_windows_runtime_images(job._image_pins)
+        images = pin_windows_runtime_images(job._image_pins, child_cwd=os.fsdecode(cwd))
         with ExitStack() as inherited_scope:
             leases = inherited_scope.enter_context(windows_sandbox_lease_handles())
             env = {key: value for key, value in (env or {}).items()

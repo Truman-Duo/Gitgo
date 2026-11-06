@@ -40,6 +40,17 @@ jobs:
           tests/test_sandbox_read_darwin.py tests/test_read_approval.py
           tests/test_read_execution_plan.py tests/test_implementation_identity.py
           tests/test_native_sandbox_abi.py tests/test_runtime_cleanup_evidence.py -q --tb=short
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        if: runner.os == 'Windows'
+        with:
+          bun-version: '1.4.4'
+      - name: Windows actual source and embedded runtime read consumers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:GITGO_BUN = (Get-Command bun).Source
+          python -B -m pytest 'tests/test_native_sandbox.py::test_windows_read_lifecycle_evidence[source]' tests/test_native_sandbox.py::test_windows_real_runner_exec_and_privileged_tool tests/test_file_feedback_contract.py tests/test_legacy_file_service.py tests/test_validation_versions.py -q --tb=short
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - if: runner.os == 'Linux'
         run: bash scripts/prepare_linux_update_ci.sh
       - name: Linux approval through actual isolated child

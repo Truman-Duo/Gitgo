@@ -108,7 +108,7 @@ def _windows_appcontainer():
             raise C.WinError(C.get_last_error())
 
 
-def pin_windows_runtime_images(owners):
+def pin_windows_runtime_images(owners, *, child_cwd=None):
     """Launcher-owned name/image reservations; never a child authority grant.
 
     Paths come only from the existing trusted runtime registration. Each image
@@ -117,8 +117,15 @@ def pin_windows_runtime_images(owners):
     """
     if _windows_appcontainer():
         raise NativeBoundaryError('An AppContainer cannot supervise native image pins')
-    from backend.core.sandbox_access import native_runtime_access
-    roots, _ = native_runtime_access()
+    from backend.core.sandbox import trusted_runtime_roots
+    # Consume the trusted runtime facts; do not re-run permission preparation
+    # or impose its automatic-ACL layout rules on an already provisioned
+    # source/embedded runtime. This function grants no filesystem access.
+    roots = list(trusted_runtime_roots())
+    if child_cwd is not None:
+        selected = Path(child_cwd).absolute()
+        if '..' not in selected.parts and any(selected.is_relative_to(Path(root)) for root in roots):
+            roots.append(selected)
     candidates = {installed_path()}
     name = 'gitgo_native_sandbox.dll'
     for root in roots:
