@@ -45,13 +45,11 @@ def _pin_windows(path, owners):
     api = WindowsReadApi()
     if not path.is_absolute() or len(path.drive) != 2 or '..' in path.parts:
         raise NativeBoundaryError("Native module requires a local absolute path")
-    parent = api.open('\\??\\' + path.anchor, None, directory=True)
+    parent = api.pin_directory('\\??\\' + path.anchor, None)
     owners.callback(api.close, parent)
-    api.identity(parent, directory=True)
     for part in path.parts[1:-1]:
-        parent = api.open(part, parent, directory=True)
+        parent = api.pin_directory(part, parent)
         owners.callback(api.close, parent)
-        api.identity(parent, directory=True)
     handle = api.open(path.name, parent, directory=False, share_write=False)
     try:
         identity = api.identity(handle, directory=False)

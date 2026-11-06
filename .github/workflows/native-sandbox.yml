@@ -98,7 +98,13 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install 1.90.0 --profile minimal
-          cargo +1.90.0 test --locked --manifest-path native/sandbox/Cargo.toml
+          if [ "${{ matrix.os }}" = macos-26 ]; then
+            cargo +1.90.0 test --locked --manifest-path native/sandbox/Cargo.toml
+          else
+            # Older macOS workers audit ABI/refusal only. Actual read boundary
+            # tests require the enforcing macOS 26 kernel in its separate gate.
+            cargo +1.90.0 test --locked --manifest-path native/sandbox/Cargo.toml -- --skip safe_read::
+          fi
           python -B scripts/build_sandbox_native.py
           python -B -m pytest tests/test_native_sandbox_abi.py -q -x
       - name: Audit native primitives and verify production stays closed
