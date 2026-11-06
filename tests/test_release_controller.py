@@ -21,6 +21,16 @@ from scripts.release_control.plan import check_source, git, load
 from scripts.release_controller import run, main
 
 
+def leaf_python():
+    if sys.platform == 'darwin':
+        # Reuse the already validated forkless fixture's actual framework
+        # binary. bin/python is a posix_spawn trampoline, intentionally denied
+        # by a single-process recipe; the controller never rewrites user argv.
+        from tests.test_macos_forkless_scope import interpreter
+        return interpreter()
+    return sys.executable
+
+
 def test_macos_scope_contract_refuses_general_commands_before_start(monkeypatch):
     from types import SimpleNamespace
     from scripts.release_control import processes
@@ -58,7 +68,7 @@ def release(tmp_path_factory):
             'channel': 'preview', 'sequence': 9},
         'signing': {'private_key': str(base/'test-only.pem'), 'key_id': 'ephemeral-test'},
         'ci': [{'run_id': 123, 'workflow': 'ci.yml', 'required_jobs': ['CI gate']}],
-        'checks': [{'id': 'source-test', 'process_scope': 'single_process', 'argv': [sys.executable, '-c',
+        'checks': [{'id': 'source-test', 'process_scope': 'single_process', 'argv': [leaf_python(), '-c',
             'from pathlib import Path; p=Path(' + repr(str(output)) + '); p.write_text("pass")'],
             'outputs': [str(output)]}], 'targets': {}}
     from backend.core.update.manifest import TARGETS
@@ -241,7 +251,7 @@ def test_independent_checks_really_overlap_and_dependents_wait(release):
             f'while not Path({str(peer)!r}).exists():\n'
             ' if time.monotonic()>end: raise SystemExit(2)\n time.sleep(.01)\n'
             f'Path({str(output)!r}).write_text("done")')
-        return {'id': name, 'process_scope': 'single_process', 'argv': [sys.executable, '-c', program], 'cwd': plan['source'],
+        return {'id': name, 'process_scope': 'single_process', 'argv': [leaf_python(), '-c', program], 'cwd': plan['source'],
                 'inputs': [], 'outputs': [str(output)], 'timeout': 15}
     plan['checks'] = [step('left', 'right'), step('right', 'left')]
     with evidence.locked():
@@ -251,7 +261,7 @@ def test_independent_checks_really_overlap_and_dependents_wait(release):
 def test_failed_check_retains_successful_sibling_and_blocks_dependent(release):
     plan, evidence, _ = release
     good = plan['checks'][0]
-    bad = {**good, 'id': 'bad', 'argv': [sys.executable, '-c', 'raise SystemExit(3)']}
+    bad = {**good, 'id': 'bad', 'argv': [leaf_python(), '-c', 'raise SystemExit(3)']}
     blocked = {**good, 'id': 'blocked', 'needs': ['bad']}
     plan['checks'] = [good, bad, blocked]
     with evidence.locked():
@@ -270,7 +280,7 @@ def test_ready_dependency_can_start_without_waiting_for_an_unrelated_long_check(
         f'Path({str(left_started)!r}).write_text("start"); deadline=time.monotonic()+10\n'
         f'while not Path({str(dependent_done)!r}).exists():\n'
         ' if time.monotonic()>deadline: raise SystemExit(2)\n time.sleep(.01)')
-    make = lambda name, argv, outputs, needs=[]: {'id': name, 'process_scope': 'single_process', 'argv': [sys.executable, '-c', argv],
+    make = lambda name, argv, outputs, needs=[]: {'id': name, 'process_scope': 'single_process', 'argv': [leaf_python(), '-c', argv],
         'outputs': [str(p) for p in outputs], 'inputs': [], 'needs': needs, 'cwd': plan['source'], 'timeout': 15}
     plan['checks'] = [make('long', left, [left_started]),
         make('short', f'from pathlib import Path; Path({str(right_done)!r}).write_text("done")', [right_done]),

@@ -101,6 +101,7 @@ def source_native_runner(source_runtime, monkeypatch):
     command[0]=str(source_runtime/"python.exe")
     monkeypatch.setattr("backend.core.loop.process_tool_runner.tool_runner_command",lambda:command)
     monkeypatch.setattr("backend.core.loop.process_tool_runner.owned_child_cwd",lambda _:source_runtime)
+    monkeypatch.setattr("backend.core.sandbox_access.native_runtime_access",lambda:([source_runtime],[]))
     return lambda workspace: owned_windows_access(workspace,[source_runtime])
 
 

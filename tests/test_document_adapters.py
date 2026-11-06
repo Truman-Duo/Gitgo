@@ -5,6 +5,13 @@ from backend.core.tools.document_tools import document_create, document_open
 from tests.test_document_candidate_service import document_native_runtime, document_native_launcher, source_runtime, isolated_python
 
 
+def test_pinned_text_adapter_keeps_universal_newlines(tmp_path_factory):
+    target = tmp_path_factory / 'mixed.txt'
+    target.write_bytes(b'first\r\nsecond\rthird\n')
+    result = document_open({'_workspace': str(tmp_path_factory), 'path': target.name})
+    assert result['content'] == 'first\nsecond\nthird\n'
+
+
 def test_office_and_pdf_adapters_use_one_bounded_contract(tmp_path_factory: Path):
     workspace = tmp_path_factory
 

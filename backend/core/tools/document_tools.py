@@ -47,7 +47,9 @@ def document_open(args: dict) -> dict:
             raw = opened.read_bytes(max_bytes=MAX_INPUT_BYTES)
         check_input(path, data=raw)
         if suffix in {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".xml"}:
-            text = raw.decode('utf-8-sig', errors='replace')
+            # Preserve the former read_text universal-newline contract while
+            # consuming the bytes from the one pinned descriptor.
+            text = raw.decode('utf-8-sig', errors='replace').replace('\r\n', '\n').replace('\r', '\n')
         elif suffix == ".pdf":
             from pypdf import PdfReader
             pages = PdfReader(BytesIO(raw)).pages
