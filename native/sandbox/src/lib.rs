@@ -8,11 +8,28 @@ pub const ABI: u32 = 1;
 pub const MAX_REQUEST: usize = 1024 * 1024;
 pub const RESPONSE_CAPACITY: usize = 65536;
 static SEALED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "linux")]
+mod linux_cgroup;
 mod safe_read;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum Request {
+    #[serde(rename = "linux_cgroup_recover")]
+    LinuxCgroupRecover { root: Vec<u8>, recovery_id: String },
+    #[serde(rename = "linux_cgroup_create")]
+    LinuxCgroupCreate {
+        root: Vec<u8>,
+        recovery_id: String,
+        memory: u64,
+        processes: u32,
+    },
+    #[serde(rename = "linux_cgroup_query")]
+    LinuxCgroupQuery { token: u64 },
+    #[serde(rename = "linux_cgroup_kill")]
+    LinuxCgroupKill { token: u64 },
+    #[serde(rename = "linux_cgroup_retire")]
+    LinuxCgroupRetire { token: u64 },
     #[serde(rename = "capabilities")]
     Capabilities {},
     #[serde(rename = "read_root")]
@@ -76,6 +93,23 @@ fn dispatch(raw: &[u8]) -> Value {
             "authority": "host-existing-permission-broker"});
     }
     let request = match request {
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupRecover { root, recovery_id } => {
+            return linux_cgroup::recover(&root, &recovery_id);
+        }
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupCreate {
+            root,
+            recovery_id,
+            memory,
+            processes,
+        } => return linux_cgroup::create(&root, &recovery_id, memory, processes),
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupQuery { token } => return linux_cgroup::query(token),
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupKill { token } => return linux_cgroup::kill(token),
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupRetire { token } => return linux_cgroup::retire(token),
         Request::ReadRoot { path } => return safe_read::response(safe_read::root(&path)),
         Request::ReadOpen {
             token,

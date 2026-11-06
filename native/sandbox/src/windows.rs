@@ -564,6 +564,11 @@ fn perform(request: Request) -> Result<Value> {
             )
         }
         Request::Capabilities {}
+        | Request::LinuxCgroupCreate { .. }
+        | Request::LinuxCgroupRecover { .. }
+        | Request::LinuxCgroupQuery { .. }
+        | Request::LinuxCgroupKill { .. }
+        | Request::LinuxCgroupRetire { .. }
         | Request::ReadRoot { .. }
         | Request::ReadOpen { .. }
         | Request::ReadClose { .. }
