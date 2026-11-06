@@ -97,7 +97,7 @@ def test_new_session_writes_never_recreate_jsonl(tmp_path_factory: Path):
 
     assert reference.startswith("sqlite:session/")
     assert not (workspace / ".gitgo" / "sessions").exists()
-    assert store.load_session("process-live") == [{"role": "user", "content": "checkpoint"}]
+    assert store.load_session("process-live") == session.messages
     store.close()
 
 

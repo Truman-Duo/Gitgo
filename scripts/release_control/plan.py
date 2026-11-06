@@ -73,6 +73,8 @@ def load(path):
         step['cwd'] = resolve(step.get('cwd', plan['source']))
         if not step.get('argv') or not all(isinstance(x, str) and x for x in step['argv']):
             raise ValueError('Check needs an argv array; shell strings are not supported')
+        if step.get('process_scope', 'descendants') not in {'descendants', 'single_process'}:
+            raise ValueError('Unknown release-check process scope')
         if type(step.get('timeout', 1800)) is not int or not 1 <= step.get('timeout', 1800) <= 7200:
             raise ValueError('Checks require bounded timeouts')
         for field in ('inputs', 'outputs'):

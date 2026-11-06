@@ -48,6 +48,7 @@ def run_checks(plan, evidence, workers):
         try:
             with log.open('ab') as stream:
                 with owned(step['argv'], cwd=step['cwd'], stdin=subprocess.DEVNULL,
+                           single_process=step.get('process_scope') == 'single_process',
                            stdout=stream, stderr=subprocess.STDOUT) as result:
                     result.wait(timeout=step.get('timeout', 1800))
             if result.returncode:

@@ -17,6 +17,7 @@ _RETAINED = []
 
 class NativeReadRuntime(FileCandidateRuntime):
     def execute(self, handler, args, timeout, *, binding, diagnostics, runtime_metadata):
+        runtime_metadata.setdefault('launch_state', 'not_started')
         if type(binding) is not NativeReadBinding:
             raise SandboxDenied('SANDBOX_POLICY_INVALID', 'Read view requires canonical invocation admission')
         binding.payload(args)
@@ -36,6 +37,7 @@ class NativeReadRuntime(FileCandidateRuntime):
             return _read_failure('READ_ACCESS_DENIED', str(args.get('path', '.')), detail=str(exc))
         if self.tool.execution_contract.file_action == 'read_existing_file':
             if stat.S_ISDIR(target.stat().st_mode):
+                runtime_metadata['sandbox_preparation'] = {'phase': 'target_directory'}
                 return _read_failure('IS_DIRECTORY', str(target))
             binding.pin_current_file(args)
 

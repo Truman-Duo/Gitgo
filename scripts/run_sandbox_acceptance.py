@@ -75,6 +75,7 @@ def main():
     packaged_tests = ['tests/test_native_sandbox.py']
     if sys.platform == 'win32':
         packaged_tests.append('tests/test_windows_sandbox_minimum.py')
+        packaged_tests.append('tests/test_native_read_runtime.py')
     subprocess.run([sys.executable, '-B', '-m', 'pytest', *packaged_tests,
                     '-k', 'packaged', '-q'], cwd=root, env=environment, check=True)
     if native is not None:

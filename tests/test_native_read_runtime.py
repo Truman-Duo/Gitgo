@@ -168,3 +168,59 @@ def test_authority_change_after_preparation_never_launches_the_reader(tmp_path_f
     assert result.is_error and 'content' not in (result.data or {})
     assert result.receipt['launch_state'] == 'not_started'
     assert result.receipt['sandbox_preparation']['retired']
+
+
+@pytest.mark.skipif(os.name != 'nt' or not os.environ.get('GITGO_SANDBOX_TEST_HOST'),
+                    reason='Requires the actual Windows frozen deliverable')
+def test_packaged_pipeline_prepares_fresh_workspace_and_consumes_exact_read_approval(tmp_path_factory):
+    """The Pipeline AND reader both execute the unmodified frozen backend."""
+    import json
+    from backend.core.child_process import INTERNAL_ROLE_FLAG, PYTHON_ROLE
+    root = tmp_path_factory / 'fresh'; root.mkdir()
+    (root / 'note.txt').write_text('ordinary-frozen', encoding='utf8')
+    target = tmp_path_factory / 'approved.txt'; target.write_text('external-frozen', encoding='utf8')
+    sibling = tmp_path_factory / 'private.txt'; sibling.write_text('not-approved', encoding='utf8')
+    driver = f'''
+import json
+from backend.core.loop.manager import AgentProcessManager
+from backend.core.loop.models import RingLevel
+from backend.core.loop.tools import ToolRegistry
+from backend.core.loop.execution_context import ExecutionContext
+from backend.core.loop.tool_pipeline import ToolPipeline
+from backend.core.loop.permission_broker import create_permission_request,grant_from_decision
+from backend.core.storage import close_owned_storage
+from backend.core.tools.catalog import build_workspace_tools
+root={str(root)!r}
+tools=build_workspace_tools(root)
+p=AgentProcessManager().fork(parent_id=None,role='supervisor',actor_kind='supervisor',
+    ring_level=RingLevel.RING_0,tool_registry=ToolRegistry(list(tools)),workspace_path=root,
+    task_id='frozen-read',task_kind='answer',capability_profile_id='supervisor.control',max_steps=8)
+ctx=ExecutionContext(p,p.session,root,cancellation=p.cancellation_event)
+tool=tools['read_file']
+def run(path):
+    return ToolPipeline().execute({{'name':'read_file','args':{{'path':path}}}},tool,ctx,'frozen-read',0)
+try:
+    first=run('note.txt');assert not first.is_error,(first.error,first.data)
+    assert first.data['content']=='ordinary-frozen'
+    target={str(target)!r};args={{'path':target}}
+    assert run(target).diagnostics['code']=='RESOURCE_SCOPE_APPROVAL_REQUIRED'
+    create_permission_request(p,{{'tool_name':'read_file','arguments':args,'resource':target,
+        'purpose':'Synthetic frozen read acceptance'}},{{'read_file':tool}},root)
+    assert grant_from_decision(p,p.pending_decision,'allow_once')
+    p.pending_decision=None
+    selected=run(target);assert not selected.is_error,(selected.error,selected.data)
+    assert selected.data['content']=='external-frozen'
+    assert run({str(sibling)!r}).diagnostics['code']=='RESOURCE_SCOPE_APPROVAL_REQUIRED'
+    assert run(target).diagnostics['code']=='RESOURCE_SCOPE_APPROVAL_REQUIRED'
+    assert first.receipt['sandbox_preparation']['retired'] and selected.receipt['sandbox_preparation']['retired']
+    print(json.dumps({{'frozen_pipeline':True,'ordinary_read':True,'approved_read':True,'sibling_denied':True,'limit_consumed':True}}))
+finally:
+    close_owned_storage()
+'''
+    env = {**os.environ, 'GITGO_STATE_HOME': str(tmp_path_factory / 'state'),
+           'GITGO_CONFIG_PATH': str(tmp_path_factory / 'config.json')}
+    result = subprocess.run([os.environ['GITGO_SANDBOX_TEST_HOST'], INTERNAL_ROLE_FLAG, PYTHON_ROLE,
+                             '-I', '-c', driver], env=env, capture_output=True, text=True,
+                            encoding='utf8', errors='replace', timeout=100)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(result.stdout)['frozen_pipeline']

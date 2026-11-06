@@ -49,6 +49,9 @@ def test_read_then_checked_write_with_external_private_state(source_runtime,nati
             trigger='input.txt',rule='The input is a sample fixture, preserve its source identity.'))
         ctx=ExecutionContext(p,p.session,str(workspace),storage=get_storage(workspace))
         tools=build_workspace_tools(workspace)
+        import sys
+        import backend.core.sandbox_access as access
+        access.native_runtime_access=lambda:([Path(sys.executable).parent],[])
         from backend.core.knowledge.prewrite import prepare_read_inventory
         inventory=prepare_read_inventory(workspace,{{'_lesson_context':{{'project_name':'test-project',
             'state_home':str(ctx.storage.paths.state_home)}}}})

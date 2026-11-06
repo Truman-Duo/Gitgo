@@ -247,7 +247,7 @@ jobs:
       - name: Actual final ZIP native boundaries
         run: |
           $env:GITGO_SANDBOX_TEST_HOST = "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked/internal/gitgo-host/gitgo-host.exe"
-          python -B -m pytest tests/test_native_sandbox.py tests/test_windows_sandbox_minimum.py -k packaged -q --tb=short
+          python -B -m pytest tests/test_native_sandbox.py tests/test_windows_sandbox_minimum.py tests/test_native_read_runtime.py -k packaged -q --tb=short
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
