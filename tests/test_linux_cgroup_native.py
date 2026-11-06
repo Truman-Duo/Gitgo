@@ -31,7 +31,7 @@ def boundary(monkeypatch, tmp_path_factory):
     assert not linux._PENDING_CGROUPS
     monkeypatch.setenv('GITGO_SANDBOX_CGROUP_ROOT', str(tmp_path_factory))
     def install(*replies):
-        library = Library([{'linux_cgroup_version': 1}, *replies])
+        library = Library([{'linux_cgroup_version': 2}, *replies])
         monkeypatch.setattr(native_sandbox, 'get_native', lambda: library)
         return library
     yield install

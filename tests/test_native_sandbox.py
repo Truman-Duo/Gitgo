@@ -1017,14 +1017,17 @@ def test_failed_resource_monitor_kills_started_tool(cross_platform_box, monkeypa
               "Path('before-monitor-failure.pending').write_text('ran');"
               "os.replace('before-monitor-failure.pending','before-monitor-failure');"
               "time.sleep(1);open('after-monitor-failure','w').write('escaped')")
-    def fail_start(_):
+    def fail_start(*_):
         deadline = time.monotonic() + 3
         while not (workspace / 'before-monitor-failure').exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert (workspace / 'before-monitor-failure').read_text() == 'ran'
         raise RuntimeError('Host thread resource unavailable')
     with monkeypatch.context() as patch:
-        patch.setattr(threading.Thread, 'start', fail_start)
+        if sys.platform == 'linux':
+            patch.setattr('backend.core.sandbox_linux.LinuxCgroup.watch', fail_start)
+        else:
+            patch.setattr(threading.Thread, 'start', fail_start)
         with pytest.raises(SandboxDenied) as error:
             sandbox_popen([executable, '-I', '-c', source], policy, cwd=str(workspace),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

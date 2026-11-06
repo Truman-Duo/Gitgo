@@ -7,7 +7,8 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Component, Path};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_GROUPS: usize = 1024;
@@ -147,6 +148,7 @@ struct Group {
     directory: File,
     name: CString,
     procs: Option<File>,
+    monitor: Option<Monitor>,
 }
 impl Group {
     fn kill(&self) -> io::Result<()> {
@@ -162,7 +164,7 @@ impl Group {
             _ => Err(invalid("invalid_cgroup_population")),
         }
     }
-    fn retire(&self) -> io::Result<bool> {
+    fn retire(&mut self) -> io::Result<bool> {
         self.kill()?;
         let deadline = Instant::now() + Duration::from_secs(3);
         while self.populated()? {
@@ -170,6 +172,9 @@ impl Group {
                 return Ok(false);
             }
             std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(monitor) = &mut self.monitor {
+            monitor.stop()?;
         }
         // Never unlink a replacement selected through a reused name.
         let current = open_at(
@@ -256,6 +261,7 @@ pub fn create(raw: &[u8], id: &str, memory: u64, processes: u32) -> Value {
             directory,
             name,
             procs: None,
+            monitor: None,
         };
         let token = state.next;
         state.next += 1;
@@ -294,7 +300,10 @@ pub fn query(token: u64) -> Value {
             .groups
             .get(&token)
             .ok_or_else(|| invalid("unknown_cgroup_token"))?;
-        Ok(json!({"ok":true,"usage_usec":group.usage()?,"populated":group.populated()?}))
+        Ok(
+            json!({"ok":true,"usage_usec":group.usage()?,"populated":group.populated()?,
+            "failure":group.monitor.as_ref().map_or(0, |m|m.failure.load(Ordering::Acquire))}),
+        )
     })();
     result.unwrap_or_else(failure)
 }
@@ -317,7 +326,7 @@ pub fn retire(token: u64) -> Value {
         let mut state = registry()
             .lock()
             .map_err(|_| invalid("cgroup_registry_poisoned"))?;
-        let Some(group) = state.groups.get(&token) else {
+        let Some(group) = state.groups.get_mut(&token) else {
             return if token > 0 && token < state.next {
                 Ok(json!({"ok":true,"complete":true}))
             } else {
@@ -414,6 +423,7 @@ pub fn recover(raw: &[u8], id: &str) -> Value {
             directory,
             name,
             procs: None,
+            monitor: None,
         };
         group.populated()?;
         control(&group.directory, "cgroup.kill", true)?;
@@ -502,5 +512,133 @@ mod real_tests {
         assert_eq!(recover(raw.as_bytes(), id)["absent"], true);
         assert_eq!(query(token)["ok"], false);
         assert_eq!(retire(u64::MAX)["ok"], false);
+    }
+}
+
+struct Monitor {
+    stop: Arc<AtomicBool>,
+    failure: Arc<AtomicU8>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    join_failed: bool,
+}
+impl Monitor {
+    fn stop(&mut self) -> io::Result<()> {
+        if self.join_failed {
+            return Err(invalid("cgroup_monitor_cleanup_unknown"));
+        }
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            self.join_failed = true;
+            return Err(invalid("cgroup_monitor_cleanup_unknown"));
+        }
+        Ok(())
+    }
+}
+pub fn watch(token: u64, pid: u32, cpu_seconds: u32) -> Value {
+    let result = (|| -> io::Result<Value> {
+        if pid == 0 || pid > i32::MAX as u32 || cpu_seconds == 0 {
+            return Err(invalid("invalid_cgroup_monitor_budget"));
+        }
+        let mut state = registry()
+            .lock()
+            .map_err(|_| invalid("cgroup_registry_poisoned"))?;
+        let group = state
+            .groups
+            .get_mut(&token)
+            .ok_or_else(|| invalid("unknown_cgroup_token"))?;
+        if group.monitor.is_some() {
+            return Err(invalid("cgroup_monitor_already_started"));
+        }
+        // The Host supplies its just-created, unreaped Popen child before poll.
+        // pidfd is retained for observation, never used to signal an unrelated PID.
+        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as i32, 0) as i32 };
+        if descriptor < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                group.kill()?;
+                return Ok(json!({"ok":true,"leader_exited":true}));
+            }
+            return Err(error);
+        }
+        let pidfd = owned(descriptor)?;
+        let directory = group.directory.try_clone()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let failure = Arc::new(AtomicU8::new(0));
+        let worker_stop = stop.clone();
+        let worker_failure = failure.clone();
+        let thread = std::thread::Builder::new()
+            .name("gitgo-cgroup".into())
+            .spawn(move || {
+                let monitored = std::panic::catch_unwind(|| -> io::Result<()> {
+                    while !worker_stop.load(Ordering::Acquire) {
+                        let mut event = libc::pollfd {
+                            fd: pidfd.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        let status = unsafe { libc::poll(&mut event, 1, 50) };
+                        if status < 0 {
+                            let error = io::Error::last_os_error();
+                            if error.kind() == io::ErrorKind::Interrupted {
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                        if event.revents != 0 {
+                            if event.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                                return Err(invalid("cgroup_pidfd_observation_failed"));
+                            }
+                            write(&directory, "cgroup.kill", "1")?;
+                            return Ok(());
+                        }
+                        let usage = counter(&text(&directory, "cpu.stat")?, "usage_usec")?;
+                        if usage >= u64::from(cpu_seconds) * 1_000_000 {
+                            worker_failure.store(1, Ordering::Release);
+                            write(&directory, "cgroup.kill", "1")?;
+                            return Ok(());
+                        }
+                    }
+                    Ok(())
+                });
+                if !matches!(monitored, Ok(Ok(()))) {
+                    worker_failure.store(2, Ordering::Release);
+                    // Unknown accounting fails closed. The normal retirement path
+                    // still independently checks whole-tree exit and retries kill.
+                    let _ = write(&directory, "cgroup.kill", "1");
+                }
+            })?;
+        group.monitor = Some(Monitor {
+            stop,
+            failure,
+            thread: Some(thread),
+            join_failed: false,
+        });
+        Ok(json!({"ok":true,"leader_exited":false}))
+    })();
+    result.unwrap_or_else(failure)
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+    #[test]
+    fn invalid_observer_inputs_refuse_before_any_effect() {
+        assert_eq!(watch(1, 0, 1)["ok"], false);
+        assert_eq!(watch(1, u32::MAX, 1)["ok"], false);
+        assert_eq!(watch(1, 1, 0)["ok"], false);
+    }
+    #[test]
+    fn panicked_monitor_retirement_does_not_turn_successful_on_retry() {
+        let mut monitor = Monitor {
+            stop: Arc::new(AtomicBool::new(false)),
+            failure: Arc::new(AtomicU8::new(0)),
+            thread: Some(std::thread::spawn(|| panic!("injected monitor failure"))),
+            join_failed: false,
+        };
+        assert!(monitor.stop().is_err());
+        assert!(monitor.stop().is_err());
+        assert!(monitor.join_failed);
     }
 }

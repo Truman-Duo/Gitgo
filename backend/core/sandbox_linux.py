@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import subprocess
 import stat
-import time
 import threading
 import uuid
 
@@ -51,11 +50,12 @@ class LinuxCgroup:
         if _PENDING_CGROUPS:
             raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "An earlier cgroup has unconfirmed cleanup.")
         self.path, self._token, self._unknown = None, None, False
+        self._failure_reason, self._monitor_started = "", False
         self._lock = threading.RLock()
         self.cleanup = {"complete": False, "mode": "linux-cgroup", "issues": ["cleanup_not_observed"]}
         try:
             self._library = get_native()
-            if self._library.call(op='capabilities').get('linux_cgroup_version') != 1:
+            if self._library.call(op='capabilities').get('linux_cgroup_version') != 2:
                 raise OSError('The matching Rust cgroup boundary is required')
             configured = os.environ.get("GITGO_SANDBOX_CGROUP_ROOT", "")
             if not configured:
@@ -86,11 +86,25 @@ class LinuxCgroup:
                 raise OSError('Native cgroup membership object is unavailable')
             return self._library.call(op='linux_cgroup_procs', token=self._token)['fd']
 
-    def usage_usec(self):
+    def watch(self, pid, cpu_seconds):
+        with self._lock:
+            self._library.call(op='linux_cgroup_watch', token=self._token, pid=pid, cpu_seconds=cpu_seconds)
+            self._monitor_started = True
+
+    @property
+    def failure_reason(self):
         with self._lock:
             if self._token is None or self._unknown:
-                raise OSError('Native cgroup accounting is unavailable')
-            return self._library.call(op='linux_cgroup_query', token=self._token)['usage_usec']
+                return self._failure_reason
+            try:
+                failure = self._library.call(op='linux_cgroup_query', token=self._token)['failure']
+                if failure == 1:
+                    self._failure_reason = 'The invocation exceeded its aggregate user+kernel CPU budget.'
+                elif failure:
+                    self._failure_reason = 'Native cgroup CPU accounting became unavailable.'
+            except OSError:
+                self._failure_reason = 'Native cgroup CPU accounting became unavailable.'
+            return self._failure_reason
 
     def kill(self):
         with self._lock:
@@ -109,6 +123,8 @@ class LinuxCgroup:
                 self.cleanup.update(complete=False, issues=['cgroup_retirement_unknown'])
                 return dict(self.cleanup)
             try:
+                if getattr(self, '_monitor_started', False):
+                    _ = self.failure_reason
                 complete = (self._token is None or
                     self._library.call(op='linux_cgroup_retire', token=self._token)['complete'] is True)
                 if not complete:
@@ -134,7 +150,7 @@ def recover_cgroup(root, recovery_id):
         if group.path == path:
             return group.close()['complete'] is True
     library = get_native()
-    if library.call(op='capabilities').get('linux_cgroup_version') != 1:
+    if library.call(op='capabilities').get('linux_cgroup_version') != 2:
         raise OSError('The matching Rust cgroup recovery boundary is required')
     response = library.call(op='linux_cgroup_recover', root=list(os.fsencode(root)), recovery_id=recovery_id)
     if response['absent'] is True:
@@ -142,6 +158,7 @@ def recover_cgroup(root, recovery_id):
     group = LinuxCgroup.__new__(LinuxCgroup)
     group.path, group._token, group._library = path, response['token'], library
     group._unknown, group._lock = False, threading.RLock()
+    group._failure_reason, group._monitor_started = "", False
     group.cleanup = {'complete': False, 'mode': 'linux-cgroup', 'issues': ['cleanup_not_observed']}
     _PENDING_CGROUPS[id(group)] = group
     return group.close()['complete'] is True
@@ -150,31 +167,13 @@ def recover_cgroup(root, recovery_id):
 class LinuxSandboxProcess(subprocess.Popen):
     def __init__(self, argv, *, cgroup, cpu_seconds, **kwargs):
         self._gitgo_cgroup = cgroup
-        self.sandbox_failure = ""
         try:
             super().__init__(argv, **kwargs)
         except BaseException:
             cgroup.close()
             raise
-        def guard_cpu():
-            try:
-                while True:
-                    if self.poll() is not None:
-                        # Do not leave remaining group members waiting for
-                        # the consumer to drain pipes or release the boundary.
-                        cgroup.kill()
-                        return
-                    if cgroup.usage_usec() >= cpu_seconds * 1_000_000:
-                        self.sandbox_failure = 'The invocation exceeded its aggregate user+kernel CPU budget.'
-                        cgroup.kill()
-                        return
-                    time.sleep(0.05)
-            except OSError:
-                if self.poll() is None:
-                    self.sandbox_failure = 'Native cgroup CPU accounting became unavailable.'
-                    cgroup.kill()  # Loss of resource accounting must fail closed.
         try:
-            threading.Thread(target=guard_cpu, daemon=True).start()
+            cgroup.watch(self.pid, cpu_seconds)
         except BaseException as exc:
             try:
                 self.kill()
@@ -191,13 +190,21 @@ class LinuxSandboxProcess(subprocess.Popen):
             denial.effect_state = 'ambiguous'
             raise denial from exc
 
+    @property
+    def sandbox_failure(self):
+        return self._gitgo_cgroup.failure_reason
+
     def kill(self):
-        self._gitgo_cgroup.kill()
-        super().kill()
+        try:
+            self._gitgo_cgroup.kill()
+        finally:
+            super().kill()
 
     def terminate(self):
-        self._gitgo_cgroup.kill()
-        super().terminate()
+        try:
+            self._gitgo_cgroup.kill()
+        finally:
+            super().terminate()
 
     def close_sandbox(self):
         self._gitgo_cleanup = self._gitgo_cgroup.close()

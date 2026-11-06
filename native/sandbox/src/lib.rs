@@ -17,6 +17,12 @@ mod safe_read;
 #[derive(Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum Request {
+    #[serde(rename = "linux_cgroup_watch")]
+    LinuxCgroupWatch {
+        token: u64,
+        pid: u32,
+        cpu_seconds: u32,
+    },
     #[serde(rename = "linux_filter_create")]
     LinuxFilterCreate { workspace: Vec<u8> },
     #[serde(rename = "linux_filter_close")]
@@ -98,11 +104,17 @@ fn dispatch(raw: &[u8]) -> Value {
         return json!({"ok": true, "abi": ABI, "platform": std::env::consts::OS,
             "windows_appcontainer": cfg!(windows), "linux_execution": false,
             "macos_execution": false, "safe_read_version": 2,
-            "linux_cgroup_version": if cfg!(target_os = "linux") {1} else {0},
+            "linux_cgroup_version": if cfg!(target_os = "linux") {2} else {0},
             "linux_filter_version": if cfg!(target_os = "linux") {1} else {0},
             "authority": "host-existing-permission-broker"});
     }
     let request = match request {
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupWatch {
+            token,
+            pid,
+            cpu_seconds,
+        } => return linux_cgroup::watch(token, pid, cpu_seconds),
         #[cfg(target_os = "linux")]
         Request::LinuxFilterCreate { workspace } => return linux_seccomp::create(&workspace),
         #[cfg(target_os = "linux")]
