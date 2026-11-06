@@ -301,7 +301,7 @@ mod tests {
                     .append(true)
                     .open(tree.0.join("file"))?;
                 writer.write_all(b"oversized")?;
-            drop(writer);
+                drop(writer);
                 file.take(9).read_to_end(output)?;
                 Ok(())
             })

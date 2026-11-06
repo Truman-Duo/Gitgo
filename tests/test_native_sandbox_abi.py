@@ -12,6 +12,24 @@ import pytest
 from backend.core.native_sandbox import NativeBoundaryError, get_native, installed_path
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows image handle attenuation')
+def test_launcher_image_pins_cannot_export_file_data(native):
+    from contextlib import ExitStack
+    from backend.core.native_sandbox import pin_windows_runtime_images
+    from backend.core.sandbox_read_windows import WindowsReadApi
+    kernel = C.WinDLL('kernel32', use_last_error=True)
+    kernel.ReadFile.argtypes = [C.c_void_p, C.c_void_p, C.c_uint32, C.POINTER(C.c_uint32), C.c_void_p]
+    kernel.ReadFile.restype = C.c_int
+    with ExitStack() as owners:
+        handles = pin_windows_runtime_images(owners)
+        assert 1 <= len(handles) <= 16
+        for handle in handles:
+            WindowsReadApi().identity(handle, directory=False)
+            output, size = C.create_string_buffer(1), C.c_uint32()
+            assert not kernel.ReadFile(handle, output, 1, C.byref(size), None)
+            assert C.get_last_error() == 5  # READ_ATTRIBUTES is not READ_DATA.
+
+
 @pytest.fixture
 def native():
     if not installed_path().is_file():

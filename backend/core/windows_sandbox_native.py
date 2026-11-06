@@ -36,6 +36,8 @@ class NativeJob:
         self._lock = threading.Lock()
         self._closed, self._failure_reason = False, ''
         self.retirement_started = False
+        self._image_pins = ExitStack()
+        self._pin_close_failed = False
         self.cleanup = {'complete': False, 'mode': 'windows-job', 'issues': ['cleanup_not_observed']}
         # Own from allocation, including failures before Popen receives control.
         PENDING_JOBS[id(self)] = self
@@ -49,10 +51,18 @@ class NativeJob:
         if self._closed:
             return dict(self.cleanup)
         self.retirement_started = True
+        if self._pin_close_failed:
+            return dict(self.cleanup)
         try:
             complete = self.library.call(op='job_retire', token=self.token)['complete'] is True
             self.cleanup.update(complete=complete, issues=[] if complete else ['job_tree_still_active'])
             if complete:
+                try:
+                    self._image_pins.close()
+                except OSError:
+                    self._pin_close_failed = True
+                    self.cleanup.update(complete=False, issues=['native_image_pin_cleanup_unknown'])
+                    return dict(self.cleanup)
                 self._closed = True
                 PENDING_JOBS.pop(id(self), None)
         except OSError:
@@ -105,15 +115,19 @@ def execute_child(proc, args, executable, preexec_fn, close_fds, pass_fds,
         job = NativeJob(result['token'], library, policy.recovery_id)
         proc._sandbox_job = job
         proc._gitgo_job_handle = job
+        from backend.core.native_sandbox import pin_windows_runtime_images, IMAGE_PINS_ENV
+        images = pin_windows_runtime_images(job._image_pins)
         with ExitStack() as inherited_scope:
             leases = inherited_scope.enter_context(windows_sandbox_lease_handles())
-            env = {key: value for key, value in (env or {}).items() if key.upper() != LEASE_HANDLES_ENV}
+            env = {key: value for key, value in (env or {}).items()
+                   if key.upper() not in {LEASE_HANDLES_ENV, IMAGE_PINS_ENV}}
             if leases:
                 env[LEASE_HANDLES_ENV] = ','.join(str(handle) for handle in leases)
+            env[IMAGE_PINS_ENV] = ','.join(str(handle) for handle in images)
             sys.audit('subprocess.Popen', executable, args, cwd, env)
             with _spawn_lock:
                 try:
-                    for handle in leases:
+                    for handle in [*leases, *images]:
                         os.set_handle_inheritable(handle, True)
                     # Once issued, a lost response is ambiguous: the existing
                     # native invocation journal must recover this named Job.
@@ -123,7 +137,7 @@ def execute_child(proc, args, executable, preexec_fn, close_fds, pass_fds,
                             executable=None if executable is None else os.fsdecode(executable),
                             command=subprocess.list2cmdline(args), cwd=os.fsdecode(cwd),
                             environment=sorted(env.items(), key=lambda item: item[0].upper()),
-                            handles=[int(p2cread), int(c2pwrite), int(errwrite), *leases], flags=creationflags)
+                            handles=[int(p2cread), int(c2pwrite), int(errwrite), *leases, *images], flags=creationflags)
                     except NativeBoundaryError as error:
                         if not error.outcome_unknown:
                             proc._native_launch_issued = False
@@ -132,7 +146,7 @@ def execute_child(proc, args, executable, preexec_fn, close_fds, pass_fds,
                     proc._handle = NativeProcessHandle(result['process_handle'], result['process_token'], library)
                     proc.pid = result['pid']
                 finally:
-                    for handle in leases:
+                    for handle in [*leases, *images]:
                         os.set_handle_inheritable(handle, False)
     except BaseException:
         if job is not None:

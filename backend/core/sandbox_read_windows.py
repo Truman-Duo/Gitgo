@@ -51,13 +51,17 @@ class WindowsReadApi:
             [C.POINTER(W.HANDLE), W.ULONG, C.POINTER(ObjectAttributes),
              C.POINTER(IoStatus), C.c_void_p, W.ULONG, W.ULONG, W.ULONG,
              W.ULONG, C.c_void_p, W.ULONG], C.c_long)
-        self.close = _function(self._kernel, 'CloseHandle', [W.HANDLE], W.BOOL)
+        self._close = _function(self._kernel, 'CloseHandle', [W.HANDLE], W.BOOL)
         self._error = _function(self._nt, 'RtlNtStatusToDosError', [C.c_long], W.ULONG)
         self._type = _function(self._kernel, 'GetFileType', [W.HANDLE], W.DWORD)
         self._info = _function(self._kernel, 'GetFileInformationByHandle',
                               [W.HANDLE, C.POINTER(FileInfo)], W.BOOL)
         self._id = _function(self._kernel, 'GetFileInformationByHandleEx',
                             [W.HANDLE, C.c_int, C.c_void_p, W.DWORD], W.BOOL)
+
+    def close(self, handle):
+        if not self._close(handle):
+            raise C.WinError(C.get_last_error())
 
     def root(self, path: Path):
         # UNC/device namespaces, drive-relative paths and alternate streams are

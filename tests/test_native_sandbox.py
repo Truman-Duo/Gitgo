@@ -89,10 +89,12 @@ def test_sensitive_handlers_have_no_model_selectable_opt_out():
 def test_environment_is_an_allowlist():
     env = sandbox_environment({"SystemRoot": "system", "LOCALAPPDATA": "local",
                                "MY_OPAQUE_CREDENTIAL": "secret", "PYTHONPATH": "evil",
+                               "GITGO_NATIVE_IMAGE_PINS": "12345",
                                "GITGO_TOOL_REGISTRY_MODULE": "evil"})
     assert env["SystemRoot"] == "system"
     assert "MY_OPAQUE_CREDENTIAL" not in env
     assert "PYTHONPATH" not in env
+    assert "GITGO_NATIVE_IMAGE_PINS" not in env
     assert "GITGO_TOOL_REGISTRY_MODULE" not in env
 
 

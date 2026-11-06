@@ -39,7 +39,7 @@ jobs:
           python -B -m pytest tests/test_sandbox_read_native.py tests/test_sandbox_read.py
           tests/test_sandbox_read_darwin.py tests/test_read_approval.py
           tests/test_read_execution_plan.py tests/test_implementation_identity.py
-          tests/test_native_sandbox_abi.py -q --tb=short
+          tests/test_native_sandbox_abi.py tests/test_runtime_cleanup_evidence.py -q --tb=short
       - if: runner.os == 'Linux'
         run: bash scripts/prepare_linux_update_ci.sh
       - name: Linux approval through actual isolated child

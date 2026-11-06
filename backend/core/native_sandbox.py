@@ -20,6 +20,7 @@ RESPONSE_CAPACITY = 65536
 _lock = threading.RLock()
 _loaded = None  # Retain loaded code AND file/ancestor pins for process lifetime.
 _failed_loads = []
+IMAGE_PINS_ENV = 'GITGO_NATIVE_IMAGE_PINS'
 
 
 class NativeBoundaryError(OSError):
@@ -45,6 +46,29 @@ def _pin_windows(path, owners):
     api = WindowsReadApi()
     if not path.is_absolute() or len(path.drive) != 2 or '..' in path.parts:
         raise NativeBoundaryError("Native module requires a local absolute path")
+    if _windows_appcontainer():
+        # The trusted launcher pins every ancestor and the exact image BEFORE
+        # launch and retains those pins until confirmed Job retirement. A
+        # restricted child cannot open its drive root itself; it opens only
+        # its granted image, with the same no-write/no-delete leaf reservation.
+        handle = api.open('\\??\\' + str(path), None, directory=False, share_write=False)
+        try:
+            identity = api.identity(handle, directory=False)
+            raw = os.environ.get(IMAGE_PINS_ENV, '')
+            numbers = raw.split(',')
+            if not 1 <= len(numbers) <= 16 or any(not n.isascii() or not n.isdecimal() for n in numbers):
+                raise NativeBoundaryError('Inherited native image pins are unavailable')
+            handles = [int(n) for n in numbers]
+            if len(set(handles)) != len(handles) or any(not 0 < h < 2**64 - 1 for h in handles):
+                raise NativeBoundaryError('Invalid inherited native image pins')
+            if not any(api.identity(h, directory=False) == identity for h in handles):
+                raise NativeBoundaryError('Loaded image has no matching inherited object pin')
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        except BaseException:
+            api.close(handle)
+            raise
+        owners.callback(os.close, fd)
+        return fd, identity
     parent = api.pin_directory('\\??\\' + path.anchor, None)
     owners.callback(api.close, parent)
     for part in path.parts[1:-1]:
@@ -59,6 +83,76 @@ def _pin_windows(path, owners):
         raise
     owners.callback(os.close, fd)
     return fd, identity
+
+
+def _windows_appcontainer():
+    """Observe the actual process token, never an environment assertion."""
+    kernel = C.WinDLL('kernel32', use_last_error=True)
+    security = C.WinDLL('advapi32', use_last_error=True)
+    security.OpenProcessToken.argtypes = [C.c_void_p, C.c_uint32, C.POINTER(C.c_void_p)]
+    security.OpenProcessToken.restype = C.c_int
+    security.GetTokenInformation.argtypes = [C.c_void_p, C.c_int, C.c_void_p, C.c_uint32, C.POINTER(C.c_uint32)]
+    security.GetTokenInformation.restype = C.c_int
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [C.c_void_p], C.c_int
+    token, value, written = C.c_void_p(), C.c_uint32(), C.c_uint32()
+    if not security.OpenProcessToken(C.c_void_p(-1), 8, C.byref(token)):
+        raise C.WinError(C.get_last_error())
+    try:
+        if not security.GetTokenInformation(token, 29, C.byref(value), C.sizeof(value), C.byref(written)):
+            raise C.WinError(C.get_last_error())
+        if written.value != C.sizeof(value):
+            raise NativeBoundaryError('AppContainer token query contract mismatch')
+        return bool(value.value)
+    finally:
+        if not kernel.CloseHandle(token):
+            raise C.WinError(C.get_last_error())
+
+
+def pin_windows_runtime_images(owners):
+    """Launcher-owned name/image reservations; never a child authority grant.
+
+    Paths come only from the existing trusted runtime registration. Each image
+    must match the already identified Host implementation. No environment path,
+    inherited handle or serialized child claim selects or authorizes a module.
+    """
+    if _windows_appcontainer():
+        raise NativeBoundaryError('An AppContainer cannot supervise native image pins')
+    from backend.core.sandbox_access import native_runtime_access
+    roots, _ = native_runtime_access()
+    candidates = {installed_path()}
+    name = 'gitgo_native_sandbox.dll'
+    for root in roots:
+        root = Path(root)
+        for suffix in (Path('native_runtime') / name, Path('backend/native_runtime') / name,
+                       Path('_internal/backend/native_runtime') / name):
+            path = root / suffix
+            if path.is_file():
+                candidates.add(path)
+    if len(candidates) > 16:
+        raise NativeBoundaryError('Too many native runtime images')
+    expected = get_native().identity
+    kernel = C.WinDLL('kernel32', use_last_error=True)
+    duplicate = kernel.DuplicateHandle
+    duplicate.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p, C.POINTER(C.c_void_p), C.c_uint32, C.c_int, C.c_uint32]
+    duplicate.restype = C.c_int
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [C.c_void_p], C.c_int
+    import msvcrt
+    handles = []
+    def close_pin(handle):
+        if not kernel.CloseHandle(handle):
+            raise C.WinError(C.get_last_error())
+    for path in sorted(candidates):
+        fd, _ = _pin_windows(path, owners)
+        if _hash(fd) != (expected['sha256'], expected['size']):
+            raise NativeBoundaryError('Child native image differs from the Host implementation')
+        inherited = C.c_void_p()
+        # Metadata only: no READ_DATA, WRITE, DELETE, READ_CONTROL or privileges.
+        if not duplicate(C.c_void_p(-1), msvcrt.get_osfhandle(fd), C.c_void_p(-1),
+                         C.byref(inherited), 0x80, False, 0):
+            raise C.WinError(C.get_last_error())
+        owners.callback(close_pin, inherited.value)
+        handles.append(inherited.value)
+    return handles
 
 
 def _hash(fd):
