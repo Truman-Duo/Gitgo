@@ -191,13 +191,16 @@ def test_windows_image_pin_close_failure_cannot_become_success_on_retry():
 def test_linux_cleanup_timeout_is_explicit_and_retains_owner(tmp_path_factory, monkeypatch):
     from backend.core import sandbox_linux as linux
     group = linux.LinuxCgroup.__new__(linux.LinuxCgroup)
+    import threading
     group.path = tmp_path_factory / 'cgroup-fixture'
     group.path.mkdir()
+    group._token, group._unknown, group._lock = 123, False, threading.RLock()
+    class Library:
+        def call(self, **request):
+            assert request == {'op': 'linux_cgroup_retire', 'token': 123}
+            return {'complete': False}
+    group._library = Library()
     group.cleanup = {'complete': False, 'mode': 'linux-cgroup', 'issues': []}
-    (group.path / 'cgroup.events').write_text('populated 1\n')
-    monkeypatch.setattr(group, 'kill', lambda: None)
-    moments = iter([0, 4])
-    monkeypatch.setattr(linux.time, 'monotonic', lambda: next(moments))
     try:
         assert group.close() == {'complete': False, 'mode': 'linux-cgroup',
                                  'issues': ['cgroup_tree_still_active']}

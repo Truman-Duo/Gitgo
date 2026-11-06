@@ -15,6 +15,8 @@ mod safe_read;
 #[derive(Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum Request {
+    #[serde(rename = "linux_cgroup_procs")]
+    LinuxCgroupProcs { token: u64 },
     #[serde(rename = "linux_cgroup_recover")]
     LinuxCgroupRecover { root: Vec<u8>, recovery_id: String },
     #[serde(rename = "linux_cgroup_create")]
@@ -90,9 +92,12 @@ fn dispatch(raw: &[u8]) -> Value {
         return json!({"ok": true, "abi": ABI, "platform": std::env::consts::OS,
             "windows_appcontainer": cfg!(windows), "linux_execution": false,
             "macos_execution": false, "safe_read_version": 2,
+            "linux_cgroup_version": if cfg!(target_os = "linux") {1} else {0},
             "authority": "host-existing-permission-broker"});
     }
     let request = match request {
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupProcs { token } => return linux_cgroup::procs(token),
         #[cfg(target_os = "linux")]
         Request::LinuxCgroupRecover { root, recovery_id } => {
             return linux_cgroup::recover(&root, &recovery_id);

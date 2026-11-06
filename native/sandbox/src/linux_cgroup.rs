@@ -146,6 +146,7 @@ struct Group {
     root: File,
     directory: File,
     name: CString,
+    procs: Option<File>,
 }
 impl Group {
     fn kill(&self) -> io::Result<()> {
@@ -254,6 +255,7 @@ pub fn create(raw: &[u8], id: &str, memory: u64, processes: u32) -> Value {
             root,
             directory,
             name,
+            procs: None,
         };
         let token = state.next;
         state.next += 1;
@@ -411,6 +413,7 @@ pub fn recover(raw: &[u8], id: &str) -> Value {
             root,
             directory,
             name,
+            procs: None,
         };
         group.populated()?;
         control(&group.directory, "cgroup.kill", true)?;
@@ -418,6 +421,30 @@ pub fn recover(raw: &[u8], id: &str) -> Value {
         state.next += 1;
         state.groups.insert(token, group);
         Ok(json!({"ok":true,"absent":false,"token":token}))
+    })();
+    result.unwrap_or_else(failure)
+}
+
+/// Borrow only the exact membership object for bubblewrap's explicit FD mount.
+/// Rust retains ownership until observed tree retirement; no directory is exported.
+pub fn procs(token: u64) -> Value {
+    let result = (|| -> io::Result<Value> {
+        let mut state = registry()
+            .lock()
+            .map_err(|_| invalid("cgroup_registry_poisoned"))?;
+        let group = state
+            .groups
+            .get_mut(&token)
+            .ok_or_else(|| invalid("unknown_cgroup_token"))?;
+        if group.procs.is_none() {
+            let file = open_at(group.directory.as_raw_fd(), b"cgroup.procs", libc::O_PATH)?;
+            filesystem(&file)?;
+            if !file.metadata()?.is_file() {
+                return Err(invalid("invalid_cgroup_control"));
+            }
+            group.procs = Some(file);
+        }
+        Ok(json!({"ok":true,"fd":group.procs.as_ref().unwrap().as_raw_fd()}))
     })();
     result.unwrap_or_else(failure)
 }

@@ -60,21 +60,8 @@ def retire_native(recovery_id, location):
         from backend.core.windows_sandbox_native import recover
         return recover(recovery_id)
     if sys.platform == "linux":
-        from backend.core.sandbox_linux import LinuxCgroup, _PENDING_CGROUPS
-        root = Path(location["root"]).resolve(strict=True)
-        if not root.is_relative_to(Path("/sys/fs/cgroup")) or root == Path("/sys/fs/cgroup"):
-            raise PublishError("PUBLISH_RUNTIME_ENVIRONMENT_CHANGED")
-        path = root / ("gitgo-" + recovery_id)
-        for group in tuple(_PENDING_CGROUPS.values()):
-            if group.path == path:
-                return group.close()["complete"] is True
-        if not path.exists():
-            return True
-        if path.is_symlink() or path.resolve().parent != root:
-            raise PublishError("PUBLISH_RUNTIME_RECORD_UNAVAILABLE")
-        group = LinuxCgroup.__new__(LinuxCgroup)
-        group.path, group.cleanup = path, {"complete": False, "mode": "linux-cgroup", "issues": []}
-        return group.close()["complete"] is True
+        from backend.core.sandbox_linux import recover_cgroup
+        return recover_cgroup(location["root"], recovery_id)
     raise PublishError("PUBLISH_RUNTIME_RECOVERY_UNAVAILABLE")
 
 
