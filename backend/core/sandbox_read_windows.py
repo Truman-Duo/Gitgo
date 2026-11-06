@@ -71,8 +71,8 @@ class WindowsReadApi:
         """Hold a loader ancestor against rename without requesting its data.
 
         AppContainer can traverse to its granted runtime while having no
-        READ_ATTRIBUTES/SYNCHRONIZE access on the drive root. DesiredAccess=0
-        gives no reading capability; DIRECTORY_FILE and DONT_REPARSE still
+        READ_ATTRIBUTES/SYNCHRONIZE access on the drive root. FILE_TRAVERSE
+        gives no listing/content capability; DIRECTORY_FILE and DONT_REPARSE still
         enforce the object kind and complete lookup. No delete sharing.
         """
         return self.open(name, parent, directory=True, _pin_only=True)
@@ -97,7 +97,7 @@ class WindowsReadApi:
         # for directories. Leaf type is checked on the returned handle.
         options = 0x200000 | 0x20 | (1 if directory else 0)
         if _pin_only:
-            access, options = 0, 0x200001
+            access, options = 0x20, 0x200001
         status = self._create(C.byref(handle), access, C.byref(attributes),
             C.byref(status_block), None, 0, 1 | (2 if share_write else 0), 1, options, None, 0)
         if status < 0:
