@@ -91,3 +91,12 @@ def test_cold_recovery_reuses_the_exact_native_resource_token(boundary, tmp_path
         'root': list(bytes(tmp_path_factory)), 'recovery_id': 'b' * 32}
     assert library.calls[-1] == {'op': 'linux_cgroup_retire', 'token': 77}
     assert not linux._PENDING_CGROUPS
+
+
+def test_interrupted_allocation_preserves_unknown_resource_owner(boundary):
+    library = boundary(KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt) as interrupted:
+        linux.LinuxCgroup(policy())
+    assert interrupted.value.cleanup['complete'] is False
+    group, = linux._PENDING_CGROUPS.values()
+    assert not group.close()['complete'] and len(library.calls) == 2

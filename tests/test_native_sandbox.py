@@ -1865,3 +1865,21 @@ def test_packaged_linux_cpu_budget_is_native_and_cannot_hide_success(cross_platf
     assert result['data']['effect_state'] == 'ambiguous' and 'CPU' in result['data']['message'], result
     assert result['cleanup']['complete'] is True, result
     assert all((workspace / f'frozen-cpu-{i}').read_text() == 'ready' for i in range(2))
+
+
+def test_linux_native_resource_descriptors_are_consumed_before_tool_exec(linux_box):
+    _, spawn = linux_box
+    source = """import os
+for name in os.listdir('/proc/self/fd'):
+    try:
+        target=os.readlink('/proc/self/fd/'+name)
+    except FileNotFoundError:
+        continue
+    assert 'memfd:gitgo-seccomp' not in target,target
+    assert 'cgroup.procs' not in target,target
+    assert '/sys/fs/cgroup/' not in target,target
+print('native-resources-not-inherited')
+"""
+    code, out, err = finished(spawn(source))
+    assert code == 0, (out, err)
+    assert out.strip() == 'native-resources-not-inherited'

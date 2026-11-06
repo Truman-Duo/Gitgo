@@ -50,6 +50,7 @@ class LinuxCgroup:
         if _PENDING_CGROUPS:
             raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "An earlier cgroup has unconfirmed cleanup.")
         self.path, self._token, self._unknown = None, None, False
+        allocation_issued = False
         self._failure_reason, self._monitor_started = "", False
         self._lock = threading.RLock()
         self.cleanup = {"complete": False, "mode": "linux-cgroup", "issues": ["cleanup_not_observed"]}
@@ -65,15 +66,21 @@ class LinuxCgroup:
             # The location remains compatible with the existing durable journal.
             # Native code independently validates root, name and filesystem.
             self.path = root / ('gitgo-' + identity)
+            allocation_issued = True
             response = self._library.call(op='linux_cgroup_create', root=list(os.fsencode(root)),
                 recovery_id=identity, memory=policy.memory_bytes, processes=policy.process_limit)
             self._token = response['token']
-        except (OSError, ValueError) as exc:
+            allocation_issued = False
+        except BaseException as exc:
+            self._unknown = allocation_issued
             if isinstance(exc, NativeBoundaryError):
                 response = getattr(exc, 'response', {})
                 self._token = response.get('token')
                 self._unknown = exc.outcome_unknown or response.get('allocation_unknown') is True
             cleanup = self.close()
+            if not isinstance(exc, (OSError, ValueError)):
+                exc.cleanup = cleanup
+                raise
             denial = SandboxDenied('SANDBOX_UNAVAILABLE',
                 f'Linux native cgroup configuration is unavailable; no fallback: {exc}')
             denial.cleanup = cleanup
