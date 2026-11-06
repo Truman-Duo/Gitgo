@@ -1855,7 +1855,7 @@ def test_packaged_linux_cpu_budget_is_native_and_cannot_hide_success(cross_platf
         "sandbox.SandboxPolicy=lambda workspace,**_:Policy(workspace,cpu_seconds=1);"
         f"runner.tool_runner_command=lambda:python_command(['-I','-c',{tool!r}]);"
         f"result=runner.ProcessToolRunner(timeout=15).run('exec_command',{{'_workspace':{str(policy.workspace)!r}}});"
-        "print(json.dumps({'success':result.success,'data':result.data,'cleanup':result.cleanup}))"
+        "print(json.dumps({'success':result.success,'data':result.data,'cleanup':result.cleanup,'error':result.error,'stderr':result.stderr,'timed_out':result.timed_out,'duration_ms':result.duration_ms}))"
     )
     process = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-I', '-c', driver],
         capture_output=True, text=True, encoding='utf8', timeout=45)
