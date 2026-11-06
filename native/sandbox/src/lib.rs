@@ -17,6 +17,8 @@ mod safe_read;
 #[derive(Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum Request {
+    #[serde(rename = "linux_directory_descriptor")]
+    LinuxDirectoryDescriptor { token: u64 },
     #[serde(rename = "linux_cgroup_watch")]
     LinuxCgroupWatch {
         token: u64,
@@ -106,9 +108,14 @@ fn dispatch(raw: &[u8]) -> Value {
             "macos_execution": false, "safe_read_version": 2,
             "linux_cgroup_version": if cfg!(target_os = "linux") {2} else {0},
             "linux_filter_version": if cfg!(target_os = "linux") {1} else {0},
+            "linux_directory_version": if cfg!(target_os = "linux") {1} else {0},
             "authority": "host-existing-permission-broker"});
     }
     let request = match request {
+        #[cfg(target_os = "linux")]
+        Request::LinuxDirectoryDescriptor { token } => {
+            return safe_read::response(safe_read::directory_descriptor(token));
+        }
         #[cfg(target_os = "linux")]
         Request::LinuxCgroupWatch {
             token,

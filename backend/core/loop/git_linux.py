@@ -33,12 +33,11 @@ class LinuxPins:
         self.read_size = 0
 
     def directory(self, path):
-        from backend.core.sandbox_read import _linux_openat2
+        from backend.core.sandbox_read import ReadRoot
         path = Path(os.path.abspath(path))
         if path not in self.directories:
-            fd = _linux_openat2(-100, str(path), os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC, 0x04 | 0x02)
-            self.owners.callback(os.close, fd)
-            self.directories[path] = fd
+            root = self.owners.enter_context(ReadRoot(path))
+            self.directories[path] = root._linux_directory_descriptor()
         return self.directories[path]
 
     def file(self, path, *, optional=False):

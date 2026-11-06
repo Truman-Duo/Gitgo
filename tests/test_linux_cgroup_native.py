@@ -100,3 +100,30 @@ def test_interrupted_allocation_preserves_unknown_resource_owner(boundary):
     assert interrupted.value.cleanup['complete'] is False
     group, = linux._PENDING_CGROUPS.values()
     assert not group.close()['complete'] and len(library.calls) == 2
+
+
+@pytest.mark.skipif(__import__('sys').platform != 'linux', reason='Actual Linux descriptor mount owner')
+def test_native_git_directory_descriptor_tracks_the_pinned_object(tmp_path_factory):
+    import fcntl
+    import os
+    from backend.core.sandbox_read import ReadRoot, ReadBoundaryError
+    root_path = tmp_path_factory / 'git-metadata'
+    root_path.mkdir()
+    (root_path / 'config').write_text('fixture')
+    with ReadRoot(root_path) as root:
+        fd = root._linux_directory_descriptor()
+        original = os.fstat(fd)
+        assert fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+        assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_PATH
+        with pytest.raises(OSError):
+            os.read(fd, 1)
+        with root.open('config') as file:
+            with pytest.raises(native_sandbox.NativeBoundaryError):
+                root._library.call(op='linux_directory_descriptor', token=file._token)
+        moved = root_path.with_name('moved-metadata')
+        root_path.rename(moved)
+        root_path.mkdir()
+        assert os.fstat(fd).st_ino == original.st_ino == moved.stat().st_ino
+        assert os.fstat(fd).st_ino != root_path.stat().st_ino
+    with pytest.raises(ReadBoundaryError):
+        root._linux_directory_descriptor()

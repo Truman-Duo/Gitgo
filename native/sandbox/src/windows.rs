@@ -564,6 +564,7 @@ fn perform(request: Request) -> Result<Value> {
             )
         }
         Request::Capabilities {}
+        | Request::LinuxDirectoryDescriptor { .. }
         | Request::LinuxCgroupWatch { .. }
         | Request::LinuxFilterCreate { .. }
         | Request::LinuxFilterClose { .. }

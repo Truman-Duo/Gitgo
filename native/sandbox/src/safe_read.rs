@@ -100,6 +100,15 @@ pub fn root(path: &[u8]) -> io::Result<Value> {
     let token = insert(Resource::Root(root))?;
     Ok(json!({"ok": true, "token": token, "identity": identity(&info)}))
 }
+#[cfg(target_os = "linux")]
+pub fn directory_descriptor(token: u64) -> io::Result<Value> {
+    use std::os::fd::AsRawFd;
+    let registry = registry()?;
+    match registry.live.get(&token) {
+        Some(Resource::Root(root)) => Ok(json!({"ok":true,"fd":root.file.as_raw_fd()})),
+        _ => Err(boundary("invalid_read_root_token")),
+    }
+}
 pub fn open(token: u64, path: &[u8], metadata_only: bool) -> io::Result<Value> {
     let root = match registry()?.live.get(&token) {
         Some(Resource::Root(value)) => Arc::clone(value),

@@ -22,6 +22,8 @@ Rust 检查实际文件系统为 cgroup2，使用目录相对且禁止链接/逃
 
 退休先使用 cgroup.kill，再观察整个后代树的 populated=0，停止并回收原生监控，最后核对目录身份并移除实际调用组。仍有成员、对象被替换、记账/退休失败或监控回收未知，都不能报告成功。token 单调递增且不复用；活动调用组上限1024，过滤器上限128。
 
+受保护 Git 的目录 pin 也复用 Rust 目录对象，通过 `linux_directory_version=1` 借用 O_PATH 描述符做原有挂载。描述符不转移所有权，Root 在整个 Git 调用期间由 Host 保留；文件 token 或退休的 Root 不能取得目录描述符。目录替换不改变已固定对象。配置快照内容生成、既有密封 memfd 和 Git 语义编排继续沿用原链路。
+
 ## seccomp 生命周期
 
 从固定系统目录选择 root 拥有且不可被 group/world 写入的 libseccomp；拒绝工作区库、PATH/LD_LIBRARY_PATH 选择及未解析的必需符号/系统调用。上下文分别使用 seccomp_release 和 dlclose 管理，匿名文件使用标准 File 所有权。
