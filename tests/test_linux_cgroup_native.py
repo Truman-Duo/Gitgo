@@ -119,7 +119,7 @@ def test_native_git_directory_descriptor_tracks_the_pinned_object(tmp_path_facto
             os.read(fd, 1)
         with root.open('config') as file:
             with pytest.raises(native_sandbox.NativeBoundaryError):
-                root._library.call(op='linux_directory_descriptor', token=file._token)
+                file._library.call(op='linux_directory_descriptor', token=file._token)
         moved = root_path.with_name('moved-metadata')
         root_path.rename(moved)
         root_path.mkdir()
