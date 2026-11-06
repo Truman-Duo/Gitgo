@@ -29,6 +29,7 @@ def test_actual_module_identity_and_capabilities(native):
     assert report['windows_appcontainer'] is (sys.platform == 'win32')
     assert report['linux_execution'] is False
     assert report['macos_execution'] is False
+    assert report['safe_read_version'] == 2
 
 
 def test_unknown_fields_and_operation_are_denied(native):

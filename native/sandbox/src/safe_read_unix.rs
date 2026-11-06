@@ -200,6 +200,15 @@ fn probe(file: &File, beneath: i32) -> io::Result<()> {
 }
 #[cfg(target_os = "macos")]
 pub fn open(root: Arc<Root>, raw: &[u8], metadata_only: bool) -> io::Result<Opened> {
+    open_selected(root, raw, metadata_only, || Ok(()))
+}
+#[cfg(target_os = "macos")]
+fn open_selected(
+    root: Arc<Root>,
+    raw: &[u8],
+    metadata_only: bool,
+    after_pin: impl FnOnce() -> io::Result<()>,
+) -> io::Result<Opened> {
     let name = relative(raw)?;
     let pin = openat(
         root.file.as_raw_fd(),
@@ -219,6 +228,7 @@ pub fn open(root: Arc<Root>, raw: &[u8], metadata_only: bool) -> io::Result<Open
             _root: root,
         });
     }
+    after_pin()?;
     let file = openat(
         root.file.as_raw_fd(),
         &name,
@@ -242,5 +252,16 @@ mod tests {
     fn ignored_beneath_is_refused() {
         let root = Root::open(b"/private/tmp").unwrap();
         assert!(probe(&root.file, 0).is_err());
+    }
+    #[test]
+    fn replacement_between_pin_and_readable_open_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let tree = crate::safe_read::tests::Tree::new();
+        std::fs::write(tree.0.join("replacement"), b"attacker").unwrap();
+        let root = Arc::new(Root::open(tree.0.as_os_str().as_bytes()).unwrap());
+        let result = open_selected(root, b"file", false, || {
+            std::fs::rename(tree.0.join("replacement"), tree.0.join("file"))
+        });
+        assert!(matches!(result, Err(error) if error.to_string() == "readable_identity_changed"));
     }
 }

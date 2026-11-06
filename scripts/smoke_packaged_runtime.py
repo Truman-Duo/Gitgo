@@ -118,6 +118,8 @@ def smoke(executable: Path) -> None:
     if not executable.is_file():
         raise FileNotFoundError(executable)
     validate_search_bundle(executable)
+    from scripts.check_native_reads import check
+    check(executable)
     # Protocol startup alone does not load every registered tool. Exercise the
     # same implementation identity used by actual admissions/approvals, rather
     # than relaxing a missing-module failure inside the authority boundary.

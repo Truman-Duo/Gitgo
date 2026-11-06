@@ -96,6 +96,54 @@ def test_exact_read_limit_and_one_byte_over(tree):
         opened.read_bytes()
 
 
+def test_publish_package_limit_is_separate_from_ordinary_reads(tree, monkeypatch):
+    from backend.core.publish import package_io
+    from backend.core.publish.state import PublishError
+    body = b'package' * ((MAX_READ_BYTES // 7) + 1)
+    (tree / 'package.zip').write_bytes(body)
+    with NativeReadRoot(tree) as root, root.open('package.zip') as opened, pytest.raises(ReadBoundaryError):
+        opened.read_bytes()
+    assert package_io.read_file(str(tree), 'package.zip') == body
+    monkeypatch.setattr(package_io, 'MAX_PACKAGE', 1024)
+    with pytest.raises(PublishError, match='PUBLISH_PACKAGE_LIMIT'):
+        package_io.read_file(str(tree), 'package.zip')
+
+
+def test_small_read_allocates_for_object_size_not_maximum(tree, monkeypatch):
+    from backend.core import sandbox_read_native as bridge
+    original = bridge.C.create_string_buffer
+    capacities = []
+    def record(capacity, *args):
+        if type(capacity) is int:
+            capacities.append(capacity)
+        return original(capacity, *args)
+    with NativeReadRoot(tree) as root, root.open('nested/note') as opened:
+        monkeypatch.setattr(bridge.C, 'create_string_buffer', record)
+        assert opened.read_bytes() == b'hello\x00\xff\n'
+    assert 8 in capacities and MAX_READ_BYTES not in capacities
+
+
+def test_unknown_close_retains_ownership_and_cannot_be_replayed(monkeypatch):
+    from backend.core import sandbox_read_native as bridge
+    from backend.core.native_sandbox import NativeBoundaryError
+    retained = []
+    monkeypatch.setattr(bridge, '_failed_closes', retained)
+    class FailingLibrary:
+        _sealed = False
+        calls = 0
+        def call(self, **request):
+            self.calls += 1
+            raise NativeBoundaryError('Injected unknown close outcome')
+    library = FailingLibrary()
+    pin = bridge.NativePinnedObject(library, {'token': 1, 'identity': {'volume': 1, 'file_id': '2'}})
+    with pytest.raises(NativeBoundaryError):
+        pin.close()
+    assert retained == [pin] and not pin._closed and library._sealed
+    with pytest.raises(NativeBoundaryError, match='no automatic replay'):
+        pin.close()
+    assert library.calls == 1
+
+
 def test_link_and_hardlink_refusal(tree):
     target = tree / 'nested' / 'note'
     os.link(target, tree / 'hardlink')

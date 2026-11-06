@@ -1,4 +1,4 @@
-"""Stage 2 candidate adapter; existing readers are not switched over yet.
+"""Rust-backed stable object reads, without an alternate permission authority.
 
 Native tokens are live resource ownership only. They are never serialized into
 read approvals, child requests or persisted as a substitute for authorization.
@@ -14,6 +14,10 @@ import threading
 
 from backend.core.native_sandbox import NativeBoundaryError, get_native
 from backend.core.sandbox_read import MAX_READ_BYTES, ObjectIdentity, ReadBoundaryError, relative_parts
+
+# Keep ownership after an unknown close outcome, even if ExitStack has removed
+# its callback. A sealed native instance cannot authorize another read/replay.
+_failed_closes = []
 
 
 def _path(path):
@@ -49,6 +53,7 @@ class NativePinnedObject:
         self._token = response['token']
         self._lock = threading.RLock()
         self._closed = False
+        self._cleanup_failed = False
         try:
             self.identity = _identity(response)
         except BaseException:
@@ -58,7 +63,15 @@ class NativePinnedObject:
     def close(self):
         with self._lock:
             if not self._closed:
-                _call(self._library, op='read_close', token=self._token)
+                if self._cleanup_failed:
+                    raise NativeBoundaryError('Read cleanup is unconfirmed; no automatic replay')
+                try:
+                    _call(self._library, op='read_close', token=self._token)
+                except BaseException:
+                    self._cleanup_failed = True
+                    self._library._sealed = True
+                    _failed_closes.append(self)
+                    raise
                 self._closed = True
 
     def __enter__(self):
@@ -72,19 +85,32 @@ class NativePinnedRead(NativePinnedObject):
     def read_bytes(self, *, max_bytes=MAX_READ_BYTES):
         if type(max_bytes) is not int or not 0 < max_bytes <= MAX_READ_BYTES:
             raise ValueError('Invalid bounded read size')
+        return self._contents(max_bytes, package=False)
+
+    def _read_package_bytes(self, *, max_bytes):
+        if type(max_bytes) is not int or not 0 < max_bytes <= 272 * 1024 * 1024:
+            raise ValueError('Invalid bounded package size')
+        return self._contents(max_bytes, package=True)
+
+    def _contents(self, max_bytes, *, package):
         with self._lock:
             if self._closed:
                 raise ValueError('Read object is closed')
             if self._library._sealed:
                 raise NativeBoundaryError('Native boundary is sealed')
-            output, written = C.create_string_buffer(max_bytes), C.c_size_t()
-            function = self._library._library.gitgo_native_read
+            size = _call(self._library, op='read_size', token=self._token, max_bytes=max_bytes)['size']
+            # This is an allocation hint, never an authorization or snapshot.
+            # Rust checks size/state again; growth cannot overflow this buffer.
+            capacity = max(1, size)
+            output, written = C.create_string_buffer(capacity), C.c_size_t()
+            function = (self._library._library.gitgo_native_package_read if package
+                        else self._library._library.gitgo_native_read)
             function.argtypes = [C.c_uint64, C.c_size_t, C.c_void_p, C.c_size_t, C.POINTER(C.c_size_t)]
             function.restype = C.c_uint32
-            status = function(self._token, max_bytes, output, len(output), C.byref(written))
+            status = function(self._token, capacity, output, len(output), C.byref(written))
             if status == 3:
                 raise ReadBoundaryError('Native bounded read refused; no content exported')
-            if status or written.value > max_bytes:
+            if status or written.value > capacity:
                 self._library._sealed = True
                 raise NativeBoundaryError('Native read transport failed; no replay')
             return C.string_at(output, written.value)
@@ -105,7 +131,7 @@ class NativeReadRoot(NativePinnedObject):
         if not path.is_absolute() or '..' in path.parts or path == Path(path.anchor):
             raise ReadBoundaryError('A concrete absolute resource root is required')
         library = get_native()
-        if library.call(op='capabilities').get('safe_read_version') != 1:
+        if library.call(op='capabilities').get('safe_read_version') != 2:
             raise ReadBoundaryError('Native safe read extension is unavailable')
         super().__init__(library, _call(library, op='read_root', path=_path(path)))
 

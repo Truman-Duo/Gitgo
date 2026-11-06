@@ -32,6 +32,15 @@ def test_new_component_source_is_covered_without_a_handwritten_import_list(sourc
     assert identity.runtime_implementation_digest() == before
 
 
+def test_native_read_binary_identity_is_bound_on_every_supported_platform(source_tree, monkeypatch):
+    from backend.core import native_sandbox
+    report = {'sha256': 'a' * 64, 'abi_version': 1}
+    monkeypatch.setattr(native_sandbox, 'implementation_identity', lambda: dict(report))
+    before = identity.runtime_implementation_digest()
+    report['sha256'] = 'b' * 64
+    assert identity.runtime_implementation_digest() != before
+
+
 def test_source_read_failure_never_reuses_old_implementation_identity(source_tree, monkeypatch):
     identity.runtime_implementation_digest()
     path = source_tree / "core" / "implementation_identity.py"

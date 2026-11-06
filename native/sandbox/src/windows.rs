@@ -566,7 +566,8 @@ fn perform(request: Request) -> Result<Value> {
         | Request::ReadRoot { .. }
         | Request::ReadOpen { .. }
         | Request::ReadClose { .. }
-        | Request::ReadHash { .. } => Err(INVALID),
+        | Request::ReadHash { .. }
+        | Request::ReadSize { .. } => Err(INVALID),
     }
 }
 

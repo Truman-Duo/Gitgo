@@ -1,7 +1,7 @@
 """Pinned Rust ABI. This module owns no permissions and no recovery ledger.
 
 No environment-selected library, PATH search, download or ctypes execution
-fallback. A missing/incompatible native module makes Windows execution deny.
+fallback. A missing/incompatible native module denies native execution and stable reads.
 """
 from __future__ import annotations
 from contextlib import ExitStack
@@ -93,7 +93,7 @@ class NativeLibrary:
                 fd, expected = _pin_windows(path, self._pins)
                 load_path = str(path)
             else:
-                # Stage 1 POSIX builds expose ABI/capabilities only. Bind dyld/
+                # Bind dyld/
                 # dlopen to our retained descriptor, never reopen the input name.
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
                 self._pins.callback(os.close, fd)

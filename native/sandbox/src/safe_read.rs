@@ -15,6 +15,7 @@ mod platform;
 mod platform;
 
 pub const MAX_READ: usize = 16 * 1024 * 1024;
+pub const MAX_PACKAGE: usize = 272 * 1024 * 1024;
 pub const MAX_HASH: u64 = 512 * 1024 * 1024;
 const MAX_LIVE: usize = 8192;
 
@@ -141,6 +142,25 @@ pub fn bytes(token: u64, limit: usize) -> io::Result<Vec<u8>> {
     if limit == 0 || limit > MAX_READ {
         return Err(boundary("invalid_read_limit"));
     }
+    bounded_bytes(token, limit)
+}
+pub fn package_bytes(token: u64, limit: usize) -> io::Result<Vec<u8>> {
+    if limit == 0 || limit > MAX_PACKAGE {
+        return Err(boundary("invalid_package_read_limit"));
+    }
+    bounded_bytes(token, limit)
+}
+pub fn size(token: u64, limit: u64) -> io::Result<Value> {
+    if limit == 0 || limit > MAX_HASH {
+        return Err(boundary("invalid_read_limit"));
+    }
+    let resource = file(token)?;
+    let opened = resource
+        .lock()
+        .map_err(|_| boundary("read_object_poisoned"))?;
+    Ok(json!({"ok": true, "size": checked_before(&opened, limit)?.size}))
+}
+fn bounded_bytes(token: u64, limit: usize) -> io::Result<Vec<u8>> {
     let resource = file(token)?;
     let mut opened = resource
         .lock()
@@ -156,7 +176,9 @@ fn read_checked(
     consume: impl FnOnce(&mut File, &mut Vec<u8>) -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
     let before = checked_before(opened, limit as u64)?;
-    let mut output = Vec::new();
+    // Reserve the observed size plus the growth sentinel. Geometric growth of
+    // a 272 MiB package must not transiently allocate a 512 MiB Rust vector.
+    let mut output = Vec::with_capacity(before.size.min(limit as u64) as usize + 1);
     // Read one extra byte to detect growth. No unvalidated prefix is exported.
     consume(&mut opened.file, &mut output)?;
     if output.len() > limit {
@@ -228,9 +250,9 @@ mod tests {
                 .collect()
         }
     }
-    struct Tree(std::path::PathBuf);
+    pub(super) struct Tree(pub(super) std::path::PathBuf);
     impl Tree {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "gitgo-read-{}-{}",
                 std::process::id(),
@@ -262,6 +284,7 @@ mod tests {
                 .open(tree.0.join("file"))?;
             writer.write_all(b"attacker")?;
             writer.sync_all()?;
+            drop(writer);
             assert_ne!(platform::snapshot(file)?, original);
             file.read_to_end(output)?;
             Ok(())
@@ -278,6 +301,7 @@ mod tests {
                     .append(true)
                     .open(tree.0.join("file"))?;
                 writer.write_all(b"oversized")?;
+            drop(writer);
                 file.take(9).read_to_end(output)?;
                 Ok(())
             })

@@ -27,6 +27,8 @@ pub enum Request {
     ReadClose { token: u64 },
     #[serde(rename = "read_hash")]
     ReadHash { token: u64, max_bytes: u64 },
+    #[serde(rename = "read_size")]
+    ReadSize { token: u64, max_bytes: u64 },
     #[serde(rename = "job_create")]
     JobCreate {
         recovery_id: String,
@@ -70,7 +72,7 @@ fn dispatch(raw: &[u8]) -> Value {
     if matches!(request, Request::Capabilities {}) {
         return json!({"ok": true, "abi": ABI, "platform": std::env::consts::OS,
             "windows_appcontainer": cfg!(windows), "linux_execution": false,
-            "macos_execution": false, "safe_read_version": 1,
+            "macos_execution": false, "safe_read_version": 2,
             "authority": "host-existing-permission-broker"});
     }
     let request = match request {
@@ -83,6 +85,9 @@ fn dispatch(raw: &[u8]) -> Value {
         Request::ReadClose { token } => return safe_read::response(safe_read::close(token)),
         Request::ReadHash { token, max_bytes } => {
             return safe_read::response(safe_read::hash(token, max_bytes));
+        }
+        Request::ReadSize { token, max_bytes } => {
+            return safe_read::response(safe_read::size(token, max_bytes));
         }
         other => other,
     };
@@ -162,10 +167,40 @@ pub unsafe extern "C" fn gitgo_native_read(
     capacity: usize,
     written: *mut usize,
 ) -> u32 {
+    unsafe { read_transport(token, limit, output, capacity, written, false) }
+}
+
+/// Separate package content plane; does not widen the ordinary read endpoint.
+/// # Safety
+/// The output and written pointers must be live, valid and disjoint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gitgo_native_package_read(
+    token: u64,
+    limit: usize,
+    output: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+) -> u32 {
+    unsafe { read_transport(token, limit, output, capacity, written, true) }
+}
+
+unsafe fn read_transport(
+    token: u64,
+    limit: usize,
+    output: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+    package: bool,
+) -> u32 {
     if written.is_null()
         || output.is_null()
         || limit == 0
-        || limit > safe_read::MAX_READ
+        || limit
+            > if package {
+                safe_read::MAX_PACKAGE
+            } else {
+                safe_read::MAX_READ
+            }
         || capacity < limit
     {
         return 1;
@@ -176,7 +211,13 @@ pub unsafe extern "C" fn gitgo_native_read(
     if SEALED.load(Ordering::Acquire) {
         return 2;
     }
-    match std::panic::catch_unwind(|| safe_read::bytes(token, limit)) {
+    match std::panic::catch_unwind(|| {
+        if package {
+            safe_read::package_bytes(token, limit)
+        } else {
+            safe_read::bytes(token, limit)
+        }
+    }) {
         Ok(Ok(bytes)) => {
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
