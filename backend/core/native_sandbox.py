@@ -216,6 +216,7 @@ class NativeLibrary:
             error = NativeBoundaryError(result.get('winerror', 0), result.get('error', 'native_failure'))
             error.winerror = result.get('winerror', 0)
             error.outcome_unknown = False
+            error.response = result
             raise error
         return result
 

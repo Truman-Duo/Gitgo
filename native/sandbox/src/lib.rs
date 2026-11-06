@@ -8,12 +8,25 @@ pub const ABI: u32 = 1;
 pub const MAX_REQUEST: usize = 1024 * 1024;
 pub const RESPONSE_CAPACITY: usize = 65536;
 static SEALED: AtomicBool = AtomicBool::new(false);
+mod safe_read;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum Request {
     #[serde(rename = "capabilities")]
     Capabilities {},
+    #[serde(rename = "read_root")]
+    ReadRoot { path: Vec<u8> },
+    #[serde(rename = "read_open")]
+    ReadOpen {
+        token: u64,
+        path: Vec<u8>,
+        metadata_only: bool,
+    },
+    #[serde(rename = "read_close")]
+    ReadClose { token: u64 },
+    #[serde(rename = "read_hash")]
+    ReadHash { token: u64, max_bytes: u64 },
     #[serde(rename = "job_create")]
     JobCreate {
         recovery_id: String,
@@ -57,14 +70,29 @@ fn dispatch(raw: &[u8]) -> Value {
     if matches!(request, Request::Capabilities {}) {
         return json!({"ok": true, "abi": ABI, "platform": std::env::consts::OS,
             "windows_appcontainer": cfg!(windows), "linux_execution": false,
-            "macos_execution": false, "authority": "host-existing-permission-broker"});
+            "macos_execution": false, "safe_read_version": 1,
+            "authority": "host-existing-permission-broker"});
     }
+    let request = match request {
+        Request::ReadRoot { path } => return safe_read::response(safe_read::root(&path)),
+        Request::ReadOpen {
+            token,
+            path,
+            metadata_only,
+        } => return safe_read::response(safe_read::open(token, &path, metadata_only)),
+        Request::ReadClose { token } => return safe_read::response(safe_read::close(token)),
+        Request::ReadHash { token, max_bytes } => {
+            return safe_read::response(safe_read::hash(token, max_bytes));
+        }
+        other => other,
+    };
     #[cfg(windows)]
     {
         windows::dispatch(request)
     }
     #[cfg(not(windows))]
     {
+        let _ = request;
         json!({"ok": false, "error": "unsupported_platform"})
     }
 }
@@ -121,6 +149,48 @@ pub unsafe extern "C" fn gitgo_native_call(
 
 #[cfg(windows)]
 mod windows;
+
+/// Bounded content plane. Capacity is checked before consuming the descriptor;
+/// no partial bytes escape on a changed object, a limit error or a panic.
+/// # Safety
+/// The output and written pointers must be live, valid and disjoint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gitgo_native_read(
+    token: u64,
+    limit: usize,
+    output: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+) -> u32 {
+    if written.is_null()
+        || output.is_null()
+        || limit == 0
+        || limit > safe_read::MAX_READ
+        || capacity < limit
+    {
+        return 1;
+    }
+    unsafe {
+        *written = 0;
+    }
+    if SEALED.load(Ordering::Acquire) {
+        return 2;
+    }
+    match std::panic::catch_unwind(|| safe_read::bytes(token, limit)) {
+        Ok(Ok(bytes)) => {
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
+                *written = bytes.len();
+            }
+            0
+        }
+        Ok(Err(_)) => 3,
+        Err(_) => {
+            SEALED.store(true, Ordering::Release);
+            2
+        }
+    }
+}
 
 /// Bounded descriptor transport; no native allocation pointer escapes the ABI.
 /// # Safety

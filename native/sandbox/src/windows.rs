@@ -562,7 +562,11 @@ fn perform(request: Request) -> Result<Value> {
                 json!({"ok": true, "process_token": process_token, "process_handle": raw, "pid": pid}),
             )
         }
-        Request::Capabilities {} => Err(INVALID),
+        Request::Capabilities {}
+        | Request::ReadRoot { .. }
+        | Request::ReadOpen { .. }
+        | Request::ReadClose { .. }
+        | Request::ReadHash { .. } => Err(INVALID),
     }
 }
 
