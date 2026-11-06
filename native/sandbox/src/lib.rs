@@ -10,11 +10,17 @@ pub const RESPONSE_CAPACITY: usize = 65536;
 static SEALED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "linux")]
 mod linux_cgroup;
+#[cfg(target_os = "linux")]
+mod linux_seccomp;
 mod safe_read;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum Request {
+    #[serde(rename = "linux_filter_create")]
+    LinuxFilterCreate { workspace: Vec<u8> },
+    #[serde(rename = "linux_filter_close")]
+    LinuxFilterClose { token: u64 },
     #[serde(rename = "linux_cgroup_procs")]
     LinuxCgroupProcs { token: u64 },
     #[serde(rename = "linux_cgroup_recover")]
@@ -93,9 +99,14 @@ fn dispatch(raw: &[u8]) -> Value {
             "windows_appcontainer": cfg!(windows), "linux_execution": false,
             "macos_execution": false, "safe_read_version": 2,
             "linux_cgroup_version": if cfg!(target_os = "linux") {1} else {0},
+            "linux_filter_version": if cfg!(target_os = "linux") {1} else {0},
             "authority": "host-existing-permission-broker"});
     }
     let request = match request {
+        #[cfg(target_os = "linux")]
+        Request::LinuxFilterCreate { workspace } => return linux_seccomp::create(&workspace),
+        #[cfg(target_os = "linux")]
+        Request::LinuxFilterClose { token } => return linux_seccomp::close(token),
         #[cfg(target_os = "linux")]
         Request::LinuxCgroupProcs { token } => return linux_cgroup::procs(token),
         #[cfg(target_os = "linux")]

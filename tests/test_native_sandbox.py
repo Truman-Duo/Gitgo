@@ -1253,16 +1253,14 @@ print('private-ipc')
 
 
 def test_linux_other_socket_domains_and_io_uring_are_denied(linux_box):
-    from backend.core.sandbox_seccomp import _load_library
     workspace, spawn = linux_box
     # Netlink is available without elevated privileges on the Host, rather
     # than relying only on domains already unavailable on a hosted kernel.
     with socket.socket(socket.AF_NETLINK,socket.SOCK_RAW,0):
         pass
-    api = _load_library(workspace)
-    numbers = [api.seccomp_syscall_resolve_name(name.encode())
-               for name in ('io_uring_setup','io_uring_enter','io_uring_register')]
-    assert all(number >= 0 for number in numbers)
+    # Independent Linux syscall ABI numbers, shared by x86_64 and aarch64.
+    # Do not ask the policy builder which calls the attack should attempt.
+    numbers = [425, 426, 427]
     source = f"""import ctypes,errno,socket
 for family in (socket.AF_UNIX,socket.AF_NETLINK,socket.AF_PACKET,40,0,9999):
     try:
@@ -1284,11 +1282,10 @@ print('domain-policy')
 
 
 def test_linux_native_filter_cannot_be_bypassed_with_x32_abi(linux_box):
-    from backend.core.sandbox_seccomp import _load_library
     workspace, spawn = linux_box
     if os.uname().machine != 'x86_64':
         pytest.skip('x32 syscall encoding is x86_64-specific')
-    number = _load_library(workspace).seccomp_syscall_resolve_name(b'socket')
+    number = 41  # x86_64 __NR_socket, independent of the policy builder
     source = ("import ctypes;print('ran',flush=True);"
               f"ctypes.CDLL(None).syscall({number | 0x40000000},2,1,0);print('escaped')")
     code, out, err = finished(spawn(source))
@@ -1330,9 +1327,9 @@ def test_linux_rejects_host_descriptor_inheritance_before_launch(linux_box, opti
 
 def test_missing_socket_filter_never_loads_into_host_or_yields_fallback(tmp_path_factory, monkeypatch):
     from backend.core.sandbox_seccomp import socket_filter
-    def unavailable(_):
-        raise OSError('System libseccomp is unavailable')
-    monkeypatch.setattr('backend.core.sandbox_seccomp._load_library',unavailable)
+    def unavailable():
+        raise OSError('Native socket filter is unavailable')
+    monkeypatch.setattr('backend.core.sandbox_seccomp.get_native',unavailable)
     with pytest.raises(SandboxDenied) as denied:
         with socket_filter(tmp_path_factory):
             pytest.fail('A missing filter must never yield a launch descriptor')

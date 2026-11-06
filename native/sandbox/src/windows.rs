@@ -564,6 +564,8 @@ fn perform(request: Request) -> Result<Value> {
             )
         }
         Request::Capabilities {}
+        | Request::LinuxFilterCreate { .. }
+        | Request::LinuxFilterClose { .. }
         | Request::LinuxCgroupProcs { .. }
         | Request::LinuxCgroupCreate { .. }
         | Request::LinuxCgroupRecover { .. }

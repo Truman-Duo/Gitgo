@@ -136,6 +136,7 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
             if not any(root.is_relative_to(Path(tree)) for tree in ("/usr", "/bin", "/lib", "/lib64")):
                 command += ["--ro-bind", str(root), str(root)]
         cgroup = LinuxCgroup(policy)
+        process = None
         try:
             procs_fd = cgroup.procs_fd
             command += ["--dir", "/run",
@@ -162,8 +163,20 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
                 # No Host descriptor other than the three stdio pipes survives.
                 command[1:1] = ['--seccomp', str(program.fileno())]
                 kwargs.update(pass_fds=(program.fileno(), procs_fd), close_fds=True)
-                return LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
+                process = LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
+            return process
         except BaseException as exc:
+            if process is not None:
+                exc.effect_state = "ambiguous"
+                try:
+                    process.kill()
+                    process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                finally:
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream is not None:
+                            stream.close()
             exc.cleanup = cgroup.close()
             raise
     raise SandboxDenied("SANDBOX_UNAVAILABLE", "No native sandbox backend is available on this platform.")
