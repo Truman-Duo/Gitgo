@@ -75,13 +75,18 @@ fn registry() -> io::Result<std::sync::MutexGuard<'static, Registry>> {
 }
 fn insert(value: Resource) -> io::Result<u64> {
     let mut registry = registry()?;
-    if registry.live.len() >= MAX_LIVE || registry.next == u64::MAX {
-        return Err(boundary("read_resource_limit"));
+    registry.insert(value)
+}
+impl Registry {
+    fn insert(&mut self, value: Resource) -> io::Result<u64> {
+        if self.live.len() >= MAX_LIVE || self.next == u64::MAX {
+            return Err(boundary("read_resource_limit"));
+        }
+        let token = self.next;
+        self.next += 1;
+        self.live.insert(token, value);
+        Ok(token)
     }
-    let token = registry.next;
-    registry.next += 1;
-    registry.live.insert(token, value);
-    Ok(token)
 }
 fn file(token: u64) -> io::Result<Arc<Mutex<Opened>>> {
     match registry()?.live.get(&token) {
@@ -273,23 +278,56 @@ mod tests {
         }
     }
     #[test]
-    fn changed_content_is_never_returned_even_with_unchanged_length() {
+    fn same_length_change_with_changed_metadata_is_refused() {
         let tree = Tree::new();
         let mut opened = tree.opened();
         let original = platform::snapshot(&opened.file).unwrap();
-        let result = read_checked(&mut opened, 16, |file, output| {
-            // Actual second writer, at the exact interval between snapshots.
-            let mut writer = std::fs::OpenOptions::new()
-                .write(true)
-                .open(tree.0.join("file"))?;
-            writer.write_all(b"attacker")?;
-            writer.sync_all()?;
-            drop(writer);
-            assert_ne!(platform::snapshot(file)?, original);
-            file.read_to_end(output)?;
-            Ok(())
-        });
+        let result =
+            read_checked(&mut opened, 16, |file, output| {
+                // Actual second writer, at the exact interval between snapshots.
+                let mut writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(tree.0.join("file"))
+                    .unwrap();
+                writer.write_all(b"attacker").unwrap();
+                // NTFS writes in the same clock tick can keep both timestamps.
+                // Test the promised metadata-change refusal deterministically;
+                // this is not a claim of an immutable/atomic content snapshot.
+                writer
+                    .set_times(std::fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400),
+                    ))
+                    .unwrap();
+                writer.sync_all().unwrap();
+                drop(writer);
+                assert_ne!(platform::snapshot(file)?, original);
+                file.read_to_end(output)?;
+                Ok(())
+            });
         assert!(result.is_err());
+    }
+    #[test]
+    fn live_resource_budget_and_token_exhaustion_refuse_without_allocation() {
+        let tree = Tree::new();
+        let root = Arc::new(platform::Root::open(&encoded(&tree.0)).unwrap());
+        let mut registry = Registry {
+            next: 1,
+            live: BTreeMap::new(),
+        };
+        for token in 1..=MAX_LIVE as u64 {
+            assert_eq!(
+                registry.insert(Resource::Root(Arc::clone(&root))).unwrap(),
+                token
+            );
+        }
+        let next = registry.next;
+        assert!(registry.insert(Resource::Root(Arc::clone(&root))).is_err());
+        assert_eq!(registry.next, next);
+        assert_eq!(registry.live.len(), MAX_LIVE);
+        registry.live.clear();
+        registry.next = u64::MAX;
+        assert!(registry.insert(Resource::Root(root)).is_err());
+        assert!(registry.live.is_empty());
     }
     #[test]
     fn growth_during_read_is_not_a_successful_prefix() {
@@ -299,8 +337,9 @@ mod tests {
             read_checked(&mut opened, 8, |file, output| {
                 let mut writer = std::fs::OpenOptions::new()
                     .append(true)
-                    .open(tree.0.join("file"))?;
-                writer.write_all(b"oversized")?;
+                    .open(tree.0.join("file"))
+                    .unwrap();
+                writer.write_all(b"oversized").unwrap();
                 drop(writer);
                 file.take(9).read_to_end(output)?;
                 Ok(())
