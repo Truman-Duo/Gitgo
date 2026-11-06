@@ -335,12 +335,17 @@ class AgentSession:
 
     def append_user(self, content: str,
                     referenced_files: list[str] | None = None,
-                    message_type: str = "") -> None:
+                    message_type: str = "", *, turn_id: str = "") -> None:
         msg = {"role": "user", "content": content}
         if referenced_files:
             msg["referenced_files"] = referenced_files
         if message_type:
             msg["message_type"] = message_type
+        if _is_conversation_user(msg):
+            from datetime import datetime, timezone
+            msg.update(message_id=str(uuid.uuid4()), timestamp=datetime.now(timezone.utc).isoformat())
+            if turn_id:
+                msg["turn_id"] = turn_id
         self.messages.append(msg)
 
     def append_assistant(self, content: str, **kwargs) -> None:

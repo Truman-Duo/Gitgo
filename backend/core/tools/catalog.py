@@ -12,7 +12,7 @@ import sys
 
 from backend.core.prompt_templates import load_prompt, render_prompt
 
-from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, NATIVE_WORKSPACE_PRODUCER, data_broker
+from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, NATIVE_RESOURCE_READ, NATIVE_WORKSPACE_PRODUCER, data_broker
 
 from backend.core.loop.agent_tool import (
     AgentTool,
@@ -107,7 +107,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             resources=[],
             runner_name="list_files",
             idempotent=True,
-            **common,
+            **{**common, 'execution_contract': NATIVE_RESOURCE_READ},
         ),
         "search_text": AgentTool(
             name="search_text",
@@ -140,7 +140,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             runner_name="search_text",
             idempotent=True,
             timeout=45,
-            **common,
+            **{**common, 'execution_contract': NATIVE_RESOURCE_READ},
         ),
         "document_open": AgentTool(
             name="document_open",
@@ -163,7 +163,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
             runner_name="document_open",
             idempotent=True,
             timeout=120,
-            **common,
+            **{**common, 'execution_contract': NATIVE_FILE_READ},
         ),
         "document_create": AgentTool(
             name="document_create",

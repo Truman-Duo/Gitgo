@@ -11,6 +11,18 @@ from backend.core.loop.runner_diagnostics import MAX_STDERR_CHARS, capture_runne
 from backend.core.storage.redaction import redact_for_persistence
 
 
+def test_missing_launch_path_does_not_invent_a_missing_module(tmp_path_factory, monkeypatch):
+    def absent(*args, **kwargs):
+        raise FileNotFoundError(2, 'native launch path unavailable')
+    monkeypatch.setattr('backend.core.sandbox.sandbox_popen', absent)
+    result = ProcessToolRunner().run('file_list', {'_workspace': str(tmp_path_factory)})
+    assert result.data['error'] == 'SANDBOX_LAUNCH_DENIED'
+    assert result.launch_state == 'not_started' and not result.started
+    assert result.data['error_info']['details']['errno'] == 2
+    assert 'runner module not found' not in str(result.data)
+    assert result.data['effect_state'] == 'not_committed'
+
+
 @pytest.mark.parametrize("case", ["success", "business", "crash", "timeout", "cancelled"])
 def test_captured_stderr_survives_each_pipeline_result(tmp_path_factory, monkeypatch, case):
     result = SubprocessResult(success=True, data={"ok": True}, exit_code=0,
@@ -28,7 +40,7 @@ def test_captured_stderr_survives_each_pipeline_result(tmp_path_factory, monkeyp
     process = AgentProcess(process_id="diagnostic", role="worker", ring_level=RingLevel.RING_0,
                            worktree_path=str(tmp_path_factory), session=AgentSession())
     ctx = ExecutionContext(process=process, session=process.session, workspace_path=str(tmp_path_factory))
-    tool = AgentTool("list_files", "read-only transport diagnostics", {}, lambda args: pytest.fail("inline execution"),
+    tool = AgentTool("file_list", "read-only transport diagnostics", {}, lambda args: pytest.fail("inline execution"),
                      execution_contract=NATIVE_PROCESS)
     events = []
     ctx.event_bus.subscribe("ToolResultReady", lambda event: events.append(event.data))

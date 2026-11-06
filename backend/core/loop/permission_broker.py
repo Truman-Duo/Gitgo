@@ -519,4 +519,9 @@ def admit_invocation_grants(process, tool, raw_arguments: dict, prepared_argumen
     for grant in {id(item): item for item in selected}.values():
         if grant["remaining_uses"] is not None:
             grant["remaining_uses"] -= 1
+    if admission is not None and tool.execution_contract.file_action in {'read_existing_file', 'read_resource'}:
+        from .read_approval import NativeReadBinding
+        admission.native_read = NativeReadBinding(process, {**prepared_arguments, '_allowed_roots': roots},
+            list({id(item): item for item in selected}.values()), admission.read_binding)
+        admission.callback(admission.native_read.close)
     return roots, None

@@ -16,11 +16,12 @@ class DocumentLimit(ValueError):
     pass
 
 
-def check_input(path):
-    if path.stat().st_size > MAX_INPUT_BYTES:
+def check_input(path, *, data=None):
+    if (len(data) if data is not None else path.stat().st_size) > MAX_INPUT_BYTES:
         raise DocumentLimit("document exceeds the 16MiB input boundary; split it before extraction")
     if path.suffix.lower() in {".docx", ".pptx", ".xlsx", ".xlsm"}:
-        with zipfile.ZipFile(path) as archive:
+        from io import BytesIO
+        with zipfile.ZipFile(BytesIO(data) if data is not None else path) as archive:
             members = archive.infolist()
             if len(members) > 4096 or sum(i.file_size for i in members) > MAX_EXPANDED_BYTES:
                 raise DocumentLimit("document archive exceeds the expansion boundary")

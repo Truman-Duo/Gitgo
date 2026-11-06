@@ -311,6 +311,7 @@ def test_legacy_derived_cache_rebases_from_current_truth_without_changing_user_s
     from backend.core.loop.provider_context import restore_cache
     s = AgentSession()
     s.append_user('actual user decision remains')
+    original = deepcopy(s.messages)
     s.to_provider_messages(dynamic_envelope=view({'items': [{'phase': 'old'}]}))
     old = durable_cache(s.provider_context_cache)
     old['format'] = 'gitgo.context.v2'
@@ -318,7 +319,7 @@ def test_legacy_derived_cache_rebases_from_current_truth_without_changing_user_s
     s.provider_context_cache = restore_cache(old, s.provider_context_seed)
     wire = s.to_provider_messages(dynamic_envelope=view({'items': [{'phase': 'suspended'}]}))
     assert decode_wire(wire) == {'items': [{'phase': 'suspended'}]}
-    assert s.messages == [{'role': 'user', 'content': 'actual user decision remains'}]
+    assert s.messages == original
 
 
 def test_nested_json_roundtrips_across_many_independent_shapes():

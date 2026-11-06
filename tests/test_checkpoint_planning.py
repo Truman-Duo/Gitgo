@@ -130,6 +130,8 @@ def test_prior_lifecycle_object_is_verified_without_repair(runtime, monkeypatch,
 
 def test_provisional_success_can_fail_using_prior_bytes_outside_sql(runtime, monkeypatch):
     runtime.save_agent_checkpoint(checkpoint(status="completed", runtime_state={"lifecycle_finalized": False}))
+    expected = {runtime._state.execute("SELECT runtime_state_ref FROM session_processes WHERE process_id='proc'").fetchone()[0],
+                runtime._state.execute("SELECT contract_ref FROM tasks WHERE task_id='task'").fetchone()[0]}
     read = runtime._read_json_blob
     observed = []
     def checked(ref, **kwargs):
@@ -140,7 +142,7 @@ def test_provisional_success_can_fail_using_prior_bytes_outside_sql(runtime, mon
     monkeypatch.setattr(runtime, "_read_json_blob", checked)
     assert runtime.save_agent_checkpoint(checkpoint(status="failed",
         runtime_state={"lifecycle_finalized": False})).revision == 2
-    assert len(observed) == 1
+    assert set(observed) == expected and len(observed) == len(expected)
 
 
 def test_complete_closure_precedes_sql_and_fact_owns_every_member(runtime, monkeypatch):

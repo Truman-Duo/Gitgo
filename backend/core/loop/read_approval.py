@@ -138,6 +138,7 @@ class AdmissionResources(ExitStack):
     def __init__(self):
         super().__init__()
         self.read_binding = None
+        self.native_read = None
 
     def retain(self, process, execution_id, call_index):
         """Unknown tree lifetime cannot release the active metadata pins."""
@@ -149,6 +150,58 @@ class AdmissionResources(ExitStack):
             "reasons": list((process.recovery or {}).get("reasons") or []) +
                 [{"code": "NATIVE_CLEANUP_UNCONFIRMED", "execution_id": execution_id,
                   "call_index": call_index, "effect_state": "ambiguous"}]}
+
+
+class NativeReadBinding:
+    """Live invocation handoff from the existing broker, not another grant."""
+    def __init__(self, process, args, grants, file_binding):
+        from .execution_contract import NativeInvocation
+        self.process, self.file_binding = process, file_binding
+        self.owner = (process.process_id, process.active_task_id or process.process_id)
+        self.arguments = NativeInvocation.encode(args)
+        self.grants = tuple(grants)
+        self.pins = ExitStack()
+        self.current_plan = None
+        self.deadline = time.monotonic() + min([1800.0, *[
+            (datetime.fromisoformat(g['expires_at']) - datetime.now(timezone.utc)).total_seconds()
+            for g in self.grants]])
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+        self.pins.close()
+
+    def pin_current_file(self, args):
+        if self.file_binding is not None or self.current_plan is not None:
+            return
+        from backend.core.tools.workspace_tools import _read_target
+        workspace, _, root, relative = _read_target(args)
+        held_workspace = self.pins.enter_context(ReadRoot(workspace))
+        held_root = self.pins.enter_context(ReadRoot(root))
+        held_file = self.pins.enter_context(held_root.pin(relative))
+        self.current_plan = ReadPlan(str(workspace), str(root), relative,
+            held_workspace.identity, held_root.identity, held_file.identity)
+
+    def remaining(self):
+        p = self.process
+        if (self.closed or self.owner != (p.process_id, p.active_task_id or p.process_id)
+                or getattr(p, 'cancel_requested', False) or p.cancellation_event.is_set()
+                or any(not any(g is actual for actual in p.approval_grants) for g in self.grants)
+                or time.monotonic() >= self.deadline):
+            raise ReadBoundaryError('Native read permission expired, revoked or changed task')
+        remaining = self.deadline - time.monotonic()
+        if self.file_binding is not None:
+            remaining = min(remaining, self.file_binding.remaining())
+        return remaining
+
+    def payload(self, args):
+        from .execution_contract import NativeInvocation
+        self.remaining()
+        if NativeInvocation.encode(args) != self.arguments:
+            raise ReadBoundaryError('Native read arguments changed after admission')
+        if self.file_binding is not None:
+            return self.file_binding.payload(args)
+        return self.current_plan.to_dict() if self.current_plan is not None else None
 
 
 def current_pin(process, record):

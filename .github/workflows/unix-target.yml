@@ -35,12 +35,6 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
           persist-credentials: false
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        if: inputs.publisher_trust
-        with:
-          ref: ${{ github.sha }}
-          path: dev-artifacts/publisher-tooling
-          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14.7'
@@ -61,6 +55,11 @@ jobs:
           python -B -m pytest tests/test_sandbox_read.py tests/test_sandbox_read_darwin.py
           tests/test_read_approval.py tests/test_read_execution_plan.py tests/test_governance_chain.py
           tests/test_alpha3_platform_boundaries.py -q --tb=short
+      - name: Native macOS release controller and archive contract regressions
+        if: runner.os == 'macOS'
+        run: >-
+          python -B -m pytest tests/test_release_controller.py tests/test_prepare_update_release.py
+          tests/test_update_staging.py -q --tb=short
       - name: Native installer, credentials and owned process source regressions
         run: python -B -m pytest tests/test_unix_install_transaction.py tests/test_uninstall_cleanup_order.py tests/test_secret_cleanup_failures.py tests/test_unix_process_scope.py -q
       - name: CAS format admission and process ordering foundations (not sandbox backend acceptance)
@@ -71,13 +70,14 @@ jobs:
         run: |
           extra=()
           if [ "${{ inputs.publisher_trust }}" = true ]; then
-            python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py policy --source . --platform "${{ inputs.platform }}" --architecture "${{ inputs.architecture }}" --output "$RUNNER_TEMP/publisher-policy.json"
+            python -B scripts/check_unix_release_delivery.py policy --source . --platform "${{ inputs.platform }}" --architecture "${{ inputs.architecture }}" --output "$RUNNER_TEMP/publisher-policy.json"
             extra=(--update-evidence --update-release-policy "$RUNNER_TEMP/publisher-policy.json")
           fi
           bash "packaging/build_${TARGET_PLATFORM}.sh" --python "$(command -v python)" --bun "$(command -v bun)" "${extra[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-${{ inputs.target }}-${{ inputs.commit }}
+          overwrite: true
           path: dist-installer/*
           if-no-files-found: error
           retention-days: 14
@@ -89,12 +89,6 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ inputs.commit }}
-          persist-credentials: false
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        if: inputs.publisher_trust
-        with:
-          ref: ${{ github.sha }}
-          path: dev-artifacts/publisher-tooling
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -120,7 +114,7 @@ jobs:
               printf "disposable-ci-fixture" | gnome-keyring-daemon --unlock --components=secrets
               python -B scripts/accept_unix_archive.py --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --report acceptance.json
               if [ "$PUBLISHER_TRUST" = true ]; then
-                python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py managed --source . --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --output managed-acceptance.json
+                python -B scripts/check_unix_release_delivery.py managed --source . --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --output managed-acceptance.json
               fi
             '
           else
@@ -135,12 +129,13 @@ jobs:
             security default-keychain -d user -s "$keychain"
             python -B scripts/accept_unix_archive.py --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --report acceptance.json
             if [ "$PUBLISHER_TRUST" = true ]; then
-              python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py managed --source . --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --output managed-acceptance.json
+              python -B scripts/check_unix_release_delivery.py managed --source . --archive "incoming/gitgo-${TARGET}.tar.gz" --commit "$SOURCE_COMMIT" --output managed-acceptance.json
             fi
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: acceptance-${{ inputs.target }}-${{ inputs.commit }}
+          overwrite: true
           path: |
             acceptance.json
             managed-acceptance.json
@@ -155,11 +150,6 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ inputs.commit }}
-          persist-credentials: false
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          path: dev-artifacts/publisher-tooling
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -178,7 +168,7 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             dbus-run-session -- bash -euc '
               printf "disposable-ci-fixture" | gnome-keyring-daemon --unlock --components=secrets
-              python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py published --source . --platform "$TARGET_PLATFORM" --architecture "$TARGET_ARCH" --commit "$SOURCE_COMMIT" --output published-acceptance.json
+              python -B scripts/check_unix_release_delivery.py published --source . --platform "$TARGET_PLATFORM" --architecture "$TARGET_ARCH" --commit "$SOURCE_COMMIT" --output published-acceptance.json
             '
           else
             keychain_dir="$(mktemp -d "$RUNNER_TEMP/gitgo-ci-keychain.XXXXXXXX")"
@@ -188,11 +178,12 @@ jobs:
             security unlock-keychain -p disposable-ci-fixture "$keychain"
             security list-keychains -d user -s "$keychain"
             security default-keychain -d user -s "$keychain"
-            python -B dev-artifacts/publisher-tooling/scripts/check_unix_release_delivery.py published --source . --platform "$TARGET_PLATFORM" --architecture "$TARGET_ARCH" --commit "$SOURCE_COMMIT" --output published-acceptance.json
+            python -B scripts/check_unix_release_delivery.py published --source . --platform "$TARGET_PLATFORM" --architecture "$TARGET_ARCH" --commit "$SOURCE_COMMIT" --output published-acceptance.json
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: published-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.commit }}
+          overwrite: true
           path: published-acceptance.json
           if-no-files-found: error
           retention-days: 14

@@ -313,6 +313,8 @@ class CapabilityLeaseTests(unittest.TestCase):
         self.assertNotIn("delegate_task_bundle", selected)
         self.assertIn("capability_status", selected)
         self.assertIn("configure_capability", selected)
+        self.assertIn("request_permission", selected)
+        self.assertNotIn("request_permission", unavailable)
         self.assertIn("list_files", CapabilityProfiles.pre_contract_tools())
         self.assertIn("web_search", CapabilityProfiles.pre_contract_tools())
         self.assertIn("web_fetch", CapabilityProfiles.pre_contract_tools())

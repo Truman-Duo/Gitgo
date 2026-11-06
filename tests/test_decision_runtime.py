@@ -286,10 +286,23 @@ class _DecisionProvider:
     def __init__(self):
         self.calls = 0
 
+    def assess_alignment(self, payload, **kwargs):
+        # This provider fixture supplies the delivery review required by the
+        # real question graph; the test exercises pause/resume, not semantics.
+        result = {'status': 'ready', 'interpretations': [], 'questions': []}
+        if payload.get('proposed_questions'):
+            result.update(status='needs_input', questions=[{**payload['proposed_questions'][0],
+                'proposal_index': 0, 'state_topic': 'api-policy', 'tier': 'foundational'}])
+        if payload.get('candidate'):
+            result['delivery_check'] = {'complete': True, 'evidence': [payload['candidate']]}
+        return result
+
     def stream_events(self, *_args, **_kwargs):
         self.calls += 1
         if self.calls == 1:
             request = {
+                'kind': 'choice',
+                'state_topic': 'api-policy',
                 "question": "Which compatibility policy should govern the public API?",
                 "why_user_must_decide": "Both are technically valid product commitments.",
                 "options": [
@@ -344,15 +357,25 @@ def test_structured_user_decision_pauses_and_resumes_same_process(tmp_path_facto
     ))
     assert first.status == OutcomeStatus.AWAITING_USER
     assert process.status == ProcessStatus.AWAITING_USER
-    assert first.metadata["pending_decision"]["options"][0]["immediate_effect"]
+    pending = first.metadata['pending_decision']
+    question = (pending.get('questions') or [pending])[0]
+    assert question['options'][0]['immediate_effect']
     assert any(item.get("event") == "decision_required" for item in events)
     assert process.task_budget.snapshot()["used"]["awaiting_user"] is True
 
     decision_id = process.pending_decision["decision_id"]
+    from backend.core.loop.decision_support import validate_round_answer
+    answers = validate_round_answer(pending, json.dumps({'answers': {
+        q['node_id']: 'Choose option 1: ' + q['options'][0]['label'] for q in pending.get('questions') or []
+    }})) if pending.get('questions') else None
     process.session.host_ledger.append({
         "event": "user_decision_received",
         "decision_id": decision_id,
         "answer": "Strict compatibility",
+        "task_id": process.active_task_id or process.process_id,
+        "state_topic": process.pending_decision['state_topic'],
+        "kind": process.pending_decision['kind'],
+        **({'answers': answers} if answers else {'selected_label': question['options'][0]['label']}),
     })
     process.pending_decision = None
     process.task_budget.resume_from_user()
@@ -363,7 +386,7 @@ def test_structured_user_decision_pauses_and_resumes_same_process(tmp_path_facto
         instruction=f"[USER DECISION {decision_id}] Strict compatibility",
         workspace_path=str(tmp_path),
     ))
-    assert second.status == OutcomeStatus.COMPLETED
+    assert second.status == OutcomeStatus.COMPLETED, json.dumps(process.pending_decision, ensure_ascii=False)
     assert second.process_id == first.process_id
     assert process.task_budget.snapshot()["used"]["awaiting_user"] is False
 
