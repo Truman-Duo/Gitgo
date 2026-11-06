@@ -60,3 +60,12 @@ jobs:
           name: stage3-${{ matrix.os }}
           path: linux-stage3.xml
           if-no-files-found: error
+  frozen-native:
+    needs: cgroup-core
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    uses: ./.github/workflows/native-acceptance.yml
+    with:
+      os: ${{ matrix.os }}

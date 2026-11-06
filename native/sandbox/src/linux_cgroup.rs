@@ -149,6 +149,7 @@ struct Group {
     name: CString,
     procs: Option<File>,
     monitor: Option<Monitor>,
+    cpu_limit_usec: u64,
 }
 impl Group {
     fn kill(&self) -> io::Result<()> {
@@ -262,6 +263,7 @@ pub fn create(raw: &[u8], id: &str, memory: u64, processes: u32) -> Value {
             name,
             procs: None,
             monitor: None,
+            cpu_limit_usec: 0,
         };
         let token = state.next;
         state.next += 1;
@@ -300,10 +302,20 @@ pub fn query(token: u64) -> Value {
             .groups
             .get(&token)
             .ok_or_else(|| invalid("unknown_cgroup_token"))?;
-        Ok(
-            json!({"ok":true,"usage_usec":group.usage()?,"populated":group.populated()?,
-            "failure":group.monitor.as_ref().map_or(0, |m|m.failure.load(Ordering::Acquire))}),
-        )
+        let usage = group.usage()?;
+        let mut failed = group
+            .monitor
+            .as_ref()
+            .map_or(0, |m| m.failure.load(Ordering::Acquire));
+        // Check the final accounting too: a leader can exit between samples.
+        if group.cpu_limit_usec != 0 && usage >= group.cpu_limit_usec {
+            failed = 1;
+            if let Some(monitor) = &group.monitor {
+                monitor.failure.store(1, Ordering::Release);
+            }
+            group.kill()?;
+        }
+        Ok(json!({"ok":true,"usage_usec":usage,"populated":group.populated()?,"failure":failed}))
     })();
     result.unwrap_or_else(failure)
 }
@@ -424,6 +436,7 @@ pub fn recover(raw: &[u8], id: &str) -> Value {
             name,
             procs: None,
             monitor: None,
+            cpu_limit_usec: 0,
         };
         group.populated()?;
         control(&group.directory, "cgroup.kill", true)?;
@@ -548,9 +561,10 @@ pub fn watch(token: u64, pid: u32, cpu_seconds: u32) -> Value {
             .groups
             .get_mut(&token)
             .ok_or_else(|| invalid("unknown_cgroup_token"))?;
-        if group.monitor.is_some() {
+        if group.monitor.is_some() || group.cpu_limit_usec != 0 {
             return Err(invalid("cgroup_monitor_already_started"));
         }
+        group.cpu_limit_usec = u64::from(cpu_seconds) * 1_000_000;
         // The Host supplies its just-created, unreaped Popen child before poll.
         // pidfd is retained for observation, never used to signal an unrelated PID.
         let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as i32, 0) as i32 };

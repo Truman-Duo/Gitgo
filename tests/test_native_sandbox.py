@@ -1830,3 +1830,38 @@ def test_packaged_host_approval_binding(cross_platform_box, handler):
     assert result.stdout.strip() == 'approval-binding-verified', result
 
 from tests.native_source_runtime import workspace_native_launcher
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Actual Linux Rust cgroup supervision')
+def test_packaged_linux_cpu_budget_is_native_and_cannot_hide_success(cross_platform_box):
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Requires an actual frozen Host, never sys.frozen simulation')
+    host = Path(configured).resolve(strict=True)
+    child = ("import sys,time;open(sys.argv[1],'w').write('ready');t=time.process_time();"
+             "exec('while time.process_time()-t<0.7: pass');time.sleep(60)")
+    tool = ("import subprocess,time;from backend.core.child_process import python_command;"
+            "print('{\"success\":true,\"data\":{\"ok\":true}}',flush=True);"
+            f"[subprocess.Popen(python_command(['-I','-c',{child!r},'frozen-cpu-'+str(i)])) for i in range(2)];"
+            "time.sleep(60)")
+    driver = (
+        "import json,sys;assert sys.frozen;"
+        "from backend.core.native_sandbox import get_native;"
+        "assert get_native().call(op='capabilities')['linux_cgroup_version']==2;"
+        "from backend.core import sandbox;"
+        "from backend.core.loop import process_tool_runner as runner;"
+        "from backend.core.child_process import python_command;"
+        "Policy=sandbox.SandboxPolicy;"
+        "sandbox.SandboxPolicy=lambda workspace,**_:Policy(workspace,cpu_seconds=1);"
+        f"runner.tool_runner_command=lambda:python_command(['-I','-c',{tool!r}]);"
+        f"result=runner.ProcessToolRunner(timeout=15).run('exec_command',{{'_workspace':{str(policy.workspace)!r}}});"
+        "print(json.dumps({'success':result.success,'data':result.data,'cleanup':result.cleanup}))"
+    )
+    process = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-I', '-c', driver],
+        capture_output=True, text=True, encoding='utf8', timeout=45)
+    assert process.returncode == 0, process.stderr
+    result = json.loads(process.stdout)
+    assert result['success'] and result['data']['error'] == 'SANDBOX_EXECUTION_FAILED', result
+    assert result['data']['effect_state'] == 'ambiguous' and 'CPU' in result['data']['message'], result
+    assert result['cleanup']['complete'] is True, result
+    assert all((workspace / f'frozen-cpu-{i}').read_text() == 'ready' for i in range(2))
