@@ -108,9 +108,15 @@ class WorkspaceAccess:
         from .windows_acl import management_lock
         from .windows_access import AccessTree
         from .sandbox_windows import WindowsApi, _PENDING_JOBS
-        if any(getattr(job, 'retirement_started', True) for job in tuple(_PENDING_JOBS.values())):
-            raise SandboxDenied('SANDBOX_CLEANUP_PENDING', 'Native processes are not retired; keep workspace access and recovery journal for inspection.')
-        with _lock, management_lock(wait_ms=30000):
+        from .windows_sandbox_native import JOB_ADMISSION
+        with _lock, management_lock(wait_ms=30000), JOB_ADMISSION:
+            if self.payload is None or self.payload.get('phase') == 'revoked':
+                return
+            # Unidentified recovered Jobs are conservatively treated as matching.
+            if any(getattr(job, 'profile_name', None) in (None, self.policy.profile_name)
+                   for job in _PENDING_JOBS.values()):
+                raise SandboxDenied('SANDBOX_CLEANUP_PENDING',
+                    'Native processes are not retired; keep workspace access and recovery journal for inspection.')
             self.payload['phase'] = 'revoking'
             save_record(self.record, self.payload)
             try:
@@ -161,10 +167,11 @@ class WorktreeAccessService:
             access.prepare()
 
     def release(self, process_id):
-        access = self.active.get(process_id)
-        if access is not None:
-            access.close()
-            self.active.pop(process_id, None)
+        with _lock:
+            access = self.active.get(process_id)
+            if access is not None:
+                access.close()
+                self.active.pop(process_id, None)
 
 
 def revoke_record(record):

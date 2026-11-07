@@ -8,6 +8,7 @@ import threading
 from backend.core.native_sandbox import get_native, NativeBoundaryError
 
 PENDING_JOBS = {}
+JOB_ADMISSION = threading.RLock()
 
 
 class NativeProcessHandle(int):
@@ -31,14 +32,16 @@ class NativeProcessHandle(int):
 
 
 class NativeJob:
-    def __init__(self, token, library, recovery_id):
+    def __init__(self, token, library, recovery_id, profile_name=None):
         self.token, self.library, self.recovery_id = token, library, recovery_id
+        self.profile_name = profile_name
         self._lock = threading.Lock()
         self._closed, self._failure_reason = False, ''
         self.retirement_started = False
         self.cleanup = {'complete': False, 'mode': 'windows-job', 'issues': ['cleanup_not_observed']}
         # Own from allocation, including failures before Popen receives control.
-        PENDING_JOBS[id(self)] = self
+        with JOB_ADMISSION:
+            PENDING_JOBS[id(self)] = self
 
     @property
     def failure_reason(self):
@@ -54,7 +57,8 @@ class NativeJob:
             self.cleanup.update(complete=complete, issues=[] if complete else ['job_tree_still_active'])
             if complete:
                 self._closed = True
-                PENDING_JOBS.pop(id(self), None)
+                with JOB_ADMISSION:
+                    PENDING_JOBS.pop(id(self), None)
         except OSError:
             self.cleanup.update(complete=False, issues=['job_retirement_unknown'])
         return dict(self.cleanup)
@@ -80,11 +84,14 @@ class NativeJob:
 
 def recover(recovery_id):
     library = get_native()
-    for job in tuple(PENDING_JOBS.values()):
-        if job.recovery_id == recovery_id:
-            return job.close()['complete'] is True
-    result = library.call(op='job_recover', recovery_id=recovery_id)
-    return result.get('absent') is True or NativeJob(result['token'], library, recovery_id).close()['complete'] is True
+    with JOB_ADMISSION:
+        job = next((job for job in PENDING_JOBS.values() if job.recovery_id == recovery_id), None)
+        if job is None:
+            result = library.call(op='job_recover', recovery_id=recovery_id)
+            if result.get('absent') is True:
+                return True
+            job = NativeJob(result['token'], library, recovery_id)
+    return job.close()['complete'] is True
 
 
 def execute_child(proc, args, executable, preexec_fn, close_fds, pass_fds,
@@ -100,9 +107,10 @@ def execute_child(proc, args, executable, preexec_fn, close_fds, pass_fds,
     library = get_native()  # Required: no ctypes launch fallback.
     job = None
     try:
-        result = library.call(op='job_create', recovery_id=policy.recovery_id,
-                              processes=policy.process_limit, memory=policy.memory_bytes, cpu_seconds=policy.cpu_seconds)
-        job = NativeJob(result['token'], library, policy.recovery_id)
+        with JOB_ADMISSION:
+            result = library.call(op='job_create', recovery_id=policy.recovery_id,
+                                  processes=policy.process_limit, memory=policy.memory_bytes, cpu_seconds=policy.cpu_seconds)
+            job = NativeJob(result['token'], library, policy.recovery_id, policy.profile_name)
         proc._sandbox_job = job
         proc._gitgo_job_handle = job
         with ExitStack() as inherited_scope:

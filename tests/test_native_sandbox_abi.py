@@ -84,6 +84,29 @@ def test_job_retirement_tokens_and_cold_recovery(native):
         native.call(op='job_retire', token=job)
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows Job and ACL ownership')
+def test_retired_jobs_do_not_exhaust_native_capacity(native, tmp_path_factory):
+    path = tmp_path_factory / 'acl-target'
+    path.write_bytes(b'owned')
+    request = dict(op='job_create', recovery_id='', processes=4,
+                   memory=128 * 1024 * 1024, cpu_seconds=5)
+    for _ in range(4_100):
+        token = native.call(**request)['token']
+        assert native.call(op='job_retire', token=token)['complete'] is True
+    assert native.call(op='job_retire', token=token)['complete'] is True
+    with pytest.raises(NativeBoundaryError):
+        native.call(op='process_release', token=token)
+    file = native.call(op='acl_open', path=str(path), access=0x20089)['token']
+    try:
+        with pytest.raises(NativeBoundaryError):
+            native.call(op='job_retire', token=file)
+        with pytest.raises(NativeBoundaryError):
+            native.call(op='acl_release', token=token)
+    finally:
+        native.call(op='acl_release', token=file)
+    assert native.call(op='acl_release', token=file)['ok'] is True
+
+
 @pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows loader pin')
 def test_loaded_image_cannot_be_replaced_or_written(native):
     image = installed_path()
@@ -100,3 +123,14 @@ def test_loaded_image_cannot_be_replaced_or_written(native):
     with pytest.raises(OSError):
         image.rename(alternate)
     assert native.call(op='capabilities')['ok'] is True
+
+
+def test_unverified_loaded_image_is_not_loaded_again(monkeypatch):
+    from backend.core import native_sandbox
+
+    monkeypatch.setattr(native_sandbox, '_loaded', None)
+    monkeypatch.setattr(native_sandbox, '_failed_loads', [object()])
+    monkeypatch.setattr(native_sandbox, 'NativeLibrary',
+                        lambda _: pytest.fail('attempted another load after failed verification'))
+    with pytest.raises(NativeBoundaryError, match='failed verification after load'):
+        native_sandbox.get_native()

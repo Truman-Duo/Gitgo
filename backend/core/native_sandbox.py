@@ -224,6 +224,8 @@ def get_native():
     global _loaded
     with _lock:
         if _loaded is None:
+            if _failed_loads:
+                raise NativeBoundaryError("Native module failed verification after load; restart after repair")
             _loaded = NativeLibrary(installed_path())
         return _loaded
 

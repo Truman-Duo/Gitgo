@@ -119,6 +119,8 @@ pub unsafe extern "C" fn gitgo_native_call(
     }
 }
 
+#[cfg(any(windows, test))]
+mod registry;
 #[cfg(windows)]
 mod windows;
 
