@@ -563,8 +563,14 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
                 result = consume_request(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None))
             if result is None: return 2
             from backend.core.protocol_io import dump_protocol_json
-            print(dump_protocol_json({"update_status": result.status, "version": result.version,
-                                      "error_code": result.error_code}),
+            report = {"update_status": result.status, "version": result.version,
+                      "error_code": result.error_code}
+            if update_on_quit and result.health_failure is not None:
+                report["health_failure"] = result.health_failure
+            if update_on_quit and result.status == "blocked" and result.error_code == "UPDATE_BUSY":
+                print("Close other Gitgo instances, then reopen Gitgo and confirm the prepared update again.",
+                      file=sys.stderr, flush=True)
+            print(dump_protocol_json(report),
                   file=sys.stderr if update_on_quit and automatic_handoff else sys.stdout, flush=True)
             if result.status == "restart_required":
                 print("Confirmation saved. Restart macOS manually, then use the installed Gitgo command. Signature, package and exclusive runtime locks will be checked again before replacement.", file=sys.stderr, flush=True)
@@ -572,7 +578,9 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             if update_on_quit:
                 # The transaction has already committed, rolled back, or
                 # reported a blocker. The next launch uses the same entry.
-                return 0 if result.status in {"committed", "rolled_back", "up_to_date", "blocked"} else 2
+                if result.status == "blocked":
+                    return 0 if automatic_handoff else 2
+                return 0 if result.status in {"committed", "rolled_back", "up_to_date"} else 2
             recovered = store.recover()
             if recovered.status not in {"idle", "committed", "rolled_back"}:
                 reject("UPDATE_RECOVERY_REQUIRED", "Update must recover before restarting")

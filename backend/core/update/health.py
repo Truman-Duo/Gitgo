@@ -10,10 +10,11 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from time import monotonic
 import uuid
 
 from .manifest import DataCompatibility, TARGETS
-from .validation import fields, json_object, number, reject
+from .validation import fields, json_object, number, reject, UpdateError
 from .version import Version
 from .persistence import pinned_profile
 
@@ -21,6 +22,33 @@ from .persistence import pinned_profile
 PROBE_ROLE = "update-data-probe"
 MAX_REPORT_BYTES = 64 * 1024
 from .bootstrap_contract import CURRENT_API as MANAGED_API_VERSION
+
+
+class ProbeFailure(UpdateError):
+    """Safe diagnostics from the updater, without candidate output or paths."""
+
+    def __init__(self, probe, reason, *, started=None, timeout=None, proc=None, stderr=None, cause=None):
+        cleanup = getattr(proc, "_gitgo_cleanup", None)
+        self.diagnostic = {
+            "probe": probe,
+            "reason": reason,
+            "elapsed_ms": None if started is None else round((monotonic() - started) * 1000),
+            "timeout_seconds": timeout,
+            "exit_code": None if proc is None else proc.returncode,
+            "errno": cause.errno if isinstance(cause, OSError) else None,
+            "stderr_chars": None if stderr is None else len(stderr),
+            "cleanup_issues": cleanup.get("issues", []) if isinstance(cleanup, dict) else [],
+        }
+        super().__init__("UPDATE_HEALTH_FAILED", f"{probe}: {reason}")
+
+
+def _probe_reason(error, phase):
+    from backend.core.process_output import OutputLimit
+    if isinstance(error, (subprocess.TimeoutExpired, TimeoutError)):
+        return phase + "_timeout"
+    if isinstance(error, OutputLimit):
+        return "output_limit"
+    return phase
 
 
 def isolated_environment(profile: Path) -> dict[str, str]:
@@ -79,22 +107,30 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool, start
     # Required Windows loader environment, never an application/user secret.
     from backend.core.process_control import spawn_managed, terminate_tree, attach_kill_job, close_job
     from backend.core.process_output import collect_output
-    proc, job = None, None
+    proc, job, stderr = None, None, None
+    role = "managed-capabilities" if managed else "update-startup-probe" if startup else PROBE_ROLE
+    started = monotonic()
+    phase = "spawn"
     try:
-        role = "managed-capabilities" if managed else "update-startup-probe" if startup else PROBE_ROLE
         proc = spawn_managed([str(host), "--gitgo-internal-role", role, "--nonce", nonce],
             cwd=str(profile), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="strict", env=env,
             macos_forkless=sys.platform == "darwin")
         job = attach_kill_job(proc)
-        output, _, _ = collect_output(proc, timeout=timeout, limit=MAX_REPORT_BYTES,
+        phase = "collect"
+        output, stderr, _ = collect_output(proc, timeout=timeout, limit=MAX_REPORT_BYTES,
                                      reject_overflow=True, terminate=lambda: terminate_tree(proc, job))
+        phase = "exit_code"
         if proc.returncode != 0:
             reject("UPDATE_HEALTH_FAILED", "Host probe exited unsuccessfully")
+        phase = "cleanup"
         # Keep runtime-owned cleanup separate from the candidate's JSON. macOS
         # owned-session-only may return complete=False; fingerprint collection
         # is still useful, but this result CANNOT authorize update commitment.
         cleanup = cleanup_report(proc, job)
+        if startup and cleanup["complete"] is not True:
+            reject("UPDATE_HEALTH_FAILED", "Candidate execution cleanup is incomplete")
+        phase = "invalid_report"
         report = json_object(output.encode("utf-8"), MAX_REPORT_BYTES)
         if managed:
             fields(report, {"schema_version", "managed_api", "runtime"})
@@ -104,8 +140,10 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool, start
             report = report["runtime"]
         fields(report, {"schema_version", "nonce", "product_id", "version", "platform", "architecture",
                         "data_compatibility", "memory_sqlite_check"} | ({"native_host_check"} if startup else set()))
+        phase = "native_host_check"
         if startup and report["native_host_check"] is not True:
             reject("UPDATE_HEALTH_FAILED", "Candidate Native Host startup failed")
+        phase = "runtime_identity"
         if (type(report["schema_version"]) is not int or report["schema_version"] != 1
                 or report["nonce"] != nonce or report["memory_sqlite_check"] is not True):
             reject("UPDATE_HEALTH_FAILED", "Host probe identity or memory health evidence is invalid")
@@ -114,10 +152,11 @@ def _probe_host(host: Path, profile: Path, *, timeout: int, managed: bool, start
         if report["product_id"] != "gitgo-terminal" or (report["platform"], report["architecture"]) not in TARGETS:
             reject("UPDATE_HEALTH_FAILED", "Host target is unsupported")
         return {"runtime": report, "cleanup": cleanup}
-    except Exception:
+    except Exception as error:
         if proc is not None and (proc.poll() is None or getattr(proc, "_gitgo_scope_socket", None) is not None):
             terminate_tree(proc, job)
-        reject("UPDATE_HEALTH_FAILED", "Host data probe failed or exceeded its bounds")
+        raise ProbeFailure(role, _probe_reason(error, phase), started=started, timeout=timeout,
+                           proc=proc, stderr=stderr, cause=error) from error
     finally:
         close_job(job)
 
@@ -167,9 +206,9 @@ def _frozen_health_check(bundle: Path, profile: Path):
         reject("UPDATE_HEALTH_FAILED", "Candidate execution cleanup is incomplete; cannot commit")
     for key in ("product_id", "version", "platform", "architecture"):
         if runtime[key] != product[key]:
-            reject("UPDATE_HEALTH_FAILED", "Candidate runtime differs from package identity")
+            raise ProbeFailure("update-startup-probe", "package_identity")
     if DataCompatibility.parse(runtime["data_compatibility"]) != expected:
-        reject("UPDATE_HEALTH_FAILED", "Candidate runtime differs from signed migration evidence")
+        raise ProbeFailure("update-startup-probe", "data_compatibility")
     dashboard_profile = profile / "dashboard"
     dashboard_profile.mkdir(mode=0o700)
     probe_dashboard_version(bundle, dashboard_profile, product["version"])
@@ -187,22 +226,32 @@ def probe_dashboard_version(bundle: Path, profile: Path, version: str):
     from backend.core.process_output import collect_output
     Version.parse(version)
     program = bundle / ("gitgo.exe" if os.name == "nt" else "gitgo")
-    proc, job = None, None
+    proc, job, stderr = None, None, None
+    started = monotonic()
+    phase = "spawn"
     try:
         proc = spawn_managed([str(program), "--version"], cwd=str(profile),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="strict", env=isolated_environment(profile),
             macos_forkless=sys.platform == "darwin")
         job = attach_kill_job(proc)
-        output, _, _ = collect_output(proc, timeout=30, limit=4096, reject_overflow=True,
+        phase = "collect"
+        output, stderr, _ = collect_output(proc, timeout=30, limit=4096, reject_overflow=True,
                                      terminate=lambda: terminate_tree(proc, job))
-        if (proc.returncode != 0 or output != f"Gitgo {version}\n"
-                or cleanup_report(proc, job).get("complete") is not True):
-            reject("UPDATE_HEALTH_FAILED", "Candidate frontend startup or cleanup failed")
-    except Exception:
+        phase = "exit_code"
+        if proc.returncode != 0:
+            reject("UPDATE_HEALTH_FAILED", "Candidate frontend exited unsuccessfully")
+        phase = "version_mismatch"
+        if output != f"Gitgo {version}\n":
+            reject("UPDATE_HEALTH_FAILED", "Candidate frontend version differs")
+        phase = "cleanup"
+        if cleanup_report(proc, job).get("complete") is not True:
+            reject("UPDATE_HEALTH_FAILED", "Candidate frontend cleanup failed")
+    except Exception as error:
         if proc is not None and (proc.poll() is None or getattr(proc, "_gitgo_scope_socket", None) is not None):
             terminate_tree(proc, job)
-        reject("UPDATE_HEALTH_FAILED", "Candidate frontend startup failed")
+        raise ProbeFailure("dashboard-version", _probe_reason(error, phase), started=started, timeout=30,
+                           proc=proc, stderr=stderr, cause=error) from error
     finally:
         close_job(job)
 

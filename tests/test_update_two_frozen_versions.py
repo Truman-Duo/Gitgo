@@ -79,11 +79,12 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
     before = tree_digest(root / "active")
     # Each test publishes its own signed candidate copy, including a deliberate
     # startup fault when requested. Keys never leave this isolated test process.
-    def prepare(broken=False, *, lifetime_days=1):
-        if broken:
+    def prepare(broken=False, *, lifetime_days=1, startup_timeout=False):
+        if broken or startup_timeout:
             program = candidate / ("gitgo.exe" if os.name == "nt" else "gitgo")
             program.chmod(0o700)
-            program.write_bytes(b"not-an-executable-test-fault")
+            program.write_bytes(b"#!/bin/sh\nwhile :; do :; done\n" if startup_timeout
+                                else b"not-an-executable-test-fault")
             refresh_inventory(candidate)
         suffix = "zip" if os.name == "nt" else "tar.gz"
         archive = base / ("candidate." + suffix)

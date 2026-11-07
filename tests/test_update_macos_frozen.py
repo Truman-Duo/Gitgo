@@ -3,7 +3,7 @@ import json
 import os
 import subprocess
 import sys
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
@@ -65,7 +65,29 @@ def test_actual_mac_bootstrap_recovers_an_interrupted_engine(actual_lab, monkeyp
     assert tree_digest(store.root / "active") == before
 
 
-def confirm_with_actual_ui(store, env, expected_status, *, automatic=False, competing_runtime=False):
+@contextmanager
+def detached_process(store, keep_lease):
+    import select
+
+    with store.runtime_lease() as (_, lease):
+        child = subprocess.Popen([sys.executable, "-c",
+            "import os, sys, time; fd = int(sys.argv[1]); "
+            "os.close(fd) if sys.argv[2] == 'close' else os.fstat(fd); "
+            "print('ready', flush=True); time.sleep(180)",
+            str(lease), "keep" if keep_lease else "close"],
+            pass_fds=(lease,), start_new_session=True, stdout=subprocess.PIPE)
+    try:
+        assert select.select([child.stdout], [], [], 10)[0]
+        assert child.stdout.readline() == b"ready\n"
+        yield
+        assert child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+        child.stdout.close()
+
+
+def confirm_with_actual_ui(store, env, expected_status, *, automatic=False, detached_lease=None):
     """Hidden PTY process/input evidence, not formal visible terminal QA."""
     import fcntl
     import pty
@@ -129,11 +151,11 @@ def confirm_with_actual_ui(store, env, expected_status, *, automatic=False, comp
             wait_for("Downloaded and verified")
             activate_menu_item(screen, "Review restart / update", send, pump)
             wait_for("attempt the selected update?")
-        with store.runtime_lease() if competing_runtime else nullcontext():
+        with detached_process(store, detached_lease) if detached_lease is not None else nullcontext():
             start = len(output); send("\r")
             wait_for(f'"update_status": "{expected_status}"', after=start)
             proc.wait(timeout=30)
-            assert proc.returncode == 0
+            assert proc.returncode == (2 if expected_status == "blocked" and not automatic else 0)
         assert deferred.pending_status(store) is None
         assert b"restart_required" not in output
         if expected_status == "blocked":
@@ -158,15 +180,23 @@ def confirm_with_actual_ui(store, env, expected_status, *, automatic=False, comp
         assert open_managed(store.root).recover().status != "busy"
 
 
-@pytest.mark.parametrize("broken", [False, True], ids=["upgrade", "startup-failure"])
-def test_actual_mac_launcher_updates_after_exit_in_same_boot(actual_lab, broken):
+@pytest.mark.parametrize("fault", ["upgrade", "startup-failure", "startup-timeout"])
+def test_actual_mac_launcher_updates_after_exit_in_same_boot(actual_lab, fault):
     store, prepare, boot, before, old, new, env = actual_lab
-    prepare(broken=broken)
+    broken = fault != "upgrade"
+    prepare(broken=fault == "startup-failure", startup_timeout=fault == "startup-timeout")
     boot_id = deferred.boot_session()
-    confirm_with_actual_ui(store, env, "rolled_back" if broken else "committed")
+    confirm_with_actual_ui(store, env, "rolled_back" if broken else "committed",
+                           detached_lease=None if broken else False)
     transaction = store._ledger()["transaction"]
     assert transaction["state"] == ("ROLLED_BACK" if broken else "COMMITTED")
     assert transaction["failure_code"] == ("UPDATE_HEALTH_FAILED" if broken else None)
+    if broken:
+        from backend.core.update.persistence import read_control
+        detail = read_control(store.root / "transactions" / transaction["id"] / "health-failure.json")
+        assert detail["stage"] == "CHECK_NEW" and detail["probe"] == "dashboard-version"
+        assert detail["reason"] == ("collect_timeout" if fault == "startup-timeout" else "exit_code")
+        assert detail["elapsed_ms"] >= (30_000 if fault == "startup-timeout" else 0)
     boot(old if broken else new)
     confirm_with_actual_ui(store, env, None)
     assert deferred.boot_session() == boot_id
@@ -185,7 +215,7 @@ def test_actual_mac_automatic_update_on_clean_exit(actual_lab):
 def test_actual_mac_other_runtime_lease_blocks_replacement(actual_lab):
     store, prepare, boot, before, old, new, env = actual_lab
     prepare()
-    confirm_with_actual_ui(store, env, "blocked", competing_runtime=True)
+    confirm_with_actual_ui(store, env, "blocked", detached_lease=True)
     assert store._ledger()["transaction"] is None
     # Disarm ordinary-quit installation before using the launcher as a probe.
     from backend.core.update.preparation_service import UpdatePreparationService
