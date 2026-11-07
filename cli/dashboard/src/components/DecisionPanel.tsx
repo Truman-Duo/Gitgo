@@ -124,11 +124,11 @@ export function DecisionPanel({
                 {manual ? null : permission ? (
                   <>
                     <Text> {t({en:"Effect: ",zh:"行为："})}{option.immediate_effect}</Text>
-                    <Text dimColor> {t({en:"Then: ",zh:"后续："})}{option.downstream_effect}</Text>
+                    {option.risks ? <Text> {t({en:"Risk: ",zh:"风险："})}{option.risks}</Text> : null}
                     {expanded ? (
                       <>
                         <Text dimColor> {t({en:"Principle: ",zh:"依据："})}{option.principle}</Text>
-                        <Text> {t({en:"Risk: ",zh:"风险："})}{option.risks}</Text>
+                        <Text dimColor> {t({en:"Then: ",zh:"后续："})}{option.downstream_effect}</Text>
                         <Text dimColor>
                           {" "}
                           {t({en:"Reversibility: ",zh:"可逆性："})}{option.reversibility}
@@ -143,11 +143,13 @@ export function DecisionPanel({
                   </Text>
                 ) : (
                   <>
-                    <Text dimColor> {t({en:"Principle: ",zh:"依据："})}{option.principle}</Text>
-                    <Text> {t({en:"Immediate: ",zh:"当前影响："})}{option.immediate_effect}</Text>
-                    <Text> {t({en:"Downstream: ",zh:"后续影响："})}{option.downstream_effect}</Text>
-                    <Text> {t({en:"Risk: ",zh:"风险："})}{option.risks}</Text>
-                    <Text dimColor> {t({en:"Reversibility: ",zh:"可逆性："})}{option.reversibility}</Text>
+                    <Text>{option.description || option.immediate_effect}</Text>
+                    {option.risks ? <Text> {t({en:"Risk: ",zh:"风险："})}{option.risks}</Text> : null}
+                    {expanded ? <>
+                      <Text dimColor> {t({en:"Principle: ",zh:"依据："})}{option.principle}</Text>
+                      <Text dimColor> {t({en:"Downstream: ",zh:"后续影响："})}{option.downstream_effect}</Text>
+                      <Text dimColor> {t({en:"Reversibility: ",zh:"可逆性："})}{option.reversibility}</Text>
+                    </> : null}
                   </>
                 )}
               </Box>

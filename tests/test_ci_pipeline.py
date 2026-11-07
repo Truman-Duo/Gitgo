@@ -60,6 +60,8 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse(output.exists())
             head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
             env['DASHBOARD_VERIFIED_COMMIT'] = head
+            # A historical source output cannot bypass standalone ownership.
+            env['SOURCE_VERIFIED_COMMIT'] = head
             result = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'scripts/ci_prerequisites.py')],
                 cwd=repo, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -77,8 +79,12 @@ class PipelineTests(unittest.TestCase):
     def test_reuse_is_bound_to_successful_dependencies_in_the_same_run(self):
         jobs = workflow('ci.yml')['jobs']
         update = jobs['managed-update-windows']
-        self.assertTrue({'python-windows', 'dashboard'} <= set(update['needs']))
-        for kind, name in [('source', 'python-windows'), ('dashboard', 'dashboard')]:
+        self.assertNotIn('python-windows', update['needs'])
+        self.assertIn('dashboard', update['needs'])
+        self.assertTrue(update['with']['source_suite_by_caller'])
+        self.assertTrue({'python-windows', 'managed-update-windows'} <= set(jobs['gate']['needs']))
+        self.assertIn("'managed-update-windows'", jobs['gate']['steps'][0]['run'])
+        for kind, name in [('dashboard', 'dashboard')]:
             self.assertEqual(update['with'][kind + '_verified_commit'], '${{ needs.' + name + '.outputs.commit }}')
             verified = next(step for step in jobs[name]['steps'] if step.get('id') == 'verified')
             self.assertNotIn('if', verified)
@@ -88,8 +94,9 @@ class PipelineTests(unittest.TestCase):
         prerequisite = next(step for step in update_steps if step.get('id') == 'prerequisites')
         self.assertIn('ci_prerequisites.py', prerequisite['run'])
         on = workflow('windows-update.yml').get('on', workflow('windows-update.yml').get(True))
-        for declaration in on['workflow_call']['inputs'].values():
-            self.assertEqual(declaration['default'], '')
+        self.assertFalse(on['workflow_call']['inputs']['source_suite_by_caller']['default'])
+        self.assertEqual(on['workflow_call']['inputs']['dashboard_verified_commit']['default'], '')
+        self.assertIn('SOURCE_SUITE_BY_CALLER', prerequisite['env'])
         for name, key in [('Full Windows source regression', 'source'),
                           ('Dashboard Windows tests and production build', 'dashboard')]:
             step = next(step for step in update_steps if step.get('name') == name)
@@ -116,7 +123,27 @@ class PipelineTests(unittest.TestCase):
         jobs = workflow('ci.yml')['jobs']
         self.assertEqual(set(jobs['windows-package']['needs']), {'contract', 'privacy', 'dashboard'})
         self.assertTrue({'python-windows', 'windows-package'} <= set(jobs['gate']['needs']))
-        self.assertIn('python-windows', jobs['managed-update-windows']['needs'])
+        self.assertNotIn('python-windows', jobs['managed-update-windows']['needs'])
+
+    def test_frozen_and_ntfs_branches_join_without_duplicate_installer_execution(self):
+        jobs = workflow('windows-update.yml')['jobs']
+        self.assertNotIn('needs', jobs['frozen'])
+        tests = [s['run'] for s in jobs['frozen']['steps']
+                 if 'pytest tests/test_update_windows_frozen.py' in s.get('run', '')]
+        self.assertEqual(len(tests), 1)
+        self.assertNotIn('-k', tests[0])  # Includes both real installers and every recovery case.
+
+    def test_unix_ci_produces_deliverable_trust_without_another_source_checkout(self):
+        jobs = workflow('ci.yml')['jobs']
+        self.assertTrue(jobs['unix-packages']['with']['publisher_trust'])
+        for job in workflow('unix-target.yml')['jobs'].values():
+            checkouts = [s for s in job['steps'] if s.get('uses', '').startswith('actions/checkout@')]
+            self.assertEqual(len(checkouts), 1)
+            self.assertEqual(checkouts[0]['with']['ref'], '${{ inputs.commit }}')
+        mac = next(step for step in workflow('unix-target.yml')['jobs']['build']['steps']
+                   if step.get('name') == 'Native macOS release controller and archive contract regressions')
+        self.assertEqual(mac['if'], "runner.os == 'macOS'")
+        self.assertIn('tests/test_release_controller.py', mac['run'])
 
     def test_full_source_output_requires_every_shard_and_a_complete_coverage_join(self):
         jobs = workflow('ci.yml')['jobs']

@@ -114,7 +114,8 @@ def admit_agent_run(process, provider, instruction, dispatcher, workspace, front
         observations.publish({'event': 'provider_route_changed', 'provider_route': provider_route,
                               'continuation_policy': 'public_history_only'})
     if instruction:
-        session.append_user(instruction, message_type='conversation')
+        session.append_user(instruction, message_type='conversation',
+            turn_id=process.active_task_id or process.process_id)
     elif not session.messages:
         transition(process, ProcessStatus.FAILED)
         return RunAdmission(result=_error_result(process, 'EMPTY_INSTRUCTION', 'Agent task has no instruction'))

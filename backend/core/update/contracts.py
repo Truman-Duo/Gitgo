@@ -45,9 +45,19 @@ def _metadata(root, name, records):
 
 def verify_bundle_contract(root: Path, manifest: UpdateManifest) -> None:
     records = {r["path"]: r for r in inventory(root)}
+    _verify_bundle_evidence(manifest, records, lambda name: _metadata(root, name, records))
+
+
+def _verify_bundle_evidence(manifest, records, metadata):
+    """Shared validation, not an authorization. Readers supply actual evidence.
+
+    Installed candidates always use the owned-filesystem reader above. The
+    publisher can inspect another OS's archive without synthesizing its modes
+    or materializing Unix links on Windows.
+    """
     if any(name in records for name in (".gitgo-install-owner", ".gitgo-path-bash", ".gitgo-path-zsh", ".gitgo-path-fish")):
         reject("UPDATE_PACKAGE_CONTRACT", "Release must not supply local installer ownership records")
-    product = _metadata(root, "product.json", records)
+    product = metadata("product.json")
     for key, expected in (("schema_version", 2), ("product_id", manifest.product_id),
                           ("version", manifest.version), ("platform", manifest.platform),
                           ("architecture", manifest.architecture), ("primary_command", "gitgo")):
@@ -71,7 +81,7 @@ def verify_bundle_contract(root: Path, manifest: UpdateManifest) -> None:
             reject("UPDATE_PACKAGE_CONTRACT", "Required component is missing or redirected")
         if manifest.platform != "windows" and not records[name]["mode"] & 0o100:
             reject("UPDATE_PACKAGE_CONTRACT", "Unix component lacks owner execution permission")
-    build = _metadata(root, "build-manifest.json", records)
+    build = metadata("build-manifest.json")
     source = fields(build.get("source"), {"commit", "tree", "dirty"})
     if (type(build.get("schema_version")) is not int or build["schema_version"] != 1
             or build.get("version") != manifest.version
@@ -108,7 +118,7 @@ def verify_bundle_contract(root: Path, manifest: UpdateManifest) -> None:
     # Compare complete, typed inventories independent of serialization order.
     if sorted(files, key=lambda item: item["path"]) != expected_files:
         reject("UPDATE_PACKAGE_CONTRACT", "Package inventory does not match build evidence")
-    contract = _metadata(root, "update-data-contract.json", records)
+    contract = metadata("update-data-contract.json")
     fields(contract, {"schema_version", "data_compatibility", "state_migrations", "observability_migrations",
                       "config", "provider"})
     if type(contract["schema_version"]) is not int or contract["schema_version"] != 1:

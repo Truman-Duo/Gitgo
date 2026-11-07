@@ -22,19 +22,26 @@ class ReadPlan:
     workspace_identity: ObjectIdentity
     root_identity: ObjectIdentity
     file_identity: ObjectIdentity
+    private_mount: bool = False
 
     def to_dict(self):
         def identity(value):
             return [value.platform, value.volume, value.file_id]
-        return {'version': 1, 'workspace': self.workspace, 'root': self.root,
+        return {'version': 2 if self.private_mount else 1, 'workspace': self.workspace, 'root': self.root,
                 'relative': self.relative, 'workspace_identity': identity(self.workspace_identity),
-                'root_identity': identity(self.root_identity), 'file_identity': identity(self.file_identity)}
+                'root_identity': identity(self.root_identity), 'file_identity': identity(self.file_identity),
+                **({'private_mount': True} if self.private_mount else {})}
 
     @classmethod
     def from_dict(cls, value):
         fields = {'version', 'workspace', 'root', 'relative', 'workspace_identity',
                   'root_identity', 'file_identity'}
-        if type(value) is not dict or set(value) != fields or type(value['version']) is not int or value['version'] != 1:
+        private_mount = type(value) is dict and value.get('version') == 2
+        if private_mount:
+            fields.add('private_mount')
+        if (type(value) is not dict or set(value) != fields or type(value['version']) is not int
+                or value['version'] not in {1, 2}
+                or private_mount and (sys.platform != 'linux' or value['private_mount'] is not True)):
             raise ReadBoundaryError('Invalid approved read schema')
         for key in ('workspace', 'root', 'relative'):
             if type(value[key]) is not str or not 0 < len(value[key]) <= 32768 or '\0' in value[key]:
@@ -52,7 +59,7 @@ class ReadPlan:
                 raise ReadBoundaryError('Invalid approved object identity')
             return ObjectIdentity(*raw)
         return cls(value['workspace'], value['root'], value['relative'],
-                   identity('workspace_identity'), identity('root_identity'), identity('file_identity'))
+                   identity('workspace_identity'), identity('root_identity'), identity('file_identity'), private_mount)
 
     def check_arguments(self, args):
         from backend.core.tools.workspace_tools import _read_target
@@ -74,7 +81,7 @@ def approved_read_scope(payload, args):
         return
     plan.check_arguments(args)
     with ReadRoot(Path(plan.workspace)) as workspace:
-        if workspace.identity != plan.workspace_identity:
+        if not plan.private_mount and workspace.identity != plan.workspace_identity:
             raise ReadBoundaryError('Approved workspace was replaced')
         token = _EXPECTED.set(plan)
         try:
@@ -85,10 +92,12 @@ def approved_read_scope(payload, args):
 
 @contextmanager
 def open_planned_read(root, relative):
-    with ReadRoot(root) as acquired, acquired.open(relative) as opened:
-        plan = _EXPECTED.get()
+    plan = _EXPECTED.get()
+    private_mount = plan is not None and plan.private_mount
+    with ReadRoot(root) as acquired, acquired.open(relative, allow_leaf_mount=private_mount) as opened:
         if plan is not None and (Path(root) != Path(plan.root)
                 or Path(relative) != Path(plan.relative)
-                or acquired.identity != plan.root_identity or opened.identity != plan.file_identity):
+                or not private_mount and acquired.identity != plan.root_identity
+                or opened.identity != plan.file_identity):
             raise ReadBoundaryError('Approved file object was replaced')
         yield opened

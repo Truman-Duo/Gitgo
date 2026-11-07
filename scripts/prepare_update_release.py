@@ -37,9 +37,9 @@ def github_policy(public, key_id, platform, architecture, repository="Truman-Duo
 
 
 
-def staged_policy(stage, public, key_id, platform, architecture, repository, channel):
+def staged_policy(stage, public, key_id, platform, architecture, repository, channel, *, raw=None):
     """Sign only packages whose installed trust accepts this publisher and feed."""
-    raw = (stage / "release-trust.json").read_bytes()
+    raw = (stage / "release-trust.json").read_bytes() if raw is None else raw
     parsed = parse_release_policy(raw, platform, architecture)
     value = json.loads(raw)
     expected = github_policy(public, key_id, platform, architecture, repository)
@@ -55,18 +55,21 @@ def staged_policy(stage, public, key_id, platform, architecture, repository, cha
 
 
 def prepare(stage, archive, private_key, key_id, channel, sequence, repository, release_tag, now=None,
-            *, baseline_manifest=None, baseline_signature=None, initial_release=False, upgrade_route="direct"):
+            *, baseline_manifest=None, baseline_signature=None, initial_release=False, upgrade_route="direct",
+            archive_evidence=None):
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-    product = json.loads((stage / "product.json").read_bytes())
-    build = json.loads((stage / "build-manifest.json").read_bytes())
-    contract = json.loads((stage / "update-data-contract.json").read_bytes())
+    metadata = archive_evidence.metadata if archive_evidence is not None else lambda name: json.loads((stage / name).read_bytes())
+    product = metadata("product.json")
+    build = metadata("build-manifest.json")
+    contract = metadata("update-data-contract.json")
     if build["source"]["dirty"] is not False:
         raise ValueError("Release signing requires clean committed source")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", release_tag):
         raise ValueError("Expected an explicit release tag")
     public = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     policy, installed_trust = staged_policy(stage, public, key_id, product["platform"],
-        product["architecture"], repository, channel)
+        product["architecture"], repository, channel,
+        raw=archive_evidence.raw["release-trust.json"] if archive_evidence is not None else None)
     instant = (now or datetime.now(timezone.utc)).replace(microsecond=0)
     stamp = lambda value: value.isoformat().replace("+00:00", "Z")
     with archive.open("rb") as source:
@@ -90,9 +93,12 @@ def prepare(stage, archive, private_key, key_id, channel, sequence, repository, 
         initial_release=initial_release, upgrade_route=upgrade_route)
     if (channel == "preview") != bool(__import__("backend.core.update.version", fromlist=["Version"]).Version.parse(manifest.version).prerelease):
         raise ValueError("Stable and preview releases must use their respective version class")
-    verify_bundle_contract(stage, manifest)
+    if archive_evidence is not None:
+        archive_evidence.verify(manifest)
+    else:
+        verify_bundle_contract(stage, manifest)
     # Windows archive and reviewed stage must describe exactly the same files.
-    if manifest.archive_format == "zip":
+    if manifest.archive_format == "zip" and archive_evidence is None:
         expected = {p.relative_to(stage).as_posix(): p for p in stage.rglob("*") if p.is_file()}
         with zipfile.ZipFile(archive) as package:
             entries = [item for item in package.infolist() if not item.is_dir()]

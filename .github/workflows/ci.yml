@@ -184,12 +184,16 @@ jobs:
   unix-packages:
     needs: [contract, privacy, dashboard]
     uses: ./.github/workflows/linux-package.yml
+    with:
+      # Test deliverable trust in the first build instead of rebuilding later.
+      publisher_trust: true
 
   managed-update-windows:
-    needs: [contract, privacy, python-windows, dashboard]
+    # Independent acceptance branches join at the final gate.
+    needs: [contract, privacy, dashboard]
     uses: ./.github/workflows/windows-update.yml
     with:
-      source_verified_commit: ${{ needs.python-windows.outputs.commit }}
+      source_suite_by_caller: true
       dashboard_verified_commit: ${{ needs.dashboard.outputs.commit }}
 
   managed-update-linux:
@@ -246,11 +250,12 @@ jobs:
       - name: Actual final ZIP native boundaries
         run: |
           $env:GITGO_SANDBOX_TEST_HOST = "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked/internal/gitgo-host/gitgo-host.exe"
-          python -B -m pytest tests/test_native_sandbox.py tests/test_windows_sandbox_minimum.py -k packaged -q --tb=short
+          python -B -m pytest tests/test_native_sandbox.py tests/test_windows_sandbox_minimum.py tests/test_native_read_runtime.py -k packaged -q --tb=short
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-final-zip
+          overwrite: true
           path: dist-installer/*
           if-no-files-found: error
           retention-days: 14

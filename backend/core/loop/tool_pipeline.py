@@ -596,7 +596,8 @@ class ToolPipeline:
 
         native_invocation = None
         try:
-            if execution_contract.kind.value == "native_process" and not tool.composite_spec and execution_contract.file_action != "produce_workspace":
+            if (execution_contract.kind.value == "native_process" and not tool.composite_spec
+                    and execution_contract.file_action not in {"produce_workspace", "read_existing_file", "read_resource"}):
                 native_invocation = NativeInvocation.compile(tool.runner_name or tool_name,
                     {**args, "_workspace": str(ctx.workspace_path)}, native_timeout(tool, args),
                     owner=runtime_metadata["owner"], registration=registered_digest)
@@ -735,6 +736,12 @@ class ToolPipeline:
                 runtime = WorkspaceCandidateRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
                 result_data = runtime.execute(tool.runner_name or tool_name, args, effective_timeout,
                     diagnostics=runner_diagnostics, runtime_metadata=runtime_metadata)
+            elif execution_contract.file_action in {'read_existing_file', 'read_resource'}:
+                from .native_read_runtime import NativeReadRuntime
+                runtime = NativeReadRuntime(self, ctx, registered_digest, runtime_metadata['owner'], tool)
+                result_data = runtime.execute(tool.runner_name or tool_name,
+                    {**args, '_workspace': str(ctx.workspace_path)}, effective_timeout,
+                    binding=admission.native_read, diagnostics=runner_diagnostics, runtime_metadata=runtime_metadata)
             elif execution_contract.kind.value == "native_process":
                 result_data = self._execute_isolated(
                     getattr(tool, "runner_name", "") or tool_name,
@@ -1092,6 +1099,8 @@ class ToolPipeline:
             result.receipt["task_contract_revision"] = runtime_metadata["task_contract_revision"]
         if "mechanism_revision" in runtime_metadata:
             result.receipt["mechanism_revision"] = runtime_metadata["mechanism_revision"]
+        if 'sandbox_preparation' in runtime_metadata:
+            result.receipt['sandbox_preparation'] = dict(runtime_metadata['sandbox_preparation'])
         for key in ("harness_unit", "harness_instances"):
             if key in runtime_metadata:
                 from copy import deepcopy

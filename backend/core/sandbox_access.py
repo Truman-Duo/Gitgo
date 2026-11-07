@@ -26,7 +26,7 @@ def _minimal_roots(paths):
 
 
 class WorkspaceAccess:
-    def __init__(self, workspace, runtimes, record, *, shallow_runtimes=(), metadata_roots=()):
+    def __init__(self, workspace, runtimes, record, *, shallow_runtimes=(), metadata_roots=(), read_roots=(), read_workspace=None):
         self.policy = SandboxPolicy(Path(workspace))
         self.runtimes = _minimal_roots(runtimes)
         validate_runtime_separation(self.policy.workspace, self.runtimes)
@@ -36,13 +36,28 @@ class WorkspaceAccess:
         self.shallow_runtimes = [p for p in self.shallow_runtimes
             if not any(p.is_relative_to(parent) for parent in self.roots)]
         self.roots.extend(self.shallow_runtimes)
+        self.read_workspace = Path(read_workspace).absolute() if read_workspace is not None else None
+        self.read_roots = sorted(set(Path(p).absolute() for p in read_roots), key=lambda p: (len(p.parts), str(p)))
+        for path in self.read_roots:
+            path.stat()
+            if path == Path(path.anchor) or path.is_relative_to(self.policy.workspace):
+                raise SandboxDenied('SANDBOX_POLICY_INVALID', 'Invalid read resource')
+        if self.read_roots and self.read_workspace is None:
+            raise SandboxDenied('SANDBOX_POLICY_INVALID', 'Read view requires its logical workspace')
+        if self.read_workspace is not None and (not self.read_workspace.is_dir() or self.read_workspace == Path(self.read_workspace.anchor)):
+            raise SandboxDenied('SANDBOX_POLICY_INVALID', 'Invalid logical read workspace')
+        self.roots.extend(self.read_roots)
         self.metadata_roots = concrete_roots(metadata_roots)
-        if any(p != self.policy.workspace.parent for p in self.metadata_roots):
+        allowed_metadata = {self.policy.workspace.parent}
+        if self.read_workspace is not None:
+            allowed_metadata.add(self.read_workspace)
+            allowed_metadata.update(parent for p in self.read_roots for parent in p.parents if parent != Path(parent.anchor))
+        if any(p not in allowed_metadata for p in self.metadata_roots):
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "Only the immediate execution parent may receive metadata access")
         if any(p in self.roots for p in self.metadata_roots):
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "Metadata-only access must not overlap another access role")
         self.roots.extend(self.metadata_roots)
-        self.record = record_path(record, self.roots)
+        self.record = record_path(record, [p for p in self.roots if p not in self.metadata_roots])
         self.payload = None
 
     def prepare(self):
@@ -55,7 +70,7 @@ class WorkspaceAccess:
             sid = api.preview_profile_sid(self.policy.profile_name)
             try: principal = sid_string(api, sid)
             finally: api.free_sid(sid)
-            with AccessTree(self.roots, shallow=self.shallow_runtimes, metadata=self.metadata_roots) as tree:
+            with AccessTree(self.roots, shallow=self.shallow_runtimes, metadata=self.metadata_roots, readonly=self.read_roots, execute=self.runtimes) as tree:
                 original = tree.snapshot()
                 principal_bytes = _profile_sid(principal)
                 if any(any(principal_bytes in ace for ace in _entries(tree.record_descriptor(r).dacl)) for r in original):
@@ -65,6 +80,7 @@ class WorkspaceAccess:
                     workspace=str(self.policy.workspace), runtimes=[str(p) for p in self.runtimes],
                     shallow_runtimes=[str(p) for p in self.shallow_runtimes],
                     metadata_roots=[str(p) for p in self.metadata_roots],
+                    read_roots=[str(p) for p in self.read_roots], read_workspace=str(self.read_workspace) if self.read_workspace else None,
                     profile=self.policy.profile_name, principal=principal,
                     records=original, planned=planned, boundaries=tree.boundaries())
                 save_record(self.record, payload, create=True)
@@ -100,7 +116,7 @@ class WorkspaceAccess:
             try:
                 # The working tree can contain new files. Pin its current
                 # inventory; remove only our SID, keeping peer task grants.
-                with AccessTree(self.roots, shallow=self.shallow_runtimes, metadata=self.metadata_roots) as tree:
+                with AccessTree(self.roots, shallow=self.shallow_runtimes, metadata=self.metadata_roots, readonly=self.read_roots, execute=self.runtimes) as tree:
                     current = tree.snapshot()
                     planned = tree.revoke(current, self.payload['principal'])
                     tree.restore(planned, expected=current, boundaries=tree.boundaries())
@@ -164,7 +180,7 @@ def revoke_record(record):
     if (payload.get('version') != 1 or payload.get('kind') != 'scoped_workspace_access'
             or payload.get('phase') not in {'prepared','applying','applied','prepare_failed','revoking','revoke_failed','revoked'}):
         raise ValueError('Unsupported scoped access journal')
-    access = WorkspaceAccess(payload['workspace'], payload['runtimes'], path, shallow_runtimes=payload.get('shallow_runtimes', []), metadata_roots=payload.get('metadata_roots', []))
+    access = WorkspaceAccess(payload['workspace'], payload['runtimes'], path, shallow_runtimes=payload.get('shallow_runtimes', []), metadata_roots=payload.get('metadata_roots', []), read_roots=payload.get('read_roots', []), read_workspace=payload.get('read_workspace'))
     from .sandbox_windows import WindowsApi
     api = WindowsApi()
     sid = api.preview_profile_sid(access.policy.profile_name)

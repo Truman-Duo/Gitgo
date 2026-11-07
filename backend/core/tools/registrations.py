@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, NATIVE_WORKSPACE_PRODUCER
+from backend.core.loop.execution_contract import NATIVE_PROCESS, NATIVE_FILE_READ, NATIVE_RESOURCE_READ, NATIVE_WORKSPACE_PRODUCER
 
 
 def register_all(register) -> None:
@@ -40,8 +40,8 @@ def register_all(register) -> None:
     # receipt-friendly implementations.
     from backend.core.tools import workspace_tools
     register("read_file", workspace_tools.read_file, NATIVE_FILE_READ)
-    register("list_files", workspace_tools.list_files, NATIVE_PROCESS)
-    register("search_text", workspace_tools.search_text, NATIVE_PROCESS)
+    register("list_files", workspace_tools.list_files, NATIVE_RESOURCE_READ)
+    register("search_text", workspace_tools.search_text, NATIVE_RESOURCE_READ)
     register("edit_file", file_edit, NATIVE_PROCESS)
     register("write_file", file_write, NATIVE_PROCESS)
     register("delete_file", file_delete, NATIVE_PROCESS)
@@ -51,7 +51,7 @@ def register_all(register) -> None:
     register("dependency_feedback", workspace_tools.dependency_feedback, NATIVE_PROCESS)
     register("rebuild_dependency_graph", workspace_tools.rebuild_dependency_graph, NATIVE_PROCESS)
     from backend.core.tools.document_tools import render_document, document_open
-    register("document_open", document_open, NATIVE_PROCESS)
+    register("document_open", document_open, NATIVE_FILE_READ)
     register("document_create", _document_requires_service, NATIVE_PROCESS)
     register("document_render", render_document, NATIVE_PROCESS)
 
