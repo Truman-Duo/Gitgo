@@ -230,8 +230,9 @@ async function main() {
     if (shutdownPromise) return shutdownPromise;
     renderer?.unmount();
     renderer?.cleanup();
-    shutdownPromise = Promise.resolve(client instanceof NativeHostClient ? client.close(exitCode === 75) : client.close())
-      .catch(() => { if (exitCode === 75) process.exit(1); })
+    const requireCleanExit = exitCode === 75 || (exitCode === 0 && managed && process.platform === "darwin");
+    shutdownPromise = Promise.resolve(client instanceof NativeHostClient ? client.close(requireCleanExit) : client.close())
+      .catch(() => { if (requireCleanExit) process.exit(1); })
       .then(() => { process.exit(exitCode); });
     return shutdownPromise;
   };

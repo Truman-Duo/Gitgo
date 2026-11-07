@@ -13,6 +13,7 @@ import uuid
 
 from .persistence import atomic_control, lock_file, read_control, sync_directory
 from .validation import fields, reject, text, UpdateError
+from .bootstrap_contract import MACOS_QUIT_API
 
 SESSION_ENV = "GITGO_UPDATE_LAUNCH_SESSION"
 HANDOFF_EXIT = 75
@@ -34,6 +35,7 @@ def _session(store, nonce):
 
 
 def platform_ready(store):
+    if macos_update_on_exit(store): return True
     if sys.platform == "linux" and store.registration["platform"] == "linux": return True
     if (sys.platform == "win32" and store.registration["platform"] == "windows"
             and store.registration.get("bootstrap_api") in (7, 8, 10)):
@@ -46,6 +48,24 @@ def platform_ready(store):
         try: boot_session(); return True
         except UpdateError: return False
     return False
+
+
+def macos_update_on_exit(store):
+    return (sys.platform == "darwin" and store.registration["platform"] == "macos"
+            and store.registration.get("bootstrap_api") == MACOS_QUIT_API)
+
+
+def exit_scope_ready(store, cleanup):
+    if type(cleanup) is not dict or type(cleanup.get("complete")) is not bool:
+        return False
+    if cleanup["complete"] or strategy(store) == "after_reboot":
+        return True
+    # A normal exit from the launcher-owned session does not prove whole-tree
+    # retirement on macOS. For this bootstrap, every managed runtime must
+    # retain the installation lease, and the transaction must acquire its
+    # exclusive counterpart before replacement. This is not a cleanup claim.
+    return (macos_update_on_exit(store) and cleanup.get("mode") == "owned-session-only"
+            and cleanup.get("issues") == ["detached_descendants_not_covered"])
 
 
 def strategy(store):
@@ -180,9 +200,7 @@ def _consume_request(store, nonce, exit_code, cleanup):
     from backend.core.installation_lease import runtime_descriptors
     from .transaction import TransactionResult
     if exit_code != HANDOFF_EXIT: return None
-    if (not platform_ready(store) or type(cleanup) is not dict
-            or type(cleanup.get("complete")) is not bool
-            or (strategy(store) == "immediate" and cleanup.get("complete") is not True)
+    if (not platform_ready(store) or not exit_scope_ready(store, cleanup)
             or runtime_descriptors()):
         return TransactionResult("blocked", error_code="UPDATE_SCOPE_UNAVAILABLE")
     try:

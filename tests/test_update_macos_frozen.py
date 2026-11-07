@@ -1,9 +1,4 @@
-"""Actual Mac programs in quiescent disposable installations, NOT reboot QA.
-
-The source coordinator calls the private engine in an unused test installation.
-No ordinary Mac session is misreported clean or allowed immediate replacement.
-Boot-session gating is separately tested; a real manual reboot remains required.
-"""
+"""Actual Mac programs and frozen public launchers in disposable installations."""
 import json
 import os
 import subprocess
@@ -14,7 +9,6 @@ import pytest
 from backend.core.update import handoff, deferred
 from backend.core.update.health import frozen_health_check
 from backend.core.update.tree import tree_digest
-from backend.core.update.persistence import lock_file
 from tests.test_update_manifest import signing
 from tests.test_update_transaction import Crash
 from tests.test_update_two_frozen_versions import actual_lab
@@ -31,7 +25,7 @@ def request(store, selected):
 def test_actual_quiescent_mac_upgrade_and_retained_rollback(actual_lab):
     store, prepare, boot, before, old, new, _ = actual_lab
     _, selected = prepare()
-    assert handoff.strategy(store) == "after_reboot"
+    assert handoff.strategy(store) == "immediate"
     # No running old app was launched beyond bounded --version. This is an
     # explicit engine laboratory, not the production handoff/reboot wrapper.
     assert handoff._perform_request(store, request(store, selected)).status == "committed"
@@ -70,21 +64,7 @@ def test_actual_mac_bootstrap_recovers_an_interrupted_engine(actual_lab, monkeyp
     assert tree_digest(store.root / "active") == before
 
 
-def test_actual_bootstrap_does_not_apply_pending_request_in_current_boot(actual_lab):
-    store, prepare, boot, before, old, new, _ = actual_lab
-    _, selected = prepare()
-    # Publish through the source driver in this explicit unused test store;
-    # the following launch exercises the actual physical frozen bootstrap.
-    with lock_file(store.root / "control/preparation.lock", expected_identity=store.registration["lock_identities"]["preparation.lock"]):
-        assert deferred.publish(store, request(store, selected)).status == "restart_required"
-    assert deferred.boot_session() == deferred._read(store)["boot_session"]
-    boot(old)
-    assert store._ledger()["current"]["version"] == old
-    assert deferred.pending_status(store)["version"] == new
-    assert tree_digest(store.root / "active") == before
-
-
-def confirm_with_actual_ui(store, env, *, rollback=False):
+def confirm_with_actual_ui(store, env, expected_status, *, rollback=False):
     """Hidden PTY process/input evidence, not formal visible terminal QA."""
     import fcntl
     import pty
@@ -137,21 +117,19 @@ def confirm_with_actual_ui(store, env, *, rollback=False):
             wait_for(prefix, after=start)
         assert not termios.tcgetattr(master)[0] & termios.ICRNL, "Mac PTY still translates Enter to newline"
         start = len(output); send("\r"); wait_for("Gitgo Software Update", after=start)
-        wait_for("After a manual macOS restart")
         if not rollback:
             wait_for("Downloaded and verified")
             activate_menu_item(screen, "Review restart / update", send, pump)
         else:
             wait_for("Retained version")
             activate_menu_item(screen, "Review rollback", send, pump)
-        wait_for("manually restart macOS")
+        wait_for("Close this session and roll back?" if rollback else "attempt the selected update?")
         start = len(output); send("\r")
-        wait_for('"update_status": "restart_required"', after=start)
+        wait_for(f'"update_status": "{expected_status}"', after=start)
         proc.wait(timeout=30)
         assert proc.returncode == 0
-        pending = deferred.pending_status(store)
-        assert pending is not None and pending["action"] == ("rollback" if rollback else "apply")
-        return pending
+        assert deferred.pending_status(store) is None
+        assert b"restart_required" not in output
     finally:
         if os.environ.get("GITGO_UPDATE_LAB_LOG"):
             try:
@@ -172,9 +150,39 @@ def confirm_with_actual_ui(store, env, *, rollback=False):
         assert open_managed(store.root).recover().status != "busy"
 
 
-def test_actual_mac_ui_confirmation_saves_intent_but_does_not_replace(actual_lab):
+@pytest.mark.parametrize("broken", [False, True], ids=["upgrade", "startup-failure"])
+def test_actual_mac_launcher_updates_after_exit_in_same_boot(actual_lab, broken):
+    store, prepare, boot, before, old, new, env = actual_lab
+    prepare(broken=broken)
+    boot_id = deferred.boot_session()
+    confirm_with_actual_ui(store, env, "rolled_back" if broken else "committed")
+    transaction = store._ledger()["transaction"]
+    assert transaction["state"] == ("ROLLED_BACK" if broken else "COMMITTED")
+    assert transaction["failure_code"] == ("UPDATE_HEALTH_FAILED" if broken else None)
+    boot(old if broken else new)
+    assert deferred.boot_session() == boot_id
+    assert (tree_digest(store.root / "active") == before) is broken
+
+
+def test_actual_mac_automatic_update_on_clean_exit(actual_lab):
+    store, prepare, boot, _, old, new, env = actual_lab
+    prepare()
+    result = subprocess.run([str(store.root / "gitgo"), "--version"],
+                            env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "Gitgo " + old
+    assert '"update_status": "committed"' in result.stderr
+    boot(new)
+
+
+def test_actual_mac_other_runtime_lease_blocks_replacement(actual_lab):
     store, prepare, boot, before, old, new, env = actual_lab
     prepare()
-    assert confirm_with_actual_ui(store, env)["version"] == new
+    with store.runtime_lease():
+        confirm_with_actual_ui(store, env, "blocked")
+    assert store._ledger()["transaction"] is None
+    # Disarm ordinary-quit installation before using the launcher as a probe.
+    from backend.core.update.preparation_service import UpdatePreparationService
+    UpdatePreparationService(store_loader=lambda: store).configure("preview", True, True, False, 0)
     boot(old)
     assert tree_digest(store.root / "active") == before

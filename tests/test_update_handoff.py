@@ -45,6 +45,10 @@ def lab(tmp_path_factory, monkeypatch, signing, request):
         return {"runtime": {**{k: product[k] for k in ("product_id", "version", "platform", "architecture")},
             "data_compatibility": contract["data_compatibility"]}, "cleanup": {"complete": False}}
     monkeypatch.setattr(installation, "probe_managed_host", probe)
+    # This fixture models the delegated POSIX launcher even on a Mac test host.
+    # The legacy reboot suite uses the same API with a macOS product.
+    from backend.core.update.bootstrap_contract import POSIX_API
+    monkeypatch.setattr(installation.ManagedStore, "BOOTSTRAP_API", POSIX_API)
     root = base / "managed"; root.mkdir(mode=0o700)
     store = initialize_managed(root, seed, protected_paths=(protected,))
     candidate = base / "candidate"; build_fixture(candidate, platform=platform, architecture=architecture)
@@ -71,6 +75,22 @@ def lab(tmp_path_factory, monkeypatch, signing, request):
 def queue(lab): return lab.service.request_apply("preview", lab.selected, "c" * 32)
 def consume(lab, nonce, cleanup=None, code=75):
     return handoff._consume_request(lab.store, nonce, code, {"complete": True} if cleanup is None else cleanup)
+
+
+def test_new_macos_exit_allows_only_expected_session_report(monkeypatch):
+    import sys
+    from backend.core.update.bootstrap_contract import MACOS_QUIT_API
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    store = SimpleNamespace(registration={"platform": "macos", "bootstrap_api": MACOS_QUIT_API})
+    cleanup = {"mode": "owned-session-only", "complete": False,
+               "issues": ["detached_descendants_not_covered"]}
+    assert handoff.platform_ready(store)
+    assert handoff.strategy(store) == "immediate"
+    assert handoff.exit_scope_ready(store, cleanup)
+    assert not handoff.exit_scope_ready(store, {**cleanup, "issues": ["supervisor_report_missing"]})
+    assert not handoff.exit_scope_ready(store, {**cleanup, "issues": [
+        "detached_descendants_not_covered", "owned_group_signal_failed"]})
 
 
 def test_queue_is_confirmed_exact_selection_not_apply_or_network(lab, monkeypatch):

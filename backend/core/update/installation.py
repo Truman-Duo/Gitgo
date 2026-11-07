@@ -474,6 +474,8 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
         reject("UPDATE_BOOTSTRAP_ROLE", "Managed lifecycle requires the stable installed bootstrap")
     store = open_managed(physical[0])
     from .bootstrap_contract import ENGINE_DELEGATION_APIS
+    # The new macOS bootstrap drives the transaction itself. A forkless
+    # delegated engine cannot spawn the separately contained health probes.
     delegated = store.registration["bootstrap_api"] in ENGINE_DELEGATION_APIS
     if delegated:
         from .coordinator import recover_if_pending
@@ -491,7 +493,8 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             return 0
     from backend.core.process_control import spawn_managed, finish_scope, terminate_tree
     from .handoff import launch_session, consume_request, SESSION_ENV, HANDOFF_EXIT
-    from .handoff import strategy
+    from .handoff import strategy, macos_update_on_exit, exit_scope_ready
+    update_on_quit = macos_update_on_exit(store)
     if strategy(store) == "after_reboot":
         if delegated:
             from .coordinator import dispatch
@@ -524,7 +527,9 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             # All launcher leases close before the updater obtains exclusivity.
             exit_code = proc.returncode
             automatic_handoff = False
-            if exit_code == 0 and nonce is not None and getattr(proc, "_gitgo_cleanup", {}).get("complete") is True:
+            cleanup = getattr(proc, "_gitgo_cleanup", {})
+            if (exit_code == 0 and nonce is not None
+                    and (cleanup.get("complete") is True or (update_on_quit and exit_scope_ready(store, cleanup)))):
                 if delegated:
                     from .coordinator import dispatch
                     try:
@@ -559,10 +564,15 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             if result is None: return 2
             from backend.core.protocol_io import dump_protocol_json
             print(dump_protocol_json({"update_status": result.status, "version": result.version,
-                                      "error_code": result.error_code}), flush=True)
+                                      "error_code": result.error_code}),
+                  file=sys.stderr if update_on_quit and automatic_handoff else sys.stdout, flush=True)
             if result.status == "restart_required":
                 print("Confirmation saved. Restart macOS manually, then use the installed Gitgo command. Signature, package and exclusive runtime locks will be checked again before replacement.", file=sys.stderr, flush=True)
                 return 0
+            if update_on_quit:
+                # The transaction has already committed, rolled back, or
+                # reported a blocker. The next launch uses the same entry.
+                return 0 if result.status in {"committed", "rolled_back", "up_to_date", "blocked"} else 2
             recovered = store.recover()
             if recovered.status not in {"idle", "committed", "rolled_back"}:
                 reject("UPDATE_RECOVERY_REQUIRED", "Update must recover before restarting")

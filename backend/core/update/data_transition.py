@@ -18,8 +18,9 @@ ENGINE_VERSION = "0.2.0"
 
 
 def executing_engine_version(registration):
-    from .bootstrap_contract import ENGINE_DELEGATION_APIS
-    return ENGINE_VERSION if registration.get("bootstrap_api") in ENGINE_DELEGATION_APIS else registration["updater_version"]
+    from .bootstrap_contract import ENGINE_DELEGATION_APIS, MACOS_QUIT_API
+    return (ENGINE_VERSION if registration.get("bootstrap_api") in (*ENGINE_DELEGATION_APIS, MACOS_QUIT_API)
+            else registration["updater_version"])
 
 
 def resource_bindings(source, target):
