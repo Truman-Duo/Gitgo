@@ -29,6 +29,14 @@ jobs:
       - if: runner.os == 'Linux'
         run: bash scripts/prepare_linux_update_ci.sh
       - run: python -m pip install -r requirements-portable.txt pyinstaller
+      - name: Build locked Rust sandbox ABI before source or frozen tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.90.0 --profile minimal
+          cargo +1.90.0 test --locked --manifest-path native/sandbox/Cargo.toml
+          python -B scripts/build_sandbox_native.py
+          python -B -m pytest tests/test_native_sandbox_abi.py -q -x
       - name: Provision and validate pinned patched SQLite in CI
         run: python -B scripts/provision_ci_sqlite.py
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -42,6 +50,12 @@ jobs:
           "GITGO_BUN=$((Get-Command bun).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Provision and validate pinned official ripgrep in CI
         run: python -B scripts/provision_ci_ripgrep.py
+      - name: Rust Windows execution boundary preflight
+        if: runner.os == 'Windows'
+        run: >-
+          python -B -m pytest tests/test_native_sandbox.py
+          -k "windows_filesystem_escape_and_workspace_write or windows_network_loopback_is_denied or windows_cleanup_reports_confirmed_tree_exit"
+          -q -x
       - name: Build and test native storage lifetime ownership
         if: runner.os == 'Windows'
         run: |
@@ -79,6 +93,14 @@ jobs:
         with:
           python-version: "3.14"
       - run: python -m pip install -r requirements-portable.txt
+      - name: Build common Rust ABI (not a macOS execution backend)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.90.0 --profile minimal
+          cargo +1.90.0 test --locked --manifest-path native/sandbox/Cargo.toml
+          python -B scripts/build_sandbox_native.py
+          python -B -m pytest tests/test_native_sandbox_abi.py -q -x
       - name: Audit native primitives and verify production stays closed
         run: python -B scripts/probe_macos_sandbox.py --output dev-artifacts/macos-capabilities.json
       - name: Diagnose native launch failures

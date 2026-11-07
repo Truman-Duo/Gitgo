@@ -124,6 +124,8 @@ def smoke(executable: Path) -> None:
     probe = subprocess.run([str(executable), INTERNAL_ROLE_FLAG, "python", "-I", "-c",
         "from backend.core.loop.permission_broker import _runtime_implementation_digest;"
         "from backend.core.workbench.sheets import _validate;"
+        "from backend.core.native_sandbox import get_native;"
+        "assert get_native().call(op='capabilities')['abi']==1;"
         "_validate({'nbformat':4,'nbformat_minor':5,'metadata':{},'cells':[]});"
         "print(_runtime_implementation_digest())"],
         capture_output=True, text=True, encoding="utf8", errors="replace", timeout=30)

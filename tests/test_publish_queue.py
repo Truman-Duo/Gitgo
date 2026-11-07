@@ -30,6 +30,8 @@ def settled(setup, item):
         if saved["run"]["state"] not in ACTIVE:
             return saved
         time.sleep(.02)
+    import faulthandler
+    faulthandler.dump_traceback()
     pytest.fail("Publish Runtime did not settle")
 
 

@@ -138,36 +138,29 @@ def test_failed_result_journal_keeps_effect_without_claiming_evidence(tmp_path_f
 
 @pytest.mark.parametrize('failure', ['query', 'active', 'close'])
 def test_windows_job_requires_observed_empty_tree_and_retains_unknown(monkeypatch, failure):
-    from backend.core import sandbox_windows as windows
-    class Api:
-        active = 1 if failure == 'active' else 0
-        query_ok = failure != 'query'
-        close_ok = failure != 'close'
-        closes = 0
-        def terminate_job(self, *args): return True
-        def query_job(self, job, kind, info, *args):
-            info._obj.active_processes = self.active
-            return self.query_ok
-        def close(self, handle):
-            self.closes += 1
-            return self.close_ok
-    api = Api()
-    job = windows.NativeJobHandle(12345, api)
+    from backend.core.windows_sandbox_native import NativeJob, PENDING_JOBS
+    class Library:
+        failed = True
+        calls = 0
+        def call(self, **request):
+            assert request == {'op': 'job_retire', 'token': 12345}
+            self.calls += 1
+            if self.failed and failure != 'active':
+                raise OSError('Native query/close failure')
+            return {'ok': True, 'complete': not self.failed}
+    library = Library()
+    job = NativeJob(12345, library, '0' * 32)
     try:
-        with monkeypatch.context() as clock:
-            moments = iter([0, 4])
-            clock.setattr(windows.time, 'monotonic', lambda: next(moments))
-            report = job.close()
+        report = job.close()
         assert report['complete'] is False and not job._closed
-        assert windows._PENDING_JOBS[id(job)] is job
-        assert api.closes == (1 if failure == 'close' else 0)
-        api.active, api.query_ok, api.close_ok = 0, True, True
+        assert PENDING_JOBS[id(job)] is job
+        library.failed = False
         assert job.close() == {'complete': True, 'mode': 'windows-job', 'issues': []}
-        assert job._closed and id(job) not in windows._PENDING_JOBS
-        count = api.closes
-        assert job.close()['complete'] and api.closes == count
+        assert job._closed and id(job) not in PENDING_JOBS
+        count = library.calls
+        assert job.close()['complete'] and library.calls == count
     finally:
-        windows._PENDING_JOBS.pop(id(job), None)
+        PENDING_JOBS.pop(id(job), None)
 
 
 def test_linux_cleanup_timeout_is_explicit_and_retains_owner(tmp_path_factory, monkeypatch):

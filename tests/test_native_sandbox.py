@@ -983,16 +983,16 @@ def test_windows_cpu_budget_counts_descendants(native_box):
     source = ("import subprocess,sys,time;print('ran',flush=True);"
               f"[subprocess.Popen([sys.executable,'-c',{child!r},'cpu-'+str(i)]) for i in range(2)];"
               "time.sleep(60)")
-    from backend.core.sandbox_windows import CpuRateControl, WindowsApi
+    from backend.core.sandbox_windows import WindowsApi
     proc = spawn(source, override=SandboxPolicy(workspace, cpu_seconds=1))
     try:
         api = WindowsApi()
-        rate = CpuRateControl()
         # Read the actual kernel policy; a successful launch alone does not
         # establish that the invocation has a hard aggregate bandwidth cap.
-        api.check(api.query_job(proc._gitgo_job_handle, 15, C.byref(rate), C.sizeof(rate), None))
-        assert rate.flags & 0x5 == 0x5  # ENABLE | HARD_CAP
-        assert 0 < rate.rate <= 10000 // api.active_cpu_count(0xFFFF)
+        job = proc._gitgo_job_handle
+        report = job.library.call(op='job_query', token=job.token)
+        assert report['cpu_flags'] & 0x5 == 0x5  # ENABLE | HARD_CAP
+        assert 0 < report['cpu_rate'] <= 10000 // api.active_cpu_count(0xFFFF)
     finally:
         code, out, err = finished(proc, timeout=12)
     assert code != 0, (out, err)
@@ -1002,7 +1002,11 @@ def test_windows_cpu_budget_counts_descendants(native_box):
 
 def test_failed_resource_monitor_kills_started_tool(cross_platform_box, monkeypatch):
     workspace, policy, executable = cross_platform_box
-    source = ("import time;open('before-monitor-failure','w').write('ran');"
+    # Publish readiness only after the entire marker is closed. Existence of
+    # a newly opened file alone can race its first write on a real runner.
+    source = ("import os,time;from pathlib import Path;"
+              "Path('before-monitor-failure.pending').write_text('ran');"
+              "os.replace('before-monitor-failure.pending','before-monitor-failure');"
               "time.sleep(1);open('after-monitor-failure','w').write('escaped')")
     def fail_start(_):
         deadline = time.monotonic() + 3
