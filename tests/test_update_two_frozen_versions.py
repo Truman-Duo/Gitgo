@@ -37,6 +37,7 @@ def refresh_inventory(root):
     build["files"] = [{"path": item["path"], **({"link": item["link"]} if item["kind"] == "symlink"
         else {"bytes": item["bytes"], "sha256": item["sha256"]})} for item in inventory(root)
         if item["kind"] != "directory" and item["path"] != "build-manifest.json"]
+    path.chmod(0o600)
     path.write_text(json.dumps(build)); path.chmod(0o400)
     if os.name == "nt": path.chmod(0o600)
 
@@ -68,6 +69,8 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
         "allowed_hosts": ["releases.example.test"], "public_keys": [{"key_id": "ephemeral-test", "ed25519_base64": __import__("base64").b64encode(key).decode()}],
         "channels": {"preview": {"manifest_url": "https://releases.example.test/manifest.json", "signature_url": "https://releases.example.test/manifest.sig"}}}
     policy_path = seed / "release-trust.json"
+    if policy_path.exists():
+        policy_path.chmod(0o600)
     policy_path.write_text(json.dumps(policy)); policy_path.chmod(0o400)
     if os.name == "nt": policy_path.chmod(0o600)
     refresh_inventory(seed)

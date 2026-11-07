@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import nullcontext
 
 import pytest
 
@@ -64,7 +65,7 @@ def test_actual_mac_bootstrap_recovers_an_interrupted_engine(actual_lab, monkeyp
     assert tree_digest(store.root / "active") == before
 
 
-def confirm_with_actual_ui(store, env, expected_status, *, rollback=False):
+def confirm_with_actual_ui(store, env, expected_status, *, automatic=False, competing_runtime=False):
     """Hidden PTY process/input evidence, not formal visible terminal QA."""
     import fcntl
     import pty
@@ -89,14 +90,16 @@ def confirm_with_actual_ui(store, env, expected_status, *, rollback=False):
     def wait_for(text, *, after=0):
         end = time.monotonic() + 90
         while text not in screen.transcript() or len(output) <= after:
-            assert time.monotonic() < end, f"Actual Mac UI did not reach {text!r}"
+            assert time.monotonic() < end, f"Actual Mac UI did not reach {text!r}: {screen.transcript()[-1200:]}"
             pump()
     def pump():
         if select.select([master], [], [], .1)[0]:
             try:
                 chunk = os.read(master, 65536)
-                output.extend(chunk); screen.feed(chunk)
-            except OSError: raise AssertionError("Actual Mac UI closed before confirmation")
+            except OSError:
+                chunk = b""
+            assert chunk, f"Actual Mac UI closed: {screen.transcript()[-1200:]}"
+            output.extend(chunk); screen.feed(chunk)
             assert len(output) < 4 * 1024**2
         else:
             assert proc.poll() is None, "Actual Mac UI exited before confirmation"
@@ -107,29 +110,34 @@ def confirm_with_actual_ui(store, env, expected_status, *, rollback=False):
         wait_for("Providers")
         screen.forget_history()
         start = len(output); send("\x1b"); wait_for("No projects yet.", after=start)
+        if expected_status is None:
+            return
         # The initial menu shows only eight commands; /update is below that
         # visible window. Wait for the opened editor, not an offscreen item.
         screen.forget_history()
         start = len(output); send("/"); wait_for("/archive", after=start)
         prefix = "/"
-        for letter in "update":
+        for letter in ("quit" if automatic else "update"):
             start = len(output); send(letter); prefix += letter
             wait_for(prefix, after=start)
         assert not termios.tcgetattr(master)[0] & termios.ICRNL, "Mac PTY still translates Enter to newline"
-        start = len(output); send("\r"); wait_for("Gitgo Software Update", after=start)
-        if not rollback:
+        start = len(output); send("\r")
+        if automatic:
+            wait_for("Quit Gitgo", after=start)
+        else:
+            wait_for("Gitgo Software Update", after=start)
             wait_for("Downloaded and verified")
             activate_menu_item(screen, "Review restart / update", send, pump)
-        else:
-            wait_for("Retained version")
-            activate_menu_item(screen, "Review rollback", send, pump)
-        wait_for("Close this session and roll back?" if rollback else "attempt the selected update?")
-        start = len(output); send("\r")
-        wait_for(f'"update_status": "{expected_status}"', after=start)
-        proc.wait(timeout=30)
-        assert proc.returncode == 0
+            wait_for("attempt the selected update?")
+        with store.runtime_lease() if competing_runtime else nullcontext():
+            start = len(output); send("\r")
+            wait_for(f'"update_status": "{expected_status}"', after=start)
+            proc.wait(timeout=30)
+            assert proc.returncode == 0
         assert deferred.pending_status(store) is None
         assert b"restart_required" not in output
+        if expected_status == "blocked":
+            assert b"UPDATE_BUSY" in output
     finally:
         if os.environ.get("GITGO_UPDATE_LAB_LOG"):
             try:
@@ -160,26 +168,24 @@ def test_actual_mac_launcher_updates_after_exit_in_same_boot(actual_lab, broken)
     assert transaction["state"] == ("ROLLED_BACK" if broken else "COMMITTED")
     assert transaction["failure_code"] == ("UPDATE_HEALTH_FAILED" if broken else None)
     boot(old if broken else new)
+    confirm_with_actual_ui(store, env, None)
     assert deferred.boot_session() == boot_id
     assert (tree_digest(store.root / "active") == before) is broken
 
 
 def test_actual_mac_automatic_update_on_clean_exit(actual_lab):
-    store, prepare, boot, _, old, new, env = actual_lab
+    store, prepare, boot, _, _, new, env = actual_lab
     prepare()
-    result = subprocess.run([str(store.root / "gitgo"), "--version"],
-                            env=env, capture_output=True, text=True, timeout=120)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "Gitgo " + old
-    assert '"update_status": "committed"' in result.stderr
+    boot_id = deferred.boot_session()
+    confirm_with_actual_ui(store, env, "committed", automatic=True)
     boot(new)
+    assert deferred.boot_session() == boot_id
 
 
 def test_actual_mac_other_runtime_lease_blocks_replacement(actual_lab):
     store, prepare, boot, before, old, new, env = actual_lab
     prepare()
-    with store.runtime_lease():
-        confirm_with_actual_ui(store, env, "blocked")
+    confirm_with_actual_ui(store, env, "blocked", competing_runtime=True)
     assert store._ledger()["transaction"] is None
     # Disarm ordinary-quit installation before using the launcher as a probe.
     from backend.core.update.preparation_service import UpdatePreparationService
