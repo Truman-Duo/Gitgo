@@ -78,6 +78,52 @@ def test_owning_runner_disconnect_cleans_its_scope(tmp_path_factory):
     assert not marker.exists()
 
 
+def test_detached_session_forwards_terminal_resize_as_sigwinch(tmp_path_factory):
+    """A detached session never receives the terminal's SIGWINCH directly.
+
+    The supervisor must observe the pty size itself and forward SIGWINCH to its
+    own group, otherwise interactive payloads (the Dashboard) never reflow when
+    the window is resized. Reproduce with a real pty; no signal is sent to the
+    payload group by the test itself.
+    """
+    import fcntl
+    import pty
+    import struct
+    import termios
+    marker = tmp_path_factory / "resized"
+    ready = tmp_path_factory / "ready"
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    code = (
+        "import pathlib,signal,time\n"
+        "def on_winch(*_):\n"
+        "    pathlib.Path(%r).write_text('winch')\n"
+        "signal.signal(signal.SIGWINCH, on_winch)\n"
+        "pathlib.Path(%r).write_text('ready')\n"
+        "time.sleep(3)\n"
+    ) % (str(marker), str(ready))
+    proc = spawn_managed([sys.executable, "-c", code],
+                         stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+        # Let the supervisor observe the initial size before we resize.
+        time.sleep(0.3)
+        # Resize via TIOCSWINSZ only. The kernel would signal the pty's
+        # foreground group, which is NOT this detached session.
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 50, 0, 0))
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists() and marker.read_text() == "winch"
+    finally:
+        terminate_tree(proc)
+        os.close(master)
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux native adoption/pidfd required")
 @pytest.mark.parametrize("parent_exits", [False, True])
 def test_linux_nested_setsid_double_fork_and_parent_exit_are_owned(tmp_path_factory, parent_exits):
