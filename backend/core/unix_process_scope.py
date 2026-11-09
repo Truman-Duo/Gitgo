@@ -89,6 +89,21 @@ def terminal_size(fd):
         return None
 
 
+def terminal_monitor():
+    """Observe the rendering terminal; input is only the final fallback."""
+    import fcntl
+    for stream_fd in (1, 2, 0):
+        try:
+            if os.isatty(stream_fd):
+                # Stay above stdio even when one inherited stream is closed.
+                # The private copy must not leak into this scope's payload.
+                descriptor = fcntl.fcntl(stream_fd, fcntl.F_DUPFD_CLOEXEC, 3)
+                return descriptor, terminal_size(descriptor)
+        except OSError:
+            pass
+    return -1, None
+
+
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     forkless = bool(args and args[-1] == "--macos-forkless")
@@ -122,6 +137,9 @@ def main(argv=None):
             raise RuntimeError("Invalid bounded scope request")
         data.extend(part)
     command = json.loads(data)
+    # Capture before starting the payload, so its first resize cannot become
+    # an unnoticed baseline after the UI has cached its initial dimensions.
+    size_fd, last_size = terminal_monitor()
     worker = None
     exit_code = 127
     try:
@@ -139,17 +157,10 @@ def main(argv=None):
     # not be hidden by a supervisor keeping stdout/stderr open itself. A real
     # terminal is different: retain one private duplicate so this detached
     # session can still observe window-size changes and forward SIGWINCH.
-    size_fd = -1
     for stream_fd in (0, 1, 2):
-        try:
-            if size_fd < 0 and os.isatty(stream_fd):
-                size_fd = os.dup(stream_fd)
-        except OSError:
-            pass
         try: os.close(stream_fd)
         except OSError: pass
     control.setblocking(False)
-    last_size = terminal_size(size_fd)
     next_size_check = 0.0
     while worker is not None and worker.poll() is None and not cancelled:
         if select.select([control], [], [], .02)[0]:
