@@ -6,7 +6,10 @@ from backend.core.prompt_templates import load_prompt
 from backend.core.workbench.calculation import safe_calculate
 
 
-_OPERATIONS = ["calculate", "create_sheet", "revise_sheet", "continue_sheet", "open_sheet", "list_sheets", "import_context", "aggregate", "check_sources", "submit_material", "add_data", "import_result"]
+_OPERATIONS = ["calculate", "create_sheet", "revise_sheet", "continue_sheet", "open_sheet", "list_sheets", "import_context", "aggregate", "check_sources", "submit_material", "add_data", "import_result", "read_result", "check_delivery"]
+_RESULT_REF = {"type": "object", "properties": {
+    "sheet_id": {"type": "string"}, "revision": {"type": "string"}, "cell_id": {"type": "string"}},
+    "required": ["sheet_id", "revision", "cell_id"], "additionalProperties": False}
 
 
 def _source_warnings(result):
@@ -21,7 +24,7 @@ def _source_warnings(result):
     return result
 
 
-def invoke(args, store=None, sources=None, material_context=None):
+def invoke(args, store=None, sources=None, material_context=None, process=None):
     operation = args.get("operation")
     if operation == "calculate":
         expression = str(args.get("expression", ""))
@@ -69,9 +72,17 @@ def invoke(args, store=None, sources=None, material_context=None):
                 cell_id=args["cell_id"], source_ref=args["source_ref"])
         elif operation == "aggregate":
             result = sources.aggregate(args["sheet_id"], args["expected_revision"],
-                cell_id=args["cell_id"], source_cell_id=args["source_cell_id"],
+                cell_id=args["cell_id"], source_cell_id=args.get("source_cell_id"), source_result=args.get("source_result"),
                 selector=args["selector"], reducer=args["reducer"],
                 field=args.get("field", ""), null_policy=args.get("null_policy", "reject"))
+        elif operation == "read_result":
+            result = sources.read_result(args["result_ref"])
+        elif operation == "check_delivery":
+            if process is None:
+                return error_payload("WORKBENCH_UNAVAILABLE", message="Delivery checks require a Runtime-bound task.")
+            from backend.core.workbench.delivery import associate
+            result = associate(process, sources, scope=args["scope"], result_ref=args["result_ref"],
+                               candidate=args["candidate"], basis=args.get("basis", "current"))
         else:
             result = sources.check(args["sheet_id"], args.get("revision"))
         return _source_warnings({"operation": operation, **result})
@@ -100,25 +111,32 @@ def bound_sheets(process):
                       owner_scope="process" if getattr(process, "parent_id", None) else "main_session")
 
 
+def bound_sources(process, workspace_path, sheets=None):
+    sheets = sheets if sheets is not None else bound_sheets(process)
+    if sheets is None or not workspace_path:
+        return None
+    from backend.core.loop.context_store import ContextObjectStore
+    from backend.core.workbench.sources import SourceWorkbench
+
+    def current_context():
+        read = getattr(process, "read_context_snapshot", None)
+        return read()[0] if read else dict(getattr(process, "context_snapshot", None) or {})
+
+    return SourceWorkbench(sheets, ContextObjectStore(workspace_path), current_context)
+
+
 def install(ctx):
     def execute(args):
         if args.get("operation") == "calculate":
             return invoke(args)
         process = getattr(ctx, "process", None)
         sheets = bound_sheets(process)
-        sources = None
-        if sheets is not None and getattr(ctx, "workspace_path", ""):
-            from backend.core.loop.context_store import ContextObjectStore
-            from backend.core.workbench.sources import SourceWorkbench
-            def current_context():
-                read = getattr(process, "read_context_snapshot", None)
-                return read()[0] if read else dict(getattr(process, "context_snapshot", None) or {})
-            sources = SourceWorkbench(sheets, ContextObjectStore(ctx.workspace_path), current_context)
-        context = current_context() if sources is not None else {}
+        sources = bound_sources(process, getattr(ctx, "workspace_path", ""), sheets)
+        context = sources.current_context() if sources is not None else {}
         project = str(context.get("project_name") or "")
         material_context = {"project": project, "task_id": getattr(process, "active_task_id", ""),
                             "context": context} if project and not getattr(process, "parent_id", None) else None
-        return invoke(args, sheets, sources, material_context)
+        return invoke(args, sheets, sources, material_context, process)
 
     ctx.tools["workbench"] = AgentTool(
         execution_contract=data_broker("runtime.workbench"),
@@ -144,9 +162,14 @@ def install(ctx):
             "description": {"type": "string", "minLength": 1, "maxLength": 2000},
             "locator": {"type": "string"},
             "source_cell_id": {"type": "string"}, "source_ref": {"type": "string"},
+            "source_result": _RESULT_REF,
+            "result_ref": _RESULT_REF,
+            "scope": {"type": "string", "minLength": 1, "maxLength": 120},
+            "candidate": {"type": "string", "minLength": 1, "maxLength": 64000},
+            "basis": {"type": "string", "enum": ["current", "historical"]},
             "selector": {"type": "string", "maxLength": 500, "description": "JSON Pointer to the input collection: empty string selects root, /items selects the items member. Plain member names or expressions are invalid."},
             "field": {"type": "string", "maxLength": 500, "description": "Optional per-row JSON Pointer: /value selects each row value member; empty string selects the row itself. Use /value, never plain value."},
-            "reducer": {"type": "string", "enum": ["count", "key_count", "sum", "min", "max", "distinct_count"]},
+            "reducer": {"type": "string", "enum": ["count", "key_count", "sum", "min", "max", "distinct_count", "distinct"]},
             "null_policy": {"type": "string", "enum": ["reject", "skip"]}},
             "required": ["operation"], "additionalProperties": False},
         # READ is the existing internal protocol-state classification, as for

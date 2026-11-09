@@ -26,9 +26,23 @@ def submit_material(sheets, sources, *, sheet_id, revision, cell_ids, purpose,
         raise ValueError("A selected material cell is missing")
     source_ids = set(cell_ids)
     source_ids.update(c["metadata"]["gitgo"].get("input_cell_id") for c in chosen
-                      if c["metadata"]["gitgo"]["kind"] == "computed_value")
+                      if c["metadata"]["gitgo"]["kind"] == "computed_value"
+                      and not c["metadata"]["gitgo"].get("input_result_ref"))
     bindings = [deepcopy(c["metadata"]["gitgo"]) for c in document["cells"]
                 if c["id"] in source_ids and c["metadata"]["gitgo"]["kind"] in {"context_source", "tool_result_source"}]
+    if sources is not None:
+        cells = {c["id"]: c for c in document["cells"]}
+        documents = {}
+        for cell in chosen:
+            meta = cell["metadata"]["gitgo"]
+            if meta["kind"] != "computed_value" or not meta.get("input_result_ref"):
+                continue
+            try:
+                source, _ = sources._lineage(cell, cells, documents)
+            except (KeyError, ValueError, OSError):
+                continue
+            if source["kind"] in {"context_source", "tool_result_source"} and source not in bindings:
+                bindings.append(deepcopy(source))
     material = {"sheet_id": sheet_id, "revision": selected, "owner": sheets.owner,
                 "cell_ids": sorted(cell_ids), "cells": chosen, "source_bindings": bindings,
                 "authority": "unconfirmed working material; notes are assertions and computed values only describe their declared inputs"}

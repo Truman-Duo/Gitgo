@@ -121,7 +121,10 @@ class DeliveryRuntime:
                 return DeliveryBoundary(retry=True)
         # Scope adoption and completion linearize on the same admission fence.
         # An earlier assessment cannot close a task after a new accepted delta.
-        evaluation = HostCompletionEvaluator.evaluate(process, content)
+        evaluation = HostCompletionEvaluator.evaluate(process, content, exact_candidate=True)
+        workbench_block = self._workbench_block(evaluation, content)
+        if workbench_block is not None:
+            return workbench_block
         if not evaluation.allowed:
             from .completion_gates import accepts_partial
             if not degraded or not accepts_partial(process, list(evaluation.gates)):
@@ -140,17 +143,26 @@ class DeliveryRuntime:
                               outcome_status=OutcomeStatus.DEGRADED if degraded else None,
                               window_action=window_check['action'],
                               window_usage_ratio=window_check['usage_ratio'])
+        if evaluation.workbench_checks:
+            result["workbench_checks"] = list(evaluation.workbench_checks)
         process.result = result
         return DeliveryBoundary(result=result)
 
     def blocked(self, guard_result, content):
         process, session = self.process, self.session
+        if any(gate["kind"] == "workbench_delivery" for gate in guard_result.gates):
+            from .answer_continuation import clear_answer_fragments
+            clear_answer_fragments(process)
+            process.completion_claim = None
+            content = ""
+            code = "workbench_delivery"
+        else:
+            code = guard_result.reason_code or 'completion_rejection'
         self.emit({'event': 'completion_gate', 'accepted': False,
                    'source': 'text_marker', 'reason': guard_result.nudge_text})
         terminal = self.pause_blocked(guard_result, content)
         if terminal is not None:
             return DeliveryBoundary(result=terminal)
-        code = guard_result.reason_code or 'completion_rejection'
         self.increment_nudge(process, code)
         if self.nudge_count(process, code) >= 3:
             transition(process, ProcessStatus.FAILED)
@@ -173,13 +185,27 @@ class DeliveryRuntime:
             return self.blocked(guard_result, content)
         evaluator = HostCompletionEvaluator.evaluate_stage_entry if staged else HostCompletionEvaluator.evaluate
         if process.task_kind == 'supervisor' and content.strip():
-            if evaluator(process, content, signals).allowed:
+            evaluation = evaluator(process, content, signals)
+            if evaluation.allowed:
                 return self.finish(content, duration_ms, window_check, source='supervisor_plain_text')
+            workbench_block = self._workbench_block(evaluation, content)
+            if workbench_block is not None:
+                return workbench_block
         if (process.task_kind == 'action' and content.strip() and process.completion_claim is None
                 and process._nudge_counters.get('evidence_ready', 0)):
             process.completion_claim = CompletionClaim.from_response(content, step=process.steps_used)
-            if evaluator(process, content, signals).allowed:
+            evaluation = evaluator(process, content, signals)
+            if evaluation.allowed:
                 return self.finish(process.completion_claim.result, duration_ms, window_check,
                     source='host_evidence_plain_text', clear_racing_claim=True)
+            workbench_block = self._workbench_block(evaluation, content)
+            if workbench_block is not None:
+                return workbench_block
             # Keep the claim visible to existing outstanding-gate projections.
         return DeliveryBoundary()
+
+    def _workbench_block(self, evaluation, content):
+        if any(gate["kind"] == "workbench_delivery" for gate in evaluation.gates):
+            from .loop_guard import GuardResult, render_completion_guidance
+            return self.blocked(GuardResult(blocked=True, gates=list(evaluation.gates),
+                nudge_text=render_completion_guidance(evaluation.gates)), content)

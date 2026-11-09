@@ -43,7 +43,11 @@ def test_only_actual_workbench_operations_are_exposed():
     assert tool.effect == ToolEffect.READ and not tool.idempotent
     with pytest.raises(ValueError, match="Unsupported workbench operation"):
         tool.execute({"operation": "execute_python", "expression": "1 + 1"})
-    assert tool.parameters["properties"]["operation"]["enum"] == ["calculate", "create_sheet", "revise_sheet", "continue_sheet", "open_sheet", "list_sheets", "import_context", "aggregate", "check_sources", "submit_material", "add_data", "import_result"]
+    assert tool.parameters["properties"]["operation"]["enum"] == [
+        "calculate", "create_sheet", "revise_sheet", "continue_sheet", "open_sheet",
+        "list_sheets", "import_context", "aggregate", "check_sources", "submit_material",
+        "add_data", "import_result", "read_result", "check_delivery",
+    ]
 
 
 def test_current_profiles_and_explicit_old_contract_get_distinct_surfaces(tmp_path_factory):

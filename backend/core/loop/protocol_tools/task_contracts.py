@@ -106,7 +106,8 @@ def install(ctx):
                 item.setdefault('required', True)
         return args
 
-    APPEND_FIELDS = {'acceptance_criteria', 'deliverables', 'uncertainties', 'required_tool_calls', 'adopt_process_ids'}
+    APPEND_FIELDS = {'acceptance_criteria', 'deliverables', 'uncertainties', 'required_tool_calls',
+                     'required_workbench_claims', 'adopt_process_ids'}
     def proposal_for(args):
         args = bind_arguments(args)
         proposal = validate_contract_proposal(args, workspace_path or process.worktree_path)
@@ -117,6 +118,8 @@ def install(ctx):
             previous = get_task_contract(process)
             if not set(previous.get("acceptance_criteria") or []).issubset(proposal.get("acceptance_criteria") or []):
                 raise ValueError("worker revisions cannot remove supervisor-assigned acceptance obligations")
+            if not set(previous.get("required_workbench_claims") or []).issubset(proposal.get("required_workbench_claims") or []):
+                raise ValueError("worker revisions cannot remove supervisor-assigned workbench checks")
             for required in previous.get("deliverables") or []:
                 if required.get("required", True) and not any(item.get("required", True)
                     and (item.get("kind"), item.get("path")) == (required.get("kind"), required.get("path"))
@@ -300,6 +303,11 @@ def install(ctx):
                     ],
                 },
                 "handoff_summary": {"type": "string"},
+                "required_workbench_claims": {
+                    "type": "array", "maxItems": 12, "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "description": "Exact scope labels that must match pinned workbench results in the delivered answer.",
+                },
                 "required_tool_calls": {
                     "type": "array",
                     "description": (

@@ -116,6 +116,7 @@ class HostEvaluation:
     allowed: bool
     reasons: tuple[str, ...] = field(default_factory=tuple)
     gates: tuple[dict, ...] = field(default_factory=tuple)
+    workbench_checks: tuple[dict, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -252,8 +253,8 @@ class HostCompletionEvaluator:
                 "task_id": process.active_task_id or process.process_id}
 
     @classmethod
-    def evaluate(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
-        return cls._evaluate(process, response, signals, final_semantic_review=True)
+    def evaluate(cls, process, response: str, signals: list | None = None, *, exact_candidate=False) -> HostEvaluation:
+        return cls._evaluate(process, response, signals, final_semantic_review=True, exact_candidate=exact_candidate)
 
     @classmethod
     def evaluate_stage_entry(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
@@ -270,7 +271,7 @@ class HostCompletionEvaluator:
         return cls._evaluate(process, response, signals, final_semantic_review=False)
 
     @classmethod
-    def _evaluate(cls, process, response: str, signals, *, final_semantic_review):
+    def _evaluate(cls, process, response: str, signals, *, final_semantic_review, exact_candidate=False):
         from .completion_gates import CompletionReasons
         reasons = CompletionReasons()
         from backend.core.mechanism_runtime.semantic_projection import unsettled_checkpoints
@@ -279,6 +280,22 @@ class HostCompletionEvaluator:
                 + ' (' + pending['phase'] + '); consume the canonical reply and settle or explicitly retire its exact invocation.')
         context, _ = process.read_context_snapshot() if getattr(process, 'read_context_snapshot', None) else ({}, 0)
         contract = context.get('task_contract') or {}
+        from backend.core.workbench.delivery import CONTEXT_KEY, assess_delivery
+        workbench_checks = []
+        if context.get(CONTEXT_KEY) or contract.get("required_workbench_claims"):
+            candidate = response
+            if not exact_candidate:
+                claim = getattr(process, "completion_claim", None)
+                review_claim = getattr(process, "review_claim", None)
+                if response.strip() == "TASK_COMPLETE" and (claim or review_claim):
+                    candidate = claim.result if claim else review_claim.get("summary", "")
+                else:
+                    candidate = CompletionClaim.from_response(response, step=process.steps_used).result
+            workbench_checks = assess_delivery(process, context, candidate)
+            with reasons.scope("workbench_delivery"):
+                for check in workbench_checks:
+                    if check["blocking"]:
+                        reasons.append(f'Workbench {check["scope"]} ({check["status"]}): {check["reason"]}')
         # Accepted outputs survive plan/answer/action transitions. A process's
         # initial type is not permission to finish an amended implementation
         # contract before its first write (which promotes the runtime type).
@@ -413,7 +430,7 @@ class HostCompletionEvaluator:
                     "delegated agents are still unresolved: " + ", ".join(unresolved)
                 )
 
-        return HostEvaluation(not reasons, tuple(reasons), tuple(reasons.gates))
+        return HostEvaluation(not reasons, tuple(reasons), tuple(reasons.gates), tuple(workbench_checks))
 
     @classmethod
     def _evaluate_supervisor(cls, process, response: str,
