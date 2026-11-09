@@ -72,8 +72,10 @@ run_dashboard_native.bat
 
 ## 参与贡献
 
+欢迎主动修复和提交 Draft PR，无需先被 assigned。普通维护使用固定入口，大型或高风险变更先协调方向与专属目标；`master` 继续保存经组合验证的版本基线。
+
 1. 阅读 [当前功能](docs/IMPLEMENTATION_STATUS.md)、[已知限制](docs/KNOWN_ISSUES.md) 和相关 Issue，明确本次范围、依赖与验收目标。
-2. 从上游最新 `master` 创建功能分支；外部贡献者在自己的 fork 开发，再向主仓库 `master` 提交 PR。分支合入后的保留或清理单独确认。
+2. 普通 bug、文档和测试改进从 [`maint/alpha3.1`](https://github.com/Truman-Duo/Gitgo/tree/maint/alpha3.1) 创建自己的开发分支，在 fork 推送后向该维护分支开 PR。已有约定目标的任务继续使用该目标；新模块或高风险变更先讨论并确定专属目标，见 [分支流程](docs/branch-lifecycle.md)。
 3. 按 [贡献指南](CONTRIBUTING.md) 使用提交格式，执行相关回归；行为变更补充真实 API 验证，界面变更在完整正式终端中验收。
 4. 使用 [PR 模板](.github/PULL_REQUEST_TEMPLATE.md) 写清变更、实际测试环境、兼容性、迁移和剩余风险。检查候选文件及其引用，移除凭据、私人数据和编程指引。
 
