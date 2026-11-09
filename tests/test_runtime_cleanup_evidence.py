@@ -138,48 +138,69 @@ def test_failed_result_journal_keeps_effect_without_claiming_evidence(tmp_path_f
 
 @pytest.mark.parametrize('failure', ['query', 'active', 'close'])
 def test_windows_job_requires_observed_empty_tree_and_retains_unknown(monkeypatch, failure):
-    from backend.core import sandbox_windows as windows
-    class Api:
-        active = 1 if failure == 'active' else 0
-        query_ok = failure != 'query'
-        close_ok = failure != 'close'
-        closes = 0
-        def terminate_job(self, *args): return True
-        def query_job(self, job, kind, info, *args):
-            info._obj.active_processes = self.active
-            return self.query_ok
-        def close(self, handle):
-            self.closes += 1
-            return self.close_ok
-    api = Api()
-    job = windows.NativeJobHandle(12345, api)
+    from backend.core.windows_sandbox_native import NativeJob, PENDING_JOBS
+    class Library:
+        failed = True
+        calls = 0
+        def call(self, **request):
+            assert request == {'op': 'job_retire', 'token': 12345}
+            self.calls += 1
+            if self.failed and failure != 'active':
+                raise OSError('Native query/close failure')
+            return {'ok': True, 'complete': not self.failed}
+    library = Library()
+    job = NativeJob(12345, library, '0' * 32)
+    released = []
+    job._image_pins.callback(lambda: released.append(True))
     try:
-        with monkeypatch.context() as clock:
-            moments = iter([0, 4])
-            clock.setattr(windows.time, 'monotonic', lambda: next(moments))
-            report = job.close()
+        report = job.close()
         assert report['complete'] is False and not job._closed
-        assert windows._PENDING_JOBS[id(job)] is job
-        assert api.closes == (1 if failure == 'close' else 0)
-        api.active, api.query_ok, api.close_ok = 0, True, True
+        assert PENDING_JOBS[id(job)] is job
+        assert released == []
+        library.failed = False
         assert job.close() == {'complete': True, 'mode': 'windows-job', 'issues': []}
-        assert job._closed and id(job) not in windows._PENDING_JOBS
-        count = api.closes
-        assert job.close()['complete'] and api.closes == count
+        assert job._closed and id(job) not in PENDING_JOBS
+        assert released == [True]
+        count = library.calls
+        assert job.close()['complete'] and library.calls == count
     finally:
-        windows._PENDING_JOBS.pop(id(job), None)
+        PENDING_JOBS.pop(id(job), None)
+
+
+def test_windows_image_pin_close_failure_cannot_become_success_on_retry():
+    from backend.core.windows_sandbox_native import NativeJob, PENDING_JOBS
+    class Library:
+        calls = 0
+        def call(self, **request):
+            self.calls += 1
+            return {'complete': True}
+    library = Library()
+    job = NativeJob(12345, library, '0' * 32)
+    def fail_close():
+        raise OSError('Injected image pin cleanup failure')
+    job._image_pins.callback(fail_close)
+    try:
+        report = job.close()
+        assert not report['complete'] and report['issues'] == ['native_image_pin_cleanup_unknown']
+        assert PENDING_JOBS[id(job)] is job
+        assert job.close() == report and library.calls == 1
+    finally:
+        PENDING_JOBS.pop(id(job), None)
 
 
 def test_linux_cleanup_timeout_is_explicit_and_retains_owner(tmp_path_factory, monkeypatch):
     from backend.core import sandbox_linux as linux
     group = linux.LinuxCgroup.__new__(linux.LinuxCgroup)
+    import threading
     group.path = tmp_path_factory / 'cgroup-fixture'
     group.path.mkdir()
+    group._token, group._unknown, group._lock = 123, False, threading.RLock()
+    class Library:
+        def call(self, **request):
+            assert request == {'op': 'linux_cgroup_retire', 'token': 123}
+            return {'complete': False}
+    group._library = Library()
     group.cleanup = {'complete': False, 'mode': 'linux-cgroup', 'issues': []}
-    (group.path / 'cgroup.events').write_text('populated 1\n')
-    monkeypatch.setattr(group, 'kill', lambda: None)
-    moments = iter([0, 4])
-    monkeypatch.setattr(linux.time, 'monotonic', lambda: next(moments))
     try:
         assert group.close() == {'complete': False, 'mode': 'linux-cgroup',
                                  'issues': ['cgroup_tree_still_active']}

@@ -33,38 +33,32 @@ class LinuxPins:
         self.read_size = 0
 
     def directory(self, path):
-        from backend.core.sandbox_read import _linux_openat2
+        from backend.core.sandbox_read import ReadRoot
         path = Path(os.path.abspath(path))
         if path not in self.directories:
-            fd = _linux_openat2(-100, str(path), os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC, 0x04 | 0x02)
-            self.owners.callback(os.close, fd)
-            self.directories[path] = fd
+            root = self.owners.enter_context(ReadRoot(path))
+            self.directories[path] = root._linux_directory_descriptor()
         return self.directories[path]
 
     def file(self, path, *, optional=False):
-        from backend.core.sandbox_read import _linux_openat2, PinnedRead, ObjectIdentity
+        from backend.core.sandbox_read import ReadRoot, ObjectIdentity, ReadBoundaryError
         path = Path(os.path.abspath(path))
         if path in self.files:
             return os.pread(self.files[path], _MAX_CONFIG + 1, 0)
         parent = self.directory(path.parent)
-        with ExitStack() as opened:
-            try:
-                selected = _linux_openat2(parent, path.name, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW,
-                                          0x08 | 0x01 | 0x04 | 0x02)
-            except FileNotFoundError:
-                if optional:
-                    return None
-                raise
-            opened.callback(os.close, selected)
-            info = os.fstat(selected)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise GitBoundaryError('GIT_CONFIG_UNSUPPORTED', 'Git metadata must be a singly linked regular file')
-            readable = os.open(f'/proc/self/fd/{selected}', os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
-            opened.callback(os.close, readable)
-            actual = os.fstat(readable)
-            if (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino):
-                raise GitBoundaryError('GIT_CONFIG_UNSUPPORTED', 'Selected Git metadata changed')
-            raw = PinnedRead(readable, ObjectIdentity('linux', info.st_dev, info.st_ino), ExitStack()).read_bytes(max_bytes=_MAX_CONFIG)
+        try:
+            with ReadRoot(path.parent) as root:
+                info = os.fstat(parent)
+                if root.identity != ObjectIdentity('linux', info.st_dev, info.st_ino):
+                    raise GitBoundaryError('GIT_CONFIG_UNSUPPORTED', 'Selected Git metadata directory changed')
+                with root.open(path.name) as opened:
+                    raw = opened.read_bytes(max_bytes=_MAX_CONFIG)
+        except FileNotFoundError:
+            if optional:
+                return None
+            raise
+        except ReadBoundaryError as error:
+            raise GitBoundaryError('GIT_CONFIG_UNSUPPORTED', str(error)) from error
         self.read_size += len(raw)
         if self.read_size > _MAX_CONFIG or len(self.files) >= 256:
             raise GitBoundaryError('GIT_CONFIG_UNSUPPORTED', 'Metadata graph exceeds its bound')

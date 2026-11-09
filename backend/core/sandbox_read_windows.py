@@ -51,13 +51,17 @@ class WindowsReadApi:
             [C.POINTER(W.HANDLE), W.ULONG, C.POINTER(ObjectAttributes),
              C.POINTER(IoStatus), C.c_void_p, W.ULONG, W.ULONG, W.ULONG,
              W.ULONG, C.c_void_p, W.ULONG], C.c_long)
-        self.close = _function(self._kernel, 'CloseHandle', [W.HANDLE], W.BOOL)
+        self._close = _function(self._kernel, 'CloseHandle', [W.HANDLE], W.BOOL)
         self._error = _function(self._nt, 'RtlNtStatusToDosError', [C.c_long], W.ULONG)
         self._type = _function(self._kernel, 'GetFileType', [W.HANDLE], W.DWORD)
         self._info = _function(self._kernel, 'GetFileInformationByHandle',
                               [W.HANDLE, C.POINTER(FileInfo)], W.BOOL)
         self._id = _function(self._kernel, 'GetFileInformationByHandleEx',
                             [W.HANDLE, C.c_int, C.c_void_p, W.DWORD], W.BOOL)
+
+    def close(self, handle):
+        if not self._close(handle):
+            raise C.WinError(C.get_last_error())
 
     def root(self, path: Path):
         # UNC/device namespaces, drive-relative paths and alternate streams are
@@ -67,8 +71,20 @@ class WindowsReadApi:
         relative_parts(str(path.relative_to(path.anchor)))
         return self.open('\\??\\' + str(path), None, directory=True)
 
+    def pin_directory(self, name, parent):
+        """Hold a loader ancestor against rename without requesting its data.
+
+        AppContainer can traverse to its granted runtime while having no
+        READ_ATTRIBUTES/SYNCHRONIZE access on the drive root. FILE_TRAVERSE
+        gives no listing/content capability; DIRECTORY_FILE and DONT_REPARSE still
+        enforce the object kind and complete lookup. No delete sharing.
+        """
+        return self.open(name, parent, directory=True, _pin_only=True)
+
     def open(self, name: str, parent, *, directory: bool, read_data: bool = True,
-             share_write: bool = True):
+             share_write: bool = True, _pin_only: bool = False):
+        if _pin_only and not directory:
+            raise ReadBoundaryError('Loader pins must be directories')
         buffer = C.create_unicode_buffer(name)
         length = len(name.encode('utf-16-le'))
         if length > 65532:
@@ -84,10 +100,15 @@ class WindowsReadApi:
         # FILE_OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | DIRECTORY_FILE
         # for directories. Leaf type is checked on the returned handle.
         options = 0x200000 | 0x20 | (1 if directory else 0)
+        if _pin_only:
+            access, options = 0x20, 0x200001
         status = self._create(C.byref(handle), access, C.byref(attributes),
             C.byref(status_block), None, 0, 1 | (2 if share_write else 0), 1, options, None, 0)
         if status < 0:
             raise C.WinError(self._error(status))
+        if _pin_only and (status != 0 or self._type(handle.value) != 1):
+            self.close(handle.value)
+            raise ReadBoundaryError('Synchronous disk directory pin is unavailable')
         return handle.value
 
     def identity(self, handle, *, directory: bool) -> ObjectIdentity:

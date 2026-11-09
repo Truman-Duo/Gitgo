@@ -70,10 +70,8 @@ class AccessTree(SecurityTree):
         # recursively propagate inheritance behind our pinned inventory.
         descriptor = self._validated(raw)
         flags = descriptor.control | (0x100 if descriptor.control & 0x400 else 0) | (0x200 if descriptor.control & 0x800 else 0)
-        buffer = C.create_string_buffer(replace(descriptor, control=flags).to_bytes())
-        status = self.set_object_security(handle, DACL | LABEL, buffer)
-        if status:
-            raise C.WinError(self.status_to_error(status))
+        from .windows_acl_native import write_scoped_descriptor
+        write_scoped_descriptor(handle, replace(descriptor, control=flags).to_bytes())
 
     def revoke(self, records, principal):
         """Remove only this preparation's exact principal, preserving peers."""

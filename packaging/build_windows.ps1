@@ -178,6 +178,8 @@ $pyInstallerArguments = @(
     "--add-data", "$promptResources;backend/resources/prompts",
     (Join-Path $root "backend\core\native_host_entry.py")
 )
+& $Python -B (Join-Path $root 'scripts\build_sandbox_native.py')
+if ($LASTEXITCODE -ne 0) { throw 'Rust sandbox ABI build failed' }
 if ($useExternalPyInstaller) {
     & $Python -B $pyInstallerRunner $PyInstallerPackages @pyInstallerArguments
 } else {
