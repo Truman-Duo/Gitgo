@@ -64,6 +64,46 @@ def signal_adopted(pid):
         os.close(fd)
 
 
+def terminal_size(fd):
+    """Fresh pty window size from the kernel, or None when fd is not a tty.
+
+    A launcher may own the terminal's foreground process group while this
+    supervisor and its payload live in a detached session: the kernel then
+    delivers SIGWINCH only to that foreground group, never here. Runtimes also
+    cache their stream size until SIGWINCH, so only a direct ioctl observes the
+    change. Pipes simply report None and are never polled.
+
+    Use os.get_terminal_size rather than a hand-rolled TIOCSWINSZ: on Darwin
+    the termios module only exposes the SET request, so a manual
+    ``fcntl.ioctl(fd, termios.TIOCSWINSZ, buffer)`` would OVERWRITE the window
+    size with zeros instead of reading it.
+    """
+    try:
+        if not os.isatty(fd):
+            return None
+        size = os.get_terminal_size(fd)
+        if not size.columns or not size.lines:
+            return None
+        return size.lines, size.columns
+    except OSError:
+        return None
+
+
+def terminal_monitor():
+    """Observe the rendering terminal; input is only the final fallback."""
+    import fcntl
+    for stream_fd in (1, 2, 0):
+        try:
+            if os.isatty(stream_fd):
+                # Stay above stdio even when one inherited stream is closed.
+                # The private copy must not leak into this scope's payload.
+                descriptor = fcntl.fcntl(stream_fd, fcntl.F_DUPFD_CLOEXEC, 3)
+                return descriptor, terminal_size(descriptor)
+        except OSError:
+            pass
+    return -1, None
+
+
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     forkless = bool(args and args[-1] == "--macos-forkless")
@@ -97,6 +137,9 @@ def main(argv=None):
             raise RuntimeError("Invalid bounded scope request")
         data.extend(part)
     command = json.loads(data)
+    # Capture before starting the payload, so its first resize cannot become
+    # an unnoticed baseline after the UI has cached its initial dimensions.
+    size_fd, last_size = terminal_monitor()
     worker = None
     exit_code = 127
     try:
@@ -111,16 +154,30 @@ def main(argv=None):
     except OSError:
         cancelled = True
     # Keep no extra references to the payload pipes; detached descendants must
-    # not be hidden by a supervisor keeping stdout/stderr open itself.
+    # not be hidden by a supervisor keeping stdout/stderr open itself. A real
+    # terminal is different: retain one private duplicate so this detached
+    # session can still observe window-size changes and forward SIGWINCH.
     for stream_fd in (0, 1, 2):
         try: os.close(stream_fd)
         except OSError: pass
     control.setblocking(False)
+    next_size_check = 0.0
     while worker is not None and worker.poll() is None and not cancelled:
         if select.select([control], [], [], .02)[0]:
             try:
                 if not control.recv(1024): cancelled = True  # owning runner died
             except BlockingIOError: pass
+        # Forward window changes the detached session cannot receive directly.
+        if size_fd >= 0 and time.monotonic() >= next_size_check:
+            next_size_check = time.monotonic() + .1
+            current = terminal_size(size_fd)
+            if current is not None and current != last_size:
+                last_size = current
+                try: os.killpg(group, signal.SIGWINCH)
+                except OSError: pass
+    if size_fd >= 0:
+        try: os.close(size_fd)
+        except OSError: pass
     if worker is not None and worker.returncode is not None:
         exit_code = worker.returncode
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
