@@ -190,6 +190,15 @@ def install(ctx):
             catalog = {**available_tools, **process.dynamic_tools, **tools}
             active, _missing = _select_authorized_tools(process, catalog, issue_protocol_scopes=False)
             snapshot['tool_access'] = admission_snapshot(process, active, catalog)
+            import sys
+            from backend.core.loop.read_approval import native_cleanup_pending
+            snapshot['native_isolation'] = {
+                'platform': sys.platform,
+                'backend': {'win32': 'appcontainer_job', 'linux': 'bubblewrap_cgroup'}.get(sys.platform),
+                'preparation': 'per_admitted_invocation',
+                'availability': 'not_probed' if sys.platform in {'win32', 'linux'} else 'unsupported',
+                'cleanup_pending': native_cleanup_pending(process),
+            }
         return snapshot
 
 

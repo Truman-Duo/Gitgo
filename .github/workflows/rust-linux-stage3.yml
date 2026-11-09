@@ -52,7 +52,7 @@ jobs:
             --setenv="GITGO_RIPGREP_PATH=$GITGO_RIPGREP_PATH" \
             --unit=gitgo-rust-stage3-tools -p Delegate=yes "$(which python)" -B \
             scripts/run_linux_sandbox_scope.py -- "$(which python)" -B -m pytest \
-            tests/test_native_sandbox.py tests/test_runtime_cleanup_evidence.py \
+            tests/test_native_sandbox.py tests/test_native_read_linux.py tests/test_runtime_cleanup_evidence.py \
             tests/test_native_sandbox_abi.py tests/test_linux_cgroup_native.py tests/test_linux_git_boundary.py tests/test_publish_recovery.py -q --tb=short --junitxml=linux-stage3.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

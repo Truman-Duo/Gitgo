@@ -3,9 +3,10 @@ name: Windows update acceptance
 on:
   workflow_call:
     inputs:
-      source_verified_commit:
-        type: string
-        default: ''
+      source_suite_by_caller:
+        # Delegation only: caller must require both branches at its final gate.
+        type: boolean
+        default: false
       dashboard_verified_commit:
         type: string
         default: ''
@@ -60,7 +61,6 @@ jobs:
           retention-days: 7
 
   frozen:
-    needs: native
     runs-on: windows-2022
     timeout-minutes: 150
     steps:
@@ -94,7 +94,7 @@ jobs:
       - name: Bind successful upstream suites to this exact checkout
         id: prerequisites
         env:
-          SOURCE_VERIFIED_COMMIT: ${{ inputs.source_verified_commit }}
+          SOURCE_SUITE_BY_CALLER: ${{ inputs.source_suite_by_caller || false }}
           DASHBOARD_VERIFIED_COMMIT: ${{ inputs.dashboard_verified_commit }}
         run: python -B scripts/ci_prerequisites.py
       - name: Full Windows source regression
@@ -112,8 +112,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build two independently committed real Windows packages
         run: python -B scripts/windows_update_ci_build.py --bun (Get-Command bun).Source
-      - name: Actual public Windows installer smoke
-        run: python -B -m pytest tests/test_update_windows_frozen.py -k installer -q --tb=short --junitxml=windows-installer.xml
       - name: Actual frozen Windows update rollback and recovery
         run: python -B -m pytest tests/test_update_windows_frozen.py -q --tb=short --junitxml=windows-frozen.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -122,7 +120,6 @@ jobs:
           name: windows-source-and-frozen-results
           path: |
             windows-source.xml
-            windows-installer.xml
             windows-frozen.xml
           if-no-files-found: warn
           retention-days: 7

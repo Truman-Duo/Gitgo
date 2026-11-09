@@ -111,10 +111,14 @@ class ProcessToolRunner:
             # Every registered child handler is native; missing names or future
             # registrations can never fall through to ordinary subprocess.Popen.
             if read_binding is not None:
-                from .read_approval import ActiveRead
-                if type(read_binding) is not ActiveRead or binding.execution_contract.file_action != "read_existing_file":
+                from .read_approval import ActiveRead, NativeReadBinding
+                if (type(read_binding) not in {ActiveRead, NativeReadBinding}
+                        or binding.execution_contract.file_action not in {'read_existing_file', 'read_resource'}
+                        or type(read_binding) is ActiveRead and binding.execution_contract.file_action != 'read_existing_file'):
                     raise SandboxDenied("SANDBOX_POLICY_INVALID", "Invalid approved read handoff")
-                input_data["_approved_read"] = read_binding.payload(args)
+                payload = read_binding.payload(args)
+                if payload is not None:
+                    input_data["_approved_read"] = payload
                 effective_timeout = min(effective_timeout, read_binding.remaining())
             child_env = os.environ.copy()
             source_root = Path(__file__).resolve().parents[3]
@@ -129,9 +133,17 @@ class ProcessToolRunner:
                 raise SandboxDenied("SANDBOX_POLICY_INVALID", "Host invocation snapshot required")
             native_invocation.check(tool_name, args, effective_timeout)
             policy = native_invocation.policy
+            if policy.read_roots:
+                from .read_approval import NativeReadBinding
+                if type(read_binding) is not NativeReadBinding:
+                    raise SandboxDenied('SANDBOX_POLICY_INVALID', 'Read scope requires a live canonical admission')
+                if sys.platform == 'linux' and input_data.get('_approved_read'):
+                    input_data['_approved_read'] = {**input_data['_approved_read'], 'version': 2, 'private_mount': True}
             child_env = sandbox_environment(child_env)
             input_data["_native_sandbox_workspace"] = str(policy.workspace)
-            input_data["args"] = {**args, "_workspace": str(policy.workspace)}
+            # Read views have a private writable execution home and a distinct
+            # logical, read-only project. The admitted arguments remain sealed.
+            input_data["args"] = {**args, "_workspace": str(args.get('_workspace') or policy.workspace)}
             from .native_invocation_scope import prepare_native_record
             # Commit intent before entering the OS launch window. A kill after
             # this point leaves unknown evidence, never permission to replay.
@@ -246,17 +258,27 @@ class ProcessToolRunner:
             )
         except FileNotFoundError as exc:
             observation["cleanup"] = getattr(exc, "cleanup", None)
+            ambiguous = getattr(exc, 'effect_state', '') == 'ambiguous'
+            observation['launch_state'] = 'unknown' if ambiguous else 'not_started'
             duration_ms = (time.monotonic() - start) * 1000
+            from backend.core.errors import error_payload
             return SubprocessResult(
-                success=False,
-                error="runner module not found: backend.core.tools.runner",
+                success=True, data={**error_payload('SANDBOX_LAUNCH_DENIED',
+                    message='The native launcher could not open a required path. The OS error does not identify a missing Python module.',
+                    details={'error_type': type(exc).__name__, 'errno': exc.errno,
+                             'winerror': getattr(exc, 'winerror', None), 'detail': str(exc)[:1500]},
+                    next_actions=[{'action': 'inspect_native_launch',
+                                   'effect': 'Inspect runtime, executable and sandbox preparation facts before retrying. Do not change the task goal or retry unsandboxed.'}]),
+                    'effect_state': 'ambiguous' if ambiguous else 'not_committed',
+                    'execution_state': 'unknown' if ambiguous else 'not_started'},
                 exit_code=-1,
                 duration_ms=duration_ms,
             )
         except Exception as exc:
             observation["cleanup"] = getattr(exc, "cleanup", None)
-            observation["launch_state"] = "unknown"
             spawned = locals().get("proc")
+            observation['launch_state'] = ('started' if spawned is not None else
+                'unknown' if getattr(exc, 'effect_state', '') == 'ambiguous' else 'not_started')
             if spawned is not None and spawned.poll() is None:
                 self._kill_tree(spawned)
             duration_ms = (time.monotonic() - start) * 1000

@@ -104,8 +104,8 @@ export function VirtualConversation({
     let turnKey = "history",
       replyIndex = 0;
     for (const [index, message] of messages.entries()) {
-      if (message.role === "user") {
-        turnKey = messageKey(message, index);
+      if ((message.turn_id && message.turn_id !== turnKey) || message.role === "user") {
+        turnKey = message.turn_id || messageKey(message, index);
         replyIndex = 0;
       }
       const key =

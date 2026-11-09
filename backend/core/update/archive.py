@@ -216,7 +216,7 @@ class _TarReader:
         return self.source.tell()
 
 
-def _extract_tar(source, destination, work, limits, checkpoint):
+def _extract_tar(source, destination, work, limits, checkpoint, *, writer=_write_entries):
     # Inflating first bounds hidden PAX/GNU headers as well as regular files;
     # Incremental zlib validates gzip's footer/CRC without gzip.GzipFile's
     # uncheckpointed optional-header reads or automatic concatenated members.
@@ -245,10 +245,10 @@ def _extract_tar(source, destination, work, limits, checkpoint):
     with plain.open("rb") as handle:
         reader = _TarReader(handle, limits.metadata_bytes)
         with tarfile.open(fileobj=reader, mode="r:", tarinfo=_BoundedTarInfo) as archive:
-            return _read_tar_entries(archive, reader, destination, limits, checkpoint)
+            return _read_tar_entries(archive, reader, destination, limits, checkpoint, writer=writer)
 
 
-def _read_tar_entries(archive, reader, destination, limits, checkpoint):
+def _read_tar_entries(archive, reader, destination, limits, checkpoint, *, writer=_write_entries):
     entries = []
     for member in archive:
         checkpoint()
@@ -277,7 +277,7 @@ def _read_tar_entries(archive, reader, destination, limits, checkpoint):
         entries.append(_Entry(member.name, kind, member.size, bool(member.mode & 0o111), member, member.linkname))
     reader.metadata_phase = False
     # The caller removes the tar spool after closing its descriptor (Windows).
-    return _write_entries(entries, archive.extractfile, destination, limits, checkpoint, wrapped=True)
+    return writer(entries, archive.extractfile, destination, limits, checkpoint, wrapped=True)
 
 
 def _zip_directory_guard(source, limits):
@@ -313,7 +313,7 @@ def _zip_directory_guard(source, limits):
     source.seek(0)
 
 
-def _extract_zip(source, destination, limits, checkpoint):
+def _extract_zip(source, destination, limits, checkpoint, *, writer=_write_entries):
     _zip_directory_guard(source, limits)
     with zipfile.ZipFile(source) as archive:
         entries = []
@@ -337,7 +337,7 @@ def _extract_zip(source, destination, limits, checkpoint):
                                   kind, member.file_size, bool(mode & 0o111), member))
         if len(entries) > limits.entries:
             reject("UPDATE_ARCHIVE_LIMIT", "Archive contains too many entries")
-        return _write_entries(entries, archive.open, destination, limits, checkpoint, wrapped=False)
+        return writer(entries, archive.open, destination, limits, checkpoint, wrapped=False)
 
 
 def _extract_archive(source, archive_format, destination: Path, work: Path,

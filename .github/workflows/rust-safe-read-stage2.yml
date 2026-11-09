@@ -62,7 +62,7 @@ jobs:
           --setenv="GITGO_RIPGREP_PATH=$GITGO_RIPGREP_PATH"
           --unit=gitgo-read-stage2 -p Delegate=yes "$(which python)" -B
           scripts/run_linux_sandbox_scope.py -- "$(which python)" -B -m pytest
-          tests/test_native_sandbox.py::test_linux_real_runner_approval_binding -q --tb=short
+          tests/test_native_sandbox.py::test_linux_real_runner_approval_binding tests/test_native_read_linux.py -q --tb=short
   unix-packages:
     uses: ./.github/workflows/linux-package.yml
 

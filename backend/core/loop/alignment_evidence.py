@@ -52,8 +52,23 @@ def resolved_answer(ledger, answer, topic):
                 and item.get('answer_digest') == answer_digest(answer.get('answer', ''))):
             return item if item.get('disposition') in {'confirmed', 'delegated'} else None
     # An explicit selection is a user-owned value; free-form discussion is not.
-    if answer.get('selected_label') and answer.get('kind') != 'clarification':
-        return {**answer, 'value': answer['selected_label'], 'disposition': 'confirmed'}
+    label = answer.get('selected_label')
+    if label:
+        # A round's envelope is clarification even when its actual child is a
+        # finite choice. Recover that meaning from the published card, never
+        # from model-supplied interpretation fields or the wrapper's kind.
+        request = next((e for e in reversed(ledger)
+                        if e.get('event') == 'user_decision_requested'
+                        and (answer.get('task_id') is None or e.get('task_id') == answer.get('task_id'))
+                        and e.get('decision_id') == answer.get('decision_id')), {})
+        if any(e.get('event') == 'user_decision_cancelled'
+               and e.get('decision_id') == answer.get('decision_id') for e in ledger):
+            return None
+        questions = request.get('questions') or [request]
+        question = next((q for q in questions if q.get('state_topic') == topic), {})
+        if (question.get('kind') in {'choice', 'preference', 'direction', 'verification', 'checkpoint'}
+                and any(o.get('label') == label for o in question.get('options') or [])):
+            return {**answer, 'value': label, 'choice_key': label, 'disposition': 'confirmed'}
     return None
 
 

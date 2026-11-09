@@ -45,3 +45,9 @@ Publish 的既有独占 lease、恢复标识与 location 核对仍是冷恢复�
 平台条件跳过、模拟故障和真正的 OS 执行分别统计。源码或交叉编译通过不等于最终包通过；本说明也不代表 macOS 通用执行/受保护 Git 已实现，或 Issue #45 全部完成。
 
 依据：[Linux cgroup v2](https://cdn.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)、[bubblewrap](https://github.com/containers/bubblewrap/blob/main/bwrap.xml)、[libseccomp API](https://github.com/seccomp/libseccomp/blob/main/src/api.c)。
+
+## 依赖同步
+
+本候选在第二阶段同步第一阶段最新 Windows 修复和 Alpha 3.1.1 后继续集成。
+Linux 的目录描述符扩展与第二阶段精确授权叶子挂载读取同时保留；
+专项执行验收同时覆盖普通读视图及一次性外部文件审批，避免只验证 cgroup 而漏掉调用链。

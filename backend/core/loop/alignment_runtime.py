@@ -144,7 +144,8 @@ class AlignmentRuntime:
                 continue
             key = (item['decision_id'], item.get('source_node_id', ''))
             if key not in represented:
-                answers.append({**item, 'unbound_to_workflow': True})
+                answers.append({**item, 'node_id': item.get('source_node_id') or item['decision_id'],
+                                'unbound_to_workflow': True})
                 represented.add(key)
         requests = [e for e in self.process.session.host_ledger if e.get('event') == 'user_decision_requested'
                     and e.get('task_id') == task_id and e.get('kind') not in CONTROL_DECISION_KINDS]
@@ -386,6 +387,19 @@ class AlignmentRuntime:
         graph = w.status()
         unresolved = [n for n in graph.get('nodes', []) if n['kind'] == 'decision' and n['status'] not in {'complete', 'assumed'}]
         if status == 'needs_input':
+            unconsumed = [n for n in unresolved if w._answers(n)
+                          and n['id'] not in interpreted_nodes
+                          and not any(e.get('event') == 'user_decision_interpreted'
+                                      and e.get('decision_id') == w._answers(n)[-1].get('decision_id')
+                                      and e.get('state_topic') == n['state_topic']
+                                      and e.get('answer_digest') == answer_digest(w._answers(n)[-1]['answer'])
+                                      for e in shadow.session.host_ledger)]
+            if unconsumed:
+                raise AlignmentValidationError('Interpret the received answers before publishing the next question; do not ask the user to repeat them.',
+                    {'code': 'RECEIVED_ANSWER_NOT_CONSUMED', 'answers': [
+                        {'node_id': n['id'], 'state_topic': n['state_topic'],
+                         'decision_id': w._answers(n)[-1]['decision_id'],
+                         'answer': w._answers(n)[-1]['answer']} for n in unconsumed[:8]]})
             partial = {p.get('node_id') for p in proposals if p.get('disposition') == 'partial'}
             missing = (partial & set(graph.get('question_frontier') or [])) - bound_questions
             if missing:

@@ -34,6 +34,7 @@ def native_read_batch(source_runtime, root, calls):
     """Use the complete Pipeline and actual AppContainer with owned runtime ACLs."""
     driver = f"""
 import json
+import sys
 from dataclasses import asdict
 from backend.core.loop.models import AgentProcess, RingLevel
 from backend.core.loop.session import AgentSession
@@ -47,6 +48,11 @@ p = AgentProcess('file-feedback', 'worker', RingLevel.RING_3, active_task_id='ta
     worktree_path=root, session=AgentSession(), tool_registry=ToolRegistry(['read_file']))
 ctx = ExecutionContext(p, p.session, root)
 tools = build_workspace_tools(root)
+import backend.core.sandbox_access as access
+from pathlib import Path
+# This disposable source runtime contains only the interpreter, copied backend
+# and fixture dependencies; it is not a user's source checkout.
+access.native_runtime_access = lambda: ([Path(sys.executable).parent], [])
 ctx.artifacts['tool_catalog'] = tools
 execution = ToolExecution(execution_id='read-recovery', ctx=ctx, tool_calls={calls!r})
 try:
@@ -64,8 +70,12 @@ finally:
     report = json.loads(run.stdout)
     results = [SimpleNamespace(**item) for item in report['results']]
     for result in results:
-        assert result.receipt['launch_state'] == 'started', json.dumps(vars(result), ensure_ascii=False)
-        assert result.receipt['runtime_cleanup']['complete'] is True, result
+        if result.receipt.get('sandbox_preparation', {}).get('phase') in {'target_missing', 'target_directory'}:
+            assert result.receipt['launch_state'] == 'not_started'
+            assert result.receipt['effect_state'] == 'not_committed'
+        else:
+            assert result.receipt.get('launch_state') == 'started', json.dumps(vars(result), ensure_ascii=False)
+            assert result.receipt['runtime_cleanup']['complete'] is True, result
     return results, report['rolled_back']
 
 

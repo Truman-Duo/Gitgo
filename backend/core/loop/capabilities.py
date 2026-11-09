@@ -233,7 +233,7 @@ class CapabilityProfiles:
         """
         return tuple(dict.fromkeys(
             cls._OBSERVE
-            + ("request_user_decision", "declare_task_contract", "configure_capability", "engineering_workflow")
+            + ("request_user_decision", "request_permission", "declare_task_contract", "configure_capability", "engineering_workflow")
         ))
 
     @classmethod
