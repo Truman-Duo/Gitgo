@@ -261,7 +261,7 @@ def test_child_plan_has_closed_schema(fixture, change):
         ReadPlan.from_dict(payload)
 
 
-def test_pipeline_transports_only_host_binding_and_releases_on_runner_failure(fixture, monkeypatch):
+def test_pipeline_transports_only_host_binding_and_releases_on_runner_failure(fixture, monkeypatch, runner_transport_only):
     process, tool, root, args, ctx = fixture
     grant = approve(fixture)
     captured = []
@@ -436,7 +436,7 @@ def test_approval_path_uses_same_worktree_mapping_as_pipeline(fixture):
 
 
 @pytest.mark.parametrize('report', ['complete', 'incomplete', 'missing'])
-def test_launch_failure_keeps_approved_read_pins_until_cleanup_confirmed(fixture, monkeypatch, report):
+def test_launch_failure_keeps_approved_read_pins_until_cleanup_confirmed(fixture, monkeypatch, report, runner_transport_only):
     from backend.core.sandbox import SandboxDenied
     from backend.core.loop.read_approval import _RETAINED_ADMISSIONS
     process, tool, root, args, ctx = fixture

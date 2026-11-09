@@ -1,4 +1,4 @@
-"""Real candidate Rust reads. No replacement of the production reader yet."""
+"""Real Rust object reads through the production native boundary."""
 import ctypes as C
 import hashlib
 import os
@@ -269,3 +269,44 @@ def test_binary_output_capacity_checked_before_descriptor_is_consumed(tree):
 def test_raw_native_windows_aliases_refused(tree, name):
     with NativeReadRoot(tree) as root, pytest.raises(OSError):
         _call(root._library, op='read_open', token=root._token, path=_path(name), metadata_only=False)
+
+
+@pytest.mark.parametrize('path', ['../secret', '/absolute', 'nested/../../secret', ''])
+def test_leaf_mount_option_does_not_bypass_relative_boundary(tree, path):
+    with NativeReadRoot(tree) as root, pytest.raises(OSError):
+        _call(root._library, op='read_open', token=root._token, path=_path(path),
+              metadata_only=False, allow_leaf_mount=True)
+
+
+def test_leaf_mount_option_is_linux_only_and_still_rejects_links(tree):
+    with NativeReadRoot(tree) as root:
+        if sys.platform != 'linux':
+            with pytest.raises(ReadBoundaryError):
+                root.open('nested/note', allow_leaf_mount=True)
+            with pytest.raises(ReadBoundaryError):
+                _call(root._library, op='read_open', token=root._token,
+                      path=_path('nested/note'), metadata_only=False, allow_leaf_mount=True)
+            return
+        with root.open('nested/note', allow_leaf_mount=True) as opened:
+            assert opened.read_bytes() == b'hello\x00\xff\n'
+        (tree / 'alias').symlink_to(tree / 'nested', target_is_directory=True)
+        (tree / 'nested' / 'link').symlink_to(tree / 'nested' / 'note')
+        for path in ('alias/note', 'nested/link'):
+            with pytest.raises(OSError):
+                root.open(path, allow_leaf_mount=True)
+
+
+def test_leaf_mount_read_requires_capability_without_legacy_fallback(tree, monkeypatch):
+    with NativeReadRoot(tree) as root:
+        original = root._library.call
+        calls = []
+        def without_extension(**request):
+            calls.append(request['op'])
+            if request['op'] == 'capabilities':
+                return {'safe_read_version': 2}
+            return original(**request)
+        with monkeypatch.context() as patch:
+            patch.setattr(root._library, 'call', without_extension)
+            with pytest.raises(ReadBoundaryError):
+                root.open('nested/note', allow_leaf_mount=True)
+        assert 'read_open' not in calls

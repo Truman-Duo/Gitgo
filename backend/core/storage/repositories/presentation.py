@@ -19,6 +19,8 @@ def _is_public_user_message(message: dict) -> bool:
     message_type = str(message.get("message_type") or "")
     if message_type and message_type != "conversation":
         return False
+    if message.get('host_authority'):
+        return False
     content = str(message.get("content") or "")
     internal_prefixes = (
         "[HOST ", "[USER DECISION ", "[GOVERNANCE ", "[\u6cbb\u7406\u5efa\u8bae]",
@@ -64,7 +66,7 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
             (session_id,),
         ).fetchall()
         task_rows = self._state.execute(
-            """SELECT task_id, outcome_ref, created_at, updated_at
+            """SELECT task_id, contract_ref, outcome_ref, created_at, updated_at
                FROM tasks WHERE session_id=? ORDER BY created_at, task_id""",
             (session_id,),
         ).fetchall()
@@ -112,7 +114,7 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
         if not isinstance(loaded, dict) or not self._is_public_user_message(loaded):
             continue
         projected = {
-            "message_id": str(row["message_id"]),
+            "message_id": str(loaded.get("message_id") or row["message_id"]),
             "turn_id": message_task(row),
             "role": "user",
             "content": str(loaded.get("content") or ""),
@@ -128,6 +130,7 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
         else:
             unscoped.append(projected)
 
+    metadata = {}
     if session_row is not None and session_row["metadata_ref"]:
         try:
             metadata = self._read_json_blob(str(session_row["metadata_ref"]))
@@ -146,6 +149,8 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
                     messages_by_task.setdefault(card["turn_id"], []).append(card)
         except StorageReferenceMissing as exc:
             unscoped.append(self._storage_projection_warning(exc))
+    from ..conversation_history import restore_task_inputs
+    restore_task_inputs(self, task_rows, messages_by_task, metadata if isinstance(metadata, dict) else {})
     public = list(unscoped)
     known_tasks: set[str] = set()
     for row in task_rows:

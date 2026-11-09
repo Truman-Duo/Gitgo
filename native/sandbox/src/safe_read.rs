@@ -100,12 +100,29 @@ pub fn root(path: &[u8]) -> io::Result<Value> {
     let token = insert(Resource::Root(root))?;
     Ok(json!({"ok": true, "token": token, "identity": identity(&info)}))
 }
-pub fn open(token: u64, path: &[u8], metadata_only: bool) -> io::Result<Value> {
+pub fn open(
+    token: u64,
+    path: &[u8],
+    metadata_only: bool,
+    allow_leaf_mount: bool,
+) -> io::Result<Value> {
     let root = match registry()?.live.get(&token) {
         Some(Resource::Root(value)) => Arc::clone(value),
         _ => return Err(boundary("invalid_read_root_token")),
     };
-    let opened = platform::open(root, path, metadata_only)?;
+    #[cfg(target_os = "linux")]
+    let opened = if allow_leaf_mount {
+        platform::open_leaf_mount(root, path, metadata_only, true)?
+    } else {
+        platform::open(root, path, metadata_only)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let opened = {
+        if allow_leaf_mount {
+            return Err(boundary("unsupported_leaf_mount_read"));
+        }
+        platform::open(root, path, metadata_only)?
+    };
     let info = platform::snapshot(&opened.file)?;
     regular(&info)?;
     let token = insert(Resource::File(Arc::new(Mutex::new(opened))))?;

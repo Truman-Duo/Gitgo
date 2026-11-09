@@ -1,7 +1,7 @@
 name: Rust sandbox stage 1 candidate
 on:
   push:
-    branches: ["feat/45-rust-native-stage1"]
+    branches: ["feat/45-rust-native-stage1", "feat/45-windows-rust-review"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -82,7 +82,7 @@ jobs:
         shell: pwsh
         run: |
           $baseline = Join-Path $env:RUNNER_TEMP 'alpha31-publish-control'
-          git worktree add --detach $baseline 172a17a0638550ce128bf752e0756eed91089bf6
+          git worktree add --detach $baseline 15e5a82a5510adaa658535d87f5b657e5c21e545
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:TEMP = Join-Path $env:USERPROFILE 'AppData/Local/Temp'
           $env:TMP = $env:TEMP

@@ -427,6 +427,8 @@ class EngineeringWorkflow:
                 continue
             if event.get("state_topic") == node["state_topic"]:
                 answers.append(event)
+            elif node.get('source_decision_id') == event.get('decision_id') and not event.get('answers'):
+                answers.append({**event, 'state_topic': node['state_topic']})
             else:
                 item = (event.get("answers") or {}).get(node["id"])
                 if item and item.get("state_topic") == node["state_topic"]:
@@ -674,10 +676,9 @@ class EngineeringWorkflow:
             return create_user_decision(self.process, request)
         topic = str(request.get("state_topic") or "").strip()
         if not topic:
-            if kind != "clarification":
-                from .decision_support import create_user_decision
-                return create_user_decision(self.process, request)
-            topic = "clarification:" + hashlib.sha256(str(request.get("question") or "").encode()).hexdigest()[:16]
+            # Identity assembly belongs here. A finite choice does not require
+            # the model to invent a mechanical topic to join its answer later.
+            topic = kind + ':' + hashlib.sha256(str(request.get("question") or "").encode()).hexdigest()[:16]
         state = self._load()
         existing = next((n for n in state.get("plan", {}).get("nodes", []) if n.get("state_topic") == topic and n["kind"] == "decision"), None)
         if existing:
@@ -721,6 +722,30 @@ class EngineeringWorkflow:
         decision_id=identity(decision_id,'decision_id')
         state = self._load()
         node = next((n for n in state.get('plan', {}).get('nodes', []) if n['id'] == node_id and n['kind'] == 'decision'), None)
+        imported = False
+        if node is None and node_id == decision_id:
+            # Compatibility for real pre-patch standalone cards. Import the
+            # published identity; never republish a question or create a reply.
+            from .decision_support import SEMANTIC_DECISION_KINDS
+            request = next((e for e in self.process.session.host_ledger
+                            if e.get('event') == 'user_decision_requested'
+                            and e.get('task_id') == task_id(self.process)
+                            and e.get('decision_id') == decision_id
+                            and e.get('kind') in SEMANTIC_DECISION_KINDS
+                            and not e.get('questions')), None)
+            if request is not None and not any(e.get('event') == 'user_decision_cancelled'
+                    and e.get('decision_id') == decision_id for e in self.process.session.host_ledger):
+                topic = request.get('state_topic') or f'decision:{decision_id}'
+                node_id = 'q_' + hashlib.sha256(topic.encode()).hexdigest()[:16]
+                node = {'id': node_id, 'kind': 'decision', 'state_topic': topic,
+                        'before_mutation': True, 'source_decision_id': decision_id}
+                plan = copy.deepcopy(state.get('plan') or {'profiles': ['alignment'], 'nodes': []})
+                plan['nodes'].append(node)
+                state = self.configured_state(compile_plan(plan, workspace(self.process)))
+                state.setdefault('requests', {})[node_id] = decision_id
+                state.setdefault('request_overrides', {})[node_id] = copy.deepcopy(request)
+                imported = True
+                node = next(n for n in state['plan']['nodes'] if n['id'] == node_id)
         requested = state.get('requests', {}).get(node_id)
         if node is None:
             raise ValueError('interpretation must bind the current question of this task')
@@ -770,6 +795,9 @@ class EngineeringWorkflow:
         if previous and content.get('disposition') == previous.get('disposition'):
             # Delivery review must not churn a source-bound value just because
             # the same model paraphrases it differently on the next call.
+            if imported:
+                self._save(state)
+                self._refresh(state)
             return previous
         conditional = any(node_id in (n.get('when') or {}) for n in state['plan']['nodes'])
         if conditional and event['disposition'] in {'confirmed', 'delegated'} and not event.get('choice_key'):

@@ -36,18 +36,29 @@ def document_open(args: dict) -> dict:
     start = max(0, int(args.get("offset", 0) or 0))
     limit = max(1_000, min(int(args.get("max_chars", 24_000) or 24_000), 100_000))
     try:
-        check_input(path)
+        from io import BytesIO
+        from .workspace_tools import _read_target
+        from backend.core.sandbox_read_plan import open_planned_read
+        from .document_limits import MAX_INPUT_BYTES
+        if path.stat().st_size > MAX_INPUT_BYTES:
+            raise DocumentLimit('document exceeds the 16MiB input boundary; split it before extraction')
+        _, _, read_root, relative = _read_target(args)
+        with open_planned_read(read_root, relative) as opened:
+            raw = opened.read_bytes(max_bytes=MAX_INPUT_BYTES)
+        check_input(path, data=raw)
         if suffix in {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".xml"}:
-            text = path.read_text(encoding="utf-8-sig", errors="replace")
+            # Preserve the former read_text universal-newline contract while
+            # consuming the bytes from the one pinned descriptor.
+            text = raw.decode('utf-8-sig', errors='replace').replace('\r\n', '\n').replace('\r', '\n')
         elif suffix == ".pdf":
             from pypdf import PdfReader
-            pages = PdfReader(str(path)).pages
+            pages = PdfReader(BytesIO(raw)).pages
             if len(pages) > 500:
                 raise DocumentLimit("PDF exceeds 500 pages; split it before extraction")
             text = bounded_join(((page.extract_text() or "") for page in pages), "\n\n")
         elif suffix == ".docx":
             from docx import Document
-            doc = Document(str(path))
+            doc = Document(BytesIO(raw))
             def docx_chunks():
                 yield from (paragraph.text for paragraph in doc.paragraphs)
                 for table in doc.tables:
@@ -56,7 +67,7 @@ def document_open(args: dict) -> dict:
             text = bounded_join(docx_chunks())
         elif suffix in {".pptx"}:
             from pptx import Presentation
-            deck = Presentation(str(path))
+            deck = Presentation(BytesIO(raw))
             if len(deck.slides) > 500:
                 raise DocumentLimit("presentation exceeds 500 slides")
             chunks = []
@@ -69,7 +80,7 @@ def document_open(args: dict) -> dict:
             text = bounded_join(chunks)
         elif suffix in {".xlsx", ".xlsm"}:
             from openpyxl import load_workbook
-            book = load_workbook(str(path), read_only=True, data_only=True)
+            book = load_workbook(BytesIO(raw), read_only=True, data_only=True)
             try:
                 def sheet_chunks():
                     for sheet in book.worksheets:
@@ -83,7 +94,7 @@ def document_open(args: dict) -> dict:
                 book.close()
         elif suffix == ".xls":
             import xlrd
-            book = xlrd.open_workbook(str(path), on_demand=True)
+            book = xlrd.open_workbook(file_contents=raw, on_demand=True)
             try:
                 chunks = []
                 for sheet in book.sheets():
@@ -113,17 +124,22 @@ def document_open(args: dict) -> dict:
             from backend.core.process_output import collect_output, OutputLimit
             from backend.core.tools.execution_profile import safe_environment
             from backend.core.installation_lease import child_options
-            completed = subprocess.Popen([str(antiword), str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                env=safe_environment(), creationflags=creation_flags(), start_new_session=os.name != "nt", **child_options())
-            job = attach_kill_job(completed)
-            try:
-                stdout, stderr, _ = collect_output(completed, timeout=60, limit=MAX_TEXT_CHARS,
-                    reject_overflow=True, terminate=lambda: terminate_tree(completed, job))
-            except OutputLimit as exc:
-                raise DocumentLimit(str(exc)) from exc
-            finally:
-                close_job(job)
+            import tempfile
+            # A pathname-only converter receives an owned copy of the already
+            # pinned bytes, never a second open of the approved source name.
+            with tempfile.TemporaryDirectory(prefix='gitgo-doc-') as temporary:
+                source = Path(temporary) / 'input.doc'; source.write_bytes(raw)
+                completed = subprocess.Popen([str(antiword), str(source)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                    env=safe_environment(), creationflags=creation_flags(), start_new_session=os.name != "nt", **child_options())
+                job = attach_kill_job(completed)
+                try:
+                    stdout, stderr, _ = collect_output(completed, timeout=60, limit=MAX_TEXT_CHARS,
+                        reject_overflow=True, terminate=lambda: terminate_tree(completed, job))
+                except OutputLimit as exc:
+                    raise DocumentLimit(str(exc)) from exc
+                finally:
+                    close_job(job)
             if completed.returncode != 0:
                 return _document_error(
                     "DOCUMENT_READ_FAILED",

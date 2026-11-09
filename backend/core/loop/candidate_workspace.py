@@ -18,7 +18,7 @@ def candidate_workspace_root(paths, *, workspace=None):
 
 
 def allocate_candidate_workspace(paths, kind, *, workspace=None):
-    if kind not in {"document", "workspace"}:
+    if kind not in {"document", "workspace", "read"}:
         raise ValueError("Unknown private producer kind")
     root = candidate_workspace_root(paths, workspace=workspace)
     stage = root / (kind[0] + "-" + uuid.uuid4().hex)

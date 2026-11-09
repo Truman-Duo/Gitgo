@@ -1,10 +1,10 @@
-use super::Request;
+use super::{Request, registry::Registry};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::{
     Foundation::*,
@@ -93,61 +93,93 @@ impl Drop for Attributes {
 struct Job {
     handle: KernelHandle,
     launched: bool,
-    retired: bool,
+    terminated: bool,
 }
 struct Resources {
-    next: u64,
-    jobs: BTreeMap<u64, Job>,
-    processes: BTreeMap<u64, KernelHandle>,
-    files: BTreeMap<u64, KernelHandle>,
-    retired_files: BTreeMap<u64, u64>,
+    jobs: Registry<Arc<Mutex<Job>>, 1>,
+    processes: Registry<KernelHandle, 2>,
+    files: Registry<KernelHandle, 3>,
 }
 static RESOURCES: OnceLock<Mutex<Resources>> = OnceLock::new();
 fn resources() -> &'static Mutex<Resources> {
     RESOURCES.get_or_init(|| {
         Mutex::new(Resources {
-            next: 1,
-            jobs: BTreeMap::new(),
-            processes: BTreeMap::new(),
-            files: BTreeMap::new(),
-            retired_files: BTreeMap::new(),
+            jobs: Registry::new(),
+            processes: Registry::new(),
+            files: Registry::new(),
         })
     })
 }
 impl Resources {
-    fn file_retired(&self, token: u64) -> bool {
-        self.retired_files
-            .range(..=token)
-            .next_back()
-            .is_some_and(|(_, end)| token <= *end)
-    }
-    fn remember_file_retirement(&mut self, token: u64) {
-        let (mut start, mut end) = (token, token);
-        if let Some((&left, &right)) = self.retired_files.range(..token).next_back()
-            && right.checked_add(1) == Some(token)
-        {
-            start = left;
-            self.retired_files.remove(&left);
-        }
-        if let Some((&right, &last)) = self.retired_files.range(token..).next()
-            && token.checked_add(1) == Some(right)
-        {
-            end = last;
-            self.retired_files.remove(&right);
-        }
-        self.retired_files.insert(start, end);
-    }
-    fn token(&mut self) -> Result<u64> {
-        // Retired IDs are never reused. Bound retained state rather than dropping
-        // tombstones and accidentally accepting a stale cleanup/launch request.
-        if self.jobs.len() + self.processes.len() >= MAX_RESOURCES || self.files.len() >= 100_256 {
+    fn job_or_process_slot(&self) -> Result<()> {
+        if self.jobs.live.len() + self.processes.live.len() >= MAX_RESOURCES {
             return Err(8);
         }
-        let token = self.next;
-        self.next = self.next.checked_add(1).ok_or(8u32)?;
-        Ok(token)
+        Ok(())
     }
 }
+
+impl Job {
+    fn retire(
+        &mut self,
+        terminate: impl FnOnce(HANDLE) -> Result<()>,
+        wait_empty: impl FnOnce(HANDLE) -> Result<bool>,
+        close: impl FnOnce(&mut KernelHandle) -> Result<()>,
+    ) -> Result<bool> {
+        if self.handle.0 == 0 {
+            return Ok(true);
+        }
+        if !self.terminated {
+            terminate(self.handle.raw())?;
+            self.terminated = true;
+        }
+        if !wait_empty(self.handle.raw())? {
+            return Ok(false);
+        }
+        close(&mut self.handle)?;
+        Ok(true)
+    }
+}
+
+fn retire_job(token: u64, retire: impl FnOnce(&mut Job) -> Result<bool>) -> Result<Value> {
+    let job = {
+        let state = resources().lock().map_err(|_| ERROR_INVALID_STATE)?;
+        if state.jobs.retired(token) {
+            return Ok(json!({"ok": true, "complete": true}));
+        }
+        state
+            .jobs
+            .live
+            .get(&token)
+            .cloned()
+            .ok_or(ERROR_INVALID_HANDLE)?
+    };
+    // A per-Job lock pins the handle while other Jobs and ACLs remain available.
+    let complete = retire(&mut *job.lock().map_err(|_| ERROR_INVALID_STATE)?)?;
+    if complete {
+        resources()
+            .lock()
+            .map_err(|_| ERROR_INVALID_STATE)?
+            .jobs
+            .live
+            .remove(&token);
+    }
+    Ok(json!({"ok": true, "complete": complete}))
+}
+
+fn wait_for_empty_job(handle: HANDLE) -> Result<bool> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if accounting(handle)?.ActiveProcesses == 0 {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn check(ok: i32) -> Result<()> {
     if ok == 0 {
         Err(unsafe { GetLastError() })
@@ -384,6 +416,15 @@ pub fn dispatch(request: Request) -> Value {
     }
 }
 fn perform(request: Request) -> Result<Value> {
+    if let Request::JobRetire { token } = request {
+        return retire_job(token, |job| {
+            job.retire(
+                |handle| check(unsafe { TerminateJobObject(handle, 1) }),
+                wait_for_empty_job,
+                KernelHandle::close,
+            )
+        });
+    }
     let mut resources = resources().lock().map_err(|_| ERROR_INVALID_STATE)?;
     match request {
         Request::JobCreate {
@@ -397,21 +438,23 @@ fn perform(request: Request) -> Result<Value> {
             } else {
                 job_name(&recovery_id)?
             };
-            let token = resources.token()?;
+            resources.job_or_process_slot()?;
+            let token = resources.jobs.next().ok_or(8u32)?;
             let handle = create_job(&name, processes, memory, cpu_seconds)?;
             resources.jobs.insert(
                 token,
-                Job {
+                Arc::new(Mutex::new(Job {
                     handle,
                     launched: false,
-                    retired: false,
-                },
+                    terminated: false,
+                })),
             );
             Ok(json!({"ok": true, "token": token}))
         }
         Request::JobRecover { recovery_id } => {
             let name = job_name(&recovery_id)?;
-            let token = resources.token()?;
+            resources.job_or_process_slot()?;
+            let token = resources.jobs.next().ok_or(8u32)?;
             let handle = unsafe { OpenJobObjectW(0x0004 | 0x0008, 0, name.as_ptr()) }; // QUERY | TERMINATE
             if handle.is_null() {
                 let error = unsafe { GetLastError() };
@@ -422,17 +465,22 @@ fn perform(request: Request) -> Result<Value> {
             }
             resources.jobs.insert(
                 token,
-                Job {
+                Arc::new(Mutex::new(Job {
                     handle: KernelHandle(handle as usize),
                     launched: true,
-                    retired: false,
-                },
+                    terminated: false,
+                })),
             );
             Ok(json!({"ok": true, "token": token, "absent": false}))
         }
         Request::JobQuery { token } => {
-            let job = resources.jobs.get(&token).ok_or(ERROR_INVALID_HANDLE)?;
-            if job.retired {
+            let job = resources
+                .jobs
+                .live
+                .get(&token)
+                .ok_or(ERROR_INVALID_HANDLE)?;
+            let job = job.try_lock().map_err(|_| ERROR_BUSY)?;
+            if job.terminated || job.handle.0 == 0 {
                 return Err(ERROR_INVALID_HANDLE);
             }
             let info = accounting(job.handle.raw())?;
@@ -450,33 +498,18 @@ fn perform(request: Request) -> Result<Value> {
                 "cpu_100ns": info.TotalUserTime + info.TotalKernelTime,
                 "cpu_flags": rate.ControlFlags, "cpu_rate": unsafe { rate.Anonymous.CpuRate }}))
         }
-        Request::JobRetire { token } => {
-            let job = resources.jobs.get_mut(&token).ok_or(ERROR_INVALID_HANDLE)?;
-            if job.retired {
-                return Ok(json!({"ok": true, "complete": true}));
-            }
-            check(unsafe { TerminateJobObject(job.handle.raw(), 1) })?;
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                if accounting(job.handle.raw())?.ActiveProcesses == 0 {
-                    job.handle.close()?;
-                    job.retired = true;
-                    return Ok(json!({"ok": true, "complete": true}));
-                }
-                if Instant::now() >= deadline {
-                    return Ok(json!({"ok": true, "complete": false}));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
+        Request::JobRetire { .. } => unreachable!(),
         Request::ProcessRelease { token } => {
-            // Keep a zero-valued tombstone: repeated release is idempotent and
-            // never closes a subsequently reused OS handle.
+            if resources.processes.retired(token) {
+                return Ok(json!({"ok": true}));
+            }
             resources
                 .processes
+                .live
                 .get_mut(&token)
                 .ok_or(ERROR_INVALID_HANDLE)?
                 .close()?;
+            resources.processes.live.remove(&token);
             Ok(json!({"ok": true}))
         }
         Request::AclOpen { path, access } => {
@@ -488,7 +521,10 @@ fn perform(request: Request) -> Result<Value> {
                 return Err(INVALID);
             }
             let path = wide(&path)?;
-            let token = resources.token()?;
+            if resources.files.live.len() >= 100_256 {
+                return Err(8);
+            }
+            let token = resources.files.next().ok_or(8u32)?;
             let handle = unsafe {
                 CreateFileW(
                     path.as_ptr(),
@@ -518,16 +554,16 @@ fn perform(request: Request) -> Result<Value> {
         Request::AclRelease { token } => {
             // Retain the closed token so a lost FFI response can be retried
             // without closing any subsequently reused OS handle.
-            if resources.file_retired(token) {
+            if resources.files.retired(token) {
                 return Ok(json!({"ok": true}));
             }
             resources
                 .files
+                .live
                 .get_mut(&token)
                 .ok_or(ERROR_INVALID_HANDLE)?
                 .close()?;
-            resources.files.remove(&token);
-            resources.remember_file_retirement(token);
+            resources.files.live.remove(&token);
             Ok(json!({"ok": true}))
         }
         Request::Launch {
@@ -540,9 +576,15 @@ fn perform(request: Request) -> Result<Value> {
             handles,
             flags,
         } => {
-            let process_token = resources.token()?; // Capacity BEFORE any effect.
-            let job = resources.jobs.get_mut(&token).ok_or(ERROR_INVALID_HANDLE)?;
-            if job.retired || job.launched {
+            resources.job_or_process_slot()?; // Capacity BEFORE any effect.
+            let process_token = resources.processes.next().ok_or(8u32)?;
+            let job = resources
+                .jobs
+                .live
+                .get(&token)
+                .ok_or(ERROR_INVALID_HANDLE)?;
+            let mut job = job.try_lock().map_err(|_| ERROR_BUSY)?;
+            if job.terminated || job.launched || job.handle.0 == 0 {
                 return Err(ERROR_INVALID_STATE);
             }
             // Even a failed/ambiguous FFI launch cannot be replayed in this scope.
@@ -558,6 +600,7 @@ fn perform(request: Request) -> Result<Value> {
                 flags,
             )?;
             let raw = process.0;
+            drop(job);
             resources.processes.insert(process_token, process);
             Ok(
                 json!({"ok": true, "process_token": process_token, "process_handle": raw, "pid": pid}),
@@ -599,10 +642,23 @@ struct BackupContext {
 }
 impl BackupContext {
     fn finish(&mut self) -> Result<()> {
-        let mut written = 0;
-        check(unsafe { BackupWrite(self.file, null(), 0, &mut written, 1, 1, &mut self.context) })?;
-        self.context = null_mut();
-        Ok(())
+        self.abort_once(|file, context| {
+            let mut written = 0;
+            check(unsafe { BackupWrite(file, null(), 0, &mut written, 1, 1, context) })
+        })
+    }
+
+    fn abort_once(
+        &mut self,
+        abort: impl FnOnce(HANDLE, &mut *mut c_void) -> Result<()>,
+    ) -> Result<()> {
+        // Once handed to Windows the outcome may be unknown on failure. Do not
+        // give Drop the same pointer again. Propagate the failed cleanup.
+        let mut context = std::mem::replace(&mut self.context, null_mut());
+        if context.is_null() {
+            return Ok(());
+        }
+        abort(self.file, &mut context)
     }
 }
 impl Drop for BackupContext {
@@ -686,7 +742,11 @@ pub fn acl(operation: u32, token: u64, input: &[u8], capacity: usize) -> Result<
         return Ok(bytes);
     }
     let resources = resources().lock().map_err(|_| ERROR_INVALID_STATE)?;
-    let file = resources.files.get(&token).ok_or(ERROR_INVALID_HANDLE)?;
+    let file = resources
+        .files
+        .live
+        .get(&token)
+        .ok_or(ERROR_INVALID_HANDLE)?;
     if file.0 == 0 {
         return Err(ERROR_INVALID_HANDLE);
     }
@@ -803,26 +863,89 @@ mod tests {
         assert!(matches!(result, Err(0x80070005)));
     }
     #[test]
-    fn retirement_ranges_preserve_holes_and_compact_repeated_trees() {
-        let mut value = Resources {
-            next: 1,
-            jobs: BTreeMap::new(),
-            processes: BTreeMap::new(),
-            files: BTreeMap::new(),
-            retired_files: BTreeMap::new(),
+    fn retirement_preserves_live_handle_after_accounting_or_close_failure() {
+        let mut job = Job {
+            handle: create_job(&[], 4, 128 * 1024 * 1024, 5).unwrap(),
+            launched: false,
+            terminated: false,
         };
-        for token in [5, 3, 4, 1] {
-            value.remember_file_retirement(token);
-        }
-        assert!(!value.file_retired(0));
-        assert!(!value.file_retired(2));
-        assert!(!value.file_retired(6));
-        value.remember_file_retirement(2);
-        for token in 6..100_000 {
-            value.remember_file_retirement(token);
-        }
-        assert_eq!(value.retired_files.len(), 1);
-        assert!(value.file_retired(99_999));
-        assert!(!value.file_retired(100_000));
+        assert_eq!(
+            job.retire(
+                |_| Ok(()),
+                |_| Err(5),
+                |_| panic!("closed without accounting")
+            ),
+            Err(5)
+        );
+        assert_ne!(job.handle.0, 0);
+        let no_retry = |_| panic!("termination already confirmed");
+        assert_eq!(
+            job.retire(no_retry, |_| Ok(false), |_| panic!("closed active Job")),
+            Ok(false)
+        );
+        assert_eq!(job.retire(no_retry, |_| Ok(true), |_| Err(6)), Err(6));
+        assert_ne!(job.handle.0, 0);
+        assert_eq!(
+            job.retire(no_retry, |_| Ok(true), KernelHandle::close),
+            Ok(true)
+        );
+        assert_eq!(
+            job.retire(
+                no_retry,
+                |_| panic!("queried retired Job"),
+                |_| panic!("closed twice")
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn retiring_job_does_not_hold_resource_registry_lock() {
+        let token = perform(Request::JobCreate {
+            recovery_id: String::new(),
+            processes: 4,
+            memory: 128 * 1024 * 1024,
+            cpu_seconds: 5,
+        })
+        .unwrap()["token"]
+            .as_u64()
+            .unwrap();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            retire_job(token, |job| {
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+                job.retire(
+                    |handle| check(unsafe { TerminateJobObject(handle, 1) }),
+                    wait_for_empty_job,
+                    KernelHandle::close,
+                )
+            })
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let free = resources().try_lock().is_ok();
+        resume.send(()).unwrap();
+        assert_eq!(worker.join().unwrap().unwrap()["complete"], true);
+        assert!(free);
+    }
+
+    #[test]
+    fn failed_backup_abort_is_not_replayed() {
+        let mut context = BackupContext {
+            file: null_mut(),
+            context: std::ptr::dangling_mut::<u8>().cast(),
+        };
+        assert_eq!(
+            context.abort_once(|_, pointer| {
+                assert!(!pointer.is_null());
+                Err(5)
+            }),
+            Err(5)
+        );
+        assert_eq!(
+            context.abort_once(|_, _| panic!("replayed ambiguous abort")),
+            Ok(())
+        );
     }
 }

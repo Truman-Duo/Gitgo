@@ -135,18 +135,26 @@ class NativeReadRoot(NativePinnedObject):
             raise ReadBoundaryError('Native safe read extension is unavailable')
         super().__init__(library, _call(library, op='read_root', path=_path(path)))
 
-    def _open(self, relative, metadata_only):
+    def _open(self, relative, metadata_only, *, allow_leaf_mount=False):
         parts = relative_parts(relative)
+        if type(allow_leaf_mount) is not bool:
+            raise ValueError('Invalid leaf mount option')
+        options = {}
+        if allow_leaf_mount:
+            if (sys.platform != 'linux' or
+                    self._library.call(op='capabilities').get('read_leaf_mount') is not True):
+                raise ReadBoundaryError('Native leaf mount reads are unavailable')
+            options['allow_leaf_mount'] = True
         with self._lock:
             if self._closed:
                 raise ValueError('Read root is closed')
             response = _call(self._library, op='read_open', token=self._token,
-                             path=_path(str(Path(*parts))), metadata_only=metadata_only)
+                             path=_path(str(Path(*parts))), metadata_only=metadata_only, **options)
             cls = NativePinnedObject if metadata_only else NativePinnedRead
             return cls(self._library, response)
 
     def pin(self, relative):
         return self._open(relative, True)
 
-    def open(self, relative):
-        return self._open(relative, False)
+    def open(self, relative, *, allow_leaf_mount=False):
+        return self._open(relative, False, allow_leaf_mount=allow_leaf_mount)

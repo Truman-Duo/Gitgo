@@ -104,18 +104,51 @@ fn absolute(raw: &[u8]) -> io::Result<()> {
 }
 #[cfg(target_os = "linux")]
 pub fn open(root: Arc<Root>, raw: &[u8], metadata_only: bool) -> io::Result<Opened> {
+    open_leaf_mount(root, raw, metadata_only, false)
+}
+#[cfg(target_os = "linux")]
+pub fn open_leaf_mount(
+    root: Arc<Root>,
+    raw: &[u8],
+    metadata_only: bool,
+    allow_leaf_mount: bool,
+) -> io::Result<Opened> {
+    let full = relative(raw)?;
+    let mut parents = Vec::new();
+    let (directory, leaf) = if allow_leaf_mount {
+        // Only the selected leaf may cross a bind mount. Ancestors still use
+        // BENEATH + NO_XDEV + NO_SYMLINKS + NO_MAGICLINKS, and stay pinned.
+        let path = Path::new(OsStr::from_bytes(raw));
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            parents.push(openat(
+                root.file.as_raw_fd(),
+                &relative(parent.as_os_str().as_bytes())?,
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                0x08 | 0x01 | 0x04 | 0x02,
+            )?);
+        }
+        let directory = parents
+            .last()
+            .map_or(root.file.as_raw_fd(), AsRawFd::as_raw_fd);
+        let leaf = path
+            .file_name()
+            .ok_or_else(|| boundary("invalid_relative_read_path"))?;
+        (directory, name(leaf.as_bytes())?)
+    } else {
+        (root.file.as_raw_fd(), full)
+    };
     let pin = openat(
-        root.file.as_raw_fd(),
-        &relative(raw)?,
+        directory,
+        &leaf,
         libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        0x08 | 0x01 | 0x04 | 0x02,
+        0x08 | (if allow_leaf_mount { 0 } else { 0x01 }) | 0x04 | 0x02,
     )?;
     let selected = snapshot(&pin)?;
     regular(&selected)?;
     if metadata_only {
         return Ok(Opened {
             file: pin,
-            _pins: vec![],
+            _pins: parents,
             readable: false,
             _root: root,
         });
@@ -130,9 +163,10 @@ pub fn open(root: Arc<Root>, raw: &[u8], metadata_only: bool) -> io::Result<Open
     if snapshot(&file)? != selected {
         return Err(boundary("readable_identity_changed"));
     }
+    parents.push(pin);
     Ok(Opened {
         file,
-        _pins: vec![pin],
+        _pins: parents,
         readable: true,
         _root: root,
     })

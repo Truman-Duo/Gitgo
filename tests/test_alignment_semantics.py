@@ -1064,10 +1064,11 @@ def test_malformed_original_question_returns_to_author_before_paid_semantic_revi
                'options': [{'label': label, 'principle': label, 'immediate_effect': label,
                             'downstream_effect': label, 'reversibility': 'Can change later'}
                            for label in ['Keep', 'Remove']]}
+    request['options'][1]['label'] = ''
     # Neither provider nor hooks are needed to reject a structural input error.
     result = AlignmentReview(p, SimpleNamespace(), None).check(
         'Choose prefix', proposed_questions=[request], trigger='question_proposal')
-    assert 'risks' in result['alignment_repair']
+    assert 'label' in result['alignment_repair']
     assert p.pending_decision is None
     assert (p.context_snapshot, p.session.host_ledger, p.status) == before
 

@@ -22,6 +22,8 @@ pub enum Request {
         token: u64,
         path: Vec<u8>,
         metadata_only: bool,
+        #[serde(default)]
+        allow_leaf_mount: bool,
     },
     #[serde(rename = "read_close")]
     ReadClose { token: u64 },
@@ -72,7 +74,7 @@ fn dispatch(raw: &[u8]) -> Value {
     if matches!(request, Request::Capabilities {}) {
         return json!({"ok": true, "abi": ABI, "platform": std::env::consts::OS,
             "windows_appcontainer": cfg!(windows), "linux_execution": false,
-            "macos_execution": false, "safe_read_version": 2,
+            "macos_execution": false, "safe_read_version": 2, "read_leaf_mount": cfg!(target_os = "linux"),
             "authority": "host-existing-permission-broker"});
     }
     let request = match request {
@@ -81,7 +83,15 @@ fn dispatch(raw: &[u8]) -> Value {
             token,
             path,
             metadata_only,
-        } => return safe_read::response(safe_read::open(token, &path, metadata_only)),
+            allow_leaf_mount,
+        } => {
+            return safe_read::response(safe_read::open(
+                token,
+                &path,
+                metadata_only,
+                allow_leaf_mount,
+            ));
+        }
         Request::ReadClose { token } => return safe_read::response(safe_read::close(token)),
         Request::ReadHash { token, max_bytes } => {
             return safe_read::response(safe_read::hash(token, max_bytes));
@@ -152,6 +162,8 @@ pub unsafe extern "C" fn gitgo_native_call(
     }
 }
 
+#[cfg(any(windows, test))]
+mod registry;
 #[cfg(windows)]
 mod windows;
 

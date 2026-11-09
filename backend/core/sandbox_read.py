@@ -132,8 +132,8 @@ class ReadRoot:
     def pin(self, relative: str):
         return self._native.pin(relative)
 
-    def open(self, relative: str):
-        return self._native.open(relative)
+    def open(self, relative: str, *, allow_leaf_mount=False):
+        return self._native.open(relative, allow_leaf_mount=allow_leaf_mount)
 
     def close(self):
         self._native.close()
