@@ -180,10 +180,10 @@ def confirm_with_actual_ui(store, env, expected_status, *, automatic=False, deta
         assert open_managed(store.root).recover().status != "busy"
 
 
-@pytest.mark.parametrize("fault", ["upgrade", "startup-failure", "startup-timeout"])
+@pytest.mark.parametrize("fault", ["upgrade-1", "upgrade-2", "upgrade-3", "startup-failure", "startup-timeout"])
 def test_actual_mac_launcher_updates_after_exit_in_same_boot(actual_lab, fault):
     store, prepare, boot, before, old, new, env = actual_lab
-    broken = fault != "upgrade"
+    broken = fault.startswith("startup-")
     prepare(broken=fault == "startup-failure", startup_timeout=fault == "startup-timeout")
     boot_id = deferred.boot_session()
     confirm_with_actual_ui(store, env, "rolled_back" if broken else "committed",

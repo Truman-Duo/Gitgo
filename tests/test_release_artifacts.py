@@ -12,7 +12,7 @@ import zipfile
 
 
 @pytest.mark.parametrize("version", ["1.0.0-alpha.3.1","1.0.0-alpha.3.2","1.0.0-alpha.3.3","1.0.0-alpha.4","2.0.0","2.0.0-beta.4+ci"])
-@pytest.mark.parametrize("platform", ["windows","linux"])
+@pytest.mark.parametrize("platform", ["windows","linux","macos"])
 def test_two_version_ci_derives_a_real_successor_without_selecting_a_release(version,platform):
     from backend.core.update.version import Version
     baseline = {"version":version,"windows_version":"1.0.0.5","primary_command":"gitgo"}

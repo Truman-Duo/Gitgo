@@ -13,7 +13,7 @@ import uuid
 
 from .persistence import atomic_control, lock_file, read_control, sync_directory
 from .validation import fields, reject, text, UpdateError
-from .bootstrap_contract import MACOS_QUIT_API
+from .bootstrap_contract import MACOS_QUIT_API, MACOS_PROBE_BROKER_API
 
 SESSION_ENV = "GITGO_UPDATE_LAUNCH_SESSION"
 HANDOFF_EXIT = 75
@@ -52,7 +52,7 @@ def platform_ready(store):
 
 def macos_update_on_exit(store):
     return (sys.platform == "darwin" and store.registration["platform"] == "macos"
-            and store.registration.get("bootstrap_api") == MACOS_QUIT_API)
+            and store.registration.get("bootstrap_api") in (MACOS_QUIT_API, MACOS_PROBE_BROKER_API))
 
 
 def exit_scope_ready(store, cleanup):

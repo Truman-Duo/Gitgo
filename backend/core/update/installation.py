@@ -474,8 +474,8 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
         reject("UPDATE_BOOTSTRAP_ROLE", "Managed lifecycle requires the stable installed bootstrap")
     store = open_managed(physical[0])
     from .bootstrap_contract import ENGINE_DELEGATION_APIS
-    # The new macOS bootstrap drives the transaction itself. A forkless
-    # delegated engine cannot spawn the separately contained health probes.
+    # The immutable launcher owns process scope; API 13 brokers bounded probes
+    # for the replaceable engine without permitting that engine to fork.
     delegated = store.registration["bootstrap_api"] in ENGINE_DELEGATION_APIS
     if delegated:
         from .coordinator import recover_if_pending
@@ -534,6 +534,10 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
                     from .coordinator import dispatch
                     try:
                         result = dispatch(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None), automatic=True)
+                        if update_on_quit and result.status not in {"idle", "disabled", "up_to_date"}:
+                            from backend.core.protocol_io import dump_protocol_json
+                            print(dump_protocol_json({"update_status": result.status, "version": result.version,
+                                                      "error_code": result.error_code}), file=sys.stderr, flush=True)
                         if result.status not in {"idle", "committed", "up_to_date", "disabled"}:
                             print("Automatic update deferred: " + (result.error_code or result.status), file=sys.stderr, flush=True)
                     except Exception as error:
