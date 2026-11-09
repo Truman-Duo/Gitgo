@@ -2,12 +2,23 @@
 import json
 from pathlib import Path
 import pytest
-from scripts.check_unix_release_delivery import TARGETS, policy, validate_published_identity
+from scripts.check_unix_release_delivery import TARGETS, policy, validate_published_identity, validate_handoff_strategy
 from types import SimpleNamespace
 from backend.core.update.manifest import TARGETS as UPDATE_TARGETS
 from backend.core.update.release_policy import parse_release_policy
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("api,expected", [(6,"after_reboot"), (9,"after_reboot"), (11,"after_reboot"),
+                                          (12,"immediate"), (13,"immediate")])
+def test_native_delivery_checks_actual_macos_launcher_capability(monkeypatch, api, expected):
+    import sys
+    monkeypatch.setattr(sys, "platform", "darwin")
+    registration = {"platform":"macos", "bootstrap_api":api}
+    assert validate_handoff_strategy(registration, expected) == expected
+    with pytest.raises(ValueError, match="handoff strategy"):
+        validate_handoff_strategy(registration, "immediate" if expected == "after_reboot" else "after_reboot")
 
 def test_all_declared_unix_targets_are_accounted_for():
     assert TARGETS == {target for target in UPDATE_TARGETS if target[0] != "windows"}
