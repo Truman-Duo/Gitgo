@@ -9,7 +9,7 @@ import json
 from decimal import Decimal
 
 from backend.core.loop.evidence_applicability import EvidenceApplicability
-from .data import aggregate, aggregate_value, parse_json, snapshot_json, text_digest
+from .data import aggregate, aggregate_value, encode_json, parse_json, pointer, snapshot_json, text_digest
 from backend.core.storage.redaction import redact_for_persistence
 from .sheets import RevisionConflict, _identifier, _text
 
@@ -24,6 +24,13 @@ class InvalidData(ValueError):
 
 SOURCE_KINDS = {"context_source", "provided_data", "tool_result_source"}
 MAX_RESULT_DEPTH = 16
+WORKBENCH_RECORDS = {"gitgo.workbench.python.v1", "gitgo.workbench.cloc.v1"}
+
+
+def applicable_as_declared(assessment, basis):
+    return assessment["state"] == "current" or (
+        basis == "historical" and assessment["reason"] == "source_version_changed")
+
 
 class SourceWorkbench:
     def __init__(self, sheets, contexts, current_context=lambda: {}):
@@ -123,12 +130,15 @@ class SourceWorkbench:
                 "snapshot_sha256": text_digest(snapshot), "origin_digest": text_digest(raw),
                 "redacted": redacted, "scope": {"workspace_path": str(self.contexts.workspace)},
                 "origin": "registered immutable tool output; not evidence of present external state"}
+        parsed = parse_json(snapshot)
+        if isinstance(parsed, dict) and isinstance(parsed.get("kind"), str) and parsed["kind"] in WORKBENCH_RECORDS:
+            meta["workbench_record"] = True
         self._append(document, {"id": cell_id, "cell_type": "raw",
                               "metadata": {"gitgo": meta}, "source": snapshot})
         committed = self.sheets.commit(sheet_id, document, expected_revision)
         return {**committed, "cell_id": cell_id, "source_ref": locator, "applicability": self._assess_source(meta)}
 
-    def _assess_source(self, meta, *, context=None, reference_cache=None):
+    def _assess_source(self, meta, *, context=None, reference_cache=None, depth=0, budget=None):
         if meta.get("kind") == "provided_data":
             return {"state": "needs_recheck", "reason": "model_assembled_data",
                     "scope_note": "Exact calculation is conditional on this supplied data; transcription, classification and completeness were not independently checked."}
@@ -139,6 +149,9 @@ class SourceWorkbench:
                 storage = get_storage(self.contexts.workspace)
             try:
                 raw = self._read_result(storage, meta["ref"], meta["owner_process_id"])
+                if meta.get("workbench_record") and text_digest(raw) == meta["origin_digest"]:
+                    return self.assess_record(parse_json(raw), context=context,
+                                              owner_process_id=meta["owner_process_id"], depth=depth, budget=budget)
             except (KeyError, ValueError, OSError):
                 return {"state": "needs_recheck", "reason": "tool_result_unavailable"}
             return {"state": "current" if text_digest(raw) == meta["origin_digest"] else "needs_recheck",
@@ -170,6 +183,47 @@ class SourceWorkbench:
                 info["depends_on"] != meta["depends_on"] or info["producer"] != meta["producer"]):
             assessment = {"state": "needs_recheck", "reason": "source_metadata_changed"}
         return {**assessment, "scope_note": "Version/dependency applicability only; not semantic verification or proof of source freshness in the external world."}
+
+    def assess_record(self, record, *, context=None, owner_process_id=None, depth=0, budget=None):
+        current = {"state": "current", "reason": "stored_tool_result_identity",
+                   "scope_note": "Recorded output and declared inputs only. Source semantics and completeness are separate."}
+        if not isinstance(record, dict) or not isinstance(record.get("kind"), str) or record["kind"] not in WORKBENCH_RECORDS:
+            return current
+        budget = [64] if budget is None else budget
+        budget[0] -= 1
+        if (depth >= MAX_RESULT_DEPTH or budget[0] < 0
+                or record.get("snapshot_state") not in ("stable", "recorded")):
+            return {"state": "needs_recheck", "reason": "workbench_input_limited"}
+        context = self.current_context() if context is None else context
+        if record["kind"] == "gitgo.workbench.cloc.v1":
+            from .code_size import SCAN_VERSIONS
+            scope, digest = record.get("scope_key"), record.get("snapshot_sha256")
+            if not isinstance(scope, str) or not isinstance(digest, str):
+                return {"state": "needs_recheck", "reason": "workbench_input_unavailable"}
+            latest = (context.get(SCAN_VERSIONS) or {}).get(scope)
+            if latest and latest["digest"] != digest:
+                return {"state": "needs_recheck", "reason": "source_version_changed"}
+            if latest and latest["state"] != "stable":
+                return {"state": "needs_recheck", "reason": "workbench_input_limited"}
+            return current
+        try:
+            for evidence in record["inputs"].values():
+                if evidence["redacted"]:
+                    return {"state": "needs_recheck", "reason": "workbench_input_limited"}
+                if "cell" in evidence:
+                    _, resolved = self.compute_input(evidence["cell"], evidence["selector"],
+                                                     context=context, depth=depth + 1, budget=budget)
+                    assessment = resolved["applicability"]
+                else:
+                    raw = self._read_result(self.sheets.storage, evidence["locator"],
+                                            owner_process_id or self.sheets.process_id)
+                    assessment = self.assess_record(parse_json(raw), context=context,
+                                                    owner_process_id=owner_process_id, depth=depth + 1, budget=budget)
+                if not applicable_as_declared(assessment, evidence.get("basis", "current")):
+                    return assessment
+        except (AttributeError, KeyError, TypeError, ValueError, OSError):
+            return {"state": "needs_recheck", "reason": "workbench_input_unavailable"}
+        return current
 
     def _pinned_cells(self, ref, documents):
         if not isinstance(ref, dict) or set(ref) != {"sheet_id", "revision", "cell_id"}:
@@ -220,6 +274,24 @@ class SourceWorkbench:
         return {**json.loads(cell["source"]), "result_ref": dict(ref),
                 "dependencies": deepcopy(dependencies), "source": deepcopy(source),
                 "applicability": self._assess_source(source, context=context)}
+
+    def compute_input(self, ref, selector="", *, context=None, depth=0, budget=None):
+        documents = {}
+        cells = self._pinned_cells(ref, documents)
+        cell = cells.get(ref["cell_id"])
+        if cell is None:
+            raise SourceUnavailable("calculation input is missing")
+        source, dependencies = self._lineage(cell, cells, documents)
+        if cell["metadata"]["gitgo"]["kind"] == "computed_value":
+            result = json.loads(cell["source"])["result"]
+            value = (parse_json(result["value"]) if result["value_type"] == "scalar_set_json"
+                     else Decimal(result["value"]))
+        else:
+            value = parse_json(cell["source"])
+        encoded = encode_json(pointer(value, selector))
+        return encoded, {"cell": dict(ref), "selector": selector, "sha256": text_digest(encoded),
+                         "dependencies": dependencies, "redacted": source["redacted"],
+                         "applicability": self._assess_source(source, context=context, depth=depth, budget=budget)}
 
     def assessments(self, document):
         cells = {c["id"]: c for c in document["cells"]}

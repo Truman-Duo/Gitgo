@@ -119,6 +119,7 @@ HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
   --name gitgo-host \
   --paths "$ROOT" --collect-submodules backend \
   --hidden-import backend.core.tools.registrations \
+  --hidden-import csv --hidden-import fractions --hidden-import statistics \
   --add-data "$ROOT/backend/resources/keyboard:backend/resources/keyboard" \
   --add-data "$ROOT/backend/resources/prompts:backend/resources/prompts" \
   --distpath "$STAGE/internal" \
@@ -129,6 +130,11 @@ HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
 "$PYTHON_BIN" -B "$ROOT/scripts/stage_search_engine.py" \
   --binary "$RIPGREP_BIN" --notices "$RIPGREP_NOTICES" \
   --destination "$STAGE/internal/gitgo-host"
+
+if [ -n "${GITGO_CLOC_BUNDLE:-}" ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/stage_workbench_cloc.py" \
+    --bundle "$GITGO_CLOC_BUNDLE" --destination "$STAGE/internal/gitgo-host"
+fi
 
 "$PYTHON_BIN" -B "$ROOT/scripts/render_product_manifest.py" \
   --source "$SCRIPT_DIR/product.json" \

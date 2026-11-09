@@ -137,14 +137,18 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                         "message": "Execution output was retained; inspect completed effects before any repeat."})
             return result
 
-    def preview(self, handler, inputs, timeout, *, trusted_arguments, copy_inputs, diagnostics, input_names=()):
+    def preview(self, handler, inputs, timeout, *, trusted_arguments, copy_inputs, diagnostics, input_names=(), input_image=None):
         """Disposable native execution; never stores or publishes output files."""
-        if handler not in {"authored_python", "authored_privileged_python", "authored_host_python", "run_test", "run_publish_plugins", "run_publish_build"} or any(
+        if handler not in {"authored_python", "authored_privileged_python", "authored_host_python", "run_test", "run_publish_plugins", "run_publish_build",
+                           "workbench_python", "workbench_cloc"} or any(
                 k not in {"_dynamic_spec", "_host_results"} for k in trusted_arguments):
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "Unknown private self-test contract")
+        if input_image is not None and (handler != "workbench_cloc" or copy_inputs):
+            raise SandboxDenied("SANDBOX_POLICY_INVALID", "An explicit input image is only supported by code analysis")
         self.trusted_arguments = json.loads(_encode(trusted_arguments))
         self.result_kind, self.collect_outputs, self.copy_inputs = "authored", False, copy_inputs
         self.input_names = tuple(input_names)
+        self.input_image = input_image
         return self._produce(handler, inputs, timeout, diagnostics)
 
     def _produce(self, handler, public, timeout, diagnostics):
@@ -155,7 +159,9 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
             raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "Prior native resources require inspection")
         root = Path(self.workspace).resolve()
         from backend.core.tools.workspace_projection import WorkspaceImage
-        before = capture(root) if self.copy_inputs else WorkspaceImage((), ())
+        before = getattr(self, "input_image", None)
+        if before is None:
+            before = capture(root) if self.copy_inputs else WorkspaceImage((), ())
         project_root = self.storage.paths.project_root.resolve()
         from .candidate_workspace import allocate_candidate_workspace
         stages, stage = allocate_candidate_workspace(self.storage.paths, "workspace", workspace=self.workspace)

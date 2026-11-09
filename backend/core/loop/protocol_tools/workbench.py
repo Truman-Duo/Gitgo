@@ -1,7 +1,7 @@
 """Workbench application tool and a narrowly scoped legacy arithmetic adapter."""
 from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 from backend.core.errors import error_payload
-from backend.core.loop.agent_tool import AgentTool, ToolEffect
+from backend.core.loop.agent_tool import AgentTool, ApprovalMode, CancellationMode, ToolEffect
 from backend.core.prompt_templates import load_prompt
 from backend.core.workbench.calculation import safe_calculate
 
@@ -176,6 +176,41 @@ def install(ctx):
         # engineering_workflow. No user workspace files or execution receipts
         # are modified. Sheet creation is not idempotent and must not be replayed.
         execute=execute, read_only=True, effect=ToolEffect.READ, idempotent=False)
+
+    def compute_requires_pipeline(args):
+        return error_payload("WORKBENCH_UNAVAILABLE", message="Workbench execution requires the admitted tool pipeline.")
+
+    ctx.tools["workbench_compute"] = AgentTool(
+        name="workbench_compute", description=load_prompt("tools/workbench_compute"),
+        execution_contract=data_broker("runtime.workbench.compute"),
+        execute=compute_requires_pipeline, read_only=False, effect=ToolEffect.PROCESS,
+        approval=ApprovalMode.ASK, approval_per_invocation=True,
+        cancellation=CancellationMode.COOPERATIVE, timeout=60,
+        parameters={"type": "object", "required": ["operation"], "additionalProperties": False,
+            "properties": {
+                "operation": {"type": "string", "enum": ["python", "code_size"]},
+                "code": {"type": "string", "minLength": 1, "maxLength": 24000},
+                "inputs": {"type": "array", "maxItems": 8, "items": {"type": "object",
+                    "required": ["name"], "additionalProperties": False, "properties": {
+                        "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,47}$"},
+                        "cell": _RESULT_REF, "locator": {"type": "string"},
+                        "basis": {"type": "string", "enum": ["current", "historical"]},
+                        "selector": {"type": "string", "maxLength": 500}},
+                    "oneOf": [{"required": ["cell"]}, {"required": ["locator"]}]}},
+                "outputs": {"type": "array", "minItems": 1, "maxItems": 12, "items": {"type": "object",
+                    "required": ["name"], "additionalProperties": False, "properties": {
+                        "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,47}$"},
+                        "unit": {"type": "string", "maxLength": 80}}}},
+                "path": {"type": "string", "minLength": 1, "maxLength": 500},
+                "include_untracked": {"type": "boolean"},
+                "exclude": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 500}},
+            },
+            "oneOf": [
+                {"properties": {"operation": {"const": "python"}}, "required": ["code", "inputs", "outputs"],
+                 "not": {"anyOf": [{"required": [name]} for name in ("path", "include_untracked", "exclude")]}},
+                {"properties": {"operation": {"const": "code_size"}}, "required": ["path"],
+                 "not": {"anyOf": [{"required": [name]} for name in ("code", "inputs", "outputs")]}},
+            ]})
 
     # Explicit old allowlists retain their original arithmetic authority only.
     def legacy_calculate(args):
