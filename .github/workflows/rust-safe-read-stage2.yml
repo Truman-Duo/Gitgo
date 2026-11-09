@@ -39,7 +39,8 @@ jobs:
           python -B -m pytest tests/test_sandbox_read_native.py tests/test_sandbox_read.py
           tests/test_sandbox_read_darwin.py tests/test_read_approval.py
           tests/test_read_execution_plan.py tests/test_implementation_identity.py
-          tests/test_native_sandbox_abi.py tests/test_runtime_cleanup_evidence.py -q --tb=short
+          tests/test_native_sandbox_abi.py tests/test_runtime_cleanup_evidence.py
+          tests/test_native_source_runtime_fixture.py -q --tb=short
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: runner.os == 'Windows'
         with:
