@@ -173,6 +173,14 @@ class ProbeServer:
                     or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
                     or descriptor_identity(fd) != identity):
                 reject("UPDATE_PROBE_LEASE", "Probe lease differs from the installation")
+            # The inode identifies the installation, not the held reservation.
+            # A separately opened fd must not masquerade as the engine's
+            # exclusive open-file description if that engine dies mid-probe.
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                reject("UPDATE_PROBE_LEASE", "Probe lacks the engine's exclusive installation lease")
         return program, profile
 
     def poll(self):

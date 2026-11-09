@@ -82,7 +82,7 @@ print('engine-complete')
         assert proc._gitgo_cleanup["complete"] is True
 
 
-@pytest.mark.parametrize("change", ["shell", "outside", "bad-lease", "large", "unknown-field"])
+@pytest.mark.parametrize("change", ["shell", "outside", "bad-lease", "unleased-inode", "large", "unknown-field"])
 def test_broker_denies_invalid_requests_before_any_probe(broker_lab, monkeypatch, change):
     import array
     store, lease, program, profile = broker_lab
@@ -99,6 +99,8 @@ def test_broker_denies_invalid_requests_before_any_probe(broker_lab, monkeypatch
         request["environment"] = {"PATH": "/attacker"}
     elif change == "large":
         pass  # An oversized length prefix is rejected before reading a body.
+    elif change == "unleased-inode":
+        other = os.open(store.root / "control/runtime.lock", os.O_RDWR)
     else:
         other = os.open(store.root / "unrelated.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
