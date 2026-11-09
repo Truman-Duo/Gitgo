@@ -133,7 +133,11 @@ def _related(raw):
 def prepare_contract_state(process, contract, proposal, workflow):
     """Pure preparation, installed with the task contract's one checkpoint."""
     before = state_for(process)
-    if not before and not contract.get("mechanism") and not process.runtime_preferences.get("task_maintenance_enabled"):
+    update = proposal.get("maintenance") or {}
+    if not isinstance(update, dict):
+        raise ValueError("maintenance update must be an object")
+    if not before and not contract.get("mechanism") and not (
+            process.runtime_preferences.get("task_maintenance_enabled") or update.get("plan")):
         return None
     state = before or _initial(process)
     definition = contract.get("mechanism") or state.get("definition")
@@ -158,9 +162,6 @@ def prepare_contract_state(process, contract, proposal, workflow):
         state["definition"] = deepcopy(definition)
         if proposal.get("mechanism"):
             state["detached"] = False
-    update = proposal.get("maintenance") or {}
-    if not isinstance(update, dict):
-        raise ValueError("maintenance update must be an object")
     if len(json.dumps(update, default=str).encode()) > 96000:
         raise ValueError("maintenance proposal exceeds task control-plane budget")
     if update and (type(update.get("expected_revision")) is not int or update["expected_revision"] != state["revision"]):
@@ -182,8 +183,12 @@ def prepare_contract_state(process, contract, proposal, workflow):
         state['plan_review'] = {**deepcopy(plan_review), 'plan_revision': state['plan']['revision'],
             'contract_revision': contract['revision'], 'maintenance_ids': list(update.get('resolve_maintenance') or [])}
     if update.get("plan") is not None:
+        epochs = state["plan"].get("evidence_revisions", {})
         state["plan"] = {**_plan(update["plan"]), "revision": state.get("plan", {}).get("revision", 0) + 1,
                          "contract_revision": contract["revision"]}
+        if epochs:
+            state["plan"]["evidence_revisions"] = {step["id"]: epochs[step["id"]]
+                for step in state["plan"]["steps"] if step["id"] in epochs}
     if update.get("related_review") is not None:
         review = _related(update["related_review"])
         previous_candidates = state.get("related", {}).get("candidates", {})
@@ -228,6 +233,10 @@ def prepare_contract_state(process, contract, proposal, workflow):
     resolutions = update.get("resolve_changes") or []
     if not isinstance(resolutions, list) or len(resolutions) > 64:
         raise ValueError("change resolutions must be bounded")
+    plan_ids = {step["id"] for step in state["plan"].get("steps", [])}
+    linked_ids = {node["work_item_id"] for node in ((workflow or {}).get("plan") or {}).get("nodes", [])
+                  if "work_item_id" in node}
+    renewed = set()
     for item in resolutions:
         change = state["changes"].get(item.get("id")) if isinstance(item, dict) else None
         withdraw_adopted = isinstance(item, dict) and item.get("disposition") == "withdraw" and change and change["status"] == "adopted"
@@ -247,6 +256,13 @@ def prepare_contract_state(process, contract, proposal, workflow):
             raise ValueError("invalid change disposition")
         if disposition == "withdraw":
             _withdrawal_source(process, item, after=change.get("authority_sequence", 0))
+        named = item.get("work_item_ids")
+        if named is not None and (not isinstance(named, list) or not named or len(named) > 64
+                or any(not isinstance(name, str) or name not in plan_ids for name in named)
+                or not change.get("user_adopted")):
+            raise ValueError("work_item_ids must name current plan steps for an actual adopted user change")
+        if change.get("user_adopted") and linked_ids:
+            renewed.update(named if named is not None else linked_ids & plan_ids)
         change.update(status="withdrawn" if disposition == "withdraw" else "adopted", resolution=deepcopy(item), contract_revision=contract["revision"],
                       plan_revision=state["plan"]["revision"])
     for identifier in update.get("resolve_maintenance") or []:
@@ -259,6 +275,12 @@ def prepare_contract_state(process, contract, proposal, workflow):
         retained = {dep["kind"] + ":" + dep["id"] for dep in state["plan"].get("dependencies", [])}
         if source in retained and str(state.get("dependency_versions", {}).get(source, "")).startswith("unavailable:"):
             raise ValueError("cannot mark an unavailable retained dependency as reconciled")
+        if linked_ids:
+            tools = set(item.get("affected_tools") or ([item["tool_name"]] if item.get("tool_name") else []))
+            matches = {step["id"] for step in state["plan"]["steps"] if tools.intersection(step.get("tools", []))}
+            matches.update(node["work_item_id"] for node in workflow["plan"]["nodes"] if "work_item_id" in node
+                           and (node.get("tool_name") in tools or tools.intersection(node.get("tools", []))))
+            renewed.update(matches or linked_ids & plan_ids)
         item.update(status="resolved", contract_revision=contract["revision"], attempts=item.get("attempts", 0) + 1)
     state["revision"] += 1
     state["epoch"] += 1
@@ -267,6 +289,7 @@ def prepare_contract_state(process, contract, proposal, workflow):
     needs_related = enabled(definition, "task.related_work") is not None and (not state.get("related", {}).get("summary") or state.get("review_requirements", {}).get("related", False)) and not update.get("related_review")
     # A changed goal/acceptance basis requires another semantic review, not a text append.
     from .task_contract import semantic_contract, get_task_contract
+    from .engineering_workflow import declared_plan
     def scope_basis(value):
         # Reconciliation commands are audit input, not new requirements. Their
         # changing plan/status must still invalidate Grill's delivery review,
@@ -274,9 +297,27 @@ def prepare_contract_state(process, contract, proposal, workflow):
         # Definition/control revisions have their own lifecycle validation.
         # They are not new business scope; newly enabled plan/related-work
         # elements are checked by needs_plan/needs_related above.
-        return digest({k: v for k, v in semantic_contract(value).items()
-                       if k not in {"maintenance_intent", "mechanism"}})
+        basis = {k: v for k, v in semantic_contract(value).items()
+                 if k not in {"maintenance_intent", "mechanism"}}
+        if basis.get("engineering_workflow"):
+            plan = declared_plan(basis["engineering_workflow"])
+            basis["engineering_workflow"] = {**{k: v for k, v in plan.items() if k not in {"nodes", "digest"}},
+                "nodes": [{k: (sorted(v) if k == "depends_on" else v) for k, v in node.items() if k != "work_item_id"}
+                          for node in sorted(plan["nodes"], key=lambda n: n["id"])]}
+        return digest(basis)
     previous_contract = get_task_contract(process)
+    if before and not renewed:
+        def obligation(value, key):
+            selected = value.get(key)
+            return sorted(digest(item) for item in selected) if isinstance(selected, list) else selected
+        fields = ("goal", "acceptance_criteria", "deliverables", "required_tool_calls", "required_workbench_claims")
+        if any(obligation(previous_contract, key) != obligation(contract, key) for key in fields):
+            renewed.update(linked_ids & plan_ids)
+        elif obligation(before.get("plan", {}), "dependencies") != obligation(state["plan"], "dependencies"):
+            renewed.update(linked_ids & plan_ids)
+    if renewed:
+        state["plan"].setdefault("evidence_revisions", {}).update(
+            {name: contract["revision"] for name in renewed})
     previous_basis = scope_basis(previous_contract) if before and previous_contract.get("revision") else None
     basis = scope_basis(contract)
     changed = bool(previous_basis and previous_basis != basis)
@@ -289,13 +330,17 @@ def prepare_contract_state(process, contract, proposal, workflow):
     state["contract_basis"] = basis
     state["phase"] = "needs_review" if pending or needs_plan or needs_related else "ready"
     state["review_requirements"] = {"plan": needs_plan, "related": needs_related}
+    return state
+
+
+def refresh_manifest(process, state, contract, workflow_plan):
+    from .task_contract import semantic_contract
     state["manifest"] = {"epoch": state["epoch"], "task_id": task_id(process), "contract_revision": contract["revision"],
         "contract_digest": digest(semantic_contract(contract)), "catalog_version": CATALOG_VERSION,
-        "definition_digest": (definition or {}).get("digest"), "plan_revision": state["plan"].get("revision", 0),
-        "workflow_digest": (workflow or {}).get("plan", {}).get("digest"), "phase": state["phase"],
+        "definition_digest": (state.get("definition") or {}).get("digest"), "plan_revision": state["plan"].get("revision", 0),
+        "workflow_digest": (workflow_plan or {}).get("digest"), "phase": state["phase"],
         "task_kind": process.task_kind, "capability_profile_id": process.capability_profile_id}
     state["manifest"]["digest"] = digest(state["manifest"])
-    return state
 
 
 def _withdrawal_source(process, resolution, *, after=0):
@@ -428,7 +473,10 @@ def inspect(process):
 
 def _inspect_current(process):
     from .task_contract import get_task_contract
+    from .engineering_workflow import EngineeringWorkflow, work_item_links
     state = state_for(process)
+    workflow = EngineeringWorkflow(process)._load()
+    links = work_item_links(state.get("plan", {}), workflow.get("plan", {}).get("nodes", []))
     from .completion_protocol import _current_task_receipts
     from .operation_policy import is_effectful_mutation
     receipts = [r for r in _current_task_receipts(process) if r.get("committed") is True and r.get("succeeded") is True
@@ -457,6 +505,7 @@ def _inspect_current(process):
         "advancement": projection(process),
         "user_control_precedence": "Persisted advancement.user_control is a real user selection. Its authority_sequence supersedes earlier source receipts about advancement only. A pinned definition is not permission to reset a newer selection.",
         "state": state, "owned_scope_updates": owned_updates,
+        **({"work_item_links": links} if links else {}),
         "source_refs": list(source_receipts(process)), "catalog_version": CATALOG_VERSION,
         "extensions": __import__("backend.core.mechanism_runtime.application", fromlist=["projection"]).projection(process),
         "consumer_projection": deepcopy(getattr(process, "_mechanism_projection", {})),

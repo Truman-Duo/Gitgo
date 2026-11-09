@@ -4,6 +4,8 @@ Initial declare requires only goal, execution_mode, deliverables and acceptance_
 
 Use one concise business plan (plan) with meaningful work and verification. engineering_workflow is optional extra evidence policy; do not translate every plan step into a second DAG. For a suitable registered practice, supply its concrete test/path inputs and let Runtime generate node ids and dependencies. A change node means an actual file mutation and requires files; mechanism configuration belongs in the business plan, not a fake file-change node. A check requires an actual registered test_id and passed boolean; never invent a test identity. Configure custom nodes only when their evidence relationships are genuinely needed.
 
+When a custom evidence node belongs to a business plan step, set work_item_id to that step's exact id. Several nodes may reference the same step. Runtime adds edges to evidence for prerequisite steps. Supply depends_on only for additional engineering order, such as sequencing two nodes within the same step. Retain stable step ids when reordering. Use work_item_links from status to align old nodes explicitly. For an adopted change, resolve_changes[].work_item_ids can name the current steps that need fresh evidence even if their descriptions still fit. Keep unaffected steps and their ids.
+
 General examples (replace goals, paths, tests and choices with actual task facts; these examples grant no authority):
 
 Initial bounded work:

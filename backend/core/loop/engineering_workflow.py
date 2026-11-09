@@ -42,6 +42,8 @@ def plan_schema():
     node = {"type": "object", "required": ["id", "kind"], "properties": {
         "id": {"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},
         "kind": {"enum":list(KINDS)}, "depends_on":{"type":"array","items":{"type":"string"}},
+        "work_item_id":{"type":"string","minLength":1,"maxLength":96,
+            "description":"Exact id of a task plan step. Runtime adds dependencies on the prerequisite work items."},
         "files":{"type":"array","minItems":1,"items":{"type":"string"}},
         "test_id":{"type":"string","minLength":1}, "passed":{"type":"boolean"},
         "tool_name":{"enum":["run_test","exec_command"]},
@@ -149,12 +151,84 @@ def _path(root: Path, raw: str) -> Path:
     return target
 
 
-def compile_plan(raw: dict, root: str | Path) -> dict:
+def declared_plan(plan):
+    """Recover the author-supplied graph from a bound workflow."""
+    if "work_item_bindings" not in plan:
+        return plan
+    raw = {k: copy.deepcopy(v) for k, v in plan.items() if k not in {"work_item_bindings", "digest"}}
+    explicit = plan["work_item_bindings"]["declared_dependencies"]
+    for node in raw["nodes"]:
+        if node["id"] in explicit:
+            node["depends_on"] = explicit[node["id"]]
+    raw["digest"] = _plan_digest(raw)
+    return raw
+
+
+def _plan_digest(plan):
+    return hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+
+
+def work_item_links(work_plan, nodes):
+    if not work_plan.get("steps") or not nodes:
+        return {}
+    links = {step["id"]: [] for step in work_plan["steps"]}
+    unmapped = []
+    for node in nodes:
+        if node.get("work_item_id") in links:
+            links[node["work_item_id"]].append(node["id"])
+        else:
+            unmapped.append(node["id"])
+    return {"by_work_item": links, "unmapped_nodes": unmapped,
+            **({"alignment_hint": "When a node belongs to a task step, revise the contract with its exact work_item_id."
+                " Preserve the existing evidence predicates."} if unmapped else {})}
+
+
+def _bind_work_items(nodes, work_plan):
+    from .mechanism_catalog import digest
+    items = {item["id"]: item for item in (work_plan or {}).get("steps", [])}
+    epochs = (work_plan or {}).get("evidence_revisions", {})
+    linked = {}
+    for node in nodes:
+        item = node.get("work_item_id")
+        if item is not None:
+            if item not in items:
+                raise ValueError(f"workflow node {node['id']} references unknown work item {item}")
+            linked.setdefault(item, []).append(node["id"])
+
+    @lru_cache(maxsize=64)
+    def ancestors(item):
+        direct = items[item].get("depends_on", [])
+        return set(direct).union(*(ancestors(parent) for parent in direct))
+
+    @lru_cache(maxsize=64)
+    def version(item):
+        fields = {key: sorted(set(value)) if isinstance(value, list) else value
+                  for key, value in items[item].items()}
+        return digest({"step": fields, "evidence_revision": epochs.get(item, 0),
+                       "prerequisites": {d: version(d) for d in fields.get("depends_on", [])}})
+
+    explicit, versions = {}, {}
+    for node in nodes:
+        item = node.get("work_item_id")
+        if item is None:
+            continue
+        deps = node["depends_on"]
+        generated = sorted({name for parent in ancestors(item) for name in linked.get(parent, [])})
+        if any(name not in deps for name in generated):
+            explicit[node["id"]] = list(deps)
+            node["depends_on"] = list(dict.fromkeys([*deps, *generated]))
+        versions[node["id"]] = version(item)
+    return {"declared_dependencies": explicit, "node_versions": versions}
+
+
+def compile_plan(raw: dict, root: str | Path, *, work_plan=None, defer_links=False) -> dict:
     """Validate the entire proposal before publishing any part of it."""
     if not isinstance(raw, dict):
         raise ValueError("configure requires a top-level plan object; content is not the plan parameter")
     if raw.get("schema_version", 1) != 1:
         raise ValueError("unsupported engineering workflow schema_version; expected 1")
+    if "work_item_bindings" in raw:
+        raise ValueError("work item bindings are Runtime-owned")
     if len(json.dumps(raw, ensure_ascii=False).encode("utf-8")) > 64_000:
         raise ValueError("engineering workflow exceeds 64KB")
     if "nodes" not in raw:
@@ -176,11 +250,14 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
         if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) or name in ids:
             raise ValueError("workflow node ids must be unique lowercase identifiers")
         ids.add(name)
+        if "work_item_id" in node and (not isinstance(node["work_item_id"], str)
+                                       or not 1 <= len(node["work_item_id"]) <= 96):
+            raise ValueError("work_item_id must be a bounded task step identifier")
         kind = node.get("kind")
         if kind not in KINDS:
             raise ValueError("unsupported workflow evidence kind")
         node["depends_on"] = list(dict.fromkeys(node.get("depends_on") or []))
-        node["required"] = bool(node.get("required", True))
+        node["required"] = True
         node["before_mutation"] = bool(node.get("before_mutation", False))
         if node["before_mutation"] and kind == "change":
             raise ValueError("a change cannot be its own pre-mutation gate")
@@ -210,6 +287,10 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
             raise ValueError("report nodes require a supported structured format")
         if kind == "report" and node.get("format") == "alignment":
             node["before_mutation"] = True
+        if node.get("format") == "architecture" or (
+                "diagnosis" in profiles and node.get("format") == "hypotheses") or (
+                kind == "check" and node["passed"] is False and {"diagnosis", "tdd"}.intersection(profiles)):
+            node["before_mutation"] = True
         if kind == "observation":
             tools = node.get("tools") or []
             if not tools or not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
@@ -219,6 +300,8 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
             if not files:
                 raise ValueError(f"change node '{name}' requires files=[concrete workspace paths]. change is a file mutation, not mechanism setup; use the business plan for setup or a preset with test_id/target_files.")
             node["files"] = [_path(root, item).relative_to(root).as_posix() for item in files]
+    has_links = any("work_item_id" in node for node in nodes)
+    binding = _bind_work_items(nodes, work_plan) if has_links and not defer_links else None
     by_id = {node["id"]: node for node in nodes}
     visiting, visited = set(), set()
 
@@ -237,6 +320,14 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
 
     for name in by_id:
         visit(name)
+    plan = {"schema_version": 1, "profiles": profiles, "nodes": nodes,
+            "preparation_files": [_path(root, p).relative_to(root).as_posix()
+                                  for p in raw.get("preparation_files", [])]}
+    if has_links and defer_links:
+        # The contract activation will validate the full graph after compiling
+        # the matching task plan in the same transaction.
+        plan["digest"] = _plan_digest(plan)
+        return plan
     @lru_cache(maxsize=64)
     def ancestors(name):
         return frozenset(by_id[name]["depends_on"]).union(*(ancestors(d) for d in by_id[name]["depends_on"]))
@@ -302,11 +393,12 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
             for node in nodes:
                 if node["kind"] == "change" and not any(r["id"] in ancestors(node["id"]) for r in reds):
                     raise ValueError("TDD changes must follow failing evidence")
-    preparation = [_path(root, p).relative_to(root).as_posix() for p in raw.get("preparation_files", [])]
+    preparation = plan["preparation_files"]
     if set(preparation).intersection(p for n in nodes if n["kind"] == "change" for p in n["files"]):
         raise ValueError("evidence preparation paths cannot overlap product change targets")
-    plan = {"schema_version": 1, "profiles": profiles, "nodes": nodes, "preparation_files": preparation}
-    plan["digest"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+    if binding is not None:
+        plan["work_item_bindings"] = binding
+    plan["digest"] = _plan_digest(plan)
     return plan
 
 
@@ -346,7 +438,7 @@ class EngineeringWorkflow:
         self.notice("WORKFLOW_CONFIGURED", "工程工作流已启用；依赖、证据和完成条件由 Host 检查。")
         return self.status()
 
-    def configured_state(self, plan):
+    def configured_state(self, plan, *, contract_revision=None):
         """Pure publication preparation, also used by atomic contract admission."""
         state = self._load()
         if state:
@@ -354,15 +446,54 @@ class EngineeringWorkflow:
                 return state
             # Additive evolution prevents changing a requirement into an easier
             # predicate or silently deleting a user decision during recovery.
-            new = {n["id"]: n for n in plan["nodes"]}
-            if not set(state["plan"]["profiles"]).issubset(plan["profiles"]) or any(new.get(n["id"]) != n for n in state["plan"]["nodes"]):
+            previous = declared_plan(state["plan"])
+            proposed = declared_plan(plan)
+            new = {n["id"]: n for n in proposed["nodes"]}
+
+            def retained(node):
+                candidate = new.get(node["id"])
+                if candidate is not None and "work_item_id" not in node and contract_revision is not None:
+                    candidate = {k: v for k, v in candidate.items() if k != "work_item_id"}
+                return candidate == node
+
+            if not set(previous["profiles"]).issubset(proposed["profiles"]) or any(not retained(n) for n in previous["nodes"]):
                 raise ValueError("active workflow can only be extended; use explicit task scope amendment for replacement")
         else:
             state = {"schema_version": 1, "task_id": task_id(self.process), "records": {}, "requests": {},
                      "receipt_start": len(self.process.tool_receipts), "revision": 0}
+        if contract_revision is not None and plan.get("work_item_bindings"):
+            self._rebind_evidence(state, plan, contract_revision)
         state["plan"] = plan
         state["revision"] += 1
         return state
+
+    def _rebind_evidence(self, state, plan, contract_revision):
+        previous = state.get("plan", {})
+        old_nodes = {n["id"]: n for n in previous.get("nodes", [])}
+        old_versions = previous.get("work_item_bindings", {}).get("node_versions", {})
+        new_versions = plan["work_item_bindings"]["node_versions"]
+        affected = {n["id"] for n in plan["nodes"] if n["id"] in new_versions and (
+            old_nodes.get(n["id"]) != n or old_versions.get(n["id"]) != new_versions[n["id"]])}
+        for _ in plan["nodes"]:
+            downstream = {n["id"] for n in plan["nodes"] if affected.intersection(n["depends_on"])}
+            if downstream <= affected:
+                break
+            affected.update(downstream)
+        if not affected:
+            return
+        required_revisions = state.setdefault("receipt_contract_revisions", {})
+        history = []
+        for name in sorted(affected):
+            required_revisions[name] = contract_revision
+            evidence = state["records"].pop(name, None)
+            if evidence is not None:
+                history.append({"node_id": name, "work_item_id": (old_nodes.get(name) or {}).get("work_item_id"),
+                                "plan_digest": previous["digest"], "evidence": evidence})
+            state["requests"].pop(name, None)
+        if history:
+            # Publication moves this into the same checkpoint's activation
+            # event. It is not part of the live evidence map.
+            state["retired_work_item_evidence"] = history
 
     def _receipts(self):
         rows = []
@@ -454,9 +585,27 @@ class EngineeringWorkflow:
                 if answer["selected_action"] == "accept_engineering_amendment":
                     old = {n["id"]: n for n in state["plan"]["nodes"]}
                     plan = amendment["plan"]
+                    if plan.get("work_item_bindings"):
+                        from .task_maintenance import state_for
+                        work_plan = state_for(self.process).get("plan")
+                        try:
+                            current = compile_plan(declared_plan(plan), workspace(self.process), work_plan=work_plan)
+                        except ValueError:
+                            current = None
+                        if not current or current["digest"] != plan["digest"]:
+                            state.pop("amendment")
+                            self._save(state)
+                            self.notice("WORKFLOW_SCOPE_UNCONFIRMED", "工作事项已变更，请重新提交当前工程范围调整。原要求仍有效。")
+                            return self._refresh(state)
                     unchanged = {n["id"] for n in plan["nodes"] if old.get(n["id"]) == n}
+                    retired = [{"node_id": name, "work_item_id": old[name].get("work_item_id"),
+                                "plan_digest": state["plan"]["digest"], "evidence": evidence}
+                               for name, evidence in state["records"].items() if name in old and name not in unchanged
+                               and "work_item_id" in old[name]]
                     state["records"] = {k: v for k, v in state["records"].items() if k in unchanged}
                     state["requests"] = {k: v for k, v in state.get("requests", {}).items() if k in unchanged}
+                    if state.get("receipt_contract_revisions"):
+                        state["receipt_contract_revisions"] = {k: v for k, v in state["receipt_contract_revisions"].items() if k in unchanged}
                     state["plan"] = plan
                     state["receipt_start"] = len(self.process.tool_receipts)
                 state.pop("amendment")
@@ -464,7 +613,8 @@ class EngineeringWorkflow:
                 if answer["selected_action"] == "accept_engineering_amendment":
                     self.process.update_context_snapshot(lambda ctx: {**ctx, KEY: copy.deepcopy(state), "task_contract": {
                         **dict(ctx.get("task_contract") or {}), KEY: copy.deepcopy(plan)}})
-                    self.notice("WORKFLOW_SCOPE_AMENDED", "已按你的明确选择调整工程要求；未完成事实仍保留在历史中。")
+                    self.notice("WORKFLOW_SCOPE_AMENDED", "已按你的明确选择调整工程要求；未完成事实仍保留在历史中。",
+                                **({"retired_work_item_evidence": retired} if retired else {}))
                 else:
                     self._save(state)
                     self.notice("WORKFLOW_SCOPE_KEPT", "已保留原工程要求。")
@@ -511,6 +661,7 @@ class EngineeringWorkflow:
                     self.notice("ALIGNMENT_BRANCH_INACTIVE", f"根据已确认答案，问题 {name} 的分支不适用。", node_id=name)
                     continue
                 minimum = max([state["receipt_start"] - 1, *[records[d].get("receipt_index", state["receipt_start"] - 1) for d in node["depends_on"]]])
+                receipt_revision = state.get("receipt_contract_revisions", {}).get(name, 0)
                 if node["kind"] == "check" and node["passed"]:
                     minimum = max([minimum, *[index for index, r in receipts if r.get("effect") == "workspace_write" and r.get("committed") is True]])
                 if node["kind"] == "change":
@@ -518,7 +669,8 @@ class EngineeringWorkflow:
                     # the latest committed receipt for every declared target.
                     latest = {}
                     for index, receipt in receipts:
-                        if index > minimum and receipt.get("effect") == "workspace_write" and receipt.get("succeeded") is True and receipt.get("committed") is True:
+                        if (index > minimum and receipt.get("task_contract_revision", 0) >= receipt_revision
+                                and receipt.get("effect") == "workspace_write" and receipt.get("succeeded") is True and receipt.get("committed") is True):
                             for path in set(node["files"]).intersection(self._receipt_files(receipt)):
                                 latest[path] = (index, receipt["receipt_id"])
                     if set(node["files"]).issubset(latest):
@@ -528,7 +680,7 @@ class EngineeringWorkflow:
                         progress = changed = True
                     continue
                 for index, receipt in receipts:
-                    if index <= minimum:
+                    if index <= minimum or receipt.get("task_contract_revision", 0) < receipt_revision:
                         continue
                     kind = node["kind"]
                     matched = (kind == "check" and receipt.get("tool_name") == "run_test" and receipt.get("test_id") == node["test_id"] and receipt.get("test_completed") is True and bool(receipt.get("test_seeds")) and receipt.get("test_passed") is node["passed"])
@@ -588,9 +740,17 @@ class EngineeringWorkflow:
         records = state["records"]
         nodes = [{**n, "status": "assumed" if records.get(n['id'], {}).get('defaulted') else "complete" if n["id"] in records else "ready" if all(d in records for d in n["depends_on"]) else "blocked",
                   "evidence": records.get(n["id"])} for n in state["plan"]["nodes"]]
+        from .task_maintenance import state_for
+        links = work_item_links(state_for(self.process).get("plan", {}), nodes)
+        if links:
+            by_id = {node["id"]: node for node in nodes}
+            links["evidence"] = {item: [{"node_id": name,
+                "status": "inapplicable" if (by_id[name]["evidence"] or {}).get("inapplicable") else by_id[name]["status"]}
+                for name in names] for item, names in links["by_work_item"].items()}
         return {"active": True, "task_id": state["task_id"], "revision": state["revision"],
                 "plan_digest": state["plan"]["digest"], "profiles": state["plan"]["profiles"],
                 "nodes": nodes, "ready": [n["id"] for n in nodes if n["status"] == "ready"],
+                **({"work_item_links": links} if links else {}),
                 "question_frontier": [n["id"] for n in nodes if n["kind"] == "decision" and n["status"] == "ready"],
                 "notices": notices,
                 "amendment": ({"decision_id": state["amendment"]["decision_id"],
@@ -831,7 +991,8 @@ class EngineeringWorkflow:
         state = self._load()
         if not state or not str(reason or "").strip():
             raise ValueError("scope amendment requires an active workflow and a user-visible reason")
-        plan = compile_plan(raw, workspace(self.process))
+        from .task_maintenance import state_for
+        plan = compile_plan(raw, workspace(self.process), work_plan=state_for(self.process).get("plan"))
         old = {n["id"]: n for n in state["plan"]["nodes"]}
         new = {n["id"]: n for n in plan["nodes"]}
         removed = sorted(set(old) - set(new))
