@@ -6,9 +6,10 @@ certifies upstream completeness, semantic truth, or a natural-language answer.
 from __future__ import annotations
 from copy import deepcopy
 import json
+from decimal import Decimal
 
 from backend.core.loop.evidence_applicability import EvidenceApplicability
-from .data import aggregate, snapshot_json, text_digest
+from .data import aggregate, aggregate_value, encode_json, parse_json, pointer, snapshot_json, text_digest
 from backend.core.storage.redaction import redact_for_persistence
 from .sheets import RevisionConflict, _identifier, _text
 
@@ -20,6 +21,15 @@ class SourceUnavailable(ValueError):
 class InvalidData(ValueError):
     pass
 
+
+SOURCE_KINDS = {"context_source", "provided_data", "tool_result_source"}
+MAX_RESULT_DEPTH = 16
+WORKBENCH_RECORDS = {"gitgo.workbench.python.v1", "gitgo.workbench.cloc.v1"}
+
+
+def applicable_as_declared(assessment, basis):
+    return assessment["state"] == "current" or (
+        basis == "historical" and assessment["reason"] == "source_version_changed")
 
 
 class SourceWorkbench:
@@ -120,12 +130,15 @@ class SourceWorkbench:
                 "snapshot_sha256": text_digest(snapshot), "origin_digest": text_digest(raw),
                 "redacted": redacted, "scope": {"workspace_path": str(self.contexts.workspace)},
                 "origin": "registered immutable tool output; not evidence of present external state"}
+        parsed = parse_json(snapshot)
+        if isinstance(parsed, dict) and isinstance(parsed.get("kind"), str) and parsed["kind"] in WORKBENCH_RECORDS:
+            meta["workbench_record"] = True
         self._append(document, {"id": cell_id, "cell_type": "raw",
                               "metadata": {"gitgo": meta}, "source": snapshot})
         committed = self.sheets.commit(sheet_id, document, expected_revision)
         return {**committed, "cell_id": cell_id, "source_ref": locator, "applicability": self._assess_source(meta)}
 
-    def _assess_source(self, meta, *, context=None, reference_cache=None):
+    def _assess_source(self, meta, *, context=None, reference_cache=None, depth=0, budget=None):
         if meta.get("kind") == "provided_data":
             return {"state": "needs_recheck", "reason": "model_assembled_data",
                     "scope_note": "Exact calculation is conditional on this supplied data; transcription, classification and completeness were not independently checked."}
@@ -136,6 +149,9 @@ class SourceWorkbench:
                 storage = get_storage(self.contexts.workspace)
             try:
                 raw = self._read_result(storage, meta["ref"], meta["owner_process_id"])
+                if meta.get("workbench_record") and text_digest(raw) == meta["origin_digest"]:
+                    return self.assess_record(parse_json(raw), context=context,
+                                              owner_process_id=meta["owner_process_id"], depth=depth, budget=budget)
             except (KeyError, ValueError, OSError):
                 return {"state": "needs_recheck", "reason": "tool_result_unavailable"}
             return {"state": "current" if text_digest(raw) == meta["origin_digest"] else "needs_recheck",
@@ -168,23 +184,128 @@ class SourceWorkbench:
             assessment = {"state": "needs_recheck", "reason": "source_metadata_changed"}
         return {**assessment, "scope_note": "Version/dependency applicability only; not semantic verification or proof of source freshness in the external world."}
 
+    def assess_record(self, record, *, context=None, owner_process_id=None, depth=0, budget=None):
+        current = {"state": "current", "reason": "stored_tool_result_identity",
+                   "scope_note": "Recorded output and declared inputs only. Source semantics and completeness are separate."}
+        if not isinstance(record, dict) or not isinstance(record.get("kind"), str) or record["kind"] not in WORKBENCH_RECORDS:
+            return current
+        budget = [64] if budget is None else budget
+        budget[0] -= 1
+        if (depth >= MAX_RESULT_DEPTH or budget[0] < 0
+                or record.get("snapshot_state") not in ("stable", "recorded")):
+            return {"state": "needs_recheck", "reason": "workbench_input_limited"}
+        context = self.current_context() if context is None else context
+        if record["kind"] == "gitgo.workbench.cloc.v1":
+            from .code_size import SCAN_VERSIONS
+            scope, digest = record.get("scope_key"), record.get("snapshot_sha256")
+            if not isinstance(scope, str) or not isinstance(digest, str):
+                return {"state": "needs_recheck", "reason": "workbench_input_unavailable"}
+            latest = (context.get(SCAN_VERSIONS) or {}).get(scope)
+            if latest and latest["digest"] != digest:
+                return {"state": "needs_recheck", "reason": "source_version_changed"}
+            if latest and latest["state"] != "stable":
+                return {"state": "needs_recheck", "reason": "workbench_input_limited"}
+            return current
+        try:
+            for evidence in record["inputs"].values():
+                if evidence["redacted"]:
+                    return {"state": "needs_recheck", "reason": "workbench_input_limited"}
+                if "cell" in evidence:
+                    _, resolved = self.compute_input(evidence["cell"], evidence["selector"],
+                                                     context=context, depth=depth + 1, budget=budget)
+                    assessment = resolved["applicability"]
+                else:
+                    raw = self._read_result(self.sheets.storage, evidence["locator"],
+                                            owner_process_id or self.sheets.process_id)
+                    assessment = self.assess_record(parse_json(raw), context=context,
+                                                    owner_process_id=owner_process_id, depth=depth + 1, budget=budget)
+                if not applicable_as_declared(assessment, evidence.get("basis", "current")):
+                    return assessment
+        except (AttributeError, KeyError, TypeError, ValueError, OSError):
+            return {"state": "needs_recheck", "reason": "workbench_input_unavailable"}
+        return current
+
+    def _pinned_cells(self, ref, documents):
+        if not isinstance(ref, dict) or set(ref) != {"sheet_id", "revision", "cell_id"}:
+            raise InvalidData("a result reference requires sheet_id, revision and cell_id")
+        _identifier(ref["cell_id"])
+        sheet_id, revision = ref["sheet_id"], ref["revision"]
+        key = (sheet_id, revision)
+        self.sheets._revision_key(*key)
+        if key not in documents:
+            document, _, _ = self.sheets._load(*key)
+            documents[key] = {cell["id"]: cell for cell in document["cells"]}
+        return documents[key]
+
+    def _lineage(self, cell, cells, documents):
+        dependencies = []
+        while cell["metadata"]["gitgo"]["kind"] == "computed_value":
+            if len(dependencies) >= MAX_RESULT_DEPTH:
+                raise InvalidData("calculation dependency depth exceeds 16")
+            meta = cell["metadata"]["gitgo"]
+            ref = meta.get("input_result_ref")
+            if ref:
+                if ref in dependencies:
+                    raise InvalidData("calculation dependency cycle")
+                dependencies.append(ref)
+                cells = self._pinned_cells(ref, documents)
+            else:
+                # Older computations identify an observed input in this document.
+                dependencies.append({"sheet_id": meta["input_sheet_id"],
+                                     "revision": meta["input_revision"], "cell_id": meta["input_cell_id"]})
+            cell = cells.get(meta["input_cell_id"])
+            if cell is None or text_digest(cell["source"]) != meta["input_sha256"]:
+                raise SourceUnavailable("calculation_input_not_present")
+            if not ref and cell["metadata"]["gitgo"]["kind"] not in SOURCE_KINDS:
+                raise SourceUnavailable("calculation_input_not_present")
+        source = cell["metadata"]["gitgo"]
+        if source["kind"] not in SOURCE_KINDS:
+            raise InvalidData("calculation inputs must be observed data or computed values, not model notes")
+        return source, dependencies
+
+    def read_result(self, ref, *, context=None):
+        """Resolve a pinned computed cell within the Runtime-bound owner scope."""
+        documents = {}
+        cells = self._pinned_cells(ref, documents)
+        cell = cells.get(ref["cell_id"])
+        if cell is None or cell["metadata"]["gitgo"]["kind"] != "computed_value":
+            raise SourceUnavailable("result reference does not select a computed value")
+        source, dependencies = self._lineage(cell, cells, documents)
+        return {**json.loads(cell["source"]), "result_ref": dict(ref),
+                "dependencies": deepcopy(dependencies), "source": deepcopy(source),
+                "applicability": self._assess_source(source, context=context)}
+
+    def compute_input(self, ref, selector="", *, context=None, depth=0, budget=None):
+        documents = {}
+        cells = self._pinned_cells(ref, documents)
+        cell = cells.get(ref["cell_id"])
+        if cell is None:
+            raise SourceUnavailable("calculation input is missing")
+        source, dependencies = self._lineage(cell, cells, documents)
+        if cell["metadata"]["gitgo"]["kind"] == "computed_value":
+            result = json.loads(cell["source"])["result"]
+            value = (parse_json(result["value"]) if result["value_type"] == "scalar_set_json"
+                     else Decimal(result["value"]))
+        else:
+            value = parse_json(cell["source"])
+        encoded = encode_json(pointer(value, selector))
+        return encoded, {"cell": dict(ref), "selector": selector, "sha256": text_digest(encoded),
+                         "dependencies": dependencies, "redacted": source["redacted"],
+                         "applicability": self._assess_source(source, context=context, depth=depth, budget=budget)}
+
     def assessments(self, document):
         cells = {c["id"]: c for c in document["cells"]}
         context = deepcopy(self.current_context() or {})
-        reference_cache = {}
-        result = {cell_id: self._assess_source(cell["metadata"]["gitgo"], context=context,
-                                              reference_cache=reference_cache)
-                  for cell_id, cell in cells.items()
-                  if cell["metadata"]["gitgo"]["kind"] in {"context_source", "provided_data", "tool_result_source"}}
+        reference_cache, documents, result = {}, {}, {}
         for cell_id, cell in cells.items():
-            meta = cell["metadata"]["gitgo"]
-            if meta["kind"] == "computed_value":
-                source = cells.get(meta["input_cell_id"])
-                source_meta = source["metadata"]["gitgo"] if source else {}
-                if source_meta.get("kind") not in {"context_source", "provided_data", "tool_result_source"} or source_meta.get("snapshot_sha256") != meta["input_sha256"]:
-                    result[cell_id] = {"state": "needs_recheck", "reason": "calculation_input_not_present"}
-                else:
-                    result[cell_id] = deepcopy(result[meta["input_cell_id"]])
+            if cell["metadata"]["gitgo"]["kind"] not in SOURCE_KINDS | {"computed_value"}:
+                continue
+            try:
+                source, _ = self._lineage(cell, cells, documents)
+            except (KeyError, ValueError, OSError):
+                result[cell_id] = {"state": "needs_recheck", "reason": "calculation_input_not_present"}
+            else:
+                result[cell_id] = self._assess_source(source, context=context, reference_cache=reference_cache)
         return result
 
     def check(self, sheet_id, revision=None):
@@ -197,30 +318,52 @@ class SourceWorkbench:
         # Assess all inputs, even when only one page of cells was requested.
         return {**opened, "cell_applicability": self.check(opened["sheet_id"], opened["revision"])["cell_applicability"]}
 
-    def aggregate(self, sheet_id, expected_revision, *, cell_id, source_cell_id,
-                  selector, reducer, field="", null_policy="reject"):
+    def aggregate(self, sheet_id, expected_revision, *, cell_id, selector, reducer,
+                  source_cell_id=None, source_result=None, field="", null_policy="reject"):
         document = self._prepare(sheet_id, expected_revision)
-        source = next((c for c in document["cells"] if c["id"] == source_cell_id), None)
-        if source is None or source["metadata"]["gitgo"]["kind"] not in {"context_source", "provided_data", "tool_result_source"}:
-            raise InvalidData("source_cell_id must select a typed data snapshot, not model notes or a derived output")
-        source_meta = source["metadata"]["gitgo"]
+        if bool(source_cell_id) == bool(source_result):
+            raise InvalidData("choose exactly one of source_cell_id and source_result")
+        ref = source_result or {"sheet_id": sheet_id, "revision": expected_revision, "cell_id": source_cell_id}
+        documents = {(sheet_id, expected_revision): {c["id"]: c for c in document["cells"]}}
+        cells = self._pinned_cells(ref, documents)
+        source = cells.get(ref["cell_id"])
+        if source is None:
+            raise SourceUnavailable("calculation input is missing")
+        source_meta, dependencies = self._lineage(source, cells, documents)
+        if len(dependencies) >= MAX_RESULT_DEPTH:
+            raise InvalidData("calculation dependency depth exceeds 16")
+        kind = source["metadata"]["gitgo"]["kind"]
+        if source_result and kind != "computed_value":
+            raise InvalidData("source_result must select a computed value")
         query = {"selector": selector, "reducer": reducer, "field": field, "null_policy": null_policy}
         try:
-            result = aggregate(source["source"], **query)
+            if kind == "computed_value":
+                previous = json.loads(source["source"])["result"]
+                if previous["value_type"] == "scalar_set_json":
+                    values = parse_json(previous["value"])
+                else:
+                    # Existing numeric reducers accept a collection. Treat one
+                    # derived number as a one-row input without float conversion.
+                    values = [Decimal(previous["value"])]
+                result = aggregate_value(values, **query)
+            else:
+                result = aggregate(source["source"], **query)
         except ValueError as exc:
             raise InvalidData(str(exc)) from exc
         payload = {"algorithm": "gitgo.json-aggregate.v1", "query": query, "result": result}
-        meta = {"kind": "computed_value", "input_cell_id": source_cell_id,
-                "input_sha256": source_meta["snapshot_sha256"],
-                "input_sheet_id": sheet_id, "input_revision": expected_revision,
-                "source_ref": source_meta.get("ref"), "origin": source_meta["kind"], "algorithm": payload["algorithm"]}
+        meta = {"kind": "computed_value", "input_cell_id": ref["cell_id"],
+                "input_sha256": text_digest(source["source"]),
+                "input_sheet_id": ref["sheet_id"], "input_revision": ref["revision"],
+                "source_ref": source_meta.get("ref"), "origin": kind, "algorithm": payload["algorithm"]}
+        if kind == "computed_value":
+            meta["input_result_ref"] = dict(ref)
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         meta["payload_sha256"] = text_digest(encoded)
         self._append(document, {"id": cell_id, "cell_type": "raw", "metadata": {"gitgo": meta},
                                "source": encoded})
         committed = self.sheets.commit(sheet_id, document, expected_revision)
         return {**committed, "cell_id": cell_id, **payload,
-                "input": {"cell_id": source_cell_id, "sha256": meta["input_sha256"],
-                          "sheet_id": sheet_id, "revision": expected_revision,
+                "result_ref": {"sheet_id": sheet_id, "revision": committed["revision"], "cell_id": cell_id},
+                "input": {**ref, "sha256": meta["input_sha256"],
                           "source_ref": meta["source_ref"], "redacted": source_meta["redacted"]},
                 "applicability": self._assess_source(source_meta)}

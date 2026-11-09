@@ -93,6 +93,15 @@ def describe_instance(process, instance, *, observations=False):
             'completion_controls': completion_controls(process, instance),
             'reviews': review_observations(instance)}
         value['error'] = deepcopy(instance.get('error'))
+        maintenance = (instance.get('maintenance') or {}).get(instance.get('maintenance_head'))
+        if maintenance and ((maintenance.get('error') and instance['phase'] == 'blocked') or (
+                maintenance.get('status') in {'needs_review', 'inspect_required'}
+                and maintenance.get('target_ref') != instance.get('effective_ref'))):
+            status = maintenance.get('status')
+            action = ('inspect_unavailable_components' if maintenance.get('error') == 'MECHANISM_DEPENDENCY_UNAVAILABLE'
+                      else 'inspect_activation' if status == 'inspect_required' else 'review_changed_definition')
+            value['maintenance'] = {'affected_nodes': deepcopy(maintenance['affected_nodes']),
+                'error': maintenance.get('error'), 'next_action': action}
     return value
 
 

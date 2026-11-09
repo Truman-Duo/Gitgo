@@ -795,6 +795,17 @@ class ToolPipeline:
                         runtime_metadata["effect_state"] = "not_committed"
                     elif runtime.phase == "recorded":
                         runtime_metadata["effect_state"] = "committed"
+            elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "runtime.workbench.compute":
+                from backend.core.workbench.compute_runtime import WorkbenchComputeRuntime
+                runtime = WorkbenchComputeRuntime(self, ctx, registered_digest, runtime_metadata["owner"], tool)
+                try:
+                    result_data = runtime.run(args, timeout=effective_timeout, diagnostics=runner_diagnostics)
+                    runtime_metadata["effect_state"] = "not_committed" if result_data.get("error") else "committed"
+                finally:
+                    if runtime.last_render:
+                        runtime_metadata["native_producers"] = [runtime.last_render]
+                        if isinstance(runtime.last_render.get("cleanup"), dict):
+                            runtime_metadata["cleanup"] = runtime.last_render["cleanup"]
             elif execution_contract.kind.value == "data_broker" and execution_contract.broker == "host.runtime.author_tool":
                 from .authoring_runtime import AuthoringRuntime
                 from .service_runtime import tool_service_scope

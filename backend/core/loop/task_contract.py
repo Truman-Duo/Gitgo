@@ -39,7 +39,7 @@ def semantic_contract(contract):
         'goal', 'execution_mode', 'deliverables', 'acceptance_criteria', 'uncertainties',
         'requires_user_decision', 'estimated_complexity', 'independent_workstreams',
         'delegation_required', 'user_requested_delegation', 'engineering_workflow',
-        'required_tool_calls', 'mechanism', 'maintenance_intent') if key in contract}
+        'required_tool_calls', 'required_workbench_claims', 'mechanism', 'maintenance_intent') if key in contract}
 
 
 def _relative_workspace_path(workspace: Path, raw: str) -> str:
@@ -160,10 +160,17 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
             "include_composite_steps": bool(item.get("include_composite_steps", False)),
         })
 
+    workbench_claims = args.get("required_workbench_claims", [])
+    if not isinstance(workbench_claims, list) or len(workbench_claims) > 12:
+        raise ValueError("required_workbench_claims must be a list of at most 12 scopes")
+    if workbench_claims:
+        from backend.core.workbench.delivery import claim_scope
+        workbench_claims = list(dict.fromkeys(claim_scope(scope) for scope in workbench_claims))
+
     workflow = None
     if args.get("engineering_workflow") is not None:
         from backend.core.loop.engineering_workflow import compile_plan
-        workflow = compile_plan(args["engineering_workflow"], workspace)
+        workflow = compile_plan(args["engineering_workflow"], workspace, defer_links=True)
 
     return {
         "schema_version": 1,
@@ -191,6 +198,7 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
         "routing_transition": routing_transition,
         "handoff_summary": str(args.get("handoff_summary") or "").strip(),
         "required_tool_calls": required_tool_calls,
+        **({"required_workbench_claims": workbench_claims} if workbench_claims else {}),
         "ignored_protocol_requirements": list(dict.fromkeys(
             ignored_protocol_requirements
         )),
@@ -415,14 +423,23 @@ def _prepare_contract(process, proposal):
     if getattr(process, 'session', None) is not None:
         from .mechanisms import reconcile_definition
         reconcile_definition(process, contract)
-    from .engineering_workflow import EngineeringWorkflow, KEY
-    workflow = EngineeringWorkflow(process).configured_state(contract[KEY]) if contract.get(KEY) else None
+    from .engineering_workflow import EngineeringWorkflow, KEY, compile_plan, declared_plan, workspace
+    workflow_plan = contract.get(KEY)
     if proposal.get("maintenance"):
         contract["maintenance_intent"] = {key: deepcopy(value) for key, value in proposal["maintenance"].items() if key != "expected_revision"}
     maintenance = None
     if getattr(process, "session", None) is not None:
         from .task_maintenance import prepare_contract_state
-        maintenance = prepare_contract_state(process, contract, proposal, workflow)
+        maintenance = prepare_contract_state(process, contract, proposal, {"plan": workflow_plan} if workflow_plan else None)
+    if workflow_plan and any("work_item_id" in node for node in workflow_plan["nodes"]):
+        workflow_plan = compile_plan(declared_plan(workflow_plan), workspace(process),
+                                     work_plan=(maintenance or {}).get("plan"))
+        contract[KEY] = workflow_plan
+    workflow = (EngineeringWorkflow(process).configured_state(workflow_plan, contract_revision=contract["revision"])
+                if workflow_plan else None)
+    if maintenance is not None:
+        from .task_maintenance import refresh_manifest
+        refresh_manifest(process, maintenance, contract, workflow_plan)
     if proposal.get("preview_digest"):
         from .mechanism_catalog import digest
         if proposal["preview_digest"] != digest(contract):
@@ -458,6 +475,7 @@ def publish_contract(process, proposal: dict, *, store=None) -> dict:
         if root.session.mechanism_activation_blocked or process.session.mechanism_activation_blocked:
             raise ValueError("MECHANISM_ACTIVATION_BLOCKED")
         contract, workflow, maintenance = _prepare_contract(process, proposal)
+        retired_work_item_evidence = workflow.pop("retired_work_item_evidence", []) if workflow else []
         revision = contract["revision"]
         activation = {"transaction_id": str(uuid.uuid4()), "base_revision": revision - 1,
             "revision": revision, "process_id": process.process_id,
@@ -512,6 +530,8 @@ def publish_contract(process, proposal: dict, *, store=None) -> dict:
                  "adopted_changes": [key for key, value in (maintenance or {}).get("changes", {}).items()
                      if value.get("contract_revision") == revision],
                  "mechanism_manifest": deepcopy((maintenance or {}).get("manifest"))}
+        if retired_work_item_evidence:
+            event["retired_work_item_evidence"] = retired_work_item_evidence
         if store is not None:
             commit_activation(process, event, store, rollback)
         else:

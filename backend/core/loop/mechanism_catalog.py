@@ -130,6 +130,7 @@ def maintenance_schema():
         "evidence_kind": {"type": "string", "enum": ["observed", "declared", "inferred"]}},
         "required": ["source", "affected", "reason", "consequence", "work", "verification", "owner", "evidence_kind"], "additionalProperties": False}
     resolution = {"type": "object", "properties": {"id": text, "reason": text, "contract_fields": texts, "question_ids": texts,
+        "work_item_ids": {**texts, "maxItems": 64, "description": "Existing plan step ids whose evidence must be renewed for the adopted change."},
         "disposition": {"type": "string", "enum": ["adopt", "withdraw"]}, "source_ref": text, "quote": text},
         "required": ["id", "reason", "contract_fields"], "additionalProperties": False}
     related_disposition = {"type": "object", "properties": {"id": text, "reason": text, "source_ref": text, "quote": text,

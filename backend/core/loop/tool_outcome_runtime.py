@@ -43,6 +43,8 @@ class ToolOutcomeRuntime:
                 text = content or 'Task completed'
             return self.delivery.finish(text, duration_ms, window, source=claim.tool_name, degraded=guard.degraded)
         if guard.blocked:
+            if any(gate["kind"] == "workbench_delivery" for gate in guard.gates):
+                return self.delivery.blocked(guard, content)
             self.emit({'event': 'completion_gate', 'accepted': False, 'source': claim.tool_name, 'reason': guard.nudge_text})
             _inc_nudge_counter(process, 'completion_tool_rejection')
             terminal = self.pause_blocked(guard, process.completion_claim.result if process.completion_claim else content)

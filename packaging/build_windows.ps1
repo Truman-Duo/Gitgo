@@ -169,6 +169,7 @@ $pyInstallerArguments = @(
     "--paths", $root, "--collect-submodules", "backend",
     "--additional-hooks-dir", (Join-Path $root "packaging\pyinstaller-hooks"),
     "--hidden-import", "backend.core.tools.registrations",
+    "--hidden-import", "csv", "--hidden-import", "fractions", "--hidden-import", "statistics",
     "--distpath", $internal,
     "--workpath", (Join-Path $root "build\terminal-host"),
     "--specpath", (Join-Path $root "build\terminal-host"),
@@ -209,6 +210,10 @@ foreach ($executable in @((Join-Path $stage "$($product.primary_command).exe"), 
 & $Python -B (Join-Path $root "scripts\stage_search_engine.py") `
     --binary $Ripgrep --notices $RipgrepNotices --destination (Split-Path -Parent $packagedHost)
 if ($LASTEXITCODE -ne 0) { throw "Bundled search engine staging failed" }
+if ($env:GITGO_CLOC_BUNDLE) {
+    & $Python -B (Join-Path $root "scripts\stage_workbench_cloc.py") --bundle $env:GITGO_CLOC_BUNDLE --destination (Split-Path -Parent $packagedHost)
+    if ($LASTEXITCODE -ne 0) { throw "Workbench cloc bundle staging failed" }
+}
 if ($UpdateEvidence) {
     & $Python -B (Join-Path $root "scripts\stage_update_contract.py") --stage $stage
     if ($LASTEXITCODE -ne 0) { throw "Frozen runtime data evidence failed" }

@@ -109,7 +109,7 @@ class CapabilityProfiles:
     )
     _DEVELOPMENT = _OBSERVE + (
         "edit_file", "write_file", "delete_file", "document_create", "apply_patch", "exec_command", "shell_script", "run_test",
-        "dependency_feedback", "rebuild_dependency_graph",
+        "dependency_feedback", "rebuild_dependency_graph", "workbench_compute",
     )
     _REVIEW = _OBSERVE + (
         "run_test", "dependency_feedback", "rebuild_dependency_graph",

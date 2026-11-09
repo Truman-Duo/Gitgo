@@ -24,7 +24,7 @@ def contract_view(value):
 
 def instance_view(value):
     result = select(value, ('id', 'instance_id', 'definition_id', 'definition_revision',
-        'epoch', 'phase', 'program_digest', 'version_policy', 'behavior_active', 'user_control', 'control_effect', 'error'))
+        'epoch', 'phase', 'program_digest', 'version_policy', 'behavior_active', 'user_control', 'control_effect', 'error', 'maintenance'))
     if value.get('inbox'):
         items = list(value['inbox'].values())
         actionable = [item for item in items if item['status'] in {'candidate', 'pending_adoption'}]
@@ -54,7 +54,7 @@ def instance_view(value):
 
 
 def task_view(value):
-    result = select(value, ('task_id', 'process_id', 'source_refs', 'catalog_version', 'authority_granted'))
+    result = select(value, ('task_id', 'process_id', 'source_refs', 'catalog_version', 'authority_granted', 'work_item_links'))
     result['contract'] = contract_view(value.get('contract') or {})
     result['advancement'] = select(value.get('advancement') or {}, ('mode', 'phase', 'user_control'))
     state = value.get('state') or {}

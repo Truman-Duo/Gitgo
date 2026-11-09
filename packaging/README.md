@@ -26,6 +26,23 @@ powershell -ExecutionPolicy Bypass -File packaging/release_windows.ps1 -BuildIns
 
 构建用 pytest 可由 `-TestPackages` 提供，默认检查开发目录 `dev-artifacts/test-packages`；PyInstaller 使用独立构建依赖，不要求安装进产品运行环境。缺少依赖时明确失败。安装器使用相同产品版本及 Windows 文件版本，需要已安装 Inno Setup。
 
+## Workbench code-size dependency
+
+To include code-size analysis, set `GITGO_CLOC_BUNDLE` to the reviewed,
+platform-native cloc bundle when running the existing build or release entry
+point. Provide the official cloc 2.10 script as `cloc.pl`, its license as
+`LICENSE.cloc`, and a relocatable Perl runtime under `perl/` with the executable
+in `perl/bin/`. Include the exact Perl version in `PERL-VERSION` (for example
+`v5.x.y`) and matching distribution notices in `PERL-NOTICES`. The staging
+script checks the pinned cloc digest, probes both tools, and records file
+hashes in the packaged bundle. Source deployments use the same layout under
+`backend/resources/cloc/` in the trusted source runtime.
+
+Each target still needs its own bundle and native sandbox acceptance. If no
+bundle is supplied, code-size calls report the missing dependency. On Alpha
+3.1 macOS also requires a native execution sandbox before workbench execution
+can be enabled.
+
 ## macOS package and installer
 
 Unix builds now enforce the Alpha 2 search contract too: supply a standalone

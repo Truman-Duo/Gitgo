@@ -211,6 +211,8 @@ def test_follow_compatible_updates_other_task_pin_keeps_old_and_constraints_cann
     repo.publish(compiled, {"user:fixture": {}}, expected_head=ref)
     report = coordinator.maintain()
     assert {v["status"] for v in report["affected"]} == {"pending", "pinned"}
+    assert all(v["affected_nodes"] == ["a"] for v in report["affected"])
+    assert next(v for v in report["affected"] if v["task_id"] == "task")["phase"] == "ready"
     assert repo.instance("task", "fixture")[0]["definition_revision"] == 2
     assert repo.instance("pinned", "fixture")[0]["definition_revision"] == 1
     current = repo.instance("pinned", "fixture")[0]
