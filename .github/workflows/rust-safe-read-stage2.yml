@@ -49,7 +49,7 @@ jobs:
         shell: pwsh
         run: |
           $env:GITGO_BUN = (Get-Command bun).Source
-          python -B -m pytest 'tests/test_native_sandbox.py::test_windows_read_lifecycle_evidence[source]' tests/test_native_sandbox.py::test_windows_real_runner_exec_and_privileged_tool tests/test_file_feedback_contract.py tests/test_legacy_file_service.py tests/test_validation_versions.py -q --tb=short
+          python -B -m pytest 'tests/test_native_sandbox.py::test_windows_read_lifecycle_evidence[source]' tests/test_native_sandbox.py::test_windows_real_runner_exec_and_privileged_tool tests/test_native_read_runtime.py tests/test_file_feedback_contract.py tests/test_legacy_file_service.py tests/test_validation_versions.py -q --tb=short
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - if: runner.os == 'Linux'
         run: bash scripts/prepare_linux_update_ci.sh
