@@ -102,10 +102,12 @@ cp "$ROOT/cli/dashboard/scripts/launch.mjs" "$ROOT/cli/dashboard/scripts/runtime
 cp "$ROOT/cli/dashboard/dist/cli.js" "$ROOT/cli/dashboard/dist/trace.js" "$STAGE/dashboard/dist/"
 
 HOST_BUILD="$ROOT/build/terminal-host-linux-$ARCH"
+"$PYTHON_BIN" -B "$ROOT/scripts/build_sandbox_native.py"
 "$PYTHON_BIN" -B -m PyInstaller \
   --noconfirm --clean --onedir \
   --name gitgo-host \
   --paths "$ROOT" --collect-submodules backend \
+  --additional-hooks-dir "$ROOT/packaging/pyinstaller-hooks" \
   --hidden-import backend.core.tools.registrations \
   --add-data "$ROOT/backend/resources/keyboard:backend/resources/keyboard" \
   --add-data "$ROOT/backend/resources/prompts:backend/resources/prompts" \

@@ -21,15 +21,16 @@ def test_prepared_native_launch_derives_sid_without_creating_profile_again(nativ
     assert (workspace / "ready.txt").read_text() == "same authorized workspace"
 
 
-def test_sid_derivation_failure_has_no_profile_creation_or_user_token_fallback(native_box, monkeypatch):
+def test_invalid_native_profile_has_no_profile_creation_or_user_token_fallback(native_box, monkeypatch):
     from backend.core.sandbox_windows import WindowsApi
     from backend.core.sandbox import SandboxDenied
     workspace, policy, spawn = native_box
-    def deny(*args):
-        raise OSError("Injected SID derivation failure")
-    monkeypatch.setattr(WindowsApi, "preview_profile_sid", deny)
-    monkeypatch.setattr(WindowsApi, "profile_sid", lambda *args: pytest.fail("Profile creation was used as launch fallback"))
-    with pytest.raises(SandboxDenied) as caught:
-        spawn("from pathlib import Path;Path('must-not-run').write_text('bad')")
+    # Exercise the real Rust prelaunch validation. Patching the retired Python
+    # SID callback no longer injects a failure into the native implementation.
+    with monkeypatch.context() as failure:
+        failure.setattr(type(policy), "profile_name", property(lambda self: 'invalid\0profile'))
+        failure.setattr(WindowsApi, "profile_sid", lambda *args: pytest.fail("Profile creation was used as launch fallback"))
+        with pytest.raises(SandboxDenied) as caught:
+            spawn("from pathlib import Path;Path('must-not-run').write_text('bad')")
     assert caught.value.code == "SANDBOX_LAUNCH_DENIED"
     assert caught.value.effect_state == "not_committed" and not (workspace / "must-not-run").exists()

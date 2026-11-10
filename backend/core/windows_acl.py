@@ -136,10 +136,8 @@ class SecurityTree:
                 self._visit(child)
 
     def _open(self, path, access):
-        handle = self.open_file(str(path), access, 1 | 2, None, 3, 0x02000000 | 0x00200000, None)
-        if handle == C.c_void_p(-1).value:
-            raise C.WinError(C.get_last_error())
-        return handle
+        from backend.core.windows_acl_native import open_file
+        return open_file(path, access)
 
     def _information(self, handle):
         info = FileInformation()
@@ -157,31 +155,10 @@ class SecurityTree:
                 raise OSError('Configuration tree changed while security handles were held')
 
     def _security_bytes(self, handle):
-        # GetSecurityInfo(SE_FILE_OBJECT) can return reconstructed inheritance
-        # flags on legacy ACLs. Recovery needs the descriptor stored by the
-        # kernel, not that synthesized view. Query every security component,
-        # including MIC, audit, resource attributes and access filters.
-        needed = W.DWORD()
-        status = self.query_security(handle, self.security_information, None, 0, C.byref(needed))
-        if status != -1073741789:  # STATUS_BUFFER_TOO_SMALL
-            if status:
-                raise C.WinError(self.status_to_error(status))
-            raise OSError('Unexpected Windows descriptor query result')
-        for _ in range(3):
-            if not 20 <= needed.value <= MAX_DESCRIPTOR_BYTES:
-                raise ValueError('Windows descriptor exceeds recovery bounds')
-            buffer = C.create_string_buffer(needed.value)
-            status = self.query_security(handle, self.security_information, buffer, len(buffer), C.byref(needed))
-            if status == -1073741789:
-                continue
-            if status:
-                raise C.WinError(self.status_to_error(status))
-            if not 20 <= needed.value <= len(buffer):
-                raise ValueError('Invalid Windows descriptor query length')
-            raw = buffer.raw[:needed.value]
-            self._validated(raw)
-            return raw
-        raise SecurityConflict('Security descriptor changed repeatedly during snapshot')
+        from backend.core.windows_acl_native import read_descriptor
+        raw = read_descriptor(handle, self.security_information)
+        self._validated(raw)
+        return raw
 
     def _validated(self, raw):
         descriptor = SecurityDescriptor.from_bytes(raw)
@@ -199,13 +176,8 @@ class SecurityTree:
         return descriptor
 
     def _text(self, raw):
-        buffer = C.create_string_buffer(raw)
-        text = W.LPWSTR()
-        self.check(self.to_sddl(buffer, 1, DACL | LABEL, C.byref(text), None))
-        try:
-            return text.value
-        finally:
-            self.free(C.cast(text, C.c_void_p))
+        from backend.core.windows_acl_native import descriptor_text
+        return descriptor_text(raw)
 
     def record_descriptor(self, record):
         value = record.get('descriptor')
@@ -269,29 +241,9 @@ class SecurityTree:
         return planned
 
     def _write_descriptor(self, handle, raw):
-        # One fixed SECURITY_DATA stream. Never accept caller-controlled stream
-        # headers or content/link/alternate-data streams from a recovery record.
-        payload = struct.pack('<IIqI', 3, 2, len(raw), 0) + raw
-        data = C.create_string_buffer(payload)
-        written, context = W.DWORD(), C.c_void_p()
+        from backend.core.windows_acl_native import write_descriptor
         with security_privileges():
-            failure = None
-            try:
-                self.check(self.backup_write(handle, data, len(payload), C.byref(written),
-                                            False, True, C.byref(context)))
-                if written.value != len(payload):
-                    raise OSError('Incomplete Windows security stream write')
-            except BaseException as error:
-                failure = error
-                raise
-            finally:
-                try:
-                    self.check(self.backup_write(handle, None, 0, C.byref(written),
-                                                True, True, C.byref(context)))
-                except OSError as cleanup_error:
-                    if failure is None:
-                        raise
-                    failure.add_note('Security stream cleanup also failed: ' + str(cleanup_error))
+            write_descriptor(handle, raw)
 
     def restore(self, records, *, expected, allow_original=False, boundaries=None):
         """Replace a prevalidated tree only from journaled, known states.
@@ -336,12 +288,18 @@ class SecurityTree:
             raise SecurityConflict('Security descriptors changed during restoration')
 
     def close(self):
-        for handle in reversed(list(self.handles.values())):
-            self.close_handle(handle)
-        self.handles.clear()
-        for handle in reversed(list(self.ancestors.values())):
-            self.close_handle(handle)
-        self.ancestors.clear()
+        # Preserve failed resources for a bounded retry. Never erase ownership
+        # just because a close was attempted.
+        failure = None
+        for owned in (self.handles, self.ancestors):
+            for path, handle in reversed(list(owned.items())):
+                try:
+                    handle.close()
+                    del owned[path]
+                except OSError as error:
+                    failure = error
+        if failure is not None:
+            raise failure
 
     def __enter__(self):
         return self

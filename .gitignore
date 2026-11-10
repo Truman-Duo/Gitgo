@@ -73,6 +73,8 @@ legacy/artifacts/
 
 # Developer-owned outputs; never product .gitgo state
 /dev-artifacts/
+/native/sandbox/target/
+/backend/native_runtime/
 
 # Developer batch launchers stay local; publish only the formal Dashboard entry.
 *.bat

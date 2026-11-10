@@ -149,6 +149,7 @@ try {
     try { Invoke-Checked "Locked Dashboard dependencies" { & $Bun install --frozen-lockfile } }
     finally { Pop-Location }
     if (-not $BuildOnly) {
+        Invoke-Checked "Locked Rust sandbox ABI" { & $Python -B scripts\build_sandbox_native.py }
         Invoke-Checked "Python test suite" {
             if ($TestPackages) { & $Python -B scripts\run_source_tests.py --packages $TestPackages tests -q }
             else { & $Python -B scripts\run_source_tests.py tests -q }

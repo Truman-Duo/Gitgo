@@ -73,11 +73,13 @@ def test_prepare_failure_retains_evidence_and_recovery_revokes_partial_grants(ac
     assert json.loads((p/'failure.json').read_text())['phase']=='revoked'
 
 
-def test_pending_native_cleanup_cannot_revoke_access(access_tree, monkeypatch):
+@pytest.mark.parametrize('retiring', [False, True])
+def test_pending_native_cleanup_cannot_revoke_access(access_tree, monkeypatch, retiring):
     w,r,p=access_tree
     access=WorkspaceAccess(w,[r],p/'pending.json').prepare()
     with monkeypatch.context() as changed:
-        changed.setattr('backend.core.sandbox_windows._PENDING_JOBS',{1:object()})
+        job = SimpleNamespace(profile_name=access.policy.profile_name, retirement_started=retiring)
+        changed.setattr('backend.core.sandbox_windows._PENDING_JOBS', {1: job})
         with pytest.raises(Exception,match='not retired'):access.close()
         assert access.payload['phase']=='applied'
     access.close()
