@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, ExitStack
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -48,6 +48,7 @@ class TransactionResult:
     status: str
     version: str | None = None
     error_code: str | None = None
+    health_failure: dict | None = None
 
 
 def _compat_wire(value: DataCompatibility) -> dict:
@@ -641,6 +642,18 @@ class InstallationStore:
                 # effect even if the call raised. Never trust the in-memory step.
                 failure = "UPDATE_HEALTH_FAILED" if isinstance(error, UpdateError) and error.code == "UPDATE_HEALTH_FAILED" else "UPDATE_OPERATION_FAILED"
                 recovered = self._recover_locked(checkpoint=checkpoint, failure_code=failure, data_locks_held=data_upgrade is not None)
+                if recovered.status == "rolled_back" and failure == "UPDATE_HEALTH_FAILED":
+                    from .health import ProbeFailure
+                    detail = {"stage": "CHECK_NEW"}
+                    if isinstance(error, ProbeFailure):
+                        detail.update(error.diagnostic)
+                    # Evidence is kept with the transaction. It is never used
+                    # as authority for recovery, replay or retries.
+                    try:
+                        atomic_control(directory / "health-failure.json", detail)
+                    except (OSError, UpdateError):
+                        pass
+                    recovered = replace(recovered, health_failure=detail)
                 if recovered.status == "idle" or (recovered.status == "committed" and recovered.version != manifest.version):
                     return TransactionResult("failed", current.version, failure)
                 return recovered

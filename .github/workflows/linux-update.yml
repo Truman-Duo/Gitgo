@@ -1,4 +1,4 @@
-name: Linux update acceptance
+name: Unix update acceptance
 
 on:
   workflow_call:
@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -33,6 +33,7 @@ jobs:
         with:
           node-version: '24.22.1'
       - name: Native build prerequisites
+        if: runner.os == 'Linux'
         # Alpha2.1 adds native source tests to the update branch's full suite.
         # Match the native acceptance prerequisites; never bypass containment.
         run: bash scripts/prepare_linux_update_ci.sh
@@ -46,6 +47,7 @@ jobs:
           uname -a
           git rev-parse HEAD
       - name: Full Linux source regression
+        if: runner.os == 'Linux'
         run: |
           umask 022
           sudo systemd-run --quiet --wait --pipe --collect --uid="$(id -u)" \
@@ -54,6 +56,12 @@ jobs:
             --setenv="GITGO_BUN=$GITGO_BUN" --unit=gitgo-update-source -p Delegate=yes \
             "$(which python)" -B scripts/run_linux_sandbox_scope.py -- \
             "$(which python)" -B -m pytest tests -q --tb=short --junitxml=linux-source.xml
+      - name: macOS updater, forkless engine and private probe channel regressions
+        if: runner.os == 'macOS'
+        run: >-
+          python -B -m pytest tests/test_update*.py tests/test_macos_forkless_scope.py
+          tests/test_unix_process_scope.py tests/test_managed_installation.py
+          -q --tb=short --junitxml=macos-source.xml
       - name: Dashboard tests and production build
         working-directory: cli/dashboard
         run: |
@@ -61,7 +69,7 @@ jobs:
           (cd ../.. && python -B -c "from tests.test_terminal_screen import assert_renderer_full_paint; assert_renderer_full_paint('bun')")
           bun test
           bun run build
-      - name: Build two independently committed real Linux bundles
+      - name: Build two independently committed real Unix bundles
         run: |
           umask 022
           python -B scripts/linux_update_ci_build.py --bun "$(command -v bun)"
@@ -69,12 +77,19 @@ jobs:
         run: |
           umask 022
           python -B -m pytest tests/test_update_two_frozen_versions.py -q --tb=short --junitxml=linux-frozen.xml
+      - name: Actual macOS quit handoff, healthy upgrades and failure recovery
+        if: runner.os == 'macOS'
+        run: |
+          export GITGO_SCOPE_TEST_HOST="$GITGO_UPDATE_CANDIDATE_STAGE/internal/gitgo-host/gitgo-host"
+          python -B -m pytest tests/test_update_macos_frozen.py tests/test_macos_forkless_scope.py -q --tb=short --junitxml=macos-frozen.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: linux-update-results-${{ matrix.os }}
+          name: unix-update-results-${{ matrix.os }}
           path: |
             linux-source.xml
             linux-frozen.xml
+            macos-source.xml
+            macos-frozen.xml
           if-no-files-found: warn
           retention-days: 7

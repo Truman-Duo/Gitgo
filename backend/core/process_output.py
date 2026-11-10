@@ -14,7 +14,7 @@ class ProcessCancelled(ValueError):
 
 
 def collect_output(proc, *, timeout, limit, terminate, input=None,
-                   cancel_event=None, reject_overflow=False):
+                   cancel_event=None, reject_overflow=False, on_poll=None):
     buffers = ["", ""]
     truncated = [False, False]
     failure = []
@@ -61,6 +61,8 @@ def collect_output(proc, *, timeout, limit, terminate, input=None,
                 raise OutputLimit(f"PROCESS_OUTPUT_LIMIT: pipe exceeded {limit} characters")
             if time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(proc.args, timeout)
+            if on_poll is not None:
+                on_poll()
             time.sleep(0.02)
         if overflow.is_set():
             raise OutputLimit(f"PROCESS_OUTPUT_LIMIT: pipe exceeded {limit} characters")

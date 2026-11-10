@@ -22,7 +22,7 @@ def ci_successor_product(product: dict, platform: str) -> dict:
     This never selects a real release version or mutates the input contract.
     """
     from backend.core.update.version import Version
-    if platform not in {"windows", "linux"}:
+    if platform not in {"windows", "linux", "macos"}:
         raise ValueError("Unsupported two-version CI target")
     previous = Version.parse(product["version"])
     core = previous.core if previous.prerelease else (*previous.core[:2], previous.core[2] + 1)

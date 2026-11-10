@@ -9,7 +9,7 @@ import {Parser, type Action} from "../../vendor/ink/src/core/termio.js";
 import {InputProvider} from "../input/runtime.js";
 import {LanguageContext} from "../ui/PageFrame.js";
 import {useTextInput} from "../hooks/useTextInput.js";
-import {displayWidth} from "../theme/index.js";
+import {colors, displayWidth} from "../theme/index.js";
 import {GeneralTab} from "./config/GeneralTab.js";
 
 const wait = (ms = 85) => new Promise(resolve => setTimeout(resolve, ms));
@@ -79,10 +79,35 @@ for (const language of ["en", "zh"] as const) test(`General aligns terminal-cell
 
 test("editing blinks only the field name, cycles one visible value and retains its column", async () => {
   const io = mount("zh");
+  // Drive the blink callback rather than guessing a wall-clock phase.
+  // Other timers stay real so Ink and keyboard events still run normally.
+  const schedule = globalThis.setInterval;
+  let blink: (() => void) | undefined;
+  globalThis.setInterval = ((callback: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    if (ms === colors.form.blinkMs) {
+      blink = () => callback(...args);
+      return schedule(() => {}, 60_000);
+    }
+    return schedule(callback, ms, ...args);
+  }) as typeof setInterval;
+  const waitFor = async (condition: () => boolean) => {
+    const deadline = performance.now() + 3000;
+    while (!condition()) {
+      if (performance.now() >= deadline) throw Error("Blink transition did not render");
+      await wait(10);
+    }
+  };
   try {
     await wait(); const at = io.locate("详细显示"), value = io.locate("OFF");
     await io.send("\r"); expect(io.footer().hidden).toBe(true);
-    await wait(450);
+    await waitFor(() => blink !== undefined);
+    blink!();
+    await waitFor(() => !io.line(at.y).includes("详细显示"));
+    expect(io.line(at.y)).toContain("OFF");
+    blink!();
+    await waitFor(() => io.line(at.y).includes("详细显示"));
+    blink!();
+    await waitFor(() => !io.line(at.y).includes("详细显示"));
     expect(io.line(at.y)).not.toContain("详细显示"); expect(io.line(at.y)).toContain("OFF");
     expect(io.locate("OFF").x).toBe(value.x);
     expect(io.line(at.y)).not.toMatch(/[›▸█]/);
@@ -91,5 +116,5 @@ test("editing blinks only the field name, cycles one visible value and retains i
     expect(io.calls.some(call => call.name === "config.set")).toBe(false);
     await io.send("\r"); expect(io.line(at.y)).toContain("详细显示");
     expect(io.calls.find(call => call.name === "config.set")!.args).toEqual({key: "verbose", value: false});
-  } finally {io.close();}
+  } finally {try {io.close();} finally {globalThis.setInterval = schedule;}}
 });

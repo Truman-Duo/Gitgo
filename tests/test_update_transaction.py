@@ -138,6 +138,28 @@ def apply(lab, **options):
                        clock=options.pop("clock", lambda: NOW), **options)
 
 
+def test_probe_timeout_preserves_rollback_and_local_diagnostics(lab):
+    from backend.core.update.health import ProbeFailure
+
+    store = lab[0]
+    before = tree_digest(store.root / "active")
+    failure = ProbeFailure("update-startup-probe", "collect_timeout", timeout=30,
+                           stderr="private diagnostic output")
+
+    def fail(*_):
+        raise failure
+
+    result = apply(lab, health_check=fail)
+    transaction = store._ledger()["transaction"]
+    assert result.status == "rolled_back" and result.error_code == "UPDATE_HEALTH_FAILED"
+    assert tree_digest(store.root / "active") == before
+    assert transaction["state"] == "ROLLED_BACK"
+    detail = read_control(store.root / "transactions" / transaction["id"] / "health-failure.json")
+    assert detail == result.health_failure == {"stage": "CHECK_NEW", **failure.diagnostic}
+    assert "private" not in json.dumps(detail)
+    assert store.recover().status == "rolled_back"
+
+
 def reopen(store):
     return SimulationStore(store.root, protected_paths=store.protected_paths)
 
