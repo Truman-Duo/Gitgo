@@ -89,10 +89,12 @@ def test_sensitive_handlers_have_no_model_selectable_opt_out():
 def test_environment_is_an_allowlist():
     env = sandbox_environment({"SystemRoot": "system", "LOCALAPPDATA": "local",
                                "MY_OPAQUE_CREDENTIAL": "secret", "PYTHONPATH": "evil",
+                               "GITGO_NATIVE_IMAGE_PINS": "12345",
                                "GITGO_TOOL_REGISTRY_MODULE": "evil"})
     assert env["SystemRoot"] == "system"
     assert "MY_OPAQUE_CREDENTIAL" not in env
     assert "PYTHONPATH" not in env
+    assert "GITGO_NATIVE_IMAGE_PINS" not in env
     assert "GITGO_TOOL_REGISTRY_MODULE" not in env
 
 
@@ -208,6 +210,8 @@ def isolated_python():
 def owned_windows_access(workspace, runtime_paths):
     """Test-owned directories only; never provision the user's installation."""
     from backend.core.sandbox_windows import WindowsApi
+    from backend.core import sandbox as sandbox_module
+    from unittest.mock import patch
     from ctypes import wintypes as W
     policy = SandboxPolicy(workspace)
     api = WindowsApi()
@@ -229,7 +233,12 @@ def owned_windows_access(workspace, runtime_paths):
     subprocess.run(["icacls", str(workspace), "/setintegritylevel", "(OI)(CI)L"],
                    check=True, capture_output=True)
     try:
-        yield policy
+        # The fixture chooses executable/source locations and provisions only
+        # these owned trees. Register the same facts for launcher image pins;
+        # no filesystem permission or production separation check is bypassed.
+        registered = (*sandbox_module.trusted_runtime_roots(), *(Path(p).resolve(strict=True) for p in runtime_paths))
+        with patch.object(sandbox_module, 'trusted_runtime_roots', lambda: registered):
+            yield policy
     finally:
         for runtime in runtime_paths:
             subprocess.run(["icacls", str(runtime), "/remove:g", f"*{sid_string}"],

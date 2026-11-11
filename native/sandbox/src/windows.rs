@@ -310,7 +310,8 @@ fn launch(
         || command.is_empty()
         || cwd.is_empty()
         || handles.len() < 3
-        || handles.len() > 19
+        // stdio + <=16 installation leases + <=16 metadata-only image pins.
+        || handles.len() > 35
         || handles.iter().any(|h| *h == 0 || *h == usize::MAX)
         || handles.iter().collect::<BTreeSet<_>>().len() != handles.len()
         || flags & !(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW) != 0
@@ -605,7 +606,12 @@ fn perform(request: Request) -> Result<Value> {
                 json!({"ok": true, "process_token": process_token, "process_handle": raw, "pid": pid}),
             )
         }
-        Request::Capabilities {} => Err(INVALID),
+        Request::Capabilities {}
+        | Request::ReadRoot { .. }
+        | Request::ReadOpen { .. }
+        | Request::ReadClose { .. }
+        | Request::ReadHash { .. }
+        | Request::ReadSize { .. } => Err(INVALID),
     }
 }
 
