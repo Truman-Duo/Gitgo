@@ -37,4 +37,5 @@ def test_optional_observer_wait_is_not_parent_gate_but_missing_creation_and_requ
     parent.delegated_contracts[child.process_id]['required_for_parent_completion'] = True
     full = HostCompletionEvaluator.evaluate(parent, 'Must still wait for this required child.')
     assert any('unresolved' in reason for reason in full.reasons)
-    assert any('did not complete' in reason for reason in full.reasons)
+    assert not full.allowed
+    assert any('closeout is not finalized' in reason for reason in full.reasons)
