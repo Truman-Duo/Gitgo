@@ -1,4 +1,5 @@
 """Project counts use one execution population before and after disconnect."""
+from contextlib import closing
 import io
 import sqlite3
 from types import SimpleNamespace
@@ -9,7 +10,8 @@ from backend.core.storage.runtime import read_project_list_status
 
 def test_cold_projection_counts_every_execution_without_a_writer(tmp_path_factory, monkeypatch):
     db = tmp_path_factory / 'state.sqlite3'
-    with sqlite3.connect(db) as conn:
+    # The sqlite context commits transactions; closing also releases the OS handle.
+    with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute('CREATE TABLE session_processes (process_id TEXT, status TEXT, updated_at TEXT, created_at TEXT, actor_kind TEXT, parent_process_id TEXT)')
         conn.executemany('INSERT INTO session_processes VALUES (?,?,?,?,?,?)', [
             ('a0','completed','1','1','supervisor',None),
@@ -150,7 +152,7 @@ def test_project_list_rejects_invalid_cas_reference_without_reading_external_pat
         store.save_process_checkpoint(root)
         paths = store._storage.paths
         monkeypatch.setattr('backend.core.storage.runtime.resolve_existing_storage_paths', lambda _: paths)
-        with sqlite3.connect(paths.state_db) as connection:
+        with closing(sqlite3.connect(paths.state_db)) as connection, connection:
             connection.execute('UPDATE session_processes SET runtime_state_ref=? WHERE process_id=?',
                                ('sha256:../../outside.json', root.process_id))
         with pytest.raises(StorageBlocked, match='STATE_REFERENCE_INVALID'):
@@ -176,7 +178,7 @@ def test_repeated_finalized_refs_are_read_once_and_outcomes_are_not_loaded(tmp_p
             process.result = {'status': 'completed', 'response': 'Final result'}
             store.save_process_checkpoint(process)
         paths = store._storage.paths
-        with sqlite3.connect(paths.state_db) as connection:
+        with closing(sqlite3.connect(paths.state_db)) as connection, connection:
             reference = connection.execute('SELECT runtime_state_ref FROM session_processes WHERE process_id=?',
                                            (root.process_id,)).fetchone()[0]
             connection.execute('UPDATE session_processes SET runtime_state_ref=?', (reference,))
@@ -239,3 +241,36 @@ def test_existing_state_reader_reuses_verified_owned_object_path(tmp_path_factor
         assert read['reference'] == reference and read['payload'] == b'{"kept":true}'
     finally:
         store.close()
+
+
+
+def test_project_projection_closes_read_connection_on_success_empty_and_error(tmp_path_factory, monkeypatch):
+    """Real close is deterministic on every OS, independent of GC or unlink semantics."""
+    import pytest
+    import backend.core.storage.runtime as runtime
+    from backend.core.storage.models import StorageBlocked
+    db = tmp_path_factory / 'connection-lifetime.sqlite3'
+    with closing(sqlite3.connect(db)) as setup, setup:
+        setup.execute('CREATE TABLE session_processes (process_id TEXT, status TEXT, updated_at TEXT, created_at TEXT, actor_kind TEXT, parent_process_id TEXT, runtime_state_ref TEXT)')
+    monkeypatch.setattr(runtime, 'resolve_existing_storage_paths', lambda _: SimpleNamespace(state_db=db))
+    original_connect = sqlite3.connect
+    observed = []
+    def connect(database, *args, **kwargs):
+        connection = original_connect(database, *args, **kwargs)
+        if str(database) == db.resolve().as_uri() + '?mode=ro':
+            observed.append(connection)  # retain handles: GC cannot hide an unclosed reader
+        return connection
+    monkeypatch.setattr(sqlite3, 'connect', connect)
+    assert read_project_list_status(tmp_path_factory) is None
+    with closing(original_connect(db)) as setup, setup:
+        setup.execute('INSERT INTO session_processes VALUES (?,?,?,?,?,?,?)',
+                      ('root', 'completed', '1', '1', 'supervisor', None, None))
+    assert read_project_list_status(tmp_path_factory)['process_id'] == 'root'
+    with closing(original_connect(db)) as setup, setup:
+        setup.execute('UPDATE session_processes SET runtime_state_ref=?', ('sha256:../../outside.json',))
+    with pytest.raises(StorageBlocked, match='STATE_REFERENCE_INVALID'):
+        read_project_list_status(tmp_path_factory)
+    assert len(observed) == 3
+    for connection in observed:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed database'):
+            connection.execute('SELECT 1')
