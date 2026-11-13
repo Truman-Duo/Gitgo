@@ -1939,6 +1939,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
         requested_process_id = cmd.get("process_id", "")
         process = None
         direct_followup = None
+        boundary_compaction_failure = None
         continuation_id = str(requested_process_id or cmd.get("conversation_process_id") or "")
         if not continuation_id and cmd.get("session_id"):
             from backend.core.loop.conversation_continuation import require_root_session_for_implicit_continuation
@@ -2181,41 +2182,6 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                     if candidate.session_id == requested_session_id:
                         reuse_session = candidate
                         apm._sessions[candidate.session_id] = candidate
-        if (canonical_user_turn and reuse_session is not None and predecessor_process is not None
-                and not cmd.get("adopted_change_origin")):
-            previous_result = dict(predecessor_process.result or {})
-            child_outcomes = []
-            child_ids, contracts, reviews = predecessor_process.coordination_snapshot()
-            for child_id in child_ids[-16:]:
-                child = apm.get(child_id)
-                child_outcomes.append({
-                    "display_name": (
-                        child.session.display_name if child is not None else "unavailable"
-                    ),
-                    "status": child.status.value if child is not None else "missing",
-                    "target_files": list(
-                        dict(contracts.get(child_id) or {}).get("target_files") or []
-                    )[:16],
-                    "review": str(dict(reviews.get(child_id) or {}).get("verdict") or "not_reviewed"),
-                })
-            compacted = reuse_session.compact_completed_task_boundary(
-                checkpoint={
-                    "status": previous_result.get("status") or predecessor_process.status.value,
-                    "response": previous_result.get("response") or "",
-                    "deliverables": list(
-                        dict(previous_result.get("metadata") or {}).get("deliverables") or []
-                    ),
-                    "child_outcomes": child_outcomes,
-                },
-            )
-            if compacted:
-                emit({
-                    "event": "context_compaction_completed",
-                    "trigger": "completed_task_boundary",
-                    "forced": False,
-                    "context_epoch": reuse_session.context_epoch,
-                    "changed": True,
-                })
         transferred_maintenance = None
         if cmd.get("adopted_change_origin"):
             origin = cmd["adopted_change_origin"]
@@ -2274,6 +2240,61 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                     session_id=("" if reuse_session is not None else str(cmd.get("session_id", ""))),
                     session=reuse_session,
                 )
+                # fork serializes session admission. Do not mutate the shared
+                # history before it succeeds: another execution may own it.
+                if (canonical_user_turn and reuse_session is not None and predecessor_process is not None
+                        and not cmd.get("adopted_change_origin")):
+                    previous_result = dict(predecessor_process.result or {})
+                    child_outcomes = []
+                    child_ids, contracts, reviews = predecessor_process.coordination_snapshot()
+                    for child_id in child_ids[-16:]:
+                        child = apm.get(child_id)
+                        child_outcomes.append({
+                            "display_name": (
+                                child.session.display_name if child is not None else "unavailable"
+                            ),
+                            "status": child.status.value if child is not None else "missing",
+                            "target_files": list(
+                                dict(contracts.get(child_id) or {}).get("target_files") or []
+                            )[:16],
+                            "review": str(dict(reviews.get(child_id) or {}).get("verdict") or "not_reviewed"),
+                        })
+                    try:
+                        compacted = reuse_session.compact_completed_task_boundary(
+                            checkpoint={
+                                "status": previous_result.get("status") or predecessor_process.status.value,
+                                "response": previous_result.get("response") or "",
+                                "deliverables": list(
+                                    dict(previous_result.get("metadata") or {}).get("deliverables") or []
+                                ),
+                                "child_outcomes": child_outcomes,
+                            },
+                        )
+                    except Exception as exc:
+                        # Atomic staging leaves the old context intact. This is
+                        # optional context GC: retain the admitted execution and
+                        # budget, report the failure, then run without compaction.
+                        compacted = False
+                        from backend.core.errors import error_payload
+                        failure = error_payload("CONTEXT_COMPACTION_FAILED", details={
+                            "trigger": "completed_task_boundary", "reason": str(exc),
+                            "continuing_without_compaction": True})
+                        boundary_compaction_failure = {
+                            "event": "context_compaction_failed", "code": "CONTEXT_COMPACTION_FAILED",
+                            "process_id": process.process_id, "task_id": task_id,
+                            "session_id": reuse_session.session_id,
+                            "trigger": "completed_task_boundary", "changed": False,
+                            "reason": "Prior context retained; continuing without compaction.",
+                            "error": failure["error_info"]}
+                        emit(boundary_compaction_failure)
+                    if compacted:
+                        emit({
+                            "event": "context_compaction_completed",
+                            "trigger": "completed_task_boundary",
+                            "forced": False,
+                            "context_epoch": reuse_session.context_epoch,
+                            "changed": True,
+                        })
                 if predecessor_process is not None and process.parent_id is None:
                     if predecessor_process.actor_kind == "supervisor":
                         apm.inherit_terminal_coordination(process, predecessor_process)
@@ -2387,6 +2408,8 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             session.workspace_path, task_id,
             storage=(daemon_ctx or {}).get("storage"),
         )
+        if boundary_compaction_failure is not None:
+            trace.append(boundary_compaction_failure)
         trace.append({
             "event": "task_admitted",
             "task_id": task_id,
