@@ -314,7 +314,7 @@ export function useLoopData(
     if (!client?.subscribeEvents || !project) return;
     const stateEvents = new Set([
       "runtime_ack", "task_admitted", "agent_started", "agent_terminal", "agent_complete",
-      "state_changed", "daemon_started", "daemon_stopped",
+      "state_changed", "daemon_started", "daemon_stopped", "agent_dag_admitted", "agent_dag_admission_failed",
       "provider_usage", "tool_result", "decision_required", "user_decision_received",
       "provider_route_activated", "provider_route_selected", "provider_route_failed", "provider_route_skipped",
       "decision_resumed", "context_compaction_requested", "context_compaction_completed",

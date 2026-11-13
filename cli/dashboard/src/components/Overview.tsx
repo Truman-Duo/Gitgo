@@ -63,7 +63,8 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
               const i = group.start + gi;
               const isSelected = i === sel;
 
-              const procBadge = p.activeProcessCount > 0 ? (p.countScope === "live_executions" ? "~" : "") + String(p.activeProcessCount) : "";
+              const procBadge = p.countScope === "live_executions" ? "~" + String(p.activeProcessCount)
+                : p.activeProcessCount > 0 ? String(p.activeProcessCount) : "";
               const procColor = p.activeProcessCount > 0 ? colors.accent : undefined;
               const procStr = (procBadge || "-").padEnd(procW);
 
