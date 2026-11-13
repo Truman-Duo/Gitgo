@@ -134,19 +134,83 @@ def compile_continuation(previous, previous_contract, owner, proposed, *, mode='
     return fields
 
 
-def require_direct_followup(previous, manager):
-    """The UI fresh-task route cannot retire an unfinished owner's assignment.
+def direct_user_task_origin(process):
+    """Host ledger provenance, never a command/runtime preference, releases A's obligation.
 
-    Continue pending work through the supervisor's remaining-work admission,
-    which retains the original tree budget and publishes the successor contract.
-    A direct new user task is available only after the old outcome was accepted.
+    parent_id still identifies the conversation's original A for presentation.
+    A Host-admitted independent user turn does not become an A delegation.
     """
-    owner = manager.get(previous.parent_id)
+    return _direct_user_origin(process.session.host_ledger, process.process_id, process.active_task_id)
+
+
+def direct_user_task_origin_from_state(state):
+    process = state.get('process') or {}
+    return _direct_user_origin((state.get('session') or {}).get('host_ledger', []),
+                               process.get('process_id'), process.get('task_id'))
+
+
+def _direct_user_origin(ledger, process_id, task_id):
+    for event in reversed(ledger):
+        if (event.get('event') == 'direct_user_task_admitted'
+                and event.get('process_id') == process_id
+                and event.get('task_id') == task_id
+                and event.get('accepted_source_process_id')
+                and event.get('owner_process_id')):
+            return event
+    return None
+
+
+def _continuation_owner(previous, manager, store=None, workspace=None):
+    original = manager.get(previous.parent_id)
+    if original is None:
+        return None
+    # A same-session A successor can review or supersede an inherited B. On a
+    # cold direct-B entry, restore only the latest explicit owner, not every A.
+    if store is not None:
+        deleted = store.deleted_process_ids()
+        for link in reversed(store.list_process_links()):
+            pid = link['process_id']
+            if (pid in deleted or link.get('parent_process_id')
+                    or link.get('session_id') != original.session.session_id):
+                continue
+            live = manager.get(pid)
+            state = None if live else store.load_process_state(pid)
+            contracts = live.delegated_contracts if live else (state or {}).get('runtime_state', {}).get('delegated_contracts', {})
+            if previous.process_id in contracts:
+                if live is None:
+                    from .recovery import restore_incomplete_processes
+                    restore_incomplete_processes(store, manager, workspace, include_process_ids=[pid])
+                break
+    candidates = [candidate for candidate in manager.list_processes()
+        if candidate.actor_kind == 'supervisor'
+        and candidate.session.session_id == original.session.session_id
+        and previous.process_id in candidate.delegated_contracts
+        and manager.owns_child(candidate, previous)]
+    return max(candidates, key=lambda candidate: candidate.created_at) if candidates else original
+
+
+def require_direct_followup(previous, manager, *, store=None, workspace=None):
+    """New independent user turns require a reliably closed predecessor.
+
+    The first turn also requires the original delegated outcome to be accepted.
+    Subsequent user turns use the Host's durable admission receipt; they do not
+    invent a missing A contract or accept an ordinary user_direct_continuation flag.
+    """
+    if not is_consumable_terminal(previous, manager):
+        raise ContinuationAdmissionError('CONTINUATION_CLOSEOUT_PENDING',
+            'Wait for reliable closeout before starting another user turn.', process_id=previous.process_id)
+    origin = direct_user_task_origin(previous)
+    if origin is not None:
+        return {'direct_user_origin': dict(origin)}
+    owner = _continuation_owner(previous, manager, store, workspace)
     contract = (getattr(owner, 'delegated_contracts', {}) or {}).get(previous.process_id)
     if contract is None:
         raise ContinuationAdmissionError('CONTINUATION_OWNER_CONTRACT_REQUIRED',
             'The original supervisor assignment is unavailable; restore it before starting a new task on this worker session.',
             process_id=previous.process_id)
-    return compile_continuation(previous, contract, owner, {
+    compiled = compile_continuation(previous, contract, owner, {
         'task_kind': previous.task_kind, 'profile_id': previous.capability_profile_id,
     }, mode='follow_up')
+    compiled['direct_user_origin'] = {'accepted_source_process_id': previous.process_id,
+                                     'owner_process_id': owner.process_id}
+    return compiled

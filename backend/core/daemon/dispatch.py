@@ -1938,6 +1938,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
         task_id = cmd.get("task_id", "") or str(uuid.uuid4())
         requested_process_id = cmd.get("process_id", "")
         process = None
+        direct_followup = None
         continuation_id = str(requested_process_id or cmd.get("conversation_process_id") or "")
         if continuation_id:
             from backend.core.loop.conversation_continuation import resolve_conversation_process
@@ -1957,7 +1958,8 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             # session. The supervisor's delegate_task path handles remaining work.
             from backend.core.loop.continuation_contract import require_direct_followup
             try:
-                require_direct_followup(process, apm)
+                direct_followup = require_direct_followup(process, apm,
+                    store=(daemon_ctx or {}).get("session_store"), workspace=session.workspace_path)
             except ValueError as exc:
                 emit({"event": "command_result", "cmd": "task", "error": str(exc),
                       "code": getattr(exc, "code", "CONTINUATION_REJECTED"),
@@ -2267,11 +2269,21 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                         apm.inherit_terminal_coordination(process, predecessor_process)
                     elif logical_parent_id:
                         process.parent_id = str(logical_parent_id)
-                        parent = apm.get(process.parent_id)
-                        if parent is not None:
-                            with parent._coordination_lock:
-                                if process.process_id not in parent.child_ids:
-                                    parent.child_ids.append(process.process_id)
+                        # parent_id preserves conversation identity for presentation;
+                        # this new user task is independent of A's delegation/completion.
+                        # Only the successful Host gate above can mint this receipt.
+                        if direct_followup is not None:
+                            from backend.core.loop.mechanism_lifecycle import next_authority_sequence
+                            origin = direct_followup["direct_user_origin"]
+                            with process.session._mechanism_lock:
+                                process.session.host_ledger.append({
+                                    "event": "direct_user_task_admitted",
+                                    "process_id": process.process_id, "task_id": task_id,
+                                    "predecessor_process_id": predecessor_process.process_id,
+                                    "accepted_source_process_id": origin["accepted_source_process_id"],
+                                    "owner_process_id": origin["owner_process_id"],
+                                    "authority_sequence": next_authority_sequence(process.session),
+                                })
                         process.runtime_preferences["predecessor_process_id"] = predecessor_process.process_id
             except ValueError as e:
                 emit({"event": "command_result", "cmd": "task",

@@ -305,3 +305,159 @@ def test_empty_retained_tool_scope_does_not_expand_to_profile_defaults(tmp_path_
         result = delegate(tools, continue_process_id=old.process_id)
     assert result['delegated'], result
     assert root._manager.get(result['process_id']).tool_registry.list_all() == []
+
+
+def _direct_user_turn(manager, previous, workspace, *, store=None, task_id='direct-turn'):
+    from backend.core.daemon.dispatch import _cmd_task
+    emitted = []
+    # Exercise real admission/persistence and only suppress provider-thread launch.
+    with patch('backend.core.daemon.dispatch.threading.Thread.start'):
+        _cmd_task({'action': 'chat', 'process_id': previous.process_id, 'task_id': task_id,
+            'context_snapshot': {}, 'instruction': 'Explain the result further', 'fresh_task_budget': True},
+            SimpleNamespace(workspace_path=workspace), SimpleNamespace(name='test'),
+            {'apm': manager, 'dispatcher': object(), 'llm': object(),
+             'session_store': store, 'evq': Queue()}, emitted.append)
+    assert emitted[-1].get('result', {}).get('status') == 'pending', emitted
+    result = manager.get(emitted[-1]['result']['process_id'])
+    result._run_lock.release()
+    return result
+
+
+def _accepted_original(workspace):
+    root, tools, old = fixture(workspace)
+    old.status = ProcessStatus.COMPLETED
+    old.result = {'status': 'completed'}
+    root.child_reviews[old.process_id] = {'verdict': 'approved', 'summary': 'Verified original outcome'}
+    return root, tools, old
+
+
+def test_real_dispatch_repeated_independent_user_turns_do_not_reopen_parent_obligations(tmp_path_factory):
+    from backend.core.loop.continuation_contract import direct_user_task_origin
+    from backend.core.loop.completion_protocol import HostCompletionEvaluator
+    root, tools, old = _accepted_original(tmp_path_factory)
+    manager = root._manager
+    root_contracts, root_children = deepcopy(root.delegated_contracts), list(root.child_ids)
+    baseline = HostCompletionEvaluator.evaluate(root, 'original work delivered').reasons
+    latest = old
+    for index in range(3):
+        successor = _direct_user_turn(manager, latest, tmp_path_factory, task_id=f'user-turn-{index}')
+        assert successor.session is old.session
+        assert successor.parent_id == root.process_id  # presentation identity only
+        assert successor.task_budget is not root.task_budget
+        assert set(successor.tool_registry.list_all()) <= set(old.tool_registry.list_all())
+        assert direct_user_task_origin(successor)['accepted_source_process_id'] == old.process_id
+        assert root.delegated_contracts == root_contracts and root.child_ids == root_children
+        assert HostCompletionEvaluator.evaluate(root, 'original work delivered').reasons == baseline
+        assert not successor.worktree  # no old published worktree is silently reopened
+        successor.status = ProcessStatus.COMPLETED
+        successor.result = {'status': 'completed'}
+        successor.lifecycle_finalized = True
+        latest = successor
+
+
+def test_cold_independent_turn_uses_durable_host_ledger_and_does_not_rebuild_parent_obligation(tmp_path_factory):
+    from backend.core.loop.manager import AgentProcessManager, SessionStore
+    from backend.core.loop.conversation_continuation import resolve_conversation_process
+    from backend.core.loop.continuation_contract import direct_user_task_origin
+    root, tools, old = _accepted_original(tmp_path_factory)
+    root.status = ProcessStatus.COMPLETED
+    root.result = {'status': 'completed'}
+    root.lifecycle_finalized = True
+    store = SessionStore(str(tmp_path_factory), state_home=tmp_path_factory / 'state')
+    try:
+        for process in (root, old):
+            store.save_process_checkpoint(process)
+            store.append_event(process.process_id, 'agent_complete', {'status': 'completed'})
+        direct = _direct_user_turn(root._manager, old, tmp_path_factory, store=store)
+        direct.status = ProcessStatus.COMPLETED
+        direct.result = {'status': 'completed'}
+        direct.lifecycle_finalized = True
+        store.save_process_checkpoint(direct)
+        store.append_event(direct.process_id, 'agent_complete', {'status': 'completed'})
+        cold = AgentProcessManager()
+        restored = resolve_conversation_process(cold, store, tmp_path_factory, direct.process_id)
+        assert direct_user_task_origin(restored)['accepted_source_process_id'] == old.process_id
+        owner = cold.get(root.process_id)
+        assert restored.task_budget is not owner.task_budget
+        assert restored.task_budget.snapshot()['task_id'] == direct.task_budget.snapshot()['task_id']
+        assert set(restored.tool_registry.list_all()) <= set(old.tool_registry.list_all())
+        assert direct.process_id not in owner.child_ids
+        assert direct.process_id not in owner.delegated_contracts
+        successor = _direct_user_turn(cold, restored, tmp_path_factory, store=store, task_id='cold-next')
+        assert successor.session is restored.session
+        assert direct_user_task_origin(successor)['accepted_source_process_id'] == old.process_id
+    finally:
+        store.close()
+
+
+def test_plain_runtime_flag_or_unrelated_ledger_record_cannot_release_unaccepted_delegation(tmp_path_factory):
+    root, tools, old = fixture(tmp_path_factory)
+    old.runtime_preferences['user_direct_continuation'] = True
+    old.session.host_ledger.append({'event': 'direct_user_task_admitted',
+        'process_id': 'unrelated', 'task_id': old.active_task_id,
+        'accepted_source_process_id': old.process_id, 'owner_process_id': root.process_id})
+    with pytest.raises(ValueError, match='CONTINUATION_OBLIGATIONS_PENDING'):
+        require_direct_followup(old, root._manager)
+
+
+def test_independent_user_turn_still_requires_reliable_closeout(tmp_path_factory):
+    root, tools, old = _accepted_original(tmp_path_factory)
+    direct = _direct_user_turn(root._manager, old, tmp_path_factory)
+    direct.status = ProcessStatus.COMPLETED
+    direct.result = {'status': 'completed'}
+    direct.lifecycle_finalized = False
+    with pytest.raises(ValueError, match='CONTINUATION_CLOSEOUT_PENDING'):
+        require_direct_followup(direct, root._manager)
+
+
+@pytest.mark.parametrize('cold', [False, True])
+def test_latest_explicit_supervisor_review_is_used_for_direct_continuation(tmp_path_factory, cold):
+    from backend.core.loop.manager import AgentProcessManager, SessionStore
+    from backend.core.loop.models import RingLevel
+    from backend.core.loop.tools import ToolRegistry
+    from backend.core.loop.conversation_continuation import resolve_conversation_process
+    root, tools, old = fixture(tmp_path_factory)
+    manager = root._manager
+    old.status = ProcessStatus.COMPLETED
+    old.result = {'status': 'completed'}
+    root.status = ProcessStatus.COMPLETED
+    root.result = {'status': 'completed'}
+    root.lifecycle_finalized = True
+    successor = manager.fork(None, 'supervisor', ToolRegistry([]), 5, RingLevel.RING_0,
+        session=root.session, task_id='next-root', actor_kind='supervisor', workspace_path=str(tmp_path_factory))
+    manager.inherit_terminal_coordination(successor, root)
+    successor.child_reviews[old.process_id] = {'verdict': 'approved', 'summary': 'Current supervisor verified'}
+    successor.status = ProcessStatus.COMPLETED
+    successor.result = {'status': 'completed'}
+    successor.lifecycle_finalized = True
+    store = SessionStore(str(tmp_path_factory), state_home=tmp_path_factory / 'state') if cold else None
+    try:
+        if cold:
+            for process in (root, old, successor):
+                store.save_process_checkpoint(process)
+                store.append_event(process.process_id, 'agent_complete', {'status': 'completed'})
+            manager = AgentProcessManager()
+            old = resolve_conversation_process(manager, store, tmp_path_factory, old.process_id)
+        result = require_direct_followup(old, manager, store=store, workspace=tmp_path_factory)
+        assert result['direct_user_origin']['owner_process_id'] == successor.process_id
+        assert manager.get(successor.process_id).child_reviews[old.process_id]['verdict'] == 'approved'
+        manager.get(successor.process_id).delegated_contracts[old.process_id]['superseded_by'] = 'newer-child'
+        with pytest.raises(ValueError, match='CONTINUATION_ALREADY_SUPERSEDED'):
+            require_direct_followup(old, manager, store=store, workspace=tmp_path_factory)
+    finally:
+        if store:
+            store.close()
+
+
+def test_recovery_budget_root_stops_at_independent_user_task_for_descendants():
+    from backend.core.loop.recovery import _root_id
+    states = {
+        'A': {'process': {'process_id': 'A', 'parent_process_id': None}},
+        'user': {'process': {'process_id': 'user', 'parent_process_id': 'A', 'task_id': 'user-task'},
+            'session': {'host_ledger': [{'event': 'direct_user_task_admitted',
+                'process_id': 'user', 'task_id': 'user-task', 'accepted_source_process_id': 'B',
+                'owner_process_id': 'A'}]}},
+        'descendant': {'process': {'process_id': 'descendant', 'parent_process_id': 'user'}},
+    }
+    assert _root_id('user', states) == 'user'
+    assert _root_id('descendant', states) == 'user'
