@@ -7,7 +7,7 @@ SessionStore persists authoritative session state through SQLite + CAS.
 
 from __future__ import annotations
 
-from backend.core.loop.lifecycle import transition
+from backend.core.loop.lifecycle import transition, execution_closeout, is_consumable_terminal
 
 import hashlib
 import json
@@ -495,10 +495,15 @@ class AgentProcessManager:
                 ]
                 if missing:
                     return "upstream dependency disappeared: " + ", ".join(missing)
+                failed_closeout = [
+                    item.process_id for item in upstream if item is not None
+                    and execution_closeout(item, self)["closeout_state"] == "failed"
+                ]
+                if failed_closeout:
+                    return "upstream dependency closeout failed: " + ", ".join(failed_closeout)
                 if any(
                     item.status in active or (
-                        item.process_id in self._threads
-                        and not item.lifecycle_finalized
+                        not is_consumable_terminal(item, self)
                     )
                     for item in upstream if item is not None
                 ):
@@ -768,6 +773,8 @@ class AgentProcessManager:
         for item in ordered:
             if item.status != ProcessStatus.COMPLETED:
                 raise ValueError(f"process is not completed: {item.process_id}")
+            if not is_consumable_terminal(item, self):
+                raise ValueError(f"process closeout is not finalized: {item.process_id}")
             review = (supervisor.child_reviews or {}).get(item.process_id, {})
             if review.get("verdict") != "approved":
                 raise ValueError(f"process lacks supervisor approval: {item.process_id}")
@@ -935,10 +942,8 @@ class AgentProcessManager:
                 result[process_id] = {
                     "status": process.status.value if process else "not_found",
                     "result": process.result if process else None,
-                    "lifecycle_finalized": (
-                        (process.lifecycle_finalized or process_id not in self._threads)
-                        if process else True
-                    ),
+                    **(execution_closeout(process, self) if process else
+                       {"lifecycle_finalized": True, "closeout_state": "finalized"}),
                 }
             return result
 
@@ -947,7 +952,7 @@ class AgentProcessManager:
                 item["status"] not in {
                     "running", "waiting", "cancelling", "awaiting_user",
                     "resume_available", "recovery_review_required", "recovering",
-                } and item.get("lifecycle_finalized", True)
+                } and item["closeout_state"] in {"finalized", "failed"}
                 for item in states.values()
             ]
             return (all(terminal) if return_when == "all_terminal" else any(terminal))
@@ -974,7 +979,7 @@ class AgentProcessManager:
                     item["status"] not in {
                         "running", "waiting", "cancelling", "awaiting_user",
                         "resume_available", "recovery_review_required", "recovering",
-                    } and item.get("lifecycle_finalized", True)
+                    } and item["closeout_state"] in {"finalized", "failed"}
                     for item in states.values()
                 ),
                 "state_version": self._state_version,

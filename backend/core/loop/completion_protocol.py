@@ -449,6 +449,10 @@ class HostCompletionEvaluator:
             if child is None:
                 reasons.append(f"required delegated agent is missing: {child_id}")
                 continue
+            from .lifecycle import is_consumable_terminal
+            if not is_consumable_terminal(child, manager):
+                reasons.append(f"required delegated agent closeout is not finalized: {child_id}")
+                continue
             result = child.result if isinstance(child.result, dict) else {}
             if child.status.value != "completed" or result.get("status") != "completed":
                 reasons.append(
