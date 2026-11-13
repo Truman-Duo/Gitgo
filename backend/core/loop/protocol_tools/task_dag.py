@@ -246,7 +246,7 @@ def install(ctx):
                 if child_id in started:
                     continue
                 try:
-                    ctx.cancel_prepared_child(child_id)
+                    ctx.cancel_prepared_child(child_id, preserve_obligation=bool(started))
                     cancelled.append(child_id)
                 except Exception as exc:
                     cleanup_errors.append({"process_id": child_id, "error": str(exc)})

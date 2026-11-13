@@ -103,7 +103,8 @@ def test_runtime_admission_failure_cancels_only_unstarted_allocations(tmp_path_f
     assert root.task_budget.snapshot()['used']['provider_calls'] == 0
 
 
-def test_start_failure_preserves_already_started_work_and_required_outcome(tmp_path_factory):
+@pytest.mark.parametrize('failure_boundary', ['second_before_launch', 'first_after_launch'])
+def test_start_failure_preserves_already_started_work_and_required_outcome(tmp_path_factory, failure_boundary):
     root, tools = _supervisor(tmp_path_factory)
     manager = root._manager
     original = manager.start
@@ -115,6 +116,8 @@ def test_start_failure_preserves_already_started_work_and_required_outcome(tmp_p
         starts.append(args[0])
         original(*args, **kwargs)
         manager._threads[args[0]].join(3)
+        if failure_boundary == 'first_after_launch':
+            raise RuntimeError('injected adapter failure after real thread launch')
 
     def model(**kwargs):
         child = kwargs['process']
@@ -131,6 +134,18 @@ def test_start_failure_preserves_already_started_work_and_required_outcome(tmp_p
     assert root.delegated_contracts[first.process_id]['required_for_parent_completion']
     assert not root.delegated_contracts[first.process_id].get('admission_rolled_back')
     assert root.task_budget.snapshot()['used']['provider_calls'] == 1
+    second_id = result['cancelled_before_start_process_ids'][0]
+    assert root.delegated_contracts[second_id]['required_for_parent_completion']
+    assert not root.delegated_contracts[second_id]['admission_rolled_back']
+    assert tools['review_child_outcome'].execute({'process_id': first.process_id,
+        'verdict': 'approved', 'summary': 'First requested outcome is correct'})['accepted']
+    # The first success cannot erase the unstarted second obligation.
+    from backend.core.loop.completion_protocol import HostCompletionEvaluator
+    evaluation = HostCompletionEvaluator.evaluate(root, 'All requested work completed')
+    assert not evaluation.allowed
+    assert any(second_id in reason for reason in evaluation.reasons)
+    assert _finish(root).retry
+    assert root.status != ProcessStatus.COMPLETED
 
 
 def test_prestart_checkpoint_failure_never_launches_workers(tmp_path_factory):
@@ -234,3 +249,43 @@ def test_duplicate_continuation_in_same_dag_is_rejected_without_admission(tmp_pa
         result = tools['delegate_task_dag'].execute({'nodes': nodes})
     assert result['execution_state'] == 'not_started'
     fork.assert_not_called()
+
+
+def test_failure_before_any_thread_starts_rolls_back_only_new_obligations(tmp_path_factory):
+    root, tools = _supervisor(tmp_path_factory)
+    with patch.object(root._manager, 'start', side_effect=RuntimeError('launch unavailable')):
+        result = tools['delegate_task_dag'].execute({'nodes': _nodes()})
+    assert result['execution_state'] == 'not_started'
+    assert not result['started_process_ids']
+    assert len(result['cancelled_before_start_process_ids']) == 2
+    assert all(not contract['required_for_parent_completion'] and contract['admission_rolled_back']
+               for contract in root.delegated_contracts.values())
+
+
+def test_partial_start_preserves_unstarted_continuation_as_latest_required_owner(tmp_path_factory):
+    root, tools = _supervisor(tmp_path_factory)
+    manager = root._manager
+    previous = manager.fork(root.process_id, 'executor', ToolRegistry([]), 4, RingLevel.RING_3,
+                            capability_profile_id='governance.observe')
+    previous.status = ProcessStatus.COMPLETED
+    previous.lifecycle_finalized = True
+    root.register_child_contract(previous.process_id, {'required_for_parent_completion': True,
+        'task_kind': 'answer', 'acceptance_criteria': ['Report remaining facts']})
+    nodes = _nodes()
+    nodes[1]['continue_process_id'] = previous.process_id
+    original = manager.start
+    starts = []
+    def start(*args, **kwargs):
+        if starts:
+            raise RuntimeError('second launch unavailable')
+        starts.append(args[0])
+        original(*args, **kwargs)
+        manager._threads[args[0]].join(3)
+    with patch.object(manager, 'start', start), patch('backend.core.loop.executor.agent_step',
+                                                      lambda **kw: _finish(kw['process']).result):
+        result = tools['delegate_task_dag'].execute({'nodes': nodes})
+    assert result['execution_state'] == 'partially_started'
+    successor_id = result['cancelled_before_start_process_ids'][0]
+    assert root.delegated_contracts[previous.process_id]['superseded_by'] == successor_id
+    assert root.delegated_contracts[successor_id]['required_for_parent_completion']
+    assert manager.get(successor_id).session is previous.session

@@ -30,10 +30,10 @@ def install(ctx):
                 prepared_children[child_id] = prepared
             raise
 
-    def cancel_prepared_child(child_id):
+    def cancel_prepared_child(child_id, *, preserve_obligation=False):
         prepared = prepared_children.pop(child_id, None)
         if prepared is not None:
-            prepared[1]()
+            prepared[1](preserve_obligation=preserve_obligation)
 
     def _spawn_child(
         *,
@@ -652,7 +652,7 @@ def install(ctx):
                     child.runtime_preferences["execution_prepared"] = True
                 raise
 
-        def cancel_prepared():
+        def cancel_prepared(*, preserve_obligation=False):
             # Only a never-started runner may use this cancellation path. Keep
             # admission history and consumed agent count; refund unused escrow.
             thread = manager._threads.get(child.process_id)
@@ -667,10 +667,13 @@ def install(ctx):
                 child.budget_lease = child.task_budget.release_process(child.process_id, status="cancelled") or {}
             with process._coordination_lock:
                 contract = process.delegated_contracts[child.process_id]
-                contract["required_for_parent_completion"] = False
-                contract["admission_rolled_back"] = True
+                if not preserve_obligation:
+                    contract["required_for_parent_completion"] = False
+                contract["admission_rolled_back"] = not preserve_obligation
+                contract["cancelled_before_start"] = True
                 previous = process.delegated_contracts.get(supersedes_process_id)
-                if previous is not None and previous.get("superseded_by") == child.process_id:
+                if (not preserve_obligation and previous is not None
+                        and previous.get("superseded_by") == child.process_id):
                     previous.pop("superseded_by", None)
             try:
                 publish_terminal()
