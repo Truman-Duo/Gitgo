@@ -2,7 +2,7 @@ import {useCopy} from "../ui/PageFrame.js";
 import {label} from "../ui/runtimeLabels.js";
 import {scrollViewport} from "../input/scrollViewport.js";
 // src/components/AgentDetail.tsx — subprocess chat conversation
-import React, { memo, useEffect, useRef, useState } from "react";
+import React, { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { ScrollBoxHandle } from "@anthropic/ink";
 import type { BackendClient } from "../backend/client.js";
@@ -136,6 +136,25 @@ export const AgentDetailScene = memo(function AgentDetailScene({
   ));
   const [feedbackStatus, setFeedbackStatus] = useState("");
   const decisionBusy = useRef(false);
+  const requestSequence = useRef(0);
+  const viewOwner = useRef({project: activeProject, processId: activeAgentId, client, active: false});
+  const admittedNavigation = useRef<{owner: typeof viewOwner.current; processId: string} | null>(null);
+  useLayoutEffect(() => {
+    const navigation = admittedNavigation.current;
+    const previous = viewOwner.current;
+    const ownContinuation = navigation?.owner === previous && navigation.processId === activeAgentId
+      && previous.project === activeProject && previous.client === client;
+    const owner = ownContinuation ? previous : {project: activeProject, processId: activeAgentId, client, active: true};
+    owner.active = true; owner.processId = activeAgentId;
+    viewOwner.current = owner;
+    admittedNavigation.current = null;
+    if (!ownContinuation) {
+      ++requestSequence.current;
+      decisionBusy.current = false;
+      setFeedbackStatus("");
+    }
+    return () => {owner.active = false;};
+  }, [activeProject, activeAgentId, client]);
   const pendingDecision = process?.pending_decision || null;
 
   useEffect(() => {
@@ -147,20 +166,37 @@ export const AgentDetailScene = memo(function AgentDetailScene({
     if (sendChatRef) {
       sendChatRef.current = (text: string) => {
         if (!activeProject || !activeAgentId || !text.trim()) return;
+        if (pendingDecision && decisionBusy.current) return;
+        const owner = viewOwner.current;
+        if (!owner.active || owner.project !== activeProject || owner.processId !== activeAgentId || owner.client !== client) return;
+        const sequence = ++requestSequence.current;
+        let settled = false;
+        const isCurrent = () => !settled && owner.active && viewOwner.current === owner && requestSequence.current === sequence;
+        const continueCurrent = (processId: string) => {
+          if (!isCurrent() || !onContinueAgent || owner.processId === processId
+              || (admittedNavigation.current?.owner === owner && admittedNavigation.current.processId === processId)) return;
+          // The admission ack may itself move this view to its successor. Keep
+          // this request's eventual success/error visible there, but invalidate
+          // it on unrelated process/project navigation or scene unmount.
+          admittedNavigation.current = {owner, processId};
+          onContinueAgent(processId);
+        };
         if (pendingDecision) {
-          if (decisionBusy.current) return;
           decisionBusy.current = true;
           setFeedbackStatus(t({en:"submitting decision…",zh:"正在提交答复…"}));
           void sendChat(client, activeProject, text.trim(), new Date().toISOString(), pendingDecision, {
             onStream: () => undefined,
             onDone: () => {
+              if (!isCurrent()) return;
               setFeedbackStatus(t({en:"decision delivered",zh:"答复已送达"}));
               void loop.refresh();
             },
-            onError: (message) => setFeedbackStatus(t({en:`decision failed: ${message}`,zh:`答复提交失败：${message}`})),
+            onError: (message) => {if (isCurrent()) setFeedbackStatus(t({en:`decision failed: ${message}`,zh:`答复提交失败：${message}`}));},
           }).finally(() => {
+            if (!isCurrent()) return;
             decisionBusy.current = false;
             onSendSettled();
+            settled = true;
           });
           return;
         }
@@ -173,23 +209,28 @@ export const AgentDetailScene = memo(function AgentDetailScene({
               activeProject, payload as StreamEvent, startedAt,
             );
           }
-          if (payload?.event === "runtime_ack" && payload?.stage === "admitted" && payload?.process_id) {
+          if (isCurrent() && payload?.event === "runtime_ack" && payload?.stage === "admitted" && payload?.process_id) {
             setFeedbackStatus(t({en:"continuation admitted",zh:"后续任务已接收"}));
-            onContinueAgent?.(String(payload.process_id));
+            continueCurrent(String(payload.process_id));
           }
         })
           .then((result: any) => {
+            if (!isCurrent()) return;
             const outcome = result?.outcome;
             const status = outcome?.status || result?.status || "unknown";
             setFeedbackStatus(status === "accepted" ? t({en:"feedback queued",zh:"补充已排队"})
               : status === "completed" ? t({en:"subprocess completed",zh:"子进程已完成"})
               : t({en:"Subprocess: ",zh:"子进程："})+label(status,t)+(outcome?.error?.message?": "+outcome.error.message:""));
             if (result?.process_id && result.process_id !== activeAgentId) {
-              onContinueAgent?.(String(result.process_id));
+              continueCurrent(String(result.process_id));
             }
             void loop.refresh();
+            settled = true;
           })
-          .catch((error) => setFeedbackStatus(t({en:`feedback failed: ${String(error)}`,zh:`补充发送失败：${String(error)}`})));
+          .catch((error) => {
+            if (isCurrent()) setFeedbackStatus(t({en:`feedback failed: ${String(error)}`,zh:`补充发送失败：${String(error)}`}));
+            settled = true;
+          });
       };
     }
     return () => {

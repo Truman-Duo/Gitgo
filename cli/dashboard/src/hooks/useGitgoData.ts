@@ -1,7 +1,6 @@
 // src/hooks/useGitgoData.ts
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { BackendClient } from "../backend/client.js";
-import { useAsyncPoll } from "./useAsyncPoll.js";
 import { projectOverview } from "../backend/tools.js";
 import type { StatusState } from "../theme/index.js";
 import { projectRuntimeRank } from "../projectRuntimeState.js";
@@ -32,17 +31,48 @@ export type ProjectRow = ProjectInfo & {
   lessonsSeverity: string;
 };
 
+type Summary = Record<string, any>;
+type Observation = {summary: Summary; eventSequence: number};
+function observationTime(summary: Summary): number | null {
+  const raw = summary.observed_at;
+  if (raw === undefined || raw === null || raw === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+function mergeObservation(previous: Observation | undefined, incoming: Observation, requestEvents?: number): Observation {
+  if (!previous) return incoming;
+  const oldTime = observationTime(previous.summary), newTime = observationTime(incoming.summary);
+  if (oldTime !== null && newTime !== null) return oldTime > newTime ? previous : incoming;
+  // Legacy summaries without comparable Host times only overlay the request
+  // during which their event arrived. A later authoritative poll repairs them.
+  return requestEvents !== undefined && previous.eventSequence > requestEvents ? previous : incoming;
+}
+
 export function useGitgoData(
   client: BackendClient | null,
   refreshSec: number = 5
 ) {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const lastRowsRef = useRef("");
-  const pendingSummariesRef = useRef<Record<string, Record<string, any>>>({});
+  const summariesRef = useRef<Record<string, Observation>>({});
+  const identitiesRef = useRef<Record<string, string>>({});
+  const projectIdsRef = useRef<Record<string, string>>({});
+  const eventSequenceRef = useRef(0);
   const eventTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const fetchInFlightRef = useRef(false);
-  const fetchQueuedRef = useRef(false);
-  const { loading, error, run } = useAsyncPoll(true);
+  const ownerRef = useRef({client, active: false});
+  const fetchInFlightRef = useRef<{owner: typeof ownerRef.current; queued: boolean} | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    const owner = {client, active: true};
+    ownerRef.current = owner;
+    summariesRef.current = {};
+    identitiesRef.current = {};
+    projectIdsRef.current = {};
+    lastRowsRef.current = "";
+    setProjects([]); setError(null); setLoading(Boolean(client));
+    return () => {owner.active = false;};
+  }, [client]);
 
   const projectRow = useCallback((
     p: ProjectInfo & {runtime_summary?: Record<string, any>},
@@ -67,47 +97,57 @@ export function useGitgoData(
   const sortedRows = useCallback((rows: ProjectRow[]) => [...rows].sort((left, right) =>
     projectRuntimeRank(left) - projectRuntimeRank(right) || left.name.localeCompare(right.name)), []);
 
-  const fetchData = useCallback(async () => {
-    if (!client) return;
-    await run(async () => {
-      const overview: any = await projectOverview(client);
-      const projectList: Array<ProjectInfo & {runtime_summary?: Record<string, any>}> =
-        Array.isArray(overview?.projects) ? overview.projects : [];
-      const rows: ProjectRow[] = projectList.map((p) => projectRow(
-        p, pendingSummariesRef.current[p.name],
-      ));
-
-      // Group: running → completed/waiting → unavailable.
-      const flat = sortedRows(rows);
-
-      // Atomic and change-aware: a project-list poll must not repaint an open
-      // chat or its command suggestions when the overview is byte-identical.
-      const fingerprint = JSON.stringify(flat);
-      if (fingerprint !== lastRowsRef.current) {
-        lastRowsRef.current = fingerprint;
-        setProjects(flat);
-      }
-    }, { loading: false });
-  }, [client, run, projectRow, sortedRows]);
-
-  // One owner for every overview request, including mount, semantic-event
-  // reconciliation and manual refresh. This avoids React development remounts
-  // or bursts of lifecycle events creating competing native calls.
+  // Serialize within a connection generation. A replacement client can load
+  // immediately without waiting for an old Host request to settle.
   const refresh = useCallback(async () => {
-    if (fetchInFlightRef.current) {
-      fetchQueuedRef.current = true;
+    const owner = ownerRef.current;
+    const current = () => owner.active && ownerRef.current === owner && owner.client === client;
+    if (!client || !current()) return;
+    if (fetchInFlightRef.current?.owner === owner) {
+      fetchInFlightRef.current.queued = true;
       return;
     }
-    fetchInFlightRef.current = true;
+    const flight = {owner, queued: false};
+    fetchInFlightRef.current = flight;
     try {
       do {
-        fetchQueuedRef.current = false;
-        await fetchData();
-      } while (fetchQueuedRef.current);
+        flight.queued = false;
+        const requestEvents = eventSequenceRef.current;
+        try {
+          const overview: any = await projectOverview(client);
+          if (!current()) return;
+          const projectList: Array<ProjectInfo & {runtime_summary?: Summary}> =
+            Array.isArray(overview?.projects) ? overview.projects : [];
+          const observations: Record<string, Observation> = {};
+          const identities: Record<string, string> = {};
+          const projectIds: Record<string, string> = {};
+          const rows = projectList.map(p => {
+            const identity = p.project_id || p.workspace;
+            const replaced = identitiesRef.current[p.name] !== undefined && identitiesRef.current[p.name] !== identity;
+            const observed = mergeObservation(replaced ? undefined : summariesRef.current[p.name],
+              {summary: p.runtime_summary || {}, eventSequence: 0}, requestEvents);
+            observations[p.name] = observed; identities[p.name] = identity;
+            if (p.project_id) projectIds[p.name] = p.project_id;
+            return projectRow(p, observed.summary);
+          });
+          summariesRef.current = observations;
+          identitiesRef.current = identities;
+          projectIdsRef.current = projectIds;
+          const flat = sortedRows(rows), fingerprint = JSON.stringify(flat);
+          if (fingerprint !== lastRowsRef.current) {
+            lastRowsRef.current = fingerprint;
+            setProjects(flat);
+          }
+          setError(null);
+        } catch (e: any) {
+          if (current()) setError(e instanceof Error ? e.message : String(e));
+        }
+      } while (current() && flight.queued);
     } finally {
-      fetchInFlightRef.current = false;
+      if (fetchInFlightRef.current === flight) fetchInFlightRef.current = null;
+      if (current()) setLoading(false);
     }
-  }, [fetchData]);
+  }, [client, projectRow, sortedRows]);
 
   // Project state is driven by user/agent lifecycle events. A slow background
   // reconciliation remains as crash/lost-event protection, not as the normal
@@ -124,12 +164,19 @@ export function useGitgoData(
       "context_compaction_completed", "context_compaction_failed",
       "deletion_status", "storage_health", "project_lifecycle_changed",
     ]);
+    const owner = ownerRef.current;
     const unsubscribe = client.subscribeEvents((event) => {
+      if (!owner.active || ownerRef.current !== owner) return;
       if (!stateEvents.has(String(event.event || ""))) return;
       if (event.event === "project_summary_updated" && event.project && event.summary) {
         const name = String(event.project);
-        const summary = event.summary as Record<string, any>;
-        pendingSummariesRef.current[name] = summary;
+        const knownProjectId = projectIdsRef.current[name];
+        if (event.project_id && knownProjectId && event.project_id !== knownProjectId) return;
+        const incoming = {summary: event.summary as Summary, eventSequence: ++eventSequenceRef.current};
+        const observation = mergeObservation(summariesRef.current[name], incoming);
+        if (observation !== incoming) return;
+        summariesRef.current[name] = observation;
+        const summary = observation.summary;
         setProjects(current => {
           if (!current.some(row => row.name === name)) return current;
           const next = sortedRows(current.map(row => row.name === name
