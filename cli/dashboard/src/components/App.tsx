@@ -1,4 +1,4 @@
-import {label} from "../ui/runtimeLabels.js";
+import {label,processDisplayStatus} from "../ui/runtimeLabels.js";
 import {isFooterDrawer} from "../ui/overlayLayout.js";
 import {FooterDrawer} from "./FooterDrawer.js";
 import {copy,type Copy} from "../ui/pageContract.js";
@@ -46,7 +46,7 @@ export type StartupSmokeTask = {
 function processRuntimeStatus(process: ProcessInfo | undefined, t:(value:Copy)=>string): string {
   if (!process) return "";
   const parts: string[] = [];
-  parts.push(label(process.status,t));
+  parts.push(label(processDisplayStatus(process),t));
   return parts.filter(Boolean).join(" · ");
 }
 

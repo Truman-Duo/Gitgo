@@ -181,14 +181,12 @@ def read_project_list_status(workspace: str | Path) -> dict | None:
     try:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA busy_timeout=250")
-        row = connection.execute(
-            """SELECT process_id, status, updated_at
-               FROM session_processes
-               WHERE COALESCE(actor_kind, '') = 'supervisor'
-                  OR parent_process_id IS NULL
-               ORDER BY updated_at DESC, created_at DESC
-               LIMIT 1"""
-        ).fetchone()
+        rows = connection.execute(
+            """SELECT process_id, status, updated_at, actor_kind, parent_process_id
+               FROM session_processes ORDER BY updated_at DESC, created_at DESC, process_id"""
+        ).fetchall()
+        row = next((item for item in rows if item["actor_kind"] == "supervisor"
+                    or item["parent_process_id"] is None), None)
     except sqlite3.OperationalError as exc:
         # A valid pre-runtime database with no process projection is New. Busy,
         # I/O and malformed-schema errors remain visible to the caller.
@@ -197,12 +195,16 @@ def read_project_list_status(workspace: str | Path) -> dict | None:
         raise
     finally:
         connection.close()
-    if row is None:
+    if not rows:
         return None
     return {
-        "process_id": str(row["process_id"] or ""),
-        "status": str(row["status"] or ""),
-        "updated_at": str(row["updated_at"] or ""),
+        "process_id": str(row["process_id"] or "") if row else "",
+        "status": str(row["status"] or "") if row else "",
+        "updated_at": str(rows[0]["updated_at"] or ""),
+        # Counts describe execution history (A and B), not conversation identity.
+        # Keep this read-only population identical online and after a restart.
+        "process_statuses": {str(item["process_id"]): str(item["status"] or "") for item in rows},
+        "count_scope": "all_executions",
     }
 
 

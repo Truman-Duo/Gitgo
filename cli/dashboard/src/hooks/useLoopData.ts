@@ -18,6 +18,9 @@ export type ProcessInfo = {
   task_maintenance?: {task_id?: string; revision?: number; epoch?: number; phase?: string; changes?: Record<string, unknown>};
   advancement?: Advancement;
   state_revision?: number;
+  lifecycle_finalized?: boolean;
+  closeout_state?: "active" | "pending" | "failed" | "finalized";
+  routing_compilation?: {requested?: string; recommended?: string; effective?: string; reason?: string};
   archived?: boolean;
   display_name?: string;
   session_id?: string;

@@ -423,6 +423,7 @@ def _process_status_payload(proc, *, presentation: dict | None = None) -> dict:
         else dict(getattr(proc, "context_snapshot", {}) or {})
     )
     from backend.core.loop.provider_identity import recorded_model_id
+    from backend.core.loop.lifecycle import execution_closeout
     from backend.core.loop.coordination import coordination_summary_from_context
     return {
         "process_id": proc.process_id,
@@ -432,6 +433,8 @@ def _process_status_payload(proc, *, presentation: dict | None = None) -> dict:
         "session_id": str(getattr(proc_session, "session_id", "")),
         "ring_level": proc.ring_level.value,
         "status": proc.status.value,
+        **execution_closeout(proc, manager),
+        "routing_compilation": dict((process_context.get("task_contract") or {}).get("routing_compilation") or {}),
         "state_revision": int(getattr(proc, "durable_revision", 0)),
         "steps_used": proc.steps_used,
         "max_steps": proc.max_steps,

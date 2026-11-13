@@ -422,6 +422,7 @@ def read_project_b_processes(self) -> dict[str, dict]:
         )
         context_snapshot = dict(runtime.get("context_snapshot") or {})
         from backend.core.loop.coordination import coordination_summary_from_context
+        from backend.core.loop.lifecycle import execution_closeout_from_state
         display_name = ""
         identity_ledger = []
         if row["metadata_ref"]:
@@ -441,6 +442,8 @@ def read_project_b_processes(self) -> dict[str, dict]:
             "role": str(row["role"] or ""),
             "ring_level": int(runtime.get("ring_level", 3) or 3),
             "status": str(row["status"] or ""),
+            **execution_closeout_from_state(str(row["status"] or ""), runtime),
+            "routing_compilation": dict((context_snapshot.get("task_contract") or {}).get("routing_compilation") or {}),
             "steps_used": int(row["steps_used"] or 0),
             "max_steps": int(row["max_steps"] or 0),
             "parent_id": owner or None,
@@ -565,12 +568,15 @@ def read_latest_root_process(self) -> dict | None:
     )
     context_snapshot = dict(runtime.get("context_snapshot") or {})
     from backend.core.loop.coordination import coordination_summary_from_context
+    from backend.core.loop.lifecycle import execution_closeout_from_state
     return {
         "process_id": process_id,
         "session_id": str(row.get("session_id") or ""),
         "role": str(row.get("role") or "supervisor"),
         "ring_level": int(runtime.get("ring_level", 0) or 0),
         "status": str(row.get("status") or ""),
+        **execution_closeout_from_state(str(row.get("status") or ""), runtime),
+        "routing_compilation": dict(contract.get("routing_compilation") or {}),
         "steps_used": int(row.get("steps_used", 0) or 0),
         "max_steps": int(row.get("max_steps", 0) or 0),
         "parent_id": None,

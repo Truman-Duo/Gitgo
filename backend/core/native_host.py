@@ -573,7 +573,10 @@ class NativeHost:
                 "state_available": True,
                 "summary_error": str(live_error)[:500],
                 "durable_status": status,
-                **self._counts_from_statuses([status]),
+                **self._counts_from_statuses(
+                    dict(latest["process_statuses"]).values()
+                    if latest and "process_statuses" in latest else [status]),
+                "count_scope": "all_executions",
                 "observed_at": observed_at,
                 "last_known_at": str((latest or {}).get("updated_at") or ""),
                 "stale": bool(live_error),
@@ -594,13 +597,23 @@ class NativeHost:
         try:
             status = client.send_command({"cmd": "loop_status"}, timeout=0.75)
             processes = dict(status.get("processes") or {})
+            from backend.core.storage import read_project_list_status
+            projection_error = ""
+            try:
+                durable = read_project_list_status(str(item.get("workspace") or "")) or {}
+            except Exception as exc:
+                # A damaged history must not hide still-running work. Explicitly
+                # mark this as a partial count rather than claiming reconciliation.
+                durable = {}
+                projection_error = str(exc)[:500]
+            statuses = dict(durable.get("process_statuses") or {})
+            statuses.update({pid: value.get("status") for pid, value in processes.items()})
             return name, {
                 "daemon_online": True, "state_available": True,
-                "summary_error": "", "durable_status": "",
-                **self._counts_from_statuses(
-                    value.get("status") for value in processes.values()
-                ),
-                "observed_at": observed_at, "last_known_at": "", "stale": False,
+                "summary_error": projection_error, "durable_status": "",
+                **self._counts_from_statuses(statuses.values()),
+                "count_scope": "live_executions" if projection_error else "all_executions",
+                "observed_at": observed_at, "last_known_at": "", "stale": bool(projection_error),
             }, True
         except Exception as exc:
             return self._durable_project_summary(

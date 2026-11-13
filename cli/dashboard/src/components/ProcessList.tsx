@@ -1,5 +1,5 @@
 import {useCopy} from "../ui/PageFrame.js";
-import {label} from "../ui/runtimeLabels.js";
+import {label,processDisplayStatus} from "../ui/runtimeLabels.js";
 // src/components/ProcessList.tsx — project subprocess flat list
 import React, { memo, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import { Box, Text, ScrollBox } from "@anthropic/ink";
@@ -206,8 +206,8 @@ export const ProcessList = memo(function ProcessList({
 
   const runningCount = flatList.filter((p) => p.status === "running").length;
   const waitingCount = flatList.filter((p) =>
-    ["waiting", "awaiting_user", "recovering", "resume_available"].includes(
-      p.status,
+    ["waiting", "awaiting_user", "recovering", "resume_available", "closing"].includes(
+      processDisplayStatus(p),
     ),
   ).length;
 
@@ -221,8 +221,8 @@ export const ProcessList = memo(function ProcessList({
   useEffect(()=>{
     if(!onStatusUpdate)return;
     const pending=flatList.filter(p=>p.status==="awaiting_user").length;
-    const blocked=flatList.filter(p=>["blocked","failed","timed_out","orphaned"].includes(p.status)).length;
-    const parts=[t({en:`${flatList.length} subprocesses`,zh:`${flatList.length} 个子进程`})];
+    const blocked=flatList.filter(p=>["blocked","failed","timed_out","orphaned","closeout_failed"].includes(processDisplayStatus(p))).length;
+    const parts=[t({en:`${flatList.length} subprocess executions`,zh:`${flatList.length} 次子进程执行`})];
     if(runningCount)parts.push(t({en:`${runningCount} working`,zh:`${runningCount} 个工作中`}));
     if(waitingCount-pending)parts.push(t({en:`${waitingCount-pending} waiting`,zh:`${waitingCount-pending} 个等待中`}));
     if(pending)parts.push(t({en:`${pending} awaiting input`,zh:`${pending} 个待答复`}));
@@ -252,7 +252,7 @@ export const ProcessList = memo(function ProcessList({
       >
         {flatList.length === 0 ? <Text dimColor>{t({en:"No subprocesses.",zh:"暂无子进程。"})}</Text> : null}
         {flatList.map((process, index) => {
-          const dot = statusDot(processStatusToDot(process.status));
+          const dot = statusDot(processStatusToDot(processDisplayStatus(process)));
           const active = index === selIdx;
           const deps = dependencies(process);
           const previous = flatList[index - 1];
@@ -272,7 +272,7 @@ export const ProcessList = memo(function ProcessList({
                     nameWidth - 2,
                   )}{" "}
                   {padEndWidth(
-                    truncate(label(process.status,t), statusWidth),
+                    truncate(label(processDisplayStatus(process),t), statusWidth),
                     statusWidth,
                   )}{" "}
                   {process.cyclic

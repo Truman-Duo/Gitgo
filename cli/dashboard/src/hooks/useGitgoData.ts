@@ -22,6 +22,7 @@ export type ProjectRow = ProjectInfo & {
   daemonOnline: boolean;
   stateAvailable: boolean;
   stateError?: string;
+  countScope?: string;
   activeProcessCount: number;
   waitingProcessCount: number;
   finishedProcessCount?: number;
@@ -55,6 +56,7 @@ export function useGitgoData(
       daemonOnline: Boolean(summary.daemon_online),
       stateAvailable: summary.state_available !== false,
       stateError: String(summary.summary_error || ""),
+      countScope: String(summary.count_scope || ""),
       activeProcessCount: Number(summary.active_process_count || 0),
       waitingProcessCount: Number(summary.waiting_process_count || 0),
       finishedProcessCount: Number(summary.finished_process_count || 0),

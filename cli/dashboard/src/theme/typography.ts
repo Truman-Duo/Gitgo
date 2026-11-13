@@ -162,7 +162,7 @@ export function processStatusToDot(s: string): StatusState {
   if (s === "running") return "ok";
   if (s === "completed" || s === "recovered") return "done";
   if ([
-    "waiting", "awaiting_user", "cancelling", "recovering", "resume_available",
+    "waiting", "awaiting_user", "cancelling", "recovering", "resume_available", "closing",
   ].includes(s)) return "warning";
   return "error";
 }
