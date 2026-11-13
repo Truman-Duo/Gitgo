@@ -67,6 +67,10 @@ DAG 应按“完整校验 → 准备全部节点 → 持久化整组关系 → �
   B 续办必须指定执行编号，不能只传会话编号绕开前序检查；主 A 的现有会话调用保留。
   同会话的新执行准入成功后才压缩旧上下文，拒绝重复请求不会改写正在运行的会话。
   压缩在临时上下文容器中完成后再发布；失败保留原上下文并记录诊断，任务继续执行。
+- 上游失败后以 `remaining` 续办，下游再次准入时可沿同属主、双向继任关系及
+  Host 来源记录找到承担原义务的新执行。原依赖义务和历史合同保留，新合同固定
+  实际依赖编号并记录转换；不会在运行途中追随“最新任务”，也不会用无关的
+  `follow_up` 代替原成果。仍须等待上游可靠收尾；已有隔离工作区不能静默换基础版本。
 
 明确的未完成兼容边界：终态 B 的 BTW“中断并采用讨论结论”不会自动续办。
 原入口虽能保存采用要求，但后继会创建新预算，没有完整继承父合同和旧隔离工作区。
@@ -118,7 +122,7 @@ python -B -m pytest -q -p no:cacheprovider \
   tests/test_process_closeout.py tests/test_dag_admission.py \
   tests/test_process_routing_choices.py tests/test_continuation_obligations.py \
   tests/test_process_routing_projection.py tests/test_optional_delegation_contract.py \
-  tests/test_continuation_compaction_admission.py
+  tests/test_continuation_compaction_admission.py tests/test_continuation_dependency_recovery.py
 ```
 
 这些测试通过现有 fixture 使用临时配置与状态目录。前端继续使用项目现有的
