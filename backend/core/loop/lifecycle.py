@@ -19,6 +19,8 @@ def execution_closeout_from_state(status: str, runtime: dict, result=None) -> di
     outcome = result if isinstance(result, dict) else runtime.get("result") or {}
     if status not in TERMINAL:
         state = "active"
+    elif finalized:
+        state = "finalized"
     elif outcome.get("code") == "SESSION_CHECKPOINT_FAILED":
         state, finalized = "failed", False
     else:

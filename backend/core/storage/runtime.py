@@ -162,6 +162,29 @@ def open_usability_statistics(project_root: str | Path, *, read_only: bool = Fal
     return sqlite3.connect(path, timeout=.25)
 
 
+PROJECT_LIST_CLOSEOUT_READ_BYTES = 16 * 1024 * 1024
+
+
+def _read_owned_state_object(connection, paths, reference: str, *, maximum: int,
+                             limit_error="STATE_OBJECT_OWNERSHIP_INVALID") -> bytes:
+    """Read verified owned CAS bytes without a writer, repair or path fallback."""
+    from backend.core.sandbox_read import ReadRoot
+    digest = reference.removeprefix("sha256:")
+    if (not reference.startswith("sha256:") or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)):
+        raise StorageBlocked("STATE_REFERENCE_INVALID")
+    owned = connection.execute("SELECT byte_length FROM objects WHERE digest=?", (digest,)).fetchone()
+    if owned is None or type(owned[0]) is not int or owned[0] < 0:
+        raise StorageBlocked("STATE_OBJECT_OWNERSHIP_INVALID")
+    if owned[0] > maximum:
+        raise StorageBlocked(limit_error)
+    with ReadRoot(paths.cas_dir) as root, root.open(digest[:2] + "/" + digest[2:]) as opened:
+        payload = opened.read_bytes(max_bytes=maximum)
+    if len(payload) != owned[0] or hashlib.sha256(payload).hexdigest() != digest:
+        raise StorageBlocked("STATE_OBJECT_DIGEST_MISMATCH")
+    return payload
+
+
 def read_project_list_status(workspace: str | Path) -> dict | None:
     """Read the list projection without constructing a writer runtime.
 
@@ -178,21 +201,58 @@ def read_project_list_status(workspace: str | Path) -> dict | None:
     uri = paths.state_db.resolve().as_uri() + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=0.25)
     connection.row_factory = sqlite3.Row
+    from backend.core.loop.lifecycle import execution_closeout_from_state, TERMINAL
+    from backend.core.sandbox_read import MAX_READ_BYTES
+    remaining_bytes = PROJECT_LIST_CLOSEOUT_READ_BYTES
+    objects = {}
+
+    def read_owned_json(reference):
+        nonlocal remaining_bytes
+        reference = str(reference)
+        if reference in objects:
+            return objects[reference]
+        maximum = min(remaining_bytes, MAX_READ_BYTES, StoragePolicy().max_cas_object_bytes)
+        payload = _read_owned_state_object(connection, paths, reference, maximum=maximum,
+                                           limit_error="PROJECT_LIST_CLOSEOUT_LIMIT")
+        remaining_bytes -= len(payload)
+        value = json.loads(payload)
+        if not isinstance(value, dict):
+            raise StorageBlocked("PROJECT_LIST_CLOSEOUT_OBJECT_INVALID")
+        objects[reference] = value
+        return value
+
     try:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA busy_timeout=250")
+        connection.execute("BEGIN")
+        columns = {item[1] for item in connection.execute("PRAGMA table_info(session_processes)")}
+        if not columns:
+            return None
+        has_tasks = "task_id" in columns and connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'").fetchone()
+        join = "LEFT JOIN tasks t ON t.task_id=sp.task_id" if has_tasks else ""
+        outcome = "t.outcome_ref" if has_tasks else "NULL"
         rows = connection.execute(
-            """SELECT process_id, status, updated_at, actor_kind, parent_process_id
-               FROM session_processes ORDER BY updated_at DESC, created_at DESC, process_id"""
+            f"""SELECT sp.*, {outcome} AS projection_outcome_ref
+                FROM session_processes sp {join}
+                ORDER BY sp.updated_at DESC, sp.created_at DESC, sp.process_id"""
         ).fetchall()
         row = next((item for item in rows if item["actor_kind"] == "supervisor"
                     or item["parent_process_id"] is None), None)
-    except sqlite3.OperationalError as exc:
-        # A valid pre-runtime database with no process projection is New. Busy,
-        # I/O and malformed-schema errors remain visible to the caller.
-        if "no such table" in str(exc).lower():
-            return None
-        raise
+        states = {}
+        for item in rows:
+            status = str(item["status"] or "")
+            runtime, result = {}, {}
+            # Only terminal records require closeout facts; never materialize
+            # sessions, provider histories or receipts for project counts.
+            if status in TERMINAL:
+                reference = item["runtime_state_ref"] if "runtime_state_ref" in columns else None
+                if reference:
+                    runtime = read_owned_json(reference)
+                if runtime.get("lifecycle_finalized") is not True and item["projection_outcome_ref"]:
+                    result = read_owned_json(item["projection_outcome_ref"])
+            states[str(item["process_id"])] = {"status": status,
+                **execution_closeout_from_state(status, runtime, result)}
     finally:
         connection.close()
     if not rows:
@@ -201,9 +261,8 @@ def read_project_list_status(workspace: str | Path) -> dict | None:
         "process_id": str(row["process_id"] or "") if row else "",
         "status": str(row["status"] or "") if row else "",
         "updated_at": str(rows[0]["updated_at"] or ""),
-        # Counts describe execution history (A and B), not conversation identity.
-        # Keep this read-only population identical online and after a restart.
-        "process_statuses": {str(item["process_id"]): str(item["status"] or "") for item in rows},
+        "process_statuses": {pid: state["status"] for pid, state in states.items()},
+        "process_states": states,
         "count_scope": "all_executions",
     }
 
@@ -216,7 +275,7 @@ def read_existing_state_blob(workspace: str | Path, namespace: str, key: str, *,
     of falling back to an older legacy snapshot.
     """
     from .bindings import peek_storage
-    from backend.core.sandbox_read import ReadRoot, MAX_READ_BYTES
+    from backend.core.sandbox_read import MAX_READ_BYTES
     validate_sqlite_runtime()
     bound = peek_storage(workspace)
     if bound is not None:
@@ -239,18 +298,7 @@ def read_existing_state_blob(workspace: str | Path, namespace: str, key: str, *,
         maximum = min(MAX_READ_BYTES, StoragePolicy().max_cas_object_bytes,
                       bound.policy.max_cas_object_bytes if bound is not None else StoragePolicy().max_cas_object_bytes)
         def read_owned(reference):
-            digest = reference.removeprefix("sha256:")
-            if (not reference.startswith("sha256:") or len(digest) != 64
-                    or any(char not in "0123456789abcdef" for char in digest)):
-                raise StorageBlocked("STATE_REFERENCE_INVALID")
-            owned = connection.execute("SELECT byte_length FROM objects WHERE digest=?", (digest,)).fetchone()
-            if owned is None or type(owned[0]) is not int or not 0 <= owned[0] <= maximum:
-                raise StorageBlocked("STATE_OBJECT_OWNERSHIP_INVALID")
-            with ReadRoot(paths.cas_dir) as root, root.open(digest[:2] + "/" + digest[2:]) as opened:
-                payload = opened.read_bytes(max_bytes=maximum)
-            if len(payload) != owned[0] or hashlib.sha256(payload).hexdigest() != digest:
-                raise StorageBlocked("STATE_OBJECT_DIGEST_MISMATCH")
-            return payload
+            return _read_owned_state_object(connection, paths, reference, maximum=maximum)
         payload = read_owned(reference)
         if decoder is not None:
             # Trusted repository decoding shares this exact read-only snapshot.

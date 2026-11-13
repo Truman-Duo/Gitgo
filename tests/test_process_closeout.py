@@ -126,6 +126,7 @@ def test_failed_checkpoint_blocks_dependency_without_hanging(tmp_path_factory):
     ({'lifecycle_finalized': False}, {}, 'pending'),
     ({'lifecycle_finalized': True}, {}, 'finalized'),
     ({'lifecycle_finalized': False}, {'code': 'SESSION_CHECKPOINT_FAILED'}, 'failed'),
+    ({'lifecycle_finalized': True}, {'code': 'SESSION_CHECKPOINT_FAILED'}, 'finalized'),
 ])
 def test_durable_projection_never_invents_closeout(runtime, result, expected):
     assert execution_closeout_from_state('completed', runtime, result)['closeout_state'] == expected

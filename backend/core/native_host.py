@@ -517,17 +517,25 @@ class NativeHost:
 
     @staticmethod
     def _counts_from_statuses(statuses) -> dict:
-        values = [str(value or "") for value in statuses]
+        values = []
+        for value in statuses:
+            if isinstance(value, dict):
+                closeout = value.get("closeout_state")
+                values.append("closing" if closeout == "pending" else
+                              "closeout_failed" if closeout == "failed" else str(value.get("status") or ""))
+            else:
+                values.append(str(value or ""))
         return {
             "active_process_count": sum(
                 value in {"running", "cancelling"} for value in values
             ),
             "waiting_process_count": sum(
-                value in {"waiting", "awaiting_user", "recovering", "resume_available"}
+                value in {"waiting", "awaiting_user", "recovering", "resume_available",
+                          "recovery_review_required", "orphaned", "blocked", "closing"}
                 for value in values
             ),
             "finished_process_count": sum(
-                value in {"completed", "failed", "timed_out", "cancelled"}
+                value in {"completed", "failed", "timed_out", "cancelled", "killed", "closeout_failed"}
                 for value in values
             ),
         }
@@ -574,6 +582,7 @@ class NativeHost:
                 "summary_error": str(live_error)[:500],
                 "durable_status": status,
                 **self._counts_from_statuses(
+                    dict(latest["process_states"]).values() if latest and "process_states" in latest else
                     dict(latest["process_statuses"]).values()
                     if latest and "process_statuses" in latest else [status]),
                 "count_scope": "all_executions",
@@ -606,8 +615,8 @@ class NativeHost:
                 # mark this as a partial count rather than claiming reconciliation.
                 durable = {}
                 projection_error = str(exc)[:500]
-            statuses = dict(durable.get("process_statuses") or {})
-            statuses.update({pid: value.get("status") for pid, value in processes.items()})
+            statuses = dict(durable.get("process_states") or durable.get("process_statuses") or {})
+            statuses.update(processes)
             return name, {
                 "daemon_online": True, "state_available": True,
                 "summary_error": projection_error, "durable_status": "",
