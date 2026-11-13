@@ -181,12 +181,22 @@ def test_explicit_optional_successor_cannot_silently_retire_parent_obligation(tm
 
 
 def test_omitted_parent_requirement_retains_an_optional_predecessor(tmp_path_factory):
-    root, tools, old = fixture(tmp_path_factory)
-    root.delegated_contracts[old.process_id]['required_for_parent_completion'] = False
+    root, tools = _supervisor(tmp_path_factory)
+    with patch.object(root._manager, 'start'):
+        first = delegate(tools, required_for_parent_completion=False)
+    assert first['delegated'], first
+    old = root._manager.get(first['process_id'])
+    old.status = ProcessStatus.FAILED
+    old.result = {'status': 'failed'}
+    old.lifecycle_finalized = True
+    assert get_task_contract(root).get('minimum_delegated_outcomes', 0) == 0
     with patch.object(root._manager, 'start'):
         result = delegate(tools, continue_process_id=old.process_id)
     assert result['delegated'], result
     assert not root.delegated_contracts[result['process_id']]['required_for_parent_completion']
+    root_contract = get_task_contract(root)
+    assert root_contract.get('minimum_delegated_outcomes', 0) == 0
+    assert root_contract['delegation_attempts'][-1]['required_for_parent_completion'] is False
 
 
 def test_retained_interfaces_keep_their_frozen_definitions(tmp_path_factory):

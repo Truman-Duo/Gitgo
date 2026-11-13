@@ -37,6 +37,14 @@ def install(ctx):
         required_for_parent = bool(
             args.get("required_for_parent_completion", True)
         )
+        if "required_for_parent_completion" not in args:
+            predecessor_id = str(args.get("continue_process_id") or args.get("supersedes_process_id") or "")
+            predecessor_contract = process.delegated_contracts.get(predecessor_id)
+            if predecessor_contract is not None:
+                # Attempt accounting and actual successor admission must agree.
+                # Omission retains an optional predecessor; it must not invent
+                # a root minimum that the optional successor cannot satisfy.
+                required_for_parent = bool(predecessor_contract.get("required_for_parent_completion", True))
         intent_id = delegation_intent_id(
             task_description, target_files, criteria,
         )
