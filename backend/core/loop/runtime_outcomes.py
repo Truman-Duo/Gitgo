@@ -254,7 +254,7 @@ def _budget_exhausted_result(process: AgentProcess, session: "AgentSession",
 
 
 def _status_result(process: AgentProcess, session: "AgentSession") -> dict:
-    if ((process.recovery or {}).get('resume_forbidden') and process.status not in (
+    if ((process.recovery or {}).get('checkpoint_commit') == 'unknown' and process.status not in (
             ProcessStatus.CANCELLING, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
             ProcessStatus.TIMED_OUT)):
         # A peer delivery checkpoint can become uncertain while this runner

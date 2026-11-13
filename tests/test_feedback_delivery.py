@@ -327,3 +327,39 @@ def test_explicit_termination_keeps_existing_outcome_even_with_recovery_evidence
     result = _status_result(child, child.session)
     assert result['status'] == expected
     assert child.recovery['checkpoint_commit'] == 'unknown'
+
+
+def test_native_recovery_keeps_mailbox_receipts_and_existing_status_projection(delivery):
+    from backend.core.loop.native_invocation_scope import retain_native_recovery
+    from backend.core.loop.runtime_outcomes import _status_result
+    root, child, tools, store, ctx, send = delivery
+    accepted = send()
+    retain_native_recovery(SimpleNamespace(process=child), [{'code': 'SANDBOX_CLEANUP_PENDING'}])
+    assert child.recovery['resume_forbidden'] and 'checkpoint_commit' not in child.recovery
+    repeated = send()
+    assert repeated.data['accepted'] and repeated.data['message_id'] == accepted.data['message_id']
+    assert _apply_pending_instructions(child, child.session) == 1
+    child.status = ProcessStatus.RECOVERY_REVIEW_REQUIRED
+    result = _status_result(child, child.session)
+    assert result['error']['code'] == 'PROCESS_NOT_RUNNABLE'
+    assert child.recovery['reasons'] == [{'code': 'SANDBOX_CLEANUP_PENDING'}]
+
+
+def test_native_debt_reported_during_provider_turn_keeps_readonly_answer_flow(delivery):
+    from backend.core.loop.executor import agent_step
+    from backend.core.loop.native_invocation_scope import retain_native_recovery
+    from backend.core.loop.tools import ToolRegistry
+    root, child, tools, store, ctx, send = delivery
+    child.capability_profile_id = 'text.only'
+    child.tool_registry = ToolRegistry([])
+    class Provider:
+        calls = 0
+        def stream_chat(self, *args, **kwargs):
+            self.calls += 1
+            retain_native_recovery(SimpleNamespace(process=child), [{'code': 'SANDBOX_CLEANUP_PENDING'}])
+            yield {'choices': [{'delta': {'content': 'Native cleanup is pending; inspect the retained evidence.'}}]}
+    provider = Provider()
+    result = agent_step(child, provider, instruction='Report the observed facts', workspace_path=ctx.workspace_path)
+    assert result['status'] == 'completed'
+    assert provider.calls == 1
+    assert child.recovery['resume_forbidden'] and 'checkpoint_commit' not in child.recovery

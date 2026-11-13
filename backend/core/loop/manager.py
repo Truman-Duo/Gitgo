@@ -861,7 +861,7 @@ class AgentProcessManager:
             try:
                 with fence(process), process.session._mechanism_lock, process._coordination_lock, process.mailbox.admission():
                     previous = process.mailbox.get(message_id) if message_id else None
-                    if (process.recovery or {}).get("resume_forbidden"):
+                    if (process.recovery or {}).get("checkpoint_commit") == "unknown":
                         return {"accepted": False, "error": "FEEDBACK_RECOVERY_REQUIRED",
                                 "automatic_replay_suppressed": True}
                     if previous is None and process.status not in {ProcessStatus.RUNNING, ProcessStatus.WAITING, ProcessStatus.AWAITING_USER}:

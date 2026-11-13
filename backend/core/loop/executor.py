@@ -175,7 +175,7 @@ def _agent_step(
         request = prepare_provider_request(process, llm_provider, surface, route, _emit_observation)
         provider_boundary = provider_turn.run(request.tools, request.web_mode, request.protocol)
         start = provider_turn.started
-        if (process.recovery or {}).get("resume_forbidden"):
+        if (process.recovery or {}).get("checkpoint_commit") == "unknown":
             from .runtime_outcomes import _status_result
             return _status_result(process, session)
         if provider_boundary.result is not None:
@@ -202,7 +202,7 @@ def _agent_step(
             if proposal_boundary.retry:
                 continue
             batch_boundary = tool_batch.execute_live_batch(tool_calls)
-            if (process.recovery or {}).get("resume_forbidden"):
+            if (process.recovery or {}).get("checkpoint_commit") == "unknown":
                 from .runtime_outcomes import _status_result
                 return _status_result(process, session)
             if batch_boundary.result is not None:

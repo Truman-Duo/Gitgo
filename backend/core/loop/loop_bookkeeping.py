@@ -10,7 +10,7 @@ def _apply_pending_instructions(
     if process.mailbox is None:
         return 0
     with process.mailbox.admission():
-        if (process.recovery or {}).get('resume_forbidden'):
+        if (process.recovery or {}).get('checkpoint_commit') == 'unknown':
             from .mailbox import MailboxRecoveryRequired
             raise MailboxRecoveryRequired('PROCESS_RECOVERY_REQUIRED: mailbox delivery requires checkpoint reconciliation')
         messages = process.mailbox.drain(
