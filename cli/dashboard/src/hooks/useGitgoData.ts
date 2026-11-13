@@ -32,7 +32,7 @@ export type ProjectRow = ProjectInfo & {
 };
 
 type Summary = Record<string, any>;
-type Observation = {summary: Summary; eventSequence: number};
+type Observation = {summary: Summary; eventSequence: number; projectId?: string};
 function observationTime(summary: Summary): number | null {
   const raw = summary.observed_at;
   if (raw === undefined || raw === null || raw === "") return null;
@@ -41,6 +41,7 @@ function observationTime(summary: Summary): number | null {
 }
 function mergeObservation(previous: Observation | undefined, incoming: Observation, requestEvents?: number): Observation {
   if (!previous) return incoming;
+  if (previous.projectId && incoming.projectId && previous.projectId !== incoming.projectId) return incoming;
   const oldTime = observationTime(previous.summary), newTime = observationTime(incoming.summary);
   if (oldTime !== null && newTime !== null) return oldTime > newTime ? previous : incoming;
   // Legacy summaries without comparable Host times only overlay the request
@@ -125,7 +126,7 @@ export function useGitgoData(
             const identity = p.project_id || p.workspace;
             const replaced = identitiesRef.current[p.name] !== undefined && identitiesRef.current[p.name] !== identity;
             const observed = mergeObservation(replaced ? undefined : summariesRef.current[p.name],
-              {summary: p.runtime_summary || {}, eventSequence: 0}, requestEvents);
+              {summary: p.runtime_summary || {}, eventSequence: 0, projectId: p.project_id}, requestEvents);
             observations[p.name] = observed; identities[p.name] = identity;
             if (p.project_id) projectIds[p.name] = p.project_id;
             return projectRow(p, observed.summary);
@@ -172,7 +173,8 @@ export function useGitgoData(
         const name = String(event.project);
         const knownProjectId = projectIdsRef.current[name];
         if (event.project_id && knownProjectId && event.project_id !== knownProjectId) return;
-        const incoming = {summary: event.summary as Summary, eventSequence: ++eventSequenceRef.current};
+        const incoming = {summary: event.summary as Summary, eventSequence: ++eventSequenceRef.current,
+          projectId: event.project_id ? String(event.project_id) : knownProjectId};
         const observation = mergeObservation(summariesRef.current[name], incoming);
         if (observation !== incoming) return;
         summariesRef.current[name] = observation;

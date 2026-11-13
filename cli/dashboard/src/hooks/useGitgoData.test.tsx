@@ -113,3 +113,16 @@ test("non-Error rejection remains visible to the current view", async () => {
   const transport = backend(() => {throw "PLAIN_HOST_FAILURE";}), view = mount(transport.client);
   try {await wait(); expect(view.data.error).toBe("PLAIN_HOST_FAILURE");} finally {view.close();}
 });
+
+test("a removed project's late event cannot contaminate a new project with the same name", async () => {
+  let value: any = overview();
+  const transport = backend(() => value), view = mount(transport.client);
+  try {
+    await wait(); value = {projects: []}; await view.data.refresh(); await wait();
+    transport.emit(summary(99, 99), "id-one"); await wait();
+    value = overview(summary(2, 0, 1), "id-two"); await view.data.refresh(); await wait();
+    expect(view.data.projects[0].project_id).toBe("id-two");
+    expect(view.data.projects[0].activeProcessCount).toBe(0);
+    expect(view.data.projects[0].finishedProcessCount).toBe(1);
+  } finally {view.close();}
+});
