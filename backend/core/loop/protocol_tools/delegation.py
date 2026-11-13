@@ -216,8 +216,10 @@ def install(ctx):
                 output_interfaces=output_interfaces,
                 interface_contract=interface_contract,
                 required_for_parent_completion=required_for_parent,
+                required_for_parent_completion_explicit="required_for_parent_completion" in args,
                 supersedes_process_id=str(args.get("supersedes_process_id", "")),
                 continue_process_id=str(args.get("continue_process_id", "")),
+                continuation_mode=str(args.get("continuation_mode", "")),
                 display_name=str(args.get("display_name", "")),
                 budget_request=dict(args.get("budget_request") or {}),
                 validate_only=validate_only,
@@ -240,6 +242,7 @@ def install(ctx):
                 "execution_state": "started" if start_immediately else "prepared",
                 "profile_id": profile_id,
                 "budget_lease": dict(child.budget_lease or {}),
+                "continuation": dict((child.context_snapshot.get("task_contract") or {}).get("continuation") or {}),
             }
         except (TypeError, ValueError, PermissionError, RuntimeError) as exc:
             return reject(
@@ -251,7 +254,9 @@ def install(ctx):
                     "valid_worker_profiles": CapabilityProfiles.describe(
                         actor_kind="worker"
                     ),
+                    **({"continuation_code": exc.code} if hasattr(exc, "code") else {}),
                 },
+                next_actions=getattr(exc, "next_actions", None),
             )
 
 
@@ -304,6 +309,8 @@ def install(ctx):
                 "required_for_parent_completion": {"type": "boolean"},
                 "supersedes_process_id": {"type": "string"},
                 "continue_process_id": {"type": "string"},
+                "continuation_mode": {"type": "string", "enum": ["remaining", "follow_up", "replace"],
+                    "description": "Omit to retain unfinished obligations, or follow up after accepted success. remaining appends to the unfinished assignment. follow_up/replace require the previous outcome to be durably complete and approved; they cannot silently discard unfinished work."},
                 "display_name": {"type": "string", "maxLength": 48},
                 "max_steps": {"type": "integer"},
                 "budget_request": {

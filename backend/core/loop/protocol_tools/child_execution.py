@@ -52,8 +52,10 @@ def install(ctx):
         output_interfaces: list[str] | None = None,
         interface_contract: dict | None = None,
         required_for_parent_completion: bool = True,
+        required_for_parent_completion_explicit: bool = False,
         supersedes_process_id: str = "",
         continue_process_id: str = "",
+        continuation_mode: str = "",
         display_name: str = "",
         actor_kind: str = "worker",
         review_target_id: str = "",
@@ -95,9 +97,13 @@ def install(ctx):
                     or review_evidence_source.get('owner_process_id') != target.process_id
                     or review_evidence_source.get('owner_task_id') != (target.active_task_id or target.process_id)):
                 raise ValueError('REVIEW_EVIDENCE_SCOPE_MISMATCH')
+        requested_target_files = list(target_files)
         previous_contract = None
         continuation = None
         resume_partial = False
+        continuation_info = {}
+        if continuation_mode and not (continue_process_id or supersedes_process_id):
+            raise ValueError("continuation_mode requires continue_process_id or supersedes_process_id")
         if continue_process_id:
             from backend.core.loop.task_contract import get_task_contract
             requirements = get_task_contract(process).get("host_requirements") or {}
@@ -138,12 +144,36 @@ def install(ctx):
             previous_contract = process.delegated_contracts.get(supersedes_process_id)
             if previous is None or previous_contract is None:
                 raise ValueError("supersedes_process_id is not an owned delegated task")
-            if previous.status in {
-                ProcessStatus.RUNNING, ProcessStatus.WAITING,
-                ProcessStatus.CANCELLING, ProcessStatus.AWAITING_USER,
-            }:
-                raise ValueError("cannot supersede a non-terminal delegated task")
+            from backend.core.loop.continuation_contract import compile_continuation
+            retained = compile_continuation(previous, previous_contract, process, {
+                "task_kind": task_kind, "profile_id": profile_id,
+                "acceptance_criteria": acceptance_criteria, "target_files": target_files,
+                "allowed_tools": allowed_tools, "required_test_ids": required_test_ids,
+                "required_tool_calls": required_tool_calls, "depends_on": dependency_ids,
+                "input_interfaces": input_interfaces, "output_interfaces": output_interfaces,
+                "interface_contract": interface_contract,
+                "required_for_parent_completion": required_for_parent_completion,
+                "required_for_parent_completion_explicit": required_for_parent_completion_explicit,
+            }, mode=continuation_mode)
+            acceptance_criteria = retained["acceptance_criteria"]
+            target_files = retained["target_files"]
+            allowed_tools = retained["allowed_tools"]
+            required_test_ids = retained["required_test_ids"]
+            required_tool_calls = retained["required_tool_calls"]
+            dependency_ids = retained["depends_on"]
+            input_interfaces, output_interfaces = retained["input_interfaces"], retained["output_interfaces"]
+            required_for_parent_completion = retained["required_for_parent_completion"]
+            continuation_info = retained["continuation"]
+            for upstream_id in dependency_ids:
+                if _owned_child(upstream_id) is None and not (validate_only and upstream_id in planned_dependency_ids):
+                    raise PermissionError("retained depends_on must reference an owned sibling task")
+            interface_contract = retained["interface_contract"]
+            if continuation_info["retained_obligations"]:
+                task_description += "\n\nRetained unfinished assignment:\n" + continuation_info["retained_assignment"]
+                if acceptance_criteria:
+                    task_description += "\n\nEffective acceptance criteria:\n- " + "\n- ".join(acceptance_criteria)
         normalised_targets = []
+        requested_normalised_targets = []
         workspace_root = Path(workspace_path or process.worktree_path).resolve()
         for item in target_files:
             value = str(item).strip().replace("\\", "/")
@@ -151,6 +181,8 @@ def install(ctx):
                 value = value[2:]
             if value == "*":
                 normalised_targets.append("*")
+                if item in requested_target_files:
+                    requested_normalised_targets.append("*")
                 continue
             candidate = Path(value)
             if not candidate.is_absolute():
@@ -165,10 +197,12 @@ def install(ctx):
                 ) from exc
             if value and value not in normalised_targets:
                 normalised_targets.append(value)
+            if value and item in requested_target_files and value not in requested_normalised_targets:
+                requested_normalised_targets.append(value)
         if resume_partial:
             old_targets = {str(item).replace("\\", "/").removeprefix("./")
                            for item in previous_contract.get("target_files", [])}
-            if "*" not in normalised_targets and (not old_targets or not old_targets.issubset(normalised_targets)):
+            if requested_target_files and "*" not in requested_normalised_targets and (not old_targets or not old_targets.issubset(requested_normalised_targets)):
                 raise ValueError("CONTINUATION_SCOPE_MISMATCH: include the retained task's target files or choose a fresh task")
         claims = [f"filesystem:{item}" for item in normalised_targets]
         if not claims and profile_id == "development.workspace":
@@ -191,7 +225,11 @@ def install(ctx):
         tool_scope_mode = str(tool_scope_mode or "profile").strip().lower()
         if tool_scope_mode not in {"profile", "test_only"}:
             raise PermissionError("tool_scope_mode must be profile or test_only")
-        if requested_tools:
+        if continuation_info.get("retained_obligations"):
+            # Empty is an issued empty scope here, not the legacy profile default.
+            effective_tools = list(dict.fromkeys(requested_tools))
+            tool_scope_source = "retained_assignment"
+        elif requested_tools:
             effective_tools = list(dict.fromkeys(requested_tools))
             tool_scope_source = "supervisor_allowlist"
         elif tool_scope_mode == "test_only":
@@ -296,6 +334,7 @@ def install(ctx):
                 "output_interfaces": list(output_interfaces or []),
                 "interface_contract": dict(interface_contract or {}),
                 "relationship_policy": relation,
+                **({"continuation": continuation_info} if continuation_info else {}),
             },
         }
         if continuation is not None:
@@ -352,6 +391,7 @@ def install(ctx):
             "interface_contract": dict(interface_contract or {}),
             "relationship_policy": relation,
             "budget_lease": dict(child.budget_lease or {}),
+            **({"continuation": continuation_info} if continuation_info else {}),
         }
         process.register_child_contract(
             child.process_id, contract,

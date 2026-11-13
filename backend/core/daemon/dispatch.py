@@ -1950,6 +1950,20 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 emit({"event": "command_result", "cmd": "task",
                       "error": str(exc), "code": str(exc).split(":", 1)[0]})
                 return
+        if (process is not None and process.parent_id and process.actor_kind != "supervisor"
+                and process.status.value in {"completed", "failed", "cancelled", "timed_out", "killed"}):
+            # The direct UI continuation creates a new user task/budget. It must
+            # not bypass the owner's unfinished contract or budget by reusing B's
+            # session. The supervisor's delegate_task path handles remaining work.
+            from backend.core.loop.continuation_contract import require_direct_followup
+            try:
+                require_direct_followup(process, apm)
+            except ValueError as exc:
+                emit({"event": "command_result", "cmd": "task", "error": str(exc),
+                      "code": getattr(exc, "code", "CONTINUATION_REJECTED"),
+                      "next_actions": getattr(exc, "next_actions", []),
+                      "owner_process_id": process.parent_id})
+                return
         if cmd.get("fresh_task_budget") and process is not None and not cmd.get("adopted_change_origin"):
             # A new user turn is adaptive, as for A: observation starts without
             # an invented mutation requirement; committed effects promote it.
