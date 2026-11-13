@@ -1940,6 +1940,15 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
         process = None
         direct_followup = None
         continuation_id = str(requested_process_id or cmd.get("conversation_process_id") or "")
+        if not continuation_id and cmd.get("session_id"):
+            from backend.core.loop.conversation_continuation import require_root_session_for_implicit_continuation
+            try:
+                require_root_session_for_implicit_continuation(
+                    apm, (daemon_ctx or {}).get("session_store"), str(cmd["session_id"]))
+            except (ValueError, StorageReferenceMissing) as exc:
+                emit({"event": "command_result", "cmd": "task",
+                      "error": str(exc), "code": str(exc).split(":", 1)[0]})
+                return
         if continuation_id:
             from backend.core.loop.conversation_continuation import resolve_conversation_process
             try:

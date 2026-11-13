@@ -530,3 +530,66 @@ def test_root_supervisor_adoption_is_not_subject_to_worker_handoff_block(tmp_pat
     assert successor.session is root.session
     assert successor.read_context_snapshot()[0][KEY]['changes']['saved-change']['status'] == 'pending'
     assert not any(event['event'] == 'direct_user_task_admitted' for event in successor.session.host_ledger)
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+@pytest.mark.parametrize('cold', [False, True])
+@pytest.mark.parametrize('claimed_actor', ['worker', 'supervisor'])
+def test_worker_session_only_cannot_skip_execution_admission(tmp_path_factory, accepted, cold, claimed_actor):
+    from backend.core.daemon.dispatch import _cmd_task
+    from backend.core.loop.manager import AgentProcessManager, SessionStore
+    root, tools, old = _accepted_original(tmp_path_factory) if accepted else fixture(tmp_path_factory)
+    manager = root._manager
+    store = SessionStore(str(tmp_path_factory), state_home=tmp_path_factory / 'state') if cold else None
+    try:
+        if cold:
+            for process in (root, old):
+                store.save_process_checkpoint(process)
+            manager = AgentProcessManager()
+        emitted = []
+        before = deepcopy((old.session.host_ledger, root.delegated_contracts, old.session.messages))
+        with patch.object(manager, 'fork') as fork:
+            _cmd_task({'action': 'chat', 'session_id': old.session.session_id,
+                'parent_id': root.process_id, 'role': claimed_actor, 'actor_kind': claimed_actor,
+                'capability_profile_id': 'supervisor.control' if claimed_actor == 'supervisor' else 'governance.observe',
+                'task_kind': 'answer', 'instruction': 'Continue this conversation',
+                'context_snapshot': {}, 'fresh_task_budget': True,
+                'runtime_preferences': {'user_direct_continuation': True}},
+                SimpleNamespace(workspace_path=tmp_path_factory), SimpleNamespace(name='test'),
+                {'apm': manager, 'dispatcher': object(), 'evq': Queue(), 'session_store': store}, emitted.append)
+        assert emitted[-1]['code'] == 'CONTINUATION_PROCESS_ID_REQUIRED', emitted
+        fork.assert_not_called()
+        assert (old.session.host_ledger, root.delegated_contracts, old.session.messages) == before
+        if cold:
+            assert manager.list_processes() == []  # identity check does not restore or execute
+    finally:
+        if store:
+            store.close()
+
+
+@pytest.mark.parametrize('with_store', [False, True])
+def test_actual_supervisor_session_only_remains_supported(tmp_path_factory, with_store):
+    from backend.core.daemon.dispatch import _cmd_task
+    from backend.core.loop.manager import SessionStore
+    root, _ = _supervisor(tmp_path_factory)
+    root.status = ProcessStatus.COMPLETED
+    root.result = {'status': 'completed'}
+    root.lifecycle_finalized = True
+    store = SessionStore(str(tmp_path_factory), state_home=tmp_path_factory / 'state') if with_store else None
+    try:
+        if store:
+            store.save_process_checkpoint(root)
+        emitted = []
+        with patch('backend.core.daemon.dispatch.threading.Thread.start'):
+            _cmd_task({'action': 'chat', 'session_id': root.session.session_id,
+                'instruction': 'Another supervisor task', 'context_snapshot': {}},
+                SimpleNamespace(workspace_path=tmp_path_factory), SimpleNamespace(name='test'),
+                {'apm': root._manager, 'dispatcher': object(), 'llm': object(),
+                 'evq': Queue(), 'session_store': store}, emitted.append)
+        assert emitted[-1].get('result', {}).get('status') == 'pending', emitted
+        successor = root._manager.get(emitted[-1]['result']['process_id'])
+        successor._run_lock.release()
+        assert successor.session is root.session and successor.actor_kind == 'supervisor'
+    finally:
+        if store:
+            store.close()
