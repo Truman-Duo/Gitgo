@@ -64,6 +64,9 @@ DAG 应按“完整校验 → 准备全部节点 → 持久化整组关系 → �
   准入路径，不通过新预算绕过旧义务。已验收的 B 保留直接后续对话能力。
   通过检查后开启的独立用户任务记录 Host 来源，继续追问不要求不存在的父委派合同；
   原 A 的显示关联与验收责任分开，冷恢复也保留独立任务的预算和工具范围。
+  B 续办必须指定执行编号，不能只传会话编号绕开前序检查；主 A 的现有会话调用保留。
+  同会话的新执行准入成功后才压缩旧上下文，拒绝重复请求不会改写正在运行的会话。
+  压缩在临时上下文容器中完成后再发布；失败保留原上下文并记录诊断，任务继续执行。
 
 明确的未完成兼容边界：终态 B 的 BTW“中断并采用讨论结论”不会自动续办。
 原入口虽能保存采用要求，但后继会创建新预算，没有完整继承父合同和旧隔离工作区。
@@ -114,7 +117,8 @@ DAG 应按“完整校验 → 准备全部节点 → 持久化整组关系 → �
 python -B -m pytest -q -p no:cacheprovider \
   tests/test_process_closeout.py tests/test_dag_admission.py \
   tests/test_process_routing_choices.py tests/test_continuation_obligations.py \
-  tests/test_process_routing_projection.py tests/test_optional_delegation_contract.py
+  tests/test_process_routing_projection.py tests/test_optional_delegation_contract.py \
+  tests/test_continuation_compaction_admission.py
 ```
 
 这些测试通过现有 fixture 使用临时配置与状态目录。前端继续使用项目现有的
