@@ -6,7 +6,8 @@ from .lifecycle import transition
 from .llm import StreamCancelledError
 from .models import ProcessStatus
 from .outcome import OutcomeStatus
-from .runtime_outcomes import _make_result, _cancellation_result, _budget_exhausted_result
+from .runtime_outcomes import _make_result, _cancellation_result, _budget_exhausted_result, _status_result
+from .mailbox import MailboxRecoveryRequired
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,8 @@ class TurnPreparation:
             return PreparedTurn(result=_budget_exhausted_result(process, session, exc))
         except StreamCancelledError:
             return PreparedTurn(result=_cancellation_result(process, session))
+        except MailboxRecoveryRequired:
+            return PreparedTurn(result=_status_result(process, session))
 
     def _window_boundary(self):
         process, session = self.process, self.session

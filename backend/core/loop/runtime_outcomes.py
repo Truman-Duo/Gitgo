@@ -254,6 +254,19 @@ def _budget_exhausted_result(process: AgentProcess, session: "AgentSession",
 
 
 def _status_result(process: AgentProcess, session: "AgentSession") -> dict:
+    if ((process.recovery or {}).get('resume_forbidden') and process.status not in (
+            ProcessStatus.CANCELLING, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
+            ProcessStatus.TIMED_OUT)):
+        # A peer delivery checkpoint can become uncertain while this runner
+        # waits at a safe boundary. Stop the turn without consuming/rejecting
+        # its retained mailbox or disguising recovery as cancellation.
+        result = TaskOutcome.failed(task_id=process.active_task_id or process.process_id,
+            process_id=process.process_id, process_status=process.status.value,
+            code='PROCESS_RECOVERY_REQUIRED', message='Inspect the retained checkpoint before resuming this execution.',
+            steps_used=process.steps_used, metadata={'automatic_replay_suppressed': True,
+                'recovery': dict(process.recovery)}).to_dict()
+        process.result = result
+        return result
     if process.status == ProcessStatus.COMPLETED and isinstance(process.result, dict):
         return process.result
     if process.status in (

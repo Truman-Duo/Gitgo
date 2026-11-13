@@ -9,10 +9,14 @@ def _apply_pending_instructions(
 ) -> int:
     if process.mailbox is None:
         return 0
-    messages = process.mailbox.drain(
-        task_id=process.active_task_id or process.process_id,
-        step=process.steps_used,
-    )
+    with process.mailbox.admission():
+        if (process.recovery or {}).get('resume_forbidden'):
+            from .mailbox import MailboxRecoveryRequired
+            raise MailboxRecoveryRequired('PROCESS_RECOVERY_REQUIRED: mailbox delivery requires checkpoint reconciliation')
+        messages = process.mailbox.drain(
+            task_id=process.active_task_id or process.process_id,
+            step=process.steps_used,
+        )
     for message in messages:
         message_type = {
             "governance_update": "governance_nudge",

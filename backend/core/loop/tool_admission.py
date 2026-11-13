@@ -94,6 +94,13 @@ class RuntimeToolAdmission:
 
     def _check_current(self):
         ctx, tool = self.ctx, self.tool
+        if (ctx.process.recovery or {}).get("resume_forbidden"):
+            # A peer checkpoint may have become uncertain after the provider
+            # started. Reject only new admission; a governance stop must not
+            # roll back an already executed batch prefix.
+            raise AdmissionError("PROCESS_RECOVERY_REQUIRED",
+                "Inspect the retained checkpoint before admitting another tool.",
+                nature="governance")
         if self.composition:
             for expected in self.metadata.get("harness_instances", []):
                 current, _ = self.composition.repo.instance(self.composition.task, expected["id"])

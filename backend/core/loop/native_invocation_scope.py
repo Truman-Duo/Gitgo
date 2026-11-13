@@ -5,6 +5,14 @@ from contextvars import ContextVar
 _SCOPE = ContextVar("native_invocation_scope", default=None)
 
 
+def current_tool_call_identity(process):
+    """Expose the existing Host call identity, never model-supplied arguments."""
+    scope = _SCOPE.get()
+    if scope is None or scope["ctx"].process is not process:
+        return None
+    return (scope["execution_id"], scope["call_index"])
+
+
 def current_native_records(ctx):
     scope = _SCOPE.get()
     return scope["records"] if scope is not None and scope["ctx"] is ctx else []

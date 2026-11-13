@@ -846,10 +846,46 @@ class AgentProcessManager:
             return {**result, "process_ids": [item.process_id for item in code_nodes],
                     "verified_dependency_ids": [item.process_id for item in evidence_nodes]}
 
-    def send_instruction(self, process_id: str, content: str) -> dict:
+    def send_instruction(self, process_id: str, content: str, *, durable=False, message_id="") -> dict:
         process = self._processes.get(process_id)
         if process is None or process.mailbox is None:
             return {"accepted": False, "error": "process not found"}
+        if durable:
+            store = getattr(self, "session_store", None)
+            if store is None:
+                return {"accepted": False, "error": "FEEDBACK_PERSISTENCE_UNAVAILABLE",
+                        "effect_state": "not_committed"}
+            from .mechanism_lifecycle import fence
+            from backend.core.storage import StorageCommitUnknown
+            message, previous = None, None
+            try:
+                with fence(process), process.session._mechanism_lock, process._coordination_lock, process.mailbox.admission():
+                    previous = process.mailbox.get(message_id) if message_id else None
+                    if (process.recovery or {}).get("resume_forbidden"):
+                        return {"accepted": False, "error": "FEEDBACK_RECOVERY_REQUIRED",
+                                "automatic_replay_suppressed": True}
+                    if previous is None and process.status not in {ProcessStatus.RUNNING, ProcessStatus.WAITING, ProcessStatus.AWAITING_USER}:
+                        return {"accepted": False, "error": "PROCESS_NOT_RUNNING:" + process.status.value}
+                    try:
+                        message = process.mailbox.enqueue_instruction(content, message_id=message_id)
+                        if previous is None:
+                            store.save_process_checkpoint(process)
+                        # A known Host identity is already in the recipient's
+                        # durable mailbox. Do not turn a replay into another
+                        # write, or report that old delivery failed if storage
+                        # happens to be unavailable while returning its receipt.
+                    except Exception as exc:
+                        if message is not None and previous is None and not isinstance(exc, StorageCommitUnknown):
+                            process.mailbox.retract_uncommitted(message.message_id)
+                        raise
+                    return {"accepted": message.status in {"accepted", "applied"},
+                            **message.to_dict(), "persistence": "checkpoint"}
+            except StorageCommitUnknown as exc:
+                return {"accepted": False, "error": str(exc), "code": "FEEDBACK_COMMIT_UNKNOWN",
+                        "message_id": message.message_id if message else message_id,
+                        "effect_state": "ambiguous", "automatic_replay_suppressed": True}
+            except (ValueError, RuntimeError, OSError) as exc:
+                return {"accepted": False, "error": str(exc), "effect_state": "not_committed"}
         try:
             message = process.mailbox.enqueue_instruction(content)
         except Exception as exc:

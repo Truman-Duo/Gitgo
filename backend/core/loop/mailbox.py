@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+from contextlib import contextmanager
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,6 +40,10 @@ class MailboxClosedError(RuntimeError):
     pass
 
 
+class MailboxRecoveryRequired(RuntimeError):
+    """Retain uncertain delivery without exposing it to another provider turn."""
+
+
 class AgentMailbox:
     """Thread-safe FIFO mailbox with an atomic completion barrier.
 
@@ -48,7 +53,7 @@ class AgentMailbox:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._pending: deque[MailboxMessage] = deque()
         self._messages: dict[str, MailboxMessage] = {}
         self._closed = False
@@ -80,8 +85,18 @@ class AgentMailbox:
             mailbox._close_reason = str(raw.get("close_reason") or "")
         return mailbox
 
-    def enqueue_instruction(self, content: str) -> MailboxMessage:
-        return self._enqueue(content, kind="user_instruction")
+    @contextmanager
+    def admission(self):
+        """Keep delivery commit/rollback atomic with drain and mailbox closure.
+
+        Checkpoint callers acquire the process session/coordination locks first;
+        durable_snapshot may then reenter this mailbox lock on the same thread.
+        """
+        with self._lock:
+            yield
+
+    def enqueue_instruction(self, content: str, *, message_id: str = "") -> MailboxMessage:
+        return self._enqueue(content, kind="user_instruction", message_id=message_id)
 
     def retract_uncommitted(self, message_id: str) -> None:
         """Rollback one unacknowledged enqueue while the runtime boundary is fenced."""
@@ -101,17 +116,22 @@ class AgentMailbox:
         """Queue a Host-routed relationship/DAG update at a safe turn boundary."""
         return self._enqueue(content, kind="coordination_update")
 
-    def _enqueue(self, content: str, *, kind: str) -> MailboxMessage:
+    def _enqueue(self, content: str, *, kind: str, message_id: str = "") -> MailboxMessage:
         text = content.strip()
         if not text:
             raise ValueError("Instruction cannot be empty")
         with self._lock:
+            previous = self._messages.get(message_id) if message_id else None
+            if previous is not None:
+                if previous.content != text or previous.kind != kind:
+                    raise ValueError("MAILBOX_MESSAGE_IDENTITY_CONFLICT")
+                return previous  # Includes durable applied/rejected messages; never enqueue twice.
             if self._closed:
                 raise MailboxClosedError(
                     self._close_reason or "Agent mailbox is closed"
                 )
             message = MailboxMessage(
-                message_id=str(uuid.uuid4()),
+                message_id=message_id or str(uuid.uuid4()),
                 kind=kind,
                 content=text,
                 accepted_at=datetime.now().isoformat(),
