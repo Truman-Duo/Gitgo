@@ -478,6 +478,46 @@ class AgentProcessManager:
             if upstream.parent_id != parent_id:
                 raise ValueError("DAG dependencies must share one supervisor owner")
 
+    def resolve_retained_dependencies(self, owner: AgentProcess, dependencies: list[str]) -> list[str]:
+        """Resolve existing obligations through Host-admitted remaining-work successors.
+
+        This changes execution references, not the logical dependency. A new
+        follow-up is unrelated work and cannot substitute for its predecessor.
+        Readiness still belongs to _wait_for_dependencies and worktree sealing.
+        """
+        _, contracts, _ = owner.coordination_snapshot()
+        resolved = []
+        for dependency_id in dependencies:
+            current_id = dependency_id
+            seen = set()
+            while True:
+                if current_id in seen:
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: supersession cycle")
+                seen.add(current_id)
+                current = self.get(current_id)
+                contract = contracts.get(current_id)
+                if not self.owns_child(owner, current) or contract is None:
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: retained dependency must remain owned")
+                next_id = contract.get("superseded_by")
+                if not next_id:
+                    break
+                successor = self.get(next_id)
+                next_contract = contracts.get(next_id) or {}
+                provenance = next_contract.get("continuation") or {}
+                if (not self.owns_child(owner, successor)
+                        or next_contract.get("supersedes_process_id") != current_id
+                        or provenance.get("source_process_id") != current_id
+                        or provenance.get("source_task_id") != (current.active_task_id or current_id)):
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: successor lacks matching owned Host provenance")
+                if provenance.get("mode") != "remaining" or provenance.get("retained_obligations") is not True:
+                    break  # A follow-up does not retire this dependency's original result.
+                if not is_consumable_terminal(current, self):
+                    raise ValueError("CONTINUATION_DEPENDENCY_CLOSEOUT_PENDING: predecessor has not reliably closed")
+                current_id = next_id
+            if current_id not in resolved:
+                resolved.append(current_id)
+        return resolved
+
     def _wait_for_dependencies(self, process: AgentProcess) -> str:
         """Wait at a Host boundary without consuming an Agent concurrency slot."""
         if not process.depends_on:

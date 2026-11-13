@@ -164,6 +164,18 @@ def install(ctx):
             input_interfaces, output_interfaces = retained["input_interfaces"], retained["output_interfaces"]
             required_for_parent_completion = retained["required_for_parent_completion"]
             continuation_info = retained["continuation"]
+            if continuation_info["retained_obligations"]:
+                old_dependencies = list(previous_contract.get("depends_on") or [])
+                resolved_dependencies = manager.resolve_retained_dependencies(process, old_dependencies)
+                dependency_ids = list(dict.fromkeys([
+                    *resolved_dependencies,
+                    *(item for item in dependency_ids if item not in old_dependencies),
+                ]))
+                if resume_partial and dependency_ids != continuation.depends_on:
+                    raise ValueError("CONTINUATION_BASE_MISMATCH: retained checkout pins its original dependency executions")
+                if old_dependencies != resolved_dependencies:
+                    continuation_info["dependency_rebinding"] = {
+                        "previous": old_dependencies, "effective": resolved_dependencies}
             for upstream_id in dependency_ids:
                 if _owned_child(upstream_id) is None and not (validate_only and upstream_id in planned_dependency_ids):
                     raise PermissionError("retained depends_on must reference an owned sibling task")
