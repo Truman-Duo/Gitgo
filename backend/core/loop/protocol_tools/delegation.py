@@ -93,16 +93,16 @@ def install(ctx):
             if (
                 current_contract.get("revision")
                 and
-                route.get("recommended") == "self_execute"
+                current_contract.get("execution_mode") not in {"delegate", "either"}
                 and not bool(host_requirements.get("manual_B_creation"))
             ):
                 return reject(
                     "DELEGATION_ADMISSION_FAILED",
-                    "The current structured contract describes bounded single-owner work; use request_self_execute, or revise the contract with a concrete complexity rationale.",
+                    "The current contract explicitly keeps execution with the supervisor; revise execution_mode before delegating.",
                     details={"routing_advice": route},
                     next_actions=[
                         {"action": "request_self_execute", "profile_id": "development.workspace"},
-                        {"action": "revise_task_contract", "required": ["estimated_complexity", "delegation_rationale"]},
+                        {"action": "declare_task_contract", "patch": {"operation": "revise", "execution_mode": "delegate", "routing_transition": "delegate_initial"}},
                     ],
                 )
             profile_error = CapabilityProfiles.worker_error(profile_id)
