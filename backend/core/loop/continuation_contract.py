@@ -189,7 +189,7 @@ def _continuation_owner(previous, manager, store=None, workspace=None):
     return max(candidates, key=lambda candidate: candidate.created_at) if candidates else original
 
 
-def require_direct_followup(previous, manager, *, store=None, workspace=None):
+def require_direct_followup(previous, manager, *, store=None, workspace=None, adopted_change=False):
     """New independent user turns require a reliably closed predecessor.
 
     The first turn also requires the original delegated outcome to be accepted.
@@ -199,6 +199,17 @@ def require_direct_followup(previous, manager, *, store=None, workspace=None):
     if not is_consumable_terminal(previous, manager):
         raise ContinuationAdmissionError('CONTINUATION_CLOSEOUT_PENDING',
             'Wait for reliable closeout before starting another user turn.', process_id=previous.process_id)
+    if adopted_change:
+        # B adoption needs an explicit owner-contract/worktree/budget handoff.
+        # It cannot reuse the independent-user-turn receipt, even after review:
+        # adoption carries old task evidence and responsibility into its successor.
+        error = ContinuationAdmissionError('CONTINUATION_ADOPTION_HANDOFF_REQUIRED',
+            'The saved change remains pending. Ask the original supervisor to handle it; '
+            'direct worker adoption requires an owner-contract, budget and worktree handoff that is not implemented.',
+            process_id=previous.process_id)
+        error.next_actions = [{'action': 'list_agents', 'process_id': previous.parent_id,
+            'reason': 'Return to the original supervisor to inspect the pending change and retained assignment.'}]
+        raise error
     origin = direct_user_task_origin(previous)
     if origin is not None:
         return {'direct_user_origin': dict(origin)}

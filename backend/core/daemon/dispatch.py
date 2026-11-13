@@ -1959,7 +1959,8 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             from backend.core.loop.continuation_contract import require_direct_followup
             try:
                 direct_followup = require_direct_followup(process, apm,
-                    store=(daemon_ctx or {}).get("session_store"), workspace=session.workspace_path)
+                    store=(daemon_ctx or {}).get("session_store"), workspace=session.workspace_path,
+                    adopted_change=bool(cmd.get("adopted_change_origin")))
             except ValueError as exc:
                 emit({"event": "command_result", "cmd": "task", "error": str(exc),
                       "code": getattr(exc, "code", "CONTINUATION_REJECTED"),

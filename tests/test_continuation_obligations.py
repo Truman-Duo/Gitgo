@@ -461,3 +461,72 @@ def test_recovery_budget_root_stops_at_independent_user_task_for_descendants():
     }
     assert _root_id('user', states) == 'user'
     assert _root_id('descendant', states) == 'user'
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+@pytest.mark.parametrize('finalized', [False, True])
+def test_terminal_worker_adoption_requires_explicit_handoff_without_mutating_saved_change(tmp_path_factory, accepted, finalized):
+    """B BTW handoff is deliberately unsupported, even after A accepted B.
+
+    This boundary must not silently acquire a new budget, inherit old receipts
+    into a fresh independent task, or discard worktree/assignment responsibility.
+    """
+    from backend.core.daemon.dispatch import _cmd_task
+    from backend.core.loop.task_maintenance import KEY
+    root, tools, old = _accepted_original(tmp_path_factory) if accepted else fixture(tmp_path_factory)
+    old.lifecycle_finalized = finalized
+    old.durable_revision = 1  # unfinalized cannot use the legacy synchronous fixture allowance
+    change = {'status': 'pending', 'content': 'Also handle this case',
+              'target_process_id': old.process_id, 'target_task_id': old.active_task_id}
+    old.update_context_snapshot(lambda context: {**context, KEY: {
+        'task_id': old.active_task_id, 'process_id': old.process_id, 'epoch': 1,
+        'changes': {'saved-change': change}}})
+    old.tool_receipts = [{'receipt_id': 'existing-effect', 'task_id': old.active_task_id}]
+    before = deepcopy((old.read_context_snapshot()[0], old.session.host_ledger,
+        old.tool_receipts, root.delegated_contracts, root.child_ids, root.task_budget.snapshot()['used']))
+    emitted = []
+    with patch.object(root._manager, 'fork') as fork:
+        _cmd_task({'action': 'chat', 'process_id': old.process_id, 'task_id': old.active_task_id,
+            'instruction': 'Adopt saved change', 'fresh_task_budget': True,
+            'adopted_change_origin': {'process_id': old.process_id,
+                'task_id': old.active_task_id, 'change_id': 'saved-change'}},
+            SimpleNamespace(workspace_path=tmp_path_factory), SimpleNamespace(name='test'),
+            {'apm': root._manager, 'dispatcher': object(), 'evq': Queue()}, emitted.append)
+    expected = 'CONTINUATION_ADOPTION_HANDOFF_REQUIRED' if finalized else 'CONTINUATION_CLOSEOUT_PENDING'
+    assert emitted[-1]['code'] == expected
+    assert emitted[-1]['owner_process_id'] == root.process_id
+    fork.assert_not_called()
+    after = deepcopy((old.read_context_snapshot()[0], old.session.host_ledger,
+        old.tool_receipts, root.delegated_contracts, root.child_ids, root.task_budget.snapshot()['used']))
+    assert after[:-1] == before[:-1]
+    assert {k: v for k, v in after[-1].items() if k != 'elapsed_seconds'} == {
+        k: v for k, v in before[-1].items() if k != 'elapsed_seconds'}
+    assert len(root._manager.list_processes()) == 2
+
+
+def test_root_supervisor_adoption_is_not_subject_to_worker_handoff_block(tmp_path_factory):
+    from backend.core.daemon.dispatch import _cmd_task
+    from backend.core.loop.task_maintenance import KEY
+    root, tools = _supervisor(tmp_path_factory)
+    root.status = ProcessStatus.CANCELLED
+    root.result = {'status': 'cancelled'}
+    root.lifecycle_finalized = True
+    root.update_context_snapshot(lambda context: {**context, KEY: {
+        'task_id': root.active_task_id, 'process_id': root.process_id, 'epoch': 1,
+        'changes': {'saved-change': {'status': 'pending', 'content': 'Also handle this case',
+            'target_process_id': root.process_id, 'target_task_id': root.active_task_id}}}})
+    emitted = []
+    with patch('backend.core.daemon.dispatch.threading.Thread.start'):
+        _cmd_task({'action': 'chat', 'process_id': root.process_id, 'task_id': root.active_task_id,
+            'instruction': 'Adopt saved change', 'context_snapshot': {}, 'fresh_task_budget': False,
+            'adopted_change_origin': {'process_id': root.process_id,
+                'task_id': root.active_task_id, 'change_id': 'saved-change'}},
+            SimpleNamespace(workspace_path=tmp_path_factory), SimpleNamespace(name='test'),
+            {'apm': root._manager, 'dispatcher': object(), 'llm': object(), 'evq': Queue()}, emitted.append)
+    assert emitted[-1].get('result', {}).get('status') == 'pending', emitted
+    successor = root._manager.get(emitted[-1]['result']['process_id'])
+    successor._run_lock.release()
+    assert successor.active_task_id == root.active_task_id
+    assert successor.session is root.session
+    assert successor.read_context_snapshot()[0][KEY]['changes']['saved-change']['status'] == 'pending'
+    assert not any(event['event'] == 'direct_user_task_admitted' for event in successor.session.host_ledger)
