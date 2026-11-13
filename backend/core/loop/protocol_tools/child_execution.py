@@ -18,6 +18,23 @@ def install(ctx):
     manager = ctx.manager
     _owned_child = ctx.owned_child
     _spawn_child = ctx.spawn_child
+    prepared_children = {}
+
+    def start_prepared_child(child_id):
+        prepared = prepared_children.pop(child_id)
+        try:
+            prepared[0]()
+        except Exception:
+            thread = manager._threads.get(child_id)
+            if thread is None or thread.ident is None:
+                prepared_children[child_id] = prepared
+            raise
+
+    def cancel_prepared_child(child_id):
+        prepared = prepared_children.pop(child_id, None)
+        if prepared is not None:
+            prepared[1]()
+
     def _spawn_child(
         *,
         task_description: str,
@@ -43,6 +60,9 @@ def install(ctx):
         budget_request: dict | None = None,
         retained_boundary: dict | None = None,
         review_evidence_source: dict | None = None,
+        validate_only: bool = False,
+        planned_dependency_ids: tuple[str, ...] = (),
+        start_immediately: bool = True,
     ):
         if manager is None:
             raise RuntimeError("AgentProcessManager is unavailable")
@@ -52,6 +72,8 @@ def install(ctx):
             str(item) for item in (depends_on or []) if str(item)
         ))
         for upstream_id in dependency_ids:
+            if validate_only and upstream_id in planned_dependency_ids:
+                continue
             if _owned_child(upstream_id) is None:
                 raise PermissionError(
                     "depends_on must reference an owned sibling task"
@@ -276,6 +298,11 @@ def install(ctx):
                 "relationship_policy": relation,
             },
         }
+        if continuation is not None:
+            manager.validate_session_continuation(continuation.session)
+        if validate_only:
+            return {"max_steps": max(1, min(max_steps, 200)),
+                    "budget_request": dict(budget_request or {})}
         child = manager.fork(
             parent_id=process.process_id,
             role="reviewer" if actor_kind == "reviewer" else "executor",
@@ -571,15 +598,59 @@ def install(ctx):
             # worktrees have distinct data planes, so unrelated writers
             # must not be serialized by their logical target paths.
             claims = [f"worktree:{child.process_id}"]
-        manager.start(
-            child.process_id,
-            run_child,
-            resources=claims,
-            resource_mode=resource_mode,
-            on_terminal=publish_terminal,
-            resume_target=lambda instruction: run_child(resuming=True, instruction=instruction),
-        )
+        def start_child():
+            child.runtime_preferences.pop("execution_prepared", None)
+            try:
+                manager.start(
+                    child.process_id, run_child, resources=claims,
+                    resource_mode=resource_mode, on_terminal=publish_terminal,
+                    resume_target=lambda instruction: run_child(resuming=True, instruction=instruction),
+                )
+            except Exception:
+                thread = manager._threads.get(child.process_id)
+                if not start_immediately and (thread is None or thread.ident is None):
+                    child.runtime_preferences["execution_prepared"] = True
+                raise
+
+        def cancel_prepared():
+            # Only a never-started runner may use this cancellation path. Keep
+            # admission history and consumed agent count; refund unused escrow.
+            thread = manager._threads.get(child.process_id)
+            if thread is not None and thread.ident is not None:
+                raise RuntimeError("DAG_PREPARED_CHILD_ALREADY_STARTED")
+            child.runtime_preferences.pop("execution_prepared", None)
+            child.cancellation_event.set()
+            transition(child, ProcessStatus.CANCELLED)
+            child.result = {"process_id": child.process_id, "status": "cancelled",
+                            "code": "DAG_ADMISSION_CANCELLED", "execution_state": "not_started"}
+            if child.task_budget is not None:
+                child.budget_lease = child.task_budget.release_process(child.process_id, status="cancelled") or {}
+            with process._coordination_lock:
+                contract = process.delegated_contracts[child.process_id]
+                contract["required_for_parent_completion"] = False
+                contract["admission_rolled_back"] = True
+                previous = process.delegated_contracts.get(supersedes_process_id)
+                if previous is not None and previous.get("superseded_by") == child.process_id:
+                    previous.pop("superseded_by", None)
+            try:
+                publish_terminal()
+                child.lifecycle_finalized = True
+            except Exception as exc:
+                child.lifecycle_finalized = False
+                child.result.update(code="SESSION_CHECKPOINT_FAILED", error=str(exc),
+                    metadata={"durable_terminal_barrier": False, "automatic_replay_suppressed": True})
+                raise
+            finally:
+                manager.notify_state_changed(child.process_id)
+
+        if start_immediately:
+            start_child()
+        else:
+            child.runtime_preferences["execution_prepared"] = True
+            prepared_children[child.process_id] = (start_child, cancel_prepared)
         return child
 
 
     ctx.spawn_child = _spawn_child
+    ctx.start_prepared_child = start_prepared_child
+    ctx.cancel_prepared_child = cancel_prepared_child

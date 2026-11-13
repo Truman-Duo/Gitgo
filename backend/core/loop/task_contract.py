@@ -610,7 +610,9 @@ def finish_delegation_attempt(
         attempts = list(contract.get("delegation_attempts") or [])
         for index in range(len(attempts) - 1, -1, -1):
             item = attempts[index]
-            if item.get("intent_id") == intent_id and item.get("state") == "admitting":
+            if (item.get("intent_id") == intent_id and item.get("state") in {"admitting", "prepared"}
+                    and (not child_process_id or not item.get("child_process_id")
+                         or item.get("child_process_id") == child_process_id)):
                 item = dict(item)
                 item["state"] = state
                 if child_process_id:

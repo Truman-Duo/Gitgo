@@ -13,7 +13,8 @@ def install(ctx):
     tools = ctx.tools
     _spawn_child = ctx.spawn_child
     delegate_task = ctx.delegate_task
-    def delegate_task(args: dict) -> dict:
+    def delegate_task(args: dict, *, validate_only=False,
+                      planned_dependency_ids=(), start_immediately=True) -> dict:
         from backend.core.errors import error_payload
         from backend.core.loop.task_contract import (
             delegation_intent_id,
@@ -39,17 +40,19 @@ def install(ctx):
         intent_id = delegation_intent_id(
             task_description, target_files, criteria,
         )
-        record_delegation_attempt(
-            process,
-            intent_id=intent_id,
-            required=required_for_parent,
-            profile_id=profile_id,
-            task_kind=raw_task_kind,
-            target_files=target_files,
-        )
+        def record_attempt():
+            record_delegation_attempt(
+                process, intent_id=intent_id, required=required_for_parent,
+                profile_id=profile_id, task_kind=raw_task_kind, target_files=target_files,
+            )
+
+        if not validate_only:
+            record_attempt()
 
         def reject(name: str, message: str, *, details: dict | None = None,
                    next_actions: list[dict] | None = None) -> dict:
+            if validate_only:
+                record_attempt()
             payload = error_payload(
                 name, message=message, details=details,
                 next_actions=next_actions, state_changed=True,
@@ -217,9 +220,14 @@ def install(ctx):
                 continue_process_id=str(args.get("continue_process_id", "")),
                 display_name=str(args.get("display_name", "")),
                 budget_request=dict(args.get("budget_request") or {}),
+                validate_only=validate_only,
+                planned_dependency_ids=planned_dependency_ids,
+                start_immediately=start_immediately,
             )
+            if validate_only:
+                return {"validated": True, "budget_node": child}
             finish_delegation_attempt(
-                process, intent_id=intent_id, state="running",
+                process, intent_id=intent_id, state="running" if start_immediately else "prepared",
                 child_process_id=child.process_id,
             )
             return {
@@ -229,10 +237,11 @@ def install(ctx):
                 "session_id": child.session.session_id,
                 "display_name": child.session.display_name,
                 "status": child.status.value,
+                "execution_state": "started" if start_immediately else "prepared",
                 "profile_id": profile_id,
                 "budget_lease": dict(child.budget_lease or {}),
             }
-        except (ValueError, PermissionError, RuntimeError) as exc:
+        except (TypeError, ValueError, PermissionError, RuntimeError) as exc:
             return reject(
                 "DELEGATION_ADMISSION_FAILED",
                 str(exc),

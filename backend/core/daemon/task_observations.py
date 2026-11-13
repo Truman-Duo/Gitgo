@@ -26,6 +26,7 @@ class TaskObservations:
             "context_compaction_completed",
             "agent_started",
             "agent_dag_admitted",
+            "agent_dag_admission_failed",
             "worktree_leased",
             "worktree_sealed",
             "worktree_promoted",
@@ -52,7 +53,7 @@ class TaskObservations:
                     owner = self.manager.get(event_process.parent_id)
                     if owner is not None:
                         store.save_process_checkpoint(owner)
-                if event.get("event") == "agent_dag_admitted":
+                if event.get("event") in {"agent_dag_admitted", "agent_dag_admission_failed"}:
                     for child_id in dict(event.get("nodes") or {}).values():
                         child = self.manager.get(str(child_id))
                         if child is not None:

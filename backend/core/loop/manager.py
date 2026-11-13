@@ -118,14 +118,7 @@ class AgentProcessManager:
                 raise ValueError(f"Session not found: {session_id}")
 
         if session is not None:
-            terminal = {ProcessStatus.COMPLETED, ProcessStatus.FAILED,
-                        ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
-                        ProcessStatus.ORPHANED}
-            if any(p.session.session_id == session.session_id and
-                   (p.status not in terminal or (p.process_id in self._threads
-                    and self._threads[p.process_id].is_alive()))
-                   for p in self._processes.values()):
-                raise ValueError("SESSION_EXECUTION_ACTIVE: wait for the previous execution to finish before continuing this session")
+            self.validate_session_continuation(session)
 
         parent = self._processes.get(parent_id) if parent_id else None
         if parent is not None and child_budget_request and child_budget_request.get("steps") is not None:
@@ -224,6 +217,17 @@ class AgentProcessManager:
                 correlation_id=process.process_id,
             )
         return process
+
+    def validate_session_continuation(self, session) -> None:
+        """One validation shared by direct admission and complete DAG preflight."""
+        terminal = {ProcessStatus.COMPLETED, ProcessStatus.FAILED,
+                    ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
+                    ProcessStatus.ORPHANED}
+        if any(p.session.session_id == session.session_id and
+               (p.status not in terminal or (p.process_id in self._threads
+                and self._threads[p.process_id].is_alive()))
+               for p in self._processes.values()):
+            raise ValueError("SESSION_EXECUTION_ACTIVE: wait for the previous execution to finish before continuing this session")
 
     def start(self, process_id: str, target, *, resources: list[str] | None = None,
               resource_mode: str = "exclusive", on_terminal=None, resume_target=None) -> None:
