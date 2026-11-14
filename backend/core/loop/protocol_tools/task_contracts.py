@@ -67,7 +67,10 @@ def install(ctx):
         current = get_task_contract(process)
         revision = int(current.get('revision') or 0)
         if revision == 0:
-            raise ValueError('TASK_CONTRACT_INITIAL_DECLARATION_REQUIRED: declare the initial task before revising it')
+            raise ValueError('TASK_CONTRACT_INITIAL_DECLARATION_REQUIRED: declare the initial task before revising it. '
+                "Call task_mechanism(operation='status'); use operation='declare' with the inherited "
+                'contract.acceptance_criteria and required contract.deliverables before operation=\'revise\'. '
+                'append is only available after the initial declaration.')
         expected = args.get('expected_revision', revision)
         if type(expected) is not int or expected != revision:
             raise TaskContractRevisionConflict('TASK_CONTRACT_REVISION_CONFLICT: reconcile the current contract before revising it')
@@ -116,12 +119,17 @@ def install(ctx):
                 raise ValueError("worker scope revision requires an explicit adopted user change")
             previous = get_task_contract(process)
             if not set(previous.get("acceptance_criteria") or []).issubset(proposal.get("acceptance_criteria") or []):
-                raise ValueError("worker revisions cannot remove supervisor-assigned acceptance obligations")
+                raise ValueError("worker revisions cannot remove supervisor-assigned acceptance obligations. "
+                    "Call task_mechanism(operation='status') and retain contract.acceptance_criteria verbatim; "
+                    "on operation='revise', use append.acceptance_criteria for additional requirements.")
             for required in previous.get("deliverables") or []:
                 if required.get("required", True) and not any(item.get("required", True)
                     and (item.get("kind"), item.get("path")) == (required.get("kind"), required.get("path"))
                     for item in proposal.get("deliverables") or []):
-                    raise ValueError("worker revisions cannot remove supervisor-assigned deliverables")
+                    raise ValueError("worker revisions cannot remove supervisor-assigned deliverables. "
+                        "Call task_mechanism(operation='status') and retain required contract.deliverables "
+                        "with their kind/path/required fields; on operation='revise', use append.deliverables "
+                        'for additional deliverables.')
             if proposal.get("execution_mode") in {"delegate", "either"} or proposal.get("adopt_process_ids"):
                 raise ValueError("worker scope revision cannot acquire supervisor delegation authority")
         if get_task_contract(process).get("revision", 0) and "expected_revision" not in proposal:
