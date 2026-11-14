@@ -1,5 +1,5 @@
 import {useCopy} from "../ui/PageFrame.js";
-import {label} from "../ui/runtimeLabels.js";
+import {label,processDisplayStatus} from "../ui/runtimeLabels.js";
 import {scrollViewport} from "../input/scrollViewport.js";
 // src/components/AgentDetail.tsx — subprocess chat conversation
 import React, { memo, useEffect, useRef, useState } from "react";
@@ -60,7 +60,7 @@ export const AgentDetail = memo(function AgentDetail({
 
   return (
     <Box flexDirection="column" paddingLeft={1} width={width} flexGrow={1}>
-      <Box flexShrink={0} minHeight={1}><Text bold wrap="truncate-end">{agentLabel(process)} · {label(process.status,t)}</Text></Box>
+      <Box flexShrink={0} minHeight={1}><Text bold wrap="truncate-end">{agentLabel(process)} · {label(processDisplayStatus(process),t)}</Text></Box>
       {process.recovery?<Box flexShrink={0}><Text color={process.recovery.resume_forbidden?colors.danger:colors.warning}>
         {process.recovery.resume_forbidden?t({en:"Recovery blocked; inspect /detail.",zh:"当前禁止恢复，请在 /detail 查看恢复条件。"})
           :process.recovery.requires_manual_verification?t({en:"Manual verification required before resuming.",zh:"恢复前需要人工核验。"})

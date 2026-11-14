@@ -359,7 +359,8 @@ def read_project_b_processes(self) -> dict[str, dict]:
                       role, actor_kind, capability_profile_id, status,
                       steps_used, max_steps, runtime_state_ref, created_at,
                       updated_at,
-                      (SELECT metadata_ref FROM sessions s WHERE s.session_id=session_processes.session_id) AS metadata_ref
+                      (SELECT metadata_ref FROM sessions s WHERE s.session_id=session_processes.session_id) AS metadata_ref,
+                      (SELECT outcome_ref FROM tasks t WHERE t.task_id=session_processes.task_id) AS outcome_ref
                FROM session_processes
                WHERE COALESCE(actor_kind, '') != 'supervisor'
                  AND (parent_process_id IS NOT NULL OR actor_kind IN ('worker', 'reviewer'))
@@ -422,6 +423,7 @@ def read_project_b_processes(self) -> dict[str, dict]:
         )
         context_snapshot = dict(runtime.get("context_snapshot") or {})
         from backend.core.loop.coordination import coordination_summary_from_context
+        from backend.core.loop.lifecycle import execution_closeout_from_state
         display_name = ""
         identity_ledger = []
         if row["metadata_ref"]:
@@ -434,6 +436,12 @@ def read_project_b_processes(self) -> dict[str, dict]:
                         identity_ledger = self._read_json_blob(str(ref)) if ref else loaded_metadata.get("host_ledger", [])
             except StorageReferenceMissing as exc:
                 storage_error = storage_error or exc
+        outcome = {}
+        if runtime.get("lifecycle_finalized") is not True and row["outcome_ref"]:
+            try:
+                outcome = self._read_json_blob(str(row["outcome_ref"]), repair=False)
+            except StorageReferenceMissing as exc:
+                storage_error = storage_error or exc
         processes[process_id] = {
             "process_id": process_id,
             "session_id": str(row["session_id"]),
@@ -441,6 +449,8 @@ def read_project_b_processes(self) -> dict[str, dict]:
             "role": str(row["role"] or ""),
             "ring_level": int(runtime.get("ring_level", 3) or 3),
             "status": str(row["status"] or ""),
+            **execution_closeout_from_state(str(row["status"] or ""), runtime, outcome),
+            "routing_compilation": dict((context_snapshot.get("task_contract") or {}).get("routing_compilation") or {}),
             "steps_used": int(row["steps_used"] or 0),
             "max_steps": int(row["max_steps"] or 0),
             "parent_id": owner or None,
@@ -521,7 +531,7 @@ def read_latest_root_process(self) -> dict | None:
     # every provider continuation, historical message and receipt.
     with self._state_lock:
         selected = self._state.execute(
-            """SELECT sp.*, s.metadata_ref, t.contract_ref FROM session_processes sp
+            """SELECT sp.*, s.metadata_ref, t.contract_ref, t.outcome_ref FROM session_processes sp
                LEFT JOIN sessions s ON s.session_id=sp.session_id
                LEFT JOIN tasks t ON t.task_id=sp.task_id
                WHERE sp.parent_process_id IS NULL
@@ -533,6 +543,8 @@ def read_latest_root_process(self) -> dict | None:
     runtime = dict(self._read_json_blob(str(row["runtime_state_ref"])) or {}) if row.get("runtime_state_ref") else {}
     metadata = dict(self._read_json_blob(str(row["metadata_ref"])) or {}) if row.get("metadata_ref") else {}
     contract = dict(self._read_json_blob(str(row["contract_ref"])) or {}) if row.get("contract_ref") else {}
+    outcome = (self._read_json_blob(str(row["outcome_ref"]), repair=False)
+               if runtime.get("lifecycle_finalized") is not True and row.get("outcome_ref") else {})
     durable_session = metadata
     if not runtime.get("context") or not runtime.get("estimated_tokens"):
         durable_session = dict(self.load_agent_session_state(str(row["process_id"])) or metadata)
@@ -565,12 +577,15 @@ def read_latest_root_process(self) -> dict | None:
     )
     context_snapshot = dict(runtime.get("context_snapshot") or {})
     from backend.core.loop.coordination import coordination_summary_from_context
+    from backend.core.loop.lifecycle import execution_closeout_from_state
     return {
         "process_id": process_id,
         "session_id": str(row.get("session_id") or ""),
         "role": str(row.get("role") or "supervisor"),
         "ring_level": int(runtime.get("ring_level", 0) or 0),
         "status": str(row.get("status") or ""),
+        **execution_closeout_from_state(str(row.get("status") or ""), runtime, outcome),
+        "routing_compilation": dict(contract.get("routing_compilation") or {}),
         "steps_used": int(row.get("steps_used", 0) or 0),
         "max_steps": int(row.get("max_steps", 0) or 0),
         "parent_id": None,

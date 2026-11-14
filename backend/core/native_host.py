@@ -92,6 +92,7 @@ class NativeHost:
         self._summary_lock = threading.RLock()
         self._summary_refresh_lock = threading.Lock()
         self._summary_cache: dict[str, dict] = {}
+        self._summary_identities: dict[str, tuple[str, str]] = {}
         # A timed-out thread cannot be force-cancelled safely.  Keep at most
         # one outstanding summary read per project and reuse it on the next
         # poll; otherwise a slow SQLite/UNC/daemon read would enqueue another
@@ -517,24 +518,34 @@ class NativeHost:
 
     @staticmethod
     def _counts_from_statuses(statuses) -> dict:
-        values = [str(value or "") for value in statuses]
+        values = []
+        for value in statuses:
+            if isinstance(value, dict):
+                closeout = value.get("closeout_state")
+                values.append("closing" if closeout == "pending" else
+                              "closeout_failed" if closeout == "failed" else str(value.get("status") or ""))
+            else:
+                values.append(str(value or ""))
         return {
             "active_process_count": sum(
                 value in {"running", "cancelling"} for value in values
             ),
             "waiting_process_count": sum(
-                value in {"waiting", "awaiting_user", "recovering", "resume_available"}
+                value in {"waiting", "awaiting_user", "recovering", "resume_available",
+                          "recovery_review_required", "orphaned", "blocked", "closing"}
                 for value in values
             ),
             "finished_process_count": sum(
-                value in {"completed", "failed", "timed_out", "cancelled"}
+                value in {"completed", "failed", "timed_out", "cancelled", "killed", "closeout_failed"}
                 for value in values
             ),
         }
 
-    def _unavailable_summary(self, name: str, message: str) -> dict:
+    def _unavailable_summary(self, name: str, message: str, *, identity=None) -> dict:
         with self._summary_lock:
-            previous = dict(self._summary_cache.get(name) or {})
+            previous = dict(self._summary_cache.get(name) or {}) if (
+                identity is None or self._summary_identities.get(name) == identity
+            ) else {}
         observed_at = str(previous.get("observed_at") or "")
         return {
             **{
@@ -573,7 +584,11 @@ class NativeHost:
                 "state_available": True,
                 "summary_error": str(live_error)[:500],
                 "durable_status": status,
-                **self._counts_from_statuses([status]),
+                **self._counts_from_statuses(
+                    dict(latest["process_states"]).values() if latest and "process_states" in latest else
+                    dict(latest["process_statuses"]).values()
+                    if latest and "process_statuses" in latest else [status]),
+                "count_scope": "all_executions",
                 "observed_at": observed_at,
                 "last_known_at": str((latest or {}).get("updated_at") or ""),
                 "stale": bool(live_error),
@@ -594,13 +609,23 @@ class NativeHost:
         try:
             status = client.send_command({"cmd": "loop_status"}, timeout=0.75)
             processes = dict(status.get("processes") or {})
+            from backend.core.storage import read_project_list_status
+            projection_error = ""
+            try:
+                durable = read_project_list_status(str(item.get("workspace") or "")) or {}
+            except Exception as exc:
+                # A damaged history must not hide still-running work. Explicitly
+                # mark this as a partial count rather than claiming reconciliation.
+                durable = {}
+                projection_error = str(exc)[:500]
+            statuses = dict(durable.get("process_states") or durable.get("process_statuses") or {})
+            statuses.update(processes)
             return name, {
                 "daemon_online": True, "state_available": True,
-                "summary_error": "", "durable_status": "",
-                **self._counts_from_statuses(
-                    value.get("status") for value in processes.values()
-                ),
-                "observed_at": observed_at, "last_known_at": "", "stale": False,
+                "summary_error": projection_error, "durable_status": "",
+                **self._counts_from_statuses(statuses.values()),
+                "count_scope": "live_executions" if projection_error else "all_executions",
+                "observed_at": observed_at, "last_known_at": "", "stale": bool(projection_error),
             }, True
         except Exception as exc:
             return self._durable_project_summary(
@@ -619,6 +644,19 @@ class NativeHost:
         path.
         """
         projects = list(projects if projects is not None else self.services.project_list())
+        # A name can be reused after deletion or point at another workspace.
+        # Retire its old read before even the coalesced response uses a cache.
+        identities = {
+            str(item.get("name") or ""): (
+                str(item.get("project_id") or ""), str(item.get("workspace") or ""),
+            ) for item in projects
+        }
+        with self._summary_lock:
+            for name, identity in self._summary_identities.items():
+                if identities.get(name) != identity:
+                    self._summary_cache.pop(name, None)
+                    self._summary_inflight.pop(name, None)
+            self._summary_identities = identities
         started = time.perf_counter()
         # A little above one second covers first-open SQLite/schema setup on a
         # normal Windows disk while remaining one aggregate deadline. Twenty
@@ -629,14 +667,15 @@ class NativeHost:
             for item in projects:
                 name = str(item.get("name") or "")
                 with self._summary_lock:
-                    cached = dict(self._summary_cache.get(name) or {})
+                    cached = (dict(self._summary_cache.get(name) or {})
+                              if self._summary_identities.get(name) == identities[name] else {})
                 summaries[name] = cached or self._unavailable_summary(
-                    name, "project summary refresh is already running",
+                    name, "project summary refresh is already running", identity=identities[name],
                 )
             return {"projects": summaries, "refresh_coalesced": True,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2)}
         try:
-            def remember(future) -> None:
+            def remember(future, identity) -> None:
                 try:
                     name, summary, cacheable = future.result()
                 except Exception:
@@ -647,10 +686,15 @@ class NativeHost:
                     "waiting_process_count", "finished_process_count", "stale",
                 )
                 with self._summary_lock:
+                    if (self._summary_identities.get(name) != identity
+                            or self._summary_inflight.get(name) is not future):
+                        return
                     previous = dict(self._summary_cache.get(name) or {})
-                    if self._summary_inflight.get(name) is future:
-                        self._summary_inflight.pop(name, None)
-                    if cacheable:
+                    self._summary_inflight.pop(name, None)
+                    # A failed refresh is a current observation too. Returning
+                    # the previous healthy cache on the next poll would erase
+                    # its error before any successful read established recovery.
+                    if cacheable or summary.get("state_available") is False:
                         self._summary_cache[name] = dict(summary)
                 # Cold/offline SQLite projections may finish after the bounded
                 # overview response. Publish the completed read-model fact so
@@ -664,6 +708,7 @@ class NativeHost:
                         "payload": {
                             "event": "project_summary_updated",
                             "project": name,
+                            "project_id": identity[0],
                             "state_available": bool(summary.get("state_available", False)),
                             # This is the same safe read-model projection the
                             # overview endpoint returns, not a second status
@@ -679,6 +724,11 @@ class NativeHost:
             for item in projects:
                 name = str(item.get("name") or "")
                 with self._summary_lock:
+                    if self._summary_identities.get(name) != identities[name]:
+                        summaries[name] = self._unavailable_summary(
+                            name, "project changed during summary refresh", identity=identities[name],
+                        )
+                        continue
                     cached = dict(self._summary_cache.get(name) or {})
                     future = self._summary_inflight.get(name)
                     if future is None or future.done():
@@ -686,7 +736,9 @@ class NativeHost:
                             self._read_project_summary, item,
                         )
                         self._summary_inflight[name] = future
-                        future.add_done_callback(remember)
+                        future.add_done_callback(
+                            lambda done, identity=identities[name]: remember(done, identity),
+                        )
                 futures[future] = name
                 if cached:
                     summaries[name] = cached
@@ -702,12 +754,21 @@ class NativeHost:
                     _name, summary, _cacheable = future.result()
                     summaries[name] = summary
                 except Exception as exc:
-                    summaries[name] = self._unavailable_summary(name, str(exc))
+                    summaries[name] = self._unavailable_summary(name, str(exc), identity=identities[name])
             for future in pending:
                 name = cold_futures[future]
                 summaries[name] = self._unavailable_summary(
                     name, f"project summary exceeded the aggregate {deadline_seconds:g}s deadline",
+                    identity=identities[name],
                 )
+            # A coalesced request may replace an owner while this request waits
+            # for its cold read. Never join that old result to newer metadata.
+            with self._summary_lock:
+                for name in list(summaries):
+                    if self._summary_identities.get(name) != identities[name]:
+                        summaries[name] = self._unavailable_summary(
+                            name, "project changed during summary refresh", identity=identities[name],
+                        )
             return {
                 "projects": summaries, "refresh_coalesced": False,
                 "deadline_ms": int(deadline_seconds * 1000),

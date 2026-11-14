@@ -174,6 +174,12 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
       const order = Array.isArray(ev.order) ? ev.order.map((item) => short(item, 24)).join(" → ") : "";
       return makeNotice(ev, "Process DAG admitted", `${Object.keys(nodes).length} nodes${order ? ` · ${order}` : ""}`);
     }
+    case "agent_dag_admission_failed": {
+      const started = Array.isArray(ev.started_process_ids) ? ev.started_process_ids.length : 0;
+      const cancelled = Array.isArray(ev.cancelled_before_start_process_ids) ? ev.cancelled_before_start_process_ids.length : 0;
+      return makeNotice(ev, "Process DAG admission failed",
+        `${started} started · ${cancelled} cancelled before start · ${short(ev.error)}`, "error");
+    }
     case "multi_agent_routed_to_supervisor":
       return makeNotice(ev, "Process request routed", "Main-process control plane");
     case "coordination_event": {

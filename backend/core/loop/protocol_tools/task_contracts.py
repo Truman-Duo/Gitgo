@@ -174,8 +174,8 @@ def install(ctx):
                 "accepted": False,
                 "effect_state": "not_committed",
                 "routing_advice": {
-                    "recommended": "self_execute",
-                    "next_action": "request_self_execute",
+                    "recommended": "undecided",
+                    "next_action": "declare_task_contract",
                 },
             }
         except (OSError, RuntimeError) as exc:
@@ -283,10 +283,12 @@ def install(ctx):
                 "requires_user_decision": {"type": "boolean"},
                 "engineering_workflow": plan_schema(),
                 "estimated_complexity": {
-                    "type": "string", "enum": ["bounded", "moderate", "high"],
+                    "type": "string", "enum": ["unknown", "bounded", "moderate", "high"],
+                    "description": "Optional routing fact, not permission. Omission preserves the old fact on revise; unknown explicitly clears an earlier estimate.",
                 },
                 "independent_workstreams": {
-                    "type": "integer", "minimum": 1, "maximum": 8,
+                    "type": ["integer", "null"], "minimum": 1, "maximum": 8,
+                    "description": "Optional known independent workstream count. null means unknown; omission on revise retains the current fact.",
                 },
                 "delegation_rationale": {"type": "string"},
                 "user_requested_delegation": {"type": "boolean"},

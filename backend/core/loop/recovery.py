@@ -211,6 +211,9 @@ def _root_id(process_id: str, states: dict[str, dict]) -> str:
     seen = set()
     while current in states and current not in seen:
         seen.add(current)
+        from .continuation_contract import direct_user_task_origin_from_state
+        if direct_user_task_origin_from_state(states[current]) is not None:
+            return current  # logical parent identity does not own an independent user's budget
         parent = str(states[current]["process"].get("parent_process_id") or "")
         if not parent or parent not in states:
             return current
@@ -549,6 +552,11 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
     for process_id, state in states.items():
         child = manager.get(process_id)
         if child is None or not child.parent_id:
+            continue
+        # Independent direct-user turns retain parent_id for conversation
+        # identity, but are not delegated obligations, live or after restart.
+        from .continuation_contract import direct_user_task_origin
+        if direct_user_task_origin(child) is not None:
             continue
         parent = manager.get(child.parent_id)
         if parent is None:

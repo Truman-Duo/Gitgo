@@ -60,3 +60,11 @@ test("mode occupies the second slot without a background and keeps worker positi
   expect(narrow.slice(36).trim()).toBe("");
  }finally{root.unmount();root.cleanup();stdin.destroy();stdout.destroy();stderr.destroy();chalk.level=previous;}
 });
+
+test("provisional and failed closeout remain visible in the main conversation strip",()=>{
+ const process=(id:string,status:string)=>({process_id:id,status,parent_id:"a",actor_kind:"worker",created_at:id}) as any;
+ const rows:any={pending:{...process("p","completed"),closeout_state:"pending"},
+  failed:{...process("f","failed"),closeout_state:"failed"},
+  done:{...process("d","completed"),closeout_state:"finalized"}};
+ expect(runningWorkers(rows).map(p=>p.process_id).sort()).toEqual(["f","p"]);
+});

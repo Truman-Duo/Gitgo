@@ -6,6 +6,7 @@ from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 import json
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.models import ProcessStatus
+from backend.core.loop.lifecycle import execution_closeout, is_consumable_terminal
 from backend.core.loop.operation_policy import is_effectful_mutation
 
 def install(ctx):
@@ -30,6 +31,7 @@ def install(ctx):
                     **(manager.presentation.read(child.process_id) if getattr(manager, "presentation", None) else {}),
                     "actor_kind": child.actor_kind,
                     "status": child.status.value,
+                    **execution_closeout(child, manager),
                     "task": child.task_description[:300],
                     "target_files": list(process.delegated_contracts.get(child.process_id, {}).get("target_files", [])),
                     "superseded_by": process.delegated_contracts.get(child.process_id, {}).get("superseded_by", ""),
@@ -95,6 +97,8 @@ def install(ctx):
             metadata = dict(outcome.get("metadata") or {})
             results[child_id] = {
                 "status": state.get("status", "not_found"),
+                "lifecycle_finalized": state.get("lifecycle_finalized", False),
+                "closeout_state": state.get("closeout_state", "pending"),
                 "outcome_ref": outcome_ref,
                 "response_excerpt": response[:1800],
                 "response_truncated": len(response) > 1800,
@@ -146,6 +150,9 @@ def install(ctx):
         child = _owned_child(child_id)
         if child is None:
             return {"accepted": False, "error": "process is not an owned child"}
+        if not is_consumable_terminal(child, manager):
+            return {"accepted": False, "error": "child closeout is not finalized",
+                    **execution_closeout(child, manager)}
         if child.status in {
             ProcessStatus.RUNNING, ProcessStatus.WAITING,
             ProcessStatus.CANCELLING, ProcessStatus.AWAITING_USER,

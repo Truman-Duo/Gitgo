@@ -99,10 +99,8 @@ def install(ctx):
                     ready.sort()
         if len(order) != len(nodes):
             return {"delegated": False, "error": "DAG contains a cycle"}
-        # Preflight every deterministic contract property before the first
-        # child is admitted.  This keeps malformed DAG calls atomic: a bad
-        # later node cannot leave earlier workers running or consume task
-        # budget merely because validation happened in topological order.
+        # Preserve cheap graph/shape diagnostics; complete child validation
+        # below reuses the direct-delegation path rather than a second schema.
         workspace_root = Path(workspace_path or process.worktree_path).resolve()
         for node_id in order:
             node = by_id[node_id]
@@ -204,6 +202,22 @@ def install(ctx):
             return {"delegated": False, "error": str(exc)}
         for node in nodes:
             node["_interface_contract"] = interface_contract
+        replacements = [str(node.get("continue_process_id") or node.get("supersedes_process_id") or "")
+                        for node in nodes]
+        replacements = [item for item in replacements if item]
+        if len(replacements) != len(set(replacements)):
+            return {"delegated": False, "error": "DAG cannot replace one execution more than once",
+                    "execution_state": "not_started", "started_process_ids": []}
+        validated_budget_nodes = []
+        for node_id in order:
+            validated = delegate_task(by_id[node_id], validate_only=True,
+                                      planned_dependency_ids=tuple(node_ids))
+            if not validated.get("validated"):
+                return {"delegated": False, "node_id": node_id,
+                        "error": f"node {node_id} validation failed: {validated.get('error')}",
+                        "validation": validated, "execution_state": "not_started",
+                        "started_process_ids": []}
+            validated_budget_nodes.append(validated["budget_node"])
         if process.task_budget is not None:
             snapshot = process.task_budget.snapshot()
             remaining = (
@@ -217,44 +231,92 @@ def install(ctx):
                 }
         if process.task_budget is not None:
             try:
-                process.task_budget.preflight_children([by_id[item] for item in order], parent_id=process.process_id)
-            except (ValueError, RuntimeError) as exc:
+                process.task_budget.preflight_children(validated_budget_nodes, parent_id=process.process_id)
+            except (TypeError, ValueError, RuntimeError) as exc:
                 return {"delegated": False, "error": str(exc), "execution_state": "not_started"}
         admitted: dict[str, str] = {}
         created: list[str] = []
+        started: list[str] = []
+        retained: list[str] = []
+        intents = {}
+        from backend.core.loop.task_contract import finish_delegation_attempt
+
+        def abort(message, *, node_id=""):
+            cancelled, cleanup_errors = [], []
+            for child_id in reversed(created):
+                if child_id in started:
+                    continue
+                try:
+                    ctx.cancel_prepared_child(child_id, preserve_obligation=bool(started))
+                    cancelled.append(child_id)
+                except Exception as exc:
+                    cleanup_errors.append({"process_id": child_id, "error": str(exc)})
+                finish_delegation_attempt(process, intent_id=intents[child_id],
+                    child_process_id=child_id, state="admission_failed")
+            result = {"delegated": False, "error": message, "node_id": node_id,
+                      "nodes": admitted, "started_process_ids": list(started),
+                      "cancelled_before_start_process_ids": cancelled,
+                      "execution_state": "partially_started" if started else "not_started",
+                      "cleanup_errors": cleanup_errors}
+            if retained:
+                result.update(retained_process_ids=list(retained),
+                              automatic_replay_suppressed=True)
+            if on_stream_event is not None:
+                try:
+                    on_stream_event({"event": "agent_dag_admission_failed",
+                        "process_id": process.process_id, "task_id": process.active_task_id,
+                        **result})
+                except Exception as exc:
+                    result["persistence_error"] = str(exc)
+            return result
+
+        # Allocate all siblings without scheduling any work. Budget or state
+        # may change after preflight; an admission failure still starts none.
         for node_id in order:
             node = by_id[node_id]
-            result = delegate_task({
-                **node,
-                "depends_on": [admitted[item] for item in node["depends_on"]],
-            })
+            try:
+                result = delegate_task({
+                    **node,
+                    "depends_on": [admitted[item] for item in node["depends_on"]],
+                }, start_immediately=False)
+            except Exception as exc:
+                retained.extend(getattr(exc, "retained_process_ids", []))
+                return abort(f"node {node_id} admission failed: {exc}", node_id=node_id)
             if result.get("delegated") is False or result.get("error"):
-                for process_id in created:
-                    manager.kill(process_id, reason="dag_admission_rollback")
-                    contract = process.delegated_contracts.get(process_id)
-                    if contract is not None:
-                        contract["required_for_parent_completion"] = False
-                        contract["admission_rolled_back"] = True
-                return {
-                    "delegated": False,
-                    "error": f"node {node_id} admission failed: {result.get('error')}",
-                    "rolled_back_process_ids": created,
-                }
-            admitted[node_id] = str(result["process_id"])
-            created.append(str(result["process_id"]))
+                retained.extend(result.get("retained_process_ids", []))
+                failure = abort(f"node {node_id} admission failed: {result.get('error')}", node_id=node_id)
+                failure["admission"] = result
+                return failure
+            child_id = str(result["process_id"])
+            admitted[node_id] = child_id
+            created.append(child_id)
+            intents[child_id] = result["intent_id"]
+        # Persist the complete admitted graph before the first worker starts.
+        # A recovered prepared graph requires explicit recovery, not replay.
         if on_stream_event is not None:
-            on_stream_event({
-                "event": "agent_dag_admitted",
-                "process_id": process.process_id,
-                "task_id": process.active_task_id,
-                "nodes": admitted,
-                "order": order,
-            })
-        return {
-            "delegated": True,
-            "nodes": admitted,
-            "topological_order": order,
-        }
+            try:
+                on_stream_event({"event": "agent_dag_admitted",
+                    "process_id": process.process_id, "task_id": process.active_task_id,
+                    "nodes": admitted, "order": order, "execution_state": "prepared"})
+            except Exception as exc:
+                return abort(f"DAG admission checkpoint failed: {exc}")
+        for node_id in order:
+            child_id = admitted[node_id]
+            try:
+                ctx.start_prepared_child(child_id)
+                started.append(child_id)
+                finish_delegation_attempt(process, intent_id=intents[child_id],
+                    child_process_id=child_id, state="running")
+            except Exception as exc:
+                # A start adapter can fail after launching; thread identity
+                # remains evidence even when that worker has already exited.
+                thread = manager._threads.get(child_id)
+                if thread is not None and thread.ident is not None and child_id not in started:
+                    started.append(child_id)
+                return abort(f"node {node_id} start failed: {exc}", node_id=node_id)
+        return {"delegated": True, "nodes": admitted, "topological_order": order,
+                "execution_state": "started", "started_process_ids": started}
+
 
 
     tools["delegate_task_dag"] = AgentTool(

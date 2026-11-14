@@ -7,7 +7,7 @@ SessionStore persists authoritative session state through SQLite + CAS.
 
 from __future__ import annotations
 
-from backend.core.loop.lifecycle import transition
+from backend.core.loop.lifecycle import transition, execution_closeout, is_consumable_terminal
 
 import hashlib
 import json
@@ -34,6 +34,16 @@ def _serialized_admission(method):
         with self._state_condition:
             return method(self, *args, **kwargs)
     return admit
+
+
+class ForkAdmissionError(RuntimeError):
+    """A failed construction or an uncertain audit commit is not a runner."""
+
+    def __init__(self, message, *, retained_process_ids=()):
+        self.retained_process_ids = list(retained_process_ids)
+        self.code = ("FORK_ADMISSION_COMMIT_UNKNOWN" if self.retained_process_ids
+                     else "FORK_ADMISSION_FAILED")
+        super().__init__(f"{self.code}: {message}")
 
 
 class AgentProcessManager:
@@ -118,16 +128,13 @@ class AgentProcessManager:
                 raise ValueError(f"Session not found: {session_id}")
 
         if session is not None:
-            terminal = {ProcessStatus.COMPLETED, ProcessStatus.FAILED,
-                        ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
-                        ProcessStatus.ORPHANED}
-            if any(p.session.session_id == session.session_id and
-                   (p.status not in terminal or (p.process_id in self._threads
-                    and self._threads[p.process_id].is_alive()))
-                   for p in self._processes.values()):
-                raise ValueError("SESSION_EXECUTION_ACTIVE: wait for the previous execution to finish before continuing this session")
+            self.validate_session_continuation(session)
 
         parent = self._processes.get(parent_id) if parent_id else None
+        retained = (getattr(parent, "recovery", None) or {}).get("fork_admission_unknown_process_ids", [])
+        if retained:
+            raise ForkAdmissionError("Inspect the retained admission before allocating more work.",
+                                     retained_process_ids=retained)
         if parent is not None and child_budget_request and child_budget_request.get("steps") is not None:
             max_steps = max(1, min(max_steps, int(child_budget_request["steps"])))
         context_snapshot = dict(context_snapshot or {})
@@ -157,6 +164,18 @@ class AgentProcessManager:
             task_budget = TaskTreeBudget.create(
                 task_id or parent_id or "unscoped-task", task_budget_limits,
             )
+
+        process = None
+        def discard_unpublished():
+            # No caller can start this identity before fork publishes it. Keep
+            # earlier leases/usage intact and remove only this factory receipt.
+            if process is not None:
+                task_budget.release_process(process.process_id, status="cancelled")
+                with process.session._mechanism_lock:
+                    process.session.host_ledger[:] = [entry for entry in process.session.host_ledger
+                        if not (entry.get("event") == "runtime_admission"
+                                and entry.get("process_id") == process.process_id)]
+            task_budget.cancel_agent_reservation()
 
         try:
             # A child binds the task mechanism instance; never copy an effective
@@ -199,31 +218,66 @@ class AgentProcessManager:
                 request=child_budget_request,
             )
         except Exception:
-            task_budget.cancel_agent_reservation()
+            discard_unpublished()
             raise
         process.depends_on = dependencies
         process.workspace_root = (
             str(Path(workspace_path).resolve()) if workspace_path else ""
         )
+        process._manager = self
+        from backend.core.history import HistoryManager
+        from backend.core.storage import StorageCommitUnknown
+        try:
+            if workspace_path:
+                HistoryManager.set_workspace(workspace_path)
+                HistoryManager.add_operation(
+                    "system", "agent_forked", "success",
+                    {"process_id": process.process_id, "role": role,
+                     "ring_level": ring_level.value, "parent_id": parent_id},
+                    correlation_id=process.process_id,
+                )
+        except StorageCommitUnknown as exc:
+            # The history write may exist. Retain a visible, non-runnable
+            # identity and its escrow; never claim that this admission rolled
+            # back or retire the predecessor's obligation.
+            from .lifecycle import block_uncertain_checkpoint
+            block_uncertain_checkpoint(process)
+            process.result = {"status": "failed", "code": "FORK_ADMISSION_COMMIT_UNKNOWN",
+                "error": str(exc), "execution_state": "not_started",
+                "metadata": {"automatic_replay_suppressed": True}}
+            self._processes[process.process_id] = process
+            self._sessions[process.session.session_id] = process.session
+            if parent is not None:
+                contract = dict((process.context_snapshot or {}).get("task_contract") or {})
+                contract.update(task_kind=process.task_kind, allowed_tools=tool_registry.list_all(),
+                    budget_lease=dict(process.budget_lease), admission_commit="unknown")
+                parent.register_child_contract(process.process_id, contract)
+                block_uncertain_checkpoint(parent)
+                parent.recovery["fork_admission_unknown_process_ids"] = [process.process_id]
+            self.notify_state_changed(process.process_id)
+            raise ForkAdmissionError(str(exc), retained_process_ids=[process.process_id]) from exc
+        except Exception as exc:
+            discard_unpublished()
+            raise ForkAdmissionError(str(exc)) from exc
+
         self._processes[process.process_id] = process
         self._sessions[process.session.session_id] = process.session
-        process._manager = self
-
         if parent is not None and not process.session.display_name:
             with parent.session._context_memo_lock:
                 parent.session.worker_sequence += 1
                 process.session.display_name = f"B{parent.session.worker_sequence}"
-
-        from backend.core.history import HistoryManager
-        if workspace_path:
-            HistoryManager.set_workspace(workspace_path)
-            HistoryManager.add_operation(
-                "system", "agent_forked", "success",
-                {"process_id": process.process_id, "role": role,
-                 "ring_level": ring_level.value, "parent_id": parent_id},
-                correlation_id=process.process_id,
-            )
         return process
+
+    def validate_session_continuation(self, session) -> None:
+        """One validation shared by direct admission and complete DAG preflight."""
+        terminal = {ProcessStatus.COMPLETED, ProcessStatus.FAILED,
+                    ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
+                    ProcessStatus.ORPHANED}
+        if any(p.session.session_id == session.session_id and
+               (p.status not in terminal or (p.process_id in self._threads
+                and self._threads[p.process_id].is_alive()))
+               for p in self._processes.values()):
+            raise ValueError("SESSION_EXECUTION_ACTIVE: wait for the previous execution to finish before continuing this session")
 
     def start(self, process_id: str, target, *, resources: list[str] | None = None,
               resource_mode: str = "exclusive", on_terminal=None, resume_target=None) -> None:
@@ -474,6 +528,46 @@ class AgentProcessManager:
             if upstream.parent_id != parent_id:
                 raise ValueError("DAG dependencies must share one supervisor owner")
 
+    def resolve_retained_dependencies(self, owner: AgentProcess, dependencies: list[str]) -> list[str]:
+        """Resolve existing obligations through Host-admitted remaining-work successors.
+
+        This changes execution references, not the logical dependency. A new
+        follow-up is unrelated work and cannot substitute for its predecessor.
+        Readiness still belongs to _wait_for_dependencies and worktree sealing.
+        """
+        _, contracts, _ = owner.coordination_snapshot()
+        resolved = []
+        for dependency_id in dependencies:
+            current_id = dependency_id
+            seen = set()
+            while True:
+                if current_id in seen:
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: supersession cycle")
+                seen.add(current_id)
+                current = self.get(current_id)
+                contract = contracts.get(current_id)
+                if not self.owns_child(owner, current) or contract is None:
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: retained dependency must remain owned")
+                next_id = contract.get("superseded_by")
+                if not next_id:
+                    break
+                successor = self.get(next_id)
+                next_contract = contracts.get(next_id) or {}
+                provenance = next_contract.get("continuation") or {}
+                if (not self.owns_child(owner, successor)
+                        or next_contract.get("supersedes_process_id") != current_id
+                        or provenance.get("source_process_id") != current_id
+                        or provenance.get("source_task_id") != (current.active_task_id or current_id)):
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: successor lacks matching owned Host provenance")
+                if provenance.get("mode") != "remaining" or provenance.get("retained_obligations") is not True:
+                    break  # A follow-up does not retire this dependency's original result.
+                if not is_consumable_terminal(current, self):
+                    raise ValueError("CONTINUATION_DEPENDENCY_CLOSEOUT_PENDING: predecessor has not reliably closed")
+                current_id = next_id
+            if current_id not in resolved:
+                resolved.append(current_id)
+        return resolved
+
     def _wait_for_dependencies(self, process: AgentProcess) -> str:
         """Wait at a Host boundary without consuming an Agent concurrency slot."""
         if not process.depends_on:
@@ -495,10 +589,15 @@ class AgentProcessManager:
                 ]
                 if missing:
                     return "upstream dependency disappeared: " + ", ".join(missing)
+                failed_closeout = [
+                    item.process_id for item in upstream if item is not None
+                    and execution_closeout(item, self)["closeout_state"] == "failed"
+                ]
+                if failed_closeout:
+                    return "upstream dependency closeout failed: " + ", ".join(failed_closeout)
                 if any(
                     item.status in active or (
-                        item.process_id in self._threads
-                        and not item.lifecycle_finalized
+                        not is_consumable_terminal(item, self)
                     )
                     for item in upstream if item is not None
                 ):
@@ -768,6 +867,8 @@ class AgentProcessManager:
         for item in ordered:
             if item.status != ProcessStatus.COMPLETED:
                 raise ValueError(f"process is not completed: {item.process_id}")
+            if not is_consumable_terminal(item, self):
+                raise ValueError(f"process closeout is not finalized: {item.process_id}")
             review = (supervisor.child_reviews or {}).get(item.process_id, {})
             if review.get("verdict") != "approved":
                 raise ValueError(f"process lacks supervisor approval: {item.process_id}")
@@ -935,10 +1036,8 @@ class AgentProcessManager:
                 result[process_id] = {
                     "status": process.status.value if process else "not_found",
                     "result": process.result if process else None,
-                    "lifecycle_finalized": (
-                        (process.lifecycle_finalized or process_id not in self._threads)
-                        if process else True
-                    ),
+                    **(execution_closeout(process, self) if process else
+                       {"lifecycle_finalized": True, "closeout_state": "finalized"}),
                 }
             return result
 
@@ -947,7 +1046,7 @@ class AgentProcessManager:
                 item["status"] not in {
                     "running", "waiting", "cancelling", "awaiting_user",
                     "resume_available", "recovery_review_required", "recovering",
-                } and item.get("lifecycle_finalized", True)
+                } and item["closeout_state"] in {"finalized", "failed"}
                 for item in states.values()
             ]
             return (all(terminal) if return_when == "all_terminal" else any(terminal))
@@ -974,7 +1073,7 @@ class AgentProcessManager:
                     item["status"] not in {
                         "running", "waiting", "cancelling", "awaiting_user",
                         "resume_available", "recovery_review_required", "recovering",
-                    } and item.get("lifecycle_finalized", True)
+                    } and item["closeout_state"] in {"finalized", "failed"}
                     for item in states.values()
                 ),
                 "state_version": self._state_version,
