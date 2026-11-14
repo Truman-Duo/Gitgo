@@ -518,12 +518,18 @@ def test_history_failure_retains_visible_new_lease_without_execution(runtime, mo
         reopened.close()
 
 
-def test_adopted_continuation_resumes_clock_without_resetting_original_allowance(runtime, monkeypatch):
+@pytest.mark.parametrize('clock_origin', [0.0, 123.456, 1_000_000.1])
+def test_adopted_continuation_resumes_clock_without_resetting_original_allowance(runtime, monkeypatch, clock_origin):
     from backend.core.loop import budget as budget_module
     from backend.core.loop.budget import TaskBudgetExceeded
     _, root, _, _ = runtime
-    now = [root.task_budget.started_monotonic + 10]
+    original = root.task_budget.snapshot()
+    original['used']['elapsed_seconds'] = 0.0
+    original['deadline']['allowance_seconds'] = 300.0
+    now = [clock_origin]
     monkeypatch.setattr(budget_module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    root.task_budget = budget_module.TaskTreeBudget.from_snapshot(original)
+    now[0] += 10
     root.task_budget.begin_provider_call(root.process_id)
     root.task_budget.consume_output_estimate(9, root.process_id)
     root.task_budget.record_provider_usage({'input_tokens': 21, 'output_tokens': 9})
@@ -536,13 +542,18 @@ def test_adopted_continuation_resumes_clock_without_resetting_original_allowance
     assert result.get('status') == 'pending'
     after = successor.task_budget.snapshot()
     assert after['used']['awaiting_user'] is False
-    assert after['used']['elapsed_seconds'] >= before['used']['elapsed_seconds']
+    # Subtracting the paused interval can round elapsed time down by a few
+    # floating-point bits; active time must still be preserved within 1 us.
+    assert after['used']['elapsed_seconds'] == pytest.approx(
+        before['used']['elapsed_seconds'], rel=0.0, abs=1e-6)
     assert after['used']['provider_calls'] == 1
     assert after['used']['estimated_output_tokens'] == before['used']['estimated_output_tokens'] == 9
     assert after['used']['reported_input_tokens'] == before['used']['reported_input_tokens'] == 21
     assert after['used']['reported_output_tokens'] == before['used']['reported_output_tokens'] == 9
-    assert after['deadline']['allowance_seconds'] == pytest.approx(before['deadline']['allowance_seconds'])
-    assert after['used']['elapsed_seconds'] == pytest.approx(10)
+    assert after['deadline']['version'] == before['deadline']['version']
+    assert after['deadline']['allowance_seconds'] == pytest.approx(
+        before['deadline']['allowance_seconds'], rel=0.0, abs=1e-6)
+    assert after['used']['elapsed_seconds'] == pytest.approx(10, rel=0.0, abs=1e-6)
     now[0] += 291
     with pytest.raises(TaskBudgetExceeded): successor.task_budget.check_deadline()
 
