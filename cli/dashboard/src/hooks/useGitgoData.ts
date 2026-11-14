@@ -43,9 +43,11 @@ function mergeObservation(previous: Observation | undefined, incoming: Observati
   if (!previous) return incoming;
   if (previous.projectId && incoming.projectId && previous.projectId !== incoming.projectId) return incoming;
   const oldTime = observationTime(previous.summary), newTime = observationTime(incoming.summary);
-  if (oldTime !== null && newTime !== null) return oldTime > newTime ? previous : incoming;
-  // Legacy summaries without comparable Host times only overlay the request
-  // during which their event arrived. A later authoritative poll repairs them.
+  if (oldTime !== null && newTime !== null && oldTime !== newTime) return oldTime > newTime ? previous : incoming;
+  // An unavailable Host observation can retain the last healthy timestamp.
+  // Equal times therefore do not prove that a returned snapshot is newer than
+  // an event received during its request. As with legacy untimed summaries,
+  // a later request may reconcile the event instead of pinning it forever.
   return requestEvents !== undefined && previous.eventSequence > requestEvents ? previous : incoming;
 }
 

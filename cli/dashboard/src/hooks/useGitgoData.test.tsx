@@ -126,3 +126,50 @@ test("a removed project's late event cannot contaminate a new project with the s
     expect(view.data.projects[0].finishedProcessCount).toBe(1);
   } finally {view.close();}
 });
+
+for (const state of ["unavailable", "completed"] as const) test(`same-time ${state} event survives the older in-flight snapshot`, async () => {
+  let value: any = overview(summary(10, 1));
+  const transport = backend(() => value), view = mount(transport.client);
+  try {
+    await wait();
+    const pending = deferred(); value = pending.promise;
+    const refreshing = view.data.refresh();
+    const event = state === "unavailable"
+      ? {...summary(10, 1), daemon_online: false, state_available: false,
+        summary_error: "CURRENT_STORAGE_UNAVAILABLE", last_known_at: "10", stale: true}
+      : summary(10, 0, 1);
+    transport.emit(event); await wait();
+    pending.resolve(overview(summary(10, 1))); await refreshing; await wait();
+    if (state === "unavailable") {
+      expect(view.data.projects[0].stateAvailable).toBe(false);
+      expect(view.data.projects[0].stateError).toBe("CURRENT_STORAGE_UNAVAILABLE");
+    } else {
+      expect(view.data.projects[0].activeProcessCount).toBe(0);
+      expect(view.data.projects[0].finishedProcessCount).toBe(1);
+    }
+  } finally {view.close();}
+});
+
+test("a genuinely newer Host snapshot can clear an unavailable event received during its request", async () => {
+  const pending = deferred(), transport = backend(() => pending.promise), view = mount(transport.client);
+  try {
+    await wait();
+    transport.emit({...summary(10, 1), daemon_online: false, state_available: false, summary_error: "OLD_STORAGE_ERROR"});
+    pending.resolve(overview(summary(11, 0, 1))); await wait();
+    expect(view.data.projects[0].stateAvailable).toBe(true); expect(view.data.projects[0].stateError).toBe("");
+    expect(view.data.projects[0].finishedProcessCount).toBe(1);
+  } finally {view.close();}
+});
+
+test("a same-time snapshot requested after an event can reconcile it instead of pinning it", async () => {
+  let value: any = overview(summary(10, 1));
+  const transport = backend(() => value), view = mount(transport.client);
+  try {
+    await wait();
+    transport.emit({...summary(10, 1), daemon_online: false, state_available: false, summary_error: "OLD_STORAGE_ERROR"});
+    await wait(); expect(view.data.projects[0].stateAvailable).toBe(false);
+    value = overview(summary(10, 0, 1)); await view.data.refresh(); await wait();
+    expect(view.data.projects[0].stateAvailable).toBe(true); expect(view.data.projects[0].stateError).toBe("");
+    expect(view.data.projects[0].finishedProcessCount).toBe(1);
+  } finally {view.close();}
+});
