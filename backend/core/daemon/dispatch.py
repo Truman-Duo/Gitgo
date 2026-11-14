@@ -10,7 +10,7 @@ from __future__ import annotations
 from backend.core.prompt_templates import load_prompt
 from backend.core.prompt_profiles import with_prompt_profile
 
-from backend.core.loop.lifecycle import transition
+from backend.core.loop.lifecycle import TERMINAL, transition
 
 import json
 import threading
@@ -2498,7 +2498,18 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                     process.mailbox.close(outcome["error"]["message"])
 
             try:
+                # Close this execution's account in the same durable terminal
+                # checkpoint. release_process retains resumable pause leases
+                # and never refunds calls or output already consumed.
+                if process.task_budget is not None:
+                    released = process.task_budget.release_process(process.process_id, status=process.status.value)
+                    if released is not None:
+                        process.budget_lease = released
                 _save_session_checkpoint(daemon_ctx, process)
+                # The supported in-memory runner has no durable barrier. Mark
+                # its completed turn only after normal closeout reaches here.
+                if (daemon_ctx or {}).get("session_store") is None and process.status.value in TERMINAL:
+                    process.lifecycle_finalized = True
             except Exception as storage_exc:
                 # The user must see a terminal error even when the durable
                 # barrier itself cannot be written.  Do not fabricate an
@@ -2584,7 +2595,11 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 _run_task_body()
             finally:
                 deadline_stop.set()
-                process.lifecycle_finalized = True
+                # Terminal finality belongs to the successful checkpoint; a
+                # failed/unknown save must not become reliable in finally.
+                # Nonterminal user/mechanism pauses retain their turn boundary.
+                if process.status.value not in TERMINAL:
+                    process.lifecycle_finalized = True
                 apm.notify_state_changed(process.process_id)
                 process._run_lock.release()
                 from .mechanism_control import resume_waiters
