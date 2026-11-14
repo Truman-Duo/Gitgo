@@ -10,7 +10,7 @@ from __future__ import annotations
 from backend.core.prompt_templates import load_prompt
 from backend.core.prompt_profiles import with_prompt_profile
 
-from backend.core.loop.lifecycle import transition
+from backend.core.loop.lifecycle import TERMINAL, transition
 
 import json
 import threading
@@ -2211,6 +2211,11 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 if key in source_context:
                     context_snapshot[key] = deepcopy(source_context[key])
             task_description = source.task_description
+        adopted_root_continuation = (transferred_maintenance is not None and predecessor_process.parent_id is None
+                                     and predecessor_process.actor_kind == 'supervisor')
+        if adopted_root_continuation and (daemon_ctx or {}).get('session_store') is None:
+            emit({'event': 'command_result', 'cmd': 'task', 'error': 'BTW_ADOPTION_CHECKPOINT_UNAVAILABLE'})
+            return
         if process is None:
             # Fork new agent
             try:
@@ -2244,6 +2249,9 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                     runtime_preferences=dict(cmd.get("runtime_preferences") or {}),
                     session_id=("" if reuse_session is not None else str(cmd.get("session_id", ""))),
                     session=reuse_session,
+                    adopted_root_origin=(cmd.get('adopted_change_origin')
+                        if predecessor_process is not None and predecessor_process.parent_id is None
+                        and predecessor_process.actor_kind == 'supervisor' else None),
                 )
                 if predecessor_process is not None and process.parent_id is None:
                     if predecessor_process.actor_kind == "supervisor":
@@ -2314,6 +2322,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
 
         if canonical_user_turn:
             store = (daemon_ctx or {}).get("session_store")
+            admission_checkpointed = False
             try:
                 if not cmd.get("adopted_change_origin"):
                     from backend.core.loop.mechanism_catalog import digest
@@ -2328,16 +2337,36 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                         turn_id=task_id,
                         turn_preview=str(instruction),
                     )
+                    admission_checkpointed = True
                     evq.put({
                         "event": "session_lineage_checkpointed",
                         "process_id": process.process_id,
                         "session_id": process.session.session_id,
                         **checkpoint,
                     })
+                if adopted_root_continuation:
+                    # The complete successor, cumulative budget and Host
+                    # continuation receipt are durable before this audit write.
+                    apm._record_fork_history(process, str(session.workspace_path))
             except Exception as exc:
                 process._run_lock.release()
+                retained = {}
+                if adopted_root_continuation:
+                    # Admission already consumed an agent slot and bound a new
+                    # lease. Do not retry it as fresh work or erase old usage.
+                    from backend.core.loop.discussion_adoption import retain_failed_continuation, checkpoint_retained_continuation
+                    retain_failed_continuation(process, exc)
+                    retained = checkpoint_retained_continuation(apm, process)
                 emit({"event": "command_result", "cmd": "task",
-                      "error": f"SESSION_UNDO_CHECKPOINT_FAILED:{exc}"})
+                      "error": ('ADOPTED_CONTINUATION_ADMISSION_FAILED' if adopted_root_continuation
+                                else f"SESSION_UNDO_CHECKPOINT_FAILED:{exc}"),
+                      **({'code': 'ADOPTED_CONTINUATION_ADMISSION_FAILED', 'detail': str(exc),
+                          'admission_checkpointed': admission_checkpointed, **retained,
+                          # DaemonClient/NativeHost already preserve this
+                          # explicit details boundary, not arbitrary top-level fields.
+                          'error_info': {'name': 'ADOPTED_CONTINUATION_ADMISSION_FAILED',
+                              'details': {'admission_checkpointed': admission_checkpointed, **retained}}}
+                         if adopted_root_continuation else {})})
                 return
 
         # Run agent_step in background thread.  The trace journal is observer
@@ -2469,7 +2498,18 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                     process.mailbox.close(outcome["error"]["message"])
 
             try:
+                # Close this execution's account in the same durable terminal
+                # checkpoint. release_process retains resumable pause leases
+                # and never refunds calls or output already consumed.
+                if process.task_budget is not None:
+                    released = process.task_budget.release_process(process.process_id, status=process.status.value)
+                    if released is not None:
+                        process.budget_lease = released
                 _save_session_checkpoint(daemon_ctx, process)
+                # The supported in-memory runner has no durable barrier. Mark
+                # its completed turn only after normal closeout reaches here.
+                if (daemon_ctx or {}).get("session_store") is None and process.status.value in TERMINAL:
+                    process.lifecycle_finalized = True
             except Exception as storage_exc:
                 # The user must see a terminal error even when the durable
                 # barrier itself cannot be written.  Do not fabricate an
@@ -2555,7 +2595,11 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 _run_task_body()
             finally:
                 deadline_stop.set()
-                process.lifecycle_finalized = True
+                # Terminal finality belongs to the successful checkpoint; a
+                # failed/unknown save must not become reliable in finally.
+                # Nonterminal user/mechanism pauses retain their turn boundary.
+                if process.status.value not in TERMINAL:
+                    process.lifecycle_finalized = True
                 apm.notify_state_changed(process.process_id)
                 process._run_lock.release()
                 from .mechanism_control import resume_waiters

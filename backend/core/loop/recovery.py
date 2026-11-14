@@ -207,15 +207,51 @@ def _depth(process_id: str, states: dict[str, dict]) -> int:
 
 
 def _root_id(process_id: str, states: dict[str, dict]) -> str:
+    from .discussion_adoption import shared_budget_predecessor
     current = process_id
     seen = set()
     while current in states and current not in seen:
         seen.add(current)
-        parent = str(states[current]["process"].get("parent_process_id") or "")
+        parent = (shared_budget_predecessor(states[current], states)
+                  or str(states[current]["process"].get("parent_process_id") or ""))
         if not parent or parent not in states:
             return current
         current = parent
     return process_id
+
+
+def _live_budget_covers(live, committed):
+    """Revision order alone cannot prove an independently loaded lease exists."""
+    if (live.get('task_id') != committed.get('task_id') or live.get('limits') != committed.get('limits')
+            or live.get('revision', 0) < committed.get('revision', 0)):
+        return False
+    for key, value in committed.get('used', {}).items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if live.get('used', {}).get(key, 0) + 1e-6 < value:
+                return False
+    for resource, purposes in committed.get('used', {}).get('by_purpose', {}).items():
+        for purpose, used in purposes.items():
+            if live.get('used', {}).get('by_purpose', {}).get(resource, {}).get(purpose, 0) < used:
+                return False
+    live_allowance = live.get('deadline', {}).get('allowance_seconds', 0)
+    committed_allowance = committed.get('deadline', {}).get('allowance_seconds', 0)
+    # Reconstructing monotonic timestamps can lose a few floating-point bits.
+    # Use an absolute microsecond bound, never a tolerance scaled to the cap.
+    if not (live_allowance >= committed_allowance or math.isclose(
+            live_allowance, committed_allowance, rel_tol=0.0, abs_tol=1e-6)):
+        return False
+    for pid, lease in committed.get('process_leases', {}).items():
+        current = live.get('process_leases', {}).get(pid)
+        if current is None or any(current.get(key) != lease.get(key) for key in (
+                'process_id', 'parent_id', 'purpose', 'kind', 'reserved_provider_calls',
+                'reserved_output_tokens', 'reserved_steps')):
+            return False
+        if lease.get('state') == 'released' and current.get('state') != 'released':
+            return False
+        if any(current.get(key, 0) < lease.get(key, 0) for key in (
+                'used_provider_calls', 'used_output_tokens', 'refunded_provider_calls', 'refunded_output_tokens')):
+            return False
+    return True
 
 
 def restore_incomplete_processes(session_store, manager, workspace: str | Path,
@@ -246,6 +282,23 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
         current = states[pending.pop()]
         runtime = current.get("runtime_state") or {}
         references = list(runtime.get("child_ids", []))
+        from .discussion_adoption import budget_predecessor_id
+        predecessor_id = budget_predecessor_id(current)
+        if predecessor_id:
+            references.append(predecessor_id)
+        # Loading an older root (or its child) must also see the later ledger.
+        # Session equality alone is insufficient: ordinary new tasks stay apart.
+        raw = current.get('process') or {}
+        if raw.get('parent_process_id'):
+            references.append(str(raw['parent_process_id']))
+        references.extend(str(link['process_id']) for link in links
+                          if link.get('parent_process_id') == raw.get('process_id'))
+        for entry in (current.get('session') or {}).get('host_ledger') or []:
+            if (entry.get('event') == 'adopted_task_execution_continued'
+                    and entry.get('predecessor_process_id') == raw.get('process_id')
+                    and entry.get('task_id') == raw.get('task_id')
+                    and entry.get('budget_task_id') == raw.get('task_id')):
+                references.append(str(entry.get('process_id') or ''))
         mechanism_owner_id = (runtime.get("runtime_preferences") or {}).get("mechanism_owner_id")
         if mechanism_owner_id:
             references.append(str(mechanism_owner_id))
@@ -280,6 +333,24 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
         return []
 
     budget_by_root: dict[str, TaskTreeBudget | None] = {}
+    # Validate every adopted group before publishing even one restored process.
+    # A previously loaded live tree can have newer usage yet still lack a
+    # separately committed child allocation. Never authorize such a child.
+    from .discussion_adoption import budget_predecessor_id
+    for root_id in {_root_id(pid, states) for pid in states}:
+        group = [pid for pid in states if _root_id(pid, states) == root_id]
+        if not any(budget_predecessor_id(states[pid]) for pid in group):
+            continue
+        live_budgets = {id(p.task_budget): p.task_budget for pid in group
+                        if (p := manager.get(pid)) is not None and p.task_budget is not None}
+        if not live_budgets:
+            continue
+        committed = [(states[pid].get('runtime_state') or {}).get('task_budget') for pid in group]
+        budget = next(iter(live_budgets.values()))
+        live = budget.snapshot()
+        if len(live_budgets) != 1 or any(not item or not _live_budget_covers(live, item) for item in committed):
+            raise ValueError('CONTINUATION_STATE_UNAVAILABLE: adopted budget needs a complete cold restore')
+        budget_by_root[root_id] = budget
     # An event may survive while the first process checkpoint transaction never
     # committed. Do not silently omit that incomplete id and do not invent
     # execution authority. Rebuild a discard-only diagnostic process so the
