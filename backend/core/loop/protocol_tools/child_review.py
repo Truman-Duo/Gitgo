@@ -346,7 +346,8 @@ def install(ctx):
         message_id = ""
         if identity is not None:
             import hashlib
-            message_id = "feedback-" + hashlib.sha256(json.dumps([
+            prefix = "feedback-v2-" if len(identity) == 3 and identity[1] == "host_ordinal" else "feedback-"
+            message_id = prefix + hashlib.sha256(json.dumps([
                 process.process_id, process.active_task_id, *identity,
                 child.process_id, child.active_task_id,
             ]).encode()).hexdigest()

@@ -358,6 +358,8 @@ class ToolBatchRuntime:
     def execute_resumed_batch(self, batch: dict):
         calls = [dict(item) for item in list(batch.get("tool_calls") or [])]
         execution_id = str(batch.get("execution_id") or "permission-resume")
+        from .feedback_identity import bind_calls
+        calls = bind_calls(self.process, calls, execution_id, resumed=True)
         action = str(batch.get("decision_action") or "")
         prior_denial = batch.get('prior_permission_denial')
         if prior_denial is not None:
@@ -449,6 +451,8 @@ class ToolBatchRuntime:
         # same path and wrapper/component checks are never duplicated.
         import uuid
         execution_id = str(uuid.uuid4())
+        from .feedback_identity import bind_calls
+        tool_calls = bind_calls(process, tool_calls, execution_id)
         missing_approval = _missing_permission(tool_calls, execution_id)
         if missing_approval is not None:
             permission_call_index, pending_tool, public_args = missing_approval

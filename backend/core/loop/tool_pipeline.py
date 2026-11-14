@@ -138,7 +138,9 @@ class ToolPipeline:
         registered = getattr(tool, "execution_contract", None)
         registered = registered if isinstance(registered, ExecutionContract) and not tool.composite_spec else None
         from backend.core.mechanism_runtime.invocations import InvocationScope
-        with AdmissionResources() as admission, native_invocation_scope(ctx, execution_id, call_index) as native_scope, InvocationScope(ctx) as mechanism_scope:
+        from .feedback_identity import call_identity
+        delivery_identity = call_identity(tool_call, execution_id) if tool.name == "send_feedback" else None
+        with AdmissionResources() as admission, native_invocation_scope(ctx, execution_id, call_index, call_identity=delivery_identity) as native_scope, InvocationScope(ctx) as mechanism_scope:
             result = self._execute(tool_call, tool, ctx, execution_id, call_index, admission=admission)
             if registered is not None:
                 result.receipt.setdefault("execution_contract", registered.to_dict())
