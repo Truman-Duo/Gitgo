@@ -463,6 +463,7 @@ class LLMProvider:
         artifacts: list[dict] = []
         usage = None
         response_id = ""
+        finish_reason = None
         for event in events:
             response_id = event.response_id or response_id
             if event.type == ProviderEventType.TEXT_DELTA:
@@ -483,6 +484,12 @@ class LLMProvider:
                 artifacts.append(event.artifact)
             elif event.type == ProviderEventType.USAGE and event.usage:
                 usage = event.usage.to_dict()
+            elif event.type == ProviderEventType.RESPONSE_COMPLETED:
+                # Chat Completions keeps its terminal reason on the wire
+                # choice. Semantic review needs this even with empty content.
+                choices = (event.raw or {}).get('choices') or []
+                if choices and isinstance(choices[0], dict):
+                    finish_reason = choices[0].get('finish_reason')
         response = {
             "content": "".join(content),
             "tool_calls": list(tool_calls.values()),
@@ -494,6 +501,8 @@ class LLMProvider:
             response["provider_artifacts"] = artifacts
         if usage is not None:
             response["usage"] = usage
+        if finish_reason is not None:
+            response["finish_reason"] = finish_reason
         return response
 
     @staticmethod
