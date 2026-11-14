@@ -33,6 +33,8 @@ export type ProjectRow = ProjectInfo & {
 
 type Summary = Record<string, any>;
 type Observation = {summary: Summary; eventSequence: number; projectId?: string};
+// Project names are user data, including names such as "constructor" or "__proto__".
+function projectIndex<T>(): Record<string, T> {return Object.create(null);}
 function observationTime(summary: Summary): number | null {
   const raw = summary.observed_at;
   if (raw === undefined || raw === null || raw === "") return null;
@@ -57,9 +59,9 @@ export function useGitgoData(
 ) {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const lastRowsRef = useRef("");
-  const summariesRef = useRef<Record<string, Observation>>({});
-  const identitiesRef = useRef<Record<string, string>>({});
-  const projectIdsRef = useRef<Record<string, string>>({});
+  const summariesRef = useRef<Record<string, Observation>>(projectIndex());
+  const identitiesRef = useRef<Record<string, string>>(projectIndex());
+  const projectIdsRef = useRef<Record<string, string>>(projectIndex());
   const eventSequenceRef = useRef(0);
   const eventTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ownerRef = useRef({client, active: false});
@@ -69,9 +71,9 @@ export function useGitgoData(
   useLayoutEffect(() => {
     const owner = {client, active: true};
     ownerRef.current = owner;
-    summariesRef.current = {};
-    identitiesRef.current = {};
-    projectIdsRef.current = {};
+    summariesRef.current = projectIndex();
+    identitiesRef.current = projectIndex();
+    projectIdsRef.current = projectIndex();
     lastRowsRef.current = "";
     setProjects([]); setError(null); setLoading(Boolean(client));
     return () => {owner.active = false;};
@@ -121,9 +123,9 @@ export function useGitgoData(
           if (!current()) return;
           const projectList: Array<ProjectInfo & {runtime_summary?: Summary}> =
             Array.isArray(overview?.projects) ? overview.projects : [];
-          const observations: Record<string, Observation> = {};
-          const identities: Record<string, string> = {};
-          const projectIds: Record<string, string> = {};
+          const observations = projectIndex<Observation>();
+          const identities = projectIndex<string>();
+          const projectIds = projectIndex<string>();
           const rows = projectList.map(p => {
             const identity = p.project_id || p.workspace;
             const replaced = identitiesRef.current[p.name] !== undefined && identitiesRef.current[p.name] !== identity;

@@ -19,10 +19,10 @@ function backend(response: () => any) {
   const listeners: Array<(event: any) => void> = []; let calls = 0;
   const client: BackendClient = {ready: true, close() {}, subscribeEvents(listener) {listeners.push(listener); return () => {};},
     async callTool() {calls++; return response();}};
-  return {client, get calls() {return calls;}, emit(value: any, projectId?: string) {
+  return {client, get calls() {return calls;}, emit(value: any, projectId?: string, projectName = "demo") {
     // Retain old callbacks intentionally: stale queued transport delivery must
     // remain harmless even after unsubscribe/reconnect.
-    for (const listener of listeners) listener({event: "project_summary_updated", project: "demo", project_id: projectId, summary: value});
+    for (const listener of listeners) listener({event: "project_summary_updated", project: projectName, project_id: projectId, summary: value});
   }};
 }
 function mount(client: BackendClient) {
@@ -171,5 +171,26 @@ test("a same-time snapshot requested after an event can reconcile it instead of 
     value = overview(summary(10, 0, 1)); await view.data.refresh(); await wait();
     expect(view.data.projects[0].stateAvailable).toBe(true); expect(view.data.projects[0].stateError).toBe("");
     expect(view.data.projects[0].finishedProcessCount).toBe(1);
+  } finally {view.close();}
+});
+
+for (const name of ["constructor", "__proto__", "toString"]) test(`project name ${name} retains cold and warm events across reconnect`, async () => {
+  const pending = deferred(), transport = backend(() => pending.promise), view = mount(transport.client);
+  const namedOverview = (time: number, identity: string) => {
+    const value = overview(summary(time, 0), identity); value.projects[0].name = name; return value;
+  };
+  try {
+    await wait();
+    expect(() => transport.emit(summary(2, 3), "id-one", name)).not.toThrow();
+    expect(() => transport.emit(summary(2, 4), undefined, name)).not.toThrow();
+    pending.resolve(namedOverview(1, "id-one")); await wait();
+    expect(view.data.projects[0].name).toBe(name); expect(view.data.projects[0].activeProcessCount).toBe(4);
+    transport.emit(summary(3, 5), "id-one", name); await wait();
+    expect(view.data.projects[0].activeProcessCount).toBe(5);
+    const next = deferred(), fresh = backend(() => next.promise); await view.reconnect(fresh.client);
+    transport.emit(summary(99, 99), "id-one", name);
+    expect(() => fresh.emit(summary(4, 6), "id-two", name)).not.toThrow();
+    next.resolve(namedOverview(3, "id-two")); await wait();
+    expect(view.data.projects[0].project_id).toBe("id-two"); expect(view.data.projects[0].activeProcessCount).toBe(6);
   } finally {view.close();}
 });
