@@ -1403,11 +1403,47 @@ class NativeHost:
         if result.get("error"):
             raise OperationError("BTW_ADOPTION_REJECTED", str(result["error"]))
         if arguments.get("mode") == "interrupt" and result.get("status") == "pending":
-            self._runtime_stop(project, process_id, reason="btw_interrupt_and_adopt", wait_timeout=30.0)
             change = result["change"]
-            continued = self._runtime_feedback(project, process_id,
-                "Continue the original task goal and reconcile the explicitly adopted BTW requirement recorded in task_mechanism status.",
-                request_id=request_id, adopted_change={"process_id": process_id, "task_id": change["target_task_id"], "change_id": change["id"]})
+            # Adoption has already committed. A later closeout/admission error
+            # must not make the caller mistake it for an unsaved request.
+            saved = {"saved": True, "status": "pending"}
+            for public, source in (("change_id", "id"), ("process_id", "target_process_id"),
+                                   ("task_id", "target_task_id"), ("source_ref", "source_ref")):
+                if isinstance(change.get(source), str):
+                    saved[public] = change[source]
+            stage = "stop"
+            try:
+                self._runtime_stop(project, process_id, reason="btw_interrupt_and_adopt", wait_timeout=30.0)
+                stage = "continue"
+                continued = self._runtime_feedback(project, process_id,
+                    "Continue the original task goal and reconcile the explicitly adopted BTW requirement recorded in task_mechanism status.",
+                    request_id=request_id, adopted_change={"process_id": process_id, "task_id": change["target_task_id"], "change_id": change["id"]})
+            except (OperationError, DaemonCommandError) as exc:
+                not_started = stage == "continue" and exc.code in {
+                    "CONTINUATION_ADOPTION_HANDOFF_REQUIRED", "CONTINUATION_CLOSEOUT_PENDING",
+                    "BTW_CANCELLATION_PENDING", "BTW_ADOPTION_CONTINUATION_CHANGED",
+                }
+                continuation = "not_started" if not_started else "unconfirmed"
+                progress = ("Continuation was not started." if not_started else
+                            f"Continuation has not been confirmed (stage: {stage}).")
+                message = exc.message if isinstance(exc, DaemonCommandError) else str(exc)
+                details = {**exc.details, "adoption": {**saved, "followup_stage": stage,
+                                                       "continuation_status": continuation}}
+                if isinstance(exc, DaemonCommandError):
+                    details["error_info"] = exc.error_info
+                raise OperationError(exc.code, f"The BTW adoption request was saved as pending. {progress} {message}",
+                                     details=details) from exc
+            except (RuntimeError, OSError) as exc:
+                # The real client raises plain exceptions on lost pipes and
+                # timeouts, including after admission. Preserve the confirmed
+                # adoption, but do not infer whether continuation started.
+                from backend.core.storage import StorageBlocked, StorageCorruptionDetected
+                if isinstance(exc, (StorageBlocked, StorageCorruptionDetected)):
+                    raise  # Keep the outer storage-specific code and recovery metadata.
+                raise OperationError("INTERNAL_ERROR",
+                    f"The BTW adoption request was saved as pending. Continuation has not been confirmed (stage: {stage}). {exc}",
+                    details={"adoption": {**saved, "followup_stage": stage,
+                                           "continuation_status": "unconfirmed"}}) from exc
             return {**continued, "adoption": result}
         return {"project": project, **result}
 
