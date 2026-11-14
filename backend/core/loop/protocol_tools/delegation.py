@@ -252,8 +252,8 @@ def install(ctx):
                 "budget_lease": dict(child.budget_lease or {}),
                 "continuation": dict((child.context_snapshot.get("task_contract") or {}).get("continuation") or {}),
             }
-        except (TypeError, ValueError, PermissionError, RuntimeError) as exc:
-            return reject(
+        except (TypeError, ValueError, PermissionError, RuntimeError, OSError) as exc:
+            failure = reject(
                 "DELEGATION_ADMISSION_FAILED",
                 str(exc),
                 details={
@@ -266,6 +266,26 @@ def install(ctx):
                 },
                 next_actions=getattr(exc, "next_actions", None),
             )
+            retained = list(getattr(exc, "retained_process_ids", []))
+            if retained:
+                failure.update(retained_process_ids=retained, execution_state="recovery_required",
+                               automatic_replay_suppressed=True, recovery_checkpointed=False)
+                # This is a new recovery checkpoint, never a retry of the
+                # uncertain history write. fork has released its admission lock.
+                store = getattr(ctx.manager, "session_store", None)
+                try:
+                    if store is None:
+                        raise RuntimeError("Recovery checkpoint store is unavailable")
+                    for retained_id in retained:
+                        retained_child = ctx.manager.get(retained_id)
+                        if retained_child is None:
+                            raise RuntimeError("Retained admission identity is unavailable: " + retained_id)
+                        store.save_process_checkpoint(retained_child)
+                    store.save_process_checkpoint(process)
+                    failure["recovery_checkpointed"] = True
+                except Exception as persistence_exc:
+                    failure["persistence_error"] = str(persistence_exc)
+            return failure
 
 
     tools["delegate_task"] = AgentTool(

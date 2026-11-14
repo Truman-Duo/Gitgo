@@ -333,6 +333,8 @@ def install(ctx):
             "context_policy": context_admission_policy(actor_kind, task_kind),
             "relationship_policy": relation,
             "task_contract": {
+                "task_kind": task_kind,
+                "required_for_parent_completion": bool(required_for_parent_completion),
                 "acceptance_criteria": acceptance_criteria,
                 "target_files": target_files,
                 "parent_process_id": process.process_id,

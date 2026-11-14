@@ -36,6 +36,16 @@ def _serialized_admission(method):
     return admit
 
 
+class ForkAdmissionError(RuntimeError):
+    """A failed construction or an uncertain audit commit is not a runner."""
+
+    def __init__(self, message, *, retained_process_ids=()):
+        self.retained_process_ids = list(retained_process_ids)
+        self.code = ("FORK_ADMISSION_COMMIT_UNKNOWN" if self.retained_process_ids
+                     else "FORK_ADMISSION_FAILED")
+        super().__init__(f"{self.code}: {message}")
+
+
 class AgentProcessManager:
     """进程树管理器。daemon 之上的调度层。"""
 
@@ -121,6 +131,10 @@ class AgentProcessManager:
             self.validate_session_continuation(session)
 
         parent = self._processes.get(parent_id) if parent_id else None
+        retained = (getattr(parent, "recovery", None) or {}).get("fork_admission_unknown_process_ids", [])
+        if retained:
+            raise ForkAdmissionError("Inspect the retained admission before allocating more work.",
+                                     retained_process_ids=retained)
         if parent is not None and child_budget_request and child_budget_request.get("steps") is not None:
             max_steps = max(1, min(max_steps, int(child_budget_request["steps"])))
         context_snapshot = dict(context_snapshot or {})
@@ -150,6 +164,18 @@ class AgentProcessManager:
             task_budget = TaskTreeBudget.create(
                 task_id or parent_id or "unscoped-task", task_budget_limits,
             )
+
+        process = None
+        def discard_unpublished():
+            # No caller can start this identity before fork publishes it. Keep
+            # earlier leases/usage intact and remove only this factory receipt.
+            if process is not None:
+                task_budget.release_process(process.process_id, status="cancelled")
+                with process.session._mechanism_lock:
+                    process.session.host_ledger[:] = [entry for entry in process.session.host_ledger
+                        if not (entry.get("event") == "runtime_admission"
+                                and entry.get("process_id") == process.process_id)]
+            task_budget.cancel_agent_reservation()
 
         try:
             # A child binds the task mechanism instance; never copy an effective
@@ -192,30 +218,54 @@ class AgentProcessManager:
                 request=child_budget_request,
             )
         except Exception:
-            task_budget.cancel_agent_reservation()
+            discard_unpublished()
             raise
         process.depends_on = dependencies
         process.workspace_root = (
             str(Path(workspace_path).resolve()) if workspace_path else ""
         )
+        process._manager = self
+        from backend.core.history import HistoryManager
+        from backend.core.storage import StorageCommitUnknown
+        try:
+            if workspace_path:
+                HistoryManager.set_workspace(workspace_path)
+                HistoryManager.add_operation(
+                    "system", "agent_forked", "success",
+                    {"process_id": process.process_id, "role": role,
+                     "ring_level": ring_level.value, "parent_id": parent_id},
+                    correlation_id=process.process_id,
+                )
+        except StorageCommitUnknown as exc:
+            # The history write may exist. Retain a visible, non-runnable
+            # identity and its escrow; never claim that this admission rolled
+            # back or retire the predecessor's obligation.
+            from .lifecycle import block_uncertain_checkpoint
+            block_uncertain_checkpoint(process)
+            process.result = {"status": "failed", "code": "FORK_ADMISSION_COMMIT_UNKNOWN",
+                "error": str(exc), "execution_state": "not_started",
+                "metadata": {"automatic_replay_suppressed": True}}
+            self._processes[process.process_id] = process
+            self._sessions[process.session.session_id] = process.session
+            if parent is not None:
+                contract = dict((process.context_snapshot or {}).get("task_contract") or {})
+                contract.update(task_kind=process.task_kind, allowed_tools=tool_registry.list_all(),
+                    budget_lease=dict(process.budget_lease), admission_commit="unknown")
+                parent.register_child_contract(process.process_id, contract)
+                block_uncertain_checkpoint(parent)
+                parent.recovery["fork_admission_unknown_process_ids"] = [process.process_id]
+            self.notify_state_changed(process.process_id)
+            raise ForkAdmissionError(str(exc), retained_process_ids=[process.process_id]) from exc
+        except Exception as exc:
+            discard_unpublished()
+            raise ForkAdmissionError(str(exc)) from exc
+
         self._processes[process.process_id] = process
         self._sessions[process.session.session_id] = process.session
-        process._manager = self
-
         if parent is not None and not process.session.display_name:
             with parent.session._context_memo_lock:
                 parent.session.worker_sequence += 1
                 process.session.display_name = f"B{parent.session.worker_sequence}"
-
-        from backend.core.history import HistoryManager
-        if workspace_path:
-            HistoryManager.set_workspace(workspace_path)
-            HistoryManager.add_operation(
-                "system", "agent_forked", "success",
-                {"process_id": process.process_id, "role": role,
-                 "ring_level": ring_level.value, "parent_id": parent_id},
-                correlation_id=process.process_id,
-            )
         return process
 
     def validate_session_continuation(self, session) -> None:

@@ -237,6 +237,7 @@ def install(ctx):
         admitted: dict[str, str] = {}
         created: list[str] = []
         started: list[str] = []
+        retained: list[str] = []
         intents = {}
         from backend.core.loop.task_contract import finish_delegation_attempt
 
@@ -257,6 +258,9 @@ def install(ctx):
                       "cancelled_before_start_process_ids": cancelled,
                       "execution_state": "partially_started" if started else "not_started",
                       "cleanup_errors": cleanup_errors}
+            if retained:
+                result.update(retained_process_ids=list(retained),
+                              automatic_replay_suppressed=True)
             if on_stream_event is not None:
                 try:
                     on_stream_event({"event": "agent_dag_admission_failed",
@@ -270,12 +274,19 @@ def install(ctx):
         # may change after preflight; an admission failure still starts none.
         for node_id in order:
             node = by_id[node_id]
-            result = delegate_task({
-                **node,
-                "depends_on": [admitted[item] for item in node["depends_on"]],
-            }, start_immediately=False)
+            try:
+                result = delegate_task({
+                    **node,
+                    "depends_on": [admitted[item] for item in node["depends_on"]],
+                }, start_immediately=False)
+            except Exception as exc:
+                retained.extend(getattr(exc, "retained_process_ids", []))
+                return abort(f"node {node_id} admission failed: {exc}", node_id=node_id)
             if result.get("delegated") is False or result.get("error"):
-                return abort(f"node {node_id} admission failed: {result.get('error')}", node_id=node_id)
+                retained.extend(result.get("retained_process_ids", []))
+                failure = abort(f"node {node_id} admission failed: {result.get('error')}", node_id=node_id)
+                failure["admission"] = result
+                return failure
             child_id = str(result["process_id"])
             admitted[node_id] = child_id
             created.append(child_id)
