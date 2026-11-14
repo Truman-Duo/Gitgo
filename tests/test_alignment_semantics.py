@@ -704,7 +704,9 @@ def test_provider_delivery_requires_explicit_complete_verdict():
     from backend.core.loop.alignment_runtime import assess_with_provider
     class Provider:
         def chat(self, *args, **kwargs):
-            return {'content': json.dumps({'status': 'ready', 'questions': [], 'interpretations': []}),
+            return {'content': json.dumps({'status': 'ready', 'questions': [], 'interpretations': [],
+                    'request_frame': {'kind': 'deliverable', 'source_quote': 'Give an introduction',
+                                      'outcome': 'An introduction'}}),
                     'usage': {'input_tokens': 10, 'output_tokens': 20}}
     result = assess_with_provider(Provider(), {'stage': 'delivery', 'candidate': 'Introduction'})
     assert result['schema_error'] == 'delivery_check_required'
