@@ -37,13 +37,16 @@ def agent_step(
     """Project known lifecycle failures through existing canonical outcomes."""
     from .budget import TaskBudgetExceeded
     from .llm import StreamCancelledError
-    from .runtime_outcomes import _budget_exhausted_result, _cancellation_result
+    from .mailbox import MailboxRecoveryRequired
+    from .runtime_outcomes import _budget_exhausted_result, _cancellation_result, _status_result
     try:
         return _agent_step(process, llm_provider, instruction, dispatcher, workspace_path, on_stream_event)
     except TaskBudgetExceeded as error:
         return _budget_exhausted_result(process, process.session, error)
     except StreamCancelledError:
         return _cancellation_result(process, process.session)
+    except MailboxRecoveryRequired:
+        return _status_result(process, process.session)
     except (ValueError, RuntimeError, TimeoutError) as error:
         code = str(error).split(":", 1)[0]
         if not code.startswith("MECHANISM_"):
@@ -172,6 +175,9 @@ def _agent_step(
         request = prepare_provider_request(process, llm_provider, surface, route, _emit_observation)
         provider_boundary = provider_turn.run(request.tools, request.web_mode, request.protocol)
         start = provider_turn.started
+        if (process.recovery or {}).get("checkpoint_commit") == "unknown":
+            from .runtime_outcomes import _status_result
+            return _status_result(process, session)
         if provider_boundary.result is not None:
             return provider_boundary.result
         if provider_boundary.retry:
@@ -196,6 +202,9 @@ def _agent_step(
             if proposal_boundary.retry:
                 continue
             batch_boundary = tool_batch.execute_live_batch(tool_calls)
+            if (process.recovery or {}).get("checkpoint_commit") == "unknown":
+                from .runtime_outcomes import _status_result
+                return _status_result(process, session)
             if batch_boundary.result is not None:
                 return batch_boundary.result
             if batch_boundary.retry:

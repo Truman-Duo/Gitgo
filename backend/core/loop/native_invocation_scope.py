@@ -5,6 +5,14 @@ from contextvars import ContextVar
 _SCOPE = ContextVar("native_invocation_scope", default=None)
 
 
+def current_tool_call_identity(process):
+    """Expose the existing Host call identity, never model-supplied arguments."""
+    scope = _SCOPE.get()
+    if scope is None or scope["ctx"].process is not process:
+        return None
+    return scope.get("call_identity") or (scope["execution_id"], scope["call_index"])
+
+
 def current_native_records(ctx):
     scope = _SCOPE.get()
     return scope["records"] if scope is not None and scope["ctx"] is ctx else []
@@ -38,8 +46,8 @@ def check_native_recovery(ctx):
 
 
 @contextmanager
-def native_invocation_scope(ctx, execution_id, call_index):
-    scope = {"ctx": ctx, "execution_id": execution_id, "call_index": call_index, "records": []}
+def native_invocation_scope(ctx, execution_id, call_index, *, call_identity=None):
+    scope = {"ctx": ctx, "execution_id": execution_id, "call_index": call_index, "records": [], "call_identity": call_identity}
     token = _SCOPE.set(scope)
     try:
         yield scope
