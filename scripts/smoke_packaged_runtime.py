@@ -113,6 +113,24 @@ def validate_search_bundle(executable: Path) -> None:
             raise ValueError(f"Packaged search asset integrity mismatch: {filename}")
 
 
+def state_inventory(root: Path, workspace: Path, executable: Path) -> dict:
+    """Read-only failure evidence; never open a writer to identify a store."""
+    from backend.core.storage.paths import _existing_project_identity, _read_project_id
+    identities = {}
+    for role, path in (("workspace", workspace), ("host_cwd", Path.cwd()),
+                       ("daemon_cwd", executable.parent)):
+        try:
+            identity = _existing_project_identity(path)
+            identities[role] = {"workspace": str(path),
+                "identity_file": str(identity) if identity else "",
+                "project_id": _read_project_id(identity) if identity else ""}
+        except (OSError, ValueError, RuntimeError) as exc:
+            identities[role] = {"workspace": str(path), "error": str(exc)}
+    return {"state_databases": sorted(str(path.relative_to(root)) for path in
+            (root / "state" / "projects").glob("*/state.sqlite3")),
+            "identity_candidates": identities}
+
+
 def smoke(executable: Path) -> None:
     executable = executable.resolve()
     if not executable.is_file():
@@ -154,6 +172,9 @@ def smoke(executable: Path) -> None:
         })
         # Development overrides must not hide a missing bundled release asset.
         env.pop("GITGO_RIPGREP_PATH", None)
+        observations = []
+        def observe(stage):
+            observations.append({"stage": stage, **state_inventory(root, workspace, executable)})
 
         tool = subprocess.run(
             [str(executable), INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE],
@@ -173,6 +194,7 @@ def smoke(executable: Path) -> None:
         names = {item["name"] for item in tool_result.get("data", {}).get("files", [])}
         if not tool_result.get("success") or "smoke.txt" not in names:
             raise RuntimeError(f"packaged tool runner returned invalid result: {tool_result}")
+        observe("file_list")
 
         search = subprocess.run(
             [str(executable), INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE],
@@ -186,6 +208,7 @@ def smoke(executable: Path) -> None:
         if (search.returncode or not search_result.get("success") or data.get("engine") != "ripgrep"
                 or data.get("complete") is not True or data.get("count") != 1):
             raise RuntimeError(f"packaged ripgrep search failed: {search_result}")
+        observe("search_text")
 
         nested_python = subprocess.run(
             [str(executable), INTERNAL_ROLE_FLAG, TOOL_RUNNER_ROLE],
@@ -219,9 +242,11 @@ def smoke(executable: Path) -> None:
                 f"returncode={nested_python.returncode} result={nested_result} "
                 f"stderr={nested_python.stderr}"
             )
+        observe("nested_python")
 
         client = ProtocolClient(executable, env)
         try:
+            observe("host_started")
             if client.host_version != __version__:
                 raise RuntimeError('Packaged Host product version differs from source')
             if os.name == "nt":
@@ -233,6 +258,7 @@ def smoke(executable: Path) -> None:
             projects = overview.get("result", {}).get("projects", [])
             if not overview.get("ok") or not any(p.get("name") == project.name for p in projects):
                 raise RuntimeError(f"packaged project overview failed: {overview}")
+            observe("project_overview")
 
             # These requests must fail before a Provider or Daemon is touched.
             # They prove that the frozen Host contains the same Unicode and
@@ -257,6 +283,7 @@ def smoke(executable: Path) -> None:
             mismatch_code = str((digest_mismatch.get("error") or {}).get("code") or "")
             if digest_mismatch.get("ok") or mismatch_code != "INPUT_INTEGRITY_MISMATCH":
                 raise RuntimeError(f"packaged Host accepted a mismatched prompt digest: {digest_mismatch}")
+            observe("rejected_inputs")
 
             # Manual compaction starts an offline project's Daemon before it
             # checks the process id. PROCESS_NOT_FOUND is expected; a Host or
@@ -269,16 +296,20 @@ def smoke(executable: Path) -> None:
             error_code = str((compact.get("error") or {}).get("code") or "")
             if error_code == "DAEMON_START_FAILED":
                 raise RuntimeError(f"packaged Daemon failed to start: {compact}")
+            observe("runtime_compact")
 
             status = client.call("runtime.status", {"project": project.name}, timeout=15)
             if not status.get("ok") or not status.get("result", {}).get("daemon_online"):
                 raise RuntimeError(f"packaged runtime status is not online: {status}")
+            observe("runtime_status")
         finally:
             client.close()
 
+        observe("host_closed")
         project_ids = list((root / "state" / "projects").glob("*/state.sqlite3"))
         if len(project_ids) != 1:
-            raise RuntimeError(f"packaged Daemon did not create one state database: {project_ids}")
+            raise RuntimeError(f"packaged Daemon did not create one state database: {project_ids}; "
+                f"stage evidence={json.dumps(observations, ensure_ascii=True)}")
 
     print("Packaged Host/Daemon/tool-runner smoke passed")
 
