@@ -82,7 +82,8 @@ class AgentProcessManager:
              runtime_preferences: dict | None = None,
              child_budget_request: dict | None = None,
              session_id: str = "",
-             session: "AgentSession | None" = None) -> AgentProcess:
+             session: "AgentSession | None" = None,
+             adopted_root_origin: dict | None = None) -> AgentProcess:
         """创建子进程。parent_id=None 时为 A 级 Agent (ring 0)。
 
         B 级（parent_id 非 None）初始为 WAITING，agent_step 真正启动时转 RUNNING，
@@ -149,7 +150,20 @@ class AgentProcessManager:
             contract_snapshot = dict(context_snapshot.get("task_contract") or {})
             contract_snapshot.setdefault("relationship_policy", relation)
             context_snapshot["task_contract"] = contract_snapshot
-        if parent is not None and parent.task_budget is not None:
+        budget_source = None
+        if adopted_root_origin is not None:
+            from .discussion_adoption import root_budget_source
+            budget_source = root_budget_source(self, adopted_root_origin, task_id=task_id,
+                session=session, parent_id=parent_id, actor_kind=actor_kind)
+        if budget_source is not None:
+            task_budget = budget_source.task_budget
+            # Older root runners finalize without releasing the root account.
+            # The validated terminal barrier allows closing it exactly once;
+            # consumed calls/tokens remain charged and the lease never reopens.
+            budget_source.budget_lease = task_budget.release_process(
+                budget_source.process_id, status=budget_source.status.value)
+            task_budget.reserve_agent()
+        elif parent is not None and parent.task_budget is not None:
             task_budget = parent.task_budget
             task_budget.reserve_agent()
         else:
@@ -208,22 +222,31 @@ class AgentProcessManager:
         self._processes[process.process_id] = process
         self._sessions[process.session.session_id] = process.session
         process._manager = self
+        if budget_source is not None:
+            from .discussion_adoption import record_continuation
+            record_continuation(process, budget_source)
+            task_budget.resume_from_user()
 
         if parent is not None and not process.session.display_name:
             with parent.session._context_memo_lock:
                 parent.session.worker_sequence += 1
                 process.session.display_name = f"B{parent.session.worker_sequence}"
 
-        from backend.core.history import HistoryManager
-        if workspace_path:
-            HistoryManager.set_workspace(workspace_path)
-            HistoryManager.add_operation(
-                "system", "agent_forked", "success",
-                {"process_id": process.process_id, "role": role,
-                 "ring_level": ring_level.value, "parent_id": parent_id},
-                correlation_id=process.process_id,
-            )
+        # Same-task root admission is checkpointed by dispatch before History
+        # can quarantine its writer. All ordinary fork ordering stays unchanged.
+        if workspace_path and budget_source is None:
+            self._record_fork_history(process, workspace_path)
         return process
+
+    @staticmethod
+    def _record_fork_history(process, workspace_path):
+        from backend.core.history import HistoryManager
+        HistoryManager.set_workspace(workspace_path)
+        HistoryManager.add_operation(
+            'system', 'agent_forked', 'success',
+            {'process_id': process.process_id, 'role': process.role,
+             'ring_level': process.ring_level.value, 'parent_id': process.parent_id},
+            correlation_id=process.process_id)
 
     def start(self, process_id: str, target, *, resources: list[str] | None = None,
               resource_mode: str = "exclusive", on_terminal=None, resume_target=None) -> None:
