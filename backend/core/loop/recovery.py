@@ -233,7 +233,12 @@ def _live_budget_covers(live, committed):
         for purpose, used in purposes.items():
             if live.get('used', {}).get('by_purpose', {}).get(resource, {}).get(purpose, 0) < used:
                 return False
-    if live.get('deadline', {}).get('allowance_seconds', 0) < committed.get('deadline', {}).get('allowance_seconds', 0):
+    live_allowance = live.get('deadline', {}).get('allowance_seconds', 0)
+    committed_allowance = committed.get('deadline', {}).get('allowance_seconds', 0)
+    # Reconstructing monotonic timestamps can lose a few floating-point bits.
+    # Use an absolute microsecond bound, never a tolerance scaled to the cap.
+    if not (live_allowance >= committed_allowance or math.isclose(
+            live_allowance, committed_allowance, rel_tol=0.0, abs_tol=1e-6)):
         return False
     for pid, lease in committed.get('process_leases', {}).items():
         current = live.get('process_leases', {}).get(pid)

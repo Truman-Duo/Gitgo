@@ -127,7 +127,10 @@ def test_cold_restore_joins_adopted_root_chain_and_historical_child(runtime, sel
     assert all(snapshot['process_leases'][p.process_id]['state'] == 'released' for p in (root, child, second))
     assert snapshot['process_leases'][third.process_id]['state'] == 'active'
     assert snapshot['limits'] == root.task_budget.snapshot()['limits']
-    assert snapshot['deadline'] == root.task_budget.snapshot()['deadline']
+    original_deadline = root.task_budget.snapshot()['deadline']
+    assert snapshot['deadline']['version'] == original_deadline['version']
+    assert snapshot['deadline']['allowance_seconds'] == pytest.approx(
+        original_deadline['allowance_seconds'], rel=0.0, abs=1e-6)
 
 
 def test_ordinary_new_user_task_keeps_fresh_budget(runtime):
@@ -367,6 +370,45 @@ def test_lazy_restore_of_historical_record_keeps_current_shared_object(runtime):
     cold._processes.pop(root.process_id)
     restore_incomplete_processes(store, cold, workspace, include_process_ids=[root.process_id])
     assert cold.get(root.process_id).task_budget is live.task_budget
+    assert live.task_budget.snapshot()['used']['provider_calls'] == 1
+
+
+@pytest.mark.parametrize('allowance_reduction', [0.0, 0.0001])
+def test_lazy_restore_distinguishes_clock_roundoff_from_reduced_allowance(runtime, monkeypatch, allowance_reduction):
+    from backend.core.loop import budget as budget_module
+
+    manager, root, store, workspace = runtime
+    original = root.task_budget.snapshot()
+    original['used']['elapsed_seconds'] = 0.0
+    clock = [0.0]
+    monkeypatch.setattr(budget_module, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    root.task_budget = budget_module.TaskTreeBudget.from_snapshot(original)
+    clock[0] = 0.3
+    origin = interrupt(runtime, root)
+    successor, result = continue_task(runtime, root, origin)
+    assert result.get('status') == 'pending', result
+    committed = store.load_process_state(successor.process_id)['runtime_state']['task_budget']
+    assert committed['deadline']['allowance_seconds'] == 300.0
+
+    # Restoring against a new monotonic origin makes subtracting the saved
+    # elapsed time yield 299.99999999999994, without any allowance reduction.
+    clock[0] = 100.1
+    cold = AgentProcessManager()
+    restore_incomplete_processes(store, cold, workspace, include_process_ids=[successor.process_id])
+    live = cold.get(successor.process_id)
+    restored_allowance = live.task_budget.snapshot()['deadline']['allowance_seconds']
+    assert 0 < 300.0 - restored_allowance < 1e-12
+    live.task_budget.begin_provider_call(live.process_id)
+    live.task_budget.deadline_monotonic -= allowance_reduction
+    cold._processes.pop(root.process_id)
+    if allowance_reduction:
+        before = set(cold._processes)
+        with pytest.raises(ValueError, match='complete cold restore'):
+            restore_incomplete_processes(store, cold, workspace, include_process_ids=[root.process_id])
+        assert set(cold._processes) == before
+    else:
+        restore_incomplete_processes(store, cold, workspace, include_process_ids=[root.process_id])
+        assert cold.get(root.process_id).task_budget is live.task_budget
     assert live.task_budget.snapshot()['used']['provider_calls'] == 1
 
 
