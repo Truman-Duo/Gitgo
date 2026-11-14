@@ -380,6 +380,7 @@ def test_lazy_restore_distinguishes_clock_roundoff_from_reduced_allowance(runtim
     manager, root, store, workspace = runtime
     original = root.task_budget.snapshot()
     original['used']['elapsed_seconds'] = 0.0
+    original['deadline']['allowance_seconds'] = 300.0
     clock = [0.0]
     monkeypatch.setattr(budget_module, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     root.task_budget = budget_module.TaskTreeBudget.from_snapshot(original)
