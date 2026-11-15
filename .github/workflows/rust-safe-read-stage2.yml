@@ -1,0 +1,120 @@
+name: Rust safe read stage 2 acceptance
+on:
+  push:
+    branches: [test/45-safe-read-stage2]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+jobs:
+  read-core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, ubuntu-24.04-arm, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.14.7'
+      - uses: ./.github/actions/build-sandbox-native
+      - run: cargo +1.90.0 test --locked --manifest-path native/sandbox/Cargo.toml
+      - run: python -m pip install --require-hashes -r packaging/requirements-build.lock
+      - run: python -B scripts/provision_ci_sqlite.py
+      - run: python -B scripts/provision_ci_ripgrep.py
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $private = Join-Path $env:USERPROFILE 'AppData/Local/Temp'
+          "TEMP=$private" >> $env:GITHUB_ENV
+          "TMP=$private" >> $env:GITHUB_ENV
+      - name: Real object reads, approvals and implementation identity
+        run: >-
+          python -B -m pytest tests/test_sandbox_read_native.py tests/test_sandbox_read.py
+          tests/test_sandbox_read_darwin.py tests/test_read_approval.py
+          tests/test_read_execution_plan.py tests/test_implementation_identity.py
+          tests/test_native_sandbox_abi.py tests/test_runtime_cleanup_evidence.py
+          tests/test_native_source_runtime_fixture.py -q --tb=short
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        if: runner.os == 'Windows'
+        with:
+          bun-version: '1.4.4'
+      - name: Windows actual source and embedded runtime read consumers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:GITGO_BUN = (Get-Command bun).Source
+          python -B -m pytest 'tests/test_native_sandbox.py::test_windows_read_lifecycle_evidence[source]' tests/test_native_sandbox.py::test_windows_real_runner_exec_and_privileged_tool tests/test_native_read_runtime.py tests/test_file_feedback_contract.py tests/test_legacy_file_service.py tests/test_validation_versions.py -q --tb=short
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - if: runner.os == 'Linux'
+        run: bash scripts/prepare_linux_update_ci.sh
+      - name: Linux approval through actual isolated child
+        if: runner.os == 'Linux'
+        shell: bash
+        run: >-
+          sudo systemd-run --quiet --wait --pipe --collect --uid="$(id -u)"
+          --working-directory="$PWD" --setenv="LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+          --setenv="GITGO_RIPGREP_PATH=$GITGO_RIPGREP_PATH"
+          --unit=gitgo-read-stage2 -p Delegate=yes "$(which python)" -B
+          scripts/run_linux_sandbox_scope.py -- "$(which python)" -B -m pytest
+          tests/test_native_sandbox.py::test_linux_real_runner_approval_binding tests/test_native_read_linux.py -q --tb=short
+  unix-packages:
+    uses: ./.github/workflows/linux-package.yml
+
+  windows-package:
+    name: Windows final ZIP and frozen continuity
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.14.7'
+      - uses: ./.github/actions/build-sandbox-native
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.4'
+      - run: python -m pip install --require-hashes -r packaging/requirements-build.lock
+      - run: python -B scripts/provision_ci_sqlite.py
+      - run: python -B scripts/provision_ci_ripgrep.py
+      - working-directory: cli/dashboard
+        run: bun install --frozen-lockfile
+      - name: Prepare private final-package directories
+        run: |
+          $private = Join-Path $env:USERPROFILE "AppData/Local/Temp/gitgo-final-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          python -B -c "import sys; from pathlib import Path; from backend.core.update.windows_storage import create_private_directory; p=Path(sys.argv[1]); create_private_directory(p); create_private_directory(p/'unpacked')" $private
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "GITGO_FINAL_PACKAGE_ROOT=$private" >> $env:GITHUB_ENV
+          "TEMP=$private" >> $env:GITHUB_ENV
+          "TMP=$private" >> $env:GITHUB_ENV
+      - name: Build, archive, then unpack final Windows ZIP
+        run: |
+          & packaging/build_windows.ps1 -Python (Get-Command python).Source -Bun (Get-Command bun).Source -Ripgrep $env:GITGO_RIPGREP_PATH -RipgrepNotices $env:GITGO_RIPGREP_NOTICES -ManagedUpdate -UpdateReleasePolicy packaging/release-trust/windows-x86_64.json -Output "$env:GITGO_FINAL_PACKAGE_ROOT/stage"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $archives = @(Get-ChildItem dist-installer/*.zip)
+          if ($archives.Count -ne 1) { throw 'Expected exactly one final Windows archive from build_windows.ps1' }
+          $archive = $archives[0]
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked"
+          python -B scripts/smoke_packaged_runtime.py --host "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked/internal/gitgo-host/gitgo-host.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B scripts/check_terminal_continuity.py --host "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked/internal/gitgo-host/gitgo-host.exe" --dashboard "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked/gitgo.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Actual final ZIP native boundaries
+        run: |
+          $env:GITGO_SANDBOX_TEST_HOST = "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked/internal/gitgo-host/gitgo-host.exe"
+          python -B -m pytest tests/test_native_sandbox.py tests/test_windows_sandbox_minimum.py -k packaged -q --tb=short
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-final-zip
+          path: dist-installer/*
+          if-no-files-found: error
+          retention-days: 14

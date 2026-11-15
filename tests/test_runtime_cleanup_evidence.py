@@ -150,15 +150,40 @@ def test_windows_job_requires_observed_empty_tree_and_retains_unknown(monkeypatc
             return {'ok': True, 'complete': not self.failed}
     library = Library()
     job = NativeJob(12345, library, '0' * 32)
+    released = []
+    job._image_pins.callback(lambda: released.append(True))
     try:
         report = job.close()
         assert report['complete'] is False and not job._closed
         assert PENDING_JOBS[id(job)] is job
+        assert released == []
         library.failed = False
         assert job.close() == {'complete': True, 'mode': 'windows-job', 'issues': []}
         assert job._closed and id(job) not in PENDING_JOBS
+        assert released == [True]
         count = library.calls
         assert job.close()['complete'] and library.calls == count
+    finally:
+        PENDING_JOBS.pop(id(job), None)
+
+
+def test_windows_image_pin_close_failure_cannot_become_success_on_retry():
+    from backend.core.windows_sandbox_native import NativeJob, PENDING_JOBS
+    class Library:
+        calls = 0
+        def call(self, **request):
+            self.calls += 1
+            return {'complete': True}
+    library = Library()
+    job = NativeJob(12345, library, '0' * 32)
+    def fail_close():
+        raise OSError('Injected image pin cleanup failure')
+    job._image_pins.callback(fail_close)
+    try:
+        report = job.close()
+        assert not report['complete'] and report['issues'] == ['native_image_pin_cleanup_unknown']
+        assert PENDING_JOBS[id(job)] is job
+        assert job.close() == report and library.calls == 1
     finally:
         PENDING_JOBS.pop(id(job), None)
 

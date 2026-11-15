@@ -32,9 +32,19 @@ def workspace_native_launcher(isolated_python, monkeypatch):
     """A real native launch with only an owned runtime receiving access."""
     from backend.core.child_process import tool_runner_command
     runtime = populate_source_runtime(isolated_python)
+    # The fixture selects a different interpreter/code installation. Register
+    # that same owned runtime for image pinning as well as ACL preparation;
+    # copied bytes alone are not a trusted installed object identity.
+    from backend.core import sandbox as sandbox_module
+    registered = (*sandbox_module.trusted_runtime_roots(), runtime.resolve(strict=True))
     command = tool_runner_command(runtime)
     command[0] = str(runtime / "python.exe")
     monkeypatch.setattr("backend.core.loop.process_tool_runner.tool_runner_command", lambda: command)
     monkeypatch.setattr("backend.core.loop.process_tool_runner.owned_child_cwd", lambda _: runtime)
     monkeypatch.setattr("backend.core.sandbox_access.native_runtime_access", lambda: ([runtime], []))
-    return runtime
+    # native_box can already own an outer runtime registration. Restore this
+    # registration before that fixture exits; the shared monkeypatch fixture
+    # tears down later and would otherwise resurrect the deleted outer runtime.
+    from unittest.mock import patch
+    with patch.object(sandbox_module, 'trusted_runtime_roots', lambda: registered):
+        yield runtime
