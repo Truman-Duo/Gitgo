@@ -10,6 +10,7 @@ import uuid
 import pytest
 
 from backend.core.native_sandbox import NativeBoundaryError, get_native, installed_path
+from tests.test_native_sandbox import isolated_python, native_box  # noqa: F401
 
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows image handle attenuation')
@@ -153,3 +154,125 @@ def test_unverified_loaded_image_is_not_loaded_again(monkeypatch):
                         lambda _: pytest.fail('attempted another load after failed verification'))
     with pytest.raises(NativeBoundaryError, match='failed verification after load'):
         native_sandbox.get_native()
+
+
+# Use a fresh module instance so the first Job/ACL allocations exercise the
+# historical numeric collisions regardless of the surrounding test order.
+_CROSS_DOMAIN_SOURCE = r'''
+from contextlib import ExitStack
+import ctypes as C
+import hashlib
+from pathlib import Path
+import sys
+from backend.core.native_sandbox import get_native, NativeBoundaryError
+from backend.core.sandbox_read_native import NativeReadRoot, _path
+
+directory, operation, kind, state = Path(sys.argv[1]), *sys.argv[2:]
+body = b'read-object'
+(directory / 'read-target').write_bytes(body)
+(directory / 'acl-target').write_bytes(b'acl-object')
+native = get_native()
+
+def refused(call, *, acl_plane=False):
+    try:
+        call()
+    except NativeBoundaryError as error:
+        if acl_plane:
+            assert error.errno == 6, error
+        else:
+            assert not error.outcome_unknown, error
+    else:
+        raise AssertionError(operation + ' accepted a token from another resource domain')
+
+with ExitStack() as owners:
+    root = owners.enter_context(NativeReadRoot(directory))
+    readers = [owners.enter_context(root.open('read-target')) for _ in range(6)]
+    job = native.call(op='job_create', recovery_id='', processes=4,
+        memory=128*1024*1024, cpu_seconds=5)['token']
+    owners.callback(native.call, op='job_retire', token=job)
+    acl = native.call(op='acl_open', path=str(directory / 'acl-target'), access=0x20089)['token']
+    owners.callback(native.call, op='acl_release', token=acl)
+    acl_before = native.acl(4, token=acl)
+    closed_reader = None
+    if kind in ('job', 'acl'):
+        foreign = job if kind == 'job' else acl
+        if state == 'retired':
+            native.call(op='job_retire' if kind == 'job' else 'acl_release', token=foreign)
+        if operation in ('bytes', 'package_bytes'):
+            function = (native._library.gitgo_native_read if operation == 'bytes'
+                        else native._library.gitgo_native_package_read)
+            function.argtypes = [C.c_uint64, C.c_size_t, C.c_void_p, C.c_size_t, C.POINTER(C.c_size_t)]
+            function.restype = C.c_uint32
+            output, written = C.create_string_buffer(b'UNCHANGED', 16), C.c_size_t(99)
+            assert function(foreign, 16, output, len(output), C.byref(written)) == 3
+            assert written.value == 0 and output.value == b'UNCHANGED'
+        else:
+            extra = ({'path': _path('read-target'), 'metadata_only': False} if operation == 'read_open'
+                     else {'max_bytes': 1024} if operation in ('read_hash', 'read_size') else {})
+            refused(lambda: native.call(op=operation, token=foreign, **extra))
+    else:
+        # In the old untyped table these are read tokens 5 and 7, aliasing the
+        # first live Job and ACL object respectively.
+        selected = readers[3 if operation.startswith('job_') else 5]
+        foreign = selected._token
+        if state == 'retired':
+            selected.close()
+            closed_reader = selected
+        if operation == 'acl_get':
+            refused(lambda: native.acl(4, token=foreign), acl_plane=True)
+        else:
+            refused(lambda: native.call(op=operation, token=foreign))
+    # A refusal must leave every unrelated live resource usable.
+    for reader in readers:
+        if reader is not closed_reader:
+            assert reader.sha256() == (hashlib.sha256(body).hexdigest(), len(body))
+    if not (kind == 'job' and state == 'retired'):
+        assert native.call(op='job_query', token=job)['active'] == 0
+    if not (kind == 'acl' and state == 'retired'):
+        assert native.acl(4, token=acl) == acl_before
+'''
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows Job and ACL domains')
+@pytest.mark.parametrize('state', ['live', 'retired'])
+@pytest.mark.parametrize('kind,operation', [
+    *[(kind, operation) for kind in ('job', 'acl')
+      for operation in ('read_open', 'read_size', 'read_hash', 'read_close', 'bytes', 'package_bytes')],
+    *[('read', operation) for operation in ('job_query', 'job_retire', 'acl_release', 'acl_get')],
+])
+def test_cross_domain_read_operations_have_no_effect(native, tmp_path_factory, kind, operation, state):
+    result = subprocess.run([sys.executable, '-B', '-c', _CROSS_DOMAIN_SOURCE,
+        str(tmp_path_factory), operation, kind, state],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Actual Windows process ownership')
+def test_live_process_tokens_cannot_select_or_retire_read_objects(native, native_box):
+    from contextlib import ExitStack
+    from backend.core.sandbox_read_native import NativeReadRoot
+    from tests.test_native_sandbox import finished
+
+    workspace, _, spawn = native_box
+    (workspace / 'note').write_bytes(b'owned-read')
+    with ExitStack() as owners:
+        root = owners.enter_context(NativeReadRoot(workspace))
+        readers = [owners.enter_context(root.open('note')) for _ in range(6)]
+        proc = spawn("import sys;print('ready',flush=True);sys.stdin.read()")
+        try:
+            process_token = proc._handle.token
+            for operation in ('read_close', 'read_hash', 'read_size'):
+                extra = {'max_bytes': 1024} if operation != 'read_close' else {}
+                with pytest.raises(NativeBoundaryError):
+                    native.call(op=operation, token=process_token, **extra)
+            for item in [root, *readers]:
+                with pytest.raises(NativeBoundaryError):
+                    native.call(op='process_release', token=item._token)
+            assert proc.poll() is None
+            assert all(reader.read_bytes() == b'owned-read' for reader in readers)
+        finally:
+            code, out, err = finished(proc)
+        assert code == 0 and out.strip() == 'ready', err
+        proc._handle.Close()
+        with pytest.raises(NativeBoundaryError):
+            native.call(op='read_close', token=process_token)

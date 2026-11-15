@@ -1,8 +1,8 @@
 //! Object ownership, not permission authority. Tokens never encode OS handles.
 //! No content leaves this module until the final metadata check succeeds.
+use crate::registry::Registry;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -57,36 +57,27 @@ enum Resource {
     Root(Arc<platform::Root>),
     File(Arc<Mutex<Opened>>),
 }
-struct Registry {
-    next: u64,
-    live: BTreeMap<u64, Resource>,
-}
-static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
-fn registry() -> io::Result<std::sync::MutexGuard<'static, Registry>> {
+type ReadRegistry = Registry<Resource, 0>;
+static REGISTRY: OnceLock<Mutex<ReadRegistry>> = OnceLock::new();
+fn registry() -> io::Result<std::sync::MutexGuard<'static, ReadRegistry>> {
     REGISTRY
-        .get_or_init(|| {
-            Mutex::new(Registry {
-                next: 1,
-                live: BTreeMap::new(),
-            })
-        })
+        .get_or_init(|| Mutex::new(ReadRegistry::new()))
         .lock()
         .map_err(|_| boundary("read_registry_poisoned"))
 }
 fn insert(value: Resource) -> io::Result<u64> {
     let mut registry = registry()?;
-    registry.insert(value)
+    insert_into(&mut registry, value)
 }
-impl Registry {
-    fn insert(&mut self, value: Resource) -> io::Result<u64> {
-        if self.live.len() >= MAX_LIVE || self.next == u64::MAX {
-            return Err(boundary("read_resource_limit"));
-        }
-        let token = self.next;
-        self.next += 1;
-        self.live.insert(token, value);
-        Ok(token)
+fn insert_into(registry: &mut ReadRegistry, value: Resource) -> io::Result<u64> {
+    if registry.live.len() >= MAX_LIVE {
+        return Err(boundary("read_resource_limit"));
     }
+    let token = registry
+        .next()
+        .ok_or_else(|| boundary("read_resource_limit"))?;
+    registry.insert(token, value);
+    Ok(token)
 }
 fn file(token: u64) -> io::Result<Arc<Mutex<Opened>>> {
     match registry()?.live.get(&token) {
@@ -129,14 +120,15 @@ pub fn open(
     Ok(json!({"ok": true, "token": token, "identity": identity(&info)}))
 }
 pub fn close(token: u64) -> io::Result<Value> {
-    // Issued tokens form a contiguous range. A retired token never names a
-    // future object; duplicate retirement needs no unbounded tombstone table.
+    // Only an issued token in the read domain can be an idempotent retirement.
+    // Job/process/ACL ordinals must never select or retire a read resource.
     let retired = {
         let mut registry = registry()?;
-        if token == 0 || token >= registry.next {
-            return Err(boundary("unknown_read_token"));
+        match registry.live.remove(&token) {
+            Some(value) => Some(value),
+            None if registry.retired(token) => None,
+            None => return Err(boundary("unknown_read_token")),
         }
-        registry.live.remove(&token)
     };
     // An already admitted operation keeps its Arc until completion. Retiring
     // here bars new operations; no descriptor closes underneath a live read.
@@ -324,27 +316,57 @@ mod tests {
         assert!(result.is_err());
     }
     #[test]
-    fn live_resource_budget_and_token_exhaustion_refuse_without_allocation() {
+    fn live_resource_budget_is_reclaimed_without_token_reuse() {
         let tree = Tree::new();
         let root = Arc::new(platform::Root::open(&encoded(&tree.0)).unwrap());
-        let mut registry = Registry {
-            next: 1,
-            live: BTreeMap::new(),
-        };
-        for token in 1..=MAX_LIVE as u64 {
+        let mut registry = ReadRegistry::new();
+        for ordinal in 1..=MAX_LIVE as u64 {
             assert_eq!(
-                registry.insert(Resource::Root(Arc::clone(&root))).unwrap(),
-                token
+                insert_into(&mut registry, Resource::Root(Arc::clone(&root))).unwrap(),
+                ordinal << 2
             );
         }
-        let next = registry.next;
-        assert!(registry.insert(Resource::Root(Arc::clone(&root))).is_err());
-        assert_eq!(registry.next, next);
+        let next = registry.next();
+        assert!(insert_into(&mut registry, Resource::Root(Arc::clone(&root))).is_err());
+        assert_eq!(registry.next(), next);
         assert_eq!(registry.live.len(), MAX_LIVE);
         registry.live.clear();
-        registry.next = u64::MAX;
-        assert!(registry.insert(Resource::Root(root)).is_err());
-        assert!(registry.live.is_empty());
+        let token = insert_into(&mut registry, Resource::Root(root)).unwrap();
+        assert_eq!(Some(token), next);
+        assert_ne!(token, 4);
+        assert!(registry.retired(4));
+        assert_eq!(registry.live.len(), 1);
+    }
+
+    #[test]
+    fn root_and_file_operations_refuse_foreign_domains_without_effects() {
+        let tree = Tree::new();
+        let root = root(&encoded(&tree.0)).unwrap()["token"].as_u64().unwrap();
+        let file = open(root, &encoded(Path::new("file")), false, false).unwrap()["token"]
+            .as_u64()
+            .unwrap();
+        let foreign: Vec<_> = [root, file]
+            .into_iter()
+            .flat_map(|token| (1..=3).map(move |tag| token | tag))
+            .collect();
+        for &token in &foreign {
+            assert!(open(token, &encoded(Path::new("file")), false, false).is_err());
+            assert!(size(token, 16).is_err());
+            assert!(hash(token, 16).is_err());
+            assert!(bytes(token, 16).is_err());
+            assert!(package_bytes(token, 16).is_err());
+            assert!(close(token).is_err());
+        }
+        assert!(hash(root, 16).is_err());
+        assert!(open(file, &encoded(Path::new("file")), false, false).is_err());
+        assert_eq!(bytes(file, 16).unwrap(), b"selected");
+        close(file).unwrap();
+        close(file).unwrap();
+        close(root).unwrap();
+        close(root).unwrap();
+        for token in foreign {
+            assert!(close(token).is_err());
+        }
     }
     #[test]
     fn growth_during_read_is_not_a_successful_prefix() {
