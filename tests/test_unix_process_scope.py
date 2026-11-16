@@ -104,15 +104,35 @@ if not {parent_exits!r}: time.sleep(10)
     assert not marker.exists()
 
 
-def test_mac_detached_child_is_not_misreported_as_complete(tmp_path_factory):
+@pytest.mark.parametrize("startup_delay", [0, 0.35])
+def test_mac_detached_child_is_not_misreported_as_complete(tmp_path_factory, startup_delay):
     if sys.platform != "darwin": pytest.skip("macOS explicit coverage boundary")
     marker = tmp_path_factory / "detached"
-    child = f"import os,time,pathlib; os.setsid(); time.sleep(.5); pathlib.Path({str(marker)!r}).write_text('observed')"
-    # Detached process closes all inherited pipes and ends itself promptly.
-    proc = launch(f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); time.sleep(.1)")
-    collect(proc)
+    child = f"""
+import os, time, pathlib
+time.sleep({startup_delay})
+os.setsid()
+os.write(1, b'ready\\n')
+os.close(1)
+time.sleep(.5)
+pathlib.Path({str(marker)!r}).write_text('observed')
+"""
+    # Wait for detachment before the parent exits and triggers group cleanup.
+    # The private readiness pipe is closed before the detached work begins.
+    parent = f"""
+import subprocess, sys
+child = subprocess.Popen([sys.executable, '-c', {child!r}],
+    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+with child.stdout:
+    assert child.stdout.readline() == b'ready\\n', 'child exited before detaching'
+"""
+    proc = launch(parent)
+    _, err, _ = collect(proc)
+    assert proc.returncode == 0, err
     assert not proc._gitgo_cleanup["complete"]
-    time.sleep(.6)
+    deadline = time.monotonic() + 5
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(.02)
     assert marker.exists()  # declared limitation, never silently counted as clean
 
 
