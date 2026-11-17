@@ -11,6 +11,26 @@ import {
 } from "./client.js";
 
 describe("native task routing", () => {
+  test("native failure retains recovery details and the visible saved-adoption message", async () => {
+    const client: any = new NativeHostClient("unused", "unused");
+    let sent: any;
+    client._ready = true;
+    client.proc = {exitCode: null, stdin: {write: (text: string) => {sent = JSON.parse(text);}}};
+    const pending = client.callTool("runtime.btw.adopt", {project: "demo"});
+    const details = {owner_process_id: "owner-A", next_actions: [{action: "list_agents", process_id: "owner-A"}],
+      adoption: {saved: true, status: "pending", change_id: "saved-change", continuation_status: "not_started"}};
+    client.onData(JSON.stringify({protocol_version: 1, type: "response", request_id: sent.request_id, ok: false,
+      error: {code: "CONTINUATION_ADOPTION_HANDOFF_REQUIRED",
+        message: "The BTW adoption request was saved as pending. Continuation was not started.", details},
+      private_state: "PRIVATE"}) + "\n");
+    const error = await pending.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.code).toBe("CONTINUATION_ADOPTION_HANDOFF_REQUIRED");
+    expect(error.message).toContain("saved as pending");
+    expect(error.details).toEqual(details);
+    expect(error.private_state).toBeUndefined();
+    expect(client.pending.size).toBe(0);
+  });
   for (const [code, signal] of [[0, null], [1, null], [null, "SIGTERM"]] as const) {
     test(`update shutdown requires a clean Host exit: ${code}/${signal}`, async () => {
       const client: any = new NativeHostClient("unused", "unused");

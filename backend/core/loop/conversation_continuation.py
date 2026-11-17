@@ -6,6 +6,31 @@ required for interrupted work; a missing historical identity never starts anew.
 from .models import ProcessStatus
 
 
+def require_root_session_for_implicit_continuation(manager, store, session_id):
+    """Only an actual supervisor session may omit its execution identity.
+
+    Worker continuation needs a process ID so acceptance, supersession and
+    recovery are checked against a particular execution. Command role/profile
+    flags cannot turn a worker's existing session into a supervisor session.
+    This is a public-entry guard; Host delegation may still fork a B session.
+    """
+    known = {process.process_id: process.actor_kind
+             for process in manager.list_processes()
+             if process.session.session_id == session_id}
+    if store is not None:
+        for link in store.list_process_links():
+            if link.get('session_id') != session_id or link['process_id'] in known:
+                continue
+            state = store.load_process_state(link['process_id'])
+            if state is None:
+                raise ValueError('CONTINUATION_STATE_UNAVAILABLE: session execution checkpoint missing; supply process_id')
+            known[link['process_id']] = (state.get('process') or {}).get('actor_kind')
+    if any(actor != 'supervisor' for actor in known.values()):
+        raise ValueError('CONTINUATION_PROCESS_ID_REQUIRED: worker session continuation requires process_id or conversation_process_id')
+    if not known and manager.get_session(session_id) is not None:
+        raise ValueError('CONTINUATION_PROCESS_ID_REQUIRED: session ownership is unavailable; supply process_id')
+
+
 def inspect_conversation_process(manager, store, workspace, process_id, session_id=""):
     """Restore identity for observation only; never claim continuation."""
     if not process_id:

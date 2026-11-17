@@ -55,9 +55,24 @@ def _name(filename):
 def read_metadata_bytes(workspace,filename,*,max_bytes=MAX_METADATA_BYTES):
     filename=_name(filename)
     with ReadRoot(Path(workspace).absolute()) as root:
-        try:
-            with root.open(".gitgo/"+filename) as opened:return opened.read_bytes(max_bytes=max_bytes)
-        except FileNotFoundError:return None
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                opened = root.open(".gitgo/" + filename)
+                break
+            except FileNotFoundError:
+                return None
+            except PermissionError as exc:
+                # Windows can temporarily deny an open while another process
+                # replaces the cache. Retry only that sharing violation.
+                if getattr(exc, "winerror", None) != 32:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(0.02, remaining))
+        with opened:
+            return opened.read_bytes(max_bytes=max_bytes)
 
 
 def write_metadata_bytes(workspace,filename,content,*,expected_sha256=None,max_bytes=MAX_METADATA_BYTES,lock_timeout=0):

@@ -232,9 +232,20 @@ def prepare_contract_state(process, contract, proposal, workflow):
         change = state["changes"].get(item.get("id")) if isinstance(item, dict) else None
         withdraw_adopted = isinstance(item, dict) and item.get("disposition") == "withdraw" and change and change["status"] == "adopted"
         if not change or (change["status"] != "pending" and not withdraw_adopted) or change["target_task_id"] != task_id(process):
-            raise ValueError("change resolution must identify this task's pending adopted request")
+            raise ValueError("change resolution must identify this task's pending adopted request. "
+                "Call task_mechanism(operation='status'); for adoption, maintenance.resolve_changes uses a pending id "
+                "from this task's state.changes, not a message_id or a child's id in owned_scope_updates. "
+                'Withdrawal may also reference this task\'s adopted change from the full task state; '
+                'it requires newer user evidence, not a fabricated pending change. '
+                "For a child_scope update, inspect this task's state.maintenance_items and use the "
+                'corresponding pending id in maintenance.resolve_maintenance; do not invent an id if none exists.')
         if not str(item.get("reason") or "").strip() or not update.get("plan") or not contract.get("acceptance_criteria"):
-            raise ValueError("adoption requires a revised plan, acceptance criteria and reconciliation reason")
+            raise ValueError("adoption requires a revised plan, acceptance criteria and reconciliation reason. "
+                "Call task_mechanism(operation='status') to inspect this task's state.changes "
+                '(use the full task state reference for historical adopted changes when withdrawing); '
+                'submit maintenance.plan, the affected acceptance_criteria and a reason in each '
+                'maintenance.resolve_changes entry together in declare_task_contract. '
+                'plan_review retain cannot replace a revised plan for a scope change.')
         fields = item.get("contract_fields") or []
         if not fields or any(f not in {"goal", "deliverables", "acceptance_criteria", "uncertainties", "engineering_workflow"} for f in fields):
             raise ValueError("adoption must identify the actual contract fields reconciled by the Agent")
@@ -252,7 +263,11 @@ def prepare_contract_state(process, contract, proposal, workflow):
     for identifier in update.get("resolve_maintenance") or []:
         item = state["maintenance_items"].get(identifier)
         if item is None or item.get("status") != "pending":
-            raise ValueError("maintenance resolution requires an actual pending trigger id")
+            raise ValueError("maintenance resolution requires an actual pending trigger id. "
+                "Call task_mechanism(operation='status'); maintenance.resolve_maintenance uses a pending "
+                "id from this task's state.maintenance_items. For child_scope updates, use the local "
+                "trigger for that child, not the child's change.id from owned_scope_updates; "
+                'do not invent a trigger if none exists.')
         if not update.get("plan") and not plan_review:
             raise ValueError("maintenance requires a revised plan or plan_review={action:retain,reason:...} when the current plan still covers the trigger")
         source = item.get("source", "")

@@ -100,7 +100,7 @@ export type TraceLifecycleEvent = {
     "agent_terminal" | "agent_complete" | "task_bundle_delegated" |
     "worktree_leased" | "worktree_sealed" | "worktree_promoted" |
     "worktree_cleanup_failed" |
-    "multi_agent_routed_to_supervisor" | "agent_dag_admitted" |
+    "multi_agent_routed_to_supervisor" | "agent_dag_admitted" | "agent_dag_admission_failed" |
     "toolcall_done" | "decision_required" | "sessions_recovery_available" |
     "session_recovery_resumed" | "session_recovery_discarded" |
     "session_recovery_blocked" |

@@ -59,8 +59,7 @@ class ProviderTurnRuntime:
         self.stream_recoveries = 0
 
     def before_attempt(self, _index, _client):
-        if self.process.task_budget is not None:
-            reserve_provider_call(self.process, self.emit)
+        reserve_provider_call(self.process, self.emit)
         return _provider_idle_timeout(self.process)
 
     def route_notice(self, artifact):
@@ -92,7 +91,7 @@ class ProviderTurnRuntime:
 
     def prepare(self):
         budget_call_index = 0
-        if self.process.task_budget is not None and (not hasattr(self.provider, 'stream_session_events')):
+        if not hasattr(self.provider, 'stream_session_events'):
             budget_call_index = reserve_provider_call(self.process, self.emit)
         self.budget_prefix = f'provider-{budget_call_index}:'
         self.idle_timeout = _provider_idle_timeout(self.process)
@@ -226,11 +225,15 @@ class ProviderTurnRuntime:
         )
 
     def failure(self, exc):
+        from .mailbox import MailboxRecoveryRequired
+        from .runtime_outcomes import _status_result
         if self.process.task_budget is not None:
             self.process.task_budget.finish_output_fragments(
                 self.process.process_id,
                 prefix=self.budget_prefix,
             )
+        if isinstance(exc, MailboxRecoveryRequired):
+            return ProviderTurnBoundary(result=_status_result(self.process, self.session))
         from backend.core.loop.budget import TaskBudgetExceeded
         from backend.core.loop.llm import StreamCancelledError, StreamInterruptedError
         if isinstance(exc, TaskBudgetExceeded):
@@ -333,7 +336,7 @@ class ProviderTurnRuntime:
     def fallback(self):
         try:
             routed_chat = hasattr(self.provider, 'stream_session_events')
-            if self.process.task_budget is not None and (not routed_chat):
+            if not routed_chat:
                 reserve_provider_call(self.process, self.emit)
             response = self.provider.chat(
                 (
@@ -393,6 +396,10 @@ class ProviderTurnRuntime:
             self.process.steps_used += 1
             self.stream_recoveries = 0
         except Exception as chat_exc:
+            from .mailbox import MailboxRecoveryRequired
+            from .runtime_outcomes import _status_result
+            if isinstance(chat_exc, MailboxRecoveryRequired):
+                return ProviderTurnBoundary(result=_status_result(self.process, self.session))
             if isinstance(chat_exc, ProviderResponseIncomplete) and chat_exc.usage:
                 self.record_sync_usage(chat_exc.usage)
                 self.emit({'event': 'provider_response_incomplete', 'phase': 'sync_fallback',

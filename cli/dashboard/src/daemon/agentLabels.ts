@@ -6,6 +6,6 @@ export function agentLabel(process: ProcessInfo): string {
 }
 export function runningWorkers(processes: Record<string, ProcessInfo>): ProcessInfo[] {
   return Object.values(processes).filter(p => Boolean(p.parent_id)
-    && p.actor_kind !== "supervisor" && ["running", "waiting", "awaiting_user"].includes(p.status))
+    && p.actor_kind !== "supervisor" && (["running", "waiting", "awaiting_user"].includes(p.status) || ["pending", "failed"].includes(p.closeout_state || "")))
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }

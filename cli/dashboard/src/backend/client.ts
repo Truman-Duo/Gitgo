@@ -9,6 +9,13 @@ import type { PendingDecision } from "../types.js";
 
 export const NATIVE_PROTOCOL_VERSION = 1;
 
+export class NativeOperationError extends Error {
+  constructor(readonly code: string, message: string, readonly details: Record<string, unknown>) {
+    super(`${code}: ${message}`);
+    this.name = "NativeOperationError";
+  }
+}
+
 export interface BackendClient {
   readonly ready: boolean;
   callTool(
@@ -302,7 +309,11 @@ export class NativeHostClient implements BackendClient {
         if (message.ok) pending.resolve(message.result);
         else {
           const error = message.error || {};
-          pending.reject(new Error(`${error.code || "NATIVE_ERROR"}: ${error.message || "Unknown error"}`));
+          pending.reject(new NativeOperationError(
+            typeof error.code === "string" && error.code ? error.code : "NATIVE_ERROR",
+            typeof error.message === "string" && error.message ? error.message : "Unknown error",
+            error.details && typeof error.details === "object" && !Array.isArray(error.details) ? error.details : {},
+          ));
         }
       }
     }

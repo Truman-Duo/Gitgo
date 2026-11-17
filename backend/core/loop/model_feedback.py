@@ -112,7 +112,7 @@ def task_feedback(args, data):
 def contract_feedback(args, data):
     if data.get('accepted') is not True:
         return data
-    result = select(data, ('accepted', 'host_validated', 'authority_granted', 'routing_advice', 'maintenance_status'))
+    result = select(data, ('accepted', 'host_validated', 'authority_granted', 'routing_advice', 'routing_compilation', 'maintenance_status'))
     result['contract_revision'] = data['contract']['revision']
     result['execution_mode'] = data['contract'].get('execution_mode')
     result['activation'] = select(data.get('activation') or {}, ('phase', 'status', 'revision', 'error'))

@@ -25,7 +25,7 @@ _GOVERNANCE_TRACE_EVENTS = {
     "governance_snapshot", "completion_gate", "decision_required", "decision_resumed",
     "user_decision_requested", "user_decision_received", "context_compaction_requested",
     "context_compaction_completed", "context_compaction_failed", "context_window_action",
-    "context_window_exceeded", "task_bundle_delegated", "agent_dag_admitted",
+    "context_window_exceeded", "task_bundle_delegated", "agent_dag_admitted", "agent_dag_admission_failed",
     "deadline_extended", "repository_scope_blocked", "repository_scope_warning",
     "session_recovery_blocked", "session_recovery_resumed", "session_recovery_failed",
     "session_recovery_discarded", "storage_health", "worktree_leased", "worktree_sealed",

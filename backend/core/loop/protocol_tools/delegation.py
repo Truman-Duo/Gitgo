@@ -13,7 +13,8 @@ def install(ctx):
     tools = ctx.tools
     _spawn_child = ctx.spawn_child
     delegate_task = ctx.delegate_task
-    def delegate_task(args: dict) -> dict:
+    def delegate_task(args: dict, *, validate_only=False,
+                      planned_dependency_ids=(), start_immediately=True) -> dict:
         from backend.core.errors import error_payload
         from backend.core.loop.task_contract import (
             delegation_intent_id,
@@ -36,20 +37,30 @@ def install(ctx):
         required_for_parent = bool(
             args.get("required_for_parent_completion", True)
         )
+        if "required_for_parent_completion" not in args:
+            predecessor_id = str(args.get("continue_process_id") or args.get("supersedes_process_id") or "")
+            predecessor_contract = process.delegated_contracts.get(predecessor_id)
+            if predecessor_contract is not None:
+                # Attempt accounting and actual successor admission must agree.
+                # Omission retains an optional predecessor; it must not invent
+                # a root minimum that the optional successor cannot satisfy.
+                required_for_parent = bool(predecessor_contract.get("required_for_parent_completion", True))
         intent_id = delegation_intent_id(
             task_description, target_files, criteria,
         )
-        record_delegation_attempt(
-            process,
-            intent_id=intent_id,
-            required=required_for_parent,
-            profile_id=profile_id,
-            task_kind=raw_task_kind,
-            target_files=target_files,
-        )
+        def record_attempt():
+            record_delegation_attempt(
+                process, intent_id=intent_id, required=required_for_parent,
+                profile_id=profile_id, task_kind=raw_task_kind, target_files=target_files,
+            )
+
+        if not validate_only:
+            record_attempt()
 
         def reject(name: str, message: str, *, details: dict | None = None,
                    next_actions: list[dict] | None = None) -> dict:
+            if validate_only:
+                record_attempt()
             payload = error_payload(
                 name, message=message, details=details,
                 next_actions=next_actions, state_changed=True,
@@ -93,16 +104,16 @@ def install(ctx):
             if (
                 current_contract.get("revision")
                 and
-                route.get("recommended") == "self_execute"
+                current_contract.get("execution_mode") not in {"delegate", "either"}
                 and not bool(host_requirements.get("manual_B_creation"))
             ):
                 return reject(
                     "DELEGATION_ADMISSION_FAILED",
-                    "The current structured contract describes bounded single-owner work; use request_self_execute, or revise the contract with a concrete complexity rationale.",
+                    "The current contract explicitly keeps execution with the supervisor; revise execution_mode before delegating.",
                     details={"routing_advice": route},
                     next_actions=[
                         {"action": "request_self_execute", "profile_id": "development.workspace"},
-                        {"action": "revise_task_contract", "required": ["estimated_complexity", "delegation_rationale"]},
+                        {"action": "declare_task_contract", "patch": {"operation": "revise", "execution_mode": "delegate", "routing_transition": "delegate_initial"}},
                     ],
                 )
             profile_error = CapabilityProfiles.worker_error(profile_id)
@@ -213,13 +224,20 @@ def install(ctx):
                 output_interfaces=output_interfaces,
                 interface_contract=interface_contract,
                 required_for_parent_completion=required_for_parent,
+                required_for_parent_completion_explicit="required_for_parent_completion" in args,
                 supersedes_process_id=str(args.get("supersedes_process_id", "")),
                 continue_process_id=str(args.get("continue_process_id", "")),
+                continuation_mode=str(args.get("continuation_mode", "")),
                 display_name=str(args.get("display_name", "")),
                 budget_request=dict(args.get("budget_request") or {}),
+                validate_only=validate_only,
+                planned_dependency_ids=planned_dependency_ids,
+                start_immediately=start_immediately,
             )
+            if validate_only:
+                return {"validated": True, "budget_node": child}
             finish_delegation_attempt(
-                process, intent_id=intent_id, state="running",
+                process, intent_id=intent_id, state="running" if start_immediately else "prepared",
                 child_process_id=child.process_id,
             )
             return {
@@ -229,11 +247,13 @@ def install(ctx):
                 "session_id": child.session.session_id,
                 "display_name": child.session.display_name,
                 "status": child.status.value,
+                "execution_state": "started" if start_immediately else "prepared",
                 "profile_id": profile_id,
                 "budget_lease": dict(child.budget_lease or {}),
+                "continuation": dict((child.context_snapshot.get("task_contract") or {}).get("continuation") or {}),
             }
-        except (ValueError, PermissionError, RuntimeError) as exc:
-            return reject(
+        except (TypeError, ValueError, PermissionError, RuntimeError, OSError) as exc:
+            failure = reject(
                 "DELEGATION_ADMISSION_FAILED",
                 str(exc),
                 details={
@@ -242,8 +262,30 @@ def install(ctx):
                     "valid_worker_profiles": CapabilityProfiles.describe(
                         actor_kind="worker"
                     ),
+                    **({"continuation_code": exc.code} if hasattr(exc, "code") else {}),
                 },
+                next_actions=getattr(exc, "next_actions", None),
             )
+            retained = list(getattr(exc, "retained_process_ids", []))
+            if retained:
+                failure.update(retained_process_ids=retained, execution_state="recovery_required",
+                               automatic_replay_suppressed=True, recovery_checkpointed=False)
+                # This is a new recovery checkpoint, never a retry of the
+                # uncertain history write. fork has released its admission lock.
+                store = getattr(ctx.manager, "session_store", None)
+                try:
+                    if store is None:
+                        raise RuntimeError("Recovery checkpoint store is unavailable")
+                    for retained_id in retained:
+                        retained_child = ctx.manager.get(retained_id)
+                        if retained_child is None:
+                            raise RuntimeError("Retained admission identity is unavailable: " + retained_id)
+                        store.save_process_checkpoint(retained_child)
+                    store.save_process_checkpoint(process)
+                    failure["recovery_checkpointed"] = True
+                except Exception as persistence_exc:
+                    failure["persistence_error"] = str(persistence_exc)
+            return failure
 
 
     tools["delegate_task"] = AgentTool(
@@ -295,6 +337,8 @@ def install(ctx):
                 "required_for_parent_completion": {"type": "boolean"},
                 "supersedes_process_id": {"type": "string"},
                 "continue_process_id": {"type": "string"},
+                "continuation_mode": {"type": "string", "enum": ["remaining", "follow_up", "replace"],
+                    "description": "Omit to retain unfinished obligations, or follow up after accepted success. remaining appends to the unfinished assignment. follow_up/replace require the previous outcome to be durably complete and approved; they cannot silently discard unfinished work."},
                 "display_name": {"type": "string", "maxLength": 48},
                 "max_steps": {"type": "integer"},
                 "budget_request": {

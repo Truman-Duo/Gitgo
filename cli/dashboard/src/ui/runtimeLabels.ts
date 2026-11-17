@@ -1,6 +1,10 @@
 import type {Copy} from "./pageContract.js";
 
 const labels = {
+ closing:{en:"Closing",zh:"收尾中"},closeout_failed:{en:"Save failed",zh:"收尾失败"},
+ self_execute:{en:"Main process",zh:"主进程执行"},delegate:{en:"Delegate",zh:"委派"},
+ continue_worker:{en:"Continue owner",zh:"原负责人续办"},undecided:{en:"Undecided",zh:"待决定"},
+
  worker:{en:"Worker",zh:"执行子进程"},reviewer:{en:"Reviewer",zh:"审查子进程"},supervisor:{en:"Main process",zh:"主进程"},
  waiting:{en:"Waiting",zh:"等待中"},recovering:{en:"Recovering",zh:"恢复中"},resume_available:{en:"Resume available",zh:"可恢复"},
  timed_out:{en:"Timed out",zh:"超时"},orphaned:{en:"Orphaned",zh:"失去关联"},killed:{en:"Stopped",zh:"已停止"},
@@ -50,4 +54,11 @@ const labels = {
 export function label(value:unknown,t:(value:Copy)=>string):string {
  const key=String(value??"");
  return Object.hasOwn(labels,key)?t(labels[key as keyof typeof labels]):key;
+}
+
+/** A completed model response remains provisional until Host closeout succeeds. */
+export function processDisplayStatus(process: {status: string; closeout_state?: string}): string {
+ if (process.closeout_state === "failed") return "closeout_failed";
+ if (process.closeout_state === "pending") return "closing";
+ return process.status;
 }

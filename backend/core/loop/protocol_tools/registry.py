@@ -19,6 +19,8 @@ class ToolBindings:
     dossier_store: Any = None
     owned_child: Any = None
     spawn_child: Any = None
+    start_prepared_child: Any = None
+    cancel_prepared_child: Any = None
     delegate_task: Any = None
     prepare_task_bundle: Any = None
 
@@ -59,9 +61,9 @@ def build_internal_tools(process, available_tools, workspace_path, llm_provider,
         factories.extend([
             Factory(coordination),
             Factory(artifacts, provides=("owned_child",)),
-            Factory(child_execution, requires=("owned_child",), provides=("spawn_child",)),
+            Factory(child_execution, requires=("owned_child",), provides=("spawn_child", "start_prepared_child", "cancel_prepared_child")),
             Factory(delegation, requires=("spawn_child",), provides=("delegate_task",)),
-            Factory(task_dag, requires=("delegate_task",)),
+            Factory(task_dag, requires=("delegate_task", "start_prepared_child", "cancel_prepared_child")),
             Factory(bundle_preparation, requires=("engineering",), provides=("prepare_task_bundle",)),
             Factory(bundle_execution, requires=("prepare_task_bundle", "spawn_child")),
             Factory(child_review, requires=("owned_child", "spawn_child")),

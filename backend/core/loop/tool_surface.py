@@ -125,12 +125,9 @@ def _select_authorized_tools(
         for name in declared
         if name in dispatcher_tools
     }
-    # The model has already supplied the semantic routing facts.  Once the
-    # compiled contract selects bounded single-owner execution, omit the three
-    # delegation entry points from the current provider surface.  A may revise
-    # the contract if the work genuinely grows; the next surface rebuild then
-    # exposes delegation again.  This avoids a reject/retry turn without using
-    # keyword intent rules or granting execution authority implicitly.
+    # Hide delegation only when the model explicitly selected self execution.
+    # Optional routing advice never removes a capability from an either/delegate
+    # contract. A concise revision can change the choice as the work evolves.
     if process.actor_kind == "supervisor":
         from backend.core.loop.task_contract import get_task_contract
         contract = get_task_contract(process)

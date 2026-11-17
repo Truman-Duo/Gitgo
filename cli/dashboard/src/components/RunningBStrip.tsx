@@ -7,7 +7,7 @@ import { ContextStatus } from "./ContextStatus.js";
 import { agentLabel } from "../daemon/agentLabels.js";
 
 const workerLabel = (process: ProcessInfo, zh: boolean) => agentLabel(process) + " · " +
-  (process.status === "running" ? (zh ? "工作中" : "working") : process.status === "awaiting_user" ? (zh ? "待答复" : "awaiting input") : (zh ? "等待" : "waiting"));
+  (process.closeout_state === "pending" ? (zh ? "收尾中" : "closing") : process.closeout_state === "failed" ? (zh ? "收尾失败" : "save failed") : process.status === "running" ? (zh ? "工作中" : "working") : process.status === "awaiting_user" ? (zh ? "待答复" : "awaiting input") : (zh ? "等待" : "waiting"));
 
 type Props = {
   language?: "en" | "zh";

@@ -3,7 +3,7 @@ import {Box,ScrollBox,Text,type ScrollBoxHandle} from "@anthropic/ink";
 import type {ProcessInfo} from "../hooks/useLoopData.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages,standardKey,type Copy} from "../ui/pageContract.js";
-import {label} from "../ui/runtimeLabels.js";
+import {label,processDisplayStatus} from "../ui/runtimeLabels.js";
 import {agentLabel} from "../daemon/agentLabels.js";
 import {useManagedInput as useInput,useScrollInput} from "../input/runtime.js";
 type Props={project:string;processId:string;processes:Record<string,ProcessInfo>;onDismiss:()=>void};
@@ -45,11 +45,14 @@ export function processDetailSections(process:ProcessInfo,processes:Record<strin
  const sections:Section[]=[
   {title:t({en:"Identity",zh:"身份"}),rows:[
    {label:t({en:"Name",zh:"名称"}),value:agentLabel(process)},
-   {label:t({en:"Status",zh:"状态"}),value:label(process.status,t)},
+   {label:t({en:"Status",zh:"状态"}),value:label(processDisplayStatus(process),t)},
    {label:t({en:"Role",zh:"角色"}),value:label(process.actor_kind||process.role,t)},
    {label:t({en:"Model",zh:"模型"}),value:value(process.model_id)},
    {label:t({en:"Process ID",zh:"进程 ID"}),value:process.process_id},
    {label:t({en:"Session ID",zh:"会话 ID"}),value:value(process.session_id)},
+   {label:t({en:"Executions in this conversation",zh:"此会话的执行次数"}),value:String(process.session_id
+    ? Object.values(processes).filter(p=>p.session_id===process.session_id).length : 1)},
+   ...(process.routing_compilation?.effective ? [{label:t({en:"Execution owner",zh:"执行分工"}),value:label(process.routing_compilation.effective,t)}] : []),
    {label:t({en:"Created",zh:"创建时间"}),value:value(process.created_at)},
   ]},
   {title:t({en:"Execution budget",zh:"执行预算"}),rows:[

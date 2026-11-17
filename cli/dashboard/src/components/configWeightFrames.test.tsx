@@ -204,7 +204,7 @@ test("complete App retains project headings and selected tab weight while unrela
   try {
     stdout.write("\x1b[2J\x1b[H"); ink.setAltScreenActive(true); ink.onRender(); await wait();
     for (let update = 0; update < 4; update++) {
-      for (const heading of ["项目名称", "进程", "项目位置"]) assert.deepEqual(textWeight(heading), {logical: true, physical: true}, heading);
+      for (const heading of ["项目名称", "执行中", "项目位置"]) assert.deepEqual(textWeight(heading), {logical: true, physical: true}, heading);
       for (const fn of subscribers) fn({event: "project_summary_updated", project: "示例", summary: {state_available: true, finished_process_count: update + 1}});
       await wait();
     }

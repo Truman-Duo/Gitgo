@@ -32,10 +32,32 @@ class DaemonCommandError(RuntimeError):
 
     def __init__(self, command: str, result: dict):
         self.command = command
-        self.code = str(result.get("error") or "DAEMON_COMMAND_FAILED")
-        self.message = str(result.get("message") or result.get("detail") or self.code)
+        code = result.get("code")
+        self.code = code if isinstance(code, str) and code else str(result.get("error") or "DAEMON_COMMAND_FAILED")
+        self.message = str(result.get("message") or result.get("detail") or result.get("error") or self.code)
         self.error_info = dict(result.get("error_info") or {})
         self.details = dict(self.error_info.get("details") or {})
+        # These fields come from the daemon's command envelope, never from
+        # parsing Provider prose. Do not retain the whole response/checkpoint.
+        if isinstance(result.get("owner_process_id"), str):
+            self.details["owner_process_id"] = result["owner_process_id"]
+        if isinstance(result.get("next_actions"), list):
+            actions = []
+            for item in result["next_actions"][:16]:
+                if not isinstance(item, dict) or not isinstance(item.get("action"), str):
+                    continue
+                action = {key: item[key] for key in ("action", "process_id", "reason")
+                          if isinstance(item.get(key), str)}
+                patch = item.get("patch")
+                if isinstance(patch, dict):
+                    bounded = {key: patch[key] for key in ("continue_process_id", "continuation_mode")
+                               if isinstance(patch.get(key), str)}
+                    if type(patch.get("required_for_parent_completion")) is bool:
+                        bounded["required_for_parent_completion"] = patch["required_for_parent_completion"]
+                    if bounded:
+                        action["patch"] = bounded
+                actions.append(action)
+            self.details["next_actions"] = actions
         super().__init__(f"Command '{command}' failed: {self.code}: {self.message}")
 
 

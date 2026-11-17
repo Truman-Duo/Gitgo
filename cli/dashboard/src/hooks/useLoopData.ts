@@ -18,6 +18,9 @@ export type ProcessInfo = {
   task_maintenance?: {task_id?: string; revision?: number; epoch?: number; phase?: string; changes?: Record<string, unknown>};
   advancement?: Advancement;
   state_revision?: number;
+  lifecycle_finalized?: boolean;
+  closeout_state?: "active" | "pending" | "failed" | "finalized";
+  routing_compilation?: {requested?: string; recommended?: string; effective?: string; reason?: string};
   archived?: boolean;
   display_name?: string;
   session_id?: string;
@@ -311,7 +314,7 @@ export function useLoopData(
     if (!client?.subscribeEvents || !project) return;
     const stateEvents = new Set([
       "runtime_ack", "task_admitted", "agent_started", "agent_terminal", "agent_complete",
-      "state_changed", "daemon_started", "daemon_stopped",
+      "state_changed", "daemon_started", "daemon_stopped", "agent_dag_admitted", "agent_dag_admission_failed",
       "provider_usage", "tool_result", "decision_required", "user_decision_received",
       "provider_route_activated", "provider_route_selected", "provider_route_failed", "provider_route_skipped",
       "decision_resumed", "context_compaction_requested", "context_compaction_completed",

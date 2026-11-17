@@ -41,7 +41,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1} minHeight={0}>
       <TableHeaderText>{padEndWidth(truncate(t({en:"Name",zh:"项目名称"}),nameW),nameW)}<Text dimColor>
-        {padEndWidth(t({en:"Procs",zh:"进程"}),procW)}{t({en:"Path",zh:"项目位置"})}
+        {padEndWidth(t({en:"Active",zh:"执行中"}),procW)}{t({en:"Path",zh:"项目位置"})}
       </Text></TableHeaderText>
 
       {projects.length === 0 ? (
@@ -63,7 +63,8 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
               const i = group.start + gi;
               const isSelected = i === sel;
 
-              const procBadge = p.activeProcessCount > 0 ? String(p.activeProcessCount) : "";
+              const procBadge = p.countScope === "live_executions" ? "~" + String(p.activeProcessCount)
+                : p.activeProcessCount > 0 ? String(p.activeProcessCount) : "";
               const procColor = p.activeProcessCount > 0 ? colors.accent : undefined;
               const procStr = (procBadge || "-").padEnd(procW);
 

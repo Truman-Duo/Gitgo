@@ -6,6 +6,7 @@ from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 import json
 from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.models import ProcessStatus
+from backend.core.loop.lifecycle import execution_closeout, is_consumable_terminal
 from backend.core.loop.operation_policy import is_effectful_mutation
 
 def install(ctx):
@@ -30,6 +31,7 @@ def install(ctx):
                     **(manager.presentation.read(child.process_id) if getattr(manager, "presentation", None) else {}),
                     "actor_kind": child.actor_kind,
                     "status": child.status.value,
+                    **execution_closeout(child, manager),
                     "task": child.task_description[:300],
                     "target_files": list(process.delegated_contracts.get(child.process_id, {}).get("target_files", [])),
                     "superseded_by": process.delegated_contracts.get(child.process_id, {}).get("superseded_by", ""),
@@ -95,6 +97,8 @@ def install(ctx):
             metadata = dict(outcome.get("metadata") or {})
             results[child_id] = {
                 "status": state.get("status", "not_found"),
+                "lifecycle_finalized": state.get("lifecycle_finalized", False),
+                "closeout_state": state.get("closeout_state", "pending"),
                 "outcome_ref": outcome_ref,
                 "response_excerpt": response[:1800],
                 "response_truncated": len(response) > 1800,
@@ -146,6 +150,9 @@ def install(ctx):
         child = _owned_child(child_id)
         if child is None:
             return {"accepted": False, "error": "process is not an owned child"}
+        if not is_consumable_terminal(child, manager):
+            return {"accepted": False, "error": "child closeout is not finalized",
+                    **execution_closeout(child, manager)}
         if child.status in {
             ProcessStatus.RUNNING, ProcessStatus.WAITING,
             ProcessStatus.CANCELLING, ProcessStatus.AWAITING_USER,
@@ -341,7 +348,18 @@ def install(ctx):
         if _owned_child(child_id) is None:
             return {"accepted": False, "error": "process is not an owned child"}
         child = _owned_child(child_id)
-        if child.status in {ProcessStatus.COMPLETED, ProcessStatus.FAILED,
+        from backend.core.loop.native_invocation_scope import current_tool_call_identity
+        identity = current_tool_call_identity(process)
+        message_id = ""
+        if identity is not None:
+            import hashlib
+            prefix = "feedback-v2-" if len(identity) == 3 and identity[1] == "host_ordinal" else "feedback-"
+            message_id = prefix + hashlib.sha256(json.dumps([
+                process.process_id, process.active_task_id, *identity,
+                child.process_id, child.active_task_id,
+            ]).encode()).hexdigest()
+        repeated = message_id and child.mailbox.get(message_id) is not None
+        if not repeated and child.status in {ProcessStatus.COMPLETED, ProcessStatus.FAILED,
                             ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED}:
             from backend.core.errors import error_payload
             return {"accepted": False, **error_payload(
@@ -352,6 +370,7 @@ def install(ctx):
             )}
         return manager.send_instruction(
             child_id, str(args.get("message", "")),
+            durable=True, message_id=message_id,
         )
 
 

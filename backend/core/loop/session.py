@@ -824,6 +824,35 @@ class AgentSession:
         token_threshold: int = 64000,
         retained_public_messages: int = 8,
     ) -> bool:
+        """Publish a complete boundary or retain the original usable context.
+
+        Call only after exclusive execution admission. Compaction reads historic
+        rows and replaces context containers; stage those containers so a local
+        failure cannot partially clear the shared conversation/provider state.
+        Historical archive rows remain read-only and are not copied recursively.
+        """
+        from copy import copy
+        staged = copy(self)
+        fields = ('messages', 'provider_state', 'epoch_archive', 'context_flags',
+                  'provider_context_cache', 'compiled_prompt_sections',
+                  'compiled_prompt_hash', 'context_epoch')
+        for name in fields:
+            setattr(staged, name, copy(getattr(self, name)))
+        changed = staged._compact_completed_task_boundary(
+            checkpoint=checkpoint, token_threshold=token_threshold,
+            retained_public_messages=retained_public_messages)
+        if changed:
+            for name in fields:
+                setattr(self, name, getattr(staged, name))
+        return changed
+
+    def _compact_completed_task_boundary(
+        self,
+        *,
+        checkpoint: dict,
+        token_threshold: int,
+        retained_public_messages: int,
+    ) -> bool:
         """Seal old execution mechanics before an unrelated root task starts.
 
         A project session intentionally survives several user turns, but

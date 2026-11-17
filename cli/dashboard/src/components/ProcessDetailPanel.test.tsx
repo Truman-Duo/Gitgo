@@ -71,7 +71,7 @@ test("project table keeps locations and uses Chinese headings; subprocess list n
   {...streams,patchConsole:false,exitOnCtrlC:false});
  try{
   await wait();const lines=frame(streams.stdout);
-  expect(lines[1]).toContain("项目名称");expect(lines[1]).toContain("项目位置");expect(lines[1]).toContain("进程");
+  expect(lines[1]).toContain("项目名称");expect(lines[1]).toContain("项目位置");expect(lines[1]).toContain("执行中");
   expect(lines.join("\n")).toContain("location-folder");
   const rows={one:processes.one,two:child("two","C:/two","awaiting_user")};
   root.rerender(<LanguageContext.Provider value="zh"><InputProvider><Box height={20} width={84}>
@@ -83,4 +83,15 @@ test("project table keeps locations and uses Chinese headings; subprocess list n
   expect(text).not.toContain("Selected subprocess");expect(text).not.toContain("PgUp");
   expect(status).toContain("1 个工作中");expect(status).toContain("1 个待答复");
  }finally{root.unmount();root.cleanup();Object.values(streams).forEach((s:any)=>s.destroy());}
+});
+
+test("closeout failure and continuation history do not masquerade as completion",()=>{
+ const first={...processes.one,session_id:"same",status:"completed",closeout_state:"pending"};
+ const second={...processes.two,session_id:"same",status:"completed",closeout_state:"failed",routing_compilation:{effective:"delegate"}};
+ const rows={one:first,two:second};
+ const values=(p:any)=>processDetailSections(p,rows,t).flatMap(s=>s.rows);
+ expect(values(first).find(r=>r.label==="状态")?.value).toBe("收尾中");
+ expect(values(second).find(r=>r.label==="状态")?.value).toBe("收尾失败");
+ expect(values(second).find(r=>r.label==="此会话的执行次数")?.value).toBe("2");
+ expect(values(second).find(r=>r.label==="执行分工")?.value).toBe("委派");
 });

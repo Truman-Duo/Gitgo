@@ -1,1 +1,1 @@
-Send corrective or additional instructions to a B Agent mailbox. Delivery is applied at the next safe turn boundary.
+Send corrective or additional instructions to a B Agent mailbox. Successful acceptance means the recipient's message is checkpointed for its next safe turn boundary. It does not mean B has applied the feedback, changed its task contract, or completed the requested work.

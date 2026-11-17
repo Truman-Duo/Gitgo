@@ -76,20 +76,32 @@ def assess_with_provider(provider, payload, *, before_attempt=None, on_notice=No
         return {'schema_error': 'provider_response_incomplete', 'incomplete_reason': exc.reason,
                 '_provider_usage': exc.usage, '_provider_cache_intent': getattr(exc, 'cache_intent', None)}
     raw = response.get('content', '') if isinstance(response, dict) else response
-    text = str(raw).strip()
-    if text.startswith('```'):
+    text = '' if raw is None else str(raw).strip()
+    if text.startswith('```') and '\n' in text:
         text = text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError:
-        # Keep billing and bounded diagnostic evidence for compiler recovery.
-        result = {'schema_error': 'invalid_json', 'unparsed_output': text[:8000]}
-    if not isinstance(result, dict):
-        result = {'schema_error': 'object_required'}
-    if not isinstance(result.get('request_frame'), dict):
-        result = {**result, 'status': 'invalid_request_frame', 'schema_error': 'request_frame_required: classify the current requested response, not a hypothetical future task'}
-    if payload.get('stage') == 'delivery' and not isinstance(result.get('delivery_check'), dict):
-        result = {**result, 'status': 'invalid_delivery_check', 'schema_error': 'delivery_check_required'}
+    if isinstance(response, dict) and response.get('finish_reason') == 'length':
+        # Preserve the wire reason without opting into the Responses API's
+        # max_output_tokens recovery allowance. A parseable fragment is still
+        # incomplete; neither syntax nor usage counts prove completion.
+        result = {'schema_error': 'provider_response_incomplete', 'incomplete_reason': 'length',
+                  'unparsed_output': text[:8000]}
+    elif not text:
+        result = {'schema_error': 'empty_response', 'unparsed_output': ''}
+    else:
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError:
+            # Keep billing and bounded diagnostic evidence for compiler recovery.
+            result = {'schema_error': 'invalid_json', 'unparsed_output': text[:8000]}
+        else:
+            # Only parsed objects reach field validation. A model-authored
+            # schema_error cannot bypass it or impersonate a transport failure.
+            if not isinstance(result, dict):
+                result = {'schema_error': 'object_required'}
+            elif not isinstance(result.get('request_frame'), dict):
+                result = {**result, 'status': 'invalid_request_frame', 'schema_error': 'request_frame_required: classify the current requested response, not a hypothetical future task'}
+            elif payload.get('stage') == 'delivery' and not isinstance(result.get('delivery_check'), dict):
+                result = {**result, 'status': 'invalid_delivery_check', 'schema_error': 'delivery_check_required'}
     if isinstance(response, dict) and response.get('usage'):
         result['_provider_usage'] = response['usage']
         result['_provider_cache_intent'] = response.get('cache_intent')

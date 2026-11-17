@@ -285,3 +285,12 @@ test("separate proposal notices survive deduplication while no-knowledge complet
   state = reduceStreamEvent(state, {event: "lesson_harvest_completed", count: 0});
   expect(state.notices).toHaveLength(2);
 });
+
+test("partial DAG admission failure preserves already-started work in its notice",()=>{
+ const state=reduceStreamEvent(initStreamState(),{event:"agent_dag_admission_failed",process_id:"a",
+  execution_state:"partially_started",started_process_ids:["b"],cancelled_before_start_process_ids:["c"],error:"start failed"});
+ expect(state.notices[0]?.severity).toBe("error");
+ expect(state.notices[0]?.detail).toContain("1 started");
+ expect(state.notices[0]?.detail).toContain("1 cancelled before start");
+ expect(state.notices[0]?.detail).not.toContain("rolled back");
+});
