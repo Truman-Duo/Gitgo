@@ -98,14 +98,12 @@ class ContextObjectStore:
             content = normalize_unicode_text(str(value))
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         self.blobs.mkdir(parents=True, exist_ok=True)
-        blob_path = self.blobs / f"{digest}.json"
-        if not blob_path.exists():
-            self._atomic_write(blob_path, {
-                "digest": digest,
-                "media_type": media_type,
-                "content": content,
-                "metadata": object_metadata,
-            })
+        self._publish_blob(digest, {
+            "digest": digest,
+            "media_type": media_type,
+            "content": content,
+            "metadata": object_metadata,
+        })
         # One atomic file per logical ref avoids lost read-modify-write updates
         # even when Native Host, daemon watcher, and another harness overlap.
         with self._refs_lock:
@@ -153,19 +151,52 @@ class ContextObjectStore:
             raise ValueError(f"unsupported context selector: {selector}")
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("invalid context digest")
-        blob_path = self.blobs / f"{digest}.json"
         try:
-            payload = json.loads(blob_path.read_text(encoding="utf-8"))
+            payload = self._read_blob(digest)
         except FileNotFoundError as exc:
             raise KeyError(f"context blob not found: {digest}") from exc
-        content = str(payload.get("content", ""))
-        if hashlib.sha256(content.encode("utf-8")).hexdigest() != digest:
-            raise ValueError(f"context blob integrity failure: {digest}")
         return ResolvedContextObject(
             ref=f"context:{name}@sha256:{digest}", logical_name=name,
             digest=digest, media_type=str(payload.get("media_type", "text/plain")),
-            content=content, metadata=dict(payload.get("metadata", {})),
+            content=payload["content"], metadata=dict(payload.get("metadata", {})),
         )
+
+    def _read_blob(self, digest: str) -> dict:
+        payload = json.loads((self.blobs / f"{digest}.json").read_text(encoding="utf-8"))
+        if (not isinstance(payload, dict) or payload.get("digest") != digest
+                or not isinstance(payload.get("content"), str)
+                or not isinstance(payload.get("metadata", {}), dict)
+                or hashlib.sha256(payload["content"].encode("utf-8")).hexdigest() != digest):
+            raise ValueError(f"context blob integrity failure: {digest}")
+        return payload
+
+    def _publish_blob(self, digest: str, value: dict) -> None:
+        # Blobs are immutable. A pre-existing object is reusable only after
+        # validation; refs must not acknowledge corrupt or incomplete content.
+        try:
+            self._read_blob(digest)
+            return
+        except FileNotFoundError:
+            pass
+        path = self.blobs / f"{digest}.json"
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8") as stream:
+                json.dump(value, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                # Same-directory hard-link publication is atomic and cannot
+                # replace a winner, even across processes. In particular a
+                # Windows reader need not share deletion of immutable blobs.
+                os.link(temporary, path)
+            except FileExistsError:
+                # Only a known name collision may reuse the selected object.
+                # Permission/disk/unsupported-filesystem errors stay visible.
+                pass
+            self._read_blob(digest)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def reference_info(self, ref: str) -> dict:
         """Describe identity and the matching logical ref's dependency metadata.
