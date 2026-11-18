@@ -8,11 +8,44 @@ pub const ABI: u32 = 1;
 pub const MAX_REQUEST: usize = 1024 * 1024;
 pub const RESPONSE_CAPACITY: usize = 65536;
 static SEALED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "linux")]
+mod linux_cgroup;
+#[cfg(target_os = "linux")]
+mod linux_seccomp;
 mod safe_read;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum Request {
+    #[serde(rename = "linux_directory_descriptor")]
+    LinuxDirectoryDescriptor { token: u64 },
+    #[serde(rename = "linux_cgroup_watch")]
+    LinuxCgroupWatch {
+        token: u64,
+        pid: u32,
+        cpu_seconds: u32,
+    },
+    #[serde(rename = "linux_filter_create")]
+    LinuxFilterCreate { workspace: Vec<u8> },
+    #[serde(rename = "linux_filter_close")]
+    LinuxFilterClose { token: u64 },
+    #[serde(rename = "linux_cgroup_procs")]
+    LinuxCgroupProcs { token: u64 },
+    #[serde(rename = "linux_cgroup_recover")]
+    LinuxCgroupRecover { root: Vec<u8>, recovery_id: String },
+    #[serde(rename = "linux_cgroup_create")]
+    LinuxCgroupCreate {
+        root: Vec<u8>,
+        recovery_id: String,
+        memory: u64,
+        processes: u32,
+    },
+    #[serde(rename = "linux_cgroup_query")]
+    LinuxCgroupQuery { token: u64 },
+    #[serde(rename = "linux_cgroup_kill")]
+    LinuxCgroupKill { token: u64 },
+    #[serde(rename = "linux_cgroup_retire")]
+    LinuxCgroupRetire { token: u64 },
     #[serde(rename = "capabilities")]
     Capabilities {},
     #[serde(rename = "read_root")]
@@ -75,9 +108,45 @@ fn dispatch(raw: &[u8]) -> Value {
         return json!({"ok": true, "abi": ABI, "platform": std::env::consts::OS,
             "windows_appcontainer": cfg!(windows), "linux_execution": false,
             "macos_execution": false, "safe_read_version": 2, "read_leaf_mount": cfg!(target_os = "linux"),
+            "linux_cgroup_version": if cfg!(target_os = "linux") {2} else {0},
+            "linux_filter_version": if cfg!(target_os = "linux") {1} else {0},
+            "linux_directory_version": if cfg!(target_os = "linux") {1} else {0},
             "authority": "host-existing-permission-broker"});
     }
     let request = match request {
+        #[cfg(target_os = "linux")]
+        Request::LinuxDirectoryDescriptor { token } => {
+            return safe_read::response(safe_read::directory_descriptor(token));
+        }
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupWatch {
+            token,
+            pid,
+            cpu_seconds,
+        } => return linux_cgroup::watch(token, pid, cpu_seconds),
+        #[cfg(target_os = "linux")]
+        Request::LinuxFilterCreate { workspace } => return linux_seccomp::create(&workspace),
+        #[cfg(target_os = "linux")]
+        Request::LinuxFilterClose { token } => return linux_seccomp::close(token),
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupProcs { token } => return linux_cgroup::procs(token),
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupRecover { root, recovery_id } => {
+            return linux_cgroup::recover(&root, &recovery_id);
+        }
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupCreate {
+            root,
+            recovery_id,
+            memory,
+            processes,
+        } => return linux_cgroup::create(&root, &recovery_id, memory, processes),
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupQuery { token } => return linux_cgroup::query(token),
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupKill { token } => return linux_cgroup::kill(token),
+        #[cfg(target_os = "linux")]
+        Request::LinuxCgroupRetire { token } => return linux_cgroup::retire(token),
         Request::ReadRoot { path } => return safe_read::response(safe_read::root(&path)),
         Request::ReadOpen {
             token,

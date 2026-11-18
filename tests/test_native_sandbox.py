@@ -1017,14 +1017,17 @@ def test_failed_resource_monitor_kills_started_tool(cross_platform_box, monkeypa
               "Path('before-monitor-failure.pending').write_text('ran');"
               "os.replace('before-monitor-failure.pending','before-monitor-failure');"
               "time.sleep(1);open('after-monitor-failure','w').write('escaped')")
-    def fail_start(_):
+    def fail_start(*_):
         deadline = time.monotonic() + 3
         while not (workspace / 'before-monitor-failure').exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert (workspace / 'before-monitor-failure').read_text() == 'ran'
         raise RuntimeError('Host thread resource unavailable')
     with monkeypatch.context() as patch:
-        patch.setattr(threading.Thread, 'start', fail_start)
+        if sys.platform == 'linux':
+            patch.setattr('backend.core.sandbox_linux.LinuxCgroup.watch', fail_start)
+        else:
+            patch.setattr(threading.Thread, 'start', fail_start)
         with pytest.raises(SandboxDenied) as error:
             sandbox_popen([executable, '-I', '-c', source], policy, cwd=str(workspace),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1253,16 +1256,14 @@ print('private-ipc')
 
 
 def test_linux_other_socket_domains_and_io_uring_are_denied(linux_box):
-    from backend.core.sandbox_seccomp import _load_library
     workspace, spawn = linux_box
     # Netlink is available without elevated privileges on the Host, rather
     # than relying only on domains already unavailable on a hosted kernel.
     with socket.socket(socket.AF_NETLINK,socket.SOCK_RAW,0):
         pass
-    api = _load_library(workspace)
-    numbers = [api.seccomp_syscall_resolve_name(name.encode())
-               for name in ('io_uring_setup','io_uring_enter','io_uring_register')]
-    assert all(number >= 0 for number in numbers)
+    # Independent Linux syscall ABI numbers, shared by x86_64 and aarch64.
+    # Do not ask the policy builder which calls the attack should attempt.
+    numbers = [425, 426, 427]
     source = f"""import ctypes,errno,socket
 for family in (socket.AF_UNIX,socket.AF_NETLINK,socket.AF_PACKET,40,0,9999):
     try:
@@ -1284,11 +1285,10 @@ print('domain-policy')
 
 
 def test_linux_native_filter_cannot_be_bypassed_with_x32_abi(linux_box):
-    from backend.core.sandbox_seccomp import _load_library
     workspace, spawn = linux_box
     if os.uname().machine != 'x86_64':
         pytest.skip('x32 syscall encoding is x86_64-specific')
-    number = _load_library(workspace).seccomp_syscall_resolve_name(b'socket')
+    number = 41  # x86_64 __NR_socket, independent of the policy builder
     source = ("import ctypes;print('ran',flush=True);"
               f"ctypes.CDLL(None).syscall({number | 0x40000000},2,1,0);print('escaped')")
     code, out, err = finished(spawn(source))
@@ -1330,9 +1330,9 @@ def test_linux_rejects_host_descriptor_inheritance_before_launch(linux_box, opti
 
 def test_missing_socket_filter_never_loads_into_host_or_yields_fallback(tmp_path_factory, monkeypatch):
     from backend.core.sandbox_seccomp import socket_filter
-    def unavailable(_):
-        raise OSError('System libseccomp is unavailable')
-    monkeypatch.setattr('backend.core.sandbox_seccomp._load_library',unavailable)
+    def unavailable():
+        raise OSError('Native socket filter is unavailable')
+    monkeypatch.setattr('backend.core.sandbox_seccomp.get_native',unavailable)
     with pytest.raises(SandboxDenied) as denied:
         with socket_filter(tmp_path_factory):
             pytest.fail('A missing filter must never yield a launch descriptor')
@@ -1830,3 +1830,58 @@ def test_packaged_host_approval_binding(cross_platform_box, handler):
     assert result.stdout.strip() == 'approval-binding-verified', result
 
 from tests.native_source_runtime import workspace_native_launcher
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Actual Linux Rust cgroup supervision')
+def test_packaged_linux_cpu_budget_is_native_and_cannot_hide_success(cross_platform_box):
+    workspace, policy, _ = cross_platform_box
+    configured = os.environ.get('GITGO_SANDBOX_TEST_HOST')
+    if not configured:
+        pytest.skip('Requires an actual frozen Host, never sys.frozen simulation')
+    host = Path(configured).resolve(strict=True)
+    child = ("import sys,time;open(sys.argv[1],'w').write('ready');t=time.process_time();"
+             "exec('while time.process_time()-t<0.7: pass');time.sleep(60)")
+    tool = ("import subprocess,time;from backend.core.child_process import python_command;"
+            "print('{\"success\":true,\"data\":{\"ok\":true}}',flush=True);"
+            f"[subprocess.Popen(python_command(['-I','-c',{child!r},'frozen-cpu-'+str(i)])) for i in range(2)];"
+            "time.sleep(60)")
+    driver = (
+        "import json,sys;assert sys.frozen;"
+        "from backend.core.native_sandbox import get_native;"
+        "assert get_native().call(op='capabilities')['linux_cgroup_version']==2;"
+        "from backend.core import sandbox;"
+        "from backend.core.loop import process_tool_runner as runner;"
+        "from backend.core.child_process import python_command;"
+        "Policy=sandbox.SandboxPolicy;"
+        "sandbox.SandboxPolicy=lambda workspace,**_:Policy(workspace,cpu_seconds=1);"
+        f"runner.tool_runner_command=lambda:python_command(['-I','-c',{tool!r}]);"
+        "from pathlib import Path;"
+        f"runner.owned_child_cwd=lambda _:Path({str(policy.workspace)!r});"
+        f"result=runner.ProcessToolRunner(timeout=15).run('exec_command',{{'_workspace':{str(policy.workspace)!r}}});"
+        "print(json.dumps({'success':result.success,'data':result.data,'cleanup':result.cleanup,'error':result.error,'stderr':result.stderr,'timed_out':result.timed_out,'duration_ms':result.duration_ms}))"
+    )
+    process = subprocess.run([str(host), '--gitgo-internal-role', 'python', '-I', '-c', driver],
+        capture_output=True, text=True, encoding='utf8', timeout=45)
+    assert process.returncode == 0, process.stderr
+    result = json.loads(process.stdout)
+    assert result['success'] and result['data']['error'] == 'SANDBOX_EXECUTION_FAILED', result
+    assert result['data']['effect_state'] == 'ambiguous' and 'CPU' in result['data']['message'], result
+    assert result['cleanup']['complete'] is True, result
+    assert all((workspace / f'frozen-cpu-{i}').read_text() == 'ready' for i in range(2))
+
+
+def test_linux_native_resource_descriptors_are_consumed_before_tool_exec(linux_box):
+    _, spawn = linux_box
+    source = """import os
+for name in os.listdir('/proc/self/fd'):
+    try:
+        target=os.readlink('/proc/self/fd/'+name)
+    except FileNotFoundError:
+        continue
+    assert 'memfd:gitgo-seccomp' not in target,target
+    assert 'cgroup.procs' not in target,target
+    assert '/sys/fs/cgroup/' not in target,target
+print('native-resources-not-inherited')
+"""
+    code, out, err = finished(spawn(source))
+    assert code == 0, (out, err)
+    assert out.strip() == 'native-resources-not-inherited'

@@ -1,6 +1,7 @@
 // Tokens are opaque, scoped to the loaded module and tagged by resource type.
-// The low two bits reserve disjoint domains: reads=0, Jobs=1, processes=2,
-// ACL files=3. Every native resource API must use this shared allocation rule.
+// The low two bits reserve disjoint domains within the loaded module: reads=0,
+// Windows Jobs/processes/ACL files=1/2/3, Linux cgroups/filters=1/2.
+// The platform-specific registries cannot coexist in a loaded module.
 // Each issued ordinal corresponds to a successful insertion. Therefore an
 // issued token missing from the live map is an exact retirement receipt.
 use std::collections::BTreeMap;

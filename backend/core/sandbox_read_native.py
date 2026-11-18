@@ -126,6 +126,15 @@ class NativePinnedRead(NativePinnedObject):
 
 
 class NativeReadRoot(NativePinnedObject):
+    def _linux_directory_descriptor(self):
+        """Borrow the pinned directory for Host Git mounts, never transfer ownership."""
+        with self._lock:
+            if sys.platform != 'linux' or self._closed:
+                raise ReadBoundaryError('A live Linux directory owner is required')
+            if self._library.call(op='capabilities').get('linux_directory_version') != 1:
+                raise ReadBoundaryError('The native directory mount extension is unavailable')
+            return _call(self._library, op='linux_directory_descriptor', token=self._token)['fd']
+
     def __init__(self, path: Path):
         path = Path(path)
         if not path.is_absolute() or '..' in path.parts or path == Path(path.anchor):

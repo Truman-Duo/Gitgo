@@ -135,6 +135,9 @@ class ReadRoot:
     def open(self, relative: str, *, allow_leaf_mount=False):
         return self._native.open(relative, allow_leaf_mount=allow_leaf_mount)
 
+    def _linux_directory_descriptor(self):
+        return self._native._linux_directory_descriptor()
+
     def close(self):
         self._native.close()
 
