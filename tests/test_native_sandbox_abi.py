@@ -49,7 +49,7 @@ def test_actual_module_identity_and_capabilities(native):
     assert report['linux_execution'] is False
     assert report['macos_execution'] is False
     assert report['safe_read_version'] == 2
-    assert report['linux_cgroup_version'] == (2 if sys.platform == 'linux' else 0)
+    assert report['linux_cgroup_version'] == (3 if sys.platform == 'linux' else 0)
     assert report['linux_filter_version'] == (1 if sys.platform == 'linux' else 0)
     assert report['linux_directory_version'] == (1 if sys.platform == 'linux' else 0)
 

@@ -180,21 +180,32 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
                 # No Host descriptor other than the three stdio pipes survives.
                 command[1:1] = ['--seccomp', str(program.fileno())]
                 kwargs.update(pass_fds=(program.fileno(), procs_fd), close_fds=True)
-                process = LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
+                process = LinuxSandboxProcess(command, cgroup=cgroup, **kwargs)
+                try:
+                    cgroup.watch(process.pid, policy.cpu_seconds)
+                except (OSError, RuntimeError) as exc:
+                    raise SandboxDenied('SANDBOX_LAUNCH_DENIED',
+                        f'Native resource accounting monitor could not start: {exc}') from exc
             return process
         except BaseException as exc:
-            if process is not None:
+            if process is None:
+                exc.cleanup = cgroup.close()
+            else:
                 exc.effect_state = "ambiguous"
+                exc.started_pid = process.pid
                 try:
-                    process.kill()
-                    process.wait(timeout=5)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
+                    exc.cleanup = process.abort_sandbox()
+                    exc.exit_code = process.returncode
+                except Exception:
+                    exc.cleanup = {"complete": False, "mode": "linux-cgroup",
+                                   "issues": ["native_cleanup_failed"]}
                 finally:
                     for stream in (process.stdin, process.stdout, process.stderr):
                         if stream is not None:
-                            stream.close()
-            exc.cleanup = cgroup.close()
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
             raise
     raise SandboxDenied("SANDBOX_UNAVAILABLE", "No native sandbox backend is available on this platform.")
 

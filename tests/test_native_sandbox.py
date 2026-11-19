@@ -1035,6 +1035,8 @@ def test_failed_resource_monitor_kills_started_tool(cross_platform_box, monkeypa
     assert error.value.result()['effect_state'] == 'ambiguous'
     assert error.value.cleanup['complete'] is True
     assert error.value.cleanup['issues'] == []
+    if sys.platform == 'linux':
+        assert error.value.started_pid > 0 and error.value.exit_code is not None
     time.sleep(1.2)
     assert not (workspace / 'after-monitor-failure').exists()
 
@@ -1847,7 +1849,7 @@ def test_packaged_linux_cpu_budget_is_native_and_cannot_hide_success(cross_platf
     driver = (
         "import json,sys;assert sys.frozen;"
         "from backend.core.native_sandbox import get_native;"
-        "assert get_native().call(op='capabilities')['linux_cgroup_version']==2;"
+        "assert get_native().call(op='capabilities')['linux_cgroup_version']==3;"
         "from backend.core import sandbox;"
         "from backend.core.loop import process_tool_runner as runner;"
         "from backend.core.child_process import python_command;"

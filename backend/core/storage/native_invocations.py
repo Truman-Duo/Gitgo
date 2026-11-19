@@ -29,6 +29,12 @@ def _host_identity():
     return _HOST
 
 
+def _settled(launch, cleanup):
+    if cleanup is None:
+        return launch == "not_started"
+    return isinstance(cleanup, dict) and cleanup.get("complete") is True and not cleanup.get("issues")
+
+
 def pending_native_invocations(storage, *, include_active=False):
     """Read unresolved native facts, independent of business effect/checkpoint.
 
@@ -53,10 +59,7 @@ def pending_native_invocations(storage, *, include_active=False):
                     raise ValueError("native invocation evidence is invalid")
                 cleanup = item.get("runtime_cleanup")
                 # Final facts can commit just before an interrupted index retirement.
-                if item["phase"] == "finished" and (
-                        item["launch_state"] == "not_started" or
-                        isinstance(cleanup, dict) and cleanup.get("complete") is True
-                        and not cleanup.get("issues")):
+                if item["phase"] == "finished" and _settled(item["launch_state"], cleanup):
                     continue
                 with _LOCK:
                     active = (os.getpid(), item["invocation_id"]) in _ACTIVE
@@ -135,7 +138,9 @@ class NativeInvocationRecord:
             cleanup = observation.get("cleanup")
             self.record.update(phase="finished", launch_state=launch,
                                runtime_cleanup=cleanup, exit_code=observation.get("exit_code"))
-            settled = launch == "not_started" or isinstance(cleanup, dict) and cleanup.get("complete") is True and not cleanup.get("issues")
+            if "pid" in observation:
+                self.record["pid"] = observation["pid"]
+            settled = _settled(launch, cleanup)
             self._write(terminal=settled)
             if settled:
                 try:

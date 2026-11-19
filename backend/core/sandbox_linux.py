@@ -28,11 +28,21 @@ def trusted_system_file(candidate: Path, workspace: Path, *, executable=False) -
         return None
 
 
-def trusted_bwrap(workspace: Path) -> str:
+def trusted_bwrap(workspace: Path, *, required_options=('--bind-fd',)) -> str:
     """Only root-owned system helpers; PATH and workspace cannot select one."""
     for candidate in (Path('/usr/bin/bwrap'), Path('/bin/bwrap')):
         path = trusted_system_file(candidate, workspace, executable=True)
         if path is not None:
+            try:
+                capabilities = subprocess.run([str(path), '--help'], capture_output=True,
+                    check=True, timeout=5, encoding='utf-8', env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+                missing = set(required_options).difference(capabilities.stdout.split())
+                if missing:
+                    raise ValueError(f'missing options: {", ".join(sorted(missing))}')
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                raise SandboxDenied('SANDBOX_UNAVAILABLE',
+                    'Linux sandboxing requires root-owned bubblewrap 0.11.1 or newer with descriptor '
+                    f'mounts. Install a supported helper through trusted system administration ({exc}).') from exc
             return str(path)
     raise SandboxDenied('SANDBOX_UNAVAILABLE',
         'Install root-owned system bubblewrap at /usr/bin/bwrap or /bin/bwrap. '
@@ -41,6 +51,9 @@ def trusted_bwrap(workspace: Path) -> str:
 
 
 _PENDING_CGROUPS = {}
+_CGROUP_VERSION = 3
+_CPU_EXCEEDED = 'The invocation exceeded its aggregate user+kernel CPU budget.'
+_CPU_UNAVAILABLE = 'Native cgroup CPU accounting became unavailable.'
 
 
 class LinuxCgroup:
@@ -51,12 +64,13 @@ class LinuxCgroup:
             raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "An earlier cgroup has unconfirmed cleanup.")
         self.path, self._token, self._unknown = None, None, False
         allocation_issued = False
-        self._failure_reason, self._monitor_started = "", False
+        self._failure_reason = ""
+        self._launcher = None
         self._lock = threading.RLock()
         self.cleanup = {"complete": False, "mode": "linux-cgroup", "issues": ["cleanup_not_observed"]}
         try:
             self._library = get_native()
-            if self._library.call(op='capabilities').get('linux_cgroup_version') != 2:
+            if self._library.call(op='capabilities').get('linux_cgroup_version') != _CGROUP_VERSION:
                 raise OSError('The matching Rust cgroup boundary is required')
             configured = os.environ.get("GITGO_SANDBOX_CGROUP_ROOT", "")
             if not configured:
@@ -73,7 +87,7 @@ class LinuxCgroup:
             allocation_issued = False
         except BaseException as exc:
             self._unknown = allocation_issued
-            if isinstance(exc, NativeBoundaryError):
+            if allocation_issued and isinstance(exc, NativeBoundaryError):
                 response = getattr(exc, 'response', {})
                 self._token = response.get('token')
                 self._unknown = exc.outcome_unknown or response.get('allocation_unknown') is True
@@ -96,7 +110,12 @@ class LinuxCgroup:
     def watch(self, pid, cpu_seconds):
         with self._lock:
             self._library.call(op='linux_cgroup_watch', token=self._token, pid=pid, cpu_seconds=cpu_seconds)
-            self._monitor_started = True
+
+    def _record_failure(self, failure):
+        if type(failure) is int and failure == 1:
+            self._failure_reason = _CPU_EXCEEDED
+        elif (type(failure) is not int or failure != 0) and not self._failure_reason:
+            self._failure_reason = _CPU_UNAVAILABLE
 
     @property
     def failure_reason(self):
@@ -104,13 +123,10 @@ class LinuxCgroup:
             if self._token is None or self._unknown:
                 return self._failure_reason
             try:
-                failure = self._library.call(op='linux_cgroup_query', token=self._token)['failure']
-                if failure == 1:
-                    self._failure_reason = 'The invocation exceeded its aggregate user+kernel CPU budget.'
-                elif failure:
-                    self._failure_reason = 'Native cgroup CPU accounting became unavailable.'
+                report = self._library.call(op='linux_cgroup_query', token=self._token)
+                self._record_failure(report.get('failure'))
             except OSError:
-                self._failure_reason = 'Native cgroup CPU accounting became unavailable.'
+                self._record_failure(None)
             return self._failure_reason
 
     def kill(self):
@@ -130,19 +146,23 @@ class LinuxCgroup:
                 self.cleanup.update(complete=False, issues=['cgroup_retirement_unknown'])
                 return dict(self.cleanup)
             try:
-                if getattr(self, '_monitor_started', False):
-                    _ = self.failure_reason
-                complete = (self._token is None or
-                    self._library.call(op='linux_cgroup_retire', token=self._token)['complete'] is True)
-                if not complete:
-                    self.cleanup.update(complete=False, issues=['cgroup_tree_still_active'])
+                if self._launcher is not None and self._launcher.poll() is None:
+                    # An in-flight launcher can still join. Keep the owner
+                    # until the direct child has a confirmed exit.
+                    self.cleanup.update(complete=False, issues=['launcher_exit_unconfirmed'])
                     return dict(self.cleanup)
+                if self._token is not None:
+                    report = self._library.call(op='linux_cgroup_retire', token=self._token)
+                    if report.get('complete') is not True:
+                        self.cleanup.update(complete=False, issues=['cgroup_tree_still_active'])
+                        return dict(self.cleanup)
+                    self._record_failure(report.get('failure'))
             except OSError as error:
                 if isinstance(error, NativeBoundaryError) and error.outcome_unknown:
                     self._unknown = True
                 self.cleanup.update(complete=False, issues=['cgroup_retirement_unknown'])
                 return dict(self.cleanup)
-            self.path, self._token = None, None
+            self.path, self._token, self._launcher = None, None, None
             _PENDING_CGROUPS.pop(id(self), None)
             self.cleanup.update(complete=True, issues=[])
             return dict(self.cleanup)
@@ -157,7 +177,7 @@ def recover_cgroup(root, recovery_id):
         if group.path == path:
             return group.close()['complete'] is True
     library = get_native()
-    if library.call(op='capabilities').get('linux_cgroup_version') != 2:
+    if library.call(op='capabilities').get('linux_cgroup_version') != _CGROUP_VERSION:
         raise OSError('The matching Rust cgroup recovery boundary is required')
     response = library.call(op='linux_cgroup_recover', root=list(os.fsencode(root)), recovery_id=recovery_id)
     if response['absent'] is True:
@@ -165,37 +185,17 @@ def recover_cgroup(root, recovery_id):
     group = LinuxCgroup.__new__(LinuxCgroup)
     group.path, group._token, group._library = path, response['token'], library
     group._unknown, group._lock = False, threading.RLock()
-    group._failure_reason, group._monitor_started = "", False
+    group._failure_reason, group._launcher = "", None
     group.cleanup = {'complete': False, 'mode': 'linux-cgroup', 'issues': ['cleanup_not_observed']}
     _PENDING_CGROUPS[id(group)] = group
     return group.close()['complete'] is True
 
 
 class LinuxSandboxProcess(subprocess.Popen):
-    def __init__(self, argv, *, cgroup, cpu_seconds, **kwargs):
+    def __init__(self, argv, *, cgroup, **kwargs):
         self._gitgo_cgroup = cgroup
-        try:
-            super().__init__(argv, **kwargs)
-        except BaseException:
-            cgroup.close()
-            raise
-        try:
-            cgroup.watch(self.pid, cpu_seconds)
-        except BaseException as exc:
-            try:
-                self.kill()
-                self.wait(timeout=5)
-            finally:
-                cgroup.close()
-                for stream in (self.stdin, self.stdout, self.stderr):
-                    if stream is not None:
-                        stream.close()
-            if not isinstance(exc, (RuntimeError, OSError)):
-                raise
-            denial = SandboxDenied('SANDBOX_LAUNCH_DENIED',
-                                   f'Native resource accounting monitor could not start: {exc}')
-            denial.effect_state = 'ambiguous'
-            raise denial from exc
+        super().__init__(argv, **kwargs)
+        cgroup._launcher = self
 
     @property
     def sandbox_failure(self):
@@ -216,3 +216,27 @@ class LinuxSandboxProcess(subprocess.Popen):
     def close_sandbox(self):
         self._gitgo_cleanup = self._gitgo_cgroup.close()
         return dict(self._gitgo_cleanup)
+
+    def abort_sandbox(self):
+        if self.poll() is None:
+            try:
+                self.kill()
+            except OSError:
+                # kill() also signals the owned launcher in its finally block.
+                # A cgroup error cannot skip waiting for that direct child.
+                pass
+            try:
+                self.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return self.close_sandbox()
+
+    def verify_sandbox_result(self):
+        cleanup = self.close_sandbox()
+        failure = self.sandbox_failure
+        if failure or not cleanup['complete']:
+            denial = SandboxDenied('SANDBOX_EXECUTION_FAILED',
+                failure or 'Final Linux resource accounting and tree cleanup could not be confirmed.')
+            denial.effect_state = 'ambiguous'
+            denial.cleanup = cleanup
+            raise denial

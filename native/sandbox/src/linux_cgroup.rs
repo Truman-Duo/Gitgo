@@ -8,11 +8,13 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_GROUPS: usize = 1024;
 const CGROUP2_MAGIC: libc::c_long = 0x63677270;
+const CPU_EXCEEDED: u8 = 1;
+const CPU_UNAVAILABLE: u8 = 2;
 fn invalid(message: &'static str) -> io::Error {
     io::Error::other(message)
 }
@@ -147,11 +149,44 @@ struct Group {
     root: File,
     directory: File,
     name: CString,
+    lifecycle: Mutex<Lifecycle>,
+}
+
+#[derive(Default)]
+struct Lifecycle {
     procs: Option<File>,
     monitor: Option<Monitor>,
     cpu_limit_usec: u64,
+    retired: Option<u8>,
 }
+
+impl Lifecycle {
+    fn failure(&self, usage: u64) -> u8 {
+        if self.cpu_limit_usec != 0 && usage >= self.cpu_limit_usec {
+            CPU_EXCEEDED
+        } else {
+            self.monitor
+                .as_ref()
+                .map_or(0, |monitor| monitor.failure.load(Ordering::Acquire))
+        }
+    }
+}
+
 impl Group {
+    fn lock(&self) -> io::Result<MutexGuard<'_, Lifecycle>> {
+        self.lifecycle
+            .lock()
+            .map_err(|_| invalid("cgroup_lifecycle_poisoned"))
+    }
+
+    fn active(&self) -> io::Result<MutexGuard<'_, Lifecycle>> {
+        let state = self.lock()?;
+        if state.retired.is_some() {
+            return Err(invalid("retired_cgroup_token"));
+        }
+        Ok(state)
+    }
+
     fn kill(&self) -> io::Result<()> {
         write(&self.directory, "cgroup.kill", "1")
     }
@@ -165,18 +200,29 @@ impl Group {
             _ => Err(invalid("invalid_cgroup_population")),
         }
     }
-    fn retire(&mut self) -> io::Result<bool> {
+    fn retire(&self, state: &mut Lifecycle) -> io::Result<Option<u8>> {
+        if let Some(failure) = state.retired {
+            return Ok(Some(failure));
+        }
         self.kill()?;
         let deadline = Instant::now() + Duration::from_secs(3);
         while self.populated()? {
             if Instant::now() >= deadline {
-                return Ok(false);
+                return Ok(None);
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        if let Some(monitor) = &mut self.monitor {
+        if let Some(monitor) = &mut state.monitor {
             monitor.stop()?;
         }
+        // After the group is empty and the monitor joined, the last sample
+        // includes CPU charged between the last live poll and process exit.
+        let failure = if state.cpu_limit_usec == 0 {
+            0
+        } else {
+            self.usage()
+                .map_or(CPU_UNAVAILABLE, |usage| state.failure(usage))
+        };
         // Never unlink a replacement selected through a reused name.
         let current = open_at(
             self.root.as_raw_fd(),
@@ -198,13 +244,29 @@ impl Group {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(true)
+        state.retired = Some(failure);
+        Ok(Some(failure))
     }
 }
-type GroupRegistry = Registry<Group, 1>;
+type GroupRegistry = Registry<Arc<Group>, 1>;
 fn registry() -> &'static Mutex<GroupRegistry> {
     static STATE: OnceLock<Mutex<GroupRegistry>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(GroupRegistry::new()))
+}
+
+fn lookup(token: u64) -> io::Result<Option<Arc<Group>>> {
+    let state = registry()
+        .lock()
+        .map_err(|_| invalid("cgroup_registry_poisoned"))?;
+    match state.live.get(&token) {
+        Some(group) => Ok(Some(Arc::clone(group))),
+        None if state.retired(token) => Ok(None),
+        None => Err(invalid("unknown_cgroup_token")),
+    }
+}
+
+fn active_group(token: u64) -> io::Result<Arc<Group>> {
+    lookup(token)?.ok_or_else(|| invalid("retired_cgroup_token"))
 }
 fn failure(error: io::Error) -> Value {
     json!({"ok":false,"error":error.to_string(),"os_error":error.raw_os_error()})
@@ -252,16 +314,17 @@ pub fn create(raw: &[u8], id: &str, memory: u64, processes: u32) -> Value {
                 );
             }
         };
-        let group = Group {
+        let group = Arc::new(Group {
             root,
             directory,
             name,
-            procs: None,
-            monitor: None,
-            cpu_limit_usec: 0,
-        };
-        state.insert(token, group);
-        let group = &state.live[&token];
+            lifecycle: Mutex::new(Lifecycle::default()),
+        });
+        // Publish ownership before configuring the group so a partial error
+        // still returns a token for the same kernel object.
+        let lifecycle = group.active()?;
+        state.insert(token, Arc::clone(&group));
+        drop(state);
         let configured = (|| -> io::Result<()> {
             control(&group.directory, "cgroup.kill", true)?;
             for (name, value) in [
@@ -282,29 +345,20 @@ pub fn create(raw: &[u8], id: &str, memory: u64, processes: u32) -> Value {
                 json!({"ok":false,"error":error.to_string(),"token":token,"cleanup_complete":false}),
             );
         }
+        drop(lifecycle);
         Ok(json!({"ok":true,"token":token}))
     })();
     result.unwrap_or_else(failure)
 }
 pub fn query(token: u64) -> Value {
     let result = (|| -> io::Result<Value> {
-        let state = registry()
-            .lock()
-            .map_err(|_| invalid("cgroup_registry_poisoned"))?;
-        let group = state
-            .live
-            .get(&token)
-            .ok_or_else(|| invalid("unknown_cgroup_token"))?;
+        let group = active_group(token)?;
+        let state = group.active()?;
         let usage = group.usage()?;
-        let mut failed = group
-            .monitor
-            .as_ref()
-            .map_or(0, |m| m.failure.load(Ordering::Acquire));
-        // Check the final accounting too: a leader can exit between samples.
-        if group.cpu_limit_usec != 0 && usage >= group.cpu_limit_usec {
-            failed = 1;
-            if let Some(monitor) = &group.monitor {
-                monitor.failure.store(1, Ordering::Release);
+        let failed = state.failure(usage);
+        if failed == CPU_EXCEEDED {
+            if let Some(monitor) = &state.monitor {
+                monitor.failure.store(CPU_EXCEEDED, Ordering::Release);
             }
             group.kill()?;
         }
@@ -314,35 +368,30 @@ pub fn query(token: u64) -> Value {
 }
 pub fn kill(token: u64) -> Value {
     let result = (|| -> io::Result<Value> {
-        let state = registry()
-            .lock()
-            .map_err(|_| invalid("cgroup_registry_poisoned"))?;
-        state
-            .live
-            .get(&token)
-            .ok_or_else(|| invalid("unknown_cgroup_token"))?
-            .kill()?;
+        let group = active_group(token)?;
+        let _state = group.active()?;
+        group.kill()?;
         Ok(json!({"ok":true}))
     })();
     result.unwrap_or_else(failure)
 }
 pub fn retire(token: u64) -> Value {
     let result = (|| -> io::Result<Value> {
-        let mut state = registry()
-            .lock()
-            .map_err(|_| invalid("cgroup_registry_poisoned"))?;
-        let Some(group) = state.live.get_mut(&token) else {
-            return if state.retired(token) {
-                Ok(json!({"ok":true,"complete":true}))
-            } else {
-                Err(invalid("unknown_cgroup_token"))
-            };
+        let Some(group) = lookup(token)? else {
+            // A repeated token proves cleanup only. The Host must keep the
+            // original accounting verdict or treat it as unavailable.
+            return Ok(json!({"ok":true,"complete":true,"failure":null}));
         };
-        let complete = group.retire()?;
-        if complete {
-            state.live.remove(&token);
+        let mut lifecycle = group.lock()?;
+        let failure = group.retire(&mut lifecycle)?;
+        if failure.is_some() {
+            registry()
+                .lock()
+                .map_err(|_| invalid("cgroup_registry_poisoned"))?
+                .live
+                .remove(&token);
         }
-        Ok(json!({"ok":true,"complete":complete}))
+        Ok(json!({"ok":true,"complete":failure.is_some(),"failure":failure}))
     })();
     result.unwrap_or_else(failure)
 }
@@ -430,13 +479,11 @@ pub fn recover(raw: &[u8], id: &str) -> Value {
             root,
             directory,
             name,
-            procs: None,
-            monitor: None,
-            cpu_limit_usec: 0,
+            lifecycle: Mutex::new(Lifecycle::default()),
         };
         group.populated()?;
         control(&group.directory, "cgroup.kill", true)?;
-        state.insert(token, group);
+        state.insert(token, Arc::new(group));
         Ok(json!({"ok":true,"absent":false,"token":token}))
     })();
     result.unwrap_or_else(failure)
@@ -446,22 +493,17 @@ pub fn recover(raw: &[u8], id: &str) -> Value {
 /// Rust retains ownership until observed tree retirement; no directory is exported.
 pub fn procs(token: u64) -> Value {
     let result = (|| -> io::Result<Value> {
-        let mut state = registry()
-            .lock()
-            .map_err(|_| invalid("cgroup_registry_poisoned"))?;
-        let group = state
-            .live
-            .get_mut(&token)
-            .ok_or_else(|| invalid("unknown_cgroup_token"))?;
-        if group.procs.is_none() {
+        let group = active_group(token)?;
+        let mut state = group.active()?;
+        if state.procs.is_none() {
             let file = open_at(group.directory.as_raw_fd(), b"cgroup.procs", libc::O_PATH)?;
             filesystem(&file)?;
             if !file.metadata()?.is_file() {
                 return Err(invalid("invalid_cgroup_control"));
             }
-            group.procs = Some(file);
+            state.procs = Some(file);
         }
-        Ok(json!({"ok":true,"fd":group.procs.as_ref().unwrap().as_raw_fd()}))
+        Ok(json!({"ok":true,"fd":state.procs.as_ref().unwrap().as_raw_fd()}))
     })();
     result.unwrap_or_else(failure)
 }
@@ -534,15 +576,59 @@ mod real_tests {
         crate::safe_read::close(read).unwrap();
         assert_eq!(query(token)["populated"], false);
         assert_eq!(recover(raw.as_bytes(), id)["token"], token);
-        assert_eq!(retire(token)["complete"], true);
+        let settled = retire(token);
+        assert_eq!(settled["complete"], true, "{settled}");
+        assert_eq!(settled["failure"], 0);
         assert!(!path.exists());
-        assert_eq!(retire(token)["complete"], true);
+        let repeated = retire(token);
+        assert_eq!(repeated["complete"], true);
+        assert!(repeated["failure"].is_null());
         assert_eq!(recover(raw.as_bytes(), id)["absent"], true);
         assert_eq!(query(token)["ok"], false);
         assert_eq!(retire(u64::MAX)["ok"], false);
         assert_eq!(retire(filter)["ok"], false);
         assert_eq!(retire(read)["ok"], false);
         assert_eq!(crate::linux_seccomp::close(token)["ok"], false);
+    }
+
+    #[test]
+    fn delayed_retirement_does_not_hold_other_groups() {
+        let Some(raw) = std::env::var_os("GITGO_SANDBOX_CGROUP_ROOT") else {
+            return;
+        };
+        let allocate = |id| {
+            let result = create(raw.as_bytes(), id, 64 * 1024 * 1024, 8);
+            assert_eq!(result["ok"], true, "{result}");
+            result["token"].as_u64().unwrap()
+        };
+        let first = allocate("45a00000000000000000000000000002");
+        let other = allocate("45a00000000000000000000000000003");
+        let group = active_group(first).unwrap();
+        let guard = group.active().unwrap();
+        let retirement = std::thread::spawn(move || retire(first));
+
+        // Wait for the retirement thread to acquire its own reference, so the
+        // other call is tested while retirement is actually waiting.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Arc::strong_count(&group) < 3 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let waiting = Arc::strong_count(&group) >= 3;
+        let (send, receive) = std::sync::mpsc::channel();
+        let concurrent = std::thread::spawn(move || {
+            let _ = send.send((query(other), kill(other)));
+        });
+        let independent = receive.recv_timeout(Duration::from_secs(1));
+        drop(guard);
+
+        assert_eq!(retirement.join().unwrap()["complete"], true);
+        concurrent.join().unwrap();
+        assert_eq!(retire(other)["complete"], true);
+        assert!(waiting, "retirement did not reach the per-group lock");
+        let (report, cancelled) =
+            independent.expect("unrelated query and cancellation waited for retirement");
+        assert_eq!(report["populated"], false, "{report}");
+        assert_eq!(cancelled["ok"], true, "{cancelled}");
     }
 }
 
@@ -572,17 +658,12 @@ pub fn watch(token: u64, pid: u32, cpu_seconds: u32) -> Value {
         if pid == 0 || pid > i32::MAX as u32 || cpu_seconds == 0 {
             return Err(invalid("invalid_cgroup_monitor_budget"));
         }
-        let mut state = registry()
-            .lock()
-            .map_err(|_| invalid("cgroup_registry_poisoned"))?;
-        let group = state
-            .live
-            .get_mut(&token)
-            .ok_or_else(|| invalid("unknown_cgroup_token"))?;
-        if group.monitor.is_some() || group.cpu_limit_usec != 0 {
+        let group = active_group(token)?;
+        let mut state = group.active()?;
+        if state.monitor.is_some() || state.cpu_limit_usec != 0 {
             return Err(invalid("cgroup_monitor_already_started"));
         }
-        group.cpu_limit_usec = u64::from(cpu_seconds) * 1_000_000;
+        state.cpu_limit_usec = u64::from(cpu_seconds) * 1_000_000;
         // The Host supplies its just-created, unreaped Popen child before poll.
         // pidfd is retained for observation, never used to signal an unrelated PID.
         let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as i32, 0) as i32 };
@@ -627,7 +708,7 @@ pub fn watch(token: u64, pid: u32, cpu_seconds: u32) -> Value {
                         }
                         let usage = counter(&text(&directory, "cpu.stat")?, "usage_usec")?;
                         if usage >= u64::from(cpu_seconds) * 1_000_000 {
-                            worker_failure.store(1, Ordering::Release);
+                            worker_failure.store(CPU_EXCEEDED, Ordering::Release);
                             write(&directory, "cgroup.kill", "1")?;
                             return Ok(());
                         }
@@ -635,13 +716,13 @@ pub fn watch(token: u64, pid: u32, cpu_seconds: u32) -> Value {
                     Ok(())
                 });
                 if !matches!(monitored, Ok(Ok(()))) {
-                    worker_failure.store(2, Ordering::Release);
+                    worker_failure.store(CPU_UNAVAILABLE, Ordering::Release);
                     // Unknown accounting fails closed. The normal retirement path
                     // still independently checks whole-tree exit and retries kill.
                     let _ = write(&directory, "cgroup.kill", "1");
                 }
             })?;
-        group.monitor = Some(Monitor {
+        state.monitor = Some(Monitor {
             stop,
             failure,
             thread: Some(thread),

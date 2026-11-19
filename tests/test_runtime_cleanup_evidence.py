@@ -195,6 +195,7 @@ def test_linux_cleanup_timeout_is_explicit_and_retains_owner(tmp_path_factory, m
     group.path = tmp_path_factory / 'cgroup-fixture'
     group.path.mkdir()
     group._token, group._unknown, group._lock = 123, False, threading.RLock()
+    group._launcher = None
     class Library:
         def call(self, **request):
             assert request == {'op': 'linux_cgroup_retire', 'token': 123}

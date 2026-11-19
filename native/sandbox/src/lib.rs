@@ -108,7 +108,7 @@ fn dispatch(raw: &[u8]) -> Value {
         return json!({"ok": true, "abi": ABI, "platform": std::env::consts::OS,
             "windows_appcontainer": cfg!(windows), "linux_execution": false,
             "macos_execution": false, "safe_read_version": 2, "read_leaf_mount": cfg!(target_os = "linux"),
-            "linux_cgroup_version": if cfg!(target_os = "linux") {2} else {0},
+            "linux_cgroup_version": if cfg!(target_os = "linux") {3} else {0},
             "linux_filter_version": if cfg!(target_os = "linux") {1} else {0},
             "linux_directory_version": if cfg!(target_os = "linux") {1} else {0},
             "authority": "host-existing-permission-broker"});
