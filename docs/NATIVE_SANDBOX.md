@@ -166,7 +166,8 @@ Git 环境控制，关闭钩子、文件监视器、签名、外部 diff/textcon
 
 ## Linux：系统前提
 
-需要可信系统 bubblewrap、当前 ABI 的 libseccomp、用户 namespace，以及已委派的 cgroup v2 scope/service。
+原生工具需要支持描述符挂载的可信系统 bubblewrap 0.11.1 或更新版本、当前 ABI 的 libseccomp、
+无特权用户 namespace，以及已委派的 cgroup v2 scope/service。普通工具在分配 cgroup 前检查 `--bind-fd`。
 缺少 cpu/memory/pids 控制器、`cgroup.kill` 或必要过滤能力时拒绝执行，不降级。
 
 后端提供私有文件系统/PID/网络/IPC namespace、只读运行时、可写工作区和私有临时目录。

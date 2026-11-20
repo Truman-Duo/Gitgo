@@ -148,23 +148,27 @@ class ProcessToolRunner:
             # Commit intent before entering the OS launch window. A kill after
             # this point leaves unknown evidence, never permission to replay.
             observation["native_record"] = prepare_native_record(native_invocation)
-            proc = sandbox_popen(
-                tool_runner_command(), policy,
-                # DaemonClient starts ``python -m gitgo`` from the package's
-                # parent directory.  Relying on inherited cwd therefore makes
-                # the top-level ``backend`` module disappear only in real
-                # daemon runs.  Anchor the isolated runner at the package root.
-                cwd=str(owned_child_cwd(source_root)),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
-                env=child_env,
-                creationflags=creation_flags(),
-                start_new_session=sys.platform != "win32",
-            )
+            try:
+                proc = sandbox_popen(
+                    tool_runner_command(), policy,
+                    # The daemon may start outside the package root.
+                    cwd=str(owned_child_cwd(source_root)),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="strict",
+                    env=child_env,
+                    creationflags=creation_flags(),
+                    start_new_session=sys.platform != "win32",
+                )
+            except BaseException as exc:
+                observation["cleanup"] = getattr(exc, "cleanup", None)
+                pid = getattr(exc, "started_pid", None)
+                if pid is not None:
+                    observation.update(started=True, pid=pid, exit_code=getattr(exc, "exit_code", None))
+                raise
             observation["started"] = True
             observation["native_record"].started(proc.pid)
             if not getattr(proc, "_gitgo_job_handle", None):
@@ -287,6 +291,7 @@ class ProcessToolRunner:
                 error=f"subprocess spawn failed: {exc}",
                 stderr=communication.stderr_snapshot() if "communication" in locals() else "",
                 stderr_partial=True,
+                effect_state=getattr(exc, "effect_state", "ambiguous" if observation.get("started") else ""),
                 exit_code=-1,
                 duration_ms=duration_ms,
                 cleanup=getattr(spawned, "_gitgo_cleanup", None),

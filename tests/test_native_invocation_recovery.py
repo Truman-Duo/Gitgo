@@ -183,6 +183,42 @@ def test_uncommitted_intent_never_enters_os(tmp_path_factory, monkeypatch, runne
     assert not result.started and result.data["error"] == "INVOCATION_JOURNAL_UNAVAILABLE"
 
 
+@pytest.mark.parametrize("pid", [None, 123])
+def test_launch_failure_keeps_resource_debt_after_store_reopen(tmp_path_factory, monkeypatch, pid):
+    from backend.core import sandbox
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    from backend.core.storage import get_storage
+
+    cleanup = {"complete": False, "mode": "linux-cgroup", "issues": ["cgroup_retirement_unknown"]}
+
+    def fail_launch(*args, **kwargs):
+        denial = sandbox.SandboxDenied("SANDBOX_LAUNCH_DENIED", "injected launch failure")
+        denial.cleanup = cleanup
+        if pid is not None:
+            denial.started_pid, denial.exit_code, denial.effect_state = pid, -9, "ambiguous"
+        raise denial
+
+    monkeypatch.setattr(sandbox, "sandbox_popen", fail_launch)
+    workspace = tmp_path_factory
+    store = get_storage(workspace)
+    result = ProcessToolRunner().run("read_file", {"_workspace": str(workspace), "path": "note.txt"})
+    assert result.data["error"] == "SANDBOX_LAUNCH_DENIED"
+    assert result.started is (pid is not None)
+    assert result.launch_state == ("started" if pid is not None else "not_started")
+    assert result.cleanup == cleanup
+    state_home = store.paths.state_home
+    store.close()
+    with StorageRuntime(workspace, state_home=state_home) as reopened:
+        findings = pending_native_invocations(reopened)
+        assert len(findings) == 1 and findings[0]["code"] == "NATIVE_CLEANUP_UNCONFIRMED"
+        rows = reopened.list_state_refs(NAMESPACE, prefix="pending/")
+        saved = json.loads(reopened.read_blob(rows[0]["value_ref"]))
+        assert saved.get("pid") == pid
+        assert saved["exit_code"] == (-9 if pid is not None else None)
+        with pytest.raises(sandbox.SandboxDenied, match="Unsettled native"):
+            NativeInvocationRecord(reopened, workspace, invocation(workspace)).prepare()
+
+
 def test_finished_fact_survives_pending_retirement_failure(bound_store, monkeypatch):
     workspace, storage = bound_store
     record = NativeInvocationRecord(storage, workspace, invocation(workspace))

@@ -153,34 +153,59 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
         for root in policy.read_roots:
             command += ["--ro-bind", str(root), str(root)]
         cgroup = LinuxCgroup(policy)
-        command += ["--dir", "/run",
-                    "--bind", str(cgroup.path / "cgroup.procs"), "/run/gitgo-cgroup.procs",
-                    "--bind", str(policy.workspace), str(policy.workspace),
-                    "--chdir", str(kwargs.pop("cwd")), "--"]
-        # Set limits inside the new PID namespace before loading tool code.
-        bootstrap = (
-            "import os,resource,sys;"
-            # This is the only cgroup file exposed: it can move a visible
-            # process INTO this invocation, never change limits or move out.
-            "f=os.open('/run/gitgo-cgroup.procs',os.O_WRONLY);os.write(f,b'0');os.close(f);"
-            f"resource.setrlimit(resource.RLIMIT_AS,({policy.memory_bytes},{policy.memory_bytes}));"
-            f"resource.setrlimit(resource.RLIMIT_CPU,({policy.cpu_seconds},{policy.cpu_seconds}));"
-            "resource.setrlimit(resource.RLIMIT_CORE,(0,0));"
-            "os.execv(sys.argv[1],sys.argv[1:])"
-        )
-        # The packaged Host exposes a private Python role; do not treat its
-        # executable as a general system interpreter.
-        command += python_command(["-I", "-c", bootstrap, *argv])
-        from backend.core.sandbox_seccomp import socket_filter
+        process = None
         try:
+            procs_fd = cgroup.procs_fd
+            command += ["--dir", "/run",
+                        "--bind-fd", str(procs_fd), "/run/gitgo-cgroup.procs",
+                        "--bind", str(policy.workspace), str(policy.workspace),
+                        "--chdir", str(kwargs.pop("cwd")), "--"]
+            # Set limits inside the new PID namespace before loading tool code.
+            bootstrap = (
+                "import os,resource,sys;"
+                # This is the only cgroup file exposed: it can move a visible
+                # process INTO this invocation, never change limits or move out.
+                "f=os.open('/run/gitgo-cgroup.procs',os.O_WRONLY);os.write(f,b'0');os.close(f);"
+                f"resource.setrlimit(resource.RLIMIT_AS,({policy.memory_bytes},{policy.memory_bytes}));"
+                f"resource.setrlimit(resource.RLIMIT_CPU,({policy.cpu_seconds},{policy.cpu_seconds}));"
+                "resource.setrlimit(resource.RLIMIT_CORE,(0,0));"
+                "os.execv(sys.argv[1],sys.argv[1:])"
+            )
+            # The packaged Host exposes a private Python role; do not treat its
+            # executable as a general system interpreter.
+            command += python_command(["-I", "-c", bootstrap, *argv])
+            from backend.core.sandbox_seccomp import socket_filter
             with socket_filter(policy.workspace) as program:
                 # bubblewrap consumes/closes this descriptor before tool exec.
                 # No Host descriptor other than the three stdio pipes survives.
                 command[1:1] = ['--seccomp', str(program.fileno())]
-                kwargs.update(pass_fds=(program.fileno(),), close_fds=True)
-                return LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
+                kwargs.update(pass_fds=(program.fileno(), procs_fd), close_fds=True)
+                process = LinuxSandboxProcess(command, cgroup=cgroup, **kwargs)
+                try:
+                    cgroup.watch(process.pid, policy.cpu_seconds)
+                except (OSError, RuntimeError) as exc:
+                    raise SandboxDenied('SANDBOX_LAUNCH_DENIED',
+                        f'Native resource accounting monitor could not start: {exc}') from exc
+            return process
         except BaseException as exc:
-            exc.cleanup = cgroup.close()
+            if process is None:
+                exc.cleanup = cgroup.close()
+            else:
+                exc.effect_state = "ambiguous"
+                exc.started_pid = process.pid
+                try:
+                    exc.cleanup = process.abort_sandbox()
+                    exc.exit_code = process.returncode
+                except Exception:
+                    exc.cleanup = {"complete": False, "mode": "linux-cgroup",
+                                   "issues": ["native_cleanup_failed"]}
+                finally:
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
             raise
     raise SandboxDenied("SANDBOX_UNAVAILABLE", "No native sandbox backend is available on this platform.")
 

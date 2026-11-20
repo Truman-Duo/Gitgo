@@ -68,6 +68,9 @@ class BoundedCommunication:
                 close_job(getattr(self.proc, "_gitgo_job_handle", None))
                 self.proc._gitgo_job_handle = None
                 if all(not thread.is_alive() for thread in self.threads):
+                    verify = getattr(self.proc, "verify_sandbox_result", None)
+                    if verify is not None:
+                        verify()
                     return tuple(bytes(data).decode("utf-8", errors="replace") for data in self.output)
             if time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(self.proc.args, timeout)

@@ -208,13 +208,14 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
         proc.wait(timeout=10)
         proc.returncode = -15
         return
-    cgroup = getattr(proc, "_gitgo_cgroup", None)
-    if cgroup is not None:
-        cgroup.kill()
+    if getattr(proc, "_gitgo_cgroup", None) is not None:
+        try:
+            proc.abort_sandbox()
+        finally:
+            close_job(job_handle)
+        return
     if proc.poll() is not None:
         close_job(job_handle)
-        if cgroup is not None:
-            cgroup.close()
         finish_scope(proc)
         return
     try:
@@ -233,8 +234,7 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
                 # Direct Popen child: no sampled PID/PGID may widen authority.
                 proc.terminate()
             else:
-                if cgroup is None:
-                    proc._gitgo_cleanup = {"complete": False, "issues": ["unmanaged_root_only"]}
+                proc._gitgo_cleanup = {"complete": False, "issues": ["unmanaged_root_only"]}
                 proc.kill()
         try:
             proc.wait(timeout=5)
@@ -243,6 +243,4 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
             proc.wait(timeout=5)
     finally:
         close_job(job_handle)
-        if cgroup is not None:
-            cgroup.close()
         finish_scope(proc)

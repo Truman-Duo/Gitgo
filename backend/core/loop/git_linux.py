@@ -11,7 +11,6 @@ import fcntl
 import os
 from pathlib import Path
 import stat
-import subprocess
 import sys
 
 from .git_execution import GitBoundaryError, _MAX_CONFIG
@@ -33,12 +32,11 @@ class LinuxPins:
         self.read_size = 0
 
     def directory(self, path):
-        from backend.core.sandbox_read import _linux_openat2
+        from backend.core.sandbox_read import ReadRoot
         path = Path(os.path.abspath(path))
         if path not in self.directories:
-            fd = _linux_openat2(-100, str(path), os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC, 0x04 | 0x02)
-            self.owners.callback(os.close, fd)
-            self.directories[path] = fd
+            root = self.owners.enter_context(ReadRoot(path))
+            self.directories[path] = root._linux_directory_descriptor()
         return self.directories[path]
 
     def file(self, path, *, optional=False):
@@ -112,20 +110,12 @@ class LinuxPins:
                         continue
 
     def wrap(self, command, *, cwd, writable):
+        from backend.core.sandbox import SandboxDenied
         from backend.core.sandbox_linux import trusted_bwrap
-        helper = trusted_bwrap(cwd)
-        # Descriptor mounts were added in bubblewrap 0.11. Older helpers must
-        # fail explicitly, never fall back to raceable /proc path mounts.
         try:
-            capabilities = subprocess.run([helper, '--help'], capture_output=True,
-                check=True, timeout=5, text=True, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
-            if not all(flag in capabilities.stdout.split() for flag in
-                       ('--bind-fd', '--ro-bind-fd', '--ro-bind-data')):
-                raise ValueError('descriptor mount support is missing')
-        except (OSError, subprocess.SubprocessError, ValueError) as error:
-            raise GitBoundaryError('GIT_BOUNDARY_UNAVAILABLE',
-                'Linux protected Git requires root-owned bubblewrap 0.11.1 or newer with descriptor mounts; '
-                'install it through trusted system administration. No unrestricted fallback is allowed.') from error
+            helper = trusted_bwrap(cwd, required_options=('--bind-fd', '--ro-bind-fd', '--ro-bind-data'))
+        except SandboxDenied as error:
+            raise GitBoundaryError('GIT_BOUNDARY_UNAVAILABLE', str(error)) from error
         writable = [Path(os.path.abspath(path)) for path in [*writable, *self.additional_writable]]
         if any(path == Path(path.anchor) for path in writable):
             raise GitBoundaryError('GIT_BOUNDARY_UNAVAILABLE', 'A filesystem root cannot be a writable Git scope')

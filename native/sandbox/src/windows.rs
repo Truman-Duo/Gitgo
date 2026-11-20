@@ -607,6 +607,16 @@ fn perform(request: Request) -> Result<Value> {
             )
         }
         Request::Capabilities {}
+        | Request::LinuxDirectoryDescriptor { .. }
+        | Request::LinuxCgroupWatch { .. }
+        | Request::LinuxFilterCreate { .. }
+        | Request::LinuxFilterClose { .. }
+        | Request::LinuxCgroupProcs { .. }
+        | Request::LinuxCgroupCreate { .. }
+        | Request::LinuxCgroupRecover { .. }
+        | Request::LinuxCgroupQuery { .. }
+        | Request::LinuxCgroupKill { .. }
+        | Request::LinuxCgroupRetire { .. }
         | Request::ReadRoot { .. }
         | Request::ReadOpen { .. }
         | Request::ReadClose { .. }
