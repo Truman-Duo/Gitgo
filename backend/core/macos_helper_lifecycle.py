@@ -26,7 +26,7 @@ import uuid
 
 from backend.core import macos_identity as identity
 from backend.core.macos_helper_install import install, trusted_directory, verify_bundle_path, require_transition_trust
-from backend.core.macos_file_authority import require_no_extended_acl
+from backend.core.macos_file_authority import FileAuthorityChanged, require_no_extended_acl
 
 REGISTRY=Path('/private/var/db/gitgo-sandbox-v1')
 JOBS=Path('/Library/LaunchDaemons')
@@ -230,10 +230,19 @@ def _startup_valid(value):
 def startup_status(root):
     """Read bounded root evidence. This is never task or install authority."""
     from backend.core.macos_broker_protocol import unique_pairs
-    trusted_directory(root/'private')
-    try: raw=identity.bounded_read(root/'private/startup.json',0,True)
-    except FileNotFoundError: return None  # Legacy helpers publish no progress.
-    return _startup_valid(json.loads(raw,object_pairs_hook=unique_pairs))
+    # The broker atomically replaces startup.json while the manager polls it.
+    # Re-open and fully validate both the directory and file on each attempt.
+    for attempt in range(3):
+        try:
+            trusted_directory(root/'private')
+            try:
+                raw = identity.bounded_read(root/'private/startup.json', 0, True)
+            except FileNotFoundError:
+                return None  # Legacy helpers publish no progress.
+            return _startup_valid(json.loads(raw, object_pairs_hook=unique_pairs))
+        except FileAuthorityChanged:
+            if attempt == 2:
+                raise
 
 
 def _startup_save(root,value):

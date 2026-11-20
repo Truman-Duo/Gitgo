@@ -23,6 +23,7 @@ from backend.core import macos_broker_protocol as wire
 from backend.core import macos_broker_service as broker
 from backend.core import macos_helper_install as install
 from backend.core import macos_helper_lifecycle as life
+from backend.core.macos_file_authority import FileAuthorityChanged, FileAuthorityError
 from backend.core import macos_identity as identity
 from backend.core import sandbox_macos as mac
 
@@ -291,3 +292,33 @@ def test_launch_prepares_fresh_binding_before_bootstrap(startup,monkeypatch):
     monkeypatch.setattr(life,'ready',ready)
     life.launch(root,HELPER)
     assert events==['verify','job','enable','bootstrap','ready']
+
+@pytest.mark.parametrize('changing', ['directory', 'file'])
+def test_startup_snapshot_revalidates_after_concurrent_publication(startup, monkeypatch, changing):
+    root, prepared, _ = startup
+    calls = []
+    def observed(which):
+        calls.append(which)
+        if which == changing and calls.count(which) == 1:
+            raise FileAuthorityChanged('concurrent status publication')
+    def read(path, owner, private):
+        observed('file')
+        return path.read_bytes()
+    monkeypatch.setattr(life, 'trusted_directory', lambda path: observed('directory'))
+    monkeypatch.setattr(identity, 'bounded_read', read)
+    assert life.startup_status(root) == prepared
+    assert calls.count('directory') == 2
+    assert calls[-2:] == ['directory', 'file']
+
+
+@pytest.mark.parametrize('error,expected_reads', [(FileAuthorityChanged, 3), (FileAuthorityError, 1)])
+def test_unverifiable_startup_snapshot_stays_rejected(startup, monkeypatch, error, expected_reads):
+    root, _, _ = startup
+    reads = []
+    def denied(path):
+        reads.append(path)
+        raise error('unverified directory')
+    monkeypatch.setattr(life, 'trusted_directory', denied)
+    with pytest.raises(error):
+        life.startup_status(root)
+    assert reads == [root/'private'] * expected_reads

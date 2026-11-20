@@ -30,6 +30,10 @@ class FileAuthorityError(ValueError):
     """An ACL-free authority boundary could not be established."""
 
 
+class FileAuthorityChanged(FileAuthorityError):
+    """Metadata changed across an otherwise successful descriptor inspection."""
+
+
 def _acl_functions():
     try:
         library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
@@ -89,6 +93,6 @@ def require_no_extended_acl(fd):
                 if functions.acl_free(acl) != 0:
                     raise FileAuthorityError('Extended ACL inspection could not release native state')
         if _stamp(os.fstat(fd)) != _stamp(before):
-            raise FileAuthorityError('Authority object changed during ACL inspection')
+            raise FileAuthorityChanged('Authority object changed during ACL inspection')
     except OSError as exc:
         raise FileAuthorityError('Authority descriptor is unavailable for ACL inspection') from exc
