@@ -52,6 +52,21 @@ def may_launch(state, recover_only=False):
             and state['launch_count'] == 0 and state['generation'] == 1)
 
 
+def cleanup_changes(state, cleanup, guard):
+    complete = cleanup['observed_empty'] is True and not cleanup['issues']
+    changes = dict(cleanup=cleanup, phase='clean' if complete else 'cleanup_pending')
+    if complete and state['reason'] == 'task_exit':
+        # Retired descendants still contribute to the ledger. Use the final
+        # reading while this supervisor is alive and persist it with cleanup.
+        try:
+            changes['reason'] = guard.finish_cpu() or 'task_exit'
+        except Exception as exc:
+            changes['reason'] = 'resource_observation_failed'
+            changes['resource_error'] = type(exc).__name__ + ': ' + str(exc)
+        changes['resource_observation'] = guard.evidence()
+    return changes
+
+
 def serve(root, recover_only=False):
     root = Path(root).absolute()
     if (sys.platform != 'darwin' or os.getuid()!=0 or os.geteuid()!=0 or
@@ -66,7 +81,7 @@ def serve(root, recover_only=False):
             identity.require_no_extended_acl(directory)
         finally: os.close(directory)
     lock=os.open(root/'service.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
-    child=connection=listener=None
+    child=connection=listener=guard=None
     fds=[]; state=None
     def commit(**changes):
         state.update(changes)
@@ -119,8 +134,7 @@ def serve(root, recover_only=False):
                     if exceeded:reason=exceeded;break
                     next_sample=time.monotonic()+.1
                 if child.poll() is not None:
-                    # Dead descendants remain in the coalition ledger. Take
-                    # a final reading before allowing successful publication.
+                    # Sample the remaining live tree before draining it.
                     try: reason=guard.check() or 'task_exit'
                     except Exception as exc:
                         commit(resource_error=type(exc).__name__+': '+str(exc))
@@ -135,9 +149,9 @@ def serve(root, recover_only=False):
             commit(reason='automatic_recovery')
         commit(phase='cleanup_pending')
         cleanup=identity.drain_uid(state['uid'],child.poll if child else lambda:None)
-        complete=cleanup['observed_empty'] and not cleanup['issues']
-        commit(cleanup=cleanup,finished=now(),phase='clean' if complete else 'cleanup_pending')
-        return 0 if complete else 75
+        changes=cleanup_changes(state,cleanup,guard)
+        commit(finished=now(),**changes)
+        return 0 if changes['phase']=='clean' else 75
     except Exception as exc:
         if state is not None:
             commit(phase='cleanup_pending',error=type(exc).__name__+': '+str(exc))

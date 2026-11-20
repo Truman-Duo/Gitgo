@@ -26,10 +26,12 @@ CAPABILITY_REQUEST_FIELDS = frozenset({
 PROTOCOL = 'gitgo.macos.project-broker'
 PROTOCOL_VERSION = 1
 OPERATION_CONTRACTS = MappingProxyType({
-    'run': 1,
-    'git_read': 1,
-    'git_objects': 1,
-    'git_checkout': 1,
+    # Revision 2 requires final resource accounting and an observed task exit
+    # before results can be accepted. Recovery status keeps its old contract.
+    'run': 2,
+    'git_read': 2,
+    'git_objects': 2,
+    'git_checkout': 2,
 })
 _RECEIPT_FIELDS = frozenset({
     'event', 'protocol', 'protocol_version', 'operation_contracts',

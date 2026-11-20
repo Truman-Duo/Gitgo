@@ -289,7 +289,7 @@ def test_client_rejects_handshake_before_sending_action(bound_store, monkeypatch
             elif fault == 'malformed':
                 response = {'event': 'capabilities'}
             elif fault == 'revision':
-                response['operation_contracts']['run'] = 2
+                response['operation_contracts']['run'] = 1
             elif fault == 'grant':
                 response['grant_id'] = 'd' * 32
             elif fault == 'invocation':

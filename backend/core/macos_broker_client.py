@@ -507,8 +507,10 @@ def _exchange(binding,fd,request,observation,cancellation,timeout):
             if request.get('op')=='git_read':
                 from backend.core.macos_git_read import valid_exit_code
                 accepted_code=valid_exit_code(request['query'],response.get('exit_code'))
-            if not accepted_code:
-                return SubprocessResult(success=False,error='Broker native process failed',effect_state='ambiguous',stderr=response.get('stderr',''))
+            reason=response.get('reason')
+            if reason!='complete' or not accepted_code:
+                return SubprocessResult(success=False,error=f'Broker native process failed ({reason or "outcome_unconfirmed"})',
+                    effect_state='ambiguous',stderr=response.get('stderr',''))
             return response
         raise TimeoutError('Broker outcome is unknown; retain invocation evidence')
     except Exception as exc:

@@ -211,7 +211,8 @@ def test_git_journal_cannot_attach_to_another_project_context(repository,tmp_pat
     finally: client._SESSION.reset(token)
 
 
-def test_service_git_branch_has_no_source_path_runner_stdin_or_workspace_export(repository,monkeypatch):
+@pytest.mark.parametrize('outcome',['complete','grant_revoked','automatic_recovery'])
+def test_service_git_branch_has_no_source_path_runner_stdin_or_workspace_export(repository,monkeypatch,outcome):
     """Wiring test only; the administrator harness checks the actual UID path."""
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -226,9 +227,17 @@ def test_service_git_branch_has_no_source_path_runner_stdin_or_workspace_export(
     def trial(work,**kw):
         workspaces.append(work)
         yield {'root':work.parent/('c'*32),'uid':200000001}
-    proc=SimpleNamespace(pid=1234,returncode=0,resource_reason=None,
+    drained=False
+    def close_sandbox():
+        nonlocal drained
+        drained=True
+    def current_grant(_):
+        if drained and outcome=='grant_revoked':raise ValueError('fixture grant revoked')
+        return approved
+    proc=SimpleNamespace(pid=1234,returncode=0,
+        termination_reason='automatic_recovery' if outcome=='automatic_recovery' else 'task_exit',
         _gitgo_cleanup=dict(complete=True,mode='macos_uid',invocation_id=request['invocation_id'],issues=[]),
-        close_sandbox=lambda:None,stdin=None,stdout=None,stderr=None)
+        close_sandbox=close_sandbox,stdin=None,stdout=None,stderr=None)
     def launch(command,policy,**kw):
         launched.append((command,policy,kw));return proc
     class Capture:
@@ -240,7 +249,7 @@ def test_service_git_branch_has_no_source_path_runner_stdin_or_workspace_export(
     monkeypatch.setattr(server,'BoundedCommunication',Capture)
     monkeypatch.setattr(server,'tool_runner_command',forbidden)
     monkeypatch.setattr(server,'export_image',forbidden)
-    monkeypatch.setattr(server,'grant',lambda _:approved)
+    monkeypatch.setattr(server,'grant',current_grant)
     monkeypatch.setattr(server.select,'select',lambda *a:([],[],[]))
     monkeypatch.setattr(server.identity,'atomic_json',lambda path,value:writes.append((path,value)))
     monkeypatch.setattr(server.identity,'owned_rows',lambda uid:[])
@@ -254,6 +263,8 @@ def test_service_git_branch_has_no_source_path_runner_stdin_or_workspace_export(
         assert all(p.stat().st_mode & 0o007==4 for p in (policy.workspace/'object-view').rglob('*') if p.is_file())
         assert sent[-1]['stdout']=='blob\n' and 'image' not in sent[-1]
         assert sent[-1]['view_sha256']==view.sha256 and sent[-1]['cleanup']['complete']
+        assert sent[-1]['reason']==outcome
+        assert sent[-1]['exit_code']==(0 if outcome=='complete' else -1)
         mapping=writes[0][1]
         assert mapping['execution_basis']==request['execution_basis'] and mapping['grant_id']==approved['grant_id']
     finally:

@@ -321,6 +321,7 @@ class DarwinTrialProcess:
         self.boot = identity.boot_id()
         self.uid = trial["uid"]
         self.pid, self.returncode = 0, None
+        self.termination_reason = None
         self.stdin = self.stdout = self.stderr = None
         self.control = None
         self._gitgo_macos_scope = self
@@ -411,9 +412,15 @@ class DarwinTrialProcess:
             self._gitgo_cleanup = dict(complete=cleanup.get('observed_empty') is True and not cleanup.get('issues'),
                 mode='macos_uid', issues=cleanup.get('issues') or [], invocation_id=state['invocation_id'],
                 uid=state['uid'], generation=state['generation'])
-            self.returncode = state.get('exit_code') if type(state.get('exit_code')) is int else -1
-            self.resource_reason=state.get('reason','') if state.get('reason','').startswith('resource_') else None
-            if self.resource_reason:self.returncode=-1
+            exit_code = state.get('exit_code')
+            reason = state.get('reason')
+            self.termination_reason = reason if type(reason) is str and reason else 'outcome_unconfirmed'
+            if self.termination_reason == 'task_exit' and (
+                    not self._gitgo_cleanup['complete'] or type(exit_code) is not int):
+                self.termination_reason = 'outcome_unconfirmed'
+            # Recovery can finish the UID drain while retaining a stale exit
+            # code. Only the original supervisor can confirm a task exit.
+            self.returncode = exit_code if self.termination_reason == 'task_exit' else -1
         return self.returncode
 
     def wait(self, timeout=None):

@@ -98,12 +98,31 @@ def test_unknown_exit_is_not_success(monkeypatch,tmp_path_factory):
     assert p.poll()==-1 and p._gitgo_cleanup['complete']
 
 
-def test_cleanup_errors_do_not_retire_identity(monkeypatch,tmp_path_factory):
+@pytest.mark.parametrize(('reason', 'exit_code', 'expected'), [
+    ('task_exit', 0, 0),
+    ('task_exit', 1, 1),
+    ('automatic_recovery', 0, -1),
+    ('resource_cpu', 0, -1),
+    ('resource_observation_failed', 0, -1),
+    ('owner_eof', 0, -1),
+    ('cancel', 0, -1),
+    ('timeout', 0, -1),
+])
+def test_only_confirmed_task_exit_reports_its_exit_status(monkeypatch,tmp_path_factory,reason,exit_code,expected):
     s=dict(uid=200000001,invocation_id='a'*32,boot_id=[1,2],phase='clean',generation=2,
-           cleanup={'observed_empty':True,'issues':['query_failed']},exit_code=0)
+           cleanup={'observed_empty':True,'issues':[]},reason=reason,exit_code=exit_code)
     monkeypatch.setattr(mac,'load_state',lambda _:s)
     p=process(tmp_path_factory)
-    assert p.poll()==0 and not p._gitgo_cleanup['complete']
+    assert p.poll()==expected and p._gitgo_cleanup['complete']
+    assert p.termination_reason==reason
+
+
+def test_cleanup_errors_do_not_retire_identity(monkeypatch,tmp_path_factory):
+    s=dict(uid=200000001,invocation_id='a'*32,boot_id=[1,2],phase='clean',generation=2,
+           cleanup={'observed_empty':True,'issues':['query_failed']},reason='task_exit',exit_code=0)
+    monkeypatch.setattr(mac,'load_state',lambda _:s)
+    p=process(tmp_path_factory)
+    assert p.poll()==-1 and not p._gitgo_cleanup['complete']
 
 
 def test_native_cancel_delegates_to_uid_owner_not_pid(monkeypatch):

@@ -213,7 +213,7 @@ def test_output_exporter_refuses_special_objects_without_following_them(tmp_path
 
 
 @pytest.mark.skipif(sys.platform!='darwin',reason='Darwin integration selection')
-@pytest.mark.parametrize('response_kind',['success','denied_after_start','unknown_cleanup','wrong_peer','project_replaced','timeout'])
+@pytest.mark.parametrize('response_kind',['success','denied_after_start','unknown_cleanup','wrong_peer','project_replaced','timeout','recovered'])
 def test_real_host_pipeline_with_simulated_broker_peer(tmp_path_factory,monkeypatch,response_kind):
     """Real candidate/file service; transport fixture is NOT privileged evidence."""
     import base64
@@ -252,6 +252,7 @@ def test_real_host_pipeline_with_simulated_broker_peer(tmp_path_factory,monkeypa
                 project.rename(project.with_name('held'));project.mkdir()
                 (project/'input.txt').write_text('original')
             wire.send(b,dict(event='finished',invocation_id=identifier,exit_code=0,
+                reason='automatic_recovery' if response_kind=='recovered' else 'complete',
                 cleanup=dict(complete=response_kind!='unknown_cleanup',mode='macos_uid',invocation_id=identifier,issues=[]),
                 stdout=json.dumps({'success':True,'data':{'error':'COMMAND_TIMEOUT','timeout':2} if response_kind=='timeout' else {'success':True,'stdout':'done','exit_code':0}}),
                 stderr='',image=image))
@@ -278,9 +279,9 @@ def test_real_host_pipeline_with_simulated_broker_peer(tmp_path_factory,monkeypa
     else:
         assert result.is_error and not (project/'output.txt').exists()
         assert result.receipt['effect_state']!='committed'
-        if response_kind not in ('wrong_peer','project_replaced','timeout'):
+        if response_kind not in ('wrong_peer','project_replaced','timeout','recovered'):
             assert result.receipt['runtime_cleanup']['complete'] is False
-        if response_kind=='project_replaced':
+        if response_kind in ('project_replaced','recovered'):
             assert result.receipt['runtime_cleanup']['complete'] is True
         if response_kind=='timeout':
             assert result.data['error']=='TOOL_TIMEOUT' and result.data['execution_state']=='timed_out'

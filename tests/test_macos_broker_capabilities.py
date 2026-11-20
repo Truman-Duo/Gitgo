@@ -42,10 +42,10 @@ def test_reply_is_a_snapshot_and_cannot_mutate_live_authority(handshake):
     _, approved, expected, receipt = handshake
     receipt['project_identity'][0] = 11
     receipt['project_object']['birth'][0] = 101
-    receipt['operation_contracts']['run'] = 2
+    receipt['operation_contracts']['run'] = 1
     assert approved['identity'] == [10, 20, 501]
     assert expected['binding']['project_object']['birth'] == [100, 0]
-    assert capabilities.OPERATION_CONTRACTS['run'] == 1
+    assert capabilities.OPERATION_CONTRACTS['run'] == 2
 
 
 @pytest.mark.parametrize('changed', [
@@ -101,10 +101,10 @@ def test_project_object_cannot_be_dropped_or_added_to_trial_receipt(handshake):
 
 
 @pytest.mark.parametrize('contracts', [
-    {}, {'run': 2}, {'run': True}, {'run': 0}, {'run': -1}, {'run': 1.0},
-    {'run': '1'}, {'run': 1, 'bad/op': 1}, {'run': 1, 'future': True},
-    {'run': 1, 'future': 2**31}, [], None,
-    {**{'run': 1}, **{'future_' + str(i): 1 for i in range(32)}},
+    {}, {'run': 1}, {'run': 3}, {'run': True}, {'run': 0}, {'run': -1}, {'run': 2.0},
+    {'run': '2'}, {'run': 2, 'bad/op': 1}, {'run': 2, 'future': True},
+    {'run': 2, 'future': 2**31}, [], None,
+    {**{'run': 2}, **{'future_' + str(i): 1 for i in range(32)}},
 ])
 def test_missing_incompatible_or_malformed_operation_contract_refused(handshake, contracts):
     _, _, expected, receipt = handshake
@@ -115,7 +115,7 @@ def test_missing_incompatible_or_malformed_operation_contract_refused(handshake,
 
 def test_contracts_are_selected_per_operation_without_claiming_future_support(handshake):
     _, _, expected, receipt = handshake
-    receipt['operation_contracts'] = {'run': 1, 'git_checkout': 2, 'future_operation': 1}
+    receipt['operation_contracts'] = {'run': 2, 'git_checkout': 1, 'future_operation': 1}
     capabilities.require_operation(receipt, 'run', **expected)
     for operation in ('git_read', 'git_checkout', 'future_operation', 'status'):
         with pytest.raises(capabilities.BrokerCompatibilityError):

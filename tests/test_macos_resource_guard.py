@@ -33,6 +33,44 @@ def test_failed_observation_is_not_zero_usage():
     guard=Guard(200000001,POLICY,reader=Mock(side_effect=PermissionError('denied')))
     with pytest.raises(PermissionError):guard.check()
 
+@pytest.mark.parametrize(('final_sample', 'expected_reason'), [
+    (1_900_000_000, 'task_exit'),
+    (2_000_000_000, 'resource_cpu'),
+    (OSError('Ledger unavailable'), 'resource_observation_failed'),
+])
+def test_cleanup_persists_final_coalition_sample(final_sample, expected_reason):
+    from backend.core.macos_execution_service import cleanup_changes
+
+    ledger = Mock()
+    ledger.read.side_effect = [1_700_000_000, final_sample]
+    guard = Guard(200000001, POLICY, reader=lambda _: [], cpu_ledger=ledger)
+    assert guard.check() is None
+
+    state = dict(reason='task_exit', exit_code=0)
+    changes = cleanup_changes(state, dict(observed_empty=True, issues=[]), guard)
+
+    assert changes['phase'] == 'clean'
+    assert changes['reason'] == expected_reason
+    assert 'exit_code' not in changes
+    ledger.read.assert_called_with(())
+    if isinstance(final_sample, OSError):
+        assert changes['resource_error'] == 'OSError: Ledger unavailable'
+    else:
+        assert changes['resource_observation']['observed_cpu_ns'] == final_sample
+
+
+def test_pending_drain_and_recovery_cannot_finalize_task_result():
+    from backend.core.macos_execution_service import cleanup_changes
+
+    guard = Mock()
+    pending = cleanup_changes(dict(reason='task_exit'), dict(observed_empty=False, issues=[]), guard)
+    assert pending['phase'] == 'cleanup_pending' and 'reason' not in pending
+    guard.finish_cpu.assert_not_called()
+
+    recovered = cleanup_changes(dict(reason='automatic_recovery'), dict(observed_empty=True, issues=[]), None)
+    assert recovered['phase'] == 'clean' and 'reason' not in recovered
+
+
 def test_counter_regression_refused():
     guard=Guard(200000001,POLICY,reader=Mock(side_effect=[[row(1,100)],[row(1,99)]]))
     guard.check()

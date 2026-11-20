@@ -139,6 +139,15 @@ class Guard:
         if self.cpu_ns>=self.policy['cpu_seconds']*1_000_000_000:return 'resource_cpu'
         return None
 
+    def finish_cpu(self):
+        """Read the same coalition after the caller has confirmed UID cleanup."""
+        if self.cpu_ledger is None:
+            raise RuntimeError('Final resource coalition observation unavailable')
+        self.cpu_ns = self.cpu_ledger.read(())
+        if self.cpu_ns >= self.policy['cpu_seconds'] * 1_000_000_000:
+            return 'resource_cpu'
+        return None
+
     def evidence(self):
         return dict(mode='coalition_cpu_sampled_uid_memory' if self.cpu_ledger else 'sampled_uid',strict_aggregate=False,samples=self.samples,
             cpu_accounting='launchd_resource_coalition' if self.cpu_ledger else 'max_self_sum_and_reaped_subtree',

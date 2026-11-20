@@ -257,6 +257,18 @@ def export_image(work,uid, *, object_files=False):
         if helper.poll() is None: helper.kill();helper.wait(timeout=3)
 
 
+def require_current_grant(root, approved):
+    current = grant(root)
+    if current != approved:
+        raise ValueError('Grant changed')
+    fd = wire.open_directory(current['project'])
+    try:
+        from backend.core.macos_project_identity import check_directory
+        check_directory(fd, current)
+    finally:
+        os.close(fd)
+
+
 def execute(connection, request, root, approved):
     identifier=request['invocation_id'];proc=None;trial=None;owner_alive=True
     base=Path(tempfile.mkdtemp(prefix='gitgo-macos-chain-',dir='/private/tmp'));base.chmod(0o700)
@@ -310,6 +322,7 @@ def execute(connection, request, root, approved):
             from backend.core.macos_resource_guard import validate
             limits=validate(approved.get('resources',dict(memory_bytes=512*1024**2,process_limit=32,cpu_seconds=120)))
             # CPU budget and elapsed-time deadline are separate contracts.
+            require_current_grant(root,approved)
             proc=sandbox_popen(command,SandboxPolicy(work,**limits),
                 invocation_id=identifier,cwd=str(work if git_operation else owned_child_cwd(Path(__file__).resolve().parents[2])),
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=not git_objects,env=environment)
@@ -326,13 +339,7 @@ def execute(connection, request, root, approved):
                     except (EOFError,OSError): owner_alive=False;reason='owner_eof'
                     proc.kill()
                 try:
-                    current=grant(root)
-                    if current!=approved: raise ValueError('Grant changed')
-                    fd=wire.open_directory(current['project'])
-                    try:
-                        from backend.core.macos_project_identity import check_directory
-                        check_directory(fd,current)
-                    finally: os.close(fd)
+                    require_current_grant(root,approved)
                 except (ValueError,OSError):
                     reason='grant_revoked';proc.kill()
                 if time.monotonic()>=end:
@@ -344,27 +351,36 @@ def execute(connection, request, root, approved):
                     first=False
                     if time.monotonic()>end+20: raise TimeoutError('Recovery outcome unavailable')
             proc.close_sandbox()
-            if getattr(proc,'resource_reason',None):reason=proc.resource_reason
+            if reason=='complete' and proc.termination_reason!='task_exit':
+                reason=proc.termination_reason or 'outcome_unconfirmed'
             cleanup=proc._gitgo_cleanup
             if not cleanup['complete'] or cleanup['issues']: raise RuntimeError('UID cleanup not confirmed')
-            image=export_image(work,trial['uid']) if not git_operation and proc.returncode==0 and reason=='complete' else {'files':[],'directories':[]}
-            response={'event':'finished','invocation_id':identifier,'cleanup':cleanup,
-                'exit_code':proc.returncode if reason=='complete' else -1,'reason':reason,
-                'stdout':out,'stderr':err,'image':image}
-            if git_objects and proc.returncode==0 and reason=='complete':
-                image=export_image(destination/'objects',trial['uid'],object_files=True)
-                image['directories']=[]
-                response['objects']=image
-            if git_checkout and proc.returncode==0 and reason=='complete':
-                # The exporter also drops to the retired UID. Root never walks
-                # task-authored working files, even after the process exits.
-                response['checkout']=export_image(checkout,trial['uid'])
-                response['commit']=request['commit']
-            if git_operation:
-                response.pop('image')
-                response['view_sha256']=request['view_sha256']
+            outputs={}
+            if reason=='complete' and proc.returncode==0:
+                if git_objects:
+                    image=export_image(destination/'objects',trial['uid'],object_files=True)
+                    image['directories']=[]
+                    outputs['objects']=image
+                elif git_checkout:
+                    # Root still delegates reads to the retired low-UID exporter.
+                    outputs.update(checkout=export_image(checkout,trial['uid']),commit=request['commit'])
+                elif not git_operation:
+                    outputs['image']=export_image(work,trial['uid'])
             # Exporter is our direct reaped low-UID child; verify it too.
             if identity.owned_rows(trial['uid']): raise RuntimeError('Post-export identity not empty')
+            if reason=='complete':
+                try:
+                    require_current_grant(root,approved)
+                except (ValueError,OSError):
+                    reason='grant_revoked'
+                    outputs.clear()
+            response={'event':'finished','invocation_id':identifier,'cleanup':cleanup,
+                'exit_code':proc.returncode if reason=='complete' else -1,'reason':reason,
+                'stdout':out,'stderr':err,**outputs}
+            if git_operation:
+                response['view_sha256']=request['view_sha256']
+            else:
+                response.setdefault('image',{'files':[],'directories':[]})
             identity.atomic_json(root/'private/last-result.json',response)
             if owner_alive: wire.send(connection,response)
     finally:
