@@ -15,6 +15,10 @@ class SandboxDenied(RuntimeError):
 
     def result(self) -> dict:
         from backend.core.errors import error_payload
+        if self.code == "NATIVE_OUTCOME_UNCONFIRMED":
+            return {**error_payload(self.code, message=str(self), next_actions=[
+                {"action": "inspect_effects_before_replanning", "effect": "Process cleanup is confirmed; verify the interrupted command outcome without automatic replay."}]),
+                "effect_state": "ambiguous"}
         if self.code == "INVOCATION_JOURNAL_UNAVAILABLE":
             return {**error_payload(self.code, message=str(self), next_actions=[
                 {"action": "inspect_project_storage", "effect": "Restore reliable invocation evidence before native execution; do not replay unknown calls."}]),
@@ -120,6 +124,9 @@ def sandbox_environment(source: dict[str, str]) -> dict[str, str]:
 
 def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
     validate_runtime_separation(policy.workspace, trusted_runtime_roots())
+    if sys.platform == "darwin":
+        from backend.core.sandbox_macos import popen
+        return popen(argv, policy, **kwargs)
     if sys.platform == "win32":
         from backend.core.sandbox_windows import WindowsSandboxProcess
         return WindowsSandboxProcess(argv, policy=policy, **kwargs)

@@ -208,6 +208,10 @@ def terminate_tree(proc: subprocess.Popen, job_handle=None) -> None:
         proc.wait(timeout=10)
         proc.returncode = -15
         return
+    macos_scope = getattr(proc, "_gitgo_macos_scope", None)
+    if macos_scope is not None:
+        macos_scope.close_sandbox()
+        return
     if getattr(proc, "_gitgo_cgroup", None) is not None:
         try:
             proc.abort_sandbox()

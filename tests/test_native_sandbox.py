@@ -916,11 +916,18 @@ def test_native_runner_stops_detached_children_with_blocked_io(
         'exec_command', {'_workspace': str(policy.workspace), 'payload': 'x' * input_size},
         cancellation_event=cancellation)), daemon=True)
     worker.start()
-    deadline = time.monotonic() + 4
+    # Observe the real five-second runner deadline and its cleanup result;
+    # a shorter readiness wait can fail before the runner finishes launching.
+    # The runner's timeout and the requirement that the child ran stay intact.
+    deadline = time.monotonic() + 7
     try:
-        while not (workspace / 'child-ready.txt').exists() and time.monotonic() < deadline:
+        while (not (workspace / 'child-ready.txt').exists() and not results
+               and worker.is_alive() and time.monotonic() < deadline):
             time.sleep(0.01)
-        assert (workspace / 'child-ready.txt').exists(), results
+        assert (workspace / 'child-ready.txt').exists(), {
+            'results': results, 'worker_alive': worker.is_alive(),
+            'workspace_files': sorted(path.name for path in workspace.iterdir()),
+        }
         ready = time.monotonic()
         if reason == 'cancel':
             cancellation.set()

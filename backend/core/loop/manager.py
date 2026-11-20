@@ -12,6 +12,7 @@ from backend.core.loop.lifecycle import transition
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 from functools import wraps
@@ -43,7 +44,8 @@ class AgentProcessManager:
     # 定期调 reap 回收孤儿
     MAX_FORK_DEPTH = 2
 
-    def __init__(self, max_concurrency: int = 4, *, worktree_manager=None, presentation=None):
+    def __init__(self, max_concurrency: int = 4, *, worktree_manager=None, presentation=None,
+                 project_snapshot_commit: str = ""):
         self.presentation = presentation
         self._processes: dict[str, AgentProcess] = {}
         self._sessions: dict[str, "AgentSession"] = {}
@@ -60,6 +62,7 @@ class AgentProcessManager:
         self._state_condition = threading.Condition()
         self._state_version = 0
         self.worktree_manager = worktree_manager
+        self.project_snapshot_commit = project_snapshot_commit
         self._worktree_lock = threading.RLock()
 
     @_serialized_admission
@@ -314,8 +317,12 @@ class AgentProcessManager:
                             process.runtime_preferences["mechanism_resume_blocked"] = str(exc)
                             self.notify_state_changed(process.process_id)
 
+        thread_target = run
+        if sys.platform == "darwin":
+            from backend.core.macos_broker_client import bind_worker
+            thread_target = bind_worker(run)
         thread = threading.Thread(
-            target=run, name=f"gitgo-agent-{process_id[:8]}", daemon=True,
+            target=thread_target, name=f"gitgo-agent-{process_id[:8]}", daemon=True,
         )
         self._threads[process_id] = thread
         try:
@@ -363,7 +370,11 @@ class AgentProcessManager:
                         self._resume_queued.discard(process_id)
 
         try:
-            threading.Thread(target=resume, name=f"gitgo-resume-{process_id[:8]}", daemon=True).start()
+            thread_target = resume
+            if sys.platform == "darwin":
+                from backend.core.macos_broker_client import bind_worker
+                thread_target = bind_worker(resume)
+            threading.Thread(target=thread_target, name=f"gitgo-resume-{process_id[:8]}", daemon=True).start()
         except Exception:
             with self._continuation_lock:
                 self._resume_queued.discard(process_id)
@@ -630,7 +641,7 @@ class AgentProcessManager:
                 lease = self.worktree_manager.create(
                     process_id=process.process_id,
                     task_id=process.active_task_id,
-                    snapshot_commit=snapshot,
+                    snapshot_commit=snapshot or self.project_snapshot_commit,
                     upstream_commits=[item for item in commits if item],
                     mode="write",
                     resume_from=WorktreeLease.from_dict(previous.worktree) if previous else None,
@@ -675,11 +686,14 @@ class AgentProcessManager:
             # creation precedes the first session checkpoint. The same live
             # process and its original lease still own the stable task id.
             lease.task_id = process.active_task_id
-            common = manager._git_text(Path(lease.path), "rev-parse", "--git-common-dir")
-            expected = manager._git_text(manager.repo_root, "rev-parse", "--git-common-dir")
-            if ((Path(lease.path) / common).resolve()
-                    != (manager.repo_root / expected).resolve()):
-                raise WorktreeError("parked worktree belongs to a different repository")
+            # The macOS verifier pins the repository and its worktree metadata
+            # directly. The generic Git command backend is unavailable there.
+            if not lease.macos_binding:
+                common = manager._git_text(Path(lease.path), "rev-parse", "--git-common-dir")
+                expected = manager._git_text(manager.repo_root, "rev-parse", "--git-common-dir")
+                if ((Path(lease.path) / common).resolve()
+                        != (manager.repo_root / expected).resolve()):
+                    raise WorktreeError("parked worktree belongs to a different repository")
             process.worktree = lease.to_dict()
             process.worktree_path = lease.path
             return lease.path

@@ -47,6 +47,7 @@ class WorktreeLease:
     changed_files: list[str] = field(default_factory=list)
     runtime_offsets: dict[str, int] = field(default_factory=dict)
     input_dependencies: list[dict] = field(default_factory=list)
+    macos_binding: dict = field(default_factory=dict)
     error: str = ""
     promoted: bool = False
     promoted_at: str = ""
@@ -112,6 +113,8 @@ class AgentWorktreeManager:
     # observations travel through the canonical metadata channels below;
     # new internal file kinds must not accidentally enter a sealed result.
     _RUNTIME_PATHS = (".gitgo",)
+    _RUNTIME_INPUT_NAMES = ("test_manifest.json", "dependency_graph.v2.json",
+                            "dependency_feedback.json", "dependency_observations.jsonl")
 
     @classmethod
     def _business_paths(cls) -> list[str]:
@@ -160,19 +163,26 @@ class AgentWorktreeManager:
     ) -> subprocess.CompletedProcess:
         from .git_execution import GitBoundaryError, protected_git
         try:
-            with protected_git(cwd, args) as (command, environment):
-                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                result = subprocess.run(command, cwd=cwd, capture_output=True,
-                    timeout=timeout_seconds, check=False, close_fds=True,
-                    creationflags=creationflags, env=environment,
-                    **({"pass_fds": command.pass_fds} if os.name == 'posix' and hasattr(command, 'pass_fds') else {}),
-                    **({"input": input_bytes} if input_bytes is not None
-                       else {"stdin": subprocess.DEVNULL}))
+            import sys
+            if sys.platform=='darwin':
+                from .git_macos import run_object_query
+                if not args or args[0]!='git':
+                    raise GitBoundaryError('GIT_COMMAND_UNSUPPORTED','Only Git object queries are supported')
+                result=run_object_query(cwd,args[1:],timeout=timeout_seconds,text=False,input_bytes=input_bytes)
+            else:
+                with protected_git(cwd, args) as (command, environment):
+                    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                    result = subprocess.run(command, cwd=cwd, capture_output=True,
+                        timeout=timeout_seconds, check=False, close_fds=True,
+                        creationflags=creationflags, env=environment,
+                        **({"pass_fds": command.pass_fds} if os.name == 'posix' and hasattr(command, 'pass_fds') else {}),
+                        **({"input": input_bytes} if input_bytes is not None
+                           else {"stdin": subprocess.DEVNULL}))
         except GitBoundaryError as exc:
             from backend.core.errors import error_payload
             failure = WorktreeError(str(exc))
             failure.diagnostic = error_payload(exc.code, message=str(exc), details={
-                "scope": "this_git_command", "command_started": False,
+                "scope": "this_git_command", "command_started": getattr(exc,'command_started',False),
                 "task_effects": "not_inferred", "unrestricted_fallback": False,
             })
             raise failure from exc
@@ -428,6 +438,12 @@ class AgentWorktreeManager:
         resume_from: WorktreeLease | None = None,
     ) -> WorktreeLease:
         """Create one isolated checkout and materialize declared predecessors."""
+        import sys
+        if sys.platform == 'darwin':
+            from backend.core.macos_worktree import create
+            return create(self,process_id=process_id,task_id=task_id,snapshot_commit=snapshot_commit,
+                upstream_commits=upstream_commits,mode=mode,review_commit=review_commit,
+                context_refs=context_refs,resume_from=resume_from)
         if mode not in {"write", "review"}:
             raise WorktreeError("worktree mode must be write or review")
         process_id = self._safe_id(process_id)
@@ -566,10 +582,39 @@ class AgentWorktreeManager:
             notices.append("Promotion artifact metadata limited to 128 files.")
         return files, notices
 
+    def stage_index(self, lease: WorktreeLease, paths: list[str], *, cancellation=None) -> dict:
+        """Stage Host-selected paths using the registered macOS worktree grant."""
+        if not lease.macos_binding:
+            raise WorktreeError('Protected macOS index staging requires a registered lease')
+        from backend.core.macos_worktree_index import stage
+        return stage(self,lease,paths,cancellation=cancellation)
+
+    def publish_index(self, lease: WorktreeLease, *, cancellation=None) -> dict:
+        """Publish only the explicit staged result; does not seal/promote a task."""
+        if not lease.macos_binding:
+            raise WorktreeError('Protected macOS result publication requires a registered lease')
+        from backend.core.macos_worktree_result import publish
+        return publish(self,lease,cancellation=cancellation)
+
+    def merge_runtime_outputs(self, lease: WorktreeLease, *, cancellation=None) -> WorktreeLease:
+        """Explicitly merge captured runtime evidence; never promote business files."""
+        if not lease.macos_binding:
+            raise WorktreeError('Protected runtime merge requires a registered macOS lease')
+        from backend.core.macos_worktree_runtime import merge
+        return merge(self,lease,cancellation=cancellation)
+
     def seal(self, lease: WorktreeLease) -> WorktreeLease:
         """Freeze a successful worker result behind an internal immutable ref."""
         if lease.mode != "write" or lease.state not in {"leased", "privacy_blocked"}:
             raise WorktreeError(f"worktree cannot be sealed from state {lease.state}")
+        if lease.macos_binding:
+            from backend.core.macos_worktree_seal import seal
+            from .native_invocation_scope import current_native_cancellation
+            cancellation=current_native_cancellation(self.repo_root)
+            if not lease.macos_binding.get('result'):
+                from backend.core.macos_worktree_finish import prepare
+                prepare(self,lease,cancellation=cancellation)
+            return seal(self, lease, cancellation=cancellation)
         path = Path(lease.path).resolve()
         parent = self._git_text(path, "rev-parse", "HEAD")
         try:
@@ -610,15 +655,24 @@ class AgentWorktreeManager:
             raise WorktreeError("sealed artifact path must be workspace-relative")
         relative = "/".join(parts)
         object_ref = f"{commit}:{relative}"
-        try:
-            size = int(self._git_text(
-                self.repo_root, "cat-file", "-s", object_ref,
-            ))
-        except (ValueError, WorktreeError) as exc:
-            raise WorktreeError("sealed artifact does not exist") from exc
-        if size > 10 * 1024 * 1024:
-            raise WorktreeError("sealed artifact exceeds the 10 MiB review limit")
-        raw = self._git_bytes(self.repo_root, "show", object_ref)
+        import sys
+        if sys.platform == 'darwin':
+            from backend.core.macos_worktree_result import read_blob
+            # Preserve literal-path semantics: do not normalize an absolute or
+            # backslash path into a different authorized artifact name.
+            if str(path or '') != relative:
+                raise WorktreeError('sealed artifact requires an exact relative path')
+            raw = read_blob(self, commit, relative)
+        else:
+            try:
+                size = int(self._git_text(
+                    self.repo_root, "cat-file", "-s", object_ref,
+                ))
+            except (ValueError, WorktreeError) as exc:
+                raise WorktreeError("sealed artifact does not exist") from exc
+            if size > 10 * 1024 * 1024:
+                raise WorktreeError("sealed artifact exceeds the 10 MiB review limit")
+            raw = self._git_bytes(self.repo_root, "show", object_ref)
         if b"\0" in raw[:8192]:
             raise WorktreeError("sealed artifact is binary")
         content = raw.decode("utf-8-sig", errors="replace")
@@ -658,6 +712,10 @@ class AgentWorktreeManager:
                        file_service_args=file_service_args)
 
     def verify(self, lease: WorktreeLease) -> dict:
+        if lease.macos_binding:
+            from backend.core.macos_worktree import verify
+            try:return verify(self,lease)
+            except (OSError,ValueError,WorktreeError) as exc:return {"valid":False,"reason":str(exc)}
         path = Path(lease.path).resolve()
         if not path.is_dir():
             return {"valid": False, "reason": "worktree path missing"}
@@ -671,6 +729,11 @@ class AgentWorktreeManager:
         return {"valid": True, "head": head}
 
     def dispose(self, lease: WorktreeLease, *, keep_ref: bool = True) -> WorktreeLease:
+        if lease.macos_binding:
+            if not keep_ref:
+                raise WorktreeError('Protected macOS ref deletion is not yet supported')
+            from backend.core.macos_worktree import retire
+            return retire(self,lease)
         self._remove_path(Path(lease.path).resolve())
         if not keep_ref:
             ref = self._ref("agents", self._safe_id(lease.process_id))
@@ -679,6 +742,13 @@ class AgentWorktreeManager:
         lease.error = ""
         self._persist(lease)
         return lease
+
+    def recover_owned(self, lease: WorktreeLease) -> WorktreeLease:
+        """Reconcile an existing macOS lease; never recreate its Git command."""
+        if not lease.macos_binding:
+            raise WorktreeError('No recorded macOS directory authority')
+        from backend.core.macos_worktree import recover
+        return recover(self,lease)
 
     def mark_promoted(self, lease: WorktreeLease) -> WorktreeLease:
         if not lease.has_promotable_result:

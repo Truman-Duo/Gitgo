@@ -158,6 +158,9 @@ def automatic_permission_request(process, tool, arguments: dict, workspace_path:
         str(item) for item in list(getattr(tool, "resources", []) or [])
         if str(item).strip()
     ]
+    if tool_name == "promote_agent_changes":
+        purpose = "publish the selected child changes into your project"
+        declared = [f"capability://project-publication/{Path(workspace_path).name}"]
     return create_permission_request(process, {
         "purpose": purpose,
         "tool_name": tool_name,

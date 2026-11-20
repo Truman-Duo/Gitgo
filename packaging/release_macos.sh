@@ -14,8 +14,8 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --python) PYTHON_BIN="$2"; BUILD_ARGS+=("--python" "$2"); shift 2 ;;
     --bun) BUN_BIN="$2"; BUILD_ARGS+=("--bun" "$2"); shift 2 ;;
-    --output|--archive|--codesign-identity|--ripgrep|--ripgrep-notices) BUILD_ARGS+=("$1" "$2"); shift 2 ;;
-    --skip-codesign|--skip-archive) BUILD_ARGS+=("$1"); shift ;;
+    --output|--archive|--codesign-identity|--ripgrep|--ripgrep-notices|--node-runtime|--update-release-policy) BUILD_ARGS+=("$1" "$2"); shift 2 ;;
+    --skip-codesign|--skip-archive|--update-evidence) BUILD_ARGS+=("$1"); shift ;;
     --base-ref) BASE_REF="$2"; shift 2 ;;
     --verify-only) VERIFY_ONLY=1; shift ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;

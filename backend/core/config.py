@@ -143,6 +143,7 @@ class ProjectConfig:
     archived: bool = False
     pending_hard_delete_at: str = ""  # ISO timestamp, empty = no pending delete
     unavailable_entry: dict = field(default_factory=dict)  # first failed entry, bound to workspace
+    macos_worktree: dict | None = None  # local operator selection, no credentials
 
     # ── 向后兼容 property ─────────────────────────────────
 
@@ -236,6 +237,7 @@ class ProjectConfig:
             archived=d.get("archived", False),
             pending_hard_delete_at=d.get("pending_hard_delete_at", ""),
             unavailable_entry=dict(d.get("unavailable_entry") or {}),
+            macos_worktree=d.get("macos_worktree"),
         )
 
 
@@ -438,6 +440,7 @@ class ConfigManager:
                 if type(previous) is dict:
                     data = preserve_fields(previous, data, replace_paths={
                         ("projects", "*", "unavailable_entry"),
+                        ("projects", "*", "macos_worktree"),
                         ("keyboard_bindings", "overrides"),
                     })
             temp_path = p.with_name(f".{p.name}.{uuid.uuid4().hex}.tmp")

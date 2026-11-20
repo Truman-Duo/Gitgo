@@ -99,7 +99,7 @@ export type TraceLifecycleEvent = {
     "context_compaction_completed" | "completion_gate" | "agent_started" |
     "agent_terminal" | "agent_complete" | "task_bundle_delegated" |
     "worktree_leased" | "worktree_sealed" | "worktree_promoted" |
-    "worktree_cleanup_failed" |
+    "worktree_cleanup_failed" | "worktree_unavailable" |
     "multi_agent_routed_to_supervisor" | "agent_dag_admitted" |
     "toolcall_done" | "decision_required" | "sessions_recovery_available" |
     "session_recovery_resumed" | "session_recovery_discarded" |

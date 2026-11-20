@@ -4,7 +4,7 @@ from __future__ import annotations
 from backend.core.prompt_templates import load_prompt
 from backend.core.loop.execution_contract import HOST_COMPUTE, data_broker
 import json
-from backend.core.loop.agent_tool import AgentTool, ToolEffect
+from backend.core.loop.agent_tool import AgentTool, ApprovalMode, ToolEffect
 from backend.core.loop.models import ProcessStatus
 from backend.core.loop.operation_policy import is_effectful_mutation
 
@@ -311,6 +311,9 @@ def install(ctx):
             return {"promoted": False, "error": str(exc)}
 
 
+    # A configured protected project publishes through the user approval card.
+    # The supervisor's review remains a separate prerequisite in the manager.
+    user_approval = bool(getattr(manager, "project_snapshot_commit", ""))
     tools["promote_agent_changes"] = AgentTool(
         execution_contract=data_broker("files.workspace.promote_agent_changes"),
         name="promote_agent_changes",
@@ -329,6 +332,8 @@ def install(ctx):
         execute=promote_agent_changes,
         read_only=False,
         effect=ToolEffect.WORKSPACE_WRITE,
+        approval=ApprovalMode.ASK if user_approval else ApprovalMode.ALLOW,
+        approval_per_invocation=user_approval,
         resources=["filesystem:*"],
         idempotent=False,
     )

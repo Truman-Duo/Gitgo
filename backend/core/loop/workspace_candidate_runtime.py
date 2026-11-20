@@ -30,6 +30,18 @@ def _failure(code, detail):
 
 
 class WorkspaceCandidateRuntime(FileCandidateRuntime):
+    def is_current(self):
+        if not super().is_current():
+            return False
+        import sys
+        if sys.platform == "darwin":
+            from backend.core.macos_broker_client import project_binding
+            try:
+                project_binding(self.workspace)
+            except (OSError, ValueError):
+                return False
+        return True
+
     def execute(self, handler, args, timeout, *, diagnostics, runtime_metadata, trusted_arguments=None, result_kind="command"):
         if self.ctx.is_cancelled() or getattr(self.ctx.process, "cancel_requested", False):
             from .tool_pipeline import ToolExecutionCancelled
@@ -45,6 +57,12 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
         identity = {"owner": self.owner, "session_id": self.session_id,
             "workspace": str(root), "project_id": storage.paths.project_id,
             "handler": handler, "registration": self.registration, "arguments": public}
+        import sys
+        if sys.platform == "darwin":
+            from backend.core.macos_broker_client import project_binding
+            project_grant = project_binding(root)
+            if project_grant is not None:
+                identity["macos_project_grant"] = project_grant
         if self.trusted_arguments or result_kind != "command":
             identity.update(trusted_arguments=self.trusted_arguments, result_kind=result_kind)
         key = hashlib.sha256(_encode(identity)).hexdigest()
@@ -119,8 +137,9 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                     # protocol result was lost. Empty output is not non-execution.
                     result["producer_completed"] = False if render.get("launch_state") == "not_started" else None
                 if render.get("launch_state") in {"started", "unknown"}:
-                    result["execution_state"] = ("completed" if record else "unknown" if result.get("error") == "SANDBOX_CLEANUP_PENDING" else
-                        "timed_out" if result.get("error") == "TOOL_TIMEOUT" else "cancelled" if result.get("error") == "TOOL_CANCELLED" else "failed")
+                    result["execution_state"] = ("timed_out" if result.get("error") == "TOOL_TIMEOUT" else
+                        "cancelled" if result.get("error") == "TOOL_CANCELLED" else "completed" if record else
+                        "unknown" if result.get("error") == "SANDBOX_CLEANUP_PENDING" else "failed")
                 info = result.get("error_info")
                 if isinstance(info, dict):
                     info["details"].update(formal_effect_state=result.get("effect_state"),
@@ -187,11 +206,20 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                 invocation = replace(invocation, policy=replace(invocation.policy, recovery_id=recovery_id))
                 lifecycle("launching", stage, {})
             try:
-                result = self.pipeline._execute_isolated(handler, actual, timeout, cancellation_event=self.ctx.cancellation,
-                    diagnostics=diagnostics, runtime_metadata=metadata, native_invocation=invocation)
+                from contextlib import nullcontext
+                import sys
+                scope = nullcontext()
+                if sys.platform == "darwin":
+                    from backend.core.macos_broker_client import candidate_scope
+                    scope = candidate_scope(root, stage)
+                with scope:
+                    result = self.pipeline._execute_isolated(handler, actual, timeout, cancellation_event=self.ctx.cancellation,
+                        diagnostics=diagnostics, runtime_metadata=metadata, native_invocation=invocation)
             except Exception as exc:
                 from .error_taxonomy import classify_tool_error
-                raise SandboxDenied(classify_tool_error(exc, tool_name=self.tool.name).code, str(exc)) from exc
+                from .tool_pipeline import ToolExecutionCancelled
+                code = "TOOL_CANCELLED" if isinstance(exc, ToolExecutionCancelled) else classify_tool_error(exc, tool_name=self.tool.name).code
+                raise SandboxDenied(code, str(exc)) from exc
         finally:
             self.last_render.update({k: metadata[k] for k in ("launch_state", "exit_code", "execution_basis") if k in metadata})
             cleanup = runtime_cleanup_report(metadata.get("cleanup"))
@@ -219,6 +247,12 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
             if "result" not in locals() and retired:
                 self._discard_stage(stage, stages)
         try:
+            # A Host-classified helper refusal has no producer output. Preserve
+            # that actionable reason only when the launch journal confirms
+            # not_started; never use task output to relax launch/cleanup checks.
+            if (metadata.get("launch_state") == "not_started" and isinstance(result, dict)
+                    and result.get("error") in {"HELPER_GRANT_INVALID", "HELPER_MAINTENANCE", "HELPER_UPGRADE_REQUIRED"}):
+                raise SandboxDenied(result["error"], result.get("message", result["error"]))
             if metadata.get("launch_state") != "started" or metadata.get("exit_code") != 0:
                 raise SandboxDenied("SANDBOX_EXECUTION_FAILED", "Native launch and protocol exit were not confirmed")
             if not self.collect_outputs:
@@ -285,7 +319,12 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
             if not current():
                 return {**_failure("FILE_CHANGED", "Execution inputs changed; no formal output was submitted"), "input_applicability": "changed"}
             if output.get("error") or output.get("success") is False:
-                return {**_failure(str(output.get("error") or "COMMAND_EXIT_NONZERO"), "Native command failed; its private changes were not published"),
+                code = str(output.get("error") or "COMMAND_EXIT_NONZERO")
+                # The command handler's legacy result is not a catalog name.
+                # Preserve timeout semantics at the formal publication boundary.
+                if code == "COMMAND_TIMEOUT":
+                    code = "TOOL_TIMEOUT"
+                return {**_failure(code, "Native command failed; its private changes were not published"),
                         "producer_failed": True, "input_applicability": "current"}
             if not members:
                 return {"effect_state": "not_committed", "execution_state": "completed", "file_results": [], "input_applicability": "current"}

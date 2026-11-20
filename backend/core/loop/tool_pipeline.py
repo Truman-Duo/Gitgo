@@ -233,12 +233,12 @@ class ToolPipeline:
             runtime_metadata["registration"] = registered_digest
             runtime_metadata["owner"] = (ctx.process.process_id, ctx.process.active_task_id or ctx.process.process_id)
             from .read_approval import native_cleanup_pending
-            if execution_contract.kind.value == "native_process" and native_cleanup_pending(ctx.process):
-                from backend.core.sandbox import SandboxDenied
-                raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "Prior native resources require inspection")
             if execution_contract.kind.value == "native_process":
                 from .native_invocation_scope import check_native_recovery
                 check_native_recovery(ctx)
+            if execution_contract.kind.value == "native_process" and native_cleanup_pending(ctx.process):
+                from backend.core.sandbox import SandboxDenied
+                raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "Prior native resources require inspection")
         except (AttributeError, ValueError, OSError, RuntimeError) as exc:
             from backend.core.sandbox import SandboxDenied
             code = (exc.code if isinstance(exc, SandboxDenied) else
