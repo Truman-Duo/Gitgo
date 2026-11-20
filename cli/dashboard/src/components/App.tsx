@@ -214,10 +214,14 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         dispatch({type: "set_cmd_result", text: String(event.message || t({en:"Configuration was not applied",zh:"配置未应用"}))});
         return;
       }
+      if (event.event === "worktree_unavailable" && event.project === activeProject) {
+        dispatch({type: "set_cmd_result", text: String(event.reason || t({en:"Worktree unavailable",zh:"工作树不可用"}))});
+        return;
+      }
       if (event.event !== "deletion_status") return;
       dispatch({type:"set_cmd_result", text:String(event.message || t({en:"Deletion "+event.state,zh:"删除状态："+event.state}))});
     });
-  }, [client, dispatch, t]);
+  }, [activeProject, client, dispatch, t]);
   useEffect(() => {
     const sample = () => {
       const next: Record<string, number | null> = {};

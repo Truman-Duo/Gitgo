@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import sys
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
@@ -92,6 +93,10 @@ class SyncSessionBase:
 
     # ── 状态查询 ────────────────────────────────────────────
 
+    @property
+    def protected_worktree_mode(self) -> bool:
+        return sys.platform == "darwin" and self.project.macos_worktree is not None
+
     def status_dict(self, semantic: bool = True, layered: bool = False) -> dict:
         """返回机器可读的当前项目状态。
 
@@ -138,6 +143,8 @@ class SyncSessionBase:
             }
             if semantic_block:
                 result["layers"]["semantic"] = semantic_block
+            if self.protected_worktree_mode:
+                result["layers"]["governance"]["git_history_available"] = False
             return result
 
         # 旧格式（向后兼容）
@@ -163,6 +170,9 @@ class SyncSessionBase:
             },
         }
 
+        if self.protected_worktree_mode:
+            result["commits"]["workspace_history_available"] = False
+            result["trial"]["history_available"] = False
         if semantic:
             result["semantic"] = self._build_semantic_layer(
                 trial_pending, entries_changed, formal_total,

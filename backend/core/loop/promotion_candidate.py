@@ -31,6 +31,10 @@ def _bytes(root, name, entry):
 
 
 def matches_record(manager, commit, paths, record, side):
+    import sys
+    if sys.platform == 'darwin':
+        from backend.core.macos_promotion_snapshot import matches_record as protected_matches
+        return protected_matches(manager, commit, paths, record, side)
     from .promotion import _matches, _tree
     if not _matches(manager, commit, paths):
         return False
@@ -55,6 +59,10 @@ def _raise(result):
 
 
 def commit_promotion_patch(manager, integration, changed, patch, base, tip, args, prepare, *, guard_paths=(), input_paths=()):
+    import sys
+    if sys.platform == 'darwin':
+        from backend.core.macos_promotion_write import commit
+        return commit(manager, changed, base, tip, args, prepare, guard_paths=guard_paths,input_paths=input_paths)
     from .promotion import _tree, _matches
     root = manager.repo_root
     version_paths = list(dict.fromkeys([*guard_paths, *changed]))

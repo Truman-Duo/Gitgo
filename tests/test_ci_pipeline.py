@@ -158,6 +158,30 @@ class PipelineTests(unittest.TestCase):
         verified = next(step for step in jobs['python-windows']['steps'] if step.get('id') == 'verified')
         self.assertIn('scripts/ci_source_shards.py --reports incoming --count 4', verified['run'])
 
+    def test_macos_stage_four_source_and_frozen_checks_are_required_by_unix_gate(self):
+        jobs = workflow('ci.yml')['jobs']
+        self.assertIn('unix-packages', jobs['gate']['needs'])
+        target = workflow('unix-target.yml')['jobs']
+        steps = target['build']['steps']
+        source = next(step for step in steps
+                      if step.get('name') == 'macOS stage four authority recovery and publication source regression')
+        self.assertEqual(source['if'], "runner.os == 'macOS'")
+        self.assertNotIn('continue-on-error', source)
+        self.assertIn('tests/test_macos*.py tests/test_sandbox_macos.py', source['run'])
+        self.assertIn('tests/test_promotion_file_service.py', source['run'])
+        # The build's clean-source receipt includes untracked checkout files.
+        # Test reports belong outside that tree and must still be retained.
+        self.assertIn('--junitxml="${RUNNER_TEMP}/macos-stage4-source.xml"', source['run'])
+        self.assertEqual(target['accept']['needs'], 'build')
+        retained = next(step for step in steps
+                        if step.get('name') == 'Retain macOS stage four test outcomes including skips')
+        self.assertEqual(retained['if'], "always() && runner.os == 'macOS'")
+        self.assertEqual(retained['with']['path'], '${{ runner.temp }}/macos-stage4-source.xml')
+        acceptance = (ROOT / 'scripts/accept_unix_archive.py').read_text(encoding='utf-8')
+        self.assertIn("GITGO_SCOPE_TEST_HOST=str(host)", acceptance)
+        self.assertIn("ROOT / 'tests/test_macos_forkless_scope.py'", acceptance)
+        self.assertIn("'-q', '-k', 'frozen'", acceptance)
+
     def test_metadata_edits_cannot_restart_packaging_or_replace_the_product_gate(self):
         ci = workflow('ci.yml')
         self.assertNotIn('edited', ci.get('on', ci.get(True))['pull_request']['types'])

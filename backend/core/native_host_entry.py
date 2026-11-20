@@ -93,11 +93,20 @@ def _run_credential_cleanup_role(argv: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     role = _role_arguments(values)
+    if role and role[0] in {"macos-broker-service", "macos-execution-service"}:
+        # Separate root-owned helper installation, never user's app/update state.
+        return _main(values)
     if sys.platform == "win32" and role and role[0] in {"windows-scope", "windows-job-lease"}:
         # installed_runtime already exempts these fixed handle-only helpers:
         # their parent passes owned Job/lease handles before any payload starts.
         # Dispatch before loading the application/update graph on every Git read.
         return _main(values)
+    if role and role[0] == "macos-helper-admin":
+        # Refuse ordinary/source/managed-active contexts before opening any
+        # installation state. This fixed role does NOT bypass installed_runtime
+        # below and does not establish trust in an operator-selected package.
+        from backend.core.macos_helper_admin import require_frozen_admin_entry
+        require_frozen_admin_entry()
     from backend.core.update.installation import installed_runtime
     from backend.core.update.validation import UpdateError
     try:
@@ -116,6 +125,9 @@ def _main(values: list[str]) -> int:
         from backend.core.native_host import main as native_host_main
         return int(native_host_main() or 0)
     name, role_argv = role
+    if name == "macos-helper-admin":
+        from backend.core.macos_helper_admin import frozen_main
+        return frozen_main(role_argv)
     if name == "update-coordinator":
         from backend.core.update.coordinator import main as coordinator_main
         return coordinator_main(role_argv)
@@ -199,6 +211,16 @@ def _main(values: list[str]) -> int:
             raise SystemExit("unix-scope requires one owned control descriptor")
         from backend.core.unix_process_scope import main as scope_main
         return scope_main(role_argv)
+    if name in ("macos-broker-service", "macos-execution-service"):
+        if sys.platform != 'darwin' or len(role_argv)!=1:
+            raise SystemExit('macOS helper requires one provisioned directory')
+        from backend.core.macos_helper_install import verify_installed_runtime
+        verify_installed_runtime()
+        if name=='macos-broker-service':
+            from backend.core.macos_broker_service import serve
+        else:
+            from backend.core.macos_execution_service import serve
+        return serve(role_argv[0])
     raise SystemExit(f"unknown Gitgo internal role: {name}")
 
 

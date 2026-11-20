@@ -13,6 +13,7 @@ from backend.core.prompt_profiles import with_prompt_profile
 from backend.core.loop.lifecycle import transition
 
 import json
+import sys
 import threading
 import traceback
 import uuid
@@ -2562,8 +2563,12 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 resume_waiters(session, project, daemon_ctx or {})
 
         try:
+            thread_target = _run_task_thread
+            if sys.platform == "darwin":
+                from backend.core.macos_broker_client import bind_worker
+                thread_target = bind_worker(_run_task_thread)
             task_thread = threading.Thread(
-                target=_run_task_thread, daemon=True,
+                target=thread_target, daemon=True,
                 name=f"task-{process.process_id[:8]}",
             )
             apm.register_thread(process.process_id, task_thread)

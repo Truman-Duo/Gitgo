@@ -13,6 +13,7 @@ CODESIGN_IDENTITY="-"
 SKIP_ARCHIVE=0
 UPDATE_EVIDENCE=0
 UPDATE_RELEASE_POLICY=""
+NODE_RUNTIME=""
 
 cleanup_bun_artifacts() {
   find "$ROOT" -maxdepth 1 -type f -name '.*.bun-build' -delete
@@ -31,6 +32,7 @@ Usage: packaging/build_macos.sh [options]
   --codesign-identity ID    codesign identity (default: ad-hoc '-')
   --skip-codesign           Do not sign local binaries
   --skip-archive            Stage files without creating a tarball
+  --node-runtime PATH       Explicit local Node/npm toolchain for sandbox acceptance
   --update-evidence         Add opt-in, frozen-runtime-verified data evidence
   --update-release-policy FILE  Pin publisher public keys and channel URLs (requires --update-evidence)
 EOF
@@ -47,6 +49,7 @@ while [ "$#" -gt 0 ]; do
     --codesign-identity) CODESIGN_IDENTITY="$2"; shift 2 ;;
     --skip-codesign) CODESIGN_IDENTITY=""; shift ;;
     --skip-archive) SKIP_ARCHIVE=1; shift ;;
+    --node-runtime) NODE_RUNTIME="$2"; shift 2 ;;
     --update-evidence) UPDATE_EVIDENCE=1; shift ;;
     --update-release-policy) UPDATE_RELEASE_POLICY="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -132,6 +135,11 @@ HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
   --binary "$RIPGREP_BIN" --notices "$RIPGREP_NOTICES" \
   --destination "$STAGE/internal/gitgo-host"
 
+if [ -n "$NODE_RUNTIME" ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/stage_macos_node.py" \
+    --node "$NODE_RUNTIME" --destination "$STAGE/internal/gitgo-host/developer-tools"
+fi
+
 "$PYTHON_BIN" -B "$ROOT/scripts/render_product_manifest.py" \
   --source "$SCRIPT_DIR/product.json" \
   --platform macos \
@@ -140,9 +148,11 @@ HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
 cp "$SCRIPT_DIR/macos/install.sh" "$STAGE/install.sh"
 cp "$SCRIPT_DIR/unix/installer-common.sh" "$STAGE/installer-common.sh"
 cp "$SCRIPT_DIR/macos/uninstall.sh" "$STAGE/uninstall.sh"
+cp "$SCRIPT_DIR/macos/sandbox-helper.sh" "$STAGE/sandbox-helper.sh"
+cp "$ROOT/scripts/manage_macos_sandbox_service.py" "$STAGE/manage_macos_sandbox_service.py"
 cp "$ROOT/LICENSE.md" "$STAGE/LICENSE.md"
 chmod 755 "$STAGE/gitgo" "$STAGE/internal/gitgo-host/gitgo-host" \
-  "$STAGE/install.sh" "$STAGE/uninstall.sh"
+  "$STAGE/install.sh" "$STAGE/uninstall.sh" "$STAGE/sandbox-helper.sh"
 
 PRIMARY_COMMAND="$($PYTHON_BIN -B -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["primary_command"])' "$STAGE/product.json")"
 while IFS= read -r alias; do

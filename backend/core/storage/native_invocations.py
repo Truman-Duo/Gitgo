@@ -59,14 +59,16 @@ def pending_native_invocations(storage, *, include_active=False):
                     raise ValueError("native invocation evidence is invalid")
                 cleanup = item.get("runtime_cleanup")
                 # Final facts can commit just before an interrupted index retirement.
-                if item["phase"] == "finished" and _settled(item["launch_state"], cleanup):
+                recovered = item.get("recovered_outcome") == "unknown"
+                if not recovered and item["phase"] == "finished" and _settled(item["launch_state"], cleanup):
                     continue
                 with _LOCK:
                     active = (os.getpid(), item["invocation_id"]) in _ACTIVE
                 if not include_active and active and item.get("host_instance") == _host_identity()[1]:
                     continue
                 findings.append({
-                    "code": "NATIVE_LAUNCH_UNCONFIRMED" if item["phase"] == "launching" else "NATIVE_CLEANUP_UNCONFIRMED",
+                    "code": "NATIVE_OUTCOME_UNCONFIRMED" if recovered else (
+                        "NATIVE_LAUNCH_UNCONFIRMED" if item["phase"] == "launching" else "NATIVE_CLEANUP_UNCONFIRMED"),
                     "invocation_id": item["invocation_id"], "execution_id": item["execution_id"],
                     "call_index": item["call_index"], "process_id": item["process_id"],
                     "task_id": item["task_id"], "tool_name": item["tool_name"],
@@ -81,6 +83,43 @@ def pending_native_invocations(storage, *, include_active=False):
     except Exception as exc:
         return findings + [{"code": "INVOCATION_EVIDENCE_UNAVAILABLE", "effect_state": "ambiguous",
                              "state": "unknown", "detail": type(exc).__name__, "updated_at": 0.0}]
+
+
+def reconcile_native_invocations(storage):
+    """Best-effort authenticated cleanup reconciliation, retaining outcome debt.
+
+    Only inactive records for the explicit Host broker binding are queried.
+    CAS prevents a slow reply from overwriting a newer owner. The original
+    evidence is retained alongside the receipt; no pending head is retired.
+    """
+    from backend.core.macos_broker_client import active, recovered_cleanup
+    if not active(): return []
+    changed=[]
+    # Bound startup latency: further debt stays visible and blocks admission.
+    for finding in pending_native_invocations(storage)[:8]:
+        if finding['code'] not in ('NATIVE_LAUNCH_UNCONFIRMED','NATIVE_CLEANUP_UNCONFIRMED'):
+            continue
+        identifier=finding['invocation_id'];key='pending/'+identifier
+        try:
+            old=storage.get_state_ref(NAMESPACE,key)
+            if old is None: continue
+            item=json.loads(storage.read_blob(old,repair=False))
+            if (item.get('invocation_id')!=identifier or item.get('project_id')!=storage.paths.project_id
+                    or item.get('recovered_outcome') is not None): continue
+            with _LOCK:
+                if (os.getpid(),identifier) in _ACTIVE and item.get('host_instance')==_host_identity()[1]: continue
+            receipt=recovered_cleanup(item)
+            if receipt is None: continue
+            updated={**item,'runtime_cleanup':receipt['cleanup'],'recovered_outcome':'unknown',
+                     'recovery_receipt':receipt,'recovery_previous_ref':old,'updated_at':time.time()}
+            ref=storage.put_blob(json.dumps(updated,sort_keys=True,allow_nan=False).encode(),media_type='application/json')
+            if storage.commit_state_revision(NAMESPACE,key,ref,expected_ref=old,
+                    revision_key='recovery/'+identifier,related_refs=(old,)):
+                changed.append(identifier)
+        except Exception:
+            # Availability/validation/storage failures retain the original debt.
+            continue
+    return changed
 
 
 class NativeInvocationRecord:
@@ -121,7 +160,8 @@ class NativeInvocationRecord:
         with _LOCK:
             findings = pending_native_invocations(self.storage)
             if findings:
-                denial = SandboxDenied("SANDBOX_CLEANUP_PENDING",
+                code="NATIVE_OUTCOME_UNCONFIRMED" if all(f['code']=='NATIVE_OUTCOME_UNCONFIRMED' for f in findings) else "SANDBOX_CLEANUP_PENDING"
+                denial = SandboxDenied(code,
                     "Unsettled native invocation evidence requires inspection; no process was started.")
                 denial.findings = findings
                 raise denial

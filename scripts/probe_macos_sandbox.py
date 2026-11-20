@@ -1,8 +1,8 @@
 """Audit native macOS primitives. A passing audit does NOT enable a backend.
 
-Uses disposable directories, an unprivileged interpreter, a loopback listener
-and a temporary ad-hoc-signed Hypervisor/Virtualization probe. No guest is
-booted, and no installed application or system configuration is changed.
+Uses disposable directories, an unprivileged interpreter and a loopback listener.
+The full audit also runs a temporary Hypervisor/Virtualization allocation probe.
+No guest is booted, and no installed application or system configuration is changed.
 """
 from __future__ import annotations
 
@@ -20,14 +20,15 @@ import tempfile
 import time
 
 
-def seatbelt_profile(workspace: Path) -> str:
+def seatbelt_profile(workspace: Path, *, allow_fork: bool = True) -> str:
     roots = ["/System", "/bin", "/usr/lib", "/usr/share", "/private/var/db/dyld",
              str(Path(sys.base_prefix).resolve()), str(Path(sys.prefix).resolve()),
              str(Path(sys.executable).resolve().parent), str(workspace)]
     quoted = lambda value: json.dumps(value, ensure_ascii=False)
     read_rules = " ".join(f"(subpath {quoted(root)})" for root in dict.fromkeys(roots))
+    fork_rule = "(allow process-fork) " if allow_fork else ""
     return ('(version 1) (deny default (with message "GitgoMacAudit")) '
-            "(allow process-exec process-fork) (allow sysctl-read) "
+            f"(allow process-exec) {fork_rule}(allow sysctl-read) "
             "(allow process-info* (target self)) (allow signal (target self)) "
             '(allow file-read-metadata) (allow file-read* (literal "/")) '
             f"(allow file-map-executable {read_rules}) "
@@ -95,6 +96,41 @@ def detached_probe(profile: str, workspace: Path) -> bool:
 
 
 
+def process_audit(report: dict, workspace: Path, permissive: str) -> None:
+    restricted = seatbelt_profile(workspace, allow_fork=False)
+    report['detached_child_survives_group_kill'] = detached_probe(permissive, workspace)
+    assert run(restricted, workspace, "print('executed')") == 'executed'
+    report['single_process_execution_control'] = True
+    operations = {
+        'fork': "pid = os.fork()",
+        'posix_spawn': "pid = os.posix_spawn('/bin/sh', ['sh', '-c', 'exit 0'], {})",
+        'posix_spawn_setsid': "pid = os.posix_spawn('/bin/sh', ['sh', '-c', 'exit 0'], {}, setsid=True)",
+    }
+    for name, operation in operations.items():
+        source = (
+            "import errno, os\n"
+            f"try:\n {operation}\n"
+            "except OSError as exc:\n"
+            " if exc.errno != errno.EPERM:\n  raise\n"
+            " print('denied')\n"
+            "else:\n"
+            " if pid == 0:\n  os._exit(0)\n"
+            " assert os.waitpid(pid, 0)[1] == 0\n"
+            " print('created')"
+        )
+        assert run(permissive, workspace, source) == 'created', name
+        assert run(restricted, workspace, source) == 'denied', name
+        # Replacing the process image must not lift the restriction.
+        replacement = (
+            "import os, sys\n"
+            f"os.execv(sys.executable, [sys.executable, '-I', '-B', '-c', {source!r}])"
+        )
+        assert run(permissive, workspace, replacement) == 'created', name
+        assert run(restricted, workspace, replacement) == 'denied', name
+        report[f'{name}_denied_in_single_process_profile'] = True
+        report[f'{name}_denied_after_exec_in_single_process_profile'] = True
+
+
 def virtualization_probe() -> dict:
     """Exercise a signed native VM allocation, not just the hv_support sysctl.
 
@@ -102,7 +138,7 @@ def virtualization_probe() -> dict:
     An unsupported machine is an observation; compile/sign/cleanup failures
     are audit errors and must not be misreported as unsupported hardware.
     """
-    source = Path(__file__).with_name('probe_macos_virtualization.swift')
+    source = Path(__file__).with_name('probe_macos_virtualization.m')
     with tempfile.TemporaryDirectory(prefix='gitgo-macos-hypervisor-') as raw:
         root = Path(raw)
         executable = root / 'virtualization-probe'
@@ -112,7 +148,8 @@ def virtualization_probe() -> dict:
             'com.apple.security.virtualization': True,
         }))
         commands = [
-            ['/usr/bin/xcrun', 'swiftc', str(source), '-o', str(executable),
+            ['/usr/bin/xcrun', 'clang', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(executable),
+             '-framework', 'Foundation',
              '-framework', 'Hypervisor', '-framework', 'Virtualization'],
             ['/usr/bin/codesign', '--force', '--sign', '-', '--identifier',
              'org.gitgo.sandbox.virtualization-probe', '--entitlements',
@@ -172,7 +209,7 @@ def audit(report: dict):
             report['network_denied_with_positive_control'] = True
         # Report observations, including kernel-version differences. Neither
         # rlimits nor process-group cleanup establish an aggregate tree policy.
-        report['detached_child_survives_group_kill'] = detached_probe(profile, workspace)
+        process_audit(report, workspace, profile)
         source = ("import resource,mmap\ntry:\n "
                   "resource.setrlimit(resource.RLIMIT_AS,(512*1024**2,512*1024**2))"
                   "\nexcept (ValueError,OSError):\n print('limit_setting_rejected')"
@@ -196,6 +233,8 @@ def audit(report: dict):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--native-only', action='store_true',
+                        help='Audit native sandbox primitives without allocating a VM')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('Run the native audit on macOS; other OS results are not evidence')
@@ -210,7 +249,8 @@ def main():
               'hypervisor_available': {'1': True, '0': False}.get(hv_value),
               'production_backend': 'unavailable', 'macos_support_complete': False, 'audit_passed': False}
     try:
-        report['virtualization'] = virtualization_probe()
+        if not args.native_only:
+            report['virtualization'] = virtualization_probe()
         audit(report)
         report['audit_passed'] = True
     except Exception as exc:

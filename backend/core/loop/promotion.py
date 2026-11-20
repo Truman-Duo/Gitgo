@@ -27,6 +27,10 @@ def _tree(manager, commit, paths):
 
 
 def _matches(manager, commit, paths):
+    import sys
+    if sys.platform=='darwin':
+        from backend.core.macos_promotion_snapshot import matches
+        return matches(manager,commit,paths)
     expected = _tree(manager, commit, paths)
     for name in paths:
         relative = Path(name)
@@ -117,9 +121,18 @@ def _promote(manager, *, snapshot_commit, ordered_commits, promotion_id, artifac
     reconciled = False
     service_args = {"_mutation_lock_root": str(storage.paths.state_home / "mutation-locks"),
         "_lesson_context": {"state_home": str(storage.paths.state_home)}, **(file_service_args or {})}
+    import sys
+    if sys.platform == 'darwin':
+        from backend.core.macos_promotion import run
+        return run(manager, snapshot_commit=snapshot_commit, ordered_commits=ordered_commits,
+            promotion_id=promotion_id, artifact_paths=artifact_paths, input_dependencies=input_dependencies,
+            prior=prior, head_ref=head_ref, save=save, service_args=service_args)
     if prior.get("state") == "prepared":
         try:
             with file_writer_locks(manager.repo_root, [manager.repo_root / name for name in prior["paths"]], service_args):
+                if prior.get("native_write") is not None:
+                    from backend.core.macos_promotion_write import retire
+                    retire(manager, prior["native_write"])
                 if matches_record(manager, prior["result_commit"], prior["paths"], prior, "after"):
                     prior = {**{k: v for k, v in prior.items() if k != "previous"},
                              "state": "committed", "reconciled_effect": True}
@@ -163,8 +176,10 @@ def _promote(manager, *, snapshot_commit, ordered_commits, promotion_id, artifac
                   "input_dependencies": dependencies, **({"file_versions": prior["file_versions"]} if "file_versions" in prior else {})}
         facts = {}
         if pending or not prior:
-            def prepare(file_versions=None):
+            def prepare(file_versions=None, *, native_write=None):
                 nonlocal head_ref
+                if native_write is not None:
+                    record["native_write"] = native_write
                 if file_versions is not None:
                     record["file_versions"] = file_versions
                 _verify_inputs(manager, integration, paths, dependencies)

@@ -55,18 +55,21 @@ def inspect_post_checkpoint_invocations(
     findings: list[dict] = []
     # Native ownership is independent of effects and checkpoint recency. A
     # terminal/foreign task's pending tree also blocks this project's launches.
-    from backend.core.storage.native_invocations import pending_native_invocations
+    from backend.core.storage.native_invocations import pending_native_invocations, reconcile_native_invocations
+    def native_findings(reader):
+        reconcile_native_invocations(reader)
+        return pending_native_invocations(reader)
     try:
         if storage is None:
             from backend.core.storage import StorageRuntime, get_storage
             selected_home = state_home or getattr(paths, "state_home", None)
             if selected_home is not None:
                 with StorageRuntime(workspace, state_home=selected_home) as reader:
-                    findings.extend(pending_native_invocations(reader))
+                    findings.extend(native_findings(reader))
             else:
-                findings.extend(pending_native_invocations(get_storage(workspace)))
+                findings.extend(native_findings(get_storage(workspace)))
         else:
-            findings.extend(pending_native_invocations(storage))
+            findings.extend(native_findings(storage))
     except Exception as exc:
         findings.append({"code": "INVOCATION_EVIDENCE_UNAVAILABLE", "state": "unknown",
                          "effect_state": "ambiguous", "updated_at": 0.0, "detail": type(exc).__name__})
@@ -149,10 +152,21 @@ def inspect_post_checkpoint_invocations(
     return sorted(findings, key=lambda item: item["updated_at"])
 
 
-def inspect_worktree_recovery(record: dict | None) -> list[dict]:
+def inspect_worktree_recovery(record: dict | None, *, storage=None) -> list[dict]:
     """Refuse resume when a durable isolated checkout cannot be verified."""
     if not record or not record.get("isolated"):
         return []
+    if record.get('macos_binding'):
+        from .worktree import AgentWorktreeManager,WorktreeLease,WorktreeError
+        from backend.core.storage import get_storage
+        try:
+            manager=AgentWorktreeManager(record['root_workspace'],storage or get_storage(record['root_workspace']))
+            lease=manager.recover_owned(WorktreeLease.from_dict(record))
+            if lease.state in ('failed','disposed','creating'):
+                return [{'code':'WORKTREE_NOT_RESUMABLE','state':lease.state,'cleanup':lease.macos_binding.get('phase')}]
+            return []
+        except (OSError,ValueError,WorktreeError) as exc:
+            return [{'code':'WORKTREE_RECOVERY_UNCONFIRMED','detail':str(exc)}]
     state = str(record.get("state") or "")
     path = Path(str(record.get("path") or ""))
     if state in {"failed", "privacy_blocked", "disposed", "creating"}:
@@ -396,7 +410,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             paths=session_store._storage.paths, storage=session_store._storage,
         ) if process_id in incomplete else []
         if process_id in incomplete:
-            findings.extend(inspect_worktree_recovery(durable_worktree))
+            findings.extend(inspect_worktree_recovery(durable_worktree,storage=session_store._storage))
         provisional_terminal = (persisted_status in _TERMINAL and runtime.get("lifecycle_finalized") is False)
         if provisional_terminal:
             findings.append({"code": "HOST_FINALIZATION_INCOMPLETE", "effect_state": "ambiguous",
@@ -419,7 +433,7 @@ def restore_incomplete_processes(session_store, manager, workspace: str | Path,
             prior_recovery.get("resume_forbidden") or commit_unknown or profile_error
             or provisional_terminal or any(
                 str(item.get("code") or "").startswith("WORKTREE_")
-                or item.get("code") in {"INVOCATION_EVIDENCE_UNAVAILABLE", "NATIVE_CLEANUP_UNCONFIRMED", "NATIVE_LAUNCH_UNCONFIRMED"}
+                or item.get("code") in {"INVOCATION_EVIDENCE_UNAVAILABLE", "NATIVE_CLEANUP_UNCONFIRMED", "NATIVE_LAUNCH_UNCONFIRMED", "NATIVE_OUTCOME_UNCONFIRMED"}
                 for item in reasons
             )
         )

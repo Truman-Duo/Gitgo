@@ -137,6 +137,37 @@ def test_failed_command_retains_output_but_does_not_publish_partial_files(tmp_pa
     assert len(calls) == 1
 
 
+def test_command_timeout_is_catalogued_and_withholds_partial_outputs(tmp_path_factory,monkeypatch):
+    ws=tmp_path_factory
+    fake_producer(monkeypatch,ws,lambda stage:(stage/'partial.txt').write_text('unfinished'),
+                  output={'error':'COMMAND_TIMEOUT','timeout':2,'argv':['python','task.py']})
+    ctx,call=make(ws)
+    result=call({'argv':['python','task.py'],'timeout':2})
+    assert result.is_error and result.data['error']=='TOOL_TIMEOUT',result.formatted
+    assert result.data['producer_failed'] and result.data['execution_state']=='timed_out'
+    assert result.receipt['effect_state']=='not_committed'
+    assert result.receipt['runtime_cleanup']['complete'] is True
+    assert not (ws/'partial.txt').exists()
+
+
+def test_typed_cancellation_survives_workspace_boundary(tmp_path_factory,monkeypatch):
+    from backend.core.loop.tool_pipeline import ToolExecutionCancelled
+    fake_producer(monkeypatch, tmp_path_factory)
+    def run(self,name,args,timeout,**kwargs):
+        (Path(args['_workspace'])/'partial.txt').write_text('unfinished')
+        kwargs['runtime_metadata'].update(launch_state='started',exit_code=-1,
+                                         cleanup={'complete':True,'mode':'test_fixture'})
+        raise ToolExecutionCancelled('tool cancelled',effect_state='ambiguous')
+    monkeypatch.setattr(ToolPipeline,'_execute_isolated',run)
+    ctx,call=make(tmp_path_factory)
+    result=call({'argv':['python','task.py']})
+    assert result.is_error and result.data['error']=='TOOL_CANCELLED',result.formatted
+    assert result.data['execution_state']=='cancelled'
+    assert result.receipt['effect_state']=='not_committed'
+    assert result.receipt['runtime_cleanup']['complete'] is True
+    assert not (tmp_path_factory/'partial.txt').exists()
+
+
 def test_stale_candidate_cannot_silently_regenerate(tmp_path_factory, monkeypatch):
     calls = fake_producer(monkeypatch, tmp_path_factory)
     ctx, call = make(tmp_path_factory)

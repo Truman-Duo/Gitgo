@@ -214,6 +214,8 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
       );
     case "worktree_cleanup_failed":
       return makeNotice(ev, "Worktree cleanup failed", short(ev.reason || ev.process_id || ""), "error");
+    case "worktree_unavailable":
+      return makeNotice(ev, "Protected worktree unavailable", short(ev.reason), "warning");
     case "decision_required": {
       const decision = asRecord(ev.decision);
       const options = Array.isArray(decision.options) ? decision.options.length : 0;

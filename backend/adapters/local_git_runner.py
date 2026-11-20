@@ -46,7 +46,13 @@ class LocalGitRunner(GitRunner):
         # worktree plumbing. A raw fallback could execute hooks, filters, textconv,
         # fsmonitor or signature programs inside the trusted process boundary.
         from backend.core.loop.git_execution import CONTENT_READ_COMMANDS, GitBoundaryError
-        if (os.name == "nt" or sys.platform == 'linux') and args:
+        broker_bound=False
+        if sys.platform=='darwin':
+            from backend.core.macos_broker_client import active
+            broker_bound=active()
+        if broker_bound and not args:
+            raise GitBoundaryError('GIT_COMMAND_UNSUPPORTED','An explicit object query is required')
+        if (os.name == "nt" or sys.platform == 'linux' or broker_bound) and args:
             if args[0] not in {"init", "--help", "--version"} and not os.path.lexists(self._repo / ".git"):
                 message = "Selected directory is not a Git repository"
                 return CompletedProcess(self._build_cmd(*args), 128,
@@ -141,6 +147,11 @@ class LocalGitRunner(GitRunner):
 class ProtectedLocalGitRunner(LocalGitRunner):
     """Trusted local plumbing using the existing fixed-configuration boundary."""
     def run(self, args, capture_output=True, timeout=None, text=True, encoding="utf-8", *, input_bytes=None, transport_identity=None, author_identity=None):
+        if sys.platform=='darwin':
+            from backend.core.loop.git_macos import run_object_query
+            return run_object_query(self._repo,args,capture_output=capture_output,timeout=timeout,
+                text=text,encoding=encoding,input_bytes=input_bytes,
+                transport_identity=transport_identity,author_identity=author_identity)
         from backend.core.loop.git_execution import protected_git, protected_git_config
         from backend.core.loop.git_execution import commit_author_environment
         boundary = protected_git_config if args and args[0] in {"init", "remote", "--help", "--version"} else protected_git

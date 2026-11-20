@@ -134,7 +134,7 @@ def runner_transport_only(monkeypatch):
     Native containment is separately exercised without this mock in
     test_native_sandbox.py. This fixture is opt-in, never applied globally.
     """
-    def launch(argv, policy, **kwargs):
+    def launch(argv, policy, *, invocation_id="", **kwargs):
         from backend.core.process_control import spawn_managed
         proc = spawn_managed(argv, **kwargs)
         # Explicit protocol-seam observation, never native containment evidence.

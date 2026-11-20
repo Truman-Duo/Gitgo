@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -320,6 +320,27 @@ def run_daemon(
     trial_interval: float = 300.0,
     debounce_sec: float = 2.0,
 ) -> None:
+    """Run one registered project, optionally using its operator-selected grant."""
+    with ExitStack() as project_scope:
+        snapshot_commit = ""
+        selection = project.macos_worktree
+        if sys.platform == "darwin" and selection is not None:
+            from backend.core.macos_daemon_project import bind_project
+            try:
+                snapshot_commit = project_scope.enter_context(bind_project(project))
+            except (OSError, ValueError) as exc:
+                _emit_v2({
+                    "event": "worktree_unavailable",
+                    "severity": "warning",
+                    "reason": str(exc),
+                }, priority="immediate")
+        _run_daemon(cfg, project, trial_interval, debounce_sec, snapshot_commit)
+
+
+def _run_daemon(
+    cfg: Config, project: ProjectConfig, trial_interval: float,
+    debounce_sec: float, snapshot_commit: str,
+) -> None:
     """Main daemon loop — blocks until shutdown command or SIGTERM/SIGINT.
 
     Outputs line-delimited JSON events to stdout.
@@ -432,6 +453,7 @@ def run_daemon(
         from backend.core.sandbox_access import WorktreeAccessService
         worktree_manager.sandbox_access = WorktreeAccessService(worktree_manager)
     apm = AgentProcessManager(worktree_manager=worktree_manager,
+                              project_snapshot_commit=snapshot_commit,
                               presentation=ProcessPresentation(storage_runtime))
     # Runtime services share the same authoritative project storage.  Binding
     # it once on the manager keeps tool spill, checkpoints and DAG state on one

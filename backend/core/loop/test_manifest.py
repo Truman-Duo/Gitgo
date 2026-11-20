@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import sys
 import errno
 import os
 import tempfile
@@ -148,6 +150,15 @@ class TestManifest:
     @classmethod
     def load(cls, workspace_path: str | Path) -> "TestManifest":
         manifest = cls(workspace_path)
+        from backend.core import macos_broker_client
+        if sys.platform == 'darwin' and macos_broker_client.active():
+            from backend.core.storage.metadata_files import read_metadata_bytes
+            data = read_metadata_bytes(manifest.workspace, 'test_manifest.json', max_bytes=1024*1024)
+            manifest._loaded_sha256 = hashlib.sha256(data).hexdigest() if data is not None else ''
+            if data is not None:
+                from backend.core.macos_worktree_runtime import records
+                manifest.records = {r.test_id:r for r in records(data)}
+            return manifest
         if not manifest.path.exists():
             return manifest
         try:
@@ -167,6 +178,13 @@ class TestManifest:
             "updated_at": datetime.now().isoformat(),
             "tests": [self.records[key].to_dict() for key in sorted(self.records)],
         }
+        from backend.core import macos_broker_client
+        if sys.platform == 'darwin' and macos_broker_client.active():
+            from backend.core.storage.metadata_files import write_metadata_bytes
+            self._loaded_sha256 = write_metadata_bytes(self.workspace, 'test_manifest.json',
+                json.dumps(payload,ensure_ascii=False,indent=2,allow_nan=False).encode(),
+                expected_sha256=getattr(self,'_loaded_sha256',''),max_bytes=1024*1024)
+            return
         fd, tmp_name = tempfile.mkstemp(
             prefix="test_manifest.", suffix=".tmp", dir=str(self.path.parent),
         )
@@ -204,6 +222,7 @@ class TestManifest:
         with _manifest_lock(self.path):
             latest = type(self).load(self.workspace)
             self.records = latest.records
+            if hasattr(latest,"_loaded_sha256"):self._loaded_sha256=latest._loaded_sha256
             for record in records:
                 self._merge_record(record)
             self._save_unlocked()
