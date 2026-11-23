@@ -8,12 +8,12 @@ from pathlib import Path
 import secrets
 import socket
 import socketserver
-import sqlite3
 import threading
 import time
 import uuid
 
 from backend.core.application import OperationError
+from backend.core.storage.runtime import ObserverSqliteError
 from .files import atomic_json, private_directory, read_private_json
 from .recording import Archive, Recorder, json_bytes
 from .trial import Trial
@@ -87,7 +87,7 @@ class ObserverBridge:
                     response = bridge.execute(request)
                 except OperationError as exc:
                     response = {"ok": False, "error": exc.to_dict()}
-                except sqlite3.Error as exc:
+                except ObserverSqliteError as exc:
                     response = {"ok": False, "error": {"code": "OBSERVER_ARCHIVE_READ_FAILED", "message": str(exc)}}
                 except (ValueError, TypeError, OSError) as exc:
                     message = str(exc)

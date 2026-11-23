@@ -15,7 +15,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import sqlite3
 import threading
 import time
 from typing import Any
@@ -23,6 +22,7 @@ import uuid
 import zlib
 
 from backend.core.storage.redaction import redact_for_persistence
+from backend.core.storage.runtime import ObserverSqliteError, open_observer_capture
 from .files import atomic_json, private_directory
 
 
@@ -148,7 +148,7 @@ class Recorder:
     def _run(self):
         db = None
         try:
-            db = sqlite3.connect(self.path)
+            db = open_observer_capture(self.path)
             db.execute("PRAGMA journal_mode=WAL")
             # Observation is async and non-authoritative. NORMAL avoids fsync per
             # token; clean close checkpoints it. A crash always leaves coverage unknown.
@@ -194,7 +194,7 @@ class Recorder:
                 try:
                     if not self._error and db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
                         self._error, self._error_code = "A reader still holds the capture WAL", "OBSERVER_FLUSH_BUSY"
-                except sqlite3.Error as exc:
+                except ObserverSqliteError as exc:
                     self._error, self._error_code = str(exc), "OBSERVER_FLUSH_FAILED"
                 finally:
                     db.close()
@@ -245,7 +245,7 @@ class Archive:
         path = self.directory / f"{source}.sqlite3"
         if not path.is_file():
             raise ValueError("OBSERVER_SOURCE_MISSING")
-        return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+        return open_observer_capture(path, read_only=True)
 
     def events(self, source: str, after_seq=0, limit=200):
         with closing(self._connect(source)) as db:

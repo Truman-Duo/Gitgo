@@ -162,6 +162,16 @@ def open_usability_statistics(project_root: str | Path, *, read_only: bool = Fal
     return sqlite3.connect(path, timeout=.25)
 
 
+ObserverSqliteError = sqlite3.Error
+
+
+def open_observer_capture(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
+    """Open a private observer archive separate from project state and traces."""
+    if read_only:
+        return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+    return sqlite3.connect(path)
+
+
 PROJECT_LIST_CLOSEOUT_READ_BYTES = 16 * 1024 * 1024
 
 
