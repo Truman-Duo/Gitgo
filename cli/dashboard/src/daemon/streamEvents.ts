@@ -24,6 +24,18 @@ export type ProgressSummaryEvent = {
   phase?: string;
   process_id: string;
   step?: number;
+  update_id?: string;
+  progress_status?: string;
+  task_id?: string;
+};
+
+export type ProgressDeltaEvent = {
+  event: "progress_delta";
+  delta: string;
+  update_id: string;
+  process_id: string;
+  phase?: string;
+  task_id?: string;
 };
 
 export type ToolcallStartEvent = {
@@ -90,7 +102,7 @@ export type CompositeStepResultEvent = {
 };
 
 export type TraceLifecycleEvent = {
-  event: "provider_request_started" | "provider_response_completed" |
+  event: "provider_request_started" | "provider_request_parameters" | "provider_response_completed" |
     "provider_response_incomplete" | "provider_usage" |
     "provider_capability_fallback" |
     "provider_route_activated" | "provider_route_selected" | "provider_route_failed" | "provider_route_skipped" |
@@ -99,9 +111,9 @@ export type TraceLifecycleEvent = {
     "context_compaction_completed" | "completion_gate" | "agent_started" |
     "agent_terminal" | "agent_complete" | "task_bundle_delegated" |
     "worktree_leased" | "worktree_sealed" | "worktree_promoted" |
-    "worktree_cleanup_failed" |
-    "multi_agent_routed_to_supervisor" | "agent_dag_admitted" |
-    "toolcall_done" | "decision_required" | "sessions_recovery_available" |
+    "worktree_cleanup_failed" | "worktree_unavailable" |
+    "multi_agent_routed_to_supervisor" | "agent_dag_admitted" | "agent_dag_admission_failed" |
+    "tool_context_prepared" | "toolcall_done" | "decision_required" | "sessions_recovery_available" |
     "session_recovery_resumed" | "session_recovery_discarded" |
     "session_recovery_blocked" |
     "deadline_extended" |
@@ -110,24 +122,28 @@ export type TraceLifecycleEvent = {
     "storage_health" | "repository_scope_blocked" | "repository_scope_warning" |
     "task_admitted" | "mailbox_applied" | "user_decision_received" |
     "decision_resumed" | "context_compaction_requested" |
-    "context_compaction_failed" | "stream_recovery" | "progress_summary" |
+    "context_compaction_failed" | "stream_recovery" |
     "lessons_harvested" | "lesson_harvest_proposed" | "lesson_harvest_completed" | "lesson_harvest_resolved" | "lesson_harvest_failed" | "lessons_verified" | "lessons_discarded" |
     "provider_switched" | "architecture_warning" | "runtime_fact" | "runtime_projection_failed";
   process_id?: string;
   step?: number;
   task_kind?: string;
   time?: string;
+  promotion?: unknown;
+  promotion_source?: "subagent" | "subprocess" | "mixed" | "unknown";
   [key: string]: unknown;
 };
 
-export type StreamEvent =
+export type StreamEvent = (
   | TextDeltaEvent
   | ReasoningDeltaEvent
   | ProgressSummaryEvent
+  | ProgressDeltaEvent
   | ToolcallStartEvent
   | ToolcallDeltaEvent
   | ToolProgressEvent
   | StreamRecoveryEvent
   | ToolResultEvent
   | CompositeStepResultEvent
-  | TraceLifecycleEvent;
+  | TraceLifecycleEvent
+) & {role?: string; temporary_subagent?: boolean; actor_label?: string};

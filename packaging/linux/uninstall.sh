@@ -45,6 +45,9 @@ source "$INSTALL_ROOT/installer-common.sh"
 INSTALL_ROOT="$(safe_path "$INSTALL_ROOT")"
 BIN_DIR="$(safe_path "$BIN_DIR")"
 owned_install || fail "Installed directory ownership cannot be confirmed"
+if [ -f "$INSTALL_ROOT/native-entry/owner.json" ]; then
+  "$INSTALL_ROOT/internal/gitgo-host/gitgo-host" --gitgo-internal-role native-entry --root "$INSTALL_ROOT" --action check
+fi
 
 # Preserve app, links, PATH and the last retry record on deletion failure.
 CONFIG_ROOT="$HOME/.gitgo"
@@ -57,6 +60,10 @@ if [ "$KEEP_CONFIG" -eq 0 ]; then
       GITGO_LLM_SECRET_PATH="$SECRET_INDEX" \
       "$HOST" --gitgo-internal-role credential-cleanup
   fi
+fi
+
+if [ -f "$INSTALL_ROOT/native-entry/owner.json" ]; then
+  "$INSTALL_ROOT/internal/gitgo-host/gitgo-host" --gitgo-internal-role native-entry --root "$INSTALL_ROOT" --action remove
 fi
 
 remove_owned_link() {

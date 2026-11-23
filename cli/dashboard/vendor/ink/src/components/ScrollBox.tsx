@@ -1,4 +1,4 @@
-import React, { type PropsWithChildren, type Ref, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
+import React, { type PropsWithChildren, type Ref, useCallback, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import type { Except } from 'type-fest';
 import type { DOMElement } from '../core/dom.js';
 import { markDirty, scheduleRenderFrom } from '../core/dom.js';
@@ -21,6 +21,8 @@ export type ScrollBoxHandle = {
   scrollIntoView: (el: DOMElement) => void;
   scrollToBottom: () => void;
   getScrollTop: () => number;
+  /** Actual last painted position; may lag a virtual-window seek target. */
+  getRenderedScrollTop: () => number;
   getPendingDelta: () => number;
   getScrollHeight: () => number;
   /**
@@ -51,6 +53,8 @@ export type ScrollBoxHandle = {
    * care about the sticky case should treat "at bottom" as a fallback.
    */
   subscribe: (listener: () => void) => () => void;
+  /** Passive painted-metrics observer; no polling or input ownership. */
+  subscribeMetrics: (listener: () => void) => () => void;
   /**
    * Set the render-time scrollTop clamp to the currently-mounted children's
    * coverage span. Called by useVirtualScroll after computing its range;
@@ -83,6 +87,27 @@ export type ScrollBoxProps = Except<Styles, 'textWrap' | 'overflow' | 'overflowX
  */
 function ScrollBox({ children, ref, stickyScroll, ...style }: PropsWithChildren<ScrollBoxProps>): React.ReactNode {
   const domRef = useRef<DOMElement>(null);
+  const metricsListeners=useRef(new Set<()=>void>());
+  const metricsQueued=useRef(false),lastMetrics=useRef('');
+  const metricsChanged=useCallback(()=>{
+    if(!metricsListeners.current.size||metricsQueued.current)return;
+    metricsQueued.current=true;
+    queueMicrotask(()=>{
+      metricsQueued.current=false;
+      const el=domRef.current;
+      if(!el)return;
+      const snapshot=[el.renderedScrollTop,el.scrollHeight,el.scrollViewportHeight,el.stickyScroll].join(':');
+      if(snapshot===lastMetrics.current)return;
+      lastMetrics.current=snapshot;
+      for(const listener of metricsListeners.current)listener();
+    });
+  },[]);
+  // Nested layout readers must keep access during parent updates. An inline
+  // callback detaches this ref before descendants' layout effects run.
+  const setDomRef = useCallback((el: DOMElement | null) => {
+    domRef.current = el;
+    if (el) {el.scrollTop ??= 0;el.onScrollMetrics=metricsChanged;}
+  }, [metricsChanged]);
   // scrollTo/scrollBy bypass React: they mutate scrollTop on the DOM node,
   // mark it dirty, and call the root's throttled scheduleRender directly.
   // The Ink renderer reads scrollTop from the node — no React state needed,
@@ -181,6 +206,9 @@ function ScrollBox({ children, ref, stickyScroll, ...style }: PropsWithChildren<
       getScrollTop() {
         return domRef.current?.scrollTop ?? 0;
       },
+      getRenderedScrollTop() {
+        return domRef.current?.renderedScrollTop ?? domRef.current?.scrollTop ?? 0;
+      },
       getPendingDelta() {
         // Accumulated-but-not-yet-drained delta. useVirtualScroll needs
         // this to mount the union [committed, committed+pending] range —
@@ -209,11 +237,24 @@ function ScrollBox({ children, ref, stickyScroll, ...style }: PropsWithChildren<
         listenersRef.current.add(listener);
         return () => listenersRef.current.delete(listener);
       },
+      subscribeMetrics(listener:()=>void){
+        metricsListeners.current.add(listener);
+        metricsChanged();
+        return()=>{metricsListeners.current.delete(listener);};
+      },
       setClampBounds(min, max) {
         const el = domRef.current;
         if (!el) return;
+        if(el.scrollClampMin===min&&el.scrollClampMax===max)return;
         el.scrollClampMin = min;
         el.scrollClampMax = max;
+        // Bounds are paint inputs. A virtual window may have committed after
+        // an earlier paint used its old clamp. Without invalidation a clean
+        // ScrollBox blits that empty edge indefinitely until another input.
+        markDirty(el);
+        if(renderQueuedRef.current)return;
+        renderQueuedRef.current=true;
+        queueMicrotask(()=>{renderQueuedRef.current=false;scheduleRenderFrom(el);});
       },
     }),
     // notify/scrollMutated are inline (no useCallback) but only close over
@@ -236,10 +277,7 @@ function ScrollBox({ children, ref, stickyScroll, ...style }: PropsWithChildren<
   // commit, which is too late for the first frame.
   return (
     <ink-box
-      ref={el => {
-        domRef.current = el;
-        if (el) el.scrollTop ??= 0;
-      }}
+      ref={setDomRef}
       style={{
         flexWrap: 'nowrap',
         flexDirection: style.flexDirection ?? 'row',

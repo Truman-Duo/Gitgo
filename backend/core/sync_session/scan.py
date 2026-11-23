@@ -112,6 +112,10 @@ class ScanMixin:
 
     def step_load_commits(self) -> list[CommitInfo]:
         """加载工作区 git 日志"""
+        if self.protected_worktree_mode:
+            self.commits = []
+            self.on_log("Workspace history is unavailable in macOS protected worktree mode")
+            return self.commits
         commits = get_git_log(
             self.workspace_path, self.project.sync_base or None,
             git_runner=self.ws_git_runner,

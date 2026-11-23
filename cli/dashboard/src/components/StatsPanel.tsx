@@ -1,6 +1,4 @@
 import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
-import {geometry} from "../theme/tokens.js";
-import {SelectionText} from "./Selection.js";
 import {label} from "../ui/runtimeLabels.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages,standardKey,moveSelection,reconcileSelection} from "../ui/pageContract.js";
@@ -25,6 +23,10 @@ import {
   padEndWidth,
 } from "../theme/index.js";
 import { waterfallRows, waterfallBar } from "./usagePresentation.js";
+import {PageActions} from "../ui/PageActions.js";
+import {RequestInputsPanel} from "./RequestInputsPanel.js";
+import {useFeedback} from "../hooks/useFeedback.js";
+import {FeedbackMessage} from "./FeedbackMessage.js";
 
 type Props = {
   client: BackendClient;
@@ -35,47 +37,54 @@ type Props = {
 export function StatsPanel({ client, project, cols, onDismiss }: Props) {
   const t=useCopy();
   const [actionFocus,setActionFocus]=useState(false),[action,setAction]=useState(0);
+  const [inputs, setInputs] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [tasks, setTasks] = useState<any[]>([]);
   const [selected, setSelected] = useState(0);
   const [events, setEvents] = useState<any[]>([]);
-  const [error, setError] = useState("");
-  const [traceError, setTraceError] = useState("");
+  const [usageFailed, setUsageFailed] = useState(false);
+  const [traceFailed, setTraceFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [traceLoading, setTraceLoading] = useState(false);
   const [page, setPage] = useState<any>({});
   const [tracePage, setTracePage] = useState<any>({});
   const generation = useRef(0);
+  const usageGeneration = useRef(0);
   const scroll = useRef<ScrollBoxHandle>(null);
-  useScrollInput(scroll,!actionFocus);
+  const task = tasks[selected];
+  const feedback = useFeedback({kind: "page", id: `trace:${project}/${task?.task_id ?? ""}/${inputs ? "inputs" : "rounds"}`});
+  useScrollInput(scroll,!actionFocus&&!inputs);
   useEffect(() => {
     let alive = true;
+    ++usageGeneration.current;
     setLoading(true);
+    setUsageFailed(false);
+    feedback.clear();
     runtimeUsage(client, project, 50, "")
       .then((data: any) => {
         if (!alive) return;
         setTasks(data.tasks || []);
         setPage(data.page || {});
-        setError("");
       })
       .catch((e) => {
-        if (alive) setError(String(e.message || e));
+        if (alive) {setUsageFailed(true); feedback.show(String(e.message || e), {tone: "error"});}
       })
       .finally(() => {
         if (alive) setLoading(false);
       });
     return () => {
       alive = false;
+      ++usageGeneration.current;
     };
   }, [client, project, refresh]);
-  const task = tasks[selected];
   useEffect(() => {
     const seq = ++generation.current;
     setEvents([]);
     setTracePage({});
-    setTraceError("");
+    setTraceFailed(false);
+    feedback.clear();
     scroll.current?.scrollTo(0);
-    if (!task) return;
+    if (!task) {setTraceLoading(false); return;}
     setTraceLoading(true);
     runtimeTrace(client, project, {
       action: "read",
@@ -89,7 +98,10 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
         setTracePage(data);
       })
       .catch((e) => {
-        if (seq === generation.current) setTraceError(String(e.message || e));
+        if (seq === generation.current) {
+          setTraceFailed(true);
+          feedback.show(t({en:"Trace unavailable: ",zh:"执行记录不可用："}) + String(e.message || e), {tone: "error"});
+        }
       })
       .finally(() => {
         if (seq === generation.current) setTraceLoading(false);
@@ -101,8 +113,10 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
   const loadMore = useCallback(() => {
     if (loading || traceLoading || !task) return;
     const seq = generation.current;
+    feedback.clear();
     if (tracePage.has_more) {
       setTraceLoading(true);
+      setTraceFailed(false);
       runtimeTrace(client, project, {
         action: "read",
         trace_id: task.task_id,
@@ -122,40 +136,47 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
             ];
           });
           setTracePage(data);
-          setTraceError("");
         })
         .catch((e) => {
-          if (seq === generation.current) setTraceError(String(e.message || e));
+          if (seq === generation.current) {
+            setTraceFailed(true);
+            feedback.show(t({en:"Trace unavailable: ",zh:"执行记录不可用："}) + String(e.message || e), {tone: "error"});
+          }
         })
         .finally(() => {
           if (seq === generation.current) setTraceLoading(false);
         });
     } else if (page.has_more && page.next_cursor) {
+      const usageSeq = usageGeneration.current;
       setLoading(true);
+      setUsageFailed(false);
       runtimeUsage(client, project, 50, page.next_cursor)
         .then((data: any) => {
-          if (seq !== generation.current) return;
+          if (usageSeq !== usageGeneration.current) return;
           setTasks((current) => [...current, ...(data.tasks || [])]);
           setPage(data.page || {});
         })
-        .catch((e) => setError(String(e.message || e)))
-        .finally(() => setLoading(false));
+        .catch((e) => {if (usageSeq === usageGeneration.current) {setUsageFailed(true); feedback.show(String(e.message || e), {tone: "error"});}})
+        .finally(() => {if (usageSeq === usageGeneration.current) setLoading(false);});
     }
-  }, [client, project, task, tracePage, page, traceLoading, loading]);
-  const actions=[{id:0,enabled:!loading&&!traceLoading&&Boolean(tracePage.has_more||page.has_more)},{id:1,enabled:!loading&&!traceLoading}];
+  }, [client, project, task, tracePage, page, traceLoading, loading, feedback.clear, feedback.show, t]);
+  const actions=[{id:0,enabled:!loading&&!traceLoading&&Boolean(tracePage.has_more||page.has_more),label:{en:"Load more",zh:"加载更多"}},
+    {id:1,enabled:!loading&&!traceLoading,label:{en:"Refresh",zh:"刷新"}},
+    {id:2,enabled:!loading&&!traceLoading&&Boolean(task),label:{en:"Request inputs",zh:"请求输入"}}];
   const activeAction=reconcileSelection(actions,action);
-  const menuHelp=useLocalHelpCommand("trace",undefined,true);
+  const menuHelp=useLocalHelpCommand("trace",undefined,!inputs);
   useInput((input,key)=>{
     if(menuHelp.handle(input,key))return;
     const command=standardKey(input,key);
     if(command==="back"){if(actionFocus)setActionFocus(false);else onDismiss();return;}
     if((command==="next"||command==="previous")){setActionFocus(v=>!v);return;}
     if(actionFocus){
-      if(command==="left"||command==="right")setAction(v=>moveSelection(actions,v,command==="left"?-1:1)??v);
+      if(command==="left"||command==="right")setAction(moveSelection(actions,activeAction??action,command==="left"?-1:1)??action);
       else if(command==="up")setActionFocus(false);
       else if(command==="activate"){
         if(activeAction===0)loadMore();
         else if(activeAction===1){setSelected(0);setRefresh(v=>v+1);}
+        else if(activeAction===2)setInputs(true);
       }
       return;
     }
@@ -163,7 +184,7 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
     else if(command==="right")setSelected(v=>Math.min(tasks.length-1,v+1));
     else if(command==="up")scroll.current?.scrollBy(-1);
     else if(command==="down")scroll.current?.scrollBy(1);
-  });
+  }, {isActive: !inputs});
   const rows = useMemo(() => waterfallRows(events, t), [events, t]);
   const multipleProcesses = new Set(rows.map((row) => row.process)).size > 1;
   const showProcess = multipleProcesses && cols >= 88;
@@ -181,17 +202,16 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
     : null;
   const field = (value: string, width: number) =>
     padEndWidth(truncate(value, width), width);
+  if (inputs) return <RequestInputsPanel key={`${project}/${task?.task_id}`} client={client} project={project} events={events}
+    partial={Boolean(tracePage.has_more)} onDismiss={() => setInputs(false)}/>;
   return (
-    <PageFrame page={pages.trace}>
+    <PageFrame page={pages.trace} header={<>
       <Text bold>{t({en:"Stats",zh:"用量"})} · {project} · {t({en:"Turn waterfall",zh:"逐轮瀑布图"})}</Text>
-      {tasks.length ? (
-        <Text>{t({en:"Turn",zh:"轮次"})} {selected+1} / {tasks.length}{page.has_more?"+":""}</Text>
-      ) : null}
-      {error ? <Text color={colors.danger}>{error}</Text> : null}
+      <FeedbackMessage feedback={feedback.message}/>
       {loading ? (
         <Text dimColor>{t({en:"Loading task usage…",zh:"正在读取任务用量…"})}</Text>
       ) : !task ? (
-        <Text dimColor>{t({en:"No recorded task usage yet.",zh:"尚无任务用量记录。"})}</Text>
+        <Text dimColor>{usageFailed?t({en:"Task usage not loaded. Refresh to retry.",zh:"任务用量尚未读取，可刷新重试。"}):t({en:"No recorded task usage yet.",zh:"尚无任务用量记录。"})}</Text>
       ) : (
         <>
           <Text>
@@ -209,6 +229,11 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
           </Text>
         </>
       )}
+    </>} footer={<>
+      <Text dimColor>{t({en:"▰ model · ▪ tool · — unrecorded · shared timeline per turn",zh:"▰ 模型 · ▪ 工具 · — 未记录 · 同轮共用时间轴"})}</Text>
+      <Text dimColor>{events.length} {t({en:"retained events",zh:"条保留事件"})}{tracePage.has_more?t({en:" · partial trace",zh:" · 执行记录尚未载全"}):""} · {tasks.length} {t({en:"loaded tasks",zh:"项已载入任务"})}{page.has_more?t({en:" · older tasks available",zh:" · 还有更早任务"}):""}</Text>
+      <PageActions items={actions} selected={activeAction} focused={actionFocus}/>
+    </>}>
       <ScrollBox
         ref={scroll}
         flexDirection="column"
@@ -216,13 +241,10 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
         minHeight={0}
         marginTop={1}
       >
-        {traceError ? (
-          <Text color={colors.danger}>{t({en:"Trace unavailable: ",zh:"执行记录不可用："})}{traceError}</Text>
-        ) : null}
         {traceLoading ? <Text dimColor>{t({en:"Loading recorded rounds…",zh:"正在读取各轮记录…"})}</Text> : null}
         {!rows.length && !traceLoading && task ? (
           <Text dimColor>
-            {t({en:"No per-round timing retained for this task. Aggregate usage above remains available.",zh:"此任务未保留逐轮时间记录，仍可查看上方汇总用量。"})}
+            {traceFailed?t({en:"Round records not loaded. Refresh to retry.",zh:"各轮记录尚未读取，可刷新重试。"}):t({en:"No per-round timing retained for this task. Aggregate usage above remains available.",zh:"此任务未保留逐轮时间记录，仍可查看上方汇总用量。"})}
           </Text>
         ) : null}
         {rows.length ? (
@@ -297,13 +319,6 @@ export function StatsPanel({ client, project, cols, onDismiss }: Props) {
           );
         })}
       </ScrollBox>
-      <Text dimColor>{t({en:"▰ model · ▪ tool · — unrecorded · shared timeline per turn",zh:"▰ 模型 · ▪ 工具 · — 未记录 · 同轮共用时间轴"})}</Text>
-      <Text dimColor>{events.length} {t({en:"retained events",zh:"条保留事件"})}{tracePage.has_more?t({en:" · partial trace",zh:" · 执行记录尚未载全"}):""} · {tasks.length} {t({en:"loaded tasks",zh:"项已载入任务"})}{page.has_more?t({en:" · older tasks available",zh:" · 还有更早任务"}):""}</Text>
-      <Box gap={geometry.actions.gap}>{[t({en:"Load more",zh:"加载更多"}),t({en:"Refresh",zh:"刷新"})].map((label,index)=><SelectionText selected={actionFocus&&activeAction===index} variant="block" key={index}
-        dimColor={!actions[index]?.enabled}
-
-        >{label}</SelectionText>)}</Box>
-
     </PageFrame>
   );
 }

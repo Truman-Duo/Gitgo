@@ -7,6 +7,7 @@ after the existing native supervisor has confirmed process-tree cleanup.
 import os
 from pathlib import Path
 import stat
+from time import monotonic
 
 from backend.core.sandbox import SandboxDenied, SandboxPolicy
 from .file_candidate_runtime import FileCandidateRuntime
@@ -25,7 +26,7 @@ class NativeReadRuntime(FileCandidateRuntime):
             raise SandboxDenied('TOOL_CANCELLED', 'Read task changed before preparation')
         if native_cleanup_pending(self.ctx.process):
             raise SandboxDenied('SANDBOX_CLEANUP_PENDING', 'Earlier native cleanup remains unconfirmed')
-        from backend.core.tools.workspace_tools import _confined_path, _read_failure
+        from backend.core.tools.workspace_tools import _IGNORED_DIRS, _confined_path, _read_failure
         workspace = Path(self.workspace)
         try:
             target = _confined_path(workspace, args.get('path', '.'), must_exist=True,
@@ -41,10 +42,18 @@ class NativeReadRuntime(FileCandidateRuntime):
                 return _read_failure('IS_DIRECTORY', str(target))
             binding.pin_current_file(args)
 
+        depth = None
+        if handler in {'list_files', 'search_text'} and target.is_dir():
+            from backend.core.tools.workspace_search import read_max_depth
+            try:
+                depth = read_max_depth(args)
+            except ValueError as exc:
+                return _read_failure('INVALID_SEARCH_ARGUMENTS', str(target), detail=str(exc))
+
         from .candidate_workspace import allocate_candidate_workspace
         from .execution_contract import NativeInvocation
         from .workspace_candidate_runtime import WorkspaceCandidateRuntime
-        from backend.core.sandbox_access import WorkspaceAccess, native_runtime_access
+        from backend.core.sandbox_access import WorkspaceAccess, native_read_runtime_access
         stages, stage = allocate_candidate_workspace(self.storage.paths, 'read', workspace=workspace)
         access = None
         # ReadRoot needs directory metadata, not data access to siblings. Linux
@@ -56,14 +65,27 @@ class NativeReadRuntime(FileCandidateRuntime):
                     and not (p == target or p.is_relative_to(target))}
         preparation = {'phase': 'preparing', 'scope': 'native_read', 'prepared': False, 'retired': False}
         runtime_metadata['sandbox_preparation'] = preparation
+        preparing_at = monotonic()
         try:
+            from .candidate_workspace import prepare_candidate_home
+            prepare_candidate_home(stage)
             if os.name == 'nt':
-                runtimes, shallow = native_runtime_access()
+                selecting_at = monotonic()
+                runtimes, shallow = native_read_runtime_access(handler, target)
+                from backend.core.sandbox import validate_runtime_separation
+                validate_runtime_separation(workspace, [*runtimes, *shallow])
+                preparation['runtime_selection_ms'] = round((monotonic() - selecting_at) * 1000, 3)
                 journal = self.storage.paths.project_root / 'sandbox_access' / (stage.name + '.json')
                 journal.parent.mkdir(parents=True, exist_ok=True)
                 access = WorkspaceAccess(stage, runtimes, journal, shallow_runtimes=shallow,
-                    read_roots=[target], read_workspace=workspace, metadata_roots=metadata)
+                    read_roots=[target], read_workspace=workspace, metadata_roots=metadata,
+                    read_max_depth=depth,
+                    private_temp_roots=[stage / '.gitgo/sandbox/home/Temp'],
+                    reuse_runtime_pins=True,
+                    excluded_read_dirs=(
+                        _IGNORED_DIRS if handler in {'list_files', 'search_text'} and target.is_dir() else ()))
                 access.prepare()
+            preparation['prepare_ms'] = round((monotonic() - preparing_at) * 1000, 3)
             if not self.is_current() or self.ctx.is_cancelled():
                 raise SandboxDenied('TOOL_CANCELLED', 'Read task changed during preparation')
             binding.payload(args)
@@ -81,20 +103,35 @@ class NativeReadRuntime(FileCandidateRuntime):
             preparation['os_error'] = {'type': type(exc).__name__, 'errno': exc.errno,
                                        'winerror': getattr(exc, 'winerror', None)}
             if not preparation['prepared']:
-                raise SandboxDenied('SANDBOX_PREPARATION_FAILED', str(exc)) from exc
+                raise SandboxDenied(getattr(exc, 'code', 'SANDBOX_PREPARATION_FAILED'), str(exc),
+                    details={'phase': preparation['phase'], 'cause_type': type(exc).__name__,
+                             'errno': exc.errno, 'winerror': getattr(exc, 'winerror', None),
+                             **getattr(exc, 'details', {})}) from exc
             raise
         finally:
             cleanup = runtime_cleanup_report(runtime_metadata.get('cleanup'))
             if runtime_metadata.get('launch_state') in {'started', 'unknown'} and (cleanup or {}).get('complete') is not True:
+                if access is not None:
+                    access.release_runtime_pins()
                 _RETAINED.append((access, stage))
                 raise SandboxDenied('SANDBOX_CLEANUP_PENDING', 'Retain the read view until native cleanup is confirmed')
             if access is not None:
+                retiring_at = monotonic()
                 try:
                     access.close()
                 except Exception as exc:
                     _RETAINED.append((access, stage))
                     runtime_metadata['sandbox_preparation']['phase'] = 'retirement_pending'
-                    raise SandboxDenied('SANDBOX_CLEANUP_PENDING', str(exc)) from exc
+                    preparation['retirement_error'] = {
+                        'code': getattr(exc, 'code', 'SANDBOX_ACCESS_RETIREMENT_FAILED'),
+                        'type': type(exc).__name__, **getattr(exc, 'details', {}),
+                    }
+                    raise SandboxDenied('SANDBOX_CLEANUP_PENDING', str(exc),
+                        details={'phase': 'retirement_pending',
+                                 'cause': preparation['retirement_error']}) from exc
+                finally:
+                    preparation.update(access.timings)
+                    preparation['retire_ms'] = round((monotonic() - retiring_at) * 1000, 3)
             runtime_metadata['sandbox_preparation']['phase'] = 'retired'
             preparation['retired'] = True
             WorkspaceCandidateRuntime._discard_stage(stage, stages)

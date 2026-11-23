@@ -1,0 +1,1 @@
+For wake only. Set true when distinct unfinished work remains after this task wrote or received the maintained files.

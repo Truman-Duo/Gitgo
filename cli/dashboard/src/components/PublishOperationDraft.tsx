@@ -10,13 +10,16 @@ import type {FooterConfig} from "./CommandBar.js";
 import type {PublishItem} from "../backend/publish.js";
 import {usePanelSize} from "../theme/index.js";
 
-export type PublishOperationMode = "remote" | "search" | "edit" | "state" | "comment_edit" | "reply" | "followup" | "comment" | "review" | "issue" | "pull" | "account" | "package" | "export" | "release" | "tag" | "import" | "download" | "link" | "branch";
+export type PublishOperationMode = "remote" | "search" | "edit" | "state" | "comment_edit" | "reply" | "followup" | "comment" | "review" | "issue" | "pull" | "account" | "signing" | "package" | "export" | "release" | "release_plan" | "tag" | "import" | "download" | "link" | "branch";
 const labels: Record<string, Copy> = {
   kind: {en: "Platform: github or gitlab", zh: "平台：github 或 gitlab"}, instance: {en: "HTTPS instance", zh: "HTTPS 实例地址"},
   repository: {en: "Repository: owner/name", zh: "仓库：所有者/名称"}, account: {en: "Account login", zh: "账户登录名"},
   resource: {en: "Read: issue, pull, issues or pulls", zh: "读取对象：issue、pull、issues 或 pulls"}, number: {en: "Issue / PR / MR number", zh: "Issue / PR / MR 编号"},
   token: {en: "Access token (stored encrypted)", zh: "访问令牌（加密保存）"}, page: {en: "Page (1–20)", zh: "页码（1–20）"},
   body: {en: "Draft text", zh: "草稿正文"}, title: {en: "Title", zh: "标题"},
+  notes: {en: "Release notes (optional)", zh: "发布说明（可选）"},
+  delivery_recipe:{en:"Release recipe",zh:"发布配方"},signing_key_id:{en:"Configured signing key ID",zh:"已配置的签名密钥 ID"},
+  key_id:{en:"Signing key ID",zh:"签名密钥 ID"},upgrade_route:{en:"Upgrade route",zh:"升级路径"},
   decision: {en: "Review: COMMENT, APPROVE, REQUEST_CHANGES", zh: "审查：COMMENT、APPROVE、REQUEST_CHANGES"},
   path: {en: "Anchor file (blank for overall review)", zh: "锚点文件（整体审查留空）"}, line: {en: "Anchor line", zh: "锚点行号"},
   side: {en: "Anchor side: LEFT or RIGHT", zh: "锚点侧：LEFT 或 RIGHT"},
@@ -40,10 +43,10 @@ const labels: Record<string, Copy> = {
   followup_status: {en: "Follow-up: pending_reply or resolved", zh: "跟进状态：pending_reply 待回复或 resolved 已处理"},
 };
 
-export function PublishOperationDraft({mode, item, busy, status, onFooter, onSubmit, onDismiss, localState, formKey = mode, initialValues}: {
+export function PublishOperationDraft({mode, item, busy, status, onFooter, onSubmit, onDismiss, localState, formKey = mode, initialValues, allowNativeRelease=false}: {
   mode: PublishOperationMode; item?: PublishItem; busy: boolean; status: string;
   onFooter: (value: FooterConfig | null) => void; onSubmit: (operation: string, args: Record<string, unknown>) => void; onDismiss: () => void;
-  localState?: PublishLocalState; formKey?: string; initialValues?: Record<string, string>;
+  localState?: PublishLocalState; formKey?: string; initialValues?: Record<string, string>;allowNativeRelease?:boolean;
 }) {
   const t = useCopy(), {h} = usePanelSize({minWidth: 20, widthOffset: 4});
   const snapshot = initialValues?.platform_snapshot_id ? item?.collaboration?.snapshots.find(row => row.id === initialValues.platform_snapshot_id) : item?.collaboration?.snapshots.at(-1);
@@ -55,7 +58,8 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
     version: "", entry: "", outputs: "", timeout: "120", package_id: item?.packages?.at(-1)?.id ?? "", destination: "", remote: "",
     package_path: "", sha256: "", process_id: "", parent_process_id: "", decision_id: "", snapshot_id: "", anchor_id: "", note: "",
     action: "retain_source", branch: item?.target ?? "", owner: item?.owner ?? "", reason: "", remote_branch: "", merge_item_id: "",
-    query: "", state: "closed", reference_kind: "comment", reference_id: "", followup_status: "pending_reply"};
+    query: "", state: "closed", reference_kind: "comment", reference_id: "", followup_status: "pending_reply", notes: "",
+    delivery_recipe:"project",signing_key_id:"",key_id:"",upgrade_route:"direct"};
   Object.assign(defaults, initialValues);
   const platform = ["kind", "instance", "repository", "account"];
   const form = usePublishForm(localState, formKey,
@@ -65,6 +69,9 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
     : ["comment_edit", "reply"].includes(mode) ? ["reference_kind", "reference_id", "body"]
     : mode === "followup" ? ["reference_kind", "reference_id", "followup_status", "owner", "note"]
     : mode === "account" ? [...platform, "token"] : mode === "release" ? [...platform, "package_id"]
+    : mode === "signing" ? ["key_id","token"]
+    : mode === "release_plan" ? [...platform,...(allowNativeRelease?["delivery_recipe"]:[]),
+      ...(allowNativeRelease&&values.delivery_recipe==="gitgo.native"?["signing_key_id","upgrade_route"]:[]), "notes"]
     : mode === "download" ? [...platform, "package_id", "destination"]
     : mode === "tag" ? ["package_id", "remote"] : mode === "import" ? ["package_path", "sha256"]
     : mode === "link" ? ["process_id", "parent_process_id", "decision_id", "snapshot_id", "anchor_id", "note"]
@@ -82,6 +89,7 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
   const submit = (next: Record<string, string>) => {
     const selectedTarget = Object.fromEntries(platform.map(name => [name, next[name]]));
     if (mode === "account") return onSubmit("account.save", {target: selectedTarget, token: next.token});
+    if (mode === "signing") return onSubmit("signing.save",{target:selectedTarget,key_id:next.key_id,token:next.token});
     if (mode === "remote") return onSubmit("collaborate", {action: "refresh", target: selectedTarget,
       resource: {kind: next.resource, ...(["issue", "pull"].includes(next.resource) ? {number: Number(next.number)} : {})}, page: Number(next.page)});
     if (mode === "search") return onSubmit("collaborate", {action: "search", target: selectedTarget, resource: {kind: next.resource}, query: next.query, page: Number(next.page)});
@@ -89,6 +97,8 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
       outputs: next.outputs.split(";").map(value => value.trim()).filter(Boolean), timeout: Number(next.timeout)}} : {})});
     if (mode === "export") return onSubmit("export", {package_id: next.package_id, destination: next.destination});
     if (mode === "release") return onSubmit("release", {package_id: next.package_id, target: selectedTarget});
+    if (mode === "release_plan") return onSubmit("release.plan", {package_id: initialValues?.package_id, target: selectedTarget, notes: next.notes,
+      delivery_recipe:allowNativeRelease?next.delivery_recipe:"project",signing_key_id:next.signing_key_id,upgrade_route:next.upgrade_route});
     if (mode === "download") return onSubmit("download", {package_id: next.package_id, target: selectedTarget, destination: next.destination});
     if (mode === "tag") return onSubmit("tag", {package_id: next.package_id, remote: next.remote});
     if (mode === "import") return onSubmit("import_package", {path: next.package_path, sha256: next.sha256});
@@ -110,19 +120,26 @@ export function PublishOperationDraft({mode, item, busy, status, onFooter, onSub
     onSubmit("collaborate", {action: "draft", snapshot_id: snapshot.id, draft: content});
   };
   const editor = usePublishFormEditor(form, {busy, onFooter, onDismiss, onSave: submit,
+    helpTopic:mode==="release_plan"||mode==="signing"?"publish.release":"publish.settings",
+    optionLabels:{delivery_recipe:{project:t({en:"Project artifacts",zh:"项目产物"}),"gitgo.native":t({en:"Gitgo native update",zh:"Gitgo 原生更新"})},
+      upgrade_route:{direct:t({en:"Direct update",zh:"直接升级"}),"legacy-repair":t({en:"Reviewed legacy repair",zh:"已审查的旧版修复路径"})}},
     choices: {kind: ["github", "gitlab"], resource: mode === "search" ? ["issues", "pulls"] : ["issue", "pull", "issues", "pulls"],
+      delivery_recipe:["project","gitgo.native"],upgrade_route:["direct","legacy-repair"],
       decision: ["COMMENT", "APPROVE", "REQUEST_CHANGES"], state: ["open", "closed"], side: ["LEFT", "RIGHT"],
       reference_kind: ["comment", "anchor"], followup_status: ["pending_reply", "resolved"],
       action: ["retain_source", "retain_work", "prepare_archive", "prepare_delete", "prepare_publish", "prepare_remote_delete"]}});
   const visible = Math.max(1, h - (mode === "branch" ? 10 : 7));
   const start = Math.max(0, Math.min(index - Math.floor(visible / 2), fields.length - visible));
   return <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
-    <Text bold>{t({en: "Publish · ", zh: "Publish · "})}{mode} · {index + 1}/{fields.length}</Text>
+    <Text bold>{mode === "release_plan" ? t({en: "Publish · Release plan", zh: "Publish · 发布计划"})
+      :mode==="signing"?t({en:"Publish · Signing key",zh:"Publish · 签名密钥"}):t({en: "Publish · ", zh: "Publish · "}) + mode}</Text>
+    {mode === "release_plan" ? <Text dimColor>{item?.packages?.find(pkg => pkg.id === defaults.package_id)?.version ?? ""} · {t({en: "Saving fixes the plan; no remote write occurs.", zh: "保存后固定计划，此时不写入远端。"})}</Text> : null}
 
 
     {status || error ? <Text>{status || error}</Text> : null}
     {stale ? <Text>{t({en: "This item changed since the draft. Ctrl+R starts again; Esc keeps the draft.", zh: "事项已变化，旧草稿不能直接保存。Ctrl+R 重新填写；Esc 保留草稿返回。"})}</Text> : null}
     {localState?.error ? <Text>{t({en: "Local draft could not be saved.", zh: "本地草稿未能保存，请保留页面并重试编辑。"})}</Text> : null}
-    {editor.rows(name => t(labels[name]), start, visible)}
+    {mode==="signing"?<Text dimColor>{defaults.repository} · {defaults.account}</Text>:null}
+    {editor.rows(name => mode==="signing"&&name==="token"?t({en:"Ed25519 private key (PEM or base64 seed)",zh:"Ed25519 私钥（PEM 或 base64 种子）"}):t(labels[name]), start, visible)}
   </Box>;
 }

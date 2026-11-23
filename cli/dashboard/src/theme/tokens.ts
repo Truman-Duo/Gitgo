@@ -23,6 +23,7 @@ export const geometry = {
   header: {padding: 1, minimumSlot: 5}, row: {minHeight: 1},
   scale: {preferredWidth: 64}, choice: {maxVisible: 8, inset: 2, rowInset: 1},
   drawer: {maxHeightRatio: 0.5},
+  record: {indent: 2, detailMaxRows: 8, contextMaxRows: 16, thoughtMaxRows: 16, detailFrameInset: 1},
   turnGuide: {borderStyle: "single", top: "┌", bottom: "└"},
 } as const;
 export const colors = {
@@ -189,8 +190,8 @@ export const colors = {
     intervalMs: 80,
     color: "#d29922",
     // Triangle fill pulse (hollow ▹ → large ▷ → solid ▶ → settled ▸) used as the running-tool buffer.
-    triangleFrames: ["▹", "▷", "▶", "▸"], // ▹▷▶▸
-    triangleIntervalMs: 150,
+    activityPulseMs: 300,
+    activityPulseLow: "#9e7624",
     // Thinking pulse grows from a centre point into an outer ring.
     thinkingFrames: ["·", "∙", "●", "◉", "●", "∙"],
     thinkingIntervalMs: 140,

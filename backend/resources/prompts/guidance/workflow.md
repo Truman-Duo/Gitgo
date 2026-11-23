@@ -1,5 +1,11 @@
 # Workflow
 
+## Correct a question input
+
+`QUESTION_OPTION_COUNT_INVALID / GITGO-E6221` names an options field with an unsupported count. An open clarification accepts 0..3 options; a fixed choice accepts 2..3. The error gives exact allowed counts. Free-form discussion/amendment already exists in the UI. Correct and resubmit the same intended call; its questions and accompanying answer updates were not published. A parameter error does not require workflow status, reconfiguration or another user decision. `QUESTION_ANSWER_KIND_INVALID / GITGO-E6220` instead identifies the optional choice/evidence discriminator.
+
+`QUESTION_AUTHORITY_OPTION_INVALID / GITGO-E6222` identifies a runtime action embedded in a business answer option. This is distinct from the number of options. Remove that action from the business card; the existing authorization path applies only when a concrete operation actually requires it. No authority or answer was granted.
+
 ## Read the current frontier
 
 Read engineering_workflow status (or decision_evidence with engineering focus) for the current plan revision, ready frontier, unresolved nodes and evidence. Follow actual dependency edges; do not run every named step blindly.

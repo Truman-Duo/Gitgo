@@ -25,7 +25,7 @@ import {ConnectivityDot,type ConnectivityState} from "../ConnectivityDot.js";
 import {llmCancel,llmModels,llmPresets,llmConnection,llmProbe,llmSave} from "../../backend/tools.js";
 import type {LLMProvider} from "../../hooks/useLLMConfig.js";
 import type {ConfigTabProps} from "./types.js";
-import {loadedProfiles,defaultProfile,configurationJson,parseConfiguration,manualModelIds,protocols,type Profile,type Model,type Connection} from "./providerEditorDraft.js";
+import {loadedProfiles,defaultProfile,defaultContextBudget,configurationJson,parseConfiguration,manualModelIds,protocols,type Profile,type Model,type Connection} from "./providerEditorDraft.js";
 
 type Preset={id:string;name:string;base_url:string;protocol:string};
 const custom:Preset={id:"custom",name:"Custom",base_url:"",protocol:"openai_chat"};
@@ -78,7 +78,9 @@ export function ProviderEditor({client,project,cmdInput,onFooter,seed,local:requ
     const models:Model[]=result.models || [],index=new Map(models.map(m=>[m.id,m]));
     setSnapshot({reference:Boolean(result.reference_only),partial:Boolean(result.partial),credentialsRequired:Boolean(result.credentials_required),ids:models.map(m=>m.id)});
     setCatalog(models.map(m=>defaultProfile(m.id,d.protocol,m,result.receipt_id)));
-    setProfiles(items=>items.map(p=>{const m=index.get(p.model_id);return m?{...p,deployment:m,model_receipt:p.protocol===d.protocol?result.receipt_id:undefined,context_source:["discovered","reference"].includes(p.context_source)&&p.context_window!==m.limits.context_window?"user":p.context_source}:p;}));
+    setProfiles(items=>items.map(p=>{const m=index.get(p.model_id);return m?{...p,deployment:m,model_receipt:p.protocol===d.protocol?result.receipt_id:undefined,
+     context_window:p.context_source==="default"?defaultContextBudget(m.limits.context_window):p.context_window,
+     context_source:["discovered","reference"].includes(p.context_source)&&p.context_window!==m.limits.context_window?"user":p.context_source}:p;}));
    }else{
     setHealth(state=>({...state,[key]:{state:result.checks?.model_response==="verified"?"online":"unknown"}}));
     if(action==="probe"&&profile){connectionAttempts.current.add(identity(d,{...profile,protocol:result.protocol}));setProfiles(items=>items.map(p=>p.model_id===profile.model_id?{...p,protocol:result.protocol,probe_receipt:result.receipt_id}:p));}
@@ -170,7 +172,7 @@ export function ProviderEditor({client,project,cmdInput,onFooter,seed,local:requ
   return true;
  },{bindingContext:"form",isActive:!scene,clipboard:form.editing?!form.isChoice&&!saving:true,inputTarget:form.editing?form.field:"commands"});
  if(scene==="help")return <HelpPanel scene="projects" topic="providers" onDismiss={()=>setScene(null)}/>;
- if(scene==="presets")return <SearchableChoiceScene helpTopic="providers" title={t({en:"Choose Provider",zh:"选择 Provider"})} showCount={false} items={presets.map(p=>({id:p.id,title:p.id==="custom"?t({en:"Custom connection",zh:"自定义连接"}):p.name}))} input={cmdInput} onFooter={onFooter} onSelect={choosePreset} onCancel={()=>{cmdInput.setValue("");if(presetOrigin==="entry")onDone(false);else setScene(null);}}/>;
+ if(scene==="presets")return <SearchableChoiceScene helpTopic="providers" title={t({en:"Choose Provider",zh:"选择 Provider"})} items={presets.map(p=>({id:p.id,title:p.id==="custom"?t({en:"Custom connection",zh:"自定义连接"}):p.name}))} input={cmdInput} onFooter={onFooter} onSelect={choosePreset} onCancel={()=>{cmdInput.setValue("");if(presetOrigin==="entry")onDone(false);else setScene(null);}}/>;
  if(scene==="json")return <DocumentEditorScene title={t({en:"Advanced · configuration JSON",zh:"高级 · 配置 JSON"})}  initialValue={jsonSeed} syntaxLanguage="json" onFooter={onFooter} onCancel={()=>setScene(null)} onSave={async text=>{const next=parseConfiguration(text,form.values,profilesRef.current);await save(next.connection,next.profiles,true);}}/>;
  const stageManual=(text:string)=>{
   const ids=manualModelIds(text);

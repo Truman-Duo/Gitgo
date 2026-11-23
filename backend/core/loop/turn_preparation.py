@@ -6,7 +6,8 @@ from .lifecycle import transition
 from .llm import StreamCancelledError
 from .models import ProcessStatus
 from .outcome import OutcomeStatus
-from .runtime_outcomes import _make_result, _cancellation_result, _budget_exhausted_result
+from .runtime_outcomes import _make_result, _cancellation_result, _budget_exhausted_result, _status_result
+from .mailbox import MailboxRecoveryRequired
 
 
 @dataclass(frozen=True)
@@ -57,10 +58,18 @@ class TurnPreparation:
             return PreparedTurn(result=_budget_exhausted_result(process, session, exc))
         except StreamCancelledError:
             return PreparedTurn(result=_cancellation_result(process, session))
+        except MailboxRecoveryRequired:
+            return PreparedTurn(result=_status_result(process, session))
 
     def _window_boundary(self):
         process, session = self.process, self.session
-        check = self.get_window().check(session)
+        window = self.get_window()
+        limit = max(1024, int(getattr(self.provider, "context_window", session.model_context_limit)))
+        if limit != session.model_context_limit:
+            session.model_context_limit = limit
+            session.context_flags.clear()
+            window.set_limit(limit)
+        check = window.check(session)
         auto = bool(process.runtime_preferences.get('auto_compact', True))
         if check['action'] != 'none':
             self.emit({'event': 'context_window_action', **check, 'context_epoch': session.context_epoch})

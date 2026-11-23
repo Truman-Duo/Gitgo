@@ -220,6 +220,7 @@ class TaskTreeBudget:
         actor_kind: str,
         max_steps: int,
         request: dict | None = None,
+        temporary: bool = False,
     ) -> dict:
         """Bind one admitted process to a task-tree budget account.
 
@@ -250,6 +251,11 @@ class TaskTreeBudget:
                 self._process_leases[process_id] = lease
                 self._revision += 1
                 return dict(lease)
+
+            parent_lease = self._process_leases.get(parent_id, {})
+            borrowed = temporary and parent_lease.get("kind") == "child"
+            if borrowed:
+                purpose = parent_lease["purpose"]
 
             # The default is a share of this process purpose's pool, rather
             # than a share of the whole tree.  In particular, a reviewer must
@@ -287,8 +293,12 @@ class TaskTreeBudget:
                 )
             requested_calls = max(1, int(request.get("provider_calls", provider_default) or provider_default))
             requested_output = max(1, int(request.get("output_tokens", output_default) or output_default))
-            available_calls = self._available_for_new_lease_locked("provider_calls", purpose)
-            available_output = self._available_for_new_lease_locked("output_tokens", purpose)
+            requested = {"provider_calls": requested_calls, "output_tokens": requested_output}
+            if borrowed:
+                available_calls, available_output = self._subagent_capacity_locked(parent_id)
+            else:
+                available_calls = self._available_for_new_lease_locked("provider_calls", purpose)
+                available_output = self._available_for_new_lease_locked("output_tokens", purpose)
             # Defaults are preferred shares, not a minimum purchase size. An
             # otherwise usable remainder must not become stranded after earlier
             # children release their unused escrow. Explicit requests retain
@@ -302,7 +312,11 @@ class TaskTreeBudget:
                     or requested_calls > available_calls or requested_output > available_output):
                 raise TaskBudgetExceeded(
                     "TASK_TREE_CHILD_ESCROW_UNAVAILABLE",
-                    f"requested child allocation exceeds the uncommitted task-tree budget; available provider_calls={available_calls}, output_tokens={available_output}; root coordination floor is protected",
+                    f"Child allocation needs {requested['provider_calls']} provider calls and "
+                    f"{requested['output_tokens']} output tokens. Available for {purpose}: "
+                    f"{available_calls} calls and {available_output} tokens.",
+                    details={"requested": requested, "available": {"provider_calls": available_calls,
+                        "output_tokens": available_output}, "purpose": purpose},
                 )
             lease = {
                 "process_id": process_id,
@@ -319,16 +333,130 @@ class TaskTreeBudget:
                 "refunded_output_tokens": 0,
             }
             self._process_leases[process_id] = lease
+            if temporary:
+                lease["temporary"] = True
+            if borrowed:
+                lease["borrowed_from_parent"] = True
+                parent_lease["reserved_provider_calls"] -= requested_calls
+                parent_lease["reserved_output_tokens"] -= requested_output
             self._revision += 1
             return dict(lease)
+
+    def _subagent_capacity_locked(self, parent_id: str) -> tuple[int, int]:
+        lease = self._process_leases.get(parent_id, {})
+        if lease.get("kind") == "child":
+            if lease.get("state") != "active":
+                return 0, 0
+            return (
+                max(0, lease["reserved_provider_calls"] - lease["used_provider_calls"] - self.limits.root_coordination_calls),
+                max(0, lease["reserved_output_tokens"] - lease["used_output_tokens"]),
+            )
+        return (self._available_for_new_lease_locked("provider_calls", "work"),
+                self._available_for_new_lease_locked("output_tokens", "work"))
+
+    def subagent_batch_request(self, parent_id: str, size: int, max_steps: int) -> dict:
+        """Split the available escrow without admitting any child yet."""
+        with self._lock:
+            self._check_deadline_locked()
+            available_calls, available_output = self._subagent_capacity_locked(parent_id)
+            purpose = self._process_leases.get(parent_id, {}).get("purpose", "work")
+            calls = min(max_steps, available_calls // size)
+            lease = self._process_leases.get(parent_id, {})
+            output_pool = (available_output if lease.get("kind") == "child"
+                           else self._purpose_ceiling_locked("output_tokens", purpose))
+            # Hold back some capacity for the owner to consume the replies.
+            output = min(max(0, available_output - min(1024, available_output // 4)) // size,
+                         math.ceil(output_pool * self.limits.default_child_share))
+            if calls < 1 or output < 1:
+                raise TaskBudgetExceeded("TASK_TREE_CHILD_ESCROW_UNAVAILABLE",
+                    "There is not enough remaining escrow for every helper in this batch.",
+                    details={"batch_size": size, "available": {"provider_calls": available_calls, "output_tokens": available_output}})
+            return {"provider_calls": calls, "output_tokens": output}
 
     def preflight_children(self, nodes: list[dict], *, parent_id: str) -> None:
         preview = self.from_snapshot(self.snapshot())
         for index, node in enumerate(nodes):
             preview.reserve_agent()
-            preview.register_process(f"preflight:{index}", parent_id=parent_id,
-                actor_kind="worker", max_steps=int(node.get("max_steps", 50) or 50),
-                request=dict(node.get("budget_request") or {}))
+            try:
+                preview.register_process(f"preflight:{index}", parent_id=parent_id,
+                    actor_kind="worker", max_steps=int(node.get("max_steps", 50) or 50),
+                    request=dict(node.get("budget_request") or {}), temporary=bool(node.get("temporary")))
+            except TaskBudgetExceeded as exc:
+                exc.details["node_index"] = index
+                raise
+
+    def configure_step_schedule(self, process_id: str, segments: list[int]) -> dict:
+        """Host-admitted root allowances in the existing durable process account."""
+        if (not isinstance(segments, list) or not 1 <= len(segments) <= 4
+                or any(type(value) is not int or value < 1 for value in segments)
+                or sum(segments) > 600):
+            raise ValueError('Invalid bounded execution step schedule')
+        with self._lock:
+            lease = self._process_leases[process_id]
+            if lease['kind'] != 'root' or segments[0] != lease['reserved_steps']:
+                raise ValueError('Execution step schedule must match its admitted root')
+            if 'step_schedule' in lease:
+                if lease['step_schedule'] != segments:
+                    raise ValueError('An admitted step schedule cannot be replaced')
+                return dict(lease)
+            lease.update(step_schedule=list(segments), step_segment=0,
+                         step_limit=segments[0], step_extensions=[])
+            self._revision += 1
+            return dict(lease)
+
+    def step_allowance(self, process_id: str) -> dict:
+        with self._lock:
+            lease = self._process_leases.get(process_id, {})
+            segments = list(lease.get('step_schedule') or [lease.get('reserved_steps', 0)])
+            return {'limit': int(lease.get('step_limit', lease.get('reserved_steps', 0))),
+                'segments': segments, 'renewals_used': int(lease.get('step_segment', 0)),
+                'maximum_renewals': len(segments) - 1, 'maximum_steps': sum(segments),
+                'extensions': [dict(item) for item in lease.get('step_extensions', [])]}
+
+    def extend_step_allowance(self, process_id: str, *, steps_used: int,
+                              reason: str, remaining_work: str) -> dict:
+        """Allocate the next pre-admitted segment, without refunding any usage.
+
+        The Agent owns the fallible semantic reason. This ledger only checks
+        identity, lifetime, timing and hard budgets; it does not certify progress.
+        """
+        with self._lock:
+            self._check_deadline_locked()
+            lease = self._process_leases.get(process_id, {})
+            segments = lease.get('step_schedule') or []
+            index = int(lease.get('step_segment', 0))
+            limit = int(lease.get('step_limit', lease.get('reserved_steps', 0)))
+            if lease.get('kind') != 'root' or lease.get('state') != 'active' or len(segments) < 2:
+                raise TaskBudgetExceeded('EXECUTION_STEP_RENEWAL_DISABLED',
+                    'This execution has a fixed allowance; child escrows and explicit test limits cannot renew themselves.')
+            if index + 1 >= len(segments):
+                raise TaskBudgetExceeded('EXECUTION_STEP_RENEWALS_EXHAUSTED', 'All three admitted renewals have been used.')
+            if steps_used < max(1, (limit * 4 + 4) // 5):
+                raise TaskBudgetExceeded('EXECUTION_STEP_RENEWAL_TOO_EARLY',
+                    'The current allowance still has more than 20 percent remaining.')
+            if steps_used > limit:
+                raise TaskBudgetExceeded('EXECUTION_STEP_ALLOWANCE_EXHAUSTED',
+                    'The execution already crossed its admitted boundary; inspect its recovery state.')
+            if self._provider_calls >= self.limits.max_provider_calls:
+                raise TaskBudgetExceeded('TASK_TREE_PROVIDER_BUDGET_EXHAUSTED', 'Provider-call hard limit is exhausted.')
+            if self._output_tokens >= self.limits.max_output_tokens:
+                raise TaskBudgetExceeded('TASK_TREE_OUTPUT_BUDGET_EXHAUSTED', 'Output-token hard limit is exhausted.')
+            next_limit = limit + segments[index + 1]
+            extension = {'segment': index + 2, 'additional_steps': segments[index + 1],
+                'previous_limit': limit, 'limit': next_limit, 'steps_used': steps_used,
+                'provider_calls_used': self._provider_calls, 'reason': reason, 'remaining_work': remaining_work}
+            lease.update(step_limit=next_limit, reserved_steps=next_limit, step_segment=index + 1,
+                         step_extensions=[*lease.get('step_extensions', []), extension])
+            self._revision += 1
+            return dict(extension)
+
+    def restore_step_allowance(self, process_id: str, before: dict) -> None:
+        """Rollback a known failed control commit; never refund calls/tokens."""
+        with self._lock:
+            lease = self._process_leases[process_id]
+            lease.update(step_limit=before['limit'], reserved_steps=before['limit'],
+                step_segment=before['renewals_used'], step_extensions=[dict(item) for item in before['extensions']])
+            self._revision += 1
 
     def release_process(self, process_id: str, *, status: str = "terminal") -> dict | None:
         with self._lock:
@@ -352,6 +480,13 @@ class TaskTreeBudget:
                 0, int(lease.get("reserved_output_tokens", 0))
                 - int(lease.get("used_output_tokens", 0))
             )
+            if lease.get("temporary"):
+                self._agents -= 1
+            if lease.get("borrowed_from_parent"):
+                parent = self._process_leases.get(lease["parent_id"], {})
+                if parent.get("state") == "active":
+                    parent["reserved_provider_calls"] += lease["refunded_provider_calls"]
+                    parent["reserved_output_tokens"] += lease["refunded_output_tokens"]
             return dict(lease)
 
     def _purpose_ceiling_locked(self, resource: str, purpose: str) -> int:

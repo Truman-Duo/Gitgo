@@ -532,7 +532,8 @@ class PromptAndReasoningStateTests(unittest.TestCase):
             process=process, tools={}, workspace_path="C:/workspace",
         )
 
-        self.assertIn("Call request_self_execute now", text)
+        self.assertIn("If you keep the accepted self_execute route and need protected tools", text)
+        self.assertIn("revise before requesting the lease", text)
         self.assertIn("pre-lease surface lacks the tool", text)
         self.assertIn("is not evidence that command, file or test capability is unsupported", text)
 
@@ -582,7 +583,8 @@ class PromptAndReasoningStateTests(unittest.TestCase):
         ])
 
         self.assertIn("surface_phase: contract_admission", envelope)
-        self.assertIn("call declare_task_contract now", envelope)
+        self.assertIn("Declare the task before effectful execution", envelope)
+        self.assertIn("multiple reasoning steps alone do not require execution admission", envelope)
         self.assertIn("safe read-only evidence and public-research", envelope)
         self.assertIn("Host will rebuild the appropriate surface", envelope)
         self.assertNotIn("mimo-v2.5", envelope)
@@ -942,6 +944,15 @@ class HostCompletionTests(unittest.TestCase):
                 process, "TASK_COMPLETE", [],
             ).allowed)
 
+    def test_missing_test_receipt_explains_how_to_use_formal_test_tool(self):
+        process = self._action_process()
+        process.completion_claim = CompletionClaim.from_args({
+            "result": "done", "verification": [{"kind": "test", "test_id": "unit:core"}],
+        }, step=2, process=process)
+        denied = HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE", [])
+        self.assertFalse(denied.allowed)
+        self.assertTrue(any("run_test" in reason and "test_id" in reason for reason in denied.reasons))
+
     def test_structured_dynamic_evidence_requires_matching_host_receipts(self):
         process = self._action_process()
         process.tool_receipts.append({
@@ -1052,10 +1063,12 @@ class HostCompletionTests(unittest.TestCase):
         }
 
         class FailureReportingProvider:
+            calls = 0
             def stream_chat(self, *_args, **_kwargs):
+                self.calls += 1
                 yield {"choices": [{"delta": {"tool_calls": [{
                     "index": 0,
-                    "id": "call-failed-supervision",
+                    "id": f"call-failed-supervision-{self.calls}",
                     "function": {
                         "name": "complete_supervision",
                         "arguments": json.dumps({
@@ -1070,7 +1083,12 @@ class HostCompletionTests(unittest.TestCase):
         ))
         self.assertEqual(outcome.status, OutcomeStatus.FAILED)
         self.assertEqual(outcome.error.code, "SUPERVISED_DELIVERY_FAILED")
-        self.assertEqual(outcome.steps_used, 1)
+        # The deferred contract is read once, then the actual completion
+        # closes the failed delivery; there is no repeated completion loop.
+        self.assertEqual(outcome.steps_used, 2)
+        contexts = [m for m in supervisor.session.messages if m.get('context_purpose') == 'tool_contract']
+        self.assertEqual(len(contexts), 1)
+        self.assertFalse(contexts[0]['data']['executed'])
         self.assertIn("Host could not seal", outcome.response)
 
 

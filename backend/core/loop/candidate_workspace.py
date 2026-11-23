@@ -28,3 +28,19 @@ def allocate_candidate_workspace(paths, kind, *, workspace=None):
     root.mkdir(parents=True, exist_ok=True)
     stage.mkdir()
     return root, stage
+
+
+def prepare_candidate_home(stage):
+    """After input projection, before ACL pinning; only on an owned producer.
+
+    WorkspaceImage excludes protected metadata. Refuse an existing .gitgo
+    rather than following anything from an execution input or an old launch.
+    """
+    stage = Path(stage)
+    metadata = stage / '.gitgo'
+    if metadata.exists() or metadata.is_symlink():
+        raise SandboxDenied('SANDBOX_PRIVATE_HOME_COLLISION', 'A fresh producer already contains reserved Gitgo metadata')
+    metadata.mkdir()
+    folders = child_environment_paths(stage)
+    for folder in set(folders.values()):
+        folder.mkdir(parents=True, exist_ok=True)

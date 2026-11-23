@@ -124,6 +124,8 @@ def verify_declared_contract(
     contract: dict | None,
     workspace_path: str | Path,
     references: list[str],
+    *,
+    snapshot_files: dict[str, bytes] | None = None,
 ) -> list[dict]:
     """Verify required declared interfaces at a Host lifecycle boundary."""
     if not contract or not references:
@@ -140,19 +142,25 @@ def verify_declared_contract(
         if item is None:
             violations.append({"ref": ref, "type": "contract_entry_missing"})
             continue
-        path = (workspace / str(item.get("file") or "")).resolve()
-        try:
-            path.relative_to(workspace)
-        except ValueError:
-            violations.append({"ref": ref, "type": "file_escape"})
-            continue
-        present, actual = _inspect_declared_interface(
-            path, str(item.get("symbol") or "")
-        )
+        name = str(item.get("file") or "")
+        symbol = str(item.get("symbol") or "")
+        if snapshot_files is None:
+            path = (workspace / name).resolve()
+            try:
+                path.relative_to(workspace)
+            except ValueError:
+                violations.append({"ref": ref, "type": "file_escape"})
+                continue
+            present, actual = _inspect_declared_interface(path, symbol)
+            file_exists = path.is_file() if not present else True
+        else:
+            content = snapshot_files.get(name)
+            file_exists = content is not None
+            present, actual = _inspect_interface_content(Path(name).suffix, content, symbol)
         if not present:
             violations.append({
                 "ref": ref,
-                "type": "file_missing" if not path.is_file() else "symbol_missing",
+                "type": "symbol_missing" if file_exists else "file_missing",
                 "expected": item.get("frozen_signature") or "present",
                 "actual": None,
             })
@@ -172,13 +180,23 @@ def _inspect_declared_interface(path: Path, symbol: str) -> tuple[bool, str]:
     if not path.is_file():
         return False, ""
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = path.read_bytes()
     except OSError:
         return False, ""
-    if path.suffix.lower() in {".py", ".pyi"}:
-        signature = _extract_current_signature_from_file(str(path), symbol)
+    return _inspect_interface_content(path.suffix, content, symbol)
+
+
+def _inspect_interface_content(suffix: str, raw: bytes | None, symbol: str) -> tuple[bool, str]:
+    if raw is None:
+        return False, ""
+    if suffix.lower() in {".py", ".pyi"}:
+        try:
+            signature = _extract_current_signature(raw.decode("utf-8"), symbol)
+        except UnicodeError:
+            return False, ""
         return signature is not None, signature or ""
 
+    content = raw.decode("utf-8", errors="replace")
     escaped = re.escape(symbol)
     patterns = (
         rf"(?m)^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?"
@@ -341,10 +359,17 @@ def _extract_current_signature_from_file(
 
     用于 verify_contract——对比冻结签名 vs 实际文件。
     """
-    import ast
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            tree = ast.parse(f.read())
+            return _extract_current_signature(f.read(), symbol)
+    except Exception:
+        return None
+
+
+def _extract_current_signature(content: str, symbol: str) -> str | None:
+    import ast
+    try:
+        tree = ast.parse(content)
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol:
                 prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"

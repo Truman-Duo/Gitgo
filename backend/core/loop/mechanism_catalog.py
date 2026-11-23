@@ -129,9 +129,22 @@ def maintenance_schema():
         ("source", "affected", "reason", "consequence", "work", "verification", "owner")},
         "evidence_kind": {"type": "string", "enum": ["observed", "declared", "inferred"]}},
         "required": ["source", "affected", "reason", "consequence", "work", "verification", "owner", "evidence_kind"], "additionalProperties": False}
+    assignment_scope = {"type": "object", "properties": {
+        "assignment_ref": {**text, "description": "Select the current issued_scope.assignment_ref. Runtime binds the worker and its available draft."},
+        "retire_criterion_numbers": {"type": "array", "items": {"type": "integer", "minimum": 1},
+            "maxItems": 64, "description": "One-based positions in issued_scope.acceptance_criteria, bound to assignment_ref."},
+        "draft_id": {**text, "description": "Exact current draft, if already offered. It may predate or follow the user change."},
+        "source_process_id": {**text, "description": "Owned worker to preserve and replace when no draft has been offered yet."},
+        "close_source": {"type": "boolean", "description": "If replacing the original worker now, request its safe closeout after this scope commits. Its draft or checkout is retained."},
+        "retire_target_files": {**texts, "minItems": 1, "maxItems": 64},
+        "retire_acceptance_criteria": {**texts, "maxItems": 64}, "retire_test_ids": {**texts, "maxItems": 64}},
+        "required": ["retire_target_files"], "additionalProperties": False,
+        "description": "Retire named parts of an owned assignment. Select its draft_id, or its source_process_id while awaiting its draft."}
     resolution = {"type": "object", "properties": {"id": text, "reason": text, "contract_fields": texts, "question_ids": texts,
-        "disposition": {"type": "string", "enum": ["adopt", "withdraw"]}, "source_ref": text, "quote": text},
-        "required": ["id", "reason", "contract_fields"], "additionalProperties": False}
+        "work_item_ids": {**texts, "maxItems": 64, "description": "Existing plan step ids whose evidence must be renewed for the adopted change."},
+        "disposition": {"type": "string", "enum": ["adopt", "withdraw"]}, "source_ref": text, "quote": text,
+        "assignment_scope": assignment_scope},
+        "required": ["id", "reason"], "additionalProperties": False}
     related_disposition = {"type": "object", "properties": {"id": text, "reason": text, "source_ref": text, "quote": text,
         "action": {"type": "string", "enum": ["reject", "withdraw"]}},
         "required": ["id", "reason", "action"], "additionalProperties": False}

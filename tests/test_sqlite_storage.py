@@ -22,6 +22,70 @@ from backend.core.storage import (
 )
 
 
+def test_discussion_does_not_restore_missing_provider_observations(tmp_path_factory):
+    workspace = _workspace(tmp_path_factory)
+    with StorageRuntime(workspace, state_home=tmp_path_factory / 'state') as runtime:
+        runtime.save_agent_checkpoint(_split_checkpoint())
+        ref = runtime._state.execute("SELECT metadata_ref FROM sessions WHERE session_id='session-root'").fetchone()[0]
+        metadata = runtime._read_json_blob(ref)
+        usage = metadata['provider_usage_ref'].removeprefix('sha256:')
+        (runtime.paths.cas_dir / usage[:2] / usage[2:]).unlink()
+        before = runtime._state.total_changes
+        view = runtime.read_discussion_state('root')
+        assert view['session']['messages'][0]['content'] == 'work root'
+        assert 'provider_usage' not in view['session']
+        assert runtime._state.total_changes == before
+        with pytest.raises(StorageReferenceMissing):
+            runtime.load_agent_process_state('root')
+        from backend.core.daemon.dispatch import _btw_parent_snapshot
+        store = SimpleNamespace(read_discussion_state=runtime.read_discussion_state, deleted_process_ids=lambda: set())
+        snapshot = _btw_parent_snapshot(None, 'root', store=store)
+        assert snapshot['attached'] and snapshot['conversation'][0]['content'] == 'work root'
+
+
+def test_discussion_marks_missing_ledger_without_restoring_or_granting_authority(tmp_path_factory):
+    workspace = _workspace(tmp_path_factory)
+    with StorageRuntime(workspace, state_home=tmp_path_factory / 'state') as runtime:
+        runtime.save_agent_checkpoint(_split_checkpoint(host_ledger=[{'event':'original-ledger'}]))
+        ref = runtime._state.execute("SELECT metadata_ref FROM sessions WHERE session_id='session-root'").fetchone()[0]
+        metadata = runtime._read_json_blob(ref)
+        digest = metadata['host_ledger_ref'].removeprefix('sha256:')
+        (runtime.paths.cas_dir / digest[:2] / digest[2:]).unlink()
+        before = runtime._state.total_changes
+        view = runtime.read_discussion_state('root')
+        assert view['session']['messages'][0]['content'] == 'work root'
+        assert view['source_warnings'] == [{'code':'STORAGE_CAS_REFERENCE_MISSING','reference':'sha256:'+digest}]
+        assert 'pending_decision' not in view['runtime_state']
+        assert view['projection'] == 'public-discussion-only'
+        assert runtime._state.total_changes == before
+        with pytest.raises(StorageReferenceMissing):
+            runtime.load_agent_process_state('root')
+        from backend.core.daemon.dispatch import _btw_scope_snapshot
+        store = SimpleNamespace(read_discussion_state=runtime.read_discussion_state, deleted_process_ids=lambda: set())
+        snapshot = _btw_scope_snapshot(None, ['root'], store=store)
+        assert snapshot['partial'] and snapshot['sources'][0]['source_warnings']
+
+
+def test_discussion_retains_saved_prose_without_repeating_outcome_or_exposing_control(tmp_path_factory):
+    workspace = _workspace(tmp_path_factory)
+    with StorageRuntime(workspace, state_home=tmp_path_factory / 'state') as runtime:
+        checkpoint = _split_checkpoint()
+        checkpoint['messages'].extend([
+            {'role':'assistant','content':'saved explanation'},
+            {'role':'assistant','content':'private control','host_authority':True},
+            {'role':'assistant','content':'quarantined prose','provider_visible':False},
+            {'role':'tool','content':'raw receipt'},
+            {'role':'assistant','content':'done'},
+        ])
+        runtime.save_agent_checkpoint(checkpoint)
+        before = runtime._state.total_changes
+        view = runtime.read_discussion_state('root')
+        assert [item['content'] for item in view['session']['messages']] == ['work root','saved explanation','done']
+        public = runtime.read_latest_conversations()['main_conversation']
+        assert [item['content'] for item in public] == ['work root','done']
+        assert runtime._state.total_changes == before
+
+
 def _split_checkpoint(process_id: str = "root", *, host_ledger=None) -> dict:
     return {
         "process_id": process_id,

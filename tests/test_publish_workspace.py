@@ -110,6 +110,32 @@ def test_privacy_and_authorship_are_saved_as_one_validated_group(setup):
     assert services.invoke("publish.get", {"project": project.name}) == after
 
 
+@pytest.mark.parametrize('kind,instance,repository', [
+    ('github', 'https://github.com', 'team/repo'),
+    ('gitlab', 'https://git.example.com', 'team/group/repo'),
+])
+def test_repository_account_target_has_one_validated_versioned_configuration(setup, kind, instance, repository):
+    from backend.core.application.services import OperationError
+    services, project, _ = setup
+    target = dict(kind=kind, instance=instance, repository=repository, account='reviewer')
+    before = services.invoke('publish.get', {'project': project.name})
+    assert before['platform_target'] == {}
+    services.invoke('publish.set', {'project': project.name, 'section': 'platform_target',
+                                  'value': target, 'expected_value': {}})
+    assert services.invoke('publish.get', {'project': project.name})['platform_target'] == target
+    with pytest.raises(OperationError, match='Settings changed'):
+        services.invoke('publish.set', {'project': project.name, 'section': 'platform_target',
+                                       'value': {**target, 'account': 'other'}, 'expected_value': {}})
+    with pytest.raises(OperationError, match='Invalid repository account target'):
+        services.invoke('publish.set', {'project': project.name, 'section': 'platform_target',
+                                       'value': {**target, 'token': 'must-not-enter-config'}, 'expected_value': target})
+    assert services.invoke('publish.get', {'project': project.name})['platform_target'] == target
+    # Configuration round-trip, not a frontend draft or a second account store.
+    from backend.core.config import ConfigManager
+    saved_project = next(p for p in ConfigManager.load().projects if p.name == project.name)
+    assert saved_project.publish_platform == target
+
+
 def test_repository_pr_browsing_needs_no_local_item_and_never_sends(setup, monkeypatch):
     from tests.test_publish_collaboration import Server
     from backend.remote import publish_platform, publish_accounts

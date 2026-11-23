@@ -31,10 +31,15 @@ class BoundedCommunication:
 
     def _write(self, payload):
         try:
-            self.proc.stdin.write(payload)
-            self.proc.stdin.close()
+            if payload is not None:
+                self.proc.stdin.write(payload)
         except (BrokenPipeError, OSError, ValueError):
             pass
+        finally:
+            try:
+                self.proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
 
     def stderr_snapshot(self) -> str:
         """Best-effort bounded capture, without claiming pipes/cleanup finished."""
@@ -47,7 +52,7 @@ class BoundedCommunication:
                 thread = threading.Thread(target=self._read, args=(stream, index), daemon=True)
                 thread.start()
                 self.threads.append(thread)
-            thread = threading.Thread(target=self._write, args=(input or "",), daemon=True)
+            thread = threading.Thread(target=self._write, args=(input,), daemon=True)
             thread.start()
             self.threads.append(thread)
         deadline = time.monotonic() + timeout if timeout is not None else float("inf")
@@ -68,6 +73,9 @@ class BoundedCommunication:
                 close_job(getattr(self.proc, "_gitgo_job_handle", None))
                 self.proc._gitgo_job_handle = None
                 if all(not thread.is_alive() for thread in self.threads):
+                    verify = getattr(self.proc, "verify_sandbox_result", None)
+                    if verify is not None:
+                        verify()
                     return tuple(bytes(data).decode("utf-8", errors="replace") for data in self.output)
             if time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(self.proc.args, timeout)

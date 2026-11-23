@@ -143,7 +143,17 @@ export const llmProbe = (c: BackendClient, draft: Record<string, unknown>, reque
 export const llmConnection = (c: BackendClient, draft: Record<string, unknown>, requestId: string) => c.callTool("provider.connection", {draft, request_id: requestId}, 40);
 export const llmCancel = (c: BackendClient, requestId: string) => c.callTool("provider.cancel", {request_id: requestId});
 export const llmModelOptions = (c: BackendClient) => c.callTool("provider.model.options");
-export const llmEffortOptions = (c: BackendClient) => c.callTool("provider.effort.options");
+export type EffortOptions = {
+  provider_id: string;
+  model_id: string;
+  revision: string;
+  levels: string[];
+  state: string;
+  effort: string;
+  default_effort?: string;
+  effective_effort?: string;
+};
+export const llmEffortOptions = (c: BackendClient): Promise<EffortOptions> => c.callTool("provider.effort.options");
 export const llmEffortSelect = (c: BackendClient, providerId:string, modelId:string, effort:string, revision:string) => c.callTool("provider.effort.select", {provider_id:providerId,model_id:modelId,effort,expected_revision:revision});
 export const llmModelSelect = (c: BackendClient, providerId:string, modelId:string, revision:string) => c.callTool("provider.model.select", {provider_id:providerId,model_id:modelId,expected_revision:revision});
 export const llmFailoverConfigure = (c: BackendClient, enabled: boolean, order?: string[], providerId?:string, revision?:string) => c.callTool("provider.failover.configure", {enabled,...(order!==undefined?{order}:{}),...(providerId?{provider_id:providerId}:{}),...(revision?{expected_revision:revision}:{})});

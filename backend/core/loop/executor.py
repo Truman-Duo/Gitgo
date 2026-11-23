@@ -37,13 +37,16 @@ def agent_step(
     """Project known lifecycle failures through existing canonical outcomes."""
     from .budget import TaskBudgetExceeded
     from .llm import StreamCancelledError
-    from .runtime_outcomes import _budget_exhausted_result, _cancellation_result
+    from .mailbox import MailboxRecoveryRequired
+    from .runtime_outcomes import _budget_exhausted_result, _cancellation_result, _status_result
     try:
         return _agent_step(process, llm_provider, instruction, dispatcher, workspace_path, on_stream_event)
     except TaskBudgetExceeded as error:
         return _budget_exhausted_result(process, process.session, error)
     except StreamCancelledError:
         return _cancellation_result(process, process.session)
+    except MailboxRecoveryRequired:
+        return _status_result(process, process.session)
     except (ValueError, RuntimeError, TimeoutError) as error:
         code = str(error).split(":", 1)[0]
         if not code.startswith("MECHANISM_"):
@@ -155,7 +158,7 @@ def _agent_step(
     from .provider_progress import ProviderProgress
     from .tool_proposal_runtime import ToolProposalRuntime
     provider_progress = ProviderProgress(process, session, loop_guard, _emit_observation)
-    tool_proposals = ToolProposalRuntime(process, session, lambda: surface.tools, _check_alignment)
+    tool_proposals = ToolProposalRuntime(process, session, lambda: surface.tools, _check_alignment, _emit_observation)
     from .turn_preparation import TurnPreparation
     from .tool_outcome_runtime import ToolOutcomeRuntime
     preparation = TurnPreparation(process, session, llm_provider, lambda: route.window,
@@ -163,6 +166,8 @@ def _agent_step(
     tool_outcomes = ToolOutcomeRuntime(process, session, delivery_runtime, _emit_observation,
         _pause_blocked_delivery, capture_recovery)
     while process.steps_used < process.max_steps:
+        from .execution_allowance import notify_boundary
+        notify_boundary(process, session, _emit_observation)
         prepared = preparation.prepare()
         if prepared.result is not None:
             return prepared.result
@@ -172,6 +177,9 @@ def _agent_step(
         request = prepare_provider_request(process, llm_provider, surface, route, _emit_observation)
         provider_boundary = provider_turn.run(request.tools, request.web_mode, request.protocol)
         start = provider_turn.started
+        if (process.recovery or {}).get("checkpoint_commit") == "unknown":
+            from .runtime_outcomes import _status_result
+            return _status_result(process, session)
         if provider_boundary.result is not None:
             return provider_boundary.result
         if provider_boundary.retry:
@@ -196,6 +204,9 @@ def _agent_step(
             if proposal_boundary.retry:
                 continue
             batch_boundary = tool_batch.execute_live_batch(tool_calls)
+            if (process.recovery or {}).get("checkpoint_commit") == "unknown":
+                from .runtime_outcomes import _status_result
+                return _status_result(process, session)
             if batch_boundary.result is not None:
                 return batch_boundary.result
             if batch_boundary.retry:
@@ -211,7 +222,7 @@ def _agent_step(
             if outcome.result is not None:
                 return outcome.result
             if not outcome.retry:
-                tool_outcomes.notify_evidence_ready()
+                tool_outcomes.notify_evidence_ready(results)
 
             if outcome.retry:
                 continue
@@ -279,7 +290,11 @@ def _agent_step(
     transition(process, ProcessStatus.FAILED)
     return _make_result(process, session, "", duration_ms=0,
                        error_code="MAX_STEPS_EXHAUSTED",
-                       error_message="Agent exhausted its step budget",
+                       error_message="Agent exhausted its current execution step allowance; completed effects and recovery evidence are retained",
+                       error_details={'steps_used': process.steps_used, 'limit': process.max_steps,
+                           'step_allowance': (process.task_budget.step_allowance(process.process_id)
+                               if process.task_budget is not None else None),
+                           'next_action': 'inspect_existing_outcome_and_continue_session_without_replaying_completed_effects'},
                        outcome_status=OutcomeStatus.FAILED)
 
 

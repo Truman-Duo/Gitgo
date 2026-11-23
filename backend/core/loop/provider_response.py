@@ -6,7 +6,9 @@ evidence on exceptions and validates tool arguments before dispatch.
 from __future__ import annotations
 from dataclasses import dataclass, field
 import json
-from .provider_protocol import ProviderEventType
+import uuid
+from .provider_protocol import ProviderEventType, deterministic_hash
+from .tool_summary import tool_argument_preview
 
 @dataclass
 class ProviderResponse:
@@ -19,6 +21,7 @@ class ProviderResponse:
     pending_tool_calls: dict[int, dict] = field(default_factory=dict)
     tool_calls: list[dict] = field(default_factory=list)
     invalid_tool_calls: list[dict] = field(default_factory=list)
+    public_progress: dict[str, str] = field(default_factory=dict)
 
 class ProviderResponseCollector:
     def __init__(self, process, session, provider, emit, on_stream_event, cache_intent, budget_stream_prefix, state):
@@ -30,8 +33,37 @@ class ProviderResponseCollector:
         self.cache_intent = cache_intent
         self.budget_stream_prefix = budget_stream_prefix
         self.state = state
+        self.attempt_id = uuid.uuid4().hex
+
+    def _progress_id(self, event):
+        return "native:" + deterministic_hash([
+            self.process.steps_used, event.response_id or self.attempt_id,
+            event.message_id, event.output_index,
+        ])
+
+    def finish_progress(self, identity, status="completed"):
+        message = self.state.public_progress.get(identity, "")
+        if not message:
+            return
+        from .public_progress import record_progress
+        record, created = record_progress(
+            self.process, message, identity, source="provider_commentary", status=status,
+        )
+        if created:
+            self.emit({"event": "progress_summary", "message": record["message"],
+                       "update_id": identity, "task_id": record["task_id"],
+                       "phase": "commentary", "progress_status": status})
+
+    def finish_partial_progress(self):
+        # A transport failure must retain explicitly public partial text. It
+        # must not turn an interrupted model message into a completed update.
+        for identity in self.state.public_progress:
+            self.finish_progress(identity, "interrupted")
 
     def consume(self, event):
+        if event.type == ProviderEventType.MESSAGE_COMPLETED and event.phase == "commentary":
+            self.finish_progress(self._progress_id(event))
+            return
         if event.type == ProviderEventType.PROVIDER_CAPABILITY_FALLBACK:
             artifact = dict(event.artifact or {})
             self.emit({
@@ -68,6 +100,12 @@ class ProviderResponseCollector:
                     text, self.process.process_id,
                     channel=self.budget_stream_prefix + "text",
                 )
+            if event.phase == "commentary":
+                identity = self._progress_id(event)
+                self.state.public_progress[identity] = self.state.public_progress.get(identity, "") + text
+                self.emit({"event":"progress_delta","delta":text,"update_id":identity,
+                           "task_id":self.process.active_task_id or self.process.process_id,"phase":"commentary"})
+                return
             self.state.accumulated_text += text
             if self.on_stream_event:
                 self.on_stream_event({
@@ -76,7 +114,7 @@ class ProviderResponseCollector:
                     "delta": text,
                     "step": self.process.steps_used,
                     "visibility": (
-                        "public" if self.process.task_kind == "answer" else "verbose"
+                        "public" if event.phase == "final_answer" or self.process.task_kind == "answer" else "verbose"
                     ),
                 })
 
@@ -270,5 +308,6 @@ class ProviderResponseCollector:
                 "tool_call_id": p["id"],
                 "tool_name": call["name"],
                 "output_index": idx,
+                "argument_preview": tool_argument_preview(call['args']),
             }, detail={"arguments": call['args'], "arguments_raw": p["partial_json"],
                 'provider_wire_call':call.get('_provider_wire_call')})

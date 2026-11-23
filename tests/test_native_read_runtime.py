@@ -34,6 +34,36 @@ def execute(ctx, tool, args):
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Actual Windows read-view provisioning')
+def test_several_line_windows_share_a_single_native_read(tmp_path_factory, workspace_native_launcher, monkeypatch):
+    import hashlib
+
+    _, ctx, tools = setup(tmp_path_factory / 'project')
+    source = b'first\nsecond\nthird\nfourth\n'
+    (Path(ctx.workspace_path) / 'note.txt').write_bytes(source)
+    tool = tools['read_file']
+    original = ToolPipeline._execute_isolated
+    launches = []
+
+    def count(self, *args, **kwargs):
+        launches.append(kwargs['native_invocation'].policy)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ToolPipeline, '_execute_isolated', count)
+    request = {'path': 'note.txt', 'ranges': [{'offset': 1, 'limit': 1}, {'offset': 3, 'limit': 1}]}
+    invalid = execute(ctx, tool, {**request, 'offset': 0})
+    assert invalid.diagnostics['code'] == 'INVALID_TOOL_ARGUMENTS'
+    assert not launches
+    result = execute(ctx, tool, request)
+    assert not result.is_error, (result.error, result.data, result.diagnostics)
+    assert len(launches) == 1
+    assert result.receipt['sandbox_preparation']['phase'] == 'retired'
+    assert result.receipt['runtime_cleanup']['complete'] is True
+    assert result.data['sha256'] == hashlib.sha256(source).hexdigest()
+    assert [(page['offset'], page['content'], page['next_offset']) for page in result.data['pages']] == [
+        (1, 'second', 2), (3, 'fourth', None)]
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Actual Windows read-view provisioning')
 @pytest.mark.parametrize('handler,args', [('read_file', {'path': 'note.txt'}),
     ('document_open', {'path': 'note.txt'}), ('list_files', {'path': '.'}),
     ('search_text', {'path': '.', 'pattern': 'native-read', 'literal': True})])
@@ -102,6 +132,60 @@ def test_read_scope_denies_sibling_bytes_and_target_write_in_the_os(tmp_path_fac
     assert (root / 'approved.txt').read_text() == 'read-only'
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Actual Windows reader runtime scope')
+def test_reader_does_not_expose_unrelated_python_packages(tmp_path_factory, workspace_native_launcher, monkeypatch):
+    _, ctx, tools = setup(tmp_path_factory / 'project')
+    (Path(ctx.workspace_path) / 'note.txt').write_text('visible', encoding='utf8')
+    private = workspace_native_launcher / 'full-packages' / 'unrelated'
+    private.mkdir(parents=True)
+    secret = private / 'secret.txt'
+    secret.write_text('not a reader dependency', encoding='utf8')
+    original = ToolPipeline._execute_isolated
+    def inspect(self, *args, **kwargs):
+        code, out, err = probe(kwargs['native_invocation'].policy, workspace_native_launcher,
+            f'open({str(secret)!r}).read()')
+        assert code != 0 and 'PermissionError' in err, (code, out, err)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(ToolPipeline, '_execute_isolated', inspect)
+    result = execute(ctx, tools['read_file'], {'path': 'note.txt'})
+    assert not result.is_error and result.data['content'] == 'visible', (result.error, result.data)
+    assert result.receipt['sandbox_preparation']['retired']
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Actual Windows document adapter dependencies')
+@pytest.mark.parametrize('extension', ['docx', 'xlsx', 'pdf', 'pptx'])
+def test_narrow_reader_preserves_document_adapters(tmp_path_factory, extension):
+    _, ctx, tools = setup(tmp_path_factory / 'project')
+    target = Path(ctx.workspace_path) / ('sample.' + extension)
+    expected = 'native adapter evidence'
+    if extension == 'docx':
+        from docx import Document
+        document = Document()
+        document.add_paragraph(expected)
+        document.save(target)
+    elif extension == 'xlsx':
+        from openpyxl import Workbook
+        book = Workbook()
+        book.active['A1'] = expected
+        book.save(target)
+        book.close()
+    elif extension == 'pptx':
+        from pptx import Presentation
+        from pptx.util import Inches
+        deck = Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        slide.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(1)).text = expected
+        deck.save(target)
+    else:
+        from reportlab.pdfgen.canvas import Canvas
+        canvas = Canvas(str(target))
+        canvas.drawString(36, 720, expected)
+        canvas.save()
+    result = execute(ctx, tools['document_open'], {'path': target.name})
+    assert not result.is_error and expected in result.data.get('content', ''), (result.error, result.data, result.diagnostics)
+    assert result.receipt['sandbox_preparation']['retired']
+
+
 @pytest.mark.skipif(os.name != 'nt', reason='Actual Windows external directory read')
 @pytest.mark.parametrize('name,args', [('list_files', {}), ('search_text', {'pattern': 'external-content', 'literal': True})])
 def test_approved_external_directory_uses_the_same_native_path(tmp_path_factory, workspace_native_launcher, name, args):
@@ -115,6 +199,81 @@ def test_approved_external_directory_uses_the_same_native_path(tmp_path_factory,
     process.pending_decision = None
     result = execute(ctx, tool, args)
     assert not result.is_error and result.data['count'] == 1, (result.error, result.data, result.diagnostics)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows structured native failure')
+@pytest.mark.parametrize('code', ['SANDBOX_CLEANUP_PENDING', 'NATIVE_TEST_EXTENSION_ERROR'])
+def test_native_failure_keeps_the_precise_upstream_cleanup_cause(tmp_path_factory, workspace_native_launcher, monkeypatch, code):
+    from backend.core.sandbox import SandboxDenied
+
+    root = tmp_path_factory / 'project'
+    _, ctx, tools = setup(root)
+    (root / 'note.txt').write_text('current evidence', encoding='utf8')
+    details = {'phase': 'retirement_pending', 'cause': {'code': 'SANDBOX_ACL_MANAGEMENT_BUSY'}}
+
+    def pending(*_args, **_kwargs):
+        raise SandboxDenied(code, 'Earlier access retirement is pending', details=details)
+
+    monkeypatch.setattr(ToolPipeline, '_execute_isolated', pending)
+    result = execute(ctx, tools['read_file'], {'path': 'note.txt'})
+    assert result.is_error
+    assert result.diagnostics['code'] == code
+    diagnostic = result.diagnostics.get('error_info', result.diagnostics)
+    assert diagnostic['details'] == details
+    assert diagnostic['effect_state'] == 'not_committed'
+    assert result.receipt['sandbox_preparation']['retired'] is True
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Actual concurrent Windows scopes')
+@pytest.mark.parametrize('name,args', [
+    ('list_files', {}),
+    ('search_text', {'pattern': 'visible', 'literal': True}),
+    ('search_text', {'pattern': 'visible', 'literal': True, 'include_hidden': True,
+                     'respect_ignore': False, 'include': ['**/*.txt']}),
+])
+def test_directory_reader_does_not_pin_or_expose_excluded_mutable_state(tmp_path_factory, workspace_native_launcher, monkeypatch, name, args):
+    import subprocess
+    from backend.core.windows_access import AccessTree
+
+    if args.get('include_hidden'):
+        from shutil import copyfile
+        from backend.core.tools.workspace_search import resolve_ripgrep
+        executable = resolve_ripgrep()
+        if executable is None:
+            pytest.skip('Requires the real ripgrep engine to test hidden-directory pruning')
+        target = workspace_native_launcher / 'rg.exe'
+        copyfile(executable, target)
+        monkeypatch.setenv('GITGO_RIPGREP_PATH', str(target))
+
+    root = tmp_path_factory / 'project'
+    _, ctx, tools = setup(root)
+    (root / 'visible.txt').write_text('visible business file', encoding='utf8')
+    subprocess.run(['git', 'init', '--template=', str(root)], check=True, capture_output=True)
+    hidden = root / '.gitgo' / 'context_objects' / 'blobs'
+    hidden.mkdir(parents=True, exist_ok=True)
+    secret = hidden / 'seed'
+    secret.write_text('synthetic internal state', encoding='utf8')
+    with AccessTree([hidden], writable=False) as tree:
+        before = tree.snapshot()
+    original = ToolPipeline._execute_isolated
+
+    def inspect(self, handler, arguments, *rest, **kwargs):
+        policy = kwargs['native_invocation'].policy
+        with AccessTree([hidden], writable=False) as tree:
+            assert tree.snapshot() == before
+        (hidden / 'new-object').write_text('concurrent state update', encoding='utf8')
+        code, _, error = probe(policy, workspace_native_launcher, f'open({str(secret)!r}).read()')
+        assert code != 0 and 'PermissionError' in error
+        return original(self, handler, arguments, *rest, **kwargs)
+
+    monkeypatch.setattr(ToolPipeline, '_execute_isolated', inspect)
+    result = execute(ctx, tools[name], {'path': '.', **args})
+    assert not result.is_error, (result.error, result.data, result.diagnostics)
+    assert result.data['count'] >= 1
+    if args.get('include_hidden'):
+        assert result.data['engine'] == 'ripgrep'
+        assert not result.data['warnings']
+    assert result.receipt['sandbox_preparation']['retired'] is True
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Actual concurrent Windows scopes')

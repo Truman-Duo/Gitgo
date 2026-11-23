@@ -1,1 +1,1 @@
-Send corrective or additional instructions to a B Agent mailbox. Delivery is applied at the next safe turn boundary.
+Send corrective or additional instructions to a B Agent mailbox. A successful call queues the message for the recipient's next safe turn. Read the task state or adoption receipt to verify any later change to the assignment.

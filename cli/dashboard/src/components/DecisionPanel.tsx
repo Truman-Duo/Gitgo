@@ -5,7 +5,10 @@ import React, { useState } from "react";
 import { Box, Text } from "@anthropic/ink";
 import type { PendingDecision } from "../types.js";
 import { AnimatedReveal } from "./AnimatedReveal.js";
-import { colors } from "../theme/index.js";
+import {projectRuntimeDecision} from "../ui/decisionCopy.js";
+import {DecisionCardFrame,DecisionSummaryText,answeredDecisionView} from "./DecisionSummary.js";
+import type {ExpandedChange} from "../hooks/useDisclosureState.js";
+import {DetailViewport} from "./DetailViewport.js";
 
 type Props = {
   decision: PendingDecision;
@@ -15,11 +18,11 @@ type Props = {
   active?: boolean;
   answer?: string | null;
   expanded?: boolean;
-  onExpandedChange?: (value: boolean) => void;
+  onExpandedChange?: (value: ExpandedChange) => void;
 };
 
 export function DecisionPanel({
-  decision,
+  decision: sourceDecision,
   selectedIndex,
   composing,
   submitting,
@@ -29,50 +32,48 @@ export function DecisionPanel({
   onExpandedChange,
 }: Props) {
   const t=useCopy();
+  const decision=projectRuntimeDecision(!active&&answer?answeredDecisionView(sourceDecision,answer):sourceDecision,t);
   const [localExpanded, setLocalExpanded] = useState(false);
   const expanded = controlledExpanded ?? localExpanded;
-  const toggle = () => {
-    if (controlledExpanded === undefined) setLocalExpanded(!expanded);
-    onExpandedChange?.(!expanded);
+  const changeExpanded = (value:ExpandedChange) => {
+    if (controlledExpanded === undefined) setLocalExpanded(value);
+    onExpandedChange?.(value);
   };
+  const toggle=()=>changeExpanded(current=>!current);
   const showOptions = active || expanded;
   const permission = decision.kind === "permission";
   const manual = decision.kind === "manual_execution";
+  const answered=!active && Boolean(answer);
+  const independentGroup=active && decision.answer_mode==="incremental" && (decision.questions?.length || 0)>1;
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="single"
-      borderColor={colors.divider.color}
-      paddingLeft={1}
-      paddingRight={1}
-      marginTop={1}
-      marginBottom={1}
-    >
-      <Box onClick={toggle}>
-        <Text bold>
-          {active
+    <DecisionCardFrame>
+      <Box onClick={toggle} clickMode="action" flexDirection="column" minWidth={0}>
+        {answered ? <DecisionSummaryText decision={sourceDecision} answer={answer!}
+          layout="inline" marker={expanded ? "▾" : "▸"}/> : <Text bold>
+          {!active ? (expanded ? "▾ " : "▸ ") : ""}{active
             ? manual ? t({en:"Manual · next step",zh:"Manual · 下一步"}) : decision.kind === "permission"
               ? t({en:"Permission required",zh:"需要授权"})
               : t({en:"Information requested",zh:"需要补充信息"})
-            : answer
-              ? t({en:"Decision answered",zh:"已答复"})
-              : t({en:"Decision",zh:"待确认事项"})}
-          {!active ? (expanded ? " ▾" : " ▸") : ""}
-        </Text>
+            : t({en:"Decision",zh:"待确认事项"})}
+        </Text>}
       </Box>
       <AnimatedReveal expanded={showOptions}>
-        <Text bold>
+       <DetailViewport enabled={!active} framed={false} onClose={()=>changeExpanded(false)}>
+        {answered && expanded ? <DecisionSummaryText decision={sourceDecision} answer={answer!} layout="stacked"/> : null}
+        {independentGroup ? decision.questions!.map(q=><Box key={q.node_id} flexDirection="column" marginBottom={1}>
+          <SelectionText selected={q.node_id===(decision.active_question_id || decision.questions![0]!.node_id)} variant="block">{q.question}</SelectionText>
+          {q.recommendation?<Text dimColor>{t({en:"Suggestion: ",zh:"建议："})}{q.recommendation}</Text>:null}
+        </Box>) : !answered ? <Text bold>
           {decision.round_position ? `${decision.round_position} · ` : ""}
           {manual ? t({en:"Run the next work unit?",zh:"执行下一步工作？"}) : decision.question}
-        </Text>
-        {decision.questions &&
+        </Text> : null}
+        {!answered && !independentGroup && decision.questions &&
         decision.questions.length > 1 &&
         !decision.round_position
           ? decision.questions.map((q) => (
               <Text key={q.node_id}>{q.question}</Text>
             ))
           : null}
-        {answer ? <Text>{formatAnswer(answer)}</Text> : null}
         {decision.materials?.length ? <Box flexDirection="column" marginTop={1}>
           <Text dimColor>{t({en:"Supplementary material",zh:"补充材料"})}</Text>
           {decision.materials.map(material => <Text key={material.reference}>{material.summary}</Text>)}
@@ -82,6 +83,7 @@ export function DecisionPanel({
           {permission ? t({en:"Why approval is needed",zh:"为何需要授权"}) : manual ? t({en:"Advancement",zh:"推进方式"}) : t({en:"Information needed",zh:"需要补充的信息"})}:{" "}
           {manual ? t({en:"Manual pauses before this step; tool and sandbox permissions still apply.",zh:"Manual 在本步前等待确认；工具权限与沙箱限制仍然生效。"}) : decision.why_user_must_decide}
         </Text>
+        {!independentGroup && decision.recommendation?<Text dimColor>{t({en:"Suggestion: ",zh:"建议："})}{decision.recommendation}</Text>:null}
         {manual && decision.manual_unit ? <Box flexDirection="column">
           <Text>{decision.manual_unit.tool_name}</Text>
           <Text dimColor>{JSON.stringify(decision.manual_unit.arguments, null, 2).slice(0, 1200)}
@@ -113,7 +115,7 @@ export function DecisionPanel({
             const selected = active && index === selectedIndex;
             return (
               <Box
-                key={`${decision.decision_id}:${option.label}`}
+                key={`${decision.decision_id}:${index}`}
                 flexDirection="column"
                 marginBottom={1}
               >
@@ -137,10 +139,20 @@ export function DecisionPanel({
                     ) : null}
                   </>
                 ) : decision.kind === "clarification" ? (
+                  <>
                   <Text dimColor>
                     {" "}
                     {option.description || option.immediate_effect}
                   </Text>
+                  {answered && expanded ? <>
+                    {option.description && option.immediate_effect && option.description!==option.immediate_effect
+                      ? <Text> {t({en:"Effect: ",zh:"行为："})}{option.immediate_effect}</Text> : null}
+                    {option.principle ? <Text dimColor> {t({en:"Principle: ",zh:"依据："})}{option.principle}</Text> : null}
+                    {option.downstream_effect ? <Text dimColor> {t({en:"Then: ",zh:"后续："})}{option.downstream_effect}</Text> : null}
+                    {option.risks ? <Text> {t({en:"Risk: ",zh:"风险："})}{option.risks}</Text> : null}
+                    {option.reversibility ? <Text dimColor> {t({en:"Reversibility: ",zh:"可逆性："})}{option.reversibility}</Text> : null}
+                  </> : null}
+                  </>
                 ) : (
                   <>
                     <Text>{option.description || option.immediate_effect}</Text>
@@ -161,20 +173,11 @@ export function DecisionPanel({
             {t({en:"Other / direct reply",zh:"其他 / 直接输入"})}
           </SelectionText>:null}
         </Box>
+       </DetailViewport>
       </AnimatedReveal>
       {active && submitting ? (
         <Text dimColor>{t({en:"Submitting the reply…",zh:"正在提交答复…"})}</Text>
       ) : null}
-    </Box>
+    </DecisionCardFrame>
   );
-}
-
-function formatAnswer(answer: string) {
-  try {
-    const value = JSON.parse(answer);
-    if (value.answers) return Object.values(value.answers).join("\n");
-  } catch {
-    /* ordinary text */
-  }
-  return answer;
 }

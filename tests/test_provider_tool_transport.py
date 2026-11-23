@@ -51,6 +51,8 @@ def test_stream_unwraps_once_and_retains_exact_native_call_for_replay():
     assert wire['id']=='actual' and wire['function']['name']==CALL and wire['function']['arguments']==raw
     assert ui[0]['tool_name']=='edit_file' and all(e.get('tool_name')!=CALL for e in ui)
     assert trace[-1][0][0]['tool_name']=='edit_file'
+    assert trace[-1][0][0]['argument_preview']=={'path':'中文.py'}
+    assert 'new_string' not in trace[-1][0][0]['argument_preview']
 
 
 @pytest.mark.parametrize('arguments',[{}, {'name':'x','arguments':[]}, {'name':'','arguments':{}},
@@ -84,6 +86,30 @@ def test_native_and_legacy_fallback_preserve_original_target_and_call_id():
     assert parsed['name']=='read_file' and parsed['args']=={'path':'a'}
 
 
+@pytest.mark.parametrize('depth', [2, 3, 4])
+def test_redundant_reserved_frames_preserve_wire_replay_and_business_payload(depth):
+    payload = {'path': 'a', 'name': 'business data', 'arguments': {'literal': True}}
+    frame = {'name': 'read_file', 'arguments': payload}
+    for _ in range(depth - 1):
+        frame = {'name': CALL, 'arguments': frame}
+    raw = json.dumps(frame)
+    result = decode({'id': 'actual', 'name': CALL, 'args': frame}, raw_arguments=raw)
+    assert result['name'] == 'read_file' and result['args'] == payload
+    assert result['args'] is not payload
+    assert _to_provider_tool_calls([result])[0]['function']['arguments'] == raw
+
+
+def test_transport_normalization_is_bounded_and_rejects_extra_authority_fields():
+    frame = {'name': 'business', 'arguments': {}}
+    for _ in range(4):
+        frame = {'name': CALL, 'arguments': frame}
+    with pytest.raises(ValueError, match='exceeds four'):
+        decode({'name': CALL, 'args': frame})
+    with pytest.raises(ValueError, match='expected exact'):
+        decode({'name': CALL, 'args': {'name': CALL, 'arguments': {
+            'name': 'business', 'arguments': {}, 'permission': 'allow'}}})
+
+
 @pytest.mark.parametrize('case',['bad_schema','denied','withdrawn'])
 def test_decoded_target_still_runs_original_pipeline_boundaries(tmp_path_factory,case):
     from backend.core.loop.agent_tool import AgentTool, ApprovalMode, ToolEffect
@@ -104,7 +130,7 @@ def test_decoded_target_still_runs_original_pipeline_boundaries(tmp_path_factory
         approval=ApprovalMode.DENY if case=='denied' else ApprovalMode.ALLOW,
         execution_contract=data_broker('test.fixture'))
     args={} if case=='bad_schema' else {'path':'file.txt'}
-    call=decode({'name':CALL,'id':'original','args':{'name':'business','arguments':args}})
+    call=decode({'name':CALL,'id':'original','args':{'name':CALL,'arguments':{'name':'business','arguments':args}}})
     ctx=ExecutionContext(process=p,session=p.session,workspace_path=str(tmp_path_factory),event_bus=EventBus())
     if case=='withdrawn':
         result=ToolExecution('withdrawn',ctx,[call]).execute_batch({})[0]
@@ -146,7 +172,7 @@ def test_live_effect_contracts_share_catalog_deltas_without_stale_capability_gra
     latest = decode_wire(second)
     assert second[:len(first)-1] == first[:-1]
     assert latest['runtime.capability']['available_tools'] == ['write']
-    assert latest['runtime.tool_contracts']['read'] == initial['runtime.tool_contracts']['read']
+    assert 'read' not in latest['runtime.tool_contracts']
     assert latest['runtime.tool_contracts']['write']['runtime_behavior']['effect'] == 'workspace_write'
     # No second complete effect inventory in prompt steering; the exact
     # changed tool remains available once through the original context map.
@@ -158,5 +184,5 @@ def test_live_effect_contracts_share_catalog_deltas_without_stale_capability_gra
     p.session.append_assistant('Tool scope revoked')
     revoked = decode_wire(p.session.to_provider_messages(dynamic_envelope=route.envelope))
     assert revoked['runtime.capability']['available_tools'] == []
-    assert revoked['runtime.tool_contracts']['write'] == latest['runtime.tool_contracts']['write']
+    assert revoked['runtime.tool_contracts'] == {}
     assert not surface.tools and not p.approval_grants

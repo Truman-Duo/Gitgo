@@ -259,7 +259,23 @@ def projection(item, state_ref):
             "reason": "PUBLISH_BRANCH_RESULT_UNVERIFIED" if state == "pending" else "PUBLISH_BRANCH_RECORDED"})
         if state == "pending":
             current_node = "branches"
-    return {**item, "identity_kind": "stable_item", "kind": "candidate", "scope": "local",
+    projected_item = dict(item)
+    if item.get("release_controller"):
+        from .release_journal import control_projection, ACTIVE_RELEASE
+        projected_item["release_controller"] = control_projection(item["release_controller"])
+        projected_item["release_controller_history"] = [control_projection(control) for control in item.get("release_controller_history", [])]
+        release_job = item["release_controller"].get("job", {})
+        if release_job.get("state") in ACTIVE_RELEASE:
+            reason, actions = "PUBLISH_RELEASE_" + release_job["state"].upper(), ["release_cancel", "release_reconcile"]
+        elif release_job.get("pending_effect") or release_job.get("state") == "needs_reconciliation":
+            reason, actions = "PUBLISH_RELEASE_RECONCILIATION_REQUIRED", ["release_reconcile"]
+        elif status == "integrated":
+            actions.extend(["release_plan", "release_run"])
+            if release_job:
+                actions.append("release_reconcile")
+    elif status == "integrated":
+        actions.append("release_plan")
+    return {**projected_item, "identity_kind": "stable_item", "kind": "candidate", "scope": "local",
         "evidence": [{**e, "current": any(e["id"] == a["id"] for a in active)} for e in item["evidence"]],
         "label": item["id"][:8], "candidate_oid": item["candidate"]["oid"],
         "target": item["plan"]["target_ref"], "current_node": current_node,

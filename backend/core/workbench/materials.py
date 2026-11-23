@@ -26,9 +26,23 @@ def submit_material(sheets, sources, *, sheet_id, revision, cell_ids, purpose,
         raise ValueError("A selected material cell is missing")
     source_ids = set(cell_ids)
     source_ids.update(c["metadata"]["gitgo"].get("input_cell_id") for c in chosen
-                      if c["metadata"]["gitgo"]["kind"] == "computed_value")
+                      if c["metadata"]["gitgo"]["kind"] == "computed_value"
+                      and not c["metadata"]["gitgo"].get("input_result_ref"))
     bindings = [deepcopy(c["metadata"]["gitgo"]) for c in document["cells"]
                 if c["id"] in source_ids and c["metadata"]["gitgo"]["kind"] in {"context_source", "tool_result_source"}]
+    if sources is not None:
+        cells = {c["id"]: c for c in document["cells"]}
+        documents = {}
+        for cell in chosen:
+            meta = cell["metadata"]["gitgo"]
+            if meta["kind"] != "computed_value" or not meta.get("input_result_ref"):
+                continue
+            try:
+                source, _ = sources._lineage(cell, cells, documents)
+            except (KeyError, ValueError, OSError):
+                continue
+            if source["kind"] in {"context_source", "tool_result_source"} and source not in bindings:
+                bindings.append(deepcopy(source))
     material = {"sheet_id": sheet_id, "revision": selected, "owner": sheets.owner,
                 "cell_ids": sorted(cell_ids), "cells": chosen, "source_bindings": bindings,
                 "authority": "unconfirmed working material; notes are assertions and computed values only describe their declared inputs"}
@@ -78,6 +92,7 @@ def captured_bindings(workspace, signal):
         return [{"state": "unresolved", "signal_id": signal.get("signal_id")}]
     return [{"state": "bound", "signal_id": record["signal_id"],
              "material_digest": detail["material_digest"], "sheet_id": material["sheet_id"],
+             "owner": material["owner"],
              "revision": ref, "cell_ids": material["cell_ids"],
              "source_bindings": deepcopy(material["source_bindings"]),
              "authority": "Selected working material only; source identity is not semantic proof"}]
@@ -86,11 +101,21 @@ def captured_bindings(workspace, signal):
 def assess_bindings(workspace, bindings):
     from backend.core.loop.context_store import ContextObjectStore
     from .sources import SourceWorkbench
-    service = SourceWorkbench(None, ContextObjectStore(workspace))
     for binding in bindings:
         if binding.get("state") != "bound":
             return {"state": "needs_recheck", "reason": "workbench_material_unresolved"}
-        sources = binding.get("source_bindings") or []
+        # Recover authority from the committed observation, not from mutable
+        # lesson metadata. Never discover another session by scanning sheets.
+        canonical = captured_bindings(workspace, {"signal_type": "workbench_material",
+                                                "signal_id": binding.get("signal_id")})
+        if (not canonical or canonical[0].get("state") != "bound"
+                or canonical[0].get("material_digest") != binding.get("material_digest")):
+            return {"state": "needs_recheck", "reason": "workbench_material_unresolved"}
+        from backend.core.storage import get_storage
+        from .sheets import SheetStore
+        sheets = SheetStore._for_material_read(get_storage(workspace), canonical[0]["owner"])
+        service = SourceWorkbench(sheets, ContextObjectStore(workspace))
+        sources = canonical[0].get("source_bindings") or []
         if not sources:
             return {"state": "needs_recheck", "reason": "workbench_material_has_no_independent_source"}
         for source in sources:

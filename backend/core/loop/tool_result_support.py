@@ -77,7 +77,7 @@ _STRUCTURAL_SUPERVISOR_WORKFLOW_TOOLS = frozenset({
 
 
 _NON_DELIVERY_CONTROL_TOOLS = _STRUCTURAL_SUPERVISOR_WORKFLOW_TOOLS | frozenset({
-    "declare_task_contract", "request_user_decision", "request_permission",
+    "declare_task_contract", "request_user_decision", "request_permission", "asset_maintenance",
 })
 
 
@@ -113,6 +113,8 @@ def _apply_host_task_transitions(process: AgentProcess, results: list) -> bool:
     workflow_results = [
         result for result in results
         if result.tool_name in _STRUCTURAL_SUPERVISOR_WORKFLOW_TOOLS
+        or (result.tool_name == "asset_maintenance" and not result.is_error
+            and (result.data or {}).get("delegated") is True and (result.data or {}).get("process_id"))
     ]
     if not workflow_results:
         return False

@@ -1,5 +1,4 @@
 """Resumable local recipes with explicit file/dependency identities."""
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import os
 import platform
 from pathlib import Path
@@ -10,12 +9,11 @@ import time
 from .evidence import digest, file_fact
 from .plan import check_source
 from .processes import owned
+from backend.core.publish.release_dag import run_dag
 
 
 def run_checks(plan, evidence, workers):
-    complete = {}
-    remaining = {s['id']: s for s in plan['checks']}
-    def execute(step):
+    def execute(step, dependencies):
         name = 'check-' + step['id']
         inputs = {p: file_fact(p) for p in step['inputs']}
         executable = step['argv'][0]
@@ -26,7 +24,7 @@ def run_checks(plan, evidence, workers):
         if executable is None:
             raise ValueError('Release check executable is unavailable')
         binding = digest({'recipe': step, 'inputs': inputs,
-                          'dependencies': {d: complete[d] for d in step.get('needs', [])},
+                          'dependencies': dependencies,
                           'executable': file_fact(executable),
                           'environment': {k: digest(os.environ.get(k)) for k in
                               {'PATH', 'PYTHONPATH', 'VIRTUAL_ENV', *step.get('environment_inputs', [])}},
@@ -63,25 +61,4 @@ def run_checks(plan, evidence, workers):
             evidence.record(name, 'failed', binding=binding, error=type(exc).__name__,
                             seconds=time.monotonic() - started)
             raise
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        pending, errors = {}, []
-        while remaining or pending:
-            ready = [s for s in remaining.values() if set(s.get('needs', [])) <= complete.keys()]
-            if not errors:
-                for step in ready[:workers-len(pending)]:
-                    pending[pool.submit(execute, step)] = step['id']
-                    del remaining[step['id']]
-            if not pending:
-                if errors:
-                    raise errors[0]
-                raise ValueError('Unsatisfied check dependencies')
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for future in done:
-                name = pending.pop(future)
-                try:
-                    complete[name] = future.result()
-                except Exception as exc:
-                    errors.append(exc)
-            if errors and not pending:
-                raise errors[0]
-    return complete
+    return run_dag(plan['checks'], execute, workers=workers)

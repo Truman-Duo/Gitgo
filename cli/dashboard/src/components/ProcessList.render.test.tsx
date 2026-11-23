@@ -5,6 +5,7 @@ import {Box, renderSync} from "@anthropic/ink";
 import instances from "../../vendor/ink/src/core/instances.js";
 import {cellAt} from "../../vendor/ink/src/core/screen.js";
 import {InputProvider} from "../input/runtime.js";
+import type {MaintainedAsset} from "../hooks/useLoopData.js";
 import {ProcessList} from "./ProcessList.js";
 
 test("empty subprocess lists render on first entry, after removal and after reopening", async () => {
@@ -18,15 +19,15 @@ test("empty subprocess lists render on first entry, after removal and after reop
     componentDidCatch(error: Error) {errors.push(error);}
     render() {return this.state.failed ? null : this.props.children;}
   }
-  const draw = (processes: Record<string, any>, selected = 0, key = "first") => <InputProvider><Boundary>
+  const draw = (processes: Record<string, any>, selected = 0, key = "first", maintainedAssets: MaintainedAsset[] = []) => <InputProvider><Boundary>
     <Box height={stdout.rows} flexDirection="column"><ProcessList key={key} project="empty-render-regression" cols={stdout.columns}
-      selIdx={selected} idsRef={ids} loopData={{processes, recoveryAvailable: [], storage: null} as any}/></Box>
+      selIdx={selected} idsRef={ids} loopData={{processes, maintainedAssets, recoveryAvailable: [], storage: null} as any}/></Box>
   </Boundary></InputProvider>;
   const root = renderSync(draw({}), {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
   const text = () => {const screen = (instances.get(stdout) as any).frontFrame.screen; return Array.from({length: screen.height}, (_, y) =>
     Array.from({length: screen.width}, (_, x) => cellAt(screen, x, y)?.char ?? " ").join("")).join("\n");};
-  const check = async (processes: Record<string, any>, selected = 0, key = "first") => {
-    root.rerender(draw(processes, selected, key)); await new Promise(resolve => setTimeout(resolve, 70)); expect(errors).toEqual([]);
+  const check = async (processes: Record<string, any>, selected = 0, key = "first", assets: MaintainedAsset[] = []) => {
+    root.rerender(draw(processes, selected, key, assets)); await new Promise(resolve => setTimeout(resolve, 70)); expect(errors).toEqual([]);
   };
   try {
     await check({}); expect(text()).toContain("No subprocesses."); expect(ids.current).toEqual([]);
@@ -34,6 +35,13 @@ test("empty subprocess lists render on first entry, after removal and after reop
     await check({root: supervisor}, 999); expect(text()).toContain("No subprocesses.");
     const worker = {process_id: "worker", parent_id: "root", parent_ids: ["root"], actor_kind: "worker", role: "worker", status: "running", created_at: "1", steps_used: 0, max_steps: 10};
     await check({root: supervisor, worker}); expect(ids.current).toEqual(["worker"]);
+    const asset: MaintainedAsset = {asset_id: "booking", name: "Booking", paths: ["app.txt"], owner: "session",
+      owner_name: "Calendar", revision: 1, subscribed: true, process_id: "worker", work_state: "offered",
+      pending_notices: 1, queued_notices: 0, delivered_notices: 1, transfer_pending: false, execution_active: false};
+    await check({root: supervisor, worker}, 0, "first", [asset]);
+    expect(text()).toContain("Booking");
+    expect(text()).toContain("Calendar · Dormant · Work offered · 1 delivered");
+    expect(text()).not.toContain("Work accepted");
     await check({}, 999); expect(text()).toContain("No subprocesses.");
     stdout.columns = 40; stdout.rows = 12; stdout.emit("resize");
     await check({}, 0, "reopened"); expect(text()).toContain("No subprocesses."); expect(ids.current).toEqual([]);

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdtempSync, unli
 import { randomUUID, createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, isAbsolute, posix, win32 } from "node:path";
+import {dashboardTerminalArgs,ensureDashboardTerminalProfile,DASHBOARD_TERMINAL_PROFILE} from './windowsTerminalProfile.js';
 
 export type TerminalMode = "auto" | "current" | "windows_terminal" | "custom" |
   "wezterm" | "alacritty" | "conemu" | "mintty" | "git_bash" | "git_bash_console" | "gnome_terminal" | "konsole" | "xterm";
@@ -172,12 +173,13 @@ export function terminalChildCommand(
   }
   if (config.terminal === "auto" || config.terminal === "windows_terminal") {
     return {command: config.command || windowsTerminalPath,
-      args: [...(config.args.length ? config.args : ["new-tab", "--"]), ...childArgs]};
+      args: [...dashboardTerminalArgs(config.args.length ? config.args : ["new-tab", "--"]), ...childArgs]};
   }
   return null;
 }
 
 const HANDOFF_ENV = ["GITGO_CONFIG_PATH", "GITGO_STATE_HOME", "GITGO_LLM_CONFIG_PATH",
+  "GITGO_OBSERVER_DIR", "GITGO_OBSERVER_TRIAL_PLAN",
   "GITGO_LAUNCH_SESSION", "GITGO_LAUNCH_SESSION_TOKEN",
   "GITGO_FRONTEND_ORIGIN",
   "GITGO_LLM_SECRET_PATH", "GITGO_PYTHON", "GITGO_BUN", "GITGO_HOST_EXECUTABLE",
@@ -243,6 +245,7 @@ export async function relaunchInConfiguredTerminal(
     } else if (["git_bash", "git_bash_console"].includes(config.terminal)) {
       return {launched: false, message: "TERMINAL_IDENTITY_UNVERIFIED: Git Bash has no verified identity; continuing here. Rescan in /config → General."};
     }
+    if(process.platform==='win32'&&child.args.includes(DASHBOARD_TERMINAL_PROFILE))ensureDashboardTerminalProfile();
     const directory = mkdtempSync(join(tmpdir(), "gitgo-terminal-"));
     const path = join(directory, "handoff.json");
     const token = randomUUID();

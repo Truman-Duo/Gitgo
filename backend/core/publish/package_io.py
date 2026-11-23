@@ -8,10 +8,9 @@ import ctypes as C
 import hashlib
 import os
 from pathlib import Path
-import stat
 import sys
 
-from backend.core.sandbox_read import ReadRoot, relative_parts
+from backend.core.sandbox_read import ReadRoot, WriteRoot, ReadBoundaryError, relative_parts
 from .package import MAX_PACKAGE
 from .state import PublishError, identifier
 
@@ -32,19 +31,11 @@ def _directory(value):
 
 def read_file(directory, filename):
     with ReadRoot(_directory(directory)) as root, root.open(_filename(filename)) as opened:
-        before = os.fstat(opened._fd)
-        if before.st_size > MAX_PACKAGE:
-            raise PublishError("PUBLISH_PACKAGE_LIMIT")
-        output = bytearray()
-        while chunk := os.read(opened._fd, min(65536, MAX_PACKAGE + 1 - len(output))):
-            output.extend(chunk)
-            if len(output) > MAX_PACKAGE:
-                raise PublishError("PUBLISH_PACKAGE_LIMIT")
-        after = os.fstat(opened._fd)
-        if (not stat.S_ISREG(after.st_mode) or after.st_nlink != 1
-                or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
-            raise PublishError("PUBLISH_EXPORT_CHANGED")
-        return bytes(output)
+        try:
+            return opened._read_package_bytes(max_bytes=MAX_PACKAGE)
+        except ReadBoundaryError as error:
+            code = 'PUBLISH_PACKAGE_LIMIT' if 'read_size_limit' in str(error) else 'PUBLISH_EXPORT_CHANGED'
+            raise PublishError(code) from error
 
 
 def observe(directory, filename, expected_sha256):
@@ -118,7 +109,7 @@ def export_new(directory, filename, raw, operation_id):
         raise PublishError("PUBLISH_PACKAGE_LIMIT")
     filename = _filename(filename)
     temporary = ".gitgo-publish-" + identifier(operation_id) + ".tmp"
-    with ReadRoot(_directory(directory)) as root:
+    with WriteRoot(_directory(directory)) as root:
         with _new_file(root, temporary) as fd:
             position = 0
             while position < len(raw):

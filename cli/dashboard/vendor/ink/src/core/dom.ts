@@ -71,6 +71,8 @@ export type DOMElement = {
   scrollHeight?: number
   scrollViewportHeight?: number
   scrollViewportTop?: number
+  /** Read-only observers, coalesced after paint by ScrollBox. */
+  onScrollMetrics?: () => void
   /** Last painted viewport, used to anchor selection to actual (not requested) scroll. */
   renderedScrollTop?: number
   renderedViewportTop?: number

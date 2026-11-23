@@ -2,6 +2,8 @@
 
 从待发布候选自己的源码运行 `python -B scripts/release_controller.py`。需要构建依赖中的 Python 包、Git 和已授权的 GitHub CLI；密钥必须位于源码与发行包之外。总控不自动合并 PR，不选择新版本，也不修改已发布版本。
 
+源码 CLI 的阶段推进已复用 `backend/core/publish/release_engine.py`；Gitgo 的签名、feed 和包结构由独立配方适配。产品 `/publish` 尚未接入这一总控，仍沿用原有发布流程；开发文件回执不能代替产品授权或项目状态。
+
 完整发布总控当前在 Windows/Linux 运行，仍可处理四目标的原生 CI 产物。macOS 通用命令的后代清理尚不能确认，因此在启动前明确拒绝；没有把进程组结束当成完整清理。macOS 只支持计划明确声明 `process_scope: single_process` 的独立检查，沿用现有禁止派生子进程的隔离探针。这不等于 macOS 通用沙箱或完整发布总控已实现。
 
 ## 准备计划

@@ -35,6 +35,23 @@ def compatible(before, after):
     return True
 
 
+def affected_nodes(before, after):
+    delta = difference(before, after)
+    touched = set(delta["added"] + delta["removed"] + delta["changed"])
+    old = {digest(edge): edge for edge in before["bindings"]}
+    new = {digest(edge): edge for edge in after["bindings"]}
+    for key in old.keys() ^ new.keys():
+        edge = old.get(key) or new[key]
+        touched.add(edge["to"]["node"])
+    edges = [*old.values(), *new.values()]
+    for _ in range(len(before["elements"]) + len(after["elements"])):
+        downstream = {edge["to"]["node"] for edge in edges if edge["from"]["node"] in touched}
+        if downstream <= touched:
+            break
+        touched.update(downstream)
+    return sorted(touched)
+
+
 class Coordinator:
     def __init__(self, registry, repository, *, capabilities=()):
         self.registry, self.repo, self.capabilities = registry, repository, tuple(capabilities)
@@ -161,36 +178,55 @@ class Coordinator:
                 continue
             definition, reference = self.repo.definition(value["definition_id"])
             old = value["compiled"]
-            safety_error = None
-            try:
-                for node in old["elements"]:
-                    self.registry.resolve(node["use"], node["version"])
-            except ValueError:
-                safety_error = "MECHANISM_DEPENDENCY_UNAVAILABLE"
+            missing = []
+            for node in old["elements"]:
+                try:
+                    descriptor = self.registry.resolve(node["use"], node["version"])
+                    if descriptor["digest"] != node["contract_digest"]:
+                        missing.append(node["id"])
+                except ValueError:
+                    missing.append(node["id"])
+            safety_error = "MECHANISM_DEPENDENCY_UNAVAILABLE" if missing else None
             if not safety_error and (value["effective_ref"] == reference or value["desired_ref"] == reference):
                 continue
             status = "pinned" if value["version_policy"] == "pinned" else "pending" if compatible(old, definition["compiled"]) else "needs_review"
             event_id = digest({"effective": value["effective_ref"], "target": reference, "safety": safety_error})
+            nodes = sorted(missing) if missing else affected_nodes(old, definition["compiled"])
+            observation = {"id": event_id, "target_ref": reference, "status": status,
+                           "affected_nodes": nodes, "error": safety_error}
+            previous = value["maintenance"].get(event_id) or {}
+            retrying = not safety_error and status == "pending" and previous.get("status") == "inspect_required"
             def record(current):
                 if event_id not in current["maintenance"] and len(current["maintenance"]) >= 64:
                     raise ValueError("MECHANISM_MAINTENANCE_CAPACITY")
-                current["maintenance"][event_id] = {"id": event_id, "target_ref": reference, "status": status,
-                    "affected_nodes": [n["id"] for n in old["elements"]], "error": safety_error}
+                current["maintenance"][event_id] = observation
+                current["maintenance_head"] = event_id
                 if safety_error:
                     current["phase"] = "blocked"
                     current["error"] = {"code": safety_error, "effect_state": "not_started"}
-            self.repo.mutate(value["task_id"], value["id"], record)
+            if not retrying and (value.get("maintenance_head") != event_id or previous != observation
+                    or (safety_error and value["phase"] != "blocked")):
+                self.repo.mutate(value["task_id"], value["id"], record)
+            phase = "blocked" if safety_error else value["phase"]
             if status == "pending" and not safety_error:
                 try:
-                    self.request(value["task_id"], value["id"], reference, expected_revision=value["revision"],
-                                 sources=definition["sources"])
+                    pending = self.request(value["task_id"], value["id"], reference, expected_revision=value["revision"],
+                                           sources=definition["sources"])
+                    phase = pending["phase"]
                     # Project impact detection can stage another task, but only
                     # that task's adapter knows its actual available services.
                     if owner_task_id is None or value["task_id"] == owner_task_id:
-                        self.settle(value["task_id"], value["id"])
+                        phase = self.settle(value["task_id"], value["id"])["phase"]
+                    if retrying:
+                        self.repo.mutate(value["task_id"], value["id"], record)
                 except (ValueError, RuntimeError) as error:
+                    observation = {**observation, "status": "inspect_required", "error": str(error)[:400]}
+                    if previous != observation:
+                        self.repo.mutate(value["task_id"], value["id"], record)
                     affected.append({"task_id": value["task_id"], "instance_id": value["id"], "event_id": event_id,
-                        "status": "inspect_required", "error": str(error)[:400]})
+                        **{key: observation[key] for key in ("status", "error", "affected_nodes")}})
                     continue
-            affected.append({"task_id": value["task_id"], "instance_id": value["id"], "event_id": event_id, "status": status})
+            affected.append({"task_id": value["task_id"], "instance_id": value["id"], "event_id": event_id,
+                             "status": status, "phase": phase, "affected_nodes": nodes,
+                             **({"error": safety_error} if safety_error else {})})
         return {"affected": affected, "after": rows[-1][0] if len(rows) == limit else "", "complete": len(rows) < limit}

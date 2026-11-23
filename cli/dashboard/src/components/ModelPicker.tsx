@@ -27,7 +27,7 @@ function ModelPickerBody({client,onFooter,onDismiss,onSelected}:Props){
     finally{saving.current=false;if(mounted.current)setLoading(false);}
   };
   return <Box flexDirection="column" minHeight={0}>
-    <SearchableChoiceScene presentation="inline" helpTopic="model" showCount={false} title={t({en:"Switch model",zh:"切换模型"})} description={data?.provider_name || t({en:"No current API configured",zh:"尚未配置当前 API"})} currentId={data?.model_id} input={input} onFooter={onFooter} busy={loading}
+    <SearchableChoiceScene presentation="inline" helpTopic="model" title={t({en:"Switch model",zh:"切换模型"})} description={data?.provider_name || t({en:"No current API configured",zh:"尚未配置当前 API"})} currentId={data?.model_id} input={input} onFooter={onFooter} busy={loading}
       items={(data?.models || []).map((p:any)=>({id:p.model_id,title:p.model_id,disabled:loading}))} onSelect={model=>void select(model)} onCancel={()=>{if(!saving.current)onDismiss();}}
       notice={data&&!data.models?.length?{tone:"info",text:t({en:"Configure models for the current API in /config providers",zh:"请先在 /config providers 中配置当前 API 的模型"})}:undefined}/>
     <FeedbackMessage feedback={feedback.message}/>

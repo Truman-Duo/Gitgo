@@ -101,7 +101,25 @@ def current_coordination_events(ledger: list[dict] | None) -> list[dict]:
                     if key not in {"event", "coordination_event_id", "event_id"}
                 },
             }
-    return [events[event_id] for event_id in order if event_id in events]
+    return project_draft_versions([events[event_id] for event_id in order])
+
+
+def project_draft_versions(events: list[dict]) -> list[dict]:
+    latest = {}
+    for event in events:
+        if event.get("draft"):
+            key = (event["owner_process_id"], event["source_task_id"], event["source_process_id"])
+            latest[key] = event["draft"]
+    projected = []
+    for event in events:
+        if draft := event.get("draft"):
+            key = (event["owner_process_id"], event["source_task_id"], event["source_process_id"])
+            current = latest[key]["id"]
+            event = {**event, "current_draft_id": current}
+            if current != draft["id"] and event.get("status") in {"pending", "awaiting_supervisor", "draft_adopted"}:
+                event["status"] = "superseded"
+        projected.append(event)
+    return projected
 
 
 def pending_coordination_events(ledger: list[dict] | None) -> list[dict]:
@@ -113,13 +131,69 @@ def pending_coordination_events(ledger: list[dict] | None) -> list[dict]:
     ]
 
 
+def _pending_user_change_for_wait(supervisor, selected: set[str]) -> dict | None:
+    from .assignment_handoff import withdrawal_source
+    from .lifecycle import ACTIVE
+
+    task_id = supervisor.active_task_id or supervisor.process_id
+    context, _ = supervisor.read_context_snapshot()
+    state = context.get("task_maintenance") or {}
+    current = state.get("task_id") == task_id and state.get("phase") == "needs_review"
+    pending = {
+        (task_id, change_id, change.get("authority_sequence", 0), change.get("base_contract_revision", 0)): change
+        for change_id, change in state.get("changes", {}).items()
+        if change.get("status") == "pending" and change.get("target_task_id") == task_id
+    } if current else {}
+    # Transient notification deduplication only. The task record continues to
+    # own whether each change has been resolved. wait_many serializes callbacks.
+    seen = supervisor._wait_feedback_notices
+    seen.intersection_update(pending)
+    unseen = pending.keys() - seen
+    manager = getattr(supervisor, "_manager", None)
+    mailbox = supervisor.mailbox
+    if not unseen or not selected or manager is None or mailbox is None:
+        return None
+    affected = []
+    with supervisor._coordination_lock:
+        for child_id in sorted(selected):
+            contract = supervisor.delegated_contracts.get(child_id)
+            child = manager.get(child_id)
+            # This is the inherited maintenance boundary for live direct
+            # assignments. The model still interprets what to change.
+            if (child and child.parent_id == supervisor.process_id and child.status.value in ACTIVE
+                    and contract is not None and not (contract.get("superseded_by") or contract.get("returned_assignment"))):
+                affected.append(child_id)
+    if not affected:
+        return None
+    changes = []
+    for key, change in pending.items():
+        if key not in unseen or not key[1].startswith("feedback-"):
+            continue
+        message = mailbox.get(key[1].removeprefix("feedback-"))
+        if (message and message.status == "applied" and message.applied_task_id == task_id
+                and withdrawal_source(supervisor, change)):
+            changes.append(key)
+            if len(changes) == 8:
+                break
+    if not changes:
+        return None
+    seen.update(changes)
+    return {"reason": "user_change_pending", "change_ids": [key[1] for key in changes],
+            "affected_process_ids": affected,
+            "next_actions": ["declare_task_contract", "task_mechanism"]}
+
+
 def supervisor_wait_interruption(supervisor, process_ids: list[str]) -> dict | None:
     """Return only actual unresolved owner actions relevant to the selected wait.
 
     Notification is not approval. Rework already requested is left to the worker;
     resolved events and unrelated siblings must not make a normal wait spin.
     """
+    if supervisor.mailbox is not None and supervisor.mailbox.has_pending_instruction():
+        return {"reason": "instruction_pending"}
     selected = set(process_ids)
+    if feedback := _pending_user_change_for_wait(supervisor, selected):
+        return feedback
     with supervisor._coordination_lock:
         events = pending_coordination_events(supervisor.session.host_ledger)
     actionable = [event for event in events
@@ -128,17 +202,37 @@ def supervisor_wait_interruption(supervisor, process_ids: list[str]) -> dict | N
         and event.get("status") in {"pending", "awaiting_supervisor", "awaiting_user"}
         and selected.intersection([event.get("source_process_id"),
                                    *list(event.get("affected_process_ids") or [])])]
-    if not actionable:
+    if actionable:
+        return {"reason": "supervisor_action_required",
+                "event_ids": [event["coordination_event_id"] for event in actionable],
+                "source_process_ids": list(dict.fromkeys(event["source_process_id"] for event in actionable)),
+                "next_actions": ["list_coordination_events", "resolve_coordination_event"]}
+    from .task_maintenance import retained_execution_block
+    from .lifecycle import ACTIVE
+    manager = getattr(supervisor, "_manager", None)
+    if not manager or not selected or not (blocked := retained_execution_block(supervisor)):
         return None
-    return {"reason": "supervisor_action_required",
-            "event_ids": [event["coordination_event_id"] for event in actionable],
-            "source_process_ids": list(dict.fromkeys(event["source_process_id"] for event in actionable)),
-            "next_actions": ["list_coordination_events", "resolve_coordination_event"]}
+    key = (supervisor.active_task_id or supervisor.process_id, blocked[0])
+    if supervisor._wait_maintenance_notice == key:
+        return None
+    with supervisor._coordination_lock:
+        affected = [
+            child_id for child_id in sorted(selected)
+            if (child := manager.get(child_id)) is not None and child.parent_id == supervisor.process_id
+            and child.status.value in ACTIVE and child.task_kind == "action"
+            and (contract := supervisor.delegated_contracts.get(child_id, {})).get("continuation", {}).get("retained_obligations")
+            and not (contract.get("superseded_by") or contract.get("returned_assignment"))
+        ]
+    if not affected:
+        return None
+    supervisor._wait_maintenance_notice = key
+    return {"reason": "supervisor_maintenance_required", "owner_process_id": supervisor.process_id,
+            "source_process_ids": affected, "message": blocked[1], "next_actions": ["declare_task_contract"]}
 
 
 def coordination_summary(process) -> dict[str, Any]:
     context, _version = process.read_context_snapshot()
-    events = list(context.get("coordination_events") or [])
+    events = project_draft_versions(list(context.get("coordination_events") or []))
     blocks = list(context.get("coordination_blocks") or [])
     return {
         "pending_count": sum(
@@ -155,7 +249,7 @@ def coordination_summary(process) -> dict[str, Any]:
 def coordination_summary_from_context(context: dict | None) -> dict[str, Any]:
     """Build the same lightweight projection for restored/offline runtimes."""
     snapshot = dict(context or {})
-    events = list(snapshot.get("coordination_events") or [])
+    events = project_draft_versions(list(snapshot.get("coordination_events") or []))
     blocks = [str(item) for item in list(snapshot.get("coordination_blocks") or []) if str(item)]
     return {
         "pending_count": sum(
@@ -239,7 +333,12 @@ def _format_notice(event: dict, *, audience: str) -> str:
     ]
     if interfaces:
         lines.append(f"affected_interfaces={interfaces}")
+    if draft := event.get("draft"):
+        lines.append(f"Draft v{draft['version']} ({draft['id']}), commit {draft['commit']}. A draft is not a delivery.")
     if audience == "supervisor":
+        if event.get("scope_change_id"):
+            lines.append("The draft is bound to the adopted withdrawal. Close out its prior executor, "
+                         "then call delegate_task with this draft_id and the remaining work.")
         lines.append(
             "This is a Host-routed event, not a private worker message. Inspect it with "
             "list_coordination_events and resolve it with resolve_coordination_event. "
@@ -278,6 +377,8 @@ def publish_coordination_event(
     affected_interfaces: list[str] | None = None,
     requires_supervisor_action: bool = True,
     block_affected: bool = False,
+    offer_draft: bool = False,
+    preserve_closed: bool = False,
 ) -> dict:
     """Record once and route through Host-owned owner/dependency relations."""
     owner = coordination_owner(manager, source)
@@ -288,6 +389,8 @@ def publish_coordination_event(
         str(item) for item in (affected_interfaces or []) if str(item)
     ))
     requested_affected = list(affected_process_ids or [])
+    if offer_draft:
+        requested_affected.extend(item.process_id for item in manager.downstream_of(source.process_id))
     if not requested_affected and (interface_refs or kind == "dependency_change"):
         for candidate in manager.downstream_of(source.process_id):
             if not interface_refs:
@@ -308,6 +411,7 @@ def publish_coordination_event(
         "kind": str(kind),
         "status": "awaiting_supervisor" if requires_supervisor_action else "notified",
         "source_process_id": source.process_id,
+        "source_task_id": source.active_task_id or source.process_id,
         "source_display_name": str(getattr(source.session, "display_name", "") or ""),
         "owner_process_id": owner.process_id,
         "affected_process_ids": affected,
@@ -318,15 +422,37 @@ def publish_coordination_event(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "route": "worker_to_host_to_supervisor_and_dependencies",
     }
-    with owner._coordination_lock:
-        owner.session.host_ledger.append({"event": "agent_coordination_event", **event})
+    if offer_draft:
+        from .assignment_handoff import (
+            AssignmentHandoffError, assignment_basis, bind_pending_scope, capture_draft, checkpoint, inspect_assignment, latest_draft,
+        )
+        from .mechanism_lifecycle import fence
+        if preserve_closed:
+            event["route"] = "runtime_preserved_on_assignment_closeout"
+        draft = capture_draft(manager, owner, event, preserve_closed=preserve_closed)
+        with fence(owner), owner._context_lock, owner._coordination_lock:
+            child, contract, _ = inspect_assignment(manager, owner, event, closeout=preserve_closed, versioned=True)
+            if draft["basis"] != assignment_basis(owner, child, contract):
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_BASIS_CHANGED", "The assignment changed while capturing this draft.")
+            previous = latest_draft(owner, source.process_id)
+            draft["version"] = previous["version"] + 1 if previous else 1
+            event["draft"] = draft
+            original, _ = owner.read_context_snapshot()
+            if change_id := bind_pending_scope(owner, child, contract, draft):
+                event["scope_change_id"] = change_id
+            _append_projection(owner, event)
+            checkpoint(manager, owner, {"event": "agent_coordination_event", **event},
+                       lambda: owner.update_context_snapshot(lambda _previous: original))
+    else:
+        with owner._coordination_lock:
+            owner.session.host_ledger.append({"event": "agent_coordination_event", **event})
+        _append_projection(owner, event)
     _append_projection(source, event)
-    _append_projection(owner, event)
     deliveries = [
         _enqueue_notice(source, event, audience="worker"),
         _enqueue_notice(owner, event, audience="supervisor"),
     ]
-    for process_id in affected:
+    for process_id in ([] if offer_draft else affected):
         target = manager.get(process_id)
         if target is None:
             continue
@@ -545,15 +671,19 @@ def resolve_coordination_event(
         raise KeyError("COORDINATION_EVENT_NOT_FOUND")
     valid = {
         "accept_revision", "request_rework", "ask_user", "acknowledge",
-        "dismiss", "restored",
+        "dismiss", "restored", "take_remaining_work", "accept_draft", "complete_returned_work",
     }
     if disposition not in valid:
         raise ValueError("COORDINATION_RESOLUTION_INVALID")
     if event.get("kind") == "interface_revision_proposed" and disposition == "acknowledge":
         raise ValueError("COORDINATION_RESOLUTION_INVALID")
+    if event.get("draft") and disposition in {"accept_revision", "restored"}:
+        raise ValueError("COORDINATION_RESOLUTION_INVALID")
 
-    if disposition == "accept_revision":
+    if disposition in {"accept_revision", "take_remaining_work", "complete_returned_work"}:
         status = "accepted"
+    elif disposition == "accept_draft":
+        status = "draft_adopted"
     elif disposition == "request_rework":
         status = "rework_requested"
     elif disposition == "ask_user":
@@ -570,13 +700,62 @@ def resolve_coordination_event(
         "resolved_by_process_id": supervisor.process_id,
         "resolved_at": datetime.now(timezone.utc).isoformat(),
     }
-    with supervisor._coordination_lock:
-        supervisor.session.host_ledger.append({
-            "event": "agent_coordination_resolution",
-            "coordination_event_id": event_id,
-            "status": status,
-            **resolution,
-        })
+    entry = {"event": "agent_coordination_resolution", "coordination_event_id": event_id,
+             "status": status, **resolution}
+    returned = None
+    accepted_result = None
+    if disposition in {"take_remaining_work", "accept_draft", "complete_returned_work"}:
+        from .assignment_handoff import (
+            AssignmentHandoffError, checkpoint, inspect_return, latest_draft, retain_draft, validate_draft,
+        )
+        from .mechanism_lifecycle import fence
+        child_id = event["source_process_id"]
+        version = event.get("draft")
+        existing = (supervisor.delegated_contracts.get(child_id) or {}).get("returned_assignment")
+        if (disposition == "take_remaining_work" and existing
+                and existing["coordination_event_id"] == event_id):
+            if supervisor.session.mechanism_activation_blocked:
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_COMMIT_UNKNOWN", "Inspect the return checkpoint before retrying.")
+            return {**event, "status": "accepted", "returned_assignment": existing, "deliveries": []}
+        if not resolution["note"]:
+            raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_STALE", "Record the decision and its reason.")
+        if disposition == "accept_draft":
+            if not version:
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_DRAFT_NOT_FOUND", "Select an explicitly versioned draft.")
+            with fence(supervisor), supervisor._context_lock, supervisor._coordination_lock:
+                validate_draft(manager, supervisor, event, closeout=False)
+                checkpoint(manager, supervisor, entry)
+        elif disposition == "complete_returned_work":
+            from .assignment_handoff import accept_returned_delivery
+            accepted_result = accept_returned_delivery(manager, supervisor, event, entry)
+        else:
+            if existing:
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_STALE", "The assignment was already returned.")
+            if not version and latest_draft(supervisor, child_id):
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_VERSION_CHANGED", "Select the current explicit draft ID.")
+            inspect = (lambda: validate_draft(manager, supervisor, event, closeout=True)) if version else (
+                lambda: inspect_return(manager, supervisor, event))
+            child, initial_contract, assignment = inspect()
+            draft = version or retain_draft(manager, child, assignment["target_files"])
+            with fence(supervisor), supervisor._context_lock, supervisor._coordination_lock:
+                current = next((item for item in current_coordination_events(supervisor.session.host_ledger)
+                                if item["coordination_event_id"] == event_id), None)
+                if current is None or current["status"] not in {"pending", "awaiting_supervisor", "draft_adopted"}:
+                    raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_STALE", "The return request has already changed.")
+                _, contract, returned = inspect()
+                if contract is not initial_contract or returned["target_files"] != assignment["target_files"]:
+                    raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_STALE", "The delegated assignment changed during retention.")
+                returned["draft"] = draft
+                supervisor.delegated_contracts[child_id] = {**contract, "returned_assignment": returned}
+                entry["returned_assignment"] = returned
+                checkpoint(manager, supervisor, entry,
+                           lambda: supervisor.delegated_contracts.__setitem__(child_id, contract))
+    else:
+        with supervisor._coordination_lock:
+            returned = (supervisor.delegated_contracts.get(event["source_process_id"]) or {}).get("returned_assignment")
+            if returned and returned["coordination_event_id"] == event_id:
+                raise ValueError("COORDINATION_RESOLUTION_INVALID")
+            supervisor.session.host_ledger.append(entry)
 
     process_ids = list(dict.fromkeys([
         str(event.get("source_process_id") or ""),
@@ -597,16 +776,22 @@ def resolve_coordination_event(
         "resolution": resolution,
         "summary": note or f"Coordination event {disposition}.",
     }
+    if accepted_result:
+        resolution["accepted_result"] = accepted_result
     deliveries = []
     for process_id in process_ids:
         process = manager.get(process_id)
         if process is None:
             continue
         _update_projected_event(process, event_id, status=status, resolution=resolution)
+        if event.get("draft") and process_id in event.get("affected_process_ids", []):
+            continue
         if process.process_id != supervisor.process_id:
             deliveries.append(_enqueue_notice(process, notice, audience="worker"))
     manager.notify_state_changed(supervisor.process_id)
-    return {**notice, "deliveries": deliveries}
+    return {**notice, "deliveries": deliveries,
+            **({"accepted_result": accepted_result} if accepted_result else {}),
+            **({"returned_assignment": returned} if disposition == "take_remaining_work" else {})}
 
 
 def coordination_block_reason(process) -> str:

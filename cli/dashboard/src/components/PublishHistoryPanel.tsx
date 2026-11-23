@@ -173,7 +173,7 @@ export function PublishHistoryPanel({client, project, itemId, head, onFooter, on
         {drawCommitGraph(graph, selected, w, Math.max(3, h - 12)).map((line, index) => <Text key={index} wrap="truncate-end">{line}</Text>)}
       </>}
       {commit ? <>
-        <Text bold wrap="truncate-end">{selected + 1}/{page!.commits.length} · {commit.oid.slice(0, 12)} · {safe(commit.subject)}</Text>
+        <Text bold wrap="truncate-end">{commit.oid.slice(0, 12)} · {safe(commit.subject)}</Text>
         <Text wrap="truncate-end">{safe(commit.author.name)} · {t({en: "Parents", zh: "父提交"})}: {commit.parents.map(oid => oid.slice(0, 12)).join(" + ") || t({en: "root", zh: "根提交"})}</Text>
       </> : null}
       {page?.next_cursor ? <Text>{t({en: "More history available", zh: "还有更早记录"})}</Text> : null}

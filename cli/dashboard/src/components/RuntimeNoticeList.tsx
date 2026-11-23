@@ -1,17 +1,26 @@
-import React from "react";
+import React, {useEffect,useState} from "react";
 import { Box, Text } from "@anthropic/ink";
-import type { Color } from "@anthropic/ink";
-import type { RuntimeNotice, RuntimeNoticeSeverity } from "../types.js";
-import { colors } from "../theme/index.js";
+import type { RuntimeNotice } from "../types.js";
+import {geometry} from "../theme/tokens.js";
 import {useCopy} from "../ui/PageFrame.js";
+import {Disclosure} from "./Disclosure.js";
+import {TraceContent} from "./TraceContent.js";
+import {DecisionPanel} from "./DecisionPanel.js";
+import type {TraceBodyReader} from "../chat/traceSource.js";
+import {runtimeNoticeFromEvent} from "../daemon/runtimeNotices.js";
+import {actorLabelCopy} from "../daemon/agentLabels.js";
+import type {StreamEvent} from "../daemon/streamEvents.js";
+import {useDisclosureState} from "../hooks/useDisclosureState.js";
 
-function severityColor(severity: RuntimeNoticeSeverity): Color {
-  switch (severity) {
-    case "success": return colors.success;
-    case "warning": return colors.warning;
-    case "error": return colors.danger;
-    default: return colors.named.gray;
-  }
+function NoticeDetail({notice,readBody}: {notice:RuntimeNotice;readBody?:TraceBodyReader}) {
+  const t=useCopy();
+  return <TraceContent references={notice.trace_refs} read={readBody}>{events=><TraceContent detailRef={notice.detail_ref || ""} readDetail={readBody?.detail}>
+    {(saved:unknown)=>{
+      const original=saved && typeof saved === "object" && "legacy_record" in saved ? saved.legacy_record : events?.[0];
+      const full=original ? runtimeNoticeFromEvent(original as StreamEvent,true)?.detail : undefined;
+      return <Text dimColor>{full || notice.detail || t({en:"No saved detail",zh:"没有保存的详情"})}</Text>;
+    }}
+  </TraceContent>}</TraceContent>;
 }
 
 export function RuntimeNoticeList({
@@ -32,22 +41,29 @@ export function RuntimeNoticeList({
 }
 
 export function RuntimeNoticeRow({
-  notice, verbose = true,
-}: { notice: RuntimeNotice; verbose?: boolean }) {
+  notice, verbose = true,readBody,
+}: { notice: RuntimeNotice; verbose?: boolean;readBody?:TraceBodyReader }) {
   const t=useCopy();
-  return <Box flexDirection="column">
-    <Box flexDirection="row">
-      <Text color={severityColor(notice.severity)}>◆ </Text>
-      {notice.actor_label ? <Text dimColor>{notice.actor_label} · </Text> : null}
-      <Text bold={notice.severity === "warning" || notice.severity === "error"}>
-        {notice.label}
-      </Text>
-    </Box>
-    {notice.detail || (verbose && notice.detail_ref) ? <Box paddingLeft={2}>
-      <Text dimColor>
-        {notice.detail || ""}{notice.detail && verbose && notice.detail_ref ? " · " : ""}
-        {verbose && notice.detail_ref ? t({en:"trace ref available",zh:"可查看轨迹引用"}) : ""}
-      </Text>
+  const label=notice.label_copy ? t(notice.label_copy) : notice.label;
+  const actor=notice.actor_label ? t(actorLabelCopy(notice.actor_label)) : "";
+  const [expanded,toggle]=useDisclosureState(false,'notice:'+notice.key);
+  if(notice.decision)return <DecisionPanel decision={notice.decision} answer={notice.decision_answer} active={false}
+    selectedIndex={0} composing={false} submitting={false} expanded={expanded} onExpandedChange={toggle}/>;
+  // Terminal lifecycle facts are plain status text within the round capsule.
+  // Preserve failure detail, without introducing another disclosure or marker.
+  if(notice.kind === "agent_complete" || notice.kind === "agent_terminal") return <Box flexDirection="column">
+    <Text dimColor>{actor ? actor + " · " : ""}{label}</Text>
+    {notice.severity === "error" || notice.severity === "warning" ? <Box paddingLeft={geometry.record.indent}>
+      <NoticeDetail notice={notice} readBody={readBody}/>
     </Box> : null}
   </Box>;
+  const expandable=Boolean(notice.detail || notice.trace_refs?.length || notice.detail_ref);
+  return <Disclosure expanded={expanded && expandable} expandable={expandable} onToggle={()=>toggle(current=>!current)} label={<>
+    {actor ? <Text dimColor>{actor} · </Text> : null}
+    <Text bold={notice.severity === "warning" || notice.severity === "error"}>{label}</Text>
+  </>}>
+    {expanded && expandable ? <Box paddingLeft={geometry.record.indent} flexDirection="column">
+      <NoticeDetail notice={notice} readBody={readBody}/>
+    </Box> : null}
+  </Disclosure>;
 }

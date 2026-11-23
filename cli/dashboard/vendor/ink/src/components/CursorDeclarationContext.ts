@@ -15,6 +15,7 @@ export type CursorDeclaration = {
    * hidden (Microsoft Terminal PR #17181).
    */
   readonly visible?: boolean
+  readonly style?: 'blinking-bar'
 }
 
 /**

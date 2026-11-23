@@ -17,6 +17,7 @@ import {useGraphicsCapability} from "../ui/terminalGraphics.js";
 import {useSvgRaster} from "../ui/svgRaster.js";
 import {PublishPrDetails} from "./PublishPrDetails.js";
 import {PublishRepositoryBrowser} from "./PublishRepositoryBrowser.js";
+import {PublishReleaseDetails} from "./PublishReleaseDetails.js";
 import {useFeedback} from "../hooks/useFeedback.js";
 import {FeedbackMessage} from "./FeedbackMessage.js";
 import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
@@ -37,7 +38,10 @@ export function PublishWorkbench(props: Props) {
   const {w, h} = usePanelSize({minWidth: 20, widthOffset: 4});
   const [local] = useState(() => props.localState ?? createPublishStateStore().scope(project));
   const [saved] = useState(() => local.get<{tab: number; sub: number; source: string; formal: string; marked: string[]; rowId?: string}>("workbench.view"));
-  const [tab, setTab] = useState(Math.max(0, Math.min(3, saved?.tab ?? 0))), [sub, setSub] = useState(Math.max(0, Math.min(1, saved?.sub ?? 0)));
+  // A fresh /publish always starts at the project workspace. Returning from a
+  // child keeps this mounted owner, rather than restoring an unrelated tab.
+  const [tab, setTab] = useState(0), [sub, setSub] = useState(0);
+  const [settingsSection,setSettingsSection]=useState<"account"|undefined>();
   const [focus, setFocus] = useState<"header" | "sub" | "body">("header"), [row, setRow] = useState(0);
   const [snapshot, setSnapshot] = useState<PublishSnapshot | null>(null), [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [source, setSource] = useState(saved?.source ?? ""), [formal, setFormal] = useState(saved?.formal ?? "");
@@ -45,9 +49,10 @@ export function PublishWorkbench(props: Props) {
   const [outgoing, setOutgoing] = useState<string[]>([]);
   const [operation, setOperation] = useState<Operation | null>(null), [history, setHistory] = useState<{itemId: string; head: string} | null>(null);
   const [repositoryBrowser, setRepositoryBrowser] = useState(false);
+  const [release, setRelease] = useState<{item: PublishItem; packageId: string} | null>(null);
   const [pr, setPr] = useState<{item: PublishItem; snapshot: PublishPlatformSnapshot; document: PlatformRecord} | null>(null);
   const [loading, setLoading] = useState(false);
-  const view = `${project}:${tab}:${sub}:${operation ? "operation" : history ? "history" : repositoryBrowser ? "repository" : pr ? "pr:" + pr.document.id : "root"}`;
+  const view = `${project}:${tab}:${sub}:${operation ? "operation" : history ? "history" : release ? "release:" + release.packageId : repositoryBrowser ? "repository" : pr ? "pr:" + pr.document.id : "root"}`;
   const pageFeedback = useFeedback({kind: "page", id: view}, {tone: "error"});
   // A confirmed operation result may follow the user across this project's tabs.
   // It is still transient; durable uncertainty remains in the saved item itself.
@@ -110,10 +115,9 @@ export function PublishWorkbench(props: Props) {
   const rows: Row[] = [];
   if (tab === 0) {
     rows.push({id: "process", label: t({en: "Process Git", zh: "过程 Git"}), detail: sourceCommit ? `${sourceCommit.oid.slice(0, 8)}  ${sourceCommit.subject}` : t({en: "No local Git history available", zh: "尚无可读取的本地 Git 历史"}), run: () => setHistory({itemId: "", head: "workspace"})},
-      {id: "prepare", label: t({en: `Consolidate ${marked.length || (sourceCommit ? 1 : 0)} selected records`, zh: `整理所选 ${marked.length || (sourceCommit ? 1 : 0)} 条记录`}),  run: prepare},
-      {id: "formal", label: t({en: "Local formal Git", zh: "本地正式 Git"}), detail: formalCommit ? `${formalCommit.oid.slice(0, 8)}  ${formalCommit.subject}` : t({en: "No observed local formal commit yet", zh: "尚无已核对的本地正式提交"}), run: () => {if (formalCommit) setHistory({itemId: formalCommit.item_id, head: `formal_operation:${formalCommit.operation_id}`});}});
+      ...(sourceCommit ? [{id: "prepare", label: t({en: `Consolidate ${marked.length || 1} selected records`, zh: `整理所选 ${marked.length || 1} 条记录`}), run: prepare}] : []),
+      {id: "formal", label: t({en: `Local formal Git · ${workspace?.formal_total ?? 0}`, zh: `本地正式 Git · ${workspace?.formal_total ?? 0}`}), detail: formalCommit ? `${formalCommit.oid.slice(0, 8)}  ${formalCommit.subject}` : t({en: "No observed local formal commit yet", zh: "尚无已核对的本地正式提交"}), run: () => {if (formalCommit) setHistory({itemId: formalCommit.item_id, head: `formal_operation:${formalCommit.operation_id}`});}});
     for (const item of items.filter(i => i.plan?.destination === "formal" && i.status !== "integrated")) rows.push({id: item.id, label: item.title, detail: `${item.status} · ${item.plan?.target_role ?? "formal"} · ${item.target}`, run: () => setOperation({itemId: item.id})});
-    rows.push({id: "collaborate", label: t({en: "Continue in collaboration", zh: "进入协作"}),  run: () => {selectedId.current = formalCommit?.item_id ?? ""; setTab(1); setSub(0); setRow(0);}});
     if (workspace?.next_cursor) rows.push({id: "more-history", label: t({en: "Earlier process history", zh: "更早的过程记录"}), run: () => {setPageStack(v => [...v, cursor.current]); void read(workspace.next_cursor!);}});
     if (pageStack.length) rows.push({id: "previous-history", label: t({en: "Return to newer records", zh: "返回较新的记录"}), run: () => {const next = [...pageStack]; void read(next.pop() ?? ""); setPageStack(next);}});
     if (marked.length) rows.push({id: "clear-selection", label: t({en: "Clear source selection", zh: "清空来源选择"}), run: () => setMarked([])});
@@ -135,18 +139,24 @@ export function PublishWorkbench(props: Props) {
   } else if (tab === 2) {
     for (const item of items.filter(i => i.status === "integrated")) {
       if (sub === 0) rows.push({id: item.id, label: item.title, detail: `${item.target} · ${item.packages?.length ?? 0} ${t({en: "artifacts", zh: "项产物"})}`, run: () => setOperation({itemId: item.id})});
-      else for (const pkg of item.packages ?? []) rows.push({id: pkg.id, label: `${pkg.version} · ${pkg.filename}`, detail: `${pkg.source_oid.slice(0, 8)} · ${t({en: "Artifact record; inspect tag and release receipts separately", zh: "产物记录；标签与平台发布状态请分别核对"})}`, run: () => setOperation({itemId: item.id})});
+      else for (const pkg of item.packages ?? []) rows.push({id: pkg.id, label: `${pkg.version} · ${pkg.filename}`, detail: `${pkg.source_oid.slice(0, 8)} · ${t({en: "Fixed package and release phases", zh: "固定产物与发布阶段"})}`, run: () => setRelease({item, packageId: pkg.id})});
     }
   }
   if (!pr && tab !== 3 && snapshot?.next_cursor) rows.push({id: "more-items", label: t({en: "More saved items", zh: "更多已保存事项"}), run: () => void read(cursor.current, true)});
   const currentRow = rows[Math.min(row, Math.max(0, rows.length - 1))];
   useLayoutEffect(() => {setRow(value => Math.max(0, Math.min(value, rows.length - 1)));}, [tab, sub, pr, rows.length]);
   useLayoutEffect(() => {if (selectedElement.current) scroll.current?.scrollIntoView(selectedElement.current);}, [row, tab, sub, w, h]);
-  useEffect(() => {local.set("workbench.view", {tab, sub, source: sourceCommit?.oid, formal: formalCommit?.oid, marked, rowId: currentRow?.id});}, [tab, sub, sourceCommit?.oid, formalCommit?.oid, marked, currentRow?.id]);
-  const child = operation || history || pr || repositoryBrowser || tab === 3 && focus === "body";
+  const viewState={source:sourceCommit?.oid,formal:formalCommit?.oid,marked,rowId:currentRow?.id};
+  const latestView=useRef(viewState);latestView.current=viewState;
+  useEffect(() => {
+    const timer=setTimeout(()=>{local.set("workbench.view",latestView.current);if(local.error)setError(local.error);},150);
+    return ()=>clearTimeout(timer);
+  },[local,sourceCommit?.oid,formalCommit?.oid,marked,currentRow?.id,setError]);
+  useEffect(()=>()=>local.set("workbench.view",latestView.current),[local]);
+  const child = operation || history || pr || release || repositoryBrowser || tab === 3 && focus === "body";
   const helpTopic=tab===0?"publish.workspace":tab===1?"publish.collaboration":tab===2?"publish.release":"publish.settings";
   const help=useLocalHelpCommand(helpTopic,onFooter,!child,focus==="body"?{suggest:input=>publishSuggestions({item:selectedItem,more:Boolean(snapshot?.next_cursor)},input,t),run:command=>setOperation({itemId:selectedItem?.id,command})}:undefined);
-  const active = items.some(item => ["queued", "running", "stopping"].includes(item.run?.state ?? "") || ["checking", "pausing", "executing"].includes(item.status));
+  const active = items.some(item => ["queued", "running", "stopping"].includes(item.run?.state ?? "") || ["queued", "running", "stopping"].includes(item.release_controller?.job?.state ?? "") || ["checking", "pausing", "executing"].includes(item.status));
   useEffect(() => {
     if (child || !active) return;
     const timer = setInterval(() => {void read(cursor.current);}, 1000);
@@ -190,12 +200,17 @@ export function PublishWorkbench(props: Props) {
   const formalGraph = useMemo(() => layoutCommitGraph(formalCommits, [], formalCommits[0]?.oid), [workspace]);
   const collaborationGraph = useMemo(() => layoutCommitGraph(semantic, [], semantic[0]?.oid), [workspace]);
   const capability = useGraphicsCapability(), graphRows = Math.max(4, Math.min(9, h - 14));
-  const scene = useMemo(() => !child && capability.sixel ? tab === 0 ? workspaceGraphSvg(processGraph, formalGraph, formalCommits,
-    sourceIndex, formalIndex, currentRow?.id === "formal" ? "formal" : "process", w, graphRows, capability)
-    : tab === 1 ? commitGraphSvg(collaborationGraph, Math.min(row, Math.max(0, semantic.length - 1)), w, graphRows, capability) : null : null,
-    [tab, Boolean(child), capability, workspace, sourceIndex, formalIndex, row, currentRow?.id, w, graphRows]);
+  const graphBand=currentRow?.id==="formal"?"formal":"process";
+  const collaborationSelection=tab===1&&sub===0?Math.min(row,Math.max(0,semantic.length-1)):0;
+  const scene = useMemo(() => !child && capability.sixel ? tab === 0 && (commits.length || formalCommits.length) ? workspaceGraphSvg(processGraph, formalGraph, formalCommits,
+    sourceIndex, formalIndex, graphBand, w, graphRows, capability)
+    : tab === 1 && sub===0 && semantic.length ? commitGraphSvg(collaborationGraph, collaborationSelection, w, graphRows, capability) : null : null,
+    [tab, sub, Boolean(child), capability, workspace, sourceIndex, formalIndex, collaborationSelection, graphBand, w, graphRows]);
   const raster = useSvgRaster(scene);
-  const header = <><HorizontalHeaderStrip items={["Workspace", t({en: "Collaboration", zh: "协作"}), t({en: "Releases", zh: "版本发布"}), t({en: "Configuration", zh: "配置"})].map((label, index) => ({id: String(index), label}))} selected={tab} width={w} contentFocused={focus !== "header" || Boolean(child)}/><Text color={colors.divider.color}>{separator(w)}</Text></>;
+  const header = <><HorizontalHeaderStrip items={[t({en:"Workspace",zh:"工作区"}), t({en: "Collaboration", zh: "协作"}), t({en: "Releases", zh: "版本发布"}), t({en: "Configuration", zh: "配置"})].map((label, index) => ({id: String(index), label}))} selected={tab} width={w} contentFocused={focus !== "header" || Boolean(child)}/><Text color={colors.divider.color}>{separator(w)}</Text></>;
+  if (release) return <Box flexDirection="column" flexGrow={1} minHeight={0}>{header}<PublishReleaseDetails key={`${project}/${release.item.id}/${release.packageId}`}
+    client={client} project={project} initialItem={release.item} packageId={release.packageId} localState={local} onFooter={onFooter}
+    onDismiss={() => {setRelease(null); void read();}}/></Box>;
   if (operation) return <Box flexDirection="column" flexGrow={1} minHeight={0}>{header}<PublishItemPanel {...props} localState={local} initial={operation} onResult={returned} onDismiss={() => {setOperation(null); void read();}}/></Box>;
   if (history) return <Box flexDirection="column" flexGrow={1} minHeight={0}>{header}<PublishHistoryPanel {...props} itemId={history.itemId} head={history.head} localState={local} onDismiss={() => setHistory(null)}/></Box>;
   if (repositoryBrowser) return <Box flexDirection="column" flexGrow={1} minHeight={0}>{header}<PublishRepositoryBrowser client={client} project={project} items={items} localState={local} onFooter={onFooter} onDismiss={() => setRepositoryBrowser(false)}
@@ -207,7 +222,7 @@ export function PublishWorkbench(props: Props) {
       }
       open(command, pr.item, values);
     }}/></Box>;
-  if (tab === 3 && focus === "body") return <Box flexDirection="column" flexGrow={1} minHeight={0}>{header}<PublishPanel {...props} localState={local} onOpenAccount={() => open("/account")} onDismiss={() => setFocus("header")}/></Box>;
+  if (tab === 3 && focus === "body") return <Box flexDirection="column" flexGrow={1} minHeight={0}>{header}<PublishPanel {...props} localState={local} initialSection={settingsSection} onOpenAccount={() => open("/account")} onDismiss={() => {setSettingsSection(undefined);setFocus("header");}}/></Box>;
   return <Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={0}>
     {header}
     {secondary.length ? <HorizontalHeaderStrip items={secondary.map((label, index) => ({id: String(index), label}))} selected={sub} width={w} contentFocused={focus !== "sub"}/> : null}
@@ -217,13 +232,11 @@ export function PublishWorkbench(props: Props) {
     {local.error ? <Text color={colors.danger}>{safe(local.error)}</Text> : null}
     <ScrollBox ref={scroll} flexDirection="column" flexGrow={1} flexBasis={0} minHeight={0}>
       {tab === 0 && !pr ? <Box flexDirection="column">
-        <Text dimColor>{t({en: "Process Git · local development history", zh: "过程 Git · 本地开发记录"})}</Text>
         {raster.image && capability.sixel ? <TerminalRaster image={raster.image} columns={w} rows={graphRows}/> : <>
           {drawCommitGraph(processGraph, sourceIndex, w, 3).map((line, i) => <Text key={`p${i}`}>{line}</Text>)}
 
           {drawCommitGraph(formalGraph, formalIndex, w, 3).map((line, i) => <Text key={`f${i}`}>{line}</Text>)}
         </>}
-        <Text dimColor>{t({en: "Local formal Git · observed commits only", zh: "本地正式 Git · 仅展示已核对的提交"})} · {workspace?.formal_total ?? 0}</Text>
         {formalCommit ? <Text dimColor>{formalCommit.oid.slice(0, 8)} ← {formalCommit.sources.map(oid => oid.slice(0, 8)).join(" · ")}</Text> : null}
         {raster.error ? <Text dimColor>{t({en: "Vector graph unavailable; using the same rail layout in text.", zh: "矢量图不可用，当前显示同一线轨布局的文字兼容视图。"})}</Text> : null}
         {marked.some(oid => !commits.some(c => c.oid === oid)) ? <Text>{t({en: "Some marked commits are outside this page. Return to that page or clear selection before consolidation.", zh: "部分选择位于其他页，请返回核对或清空选择后整理。"})}</Text> : null}

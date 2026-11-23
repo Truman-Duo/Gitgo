@@ -75,16 +75,16 @@ test("conversation mounts a moving message window instead of the full history", 
   try {
     await settle();
     let text = mountedText((instances.get(stdout) as any).rootNode);
-    expect(text).toContain("VIRTUAL_ROW_0");
-    expect(text).not.toContain("VIRTUAL_ROW_999");
-    expect((text.match(/VIRTUAL_ROW_/g) || []).length).toBeLessThan(40);
-
-    scrollRef.current?.scrollToBottom();
-    expect(scrollRef.current?.isSticky()).toBe(true);
-    await settle();
-    text = mountedText((instances.get(stdout) as any).rootNode);
     expect(text).toContain("VIRTUAL_ROW_999");
     expect(text).not.toContain("VIRTUAL_ROW_0");
+    expect((text.match(/VIRTUAL_ROW_/g) || []).length).toBeLessThan(40);
+
+    scrollRef.current?.scrollTo(0);
+    expect(scrollRef.current?.isSticky()).toBe(false);
+    await settle();
+    text = mountedText((instances.get(stdout) as any).rootNode);
+    expect(text).toContain("VIRTUAL_ROW_0");
+    expect(text).not.toContain("VIRTUAL_ROW_999");
     expect((text.match(/VIRTUAL_ROW_/g) || []).length).toBeLessThan(40);
   } finally {
     root.unmount(); root.cleanup(); stdin.destroy(); stdout.destroy(); stderr.destroy();
@@ -137,7 +137,7 @@ test("virtualized width reflow preserves a semantic mid-history anchor", async (
   }
 });
 
-test("terminal guide closes at the result before trailing knowledge; waiting never closes", async () => {
+test("terminal guide closes at the result while process notices stay folded; waiting never closes", async () => {
   const stdin: any = new PassThrough(); stdin.isTTY = true; stdin.setRawMode = () => stdin;
   stdin.ref = () => stdin; stdin.unref = () => stdin;
   const stdout: any = new PassThrough(); stdout.isTTY = true; stdout.columns = 100; stdout.rows = 18;
@@ -158,7 +158,7 @@ test("terminal guide closes at the result before trailing knowledge; waiting nev
     const text = ink.getLastOutput ? ink.getLastOutput() : ink.lastOutput;
     // Endpoint nodes are real Ink output, independent of stored message roles.
     const mounted = mountedText(ink.rootNode);
-    expect(mounted).toContain("└"); expect(mounted).not.toContain("┗"); expect(mounted).toContain("Knowledge proposal saved");
+    expect(mounted).toContain("└"); expect(mounted).not.toContain("┗"); expect(mounted).not.toContain("Knowledge proposal saved");
     root.rerender(draw([messages[0]!, {...messages[1]!, status: "awaiting_user"}]));
     await settle();
     expect(mountedText(ink.rootNode)).not.toContain("└");

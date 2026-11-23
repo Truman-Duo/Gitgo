@@ -34,10 +34,12 @@ test('new decision preserves earlier open cards, including virtual unmount and r
   expect(allText(state(io.stdout).ink.rootNode)).toContain('question-one');
   expect(allText(state(io.stdout).ink.rootNode)).toContain('question-two');
   root.rerender(draw([user,card('one',true),card('two',true)]));await wait();
-  const click=nodes(state(io.stdout).ink.rootNode).find(n=>n._eventHandlers?.onClick&&allText(n).startsWith('Decision answered'));
+  const click=nodes(state(io.stdout).ink.rootNode).find(n=>n._eventHandlers?.onClick&&/^[▸▾] question-one/.test(allText(n)));
   expect(click).toBeDefined();click._eventHandlers.onClick({});await wait(230);
-  expect(allText(state(io.stdout).ink.rootNode)).not.toContain('question-one');
-  click._eventHandlers.onClick({});await wait(230);
+  expect(allText(state(io.stdout).ink.rootNode)).toContain('question-one');
+  expect(allText(state(io.stdout).ink.rootNode).match(/Please choose a scope/g)).toHaveLength(1);
+  const summary=nodes(state(io.stdout).ink.rootNode).find(n=>n._eventHandlers?.onClick&&/^[▸▾] question-one/.test(allText(n)));
+  expect(summary).toBeDefined();summary._eventHandlers.onClick({});await wait(230);
   expect(state(io.stdout).text).toContain('question-one');
   expect(allText(state(io.stdout).ink.rootNode)).toContain('question-one');
   const long=[user,card('one',true),card('two',true),...Array.from({length:65},(_,i):ChatMessage=>({role:i%2?'assistant':'user',message_id:`later-${i}`,content:`later ${i}\nmore lines\ncontext`,timestamp:user.timestamp}))];
@@ -49,22 +51,25 @@ test('new decision preserves earlier open cards, including virtual unmount and r
  }finally{root.unmount();root.cleanup();Object.values(io).forEach(s=>s.destroy());}
 });
 
-test('live tool preview and turn guide fold gradually into the final reply without a trace read',async()=>{
+test('live process settles into one folded final capsule without residual previews or history reads',async()=>{
  const io=terminal(),scroll=createRef<ScrollBoxHandle>(),calls:any[]=[];
  const stream:StreamingRow={text:'',reasoning:'private reasoning must stay hidden',timestamp:new Date().toISOString(),tools:[{tool_name:'bash',tool_call_id:'c',target:'python check.py',result_text:Array.from({length:9},(_,i)=>`preview-line-${i}`).join('\n'),state:'completed',allowed:true,status_label:'OK',duration_ms:120,timestamp:''}],notices:[]};
- const client:any={ready:true,close(){},async callTool(op:any,args:any){calls.push({op,args});return {};}};
+ const client:any={ready:true,close(){},async callTool(op:any,args:any){calls.push({op,args});
+  if(args.action==='summary')return {trace_id:args.trace_id,event_count:0};
+  expect(args.action).toBe('index');return {snapshot:{schema:1,trace_id:args.trace_id,process_id:args.process_id||'',first_seq:0,last_seq:0,event_count:0},events:[],next_seq:-1,has_more:false};}};
  const draw=(messages:ChatMessage[],streaming:StreamingRow|null)=><InputProvider><Box height={28} width={100}><VirtualConversation client={client} project="sample" messages={messages} streaming={streaming} contentWidth={94} scrollRef={scroll}/></Box></InputProvider>;
  const root=renderSync(draw([user],stream),{...io,patchConsole:false,exitOnCtrlC:false});
  try{
   await wait();const before=state(io.stdout).text;
   expect(before).toContain('┌');expect(before).toContain('│');expect(before).not.toContain('└');
   expect(before.split('\n').find(line=>line.includes('Inspect this file'))?.[0]).toBe('┌');
-  expect(before).toContain('python check.py');expect(before).toContain('preview-line-0');expect(before).not.toContain('preview-line-8');expect(before).not.toContain('private reasoning');
+  expect(before).toContain('python check.py');expect(before).not.toContain('preview-line-0');expect(before).not.toContain('preview-line-8');expect(before).not.toContain('private reasoning');
   const outcome:ChatMessage={role:'assistant',content:'Verified result\nLast line of answer',message_id:'outcome',timestamp:new Date().toISOString(),status:'completed',trace_id:'task',duration_ms:120,tools:stream.tools};
   root.rerender(draw([{...user,message_id:"persisted-user-1"},outcome],null));await wait(50);
-  const during=state(io.stdout).text;expect(during).toContain('preview-line-0');expect(during).toContain('Verified result');
+  const during=state(io.stdout).text;expect(during).not.toContain('preview-line-0');expect(during).toContain('Verified result');
   await wait(270);const after=state(io.stdout).text;
-  expect(after).not.toContain('preview-line-0');expect(after).toContain('Verified result');expect(after).toContain('└');expect(after.split('\n').find(line=>line.includes('Last line of answer'))?.[0]).toBe('└');expect(calls).toHaveLength(0);
+  expect(after).not.toContain('preview-line-0');expect(after).toContain('Verified result');expect(after).toContain('└');expect(after.split('\n').find(line=>line.includes('Last line of answer'))?.[0]).toBe('└');
+  expect(calls.map(call=>call.args.action)).toEqual([]);expect(calls.every(call=>call.op==='runtime.trace')).toBe(true);
  }finally{root.unmount();root.cleanup();Object.values(io).forEach(s=>s.destroy());}
 });
 
@@ -73,7 +78,11 @@ test('verbose composite children retain their explicit parent label and bounded 
  expect(preview.lines.map(l=>l.text)).toEqual(['cmd','hello','second','third','fourth']);expect(preview.more).toBe(true);
  expect(toolPreview({tool_name:'bash',target:'first\nsecond\nthird',allowed:true,status_label:'OK',duration_ms:0,timestamp:''},40).more).toBe(true);
  const io=terminal();const root=renderSync(<InputProvider><Box height={28}><TurnTimeline width={94} verbose activity={[{kind:'tool',toolIndex:0}]} tools={[{tool_name:'read_file',allowed:true,status_label:'OK',timestamp:'',duration_ms:20,state:'completed',target:'child.txt',composite_tool:'inspect_bundle',step_id:'source',execution_id:'exec',result_text:'Nested file content'}]} notices={[]}/></Box></InputProvider>,{...io,patchConsole:false,exitOnCtrlC:false});
- try{await wait();const text=state(io.stdout).text;expect(text).toContain('inspect_bundle / source');expect(text).toContain('Nested file content');expect(text).toContain('│');}finally{root.unmount();root.cleanup();Object.values(io).forEach(s=>s.destroy());}
+ try{await wait();let view=state(io.stdout);expect(view.text).toContain('inspect_bundle / source');expect(view.text).not.toContain('Nested file content');
+  const header=nodes(view.ink.rootNode).find(node=>node._eventHandlers?.onClick&&allText(node).includes('read_file'));
+  expect(header).toBeDefined();header._eventHandlers.onClick({});await wait();
+  view=state(io.stdout);expect(view.text).toContain('Nested file content');expect(view.text).toContain('│');
+ }finally{root.unmount();root.cleanup();Object.values(io).forEach(s=>s.destroy());}
 });
 
 test('motion cancellation prevents frames after the owner unmounts',async()=>{
@@ -81,7 +90,7 @@ test('motion cancellation prevents frames after the owner unmounts',async()=>{
 });
 
 
-test('verbose renders interleaved phases in arrival order while compact mode keeps public progress',async()=>{
+test('live phases retain public arrival order and replace earlier thinking in both modes',async()=>{
  const io=terminal();
  const activity:NonNullable<StreamingRow['activity']>=[
   {kind:'progress',text:'First public update',visibility:'public'},
@@ -99,10 +108,11 @@ test('verbose renders interleaved phases in arrival order while compact mode kee
  const root=renderSync(draw(true),{...io,patchConsole:false,exitOnCtrlC:false});
  try{
   await wait();const text=state(io.stdout).text;
-  const positions=['First public update','First private thought','read_file','Second private thought','Second public update','search_text'].map(label=>text.indexOf(label));
+  const positions=['First public update','read_file','Second public update','search_text'].map(label=>text.indexOf(label));
   expect(positions.every(position=>position>=0)).toBe(true);
   expect(positions).toEqual([...positions].sort((a,b)=>a-b));
-  expect(text.match(/Thinking/g)).toHaveLength(2);
+  expect(text).not.toContain('Thinking');
+  expect(text).not.toContain('private thought');
   root.rerender(draw(false));await wait();const compact=state(io.stdout).text;
   expect(compact).toContain('First public update');expect(compact).toContain('Second public update');
   expect(compact).not.toContain('private thought');expect(compact).toContain('read_file');expect(compact).toContain('search_text');

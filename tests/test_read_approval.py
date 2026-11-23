@@ -75,7 +75,10 @@ def admit(fixture, admission, args=None):
 def test_capture_is_metadata_only_and_serializable(fixture, monkeypatch):
     def no_data(*a, **kw):
         pytest.fail('Host must not read file data during approval capture')
-    monkeypatch.setattr(os, 'read', no_data)
+    from backend.core.sandbox_read_native import NativePinnedRead
+    monkeypatch.setattr(NativePinnedRead, 'read_bytes', no_data)
+    monkeypatch.setattr(NativePinnedRead, 'sha256', no_data)
+    monkeypatch.setattr(NativePinnedRead, '_read_package_bytes', no_data)
     from backend.core.sandbox_read import ReadRoot
     monkeypatch.setattr(ReadRoot, 'open', no_data)
     card = request(fixture)
@@ -279,7 +282,7 @@ def test_pipeline_transports_only_host_binding_and_releases_on_runner_failure(fi
 
 def test_failed_publication_releases_every_pin(fixture, monkeypatch):
     process, _, root, args, _ = fixture
-    def fail(*a):
+    def fail(*a, **kwargs):
         raise RuntimeError('publication failed')
     monkeypatch.setattr('backend.core.loop.decision_support.create_user_decision', fail)
     with pytest.raises(RuntimeError, match='publication failed'):

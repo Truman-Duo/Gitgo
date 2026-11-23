@@ -34,7 +34,7 @@ test('General saves split/unified once and compact tool diffs retain the shared 
  }};
  function Fixture(){const config=useGeneralConfig(client),input=useTextInput();return <InputProvider><DiffLayoutContext.Provider value={config.diffLayout}><Box flexDirection="column" height={40}>
   <GeneralTab client={client} project="test" cmdInput={input} initialSetting="diff_layout" contentFocused onFooter={()=>{}} report={()=>{}} shell={{back(){},goToTab(){},tabPrev(){},tabNext(){},leaveContent(){}}}/>
-  <ToolCallDisplay compactPreview width={96} tool={{tool_name:'write_file',target:'sample.py',state:'completed',allowed:true,status_label:'OK',duration_ms:1,timestamp:'',diff:patch}}/>
+  <ToolCallDisplay expanded width={96} tool={{tool_name:'write_file',target:'sample.py',state:'completed',allowed:true,status_label:'OK',duration_ms:1,timestamp:'',diff:patch}}/>
  </Box></DiffLayoutContext.Provider></InputProvider>;}
  const root=renderSync(<Fixture/>,{...io,patchConsole:false,exitOnCtrlC:false});
  try{
@@ -48,7 +48,7 @@ test('General saves split/unified once and compact tool diffs retain the shared 
   const old=frame.findIndex(line=>line.includes('old_value')),next=frame.findIndex(line=>line.includes('new_value'));
   expect(old).toBeGreaterThanOrEqual(0);expect(next).toBe(old+1);
   expect(frame[old]).toMatch(/10\s+- old_value/);expect(frame[next]).toMatch(/20\s+\+ new_value/);
-  expect(frame.filter(line=>line.includes('sample.py'))).toHaveLength(1);
+  expect(frame.filter(line=>line.includes('old_value'))).toHaveLength(1);expect(frame.filter(line=>line.includes('new_value'))).toHaveLength(1);
  }finally{root.unmount();root.cleanup();Object.values(io).forEach(stream=>stream.destroy());}
 });
 

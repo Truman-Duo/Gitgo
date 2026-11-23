@@ -1,0 +1,1 @@
+Bash is the default syntax selection. The current protected macOS helper accepts exec_command producers; binding that helper does not make shell_script available. Only use shell_script where the runtime explicitly provides a supported isolated execution path.

@@ -27,7 +27,9 @@ async def smoke(project: str) -> dict:
             expected = {
                 "gitgo_control_status", "gitgo_control_chat", "gitgo_control_decide",
                 "gitgo_control_feedback", "gitgo_control_stop",
-                "gitgo_control_compact", "gitgo_control_trace",
+                "gitgo_control_compact", "gitgo_control_trace", "gitgo_control_attach",
+                "gitgo_control_observer", "gitgo_control_events", "gitgo_control_body",
+                "gitgo_control_usage", "gitgo_control_providers", "gitgo_control_switch",
             }
             if set(names) != expected:
                 raise RuntimeError(f"unexpected control surface: {names}")

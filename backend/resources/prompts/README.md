@@ -34,6 +34,13 @@ arguments. Project-local files cannot override them. The existing user configura
 selects a release-owned semantic instance; it does not supply arbitrary paths
 or resource replacements.
 
+Keep opening guidance focused on the current goal, source authority and the next
+decision. Write discovery text as a complete first line describing when a tool
+helps and, where useful, a nearby alternative. Put operation-specific instructions
+and failure handling at the corresponding boundary. Use numbered conditions only
+where they help distinguish actions. Base recovery on actual execution/effect
+state and keep business examples independent of acceptance fixtures.
+
 Prompt changes are versioned through Git and the existing compiler content
 hashes. Already-sent prefixes retain their original bytes; the compiler projects
 later changes using its existing steering mechanism. Restart the owning process

@@ -39,7 +39,7 @@ def semantic_contract(contract):
         'goal', 'execution_mode', 'deliverables', 'acceptance_criteria', 'uncertainties',
         'requires_user_decision', 'estimated_complexity', 'independent_workstreams',
         'delegation_required', 'user_requested_delegation', 'engineering_workflow',
-        'required_tool_calls', 'mechanism', 'maintenance_intent') if key in contract}
+        'required_tool_calls', 'required_workbench_claims', 'mechanism', 'maintenance_intent') if key in contract}
 
 
 def _relative_workspace_path(workspace: Path, raw: str) -> str:
@@ -102,12 +102,14 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
             ),
         })
 
-    complexity = str(args.get("estimated_complexity") or "bounded").strip().lower()
-    if complexity not in {"bounded", "moderate", "high"}:
-        raise ValueError("estimated_complexity must be bounded, moderate, or high")
-    workstreams = int(args.get("independent_workstreams", 1) or 1)
-    if not 1 <= workstreams <= 8:
-        raise ValueError("independent_workstreams must be between 1 and 8")
+    # Absence means no fact was supplied; explicit unknown survives revisions.
+    # Neither is evidence that a task is small or has only one owner.
+    complexity = str(args.get("estimated_complexity") or "unknown").strip().lower()
+    if complexity not in {"unknown", "bounded", "moderate", "high"}:
+        raise ValueError("estimated_complexity must be unknown, bounded, moderate, or high")
+    workstreams = args.get("independent_workstreams")
+    if workstreams is not None and (type(workstreams) is not int or not 1 <= workstreams <= 8):
+        raise ValueError("independent_workstreams must be null (unknown) or an integer between 1 and 8")
     routing_transition = str(args.get("routing_transition") or "initial").strip().lower()
     if routing_transition not in ROUTING_TRANSITIONS:
         raise ValueError(
@@ -160,10 +162,17 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
             "include_composite_steps": bool(item.get("include_composite_steps", False)),
         })
 
+    workbench_claims = args.get("required_workbench_claims", [])
+    if not isinstance(workbench_claims, list) or len(workbench_claims) > 12:
+        raise ValueError("required_workbench_claims must be a list of at most 12 scopes")
+    if workbench_claims:
+        from backend.core.workbench.delivery import claim_scope
+        workbench_claims = list(dict.fromkeys(claim_scope(scope) for scope in workbench_claims))
+
     workflow = None
     if args.get("engineering_workflow") is not None:
         from backend.core.loop.engineering_workflow import compile_plan
-        workflow = compile_plan(args["engineering_workflow"], workspace)
+        workflow = compile_plan(args["engineering_workflow"], workspace, defer_links=True)
 
     return {
         "schema_version": 1,
@@ -183,14 +192,15 @@ def validate_contract_proposal(args: dict, workspace_path: str) -> dict[str, Any
             if str(item).strip()
         ],
         "requires_user_decision": bool(args.get("requires_user_decision", False)),
-        "estimated_complexity": complexity,
-        "independent_workstreams": workstreams,
+        **({"estimated_complexity": complexity} if "estimated_complexity" in args else {}),
+        **({"independent_workstreams": workstreams} if "independent_workstreams" in args else {}),
         "delegation_rationale": str(args.get("delegation_rationale") or "").strip(),
         "user_requested_delegation": user_requested_delegation,
         "user_request_evidence": user_request_evidence,
         "routing_transition": routing_transition,
         "handoff_summary": str(args.get("handoff_summary") or "").strip(),
         "required_tool_calls": required_tool_calls,
+        **({"required_workbench_claims": workbench_claims} if workbench_claims else {}),
         "ignored_protocol_requirements": list(dict.fromkeys(
             ignored_protocol_requirements
         )),
@@ -224,19 +234,16 @@ def routing_advice(contract: dict) -> dict:
         return {"recommended": "continue_worker", "binding": False, "reason": transition}
     if transition in {"handoff_to_worker", "parallelize"}:
         return {"recommended": "delegate", "binding": False, "reason": transition}
-    workstreams = int(contract.get("independent_workstreams", 1) or 1)
-    complexity = str(contract.get("estimated_complexity") or "bounded")
+    workstreams = contract.get("independent_workstreams")
+    complexity = str(contract.get("estimated_complexity") or "unknown")
     rationale = str(contract.get("delegation_rationale") or "").strip()
-    if workstreams > 1:
+    if isinstance(workstreams, int) and workstreams > 1:
         return {"recommended": "delegate", "binding": False, "reason": "independent_workstreams"}
     if complexity in {"moderate", "high"} and rationale:
         return {"recommended": "delegate", "binding": False, "reason": "complexity_justified"}
-    return {
-        "recommended": "self_execute",
-        "binding": False,
-        "reason": "bounded_single_owner",
-        "override_requires": ["estimated_complexity", "delegation_rationale"],
-    }
+    if complexity == "bounded" and workstreams == 1:
+        return {"recommended": "self_execute", "binding": False, "reason": "bounded_single_owner"}
+    return {"recommended": "undecided", "binding": False, "reason": "routing_facts_unknown"}
 
 
 def compile_routing_proposal(
@@ -247,49 +254,37 @@ def compile_routing_proposal(
 ) -> tuple[dict, dict]:
     """Compile semantic facts into a route before the contract is published.
 
-    A supplies the semantic facts; the Host performs deterministic bookkeeping.
-    A contradictory request to delegate bounded single-owner work is normalized
-    to self-execution instead of forcing an error/retry round. This grants no
-    authority: A must still explicitly request a task-scoped execution lease.
+    Advice never overrides an explicit model choice. Unknown facts leave both
+    routes available. This grants no authority: execution still needs the same
+    task-scoped lease and every tool keeps its existing admission checks.
     """
     normalized = dict(proposal)
     requirements = dict(previous.get("host_requirements") or {})
     candidate = {**previous, **normalized, "host_requirements": requirements}
     transition = str(normalized.get("routing_transition") or "initial")
-    workstreams = int(normalized.get("independent_workstreams", 1) or 1)
+    workstreams = normalized.get("independent_workstreams")
     adopted = [
         str(item) for item in (normalized.get("adopt_process_ids") or [])
         if str(item)
     ]
 
-    if transition == "parallelize" and workstreams <= 1:
+    if transition == "parallelize" and (not isinstance(workstreams, int) or workstreams <= 1):
         raise ValueError("parallelize requires at least two independent_workstreams")
     if transition == "continue_owner" and not adopted:
         raise ValueError("continue_owner requires adopt_process_ids for the existing owner")
     if transition == "handoff_to_worker" and not workflow_started:
         raise ValueError(
             "handoff_to_worker requires Host-observed work in the current workflow; "
-            "use self_execute for bounded initial work or provide a truthful "
-            "moderate/high initial complexity rationale"
+            "use delegate_initial for a new delegation, or investigate first"
         )
 
-    advice = routing_advice(candidate)
     requested_mode = str(normalized.get("execution_mode") or "either")
-    asked_to_delegate = bool(
-        normalized.get("delegation_required") or requested_mode == "delegate"
-    )
-    adjusted = False
-    if (
-        advice.get("recommended") == "self_execute"
-        and asked_to_delegate
-        and not requirements.get("manual_B_creation")
-    ):
-        normalized["execution_mode"] = "self_execute"
-        normalized["delegation_required"] = False
-        normalized["minimum_delegated_outcomes"] = 0
-        if transition == "delegate_initial":
-            normalized["routing_transition"] = "keep_supervisor"
-        adjusted = True
+    # Contradictory explicit choices require correction, never silent rewriting.
+    worker_transition = transition in {"delegate_initial", "handoff_to_worker", "continue_owner", "parallelize"}
+    if worker_transition and requested_mode not in {"delegate", "either"}:
+        raise ValueError("worker routing transitions require execution_mode delegate or either")
+    if transition == "keep_supervisor" and (requested_mode == "delegate" or normalized.get("delegation_required")):
+        raise ValueError("keep_supervisor conflicts with an explicit delegation requirement")
 
     if requirements.get("manual_B_creation"):
         if normalized.get("execution_mode") not in ("delegate", "either"):
@@ -316,6 +311,15 @@ def compile_routing_proposal(
 
     compiled_candidate = {**candidate, **normalized}
     compiled_advice = routing_advice(compiled_candidate)
+    if transition == "continue_owner":
+        effective = "continue_worker"
+    elif requested_mode == "delegate" or normalized.get("delegation_required") or worker_transition:
+        effective = "delegate"
+    elif requested_mode != "either" or transition == "keep_supervisor":
+        effective = "self_execute"
+    else:
+        # either is deliberately open, even when there is a useful preference.
+        effective = "undecided"
     # Ownership and authority are separate axes.  A bounded owner may research,
     # calculate and answer with observation-only tools without an execution
     # lease.  A lease is required only when the declared delivery itself is
@@ -337,15 +341,17 @@ def compile_routing_proposal(
     compilation = {
         "requested": requested_mode,
         "recommended": compiled_advice.get("recommended"),
-        "reason": advice.get("reason") if adjusted else compiled_advice.get("reason"),
-        "adjusted": adjusted,
+        "effective": effective,
+        "reason": compiled_advice.get("reason"),
+        "adjusted": False,
         "authority_granted": False,
         "next_action": (
             self_execute_action
-            if compiled_advice.get("recommended") == "self_execute"
+            if effective == "self_execute"
             else "continue_owner"
-            if compiled_advice.get("recommended") == "continue_worker"
-            else "delegate_task"
+            if effective == "continue_worker"
+            else "delegate_task" if effective == "delegate"
+            else "choose_execution_route"
         ),
     }
     return normalized, compilation
@@ -366,6 +372,26 @@ def _update_contract(process, update) -> dict:
         return dict(contract)
 
 
+def workflow_has_progress(process) -> bool:
+    """Actual current-task observations/effects, not declarations or attempts.
+
+    Execution provenance is supplied by registered Host tools, not result JSON.
+    Old workflow_started flags were set before admission and are not evidence.
+    """
+    task = getattr(process, "active_task_id", "") or getattr(process, "process_id", "")
+    for receipt in getattr(process, "tool_receipts", ()):
+        if (receipt.get("task_id") != task or receipt.get("succeeded") is not True
+                or receipt.get("committed") is not True):
+            continue
+        execution = receipt.get("execution_contract") or {}
+        kind, broker = execution.get("kind"), str(execution.get("broker") or "")
+        if kind in {"native_process", "external_service"}:
+            return True
+        if kind == "data_broker" and broker and not broker.startswith("host."):
+            return True
+    return False
+
+
 def _compile_contract(process, previous: dict, proposal: dict) -> dict:
     preserved_attempts = list(previous.get("delegation_attempts") or [])
     revision = int(previous.get("revision", 0) or 0) + 1
@@ -381,7 +407,7 @@ def _compile_contract(process, previous: dict, proposal: dict) -> dict:
     }
     # Host facts come from explicit UI actions, never natural-language inference.
     requirements = dict(previous.get("host_requirements") or {})
-    workflow_started = bool(previous.get("workflow_started") or getattr(process, "successful_actions", 0))
+    workflow_started = workflow_has_progress(process)
     normalized, compilation = compile_routing_proposal(previous,
         {key: value for key, value in proposal.items() if key not in {"expected_revision", "maintenance", "preview_digest"}}, workflow_started=workflow_started)
     merged.update(normalized)
@@ -415,14 +441,23 @@ def _prepare_contract(process, proposal):
     if getattr(process, 'session', None) is not None:
         from .mechanisms import reconcile_definition
         reconcile_definition(process, contract)
-    from .engineering_workflow import EngineeringWorkflow, KEY
-    workflow = EngineeringWorkflow(process).configured_state(contract[KEY]) if contract.get(KEY) else None
+    from .engineering_workflow import EngineeringWorkflow, KEY, compile_plan, declared_plan, workspace
+    workflow_plan = contract.get(KEY)
     if proposal.get("maintenance"):
         contract["maintenance_intent"] = {key: deepcopy(value) for key, value in proposal["maintenance"].items() if key != "expected_revision"}
     maintenance = None
     if getattr(process, "session", None) is not None:
         from .task_maintenance import prepare_contract_state
-        maintenance = prepare_contract_state(process, contract, proposal, workflow)
+        maintenance = prepare_contract_state(process, contract, proposal, {"plan": workflow_plan} if workflow_plan else None)
+    if workflow_plan and any("work_item_id" in node for node in workflow_plan["nodes"]):
+        workflow_plan = compile_plan(declared_plan(workflow_plan), workspace(process),
+                                     work_plan=(maintenance or {}).get("plan"))
+        contract[KEY] = workflow_plan
+    workflow = (EngineeringWorkflow(process).configured_state(workflow_plan, contract_revision=contract["revision"])
+                if workflow_plan else None)
+    if maintenance is not None:
+        from .task_maintenance import refresh_manifest
+        refresh_manifest(process, maintenance, contract, workflow_plan)
     if proposal.get("preview_digest"):
         from .mechanism_catalog import digest
         if proposal["preview_digest"] != digest(contract):
@@ -458,6 +493,7 @@ def publish_contract(process, proposal: dict, *, store=None) -> dict:
         if root.session.mechanism_activation_blocked or process.session.mechanism_activation_blocked:
             raise ValueError("MECHANISM_ACTIVATION_BLOCKED")
         contract, workflow, maintenance = _prepare_contract(process, proposal)
+        retired_work_item_evidence = workflow.pop("retired_work_item_evidence", []) if workflow else []
         revision = contract["revision"]
         activation = {"transaction_id": str(uuid.uuid4()), "base_revision": revision - 1,
             "revision": revision, "process_id": process.process_id,
@@ -512,6 +548,8 @@ def publish_contract(process, proposal: dict, *, store=None) -> dict:
                  "adopted_changes": [key for key, value in (maintenance or {}).get("changes", {}).items()
                      if value.get("contract_revision") == revision],
                  "mechanism_manifest": deepcopy((maintenance or {}).get("manifest"))}
+        if retired_work_item_evidence:
+            event["retired_work_item_evidence"] = retired_work_item_evidence
         if store is not None:
             commit_activation(process, event, store, rollback)
         else:
@@ -534,11 +572,14 @@ def delegation_intent_id(
     task_description: str,
     target_files: list[str],
     acceptance_criteria: list[str],
+    *,
+    draft_id: str = "",
 ) -> str:
     canonical = json.dumps({
         "task_description": str(task_description).strip(),
         "target_files": sorted(str(item) for item in target_files),
         "acceptance_criteria": sorted(str(item) for item in acceptance_criteria),
+        **({"draft_id": draft_id} if draft_id else {}),
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "delegation_" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
@@ -567,7 +608,6 @@ def record_delegation_attempt(
         }
         attempts.append(attempt)
         contract["delegation_attempts"] = attempts[-32:]
-        contract["workflow_started"] = True
         if required and not contract.get("delegation_required"):
             # A's structured tool call is a stronger signal than prose.  It does
             # not claim that the user mandated B, but it prevents a failed
@@ -593,7 +633,9 @@ def finish_delegation_attempt(
         attempts = list(contract.get("delegation_attempts") or [])
         for index in range(len(attempts) - 1, -1, -1):
             item = attempts[index]
-            if item.get("intent_id") == intent_id and item.get("state") == "admitting":
+            if (item.get("intent_id") == intent_id and item.get("state") in {"admitting", "prepared"}
+                    and (not child_process_id or not item.get("child_process_id")
+                         or item.get("child_process_id") == child_process_id)):
                 item = dict(item)
                 item["state"] = state
                 if child_process_id:
@@ -628,7 +670,6 @@ def record_unbound_delegation_failure(
             "error_info": dict(error_info or {}),
         })
         contract["delegation_attempts"] = attempts[-32:]
-        contract["workflow_started"] = True
         contract["agent_required_delegation"] = True
         contract["minimum_delegated_outcomes"] = max(
             1, int(contract.get("minimum_delegated_outcomes", 0) or 0),

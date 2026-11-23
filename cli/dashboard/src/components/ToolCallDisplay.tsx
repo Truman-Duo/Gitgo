@@ -1,194 +1,111 @@
-// src/components/ToolCallDisplay.tsx — Shared tool call card renderer.
-// Used by ChatPanel and AgentDetail.
+// A tool owns one foldable body. Gray names are normal; only failures are red.
+import React, {useCallback,useEffect,useMemo,useState} from "react";
+import {Box,Text} from "@anthropic/ink";
+import type {ToolCallCard} from "../types.js";
+import type {TraceBodyReader} from "../chat/traceSource.js";
+import {colors,formatDuration,truncate} from "../theme/index.js";
+import {Disclosure} from "./Disclosure.js";
+import {TraceContent} from "./TraceContent.js";
+import {DiffView} from "./DiffView.js";
+import {parseUnifiedDiff} from "../utils/diff.js";
+import {useSharedClock} from "../hooks/useSharedClock.js";
+import {useCopy} from "../ui/PageFrame.js";
+import {timelineFromTrace} from "../chat/turnTimeline.js";
+import {actorLabelCopy} from "../daemon/agentLabels.js";
+import {materializeToolDetail,toolOutputWithoutPatch,toolArgumentSummary} from "../chat/toolResult.js";
+import {geometry} from "../theme/tokens.js";
+import {useDisclosureState} from "../hooks/useDisclosureState.js";
+import {DetailViewport} from "./DetailViewport.js";
+import {TraceSourceText} from "./TraceSourceText.js";
+import {VirtualContent} from "./VirtualContent.js";
+import {VerbatimText} from "./VerbatimText.js";
 
-import React, { useEffect, useMemo, useState } from "react";
-import { Box, Text } from "@anthropic/ink";
-import type { ToolCallCard } from "../types.js";
-import { toolPreview } from "../chat/toolPreview.js";
-import { toolIcon, colors, formatDuration, truncate } from "../theme/index.js";
-import { Spinner } from "./Spinner.js";
-import { DiffView } from "./DiffView.js";
-import { parseUnifiedDiff } from "../utils/diff.js";
-
-const DISPATCH_NAMES = [
-  "dispatch_tool",
-  "fork_agent",
-  "delegate_task",
-  "delegate_task_bundle",
-];
-
-function extractPidShort(s: string | undefined): string | null {
-  if (!s) return null;
-  // Real pids are UUIDs (manager.fork → str(uuid.uuid4())); mock uses proc-XXX / cpl-XXX.
-  const m = s.match(
-    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:proc|cpl)-\d{3}/i,
-  );
-  return m ? m[0].slice(0, 8) : null;
+function ToolBody({tool,width}: {tool:ToolCallCard;width?:number}) {
+  const t=useCopy();
+  const files=useMemo(()=>tool.diff ? parseUnifiedDiff(tool.diff) : [],[tool.diff]);
+  const output=useMemo(()=>toolOutputWithoutPatch(tool.result_text,files.length ? tool.diff : ""),[tool.result_text,tool.diff,files.length]);
+  const reason=tool.blocked_reason && !output.includes(tool.blocked_reason) ? tool.blocked_reason : "";
+  return <Box flexDirection="column" paddingLeft={geometry.record.indent}>
+    {reason ? <Text dimColor>{reason}</Text> : null}
+    {tool.source_text!==undefined ? <VerbatimText content={tool.source_text} width={Math.max(1,(width||80)-geometry.record.indent)}/>
+      : output ? <VerbatimText content={output} width={Math.max(1,(width||80)-geometry.record.indent)}/> : null}
+    {files.length ? <DiffView files={files} width={width ? Math.max(12,width-4) : undefined}/> : null}
+  </Box>;
 }
-
-export function ToolCallDisplay({
-  tool,
-  expanded = false,
-  width,
-  displayName,
-  count = 1,
-  suppressDetails = false,
-  compactPreview = false,
-}: {
-  tool: ToolCallCard;
-  expanded?: boolean;
-  width?: number;
-  displayName?: string;
-  count?: number;
-  suppressDetails?: boolean;
-  compactPreview?: boolean;
+function ResolvedArguments({tool,onSummary}:{tool:ToolCallCard;onSummary:(summary:string)=>void}) {
+ const summary=useMemo(()=>toolArgumentSummary(tool),[tool.arguments,tool.argument_preview,tool.target,tool.tool_name]);
+ useEffect(()=>{if(summary)onSummary(summary);},[summary,onSummary]);
+ return null;
+}
+function PagedBody({tool,read,width,onSummary}:{tool:ToolCallCard;read:TraceBodyReader;width:number;onSummary:(summary:string)=>void}) {
+ const t=useCopy();
+ return <TraceContent detailRef={tool.detail_ref!} readDetail={read.recordSources}>
+  {(saved:any)=>{
+   if(!saved)return null;
+   if(saved.has_diff || !Array.isArray(saved.sources) || !saved.sources.length)
+    return <RecordedBody tool={tool} read={read} width={width} onSummary={onSummary}/>;
+   const sources=saved.sources as Array<{source_index:number;total_chars:number;kind:string}>;
+   return <Box paddingLeft={geometry.record.indent} flexDirection="column">
+    <ResolvedArguments tool={{...tool,argument_preview:saved.argument_preview}} onSummary={onSummary}/>
+    <VirtualContent itemKeys={sources.map(source=>String(source.source_index))} minimumItems={1} layoutKey={width}
+     estimateRows={(_key,index)=>Math.max(1,Math.ceil(sources[index]!.total_chars/Math.max(1,width-geometry.record.indent)))}>
+     {index=><TraceSourceText reference={tool.detail_ref!} index={sources[index]!.source_index} read={read.recordSource!}
+      width={Math.max(1,width-geometry.record.indent)} totalChars={sources[index]!.total_chars}/>}
+    </VirtualContent>
+    {saved.file_excerpt ? <Text dimColor>{t({en:"The saved read contains a file excerpt.",zh:"本次已记录的读取结果为文件片段。"})}</Text> : null}
+   </Box>;
+  }}
+ </TraceContent>;
+}
+function RecordedBody({tool,read,width,onSummary}: {tool:ToolCallCard;read?:TraceBodyReader;width?:number;onSummary:(summary:string)=>void}) {
+  return <TraceContent references={tool.trace_refs} read={read}>{events=>{
+    const exact=events ? timelineFromTrace(events,tool.process_id).tools.find(item=>item.tool_call_id===tool.tool_call_id && item.process_id===tool.process_id) : undefined;
+    const recorded=exact ? {...tool,...exact,
+      ...(tool.state === "unresolved" ? {state:tool.state,blocked_reason:tool.blocked_reason,allowed:false,is_running:false} : {})} : tool;
+    return <TraceContent detailRef={recorded.detail_ref || ""} readDetail={read?.detail}>
+      {(detail:unknown)=>{
+        const full=materializeToolDetail(recorded,detail);
+        return <><ResolvedArguments tool={full} onSummary={onSummary}/><ToolBody tool={full} width={width}/></>;
+      }}
+    </TraceContent>;
+  }}</TraceContent>;
+}
+export function ToolCallDisplay({tool,expanded:defaultExpanded=false,width,displayName,count=1,countUnit="calls",readBody,children}: {
+  tool:ToolCallCard;expanded?:boolean;width?:number;displayName?:string;count?:number;
+  countUnit?:"calls"|"requests"|"pages";
+  readBody?:TraceBodyReader;children?:React.ReactNode;
 }) {
-  const [now, setNow] = useState(Date.now());
-  const icon = toolIcon(tool.tool_name);
-  const state =
-    tool.state ??
-    (tool.is_running ? "running" : tool.allowed ? "completed" : "error");
-  const isRunning = state === "running" || state === "pending";
-  const isError = state === "error";
-  const isUnresolved = state === "unresolved";
-  const isDone = state === "completed";
-  const hasTarget = tool.target && tool.target.length > 0;
-  const hasResult = tool.result_text && tool.result_text.length > 0;
-  const diffFiles = useMemo(
-    () => (isDone && tool.diff ? parseUnifiedDiff(tool.diff) : []),
-    [isDone, tool.diff],
-  );
-  const preview = useMemo(
-    () => toolPreview(tool, Math.max(12, (width || 80) - 5)),
-    [tool.target, tool.diff, tool.result_text, width],
-  );
-  const showPreview = !expanded && (compactPreview || Boolean(tool.diff));
-  const isDispatch = DISPATCH_NAMES.some(
-    (d) => tool.tool_name.includes(d) || d.includes(tool.tool_name),
-  );
-  const forkedPid = isDispatch
-    ? extractPidShort(tool.result_text) || extractPidShort(tool.target)
-    : null;
-  useEffect(() => {
-    if (!isRunning) return;
-    const timer = setInterval(() => setNow(Date.now()), 100);
-    return () => clearInterval(timer);
-  }, [isRunning]);
-  const startedAt = Date.parse(tool.timestamp) || now;
-  const duration = isRunning
-    ? Math.max(0, now - startedAt)
-    : Math.max(0, tool.duration_ms || 0);
-
-  return (
-    <Box flexDirection="column">
-      <Box
-        flexDirection="row"
-        gap={1}
-        backgroundColor={isError ? colors.dangerBg : undefined}
-      >
-        {tool.actor_label ? <Text dimColor>{tool.actor_label} ·</Text> : null}
-        {isRunning ? (
-          <Spinner
-            frames={colors.spinner.triangleFrames}
-            intervalMs={colors.spinner.triangleIntervalMs}
-            color={colors.warning}
-          />
-        ) : (
-          <Text
-            color={
-              isError
-                ? colors.danger
-                : isUnresolved
-                  ? colors.warning
-                  : undefined
-            }
-            dimColor={isDone}
-          >
-            {icon}
-          </Text>
-        )}
-        <Text dimColor={isDone}>
-          {displayName || tool.tool_name}
-          {count > 1 ? ` (${count})` : ""}
-        </Text>
-        {hasTarget && !suppressDetails && !showPreview ? (
-          <Text dimColor={isDone}>
-            (
-            {truncate(
-              tool.target,
-              Math.max(12, (width || 80) - tool.tool_name.length - 18),
-            )}
-            )
-          </Text>
-        ) : null}
-        {forkedPid ? <Text dimColor={isDone}>→ {forkedPid}</Text> : null}
-        <Text dimColor>{formatDuration(duration)}</Text>
-      </Box>
-      {!suppressDetails && (isError || isUnresolved) && tool.blocked_reason ? (
-        <Box flexDirection="row" paddingLeft={2}>
-          <Text color={colors.warning} dimColor>
-            {expanded ? tool.blocked_reason : tool.blocked_reason.slice(0, 80)}
-          </Text>
-        </Box>
-      ) : null}
-      {!suppressDetails && showPreview && diffFiles.length === 0 && preview.lines.length ? (
-        <Box
-          flexDirection="column"
-          marginLeft={2}
-          paddingLeft={1}
-          borderStyle="single"
-          borderLeft
-          borderTop={false}
-          borderBottom={false}
-          borderRight={false}
-          borderColor={colors.chat.turnGuide}
-        >
-          {preview.lines.map((line, index) => (
-            <Text
-              key={index}
-              color={colors.chat.reasoningFg}
-            >
-              {line.text}
-            </Text>
-          ))}
-          {preview.more ? <Text dimColor>…</Text> : null}
-        </Box>
-      ) : null}
-      {!suppressDetails && showPreview && diffFiles.length > 0 ? (
-        <Box paddingLeft={2}>
-          <DiffView files={diffFiles} width={width ? Math.max(20, width - 2) : undefined} maxRows={6}/>
-        </Box>
-      ) : null}
-      {!suppressDetails && expanded && (hasResult || diffFiles.length > 0) ? (
-        <Box
-          flexDirection="column"
-          marginLeft={2}
-          paddingLeft={1}
-          borderStyle="single"
-          borderLeft
-          borderTop={false}
-          borderBottom={false}
-          borderRight={false}
-          borderColor={colors.chat.turnGuide}
-        >
-          {hasResult ? <Text dimColor>⎿ {tool.result_text}</Text> : null}
-          {diffFiles.length > 0 ? (
-            <DiffView
-              files={diffFiles}
-              width={width ? Math.max(20, width - 4) : undefined}
-            />
-          ) : null}
-        </Box>
-      ) : null}
-      {!suppressDetails &&
-      !expanded &&
-      !showPreview &&
-      !isError &&
-      tool.compact_summary ? (
-        <Box paddingLeft={2}>
-          <Text dimColor>⎿ {tool.compact_summary}</Text>
-        </Box>
-      ) : null}
-    </Box>
-  );
+  const t=useCopy();
+  const [expanded,setExpanded]=useDisclosureState(defaultExpanded,'tool:'+JSON.stringify([tool.process_id,
+    tool.tool_call_id||tool.detail_ref||[tool.tool_name,tool.timestamp,tool.target],Boolean(children)]));
+  const identity=JSON.stringify([tool.process_id,tool.tool_call_id,tool.detail_ref,tool.trace_refs]);
+  const [loadedSummary,setLoadedSummary]=useState<{identity:string;summary:string}>();
+  const onSummary=useCallback((summary:string)=>setLoadedSummary(previous=>previous?.identity===identity && previous.summary===summary
+    ? previous : {identity,summary}),[identity]);
+  const preview=useMemo(()=>toolArgumentSummary(tool,Math.max(12,(width||80)-tool.tool_name.length-16)),
+    [tool.arguments,tool.argument_preview,tool.target,tool.tool_name,width]);
+  const argumentsText=loadedSummary?.identity===identity ? loadedSummary.summary : preview;
+  const state=tool.state ?? (tool.is_running ? "running" : tool.allowed ? "completed" : "error");
+  const running=state==="running" || state==="pending";
+  const now=useSharedClock(100,running);
+  const started=Date.parse(tool.timestamp) || now;
+  const duration=running ? Math.max(0,now-started) : Math.max(0,tool.duration_ms || 0);
+  const expandable=Boolean(children || tool.target || tool.arguments !== undefined || tool.result_text || tool.diff || tool.blocked_reason || tool.trace_refs?.length || tool.detail_ref);
+  return <Disclosure expanded={expanded && expandable} expandable={expandable} running={state==="running"}
+    onToggle={()=>setExpanded(current=>!current)} label={<>
+      {tool.actor_label ? <Text color={colors.chat.reasoningFg}>{t(actorLabelCopy(tool.actor_label))} · </Text> : null}
+      <Text color={state==="error" ? colors.danger : colors.chat.reasoningFg}>{displayName || tool.tool_name}{count>1
+        ? countUnit==="pages" ? t({en:` ${count} web pages`,zh:` ${count} 个网页`})
+        : countUnit==="requests" ? t({en:` · ${count} requests`,zh:` ${count} 次`})
+        : t({en:` · ${count} calls`,zh:` ${count} 次调用`}) : ""}</Text>
+      {argumentsText ? <Text color={colors.chat.reasoningFg}> {truncate(argumentsText,Math.max(12,(width||80)-tool.tool_name.length-16))}</Text> : null}
+      {state==="unresolved" ? <Text dimColor>{t({en:" · Unconfirmed",zh:" · 状态未确认"})}</Text> : null}
+      <Text dimColor> {formatDuration(duration)}</Text>
+    </>}>
+    {expanded && expandable ? children || <DetailViewport onClose={()=>setExpanded(false)} width={width}>
+      {bodyWidth=>tool.detail_ref && readBody?.recordSources && readBody.recordSource
+        ? <PagedBody tool={tool} read={readBody} width={bodyWidth} onSummary={onSummary}/>
+        : <RecordedBody tool={tool} read={readBody} width={bodyWidth} onSummary={onSummary}/>}
+    </DetailViewport> : null}
+  </Disclosure>;
 }

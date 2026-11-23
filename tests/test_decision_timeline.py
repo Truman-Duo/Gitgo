@@ -25,7 +25,7 @@ def test_decisions_survive_checkpoint_reopen_without_duplicate_control_reply(tmp
         "process_id": "a", "session_id": "s", "task_id": "task", "parent_id": None,
         "actor_kind": "supervisor", "task_kind": "supervisor", "status": "awaiting_user",
         "messages": [{"role": "user", "content": "Make a page"}],
-        "session_metadata": {"host_ledger": [request("one", 1),
+        "session_metadata": {"host_ledger": [{**request("one", 1), "display_template": "permission", "display_context": {"read_approval": False}},
             {"event": "user_decision_received", "decision_id": "one", "answer": "simple"}, request("two", 2)]},
         "result": {"status": "awaiting_user", "response": "internal formatted control reply"},
     }
@@ -35,6 +35,9 @@ def test_decisions_survive_checkpoint_reopen_without_duplicate_control_reply(tmp
         messages = reopened.read_latest_conversations()["main_conversation"]
         assert [message["kind"] for message in messages] == ["conversation", "decision", "decision"]
         assert messages[1]["decision_answer"] == "simple"
+        assert messages[1]["decision"]["display_template"] == "permission"
+        assert messages[1]["decision"]["display_context"] == {"read_approval": False}
+        assert messages[1]["decision"]["question"] == "Question one"
         assert messages[2]["decision"]["decision_id"] == "two"
         assert "internal formatted control reply" not in str(messages)
 

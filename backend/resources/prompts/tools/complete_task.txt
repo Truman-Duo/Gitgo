@@ -1,1 +1,2 @@
-Submit the action result and verification evidence for deterministic host evaluation. This does not self-approve completion.
+Submit the current result and applicable verification for Runtime evaluation. This does not self-approve completion or authorize execution.
+Optional answer_updates consumes real replies with [{state_topic,disposition,value,quote,remaining?}] in this same call. Runtime binds identities and checks existing evidence gates; no hidden LLM review follows.

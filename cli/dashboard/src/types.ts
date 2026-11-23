@@ -1,4 +1,6 @@
 // src/types.ts — Shared types consumed by hooks, components, and mock data.
+import type {TraceBodyRef} from "./chat/traceSource.js";
+import type {Copy} from "./ui/pageContract.js";
 
 // ── Diff (OpenCode-style side-by-side / unified) ────────────
 
@@ -40,6 +42,9 @@ export type ToolCallCard = {
   timestamp: string;
   blocked_reason?: string;
   result_text?: string;
+  source_text?: string;
+  /** Runtime-provided interface information, not an executed business call. */
+  context_only?: boolean;
   /** Deterministic Host projection used when verbose output is folded. */
   compact_summary?: string;
   is_running?: boolean;
@@ -49,6 +54,9 @@ export type ToolCallCard = {
   actor_label?: "A" | "B" | string;
   process_id?: string;
   detail_ref?: string;
+  trace_refs?: TraceBodyRef[];
+  arguments?: unknown;
+    argument_preview?: Record<string,unknown>;
 };
 
 export type RuntimeNoticeSeverity = "info" | "success" | "warning" | "error";
@@ -58,12 +66,17 @@ export type RuntimeNotice = {
   key: string;
   kind: string;
   label: string;
+  label_copy?: Copy;
   detail?: string;
   severity: RuntimeNoticeSeverity;
   timestamp?: string;
   process_id?: string;
   detail_ref?: string;
   actor_label?: "A" | "B" | string;
+  trace_refs?: TraceBodyRef[];
+  decision_id?: string;
+  decision?: PendingDecision;
+  decision_answer?: string | null;
 };
 
 export type ProviderUsageSummary = {
@@ -71,12 +84,22 @@ export type ProviderUsageSummary = {
   output_tokens: number;
 };
 
-export type StreamActivity =
+/** Public request metadata plus a reference to its saved, access-controlled input. */
+export type RequestInputEvent = {
+  event:string;seq?:number;time?:string;process_id?:string;detail_ref?:string;[key:string]:unknown;
+};
+
+export type StreamActivity = (
   | { kind: "draft"; text: string; visibility: "public" | "verbose"; process_id?: string; actor_label?: string }
   | { kind: "reasoning"; text: string; process_id?: string; actor_label?: string }
-  | { kind: "progress"; text: string; visibility: "public" | "verbose"; process_id?: string; actor_label?: string }
+  | { kind: "progress"; text: string; visibility: "public" | "verbose"; process_id?: string; actor_label?: string; update_id?: string; turn_id?: string; progress_status?: string }
   | { kind: "tool"; toolIndex: number; detail_ref?: string }
-  | { kind: "notice"; noticeIndex: number; detail_ref?: string };
+  | { kind: "notice"; noticeIndex: number; detail_ref?: string }
+  | { kind: "context"; request: RequestInputEvent; process_id?: string; actor_label?: string }
+) & {trace_refs?: TraceBodyRef[]; record_id?: string; stage_id?:string};
+
+/** Transient presentation of one actual provider cycle, never task authority. */
+export type LiveStageDetail = {id:string;process_id:string;reasoning:string};
 
 export type DecisionOption = {
   label: string;
@@ -98,6 +121,9 @@ export type PendingDecision = {
   kind?: "clarification" | "preference" | "direction" | "verification" | "choice" | "permission" | "recovery" | "checkpoint" | string;
   state_topic?: string;
   supersedes_decision_id?: string;
+  /** Runtime-owned presentation only; never used for answer or authorization binding. */
+  display_template?: string;
+  display_context?: Record<string, unknown>;
   permission_request?: {
     purpose?: string;
     tool_name?: string;
@@ -110,6 +136,7 @@ export type PendingDecision = {
   manual_unit?: {unit_id: string; revision: number; scope_id: string; tool_name: string; arguments: Record<string, unknown>};
   question: string;
   why_user_must_decide: string;
+  recommendation?: string;
   options: DecisionOption[];
   allow_free_form: boolean;
   created_at?: string;
@@ -117,7 +144,9 @@ export type PendingDecision = {
   source_actor_kind?: string;
   source_display_name?: string;
   owner_process_id?: string;
-  questions?: Array<Pick<PendingDecision, "question" | "why_user_must_decide" | "options" | "allow_free_form" | "kind" | "state_topic"> & {node_id: string}>;
+  questions?: Array<Pick<PendingDecision, "question" | "why_user_must_decide" | "recommendation" | "options" | "allow_free_form" | "kind" | "state_topic"> & {node_id: string}>;
+  answer_mode?: "incremental";
+  active_question_id?: string;
   round_position?: string;
   materials?: Array<{reference: string; summary: string; source: string; authority_granted: false}>;
 };
@@ -149,17 +178,29 @@ export type ChatMessage = {
   reasoning?: string;
   /** Ordered live projection retained while the SQLite trace becomes authoritative. */
   activity?: StreamActivity[];
+  /** Explicit progress already projected as independent public messages. */
+  public_progress_keys?: string[];
+  update_id?: string;
+  progress_status?: string;
   id?: string;
   tools?: ToolCallCard[];
   notices?: RuntimeNotice[];
   provider_usage?: ProviderUsageSummary;
+  /** Read-only UI grouping of existing journal records; never written back. */
+  process_messages?: ChatMessage[];
 };
 
 // Transient streaming row — kept OUT of the persisted message list so it is
 // never clobbered by the authoritative poll snapshot.
 export type StreamingRow = {
+  stage?:LiveStageDetail;
+  stageSequence?:number;
   text: string;
   reasoning: string;
+  /** Current provider thinking only; never a completed-history display record. */
+  thinking?: boolean;
+  thinkingText?: string;
+  thinkingStartedAt?:string;
   tools: ToolCallCard[];
   notices: RuntimeNotice[];
   activity?: StreamActivity[];

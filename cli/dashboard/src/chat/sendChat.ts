@@ -59,8 +59,13 @@ function completedRound(outcome: any, state = initStreamState()): CompletedRound
   };
 }
 
-function outcomeError(outcome: any): string {
-  const code = outcome?.error?.code || "AGENT_TASK_FAILED";
+export function outcomeError(outcome: any): string {
+  const details = outcome?.error?.details;
+  const failure = details?.details?.failure ?? details?.failure;
+  // Current task categories remain compatible; show the concrete, backend-
+  // supplied cause rather than flattening every provider failure to that category.
+  const code = typeof failure?.code === "string" && /^[A-Z][A-Z0-9_]+$/.test(failure.code)
+    ? failure.code : outcome?.error?.code || "AGENT_TASK_FAILED";
   const message = outcome?.error?.message || `Agent task ended as ${outcome?.status || "unknown"}`;
   return `[${code}] ${message}`;
 }
@@ -76,6 +81,8 @@ export function pendingDecisionFromOutcome(outcome: any): PendingDecision | null
     kind: String(raw.kind || "choice"),
     state_topic: raw.state_topic ? String(raw.state_topic) : undefined,
     supersedes_decision_id: raw.supersedes_decision_id ? String(raw.supersedes_decision_id) : undefined,
+    display_template: typeof raw.display_template === "string" ? raw.display_template : undefined,
+    display_context: raw.display_context && typeof raw.display_context === "object" ? raw.display_context : undefined,
     permission_request: raw.permission_request && typeof raw.permission_request === "object"
       ? {
           purpose: String(raw.permission_request.purpose || ""),
@@ -83,12 +90,17 @@ export function pendingDecisionFromOutcome(outcome: any): PendingDecision | null
           effect: String(raw.permission_request.effect || ""),
           resource: String(raw.permission_request.resource || ""),
           api_details: String(raw.permission_request.api_details || ""),
+          arguments_preview: String(raw.permission_request.arguments_preview || ""),
+          approval_scope: String(raw.permission_request.approval_scope || ""),
         }
       : undefined,
     question: String(raw.question || ""),
     why_user_must_decide: String(raw.why_user_must_decide || ""),
+    recommendation:typeof raw.recommendation==="string"?raw.recommendation:undefined,
+    answer_mode:raw.answer_mode==="incremental"?"incremental":undefined,
     options: options.map((option: any) => ({
       label: String(option?.label || ""),
+      description:typeof option?.description==="string"?option.description:undefined,
       principle: String(option?.principle || ""),
       immediate_effect: String(option?.immediate_effect || ""),
       downstream_effect: String(option?.downstream_effect || ""),
@@ -152,23 +164,16 @@ export async function sendChat(
               taskId: String(ack?.task_id || ""),
               stage: String(ack?.stage || ""),
             });
-            const stage = String(ack?.stage || "");
-            const label = stage === "accepted"
-              ? "Starting runtime and restoring the session…"
-              : stage === "admitted" ? "Runtime ready; starting work…" : "";
-            if (label) {
-              const activity = state.activity.filter((item) => !(
-                item.kind === "progress"
-                && (item.text === "Starting runtime and restoring the session…"
-                  || item.text === "Runtime ready; starting work…")
-              ));
-              state = {
-                ...state,
-                activity: [...activity, {kind: "progress", text: label, visibility: "public"}],
-              };
+            // Admission updates correlation and the existing running container.
+            // It is not an Agent explanation and must not invent public prose.
+            if (ack?.stage === "accepted" || ack?.stage === "admitted") {
               cb.onStream({
                 text: state.text,
                 reasoning: state.reasoning,
+                thinking: state.thinking,
+                thinkingText: state.thinkingText,
+                thinkingStartedAt:state.thinkingStartedAt,
+                stage:state.stage,stageSequence:state.stageSequence,
                 tools: state.tools,
                 notices: state.notices,
                 activity: state.activity,
@@ -197,6 +202,10 @@ export async function sendChat(
             cb.onStream({
               text: state.text,
               reasoning: state.reasoning,
+              thinking: state.thinking,
+              thinkingText: state.thinkingText,
+              thinkingStartedAt:state.thinkingStartedAt,
+              stage:state.stage,stageSequence:state.stageSequence,
               tools: state.tools,
               notices: state.notices,
               activity: state.activity,

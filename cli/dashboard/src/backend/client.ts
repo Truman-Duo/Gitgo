@@ -9,6 +9,13 @@ import type { PendingDecision } from "../types.js";
 
 export const NATIVE_PROTOCOL_VERSION = 1;
 
+export class NativeOperationError extends Error {
+  constructor(readonly code: string, message: string, readonly details: Record<string, unknown>) {
+    super(`${code}: ${message}`);
+    this.name = "NativeOperationError";
+  }
+}
+
 export interface BackendClient {
   readonly ready: boolean;
   callTool(
@@ -86,7 +93,8 @@ export function buildNativeTaskCall(args: NativeTaskRequest): {
     message_utf8_sha256: createHash("sha256").update(args.message, "utf8").digest("hex"),
   };
   return decision
-    ? { operation: "runtime.decision", arguments: { ...integrity, ...decision } }
+    ? { operation: "runtime.decision", arguments: { ...integrity,
+        task_id:decision.task_id,process_id:decision.process_id,decision_id:decision.decision_id } }
     : { operation: "runtime.chat", arguments: integrity };
 }
 
@@ -142,6 +150,8 @@ export class NativeHostClient implements BackendClient {
         PYTHONUNBUFFERED: "1",
         PYTHONIOENCODING: "utf-8",
         PYTHONUTF8: "1",
+        // Terminal handoff must finish before creating the observer's run directory.
+        ...(process.env.GITGO_OBSERVER_DIR?{GITGO_OBSERVER_DEFER_START:"1"}:{}),
       },
       windowsHide: true,
     });
@@ -302,7 +312,11 @@ export class NativeHostClient implements BackendClient {
         if (message.ok) pending.resolve(message.result);
         else {
           const error = message.error || {};
-          pending.reject(new Error(`${error.code || "NATIVE_ERROR"}: ${error.message || "Unknown error"}`));
+          pending.reject(new NativeOperationError(
+            typeof error.code === "string" && error.code ? error.code : "NATIVE_ERROR",
+            typeof error.message === "string" && error.message ? error.message : "Unknown error",
+            error.details && typeof error.details === "object" && !Array.isArray(error.details) ? error.details : {},
+          ));
         }
       }
     }

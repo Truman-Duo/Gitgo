@@ -37,6 +37,7 @@ def _input(process, payload, answer, *, published_question=None):
             'kind': process.task_kind, 'node': node['id'], 'answer': answer_digest(source['answer']),
             'question': {'kind': shape.get('kind', 'clarification'), 'state_topic': node['state_topic'],
                          'question': shape.get('question'), 'why_user_must_decide': shape.get('why_user_must_decide'),
+                         'recommendation': shape.get('recommendation'),
                          'options': shape.get('options') or [], 'allow_free_form': shape.get('allow_free_form', True)},
             'plan': state['plan'], 'records': {k: v for k, v in state.get('records', {}).items() if k != node['id']},
             'other_question_overrides': {k: v for k, v in state.get('request_overrides', {}).items() if k != node['id']},

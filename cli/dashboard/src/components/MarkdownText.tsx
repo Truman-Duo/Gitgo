@@ -3,6 +3,7 @@ import {Ansi, Box, Text as InkText, type TextProps} from "@anthropic/ink";
 import {marked} from "marked";
 import {highlightCode} from "../theme/syntax.js";
 import {colors, displayWidth, padEndWidth, wrap} from "../theme/index.js";
+import {VirtualContent} from "./VirtualContent.js";
 
 type Props = {content: string; width: number; dimColor?: boolean};
 
@@ -15,14 +16,40 @@ function Text({color, dimColor, ...props}: TextProps) {
   return <InkText {...props} color={dimColor ? colors.chat.reasoningFg : color ?? foreground}/>;
 }
 
-const cache = new Map<string, any[]>();
+const cache = new Map<string, {tokens: any[]; estimatedBytes: number}>();
+const maximumCacheBytes = 8 * 1024 * 1024;
+let cacheBytes = 0;
 function lex(content: string): any[] {
   const hit = cache.get(content);
-  if (hit) return hit;
+  if (hit) {cache.delete(content); cache.set(content, hit); return hit.tokens;}
   const tokens = marked.lexer(content, {gfm: true}) as any[];
-  cache.set(content, tokens);
-  if (cache.size > 300) cache.delete(cache.keys().next().value as string);
+  // Account for retained source/raw/text/inline data, not just the entry count.
+  // This conservative content estimate is not a bound on the engine's heap.
+  const estimatedBytes = Math.max(content.length * 2, Buffer.byteLength(content)) * 6 + tokens.length * 192;
+  if (estimatedBytes <= maximumCacheBytes) {
+    cache.set(content, {tokens, estimatedBytes}); cacheBytes += estimatedBytes;
+    while (cache.size > 300 || cacheBytes > maximumCacheBytes) {
+      const key = cache.keys().next().value!; cacheBytes -= cache.get(key)!.estimatedBytes; cache.delete(key);
+    }
+  }
   return tokens;
+}
+
+// This deliberately small plain-text subset has no Markdown constructs,
+// escaping, autolinks, entities, or indented code. Everything else uses marked.
+function largePlainText(content: string) {
+  return content.length > 4096 && !/[\\\x60*_{}\[\]()<>#+.!|~=:&@-]/.test(content)
+    && !/(?:^|\n)(?: {4}|\t)/.test(content)
+    && !/(?:^|\n)[ \t]*\r?\n| {2}\r?\n/.test(content);
+}
+
+function PlainLines({content, width, dimColor}: Props) {
+  const lines = useMemo(() => content.split("\n"), [content]);
+  const keys = useMemo(() => lines.map((_, index) => String(index)), [lines]);
+  return <VirtualContent itemKeys={keys} minimumItems={60} layoutKey={width}
+    estimateRows={(_key, index) => Math.max(1, Math.ceil(lines[index]!.length / Math.max(1, width)))}>
+    {index => <Box minHeight={1} flexShrink={0}><Text dimColor={dimColor} wrap="wrap">{lines[index]}</Text></Box>}
+  </VirtualContent>;
 }
 
 function plain(token: any): string {
@@ -136,10 +163,16 @@ function Blocks({tokens, width, dimColor}: {tokens: any[]; width: number; dimCol
     const key = `${token.type}-${index}`;
     if (token.type === "space") return null;
     if (token.type === "heading") return <Box key={key} marginTop={index ? 1 : 0}><Text bold dimColor={dimColor}><Inline tokens={token.tokens || []}/></Text></Box>;
-    if (token.type === "paragraph" || token.type === "text") return <Text key={key} wrap="wrap" dimColor={dimColor}><Inline tokens={token.tokens || [{type: "text", text: token.text || token.raw}]}/></Text>;
+    if (token.type === "paragraph" || token.type === "text") {
+      const inline = token.tokens || [{type: "text", text: token.text || token.raw}];
+      if (inline.every((part: any) => part.type === "text" && !part.tokens) && String(token.text || "").length > 4096) {
+        return <PlainLines key={key} content={inline.map((part: any) => part.text || "").join("")} width={width} dimColor={dimColor}/>;
+      }
+      return <Text key={key} wrap="wrap" dimColor={dimColor}><Inline tokens={inline}/></Text>;
+    }
     if (token.type === "code") return <Box key={key} flexDirection="column" paddingLeft={1} borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor={colors.named.gray}>
       {token.lang ? <Text dimColor>{token.lang}</Text> : null}
-      {dimColor ? <Text dimColor>{String(token.text || "")}</Text>
+      {dimColor ? <PlainLines content={String(token.text || "")} width={Math.max(1, width - 2)} dimColor/>
         : <Ansi>{highlightCode(String(token.text || ""), String(token.lang || ""))}</Ansi>}
     </Box>;
     if (token.type === "blockquote") return <Box key={key} paddingLeft={1} borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor={colors.named.gray}>
@@ -158,15 +191,18 @@ function Blocks({tokens, width, dimColor}: {tokens: any[]; width: number; dimCol
 }
 
 export function MarkdownText({content, width, dimColor}: Props) {
-  const tokens = useMemo(() => lex(content), [content]);
+  const tokens = useMemo(() => largePlainText(content) ? null : lex(content), [content]);
   return <MarkdownForeground.Provider value={dimColor ? colors.chat.reasoningFg : colors.chat.assistantFg}>
-    <Box flexDirection="column" width={Math.max(8, width)}><Blocks tokens={tokens} width={width} dimColor={dimColor}/></Box>
+    <Box flexDirection="column" width={Math.max(8, width)}>{tokens
+      ? <Blocks tokens={tokens} width={width} dimColor={dimColor}/>
+      : <PlainLines content={content.replace(/\r?\n$/, "")} width={width} dimColor={dimColor}/>}</Box>
   </MarkdownForeground.Provider>;
 }
 
 /** Reparse only the growing final top-level block during token streaming. */
 export function StreamingMarkdownText({content, width, dimColor}: Props) {
   const stableRef = useRef("");
+  if (largePlainText(content)) return <MarkdownText content={content} width={width} dimColor={dimColor}/>;
   if (!content.startsWith(stableRef.current)) stableRef.current = "";
   const boundary = stableRef.current.length;
   const tokens = marked.lexer(content.slice(boundary), {gfm: true}) as any[];

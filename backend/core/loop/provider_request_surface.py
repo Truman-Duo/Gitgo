@@ -25,13 +25,17 @@ def prepare_provider_request(process, provider, surface, route, emit):
     tools = build_tools_json(surface.tools) if surface.tools else None
     mode = str(process.runtime_preferences.get('web_search_mode') or 'auto')
     protocol = str(getattr(getattr(provider, 'protocol', ''), 'value', getattr(provider, 'protocol', '')))
-    if tools and mode == 'disabled':
-        tools = [item for item in tools if str((item.get('function') or {}).get('name') or item.get('name') or '')
-                 not in {'web_search', 'web_fetch'}] or None
+    def name(item):
+        return str((item.get('function') or {}).get('name') or item.get('name') or '')
+    from .task_execution_policy import hidden_tools
+    excluded = hidden_tools(process, (name(item) for item in tools or []))
+    if mode == 'disabled':
+        excluded.update({'web_search', 'web_fetch'})
+    if tools and excluded:
+        tools = [item for item in tools if name(item) not in excluded] or None
     from .provider_cache import order_live_tools
     tools = order_live_tools(process.session, tools) or None
-    active = [str((item.get('function') or {}).get('name') or item.get('name') or '') for item in tools or []]
-    excluded = {'web_search', 'web_fetch'} if mode == 'disabled' else set()
+    active = [name(item) for item in tools or []]
     route.prepare_envelope(tools, surface.discovery(active, excluded=excluded))
     sealed = process.session.seal_dangling_tool_calls(recovery_code='LIVE_TOOL_RESULT_UNAVAILABLE', provider_route=route.route)
     if sealed:

@@ -1,6 +1,10 @@
 import type {Copy} from "./pageContract.js";
 
 const labels = {
+ closing:{en:"Closing",zh:"收尾中"},closeout_failed:{en:"Save failed",zh:"收尾失败"},
+ self_execute:{en:"Main process",zh:"主进程执行"},delegate:{en:"Delegate",zh:"委派"},
+ continue_worker:{en:"Continue owner",zh:"原负责人续办"},undecided:{en:"Undecided",zh:"待决定"},
+
  worker:{en:"Worker",zh:"执行子进程"},reviewer:{en:"Reviewer",zh:"审查子进程"},supervisor:{en:"Main process",zh:"主进程"},
  waiting:{en:"Waiting",zh:"等待中"},recovering:{en:"Recovering",zh:"恢复中"},resume_available:{en:"Resume available",zh:"可恢复"},
  timed_out:{en:"Timed out",zh:"超时"},orphaned:{en:"Orphaned",zh:"失去关联"},killed:{en:"Stopped",zh:"已停止"},
@@ -50,4 +54,27 @@ const labels = {
 export function label(value:unknown,t:(value:Copy)=>string):string {
  const key=String(value??"");
  return Object.hasOwn(labels,key)?t(labels[key as keyof typeof labels]):key;
+}
+
+/** A completed model response remains provisional until Host closeout succeeds. */
+export function processDisplayStatus(process: {status: string; closeout_state?: string}): string {
+ if (process.closeout_state === "failed") return "closeout_failed";
+ if (process.closeout_state === "pending") return "closing";
+ return process.status;
+}
+import type {MaintainedAsset} from "../hooks/useLoopData.js";
+
+export function assetMaintenanceLabel(asset: MaintainedAsset, t: (value: {en:string;zh:string})=>string): string {
+ const owner=asset.owner==="project"?t({en:"Main process",zh:"主进程"}):asset.owner_name||asset.owner.slice(0,8);
+ const execution=asset.execution_active?t({en:"Executing",zh:"执行中"}):t({en:"Dormant",zh:"休眠"});
+ const work=asset.work_state==="offered"?t({en:"Work offered",zh:"待接单"})
+  :asset.work_state==="unaccepted"?t({en:"Work unaccepted",zh:"未接单"})
+  :asset.work_state==="accepted"?t({en:"Work accepted",zh:"已接单"})
+  :asset.work_state==="delivered"?t({en:"Work delivered",zh:"已交付"})
+  :asset.work_state==="needs_reassignment"?t({en:"Work awaiting reassignment",zh:"待重新派工"}):"";
+ return [owner,execution,work,
+  asset.queued_notices?t({en:`${asset.queued_notices} queued`,zh:`${asset.queued_notices} 条待投递` }):"",
+  asset.delivered_notices?t({en:`${asset.delivered_notices} delivered`,zh:`${asset.delivered_notices} 条已送达` }):"",
+  asset.transfer_pending?t({en:"Transfer awaiting acceptance",zh:"移交待接任"}):"",
+ ].filter(Boolean).join(" · ");
 }

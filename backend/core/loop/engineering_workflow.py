@@ -42,6 +42,8 @@ def plan_schema():
     node = {"type": "object", "required": ["id", "kind"], "properties": {
         "id": {"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},
         "kind": {"enum":list(KINDS)}, "depends_on":{"type":"array","items":{"type":"string"}},
+        "work_item_id":{"type":"string","minLength":1,"maxLength":96,
+            "description":"Exact id of a task plan step. Runtime adds dependencies on the prerequisite work items."},
         "files":{"type":"array","minItems":1,"items":{"type":"string"}},
         "test_id":{"type":"string","minLength":1}, "passed":{"type":"boolean"},
         "tool_name":{"enum":["run_test","exec_command"]},
@@ -149,12 +151,84 @@ def _path(root: Path, raw: str) -> Path:
     return target
 
 
-def compile_plan(raw: dict, root: str | Path) -> dict:
+def declared_plan(plan):
+    """Recover the author-supplied graph from a bound workflow."""
+    if "work_item_bindings" not in plan:
+        return plan
+    raw = {k: copy.deepcopy(v) for k, v in plan.items() if k not in {"work_item_bindings", "digest"}}
+    explicit = plan["work_item_bindings"]["declared_dependencies"]
+    for node in raw["nodes"]:
+        if node["id"] in explicit:
+            node["depends_on"] = explicit[node["id"]]
+    raw["digest"] = _plan_digest(raw)
+    return raw
+
+
+def _plan_digest(plan):
+    return hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+
+
+def work_item_links(work_plan, nodes):
+    if not work_plan.get("steps") or not nodes:
+        return {}
+    links = {step["id"]: [] for step in work_plan["steps"]}
+    unmapped = []
+    for node in nodes:
+        if node.get("work_item_id") in links:
+            links[node["work_item_id"]].append(node["id"])
+        else:
+            unmapped.append(node["id"])
+    return {"by_work_item": links, "unmapped_nodes": unmapped,
+            **({"alignment_hint": "When a node belongs to a task step, revise the contract with its exact work_item_id."
+                " Preserve the existing evidence predicates."} if unmapped else {})}
+
+
+def _bind_work_items(nodes, work_plan):
+    from .mechanism_catalog import digest
+    items = {item["id"]: item for item in (work_plan or {}).get("steps", [])}
+    epochs = (work_plan or {}).get("evidence_revisions", {})
+    linked = {}
+    for node in nodes:
+        item = node.get("work_item_id")
+        if item is not None:
+            if item not in items:
+                raise ValueError(f"workflow node {node['id']} references unknown work item {item}")
+            linked.setdefault(item, []).append(node["id"])
+
+    @lru_cache(maxsize=64)
+    def ancestors(item):
+        direct = items[item].get("depends_on", [])
+        return set(direct).union(*(ancestors(parent) for parent in direct))
+
+    @lru_cache(maxsize=64)
+    def version(item):
+        fields = {key: sorted(set(value)) if isinstance(value, list) else value
+                  for key, value in items[item].items()}
+        return digest({"step": fields, "evidence_revision": epochs.get(item, 0),
+                       "prerequisites": {d: version(d) for d in fields.get("depends_on", [])}})
+
+    explicit, versions = {}, {}
+    for node in nodes:
+        item = node.get("work_item_id")
+        if item is None:
+            continue
+        deps = node["depends_on"]
+        generated = sorted({name for parent in ancestors(item) for name in linked.get(parent, [])})
+        if any(name not in deps for name in generated):
+            explicit[node["id"]] = list(deps)
+            node["depends_on"] = list(dict.fromkeys([*deps, *generated]))
+        versions[node["id"]] = version(item)
+    return {"declared_dependencies": explicit, "node_versions": versions}
+
+
+def compile_plan(raw: dict, root: str | Path, *, work_plan=None, defer_links=False) -> dict:
     """Validate the entire proposal before publishing any part of it."""
     if not isinstance(raw, dict):
         raise ValueError("configure requires a top-level plan object; content is not the plan parameter")
     if raw.get("schema_version", 1) != 1:
         raise ValueError("unsupported engineering workflow schema_version; expected 1")
+    if "work_item_bindings" in raw:
+        raise ValueError("work item bindings are Runtime-owned")
     if len(json.dumps(raw, ensure_ascii=False).encode("utf-8")) > 64_000:
         raise ValueError("engineering workflow exceeds 64KB")
     if "nodes" not in raw:
@@ -176,11 +250,14 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
         if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) or name in ids:
             raise ValueError("workflow node ids must be unique lowercase identifiers")
         ids.add(name)
+        if "work_item_id" in node and (not isinstance(node["work_item_id"], str)
+                                       or not 1 <= len(node["work_item_id"]) <= 96):
+            raise ValueError("work_item_id must be a bounded task step identifier")
         kind = node.get("kind")
         if kind not in KINDS:
             raise ValueError("unsupported workflow evidence kind")
         node["depends_on"] = list(dict.fromkeys(node.get("depends_on") or []))
-        node["required"] = bool(node.get("required", True))
+        node["required"] = True
         node["before_mutation"] = bool(node.get("before_mutation", False))
         if node["before_mutation"] and kind == "change":
             raise ValueError("a change cannot be its own pre-mutation gate")
@@ -210,6 +287,10 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
             raise ValueError("report nodes require a supported structured format")
         if kind == "report" and node.get("format") == "alignment":
             node["before_mutation"] = True
+        if node.get("format") == "architecture" or (
+                "diagnosis" in profiles and node.get("format") == "hypotheses") or (
+                kind == "check" and node["passed"] is False and {"diagnosis", "tdd"}.intersection(profiles)):
+            node["before_mutation"] = True
         if kind == "observation":
             tools = node.get("tools") or []
             if not tools or not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
@@ -219,6 +300,8 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
             if not files:
                 raise ValueError(f"change node '{name}' requires files=[concrete workspace paths]. change is a file mutation, not mechanism setup; use the business plan for setup or a preset with test_id/target_files.")
             node["files"] = [_path(root, item).relative_to(root).as_posix() for item in files]
+    has_links = any("work_item_id" in node for node in nodes)
+    binding = _bind_work_items(nodes, work_plan) if has_links and not defer_links else None
     by_id = {node["id"]: node for node in nodes}
     visiting, visited = set(), set()
 
@@ -237,6 +320,14 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
 
     for name in by_id:
         visit(name)
+    plan = {"schema_version": 1, "profiles": profiles, "nodes": nodes,
+            "preparation_files": [_path(root, p).relative_to(root).as_posix()
+                                  for p in raw.get("preparation_files", [])]}
+    if has_links and defer_links:
+        # The contract activation will validate the full graph after compiling
+        # the matching task plan in the same transaction.
+        plan["digest"] = _plan_digest(plan)
+        return plan
     @lru_cache(maxsize=64)
     def ancestors(name):
         return frozenset(by_id[name]["depends_on"]).union(*(ancestors(d) for d in by_id[name]["depends_on"]))
@@ -302,12 +393,19 @@ def compile_plan(raw: dict, root: str | Path) -> dict:
             for node in nodes:
                 if node["kind"] == "change" and not any(r["id"] in ancestors(node["id"]) for r in reds):
                     raise ValueError("TDD changes must follow failing evidence")
-    preparation = [_path(root, p).relative_to(root).as_posix() for p in raw.get("preparation_files", [])]
+    preparation = plan["preparation_files"]
     if set(preparation).intersection(p for n in nodes if n["kind"] == "change" for p in n["files"]):
         raise ValueError("evidence preparation paths cannot overlap product change targets")
-    plan = {"schema_version": 1, "profiles": profiles, "nodes": nodes, "preparation_files": preparation}
-    plan["digest"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+    if binding is not None:
+        plan["work_item_bindings"] = binding
+    plan["digest"] = _plan_digest(plan)
     return plan
+
+
+class DecisionRevisionError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
 
 
 class EngineeringWorkflow:
@@ -340,13 +438,18 @@ class EngineeringWorkflow:
         return event
 
     def configure(self, raw):
-        plan = compile_plan(raw, workspace(self.process))
+        plan = self.compile_declared(raw)
         state = self.configured_state(plan)
         self._save(state)
         self.notice("WORKFLOW_CONFIGURED", "工程工作流已启用；依赖、证据和完成条件由 Host 检查。")
         return self.status()
 
-    def configured_state(self, plan):
+    def compile_declared(self, raw):
+        """Bind an author declaration to this task; never accept client bindings."""
+        from .task_maintenance import state_for
+        return compile_plan(raw, workspace(self.process), work_plan=state_for(self.process).get("plan"))
+
+    def configured_state(self, plan, *, contract_revision=None):
         """Pure publication preparation, also used by atomic contract admission."""
         state = self._load()
         if state:
@@ -354,15 +457,54 @@ class EngineeringWorkflow:
                 return state
             # Additive evolution prevents changing a requirement into an easier
             # predicate or silently deleting a user decision during recovery.
-            new = {n["id"]: n for n in plan["nodes"]}
-            if not set(state["plan"]["profiles"]).issubset(plan["profiles"]) or any(new.get(n["id"]) != n for n in state["plan"]["nodes"]):
+            previous = declared_plan(state["plan"])
+            proposed = declared_plan(plan)
+            new = {n["id"]: n for n in proposed["nodes"]}
+
+            def retained(node):
+                candidate = new.get(node["id"])
+                if candidate is not None and "work_item_id" not in node and contract_revision is not None:
+                    candidate = {k: v for k, v in candidate.items() if k != "work_item_id"}
+                return candidate == node
+
+            if not set(previous["profiles"]).issubset(proposed["profiles"]) or any(not retained(n) for n in previous["nodes"]):
                 raise ValueError("active workflow can only be extended; use explicit task scope amendment for replacement")
         else:
             state = {"schema_version": 1, "task_id": task_id(self.process), "records": {}, "requests": {},
                      "receipt_start": len(self.process.tool_receipts), "revision": 0}
+        if contract_revision is not None and plan.get("work_item_bindings"):
+            self._rebind_evidence(state, plan, contract_revision)
         state["plan"] = plan
         state["revision"] += 1
         return state
+
+    def _rebind_evidence(self, state, plan, contract_revision):
+        previous = state.get("plan", {})
+        old_nodes = {n["id"]: n for n in previous.get("nodes", [])}
+        old_versions = previous.get("work_item_bindings", {}).get("node_versions", {})
+        new_versions = plan["work_item_bindings"]["node_versions"]
+        affected = {n["id"] for n in plan["nodes"] if n["id"] in new_versions and (
+            old_nodes.get(n["id"]) != n or old_versions.get(n["id"]) != new_versions[n["id"]])}
+        for _ in plan["nodes"]:
+            downstream = {n["id"] for n in plan["nodes"] if affected.intersection(n["depends_on"])}
+            if downstream <= affected:
+                break
+            affected.update(downstream)
+        if not affected:
+            return
+        required_revisions = state.setdefault("receipt_contract_revisions", {})
+        history = []
+        for name in sorted(affected):
+            required_revisions[name] = contract_revision
+            evidence = state["records"].pop(name, None)
+            if evidence is not None:
+                history.append({"node_id": name, "work_item_id": (old_nodes.get(name) or {}).get("work_item_id"),
+                                "plan_digest": previous["digest"], "evidence": evidence})
+            state["requests"].pop(name, None)
+        if history:
+            # Publication moves this into the same checkpoint's activation
+            # event. It is not part of the live evidence map.
+            state["retired_work_item_evidence"] = history
 
     def _receipts(self):
         rows = []
@@ -378,6 +520,9 @@ class EngineeringWorkflow:
         return rows
 
     def _valid_record(self, node, record, *, validation_cache=None):
+        if record.get('elicitation_retirement'):
+            from .elicitation_relevance import valid_retirement
+            return valid_retirement(self.process, node, record, self._load())
         if record.get('defaulted'):
             source = self._answers(node)
             from .alignment_evidence import answer_digest
@@ -454,9 +599,27 @@ class EngineeringWorkflow:
                 if answer["selected_action"] == "accept_engineering_amendment":
                     old = {n["id"]: n for n in state["plan"]["nodes"]}
                     plan = amendment["plan"]
+                    if plan.get("work_item_bindings"):
+                        from .task_maintenance import state_for
+                        work_plan = state_for(self.process).get("plan")
+                        try:
+                            current = compile_plan(declared_plan(plan), workspace(self.process), work_plan=work_plan)
+                        except ValueError:
+                            current = None
+                        if not current or current["digest"] != plan["digest"]:
+                            state.pop("amendment")
+                            self._save(state)
+                            self.notice("WORKFLOW_SCOPE_UNCONFIRMED", "工作事项已变更，请重新提交当前工程范围调整。原要求仍有效。")
+                            return self._refresh(state)
                     unchanged = {n["id"] for n in plan["nodes"] if old.get(n["id"]) == n}
+                    retired = [{"node_id": name, "work_item_id": old[name].get("work_item_id"),
+                                "plan_digest": state["plan"]["digest"], "evidence": evidence}
+                               for name, evidence in state["records"].items() if name in old and name not in unchanged
+                               and "work_item_id" in old[name]]
                     state["records"] = {k: v for k, v in state["records"].items() if k in unchanged}
                     state["requests"] = {k: v for k, v in state.get("requests", {}).items() if k in unchanged}
+                    if state.get("receipt_contract_revisions"):
+                        state["receipt_contract_revisions"] = {k: v for k, v in state["receipt_contract_revisions"].items() if k in unchanged}
                     state["plan"] = plan
                     state["receipt_start"] = len(self.process.tool_receipts)
                 state.pop("amendment")
@@ -464,7 +627,8 @@ class EngineeringWorkflow:
                 if answer["selected_action"] == "accept_engineering_amendment":
                     self.process.update_context_snapshot(lambda ctx: {**ctx, KEY: copy.deepcopy(state), "task_contract": {
                         **dict(ctx.get("task_contract") or {}), KEY: copy.deepcopy(plan)}})
-                    self.notice("WORKFLOW_SCOPE_AMENDED", "已按你的明确选择调整工程要求；未完成事实仍保留在历史中。")
+                    self.notice("WORKFLOW_SCOPE_AMENDED", "已按你的明确选择调整工程要求；未完成事实仍保留在历史中。",
+                                **({"retired_work_item_evidence": retired} if retired else {}))
                 else:
                     self._save(state)
                     self.notice("WORKFLOW_SCOPE_KEPT", "已保留原工程要求。")
@@ -511,6 +675,7 @@ class EngineeringWorkflow:
                     self.notice("ALIGNMENT_BRANCH_INACTIVE", f"根据已确认答案，问题 {name} 的分支不适用。", node_id=name)
                     continue
                 minimum = max([state["receipt_start"] - 1, *[records[d].get("receipt_index", state["receipt_start"] - 1) for d in node["depends_on"]]])
+                receipt_revision = state.get("receipt_contract_revisions", {}).get(name, 0)
                 if node["kind"] == "check" and node["passed"]:
                     minimum = max([minimum, *[index for index, r in receipts if r.get("effect") == "workspace_write" and r.get("committed") is True]])
                 if node["kind"] == "change":
@@ -518,7 +683,8 @@ class EngineeringWorkflow:
                     # the latest committed receipt for every declared target.
                     latest = {}
                     for index, receipt in receipts:
-                        if index > minimum and receipt.get("effect") == "workspace_write" and receipt.get("succeeded") is True and receipt.get("committed") is True:
+                        if (index > minimum and receipt.get("task_contract_revision", 0) >= receipt_revision
+                                and receipt.get("effect") == "workspace_write" and receipt.get("succeeded") is True and receipt.get("committed") is True):
                             for path in set(node["files"]).intersection(self._receipt_files(receipt)):
                                 latest[path] = (index, receipt["receipt_id"])
                     if set(node["files"]).issubset(latest):
@@ -528,7 +694,7 @@ class EngineeringWorkflow:
                         progress = changed = True
                     continue
                 for index, receipt in receipts:
-                    if index <= minimum:
+                    if index <= minimum or receipt.get("task_contract_revision", 0) < receipt_revision:
                         continue
                     kind = node["kind"]
                     matched = (kind == "check" and receipt.get("tool_name") == "run_test" and receipt.get("test_id") == node["test_id"] and receipt.get("test_completed") is True and bool(receipt.get("test_seeds")) and receipt.get("test_passed") is node["passed"])
@@ -586,16 +752,24 @@ class EngineeringWorkflow:
         state = self._refresh(state)
         notices = [n for n in self.process.session.host_ledger if n.get("event") == "engineering_notice" and n.get("task_id") == task_id(self.process)][-16:]
         records = state["records"]
-        nodes = [{**n, "status": "assumed" if records.get(n['id'], {}).get('defaulted') else "complete" if n["id"] in records else "ready" if all(d in records for d in n["depends_on"]) else "blocked",
+        nodes = [{**n, "status": "retired" if records.get(n['id'], {}).get('elicitation_retirement') else "assumed" if records.get(n['id'], {}).get('defaulted') else "complete" if n["id"] in records else "ready" if all(d in records for d in n["depends_on"]) else "blocked",
                   "evidence": records.get(n["id"])} for n in state["plan"]["nodes"]]
+        from .task_maintenance import state_for
+        links = work_item_links(state_for(self.process).get("plan", {}), nodes)
+        if links:
+            by_id = {node["id"]: node for node in nodes}
+            links["evidence"] = {item: [{"node_id": name,
+                "status": "inapplicable" if (by_id[name]["evidence"] or {}).get("inapplicable") else by_id[name]["status"]}
+                for name in names] for item, names in links["by_work_item"].items()}
         return {"active": True, "task_id": state["task_id"], "revision": state["revision"],
                 "plan_digest": state["plan"]["digest"], "profiles": state["plan"]["profiles"],
                 "nodes": nodes, "ready": [n["id"] for n in nodes if n["status"] == "ready"],
+                **({"work_item_links": links} if links else {}),
                 "question_frontier": [n["id"] for n in nodes if n["kind"] == "decision" and n["status"] == "ready"],
                 "notices": notices,
                 "amendment": ({"decision_id": state["amendment"]["decision_id"],
                                "plan_digest": state["amendment"]["plan"]["digest"]} if state.get("amendment") else None),
-                "complete": all(not n["required"] or n["status"] == "complete" or (n['status'] == 'assumed' and self.process.task_kind in {'answer', 'plan'}) for n in nodes)}
+                "complete": all(not n["required"] or n["status"] == "complete" or (n['status'] in {'assumed', 'retired'} and self.process.task_kind in {'answer', 'plan'}) for n in nodes)}
 
     def request_decision(self, node_id, request):
         state, node = self._ready_node(node_id, "decision")
@@ -621,18 +795,26 @@ class EngineeringWorkflow:
             raise
         return result
 
-    def ask_frontier(self):
-        """Publish one ready facet; adopt its answer before selecting the next.
+    def ask_frontier(self, selected=None):
+        """Publish dependency-ready independent questions, never a fixed form.
 
-        The graph can contain several independent candidates. They are not a
-        questionnaire: a reply may resolve other facets or delegate them, so
-        publishing the whole frontier would force obsolete questions on users.
+        A submitted subset resumes interpretation immediately. Any remaining
+        candidates are reconsidered against that answer before another card.
         """
-        state = self._refresh(self._load()) if self._load() else {}
+        state = self._load()
+        state = self._refresh(state) if state else {}
         if not state:
             raise ValueError("configure an alignment tree before asking its frontier")
-        frontier = self.status()["question_frontier"][:1]
+        return self._ask_ready(state, selected)
+
+    def _ask_ready(self, state, selected=None):
+        frontier = [node['id'] for node in state['plan']['nodes']
+            if node['kind'] == 'decision' and node['id'] not in state['records']
+            and all(dep in state['records'] for dep in node['depends_on'])
+            and (selected is None or node['id'] in selected)][:8]
         if not frontier:
+            if selected is not None:
+                raise ValueError('question prerequisites are unresolved; ask their ready frontier first')
             return {"status": "no_ready_questions", **self.status()}
         questions = []
         for node in state["plan"]["nodes"]:
@@ -644,9 +826,9 @@ class EngineeringWorkflow:
             questions.append({**request, "node_id": node["id"], "state_topic": node["state_topic"]})
         result = self._publish_question(state, {
             "kind": "clarification", "question": questions[0]["question"], "why_user_must_decide": questions[0]["why_user_must_decide"],
-            "questions": questions, "options": [], "allow_free_form": True,
+            "questions": questions, "options": [], "allow_free_form": True, "answer_mode": "incremental",
         }, frontier)
-        self.notice("ALIGNMENT_ROUND_AWAITING_USER", "等待当前问题的回答；采用回答后再决定是否需要下一题。", node_ids=frontier)
+        self.notice("ALIGNMENT_ROUND_AWAITING_USER", "等待当前可答问题的答复；每次答复后重新判断剩余问题。", node_ids=frontier)
         return result
 
     def revise_decision(self, node_id, request):
@@ -669,38 +851,66 @@ class EngineeringWorkflow:
 
     def ask_semantic(self, request):
         """Default questions use the same DAG, without a separate skill API."""
-        kind = request.get("kind", "choice")
+        kind = request.get("kind", "clarification")
         from .decision_support import SEMANTIC_DECISION_KINDS
         if kind not in SEMANTIC_DECISION_KINDS:
             from .decision_support import create_user_decision
             return create_user_decision(self.process, request)
-        topic = str(request.get("state_topic") or "").strip()
-        if not topic:
-            # Identity assembly belongs here. A finite choice does not require
-            # the model to invent a mechanical topic to join its answer later.
-            topic = kind + ':' + hashlib.sha256(str(request.get("question") or "").encode()).hexdigest()[:16]
+        from .question_surface import question_proposals
+        proposals = question_proposals(self.process, [request])
         state = self._load()
-        existing = next((n for n in state.get("plan", {}).get("nodes", []) if n.get("state_topic") == topic and n["kind"] == "decision"), None)
-        if existing:
-            if request.get("supersedes_decision_id"):
-                return self.revise_decision(existing["id"], request)
-            return self.request_decision(existing["id"], request)
-        name = "q_" + hashlib.sha256(topic.encode()).hexdigest()[:16]
-        plan = copy.deepcopy(state.get("plan") or {"profiles": ["alignment"], "nodes": []})
+        state = self._refresh(state) if state else {}
+        if len(proposals) == 1:
+            item = proposals[0]
+            existing = next((node for node in state.get('plan', {}).get('nodes', [])
+                if node.get('state_topic') == item['state_topic'] and node['kind'] == 'decision'), None)
+            if existing:
+                if item.get('supersedes_decision_id'):
+                    return self.revise_decision(existing['id'], item)
+                return self.request_decision(existing['id'], item)
+        plan = copy.deepcopy(declared_plan(state["plan"]) if state else {"profiles": ["alignment"], "nodes": []})
         plan["profiles"] = list(dict.fromkeys([*plan["profiles"], "alignment"]))
-        plan["nodes"].append({"id": name, "kind": "decision", "state_topic": topic, "before_mutation": True})
+        topics = {node['state_topic']: node['id'] for node in plan['nodes'] if node['kind'] == 'decision'}
+        topics.update({item['state_topic']: topics.get(item['state_topic']) or
+            'q_' + hashlib.sha256(item['state_topic'].encode()).hexdigest()[:16] for item in proposals})
+        if self.process.pending_decision is not None:
+            raise ValueError('answer the current question before publishing another group')
+        selected, overrides = [], copy.deepcopy(state.get('request_overrides') or {})
+        for item in proposals:
+            topic, name = item['state_topic'], topics[item['state_topic']]
+            if item.get('supersedes_decision_id'):
+                raise ValueError('revise one existing decision before proposing another group')
+            dependencies = item.get('depends_on_topics', [])
+            if any(dep not in topics for dep in dependencies):
+                raise ValueError('QUESTION_DEPENDENCY_UNKNOWN: reference existing or proposed semantic topics')
+            if any(state.get('records', {}).get(topics[dep], {}).get('inapplicable') for dep in dependencies):
+                raise ValueError('question prerequisites belong to an inactive branch')
+            old = next((node for node in plan['nodes'] if node['id'] == name), None)
+            if old is None:
+                plan['nodes'].append({'id': name, 'kind': 'decision', 'state_topic': topic,
+                    'depends_on': [topics[dep] for dep in dependencies], 'before_mutation': True})
+            elif 'depends_on_topics' in item and old['depends_on'] != [topics[dep] for dep in dependencies]:
+                raise ValueError('existing dependencies require an explicit workflow amendment')
+            overrides[name] = item
+            selected.append(name)
         # Validate the question before extending requirements. No pending card
         # should survive a failed graph publication.
-        compiled = compile_plan(plan, workspace(self.process))
+        compiled = self.compile_declared(plan)
         prepared = self.configured_state(compiled)
+        prepared['request_overrides'] = overrides
         if kind == 'clarification':
             # A model-elicited clarification is distinct from an explicitly
             # configured workflow requirement. Preserve its conservative tier
             # and origin so a source-bound user request for exploratory output
             # can change the read-only deliverable without resolving this node.
-            prepared['elicitation_tiers'] = {**prepared.get('elicitation_tiers', {}), name: 'foundational'}
-        result = self._publish_question(prepared, {**request, "state_topic": topic}, [name])
-        return result
+            prepared['elicitation_tiers'] = {**prepared.get('elicitation_tiers', {}),
+                **{name: 'foundational' for name in selected}}
+        if len(proposals) == 1:
+            node = next(node for node in compiled['nodes'] if node['id'] == selected[0])
+            if any(dep not in prepared['records'] for dep in node['depends_on']):
+                raise ValueError('question prerequisites are unresolved; ask their ready frontier first')
+            return self._publish_question(prepared, proposals[0], selected)
+        return self._ask_ready(prepared, selected)
 
     def resolve_answer(self, node_id, decision_id, content):
         if not isinstance(content,dict):
@@ -739,9 +949,9 @@ class EngineeringWorkflow:
                 node_id = 'q_' + hashlib.sha256(topic.encode()).hexdigest()[:16]
                 node = {'id': node_id, 'kind': 'decision', 'state_topic': topic,
                         'before_mutation': True, 'source_decision_id': decision_id}
-                plan = copy.deepcopy(state.get('plan') or {'profiles': ['alignment'], 'nodes': []})
+                plan = copy.deepcopy(declared_plan(state['plan']) if state else {'profiles': ['alignment'], 'nodes': []})
                 plan['nodes'].append(node)
-                state = self.configured_state(compile_plan(plan, workspace(self.process)))
+                state = self.configured_state(self.compile_declared(plan))
                 state.setdefault('requests', {})[node_id] = decision_id
                 state.setdefault('request_overrides', {})[node_id] = copy.deepcopy(request)
                 imported = True
@@ -749,7 +959,18 @@ class EngineeringWorkflow:
         requested = state.get('requests', {}).get(node_id)
         if node is None:
             raise ValueError('interpretation must bind the current question of this task')
+        if any(entry.get('event') == 'user_decision_cancelled'
+               and entry.get('decision_id') == decision_id
+               and entry.get('task_id', task_id(self.process)) == task_id(self.process)
+               for entry in self.process.session.host_ledger):
+            raise ValueError('cancelled receipt cannot bind the current question')
         later_source = None
+        revising = False
+        if 'revise' in content and type(content['revise']) is not bool:
+            raise ValueError('revise must be a boolean semantic choice')
+        if ('correct' in content and type(content['correct']) is not bool) or (content.get('correct') and content.get('revise')):
+            raise DecisionRevisionError('ALIGNMENT_REPLY_CORRECTION_INVALID',
+                'correct:true repairs an interpretation of the same receipt; do not combine it with a new-user-reply revision.')
         if requested not in {None, decision_id}:
             # A later real business reply can volunteer an answer to a still
             # unresolved facet. Confirmed values retain the explicit revision
@@ -761,15 +982,45 @@ class EngineeringWorkflow:
                 and a.get('source_node_id', '') == source_id), None)
             order = {e.get('decision_id'): i for i, e in enumerate(self.process.session.host_ledger)
                      if e.get('event') == 'user_decision_requested' and e.get('task_id') == task_id(self.process)}
-            if (node_id in state.get('records', {}) or not later_source or not receipts
+            owner = next((e.get('process_id', self.process.process_id if not self.process.parent_id else '')
+                for e in reversed(self.process.session.host_ledger) if e.get('event') == 'user_decision_requested'
+                and e.get('task_id') == task_id(self.process) and e.get('decision_id') == decision_id), '')
+            if (not later_source or not receipts
+                    or owner != self.process.process_id
                     or receipts[-1]['decision_id'] != decision_id
                     or order.get(decision_id, -1) <= order.get(requested, len(self.process.session.host_ledger))):
+                if content.get('revise') is True:
+                    raise DecisionRevisionError('ALIGNMENT_REPLY_REVISION_SOURCE_INVALID',
+                        'A revision needs the newest actual business reply after the earlier decision; old, control or guessed sources cannot revise it.')
                 raise ValueError('interpretation must bind the current question of this task or a newer actual business reply to an unresolved facet')
+            if node_id in state.get('records', {}):
+                if content.get('revise') is not True:
+                    raise DecisionRevisionError('ALIGNMENT_REPLY_REVISION_REQUIRED',
+                        'This topic is already confirmed. Omit a restatement. If the newer actual user reply changes it, '
+                        'revise:true replaces this entire topic with the exact new quote and invalidates dependents. '
+                        'First preserve any unaffected independent source-backed facts as separate topics; old receipt '
+                        'facts need their actual earlier source. Do not ask again for a change already stated by the user.')
+                revising = True
         answer = next((a for a in reversed(self._answers(node)) if a.get('decision_id') == decision_id), None)
         if answer is None and later_source:
             from .alignment_evidence import source_answer
             answer = source_answer(self.process.session.host_ledger, task_id(self.process), decision_id, content.get('source_node_id', ''))
-        if answer is None and not state.get('requests', {}).get(node_id):
+        # A reply to one item of a live independent group may also settle a
+        # sibling (for example by explicit delegation). The sibling was
+        # published, but has no direct receipt in this submitted subset. Bind
+        # the real source from that same card rather than treating publication
+        # of the sibling as proof it must have a separate answer.
+        same_round = next((entry for entry in reversed(self.process.session.host_ledger)
+            if entry.get('event') == 'user_decision_requested'
+            and entry.get('task_id') == task_id(self.process)
+            and entry.get('process_id') == self.process.process_id
+            and entry.get('decision_id') == decision_id
+            and entry.get('answer_mode') == 'incremental'
+            and node_id in {q.get('node_id') for q in entry.get('questions') or []}), None)
+        can_use_sibling = (requested == decision_id and node_id not in state.get('records', {}) and same_round
+            and (not content.get('source_node_id') or content['source_node_id'] in
+                 {q.get('node_id') for q in same_round.get('questions') or []}))
+        if answer is None and (not requested or can_use_sibling):
             from .alignment_evidence import source_answer, answer_digest
             answer = source_answer(self.process.session.host_ledger, task_id(self.process), decision_id, content.get('source_node_id', ''))
             if answer is None and not content.get('source_node_id') and content.get('quote'):
@@ -781,10 +1032,12 @@ class EngineeringWorkflow:
                 # Derive omitted plumbing from immutable evidence, not invented
                 # facts. Identical copies of one reply in a round are equivalent;
                 # genuinely different sources still require explicit selection.
-                if sources and len({answer_digest(item['answer']) for _, item in sources}) == 1:
+                if sources and (len(sources) == 1 if same_round else len({answer_digest(item['answer']) for _, item in sources}) == 1):
                     key, item = sources[0]
                     content = {**content, 'source_node_id': key}
                     answer = {**receipt, **item}
+        if answer and can_use_sibling and answer.get('process_id', self.process.process_id) != self.process.process_id:
+            raise ValueError('answer must belong to the current question process')
         if not answer or not answer.get('answer'):
             raise ValueError('no actual user receipt for this question')
         if answer.get('answers') and node_id in answer['answers'] and not content.get('source_node_id'):
@@ -792,13 +1045,27 @@ class EngineeringWorkflow:
         from .alignment_evidence import interpret_answer, resolved_answer
         event = interpret_answer(self.process, node, answer, content, publish=False)
         previous = resolved_answer(self.process.session.host_ledger, answer, node['state_topic'])
+        if content.get('correct') and (not previous or revising):
+            raise DecisionRevisionError('ALIGNMENT_REPLY_CORRECTION_INVALID',
+                'A correction needs an existing resolved interpretation of this same actual receipt; use revise:true only for a newer user change.')
         if previous and content.get('disposition') == previous.get('disposition'):
-            # Delivery review must not churn a source-bound value just because
-            # the same model paraphrases it differently on the next call.
-            if imported:
-                self._save(state)
-                self._refresh(state)
-            return previous
+            changed = any(event.get(k) != previous.get(k) for k in ('value', 'value_basis', 'quote', 'choice_key'))
+            proposal_changed = event.get('agent_interpretation') != previous.get('agent_interpretation')
+            if not content.get('correct'):
+                if changed and event.get('value_basis'):
+                    raise DecisionRevisionError('ALIGNMENT_REPLY_CORRECTION_REQUIRED',
+                        'This same-receipt interpretation is already recorded. To repair its meaning/source selection, resend with correct:true and exact source words; no new user answer is needed.')
+                # Preserve legacy idempotence and avoid churn from another
+                # paraphrase. Explicit correction is an Agent decision.
+                if imported:
+                    self._save(state)
+                    self._refresh(state)
+                return previous
+            if not changed and not proposal_changed:
+                return previous
+        if content.get('correct'):
+            event['corrects_interpretation_digest'] = hashlib.sha256(json.dumps(previous, sort_keys=True).encode()).hexdigest()
+            state.get('records', {}).pop(node_id, None)
         conditional = any(node_id in (n.get('when') or {}) for n in state['plan']['nodes'])
         if conditional and event['disposition'] in {'confirmed', 'delegated'} and not event.get('choice_key'):
             # A semantic paraphrase is not a branch key. Rich free-form answers
@@ -810,6 +1077,9 @@ class EngineeringWorkflow:
                 raise ValueError('conditional decision requires choice_key separate from its semantic value')
             event['choice_key'] = literal
         state.setdefault('requests', {})[node_id] = decision_id
+        if revising:
+            event['supersedes_decision_id'] = state['records'][node_id]['decision_id']
+            state['records'].pop(node_id)
         self.process.session.host_ledger.append(event)
         self._save(state)
         self._refresh(state)
@@ -831,7 +1101,8 @@ class EngineeringWorkflow:
         state = self._load()
         if not state or not str(reason or "").strip():
             raise ValueError("scope amendment requires an active workflow and a user-visible reason")
-        plan = compile_plan(raw, workspace(self.process))
+        from .task_maintenance import state_for
+        plan = compile_plan(raw, workspace(self.process), work_plan=state_for(self.process).get("plan"))
         old = {n["id"]: n for n in state["plan"]["nodes"]}
         new = {n["id"]: n for n in plan["nodes"]}
         removed = sorted(set(old) - set(new))
@@ -854,7 +1125,7 @@ class EngineeringWorkflow:
                  "downstream_effect": "仍需补齐现有缺失证据。", "risks": "可能需要额外时间或当前环境无法提供的验证。",
                  "reversibility": "稍后仍可提出新调整。", "action": "keep_engineering_workflow", "recommended": True},
             ],
-        })
+        }, display_template="engineering_amendment", display_context={"reason": str(reason), "changes": changes})
         state["amendment"] = {"plan": plan, "decision_id": result["decision_id"]}
         self._save(state)
         self.notice("WORKFLOW_SCOPE_DECISION_REQUIRED", "工程范围调整正在等待你的决定；原要求继续有效。")
@@ -942,6 +1213,7 @@ class EngineeringWorkflow:
         reasons = [f"engineering workflow {n['id']} ({n['kind']}) requires current evidence"
                    for n in status.get("nodes", []) if n["required"] and n["status"] != "complete"
                    and not (n['status'] == 'assumed' and self.process.task_kind in {'answer', 'plan'})
+                   and not (n['status'] == 'retired' and self.process.task_kind in {'answer', 'plan'})
                    and not (exploration and n['kind'] == 'decision' and n['id'] in elicited)]
         if status.get("amendment"):
             reasons.append("engineering workflow scope amendment (decision) requires an explicit user choice")
@@ -951,6 +1223,39 @@ class EngineeringWorkflow:
         try:
             with self.process._context_lock:
                 operation = args.get("operation", "status")
+                if operation == 'ask_semantic':
+                    from .question_surface import validate_question_kinds
+                    validate_question_kinds(args.get('request') or {})
+                if operation == 'resolve_answer' and isinstance(args.get('content'), dict):
+                    from .main_dialogue import apply_answer_updates, DialogueUpdateError
+                    content = dict(args['content'])
+                    for key in ('node_id', 'decision_id'):
+                        if args.get(key):
+                            if content.get(key) and content[key] != args[key]:
+                                raise DialogueUpdateError('ALIGNMENT_REPLY_UPDATE_INVALID', 'Duplicated resolve_answer identities must agree.')
+                            content[key] = args[key]
+                    if args.get('scope_update') is not None:
+                        from .main_dialogue import require_response_components
+                        require_response_components(self.process, args['scope_update'])
+                    apply_answer_updates(self.process, [*(args.get('answer_updates') or []), content], args.get('scope_update'))
+                    state = self._load()
+                    node = next(n for n in state['plan']['nodes'] if n['kind'] == 'decision'
+                                and (n['id'] == content.get('node_id') if content.get('node_id')
+                                     else n['state_topic'] == content.get('state_topic')))
+                    if content.get('disposition') == 'not_needed':
+                        return {'status': 'retired', 'node_id': node['id'],
+                                'record': state['records'][node['id']], 'authority_granted': False}
+                    return next(e for e in reversed(self.process.session.host_ledger)
+                                if e.get('event') == 'user_decision_interpreted' and e.get('node_id') == node['id']
+                                and e.get('task_id') == task_id(self.process))
+                if ('answer_updates' in args or 'scope_update' in args) and operation in {'configure', 'record', 'ask', 'ask_frontier', 'ask_semantic', 'revise_decision', 'resolve_answer', 'propose_amendment', 'retrospective', 'status'}:
+                    from .main_dialogue import apply_answer_updates, require_response_components, DialogueUpdateError, update_error
+                    try:
+                        if args.get('scope_update') is not None:
+                            require_response_components(self.process, args['scope_update'])
+                        apply_answer_updates(self.process, args.get('answer_updates', []), args.get('scope_update'))
+                    except DialogueUpdateError as exc:
+                        return update_error(exc)
                 if operation == "configure":
                     return self.configure(args.get("plan"))
                 if operation == "record":
@@ -970,9 +1275,36 @@ class EngineeringWorkflow:
                 if operation == "retrospective":
                     return self.retrospective()
                 if operation == "status":
+                    if args.get('node_id'):
+                        state = self.status()
+                        node = next((n for n in state.get('nodes', []) if n['id'] == args['node_id']), None)
+                        if node is None:
+                            raise ValueError('status detail must identify a current workflow node')
+                        from .dialogue_context import unresolved_interpretations
+                        from .decision_support import confirmed_user_state
+                        current = next((d for d in confirmed_user_state(self.process.session.host_ledger,
+                            task_id=state['task_id']) if d['topic'] == node.get('state_topic')), None)
+                        return {'task_id': state['task_id'], 'node': node,
+                                'question_request': (self._load().get('request_overrides', {}).get(node['id'])
+                                                     or node.get('request')),
+                                'interpretation': unresolved_interpretations(self.process, include_interpretations=True).get(node['id']),
+                                'current_decision': current,
+                                'authority_granted': False}
                     return self.status()
                 raise ValueError("unknown engineering workflow operation")
         except (ValueError, TypeError, KeyError, OSError, UnicodeError, RuntimeError) as exc:
+            from .main_dialogue import DialogueUpdateError, update_error
+            if isinstance(exc, DialogueUpdateError):
+                return update_error(exc)
+            from .question_surface import QuestionInputError
+            if isinstance(exc, QuestionInputError):
+                from backend.core.errors import error_payload
+                return error_payload(exc.code, message=str(exc), details=exc.details,
+                    next_actions=[{'action': 'request_user_decision', 'when': 'correct the named input field; do not reconfigure the workflow'}])
+            if isinstance(exc, DecisionRevisionError):
+                from backend.core.errors import error_payload
+                return error_payload(exc.code, message=str(exc), details={
+                    'phase': 'decision_revision', 'effect_state': 'not_executed', 'authority_granted': False})
             notice = self.notice("WORKFLOW_RECOVERY_REQUIRED", f"工程工作流未完成操作：{exc}。已保留原有要求和证据。")
             from backend.core.errors import error_payload
             return error_payload("ENGINEERING_WORKFLOW_RECOVERY_REQUIRED", message=notice["message"],

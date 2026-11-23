@@ -231,9 +231,10 @@ class HistoryManager:
         ])
 
     @staticmethod
-    def _append_one(entry: HistoryEntry) -> None:
+    def _append_one(entry: HistoryEntry, *, storage: StorageRuntime | None = None) -> None:
         """Append one SQLite/CAS record. Caller holds ``_lock``."""
-        HistoryManager._storage().append_history_record(
+        target = storage if storage is not None else HistoryManager._storage()
+        target.append_history_record(
             asdict(entry),
             compact_threshold=_COMPACT_THRESHOLD,
             keep_entries=_MAX_ENTRIES,
@@ -257,7 +258,7 @@ class HistoryManager:
     @classmethod
     def add_operation(cls, project_name: str, operation: str,
                       status: str = "success", detail: dict | None = None,
-                      correlation_id: str = "") -> None:
+                      correlation_id: str = "", *, storage: StorageRuntime | None = None) -> None:
         """记录一条操作历史（线程安全，JSONL 追加写入）。
 
         operation: "scan" | "formalize" | "sync" | "push"
@@ -274,7 +275,7 @@ class HistoryManager:
         )
 
         with cls._lock:
-            cls._append_one(entry)
+            cls._append_one(entry, storage=storage)
 
     @classmethod
     def add_suggestion(cls, project_name: str, suggest_type: str,

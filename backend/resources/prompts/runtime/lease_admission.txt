@@ -1,1 +1,1 @@
-The Host accepted a self-execute contract but has not issued its task-scoped lease. Call request_self_execute before attempting or describing the protected work.
+The current self-execute contract has no task-scoped lease. Request the lease before protected work if you keep this route. Revise the contract first if new evidence changes the route or shows validation alone is sufficient.

@@ -30,5 +30,6 @@
 - [原生沙箱配置与恢复](NATIVE_SANDBOX.md)
 - [执行与审批边界](EFFECTIVE_EXECUTION_PLAN.md)
 - [存储与受保护 checkpoint](CAS_LIFECYCLE.md)
+- [任务计划、执行证据与机制职责](task-workflow-and-mechanism-boundaries.md)
 
 这些说明独立提供使用、贡献和验收所需的信息；不包含私人项目数据和研发指令。

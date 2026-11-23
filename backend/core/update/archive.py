@@ -216,13 +216,14 @@ class _TarReader:
         return self.source.tell()
 
 
-def _extract_tar(source, destination, work, limits, checkpoint, *, writer=_write_entries):
+def _extract_tar(source, destination, work, limits, checkpoint, *, writer=_write_entries, source_size=None):
     # Inflating first bounds hidden PAX/GNU headers as well as regular files;
     # Incremental zlib validates gzip's footer/CRC without gzip.GzipFile's
     # uncheckpointed optional-header reads or automatic concatenated members.
     plain = work / "expanded.tar"
-    maximum = min(limits.total_bytes + limits.metadata_bytes,
-                  os.fstat(source.fileno()).st_size * limits.expansion_ratio)
+    compressed_size = os.fstat(source.fileno()).st_size if source_size is None else source_size
+    number(compressed_size, minimum=1, maximum=2 * 1024**3)
+    maximum = min(limits.total_bytes + limits.metadata_bytes, compressed_size * limits.expansion_ratio)
     compressed = zlib.decompressobj(wbits=31)
     with plain.open("xb") as output:
         size = 0

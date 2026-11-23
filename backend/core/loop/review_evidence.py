@@ -89,18 +89,27 @@ def read_observations(results):
             continue
         if not data.get('path') or not data.get('sha256'):
             continue
-        observation = {'receipt_id': item['receipt_id'], 'json_pointer': f'/tool_results/{index}',
-            'observed_order': index,
-            **{key: deepcopy(data[key]) for key in ('path', 'sha256', 'size', 'total_lines',
-                'offset', 'returned_lines', 'truncated') if key in data}}
-        identity = (data['path'], data['sha256'], data.get('offset', 0), data.get('returned_lines'))
-        content = data.get('content')
-        if identity not in materialized and isinstance(content, str) and len(content) <= min(1600, remaining):
-            observation['witnessed_content'] = content
-            observation['content_scope'] = 'Exact returned read page; truncated/offset/returned_lines still apply. Not a claim about the file now.'
-            materialized.add(identity)
-            remaining -= len(content)
-        observations.append(observation)
+        pages = data.get('pages')
+        if not isinstance(pages, list):
+            pages = [data]
+        for page_index, page in enumerate(pages):
+            if not isinstance(page, dict):
+                continue
+            pointer = f'/tool_results/{index}'
+            if page is not data:
+                pointer += f'/data/pages/{page_index}'
+            observation = {'receipt_id': item['receipt_id'], 'json_pointer': pointer,
+                'observed_order': index,
+                **{key: data[key] for key in ('path', 'sha256', 'size', 'total_lines') if key in data},
+                **{key: page[key] for key in ('offset', 'returned_lines', 'truncated') if key in page}}
+            identity = (data['path'], data['sha256'], page.get('offset', 0), page.get('returned_lines'))
+            content = page.get('content')
+            if identity not in materialized and isinstance(content, str) and len(content) <= min(1600, remaining):
+                observation['witnessed_content'] = content
+                observation['content_scope'] = 'Exact returned read page; truncated/offset/returned_lines still apply. Not a claim about the file now.'
+                materialized.add(identity)
+                remaining -= len(content)
+            observations.append(observation)
     return {'items': observations[:32], 'total': len(observations), 'partial': len(observations) > 32,
         'meaning': 'Exact witnessed reads; unchanged hashes establish those observed contents only, not absence of all intervening effects.'}
 

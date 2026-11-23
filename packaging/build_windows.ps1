@@ -109,6 +109,10 @@ if ($ManagedUpdate) {
     if ($LASTEXITCODE -ne 0) { throw 'Managed build output is not protected by native NTFS ownership' }
 }
 New-Item -ItemType Directory -Force -Path $stage, $internal | Out-Null
+$brandResources = Join-Path $stage "assets\brand"
+& $Bun (Join-Path $root "cli\dashboard\scripts\build-icons.ts") --stage $brandResources
+if ($LASTEXITCODE -ne 0) { throw "Platform icon resources failed generation or verification" }
+$brandIcon = Join-Path $brandResources "gitgo.ico"
 & $Python -B (Join-Path $root "scripts\check_terminal_build_runtime.py") $PyInstallerPackages
 if ($LASTEXITCODE -ne 0) { throw "Selected build runtime is missing core application dependencies" }
 
@@ -128,6 +132,7 @@ try {
 try {
     & $Bun build (Join-Path $root "cli\dashboard\src\main.tsx") `
         --compile --windows-title "$($product.display_name)" `
+        --windows-icon $brandIcon `
         --windows-version "$($product.windows_version)" `
         --windows-description "$($product.display_name) $($product.version)" `
         --outfile (Join-Path $stage "$($product.primary_command).exe")
@@ -164,11 +169,13 @@ if ($LASTEXITCODE -ne 0) { throw "Windows Host version metadata generation faile
 $pyInstallerArguments = @(
     "--noconfirm", "--clean", "--onedir",
     "--name", "gitgo-host",
+    "--icon", $brandIcon,
     # Tools are registered/imported dynamically and approval digests cover their
     # implementations even before first use. Match native acceptance packaging.
     "--paths", $root, "--collect-submodules", "backend",
     "--additional-hooks-dir", (Join-Path $root "packaging\pyinstaller-hooks"),
     "--hidden-import", "backend.core.tools.registrations",
+    "--hidden-import", "csv", "--hidden-import", "fractions", "--hidden-import", "statistics",
     "--distpath", $internal,
     "--workpath", (Join-Path $root "build\terminal-host"),
     "--specpath", (Join-Path $root "build\terminal-host"),
@@ -178,6 +185,8 @@ $pyInstallerArguments = @(
     "--add-data", "$promptResources;backend/resources/prompts",
     (Join-Path $root "backend\core\native_host_entry.py")
 )
+& $Python -B (Join-Path $root 'scripts\build_sandbox_native.py')
+if ($LASTEXITCODE -ne 0) { throw 'Rust sandbox ABI build failed' }
 if ($useExternalPyInstaller) {
     & $Python -B $pyInstallerRunner $PyInstallerPackages @pyInstallerArguments
 } else {
@@ -192,6 +201,8 @@ if ($ManagedUpdate) {
 }
 & $Python -B (Join-Path $root 'scripts\render_product_manifest.py') @renderArguments
 if ($LASTEXITCODE -ne 0) { throw "Product manifest rendering failed" }
+& $Python -B (Join-Path $root 'scripts\stage_native_entry.py') --stage $stage
+if ($LASTEXITCODE -ne 0) { throw "Native entry contract staging failed" }
 
 $packagedHost = Join-Path $internal "gitgo-host\gitgo-host.exe"
 $sourceNotices = Join-Path $stage 'source-notices'
@@ -209,6 +220,10 @@ foreach ($executable in @((Join-Path $stage "$($product.primary_command).exe"), 
 & $Python -B (Join-Path $root "scripts\stage_search_engine.py") `
     --binary $Ripgrep --notices $RipgrepNotices --destination (Split-Path -Parent $packagedHost)
 if ($LASTEXITCODE -ne 0) { throw "Bundled search engine staging failed" }
+if ($env:GITGO_CLOC_BUNDLE) {
+    & $Python -B (Join-Path $root "scripts\stage_workbench_cloc.py") --bundle $env:GITGO_CLOC_BUNDLE --destination (Split-Path -Parent $packagedHost)
+    if ($LASTEXITCODE -ne 0) { throw "Workbench cloc bundle staging failed" }
+}
 if ($UpdateEvidence) {
     & $Python -B (Join-Path $root "scripts\stage_update_contract.py") --stage $stage
     if ($LASTEXITCODE -ne 0) { throw "Frozen runtime data evidence failed" }

@@ -265,7 +265,9 @@ export class DaemonClient {
           // never from wording in the user's message.
           capability_profile_id: "supervisor.control",
           task_kind: "answer",
-          max_steps: 50,
+          max_steps: 150,
+          runtime_preferences: {execution_step_schedule: [150, 250, 150, 50]},
+          task_budget: {max_provider_calls: 800},
           task_description: (args.message || "").slice(0, 200),
         };
         if (sessionId) command.session_id = sessionId;

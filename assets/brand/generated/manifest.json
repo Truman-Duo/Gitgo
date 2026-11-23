@@ -1,0 +1,99 @@
+{
+  "source": {
+    "name": "gitgo-icon.svg",
+    "sha256": "ed24abd2ea22f97c2c3964dd0103be41006b80e9d3deaf2fcf11a5ee93b72d9a"
+  },
+  "recipe": {
+    "version": 2,
+    "renderer": "@resvg/resvg-wasm",
+    "renderer_version": "2.6.2",
+    "renderer_wasm_sha256": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
+    "converter_sha256": "60153a7ca1e891ec20dc17940682cf57be439742412cd5a616d10bd3f36da5bf",
+    "sizes": [
+      16,
+      20,
+      24,
+      32,
+      48,
+      64,
+      128,
+      256,
+      512,
+      1024
+    ],
+    "geometry": "source-viewBox",
+    "background": "transparent"
+  },
+  "files": [
+    {
+      "name": "gitgo-16.png",
+      "sha256": "1afa2f49b4b3cbba33510a56685e598e951e65e850d89e25f31790080a4ebf79",
+      "bytes": 761,
+      "size": 16
+    },
+    {
+      "name": "gitgo-20.png",
+      "sha256": "edb20706ef4389f476ab4c3590bf6a57ee4a4438a67bc72e572abaa0ae210a34",
+      "bytes": 1056,
+      "size": 20
+    },
+    {
+      "name": "gitgo-24.png",
+      "sha256": "6d8dc52d2ccc1bbb7bb65348217b878af987986c51967f058e52e22c707c58ba",
+      "bytes": 1376,
+      "size": 24
+    },
+    {
+      "name": "gitgo-32.png",
+      "sha256": "37b60a297e3f139799abfbe263f79aec21499d894915ca85bbf38e3905a47ec0",
+      "bytes": 2213,
+      "size": 32
+    },
+    {
+      "name": "gitgo-48.png",
+      "sha256": "40222ec65ae735d8aceeebc460339bc9df0f658e960ac876f750ed133c2b9d8c",
+      "bytes": 4419,
+      "size": 48
+    },
+    {
+      "name": "gitgo-64.png",
+      "sha256": "ea6c5f947f4f4a19b054b1b9a2434d90061bb4d07bc8f7a5ffdbb61910ffb9a1",
+      "bytes": 7201,
+      "size": 64
+    },
+    {
+      "name": "gitgo-128.png",
+      "sha256": "fbc0134045484288a3fa78b0454829f3a690c053ba78b4faba58e1c49ced1ba6",
+      "bytes": 24725,
+      "size": 128
+    },
+    {
+      "name": "gitgo-256.png",
+      "sha256": "fddbc404d5d7030a35e88400f6b01babdb98fbcb9dbf4b8c1e768c5d41f96004",
+      "bytes": 88281,
+      "size": 256
+    },
+    {
+      "name": "gitgo-512.png",
+      "sha256": "10d9196f33561a5f198216506491a3f92e7781528549fb68430a83f287d33c64",
+      "bytes": 303471,
+      "size": 512
+    },
+    {
+      "name": "gitgo-1024.png",
+      "sha256": "4cfb602d85f4bcea5faab38b3f4049d7e083efecefbf28319deff7202c288aaf",
+      "bytes": 891717,
+      "size": 1024
+    },
+    {
+      "name": "gitgo.ico",
+      "sha256": "3fe832fd6f67900441c464dd325cafbd192709c4154ab1f9af46c5959faa459d",
+      "bytes": 130166
+    },
+    {
+      "name": "gitgo.icns",
+      "sha256": "34d1befb3582c85f6270896cf989b9b0ea367998380a4f1d2ce2e9c5a6c5d2af",
+      "bytes": 1719631
+    }
+  ]
+}

@@ -450,12 +450,30 @@ def install(ctx):
 
 
     def complete_task(args: dict) -> dict:
+        from backend.core.loop.main_dialogue import completion_arguments, require_response_components, DialogueUpdateError, update_error
         try:
-            claim = CompletionClaim.from_args(args, step=process.steps_used, process=process)
+            require_response_components(process, args.get('scope_update'))
+            claim = CompletionClaim.from_args(completion_arguments(args), step=process.steps_used, process=process)
+        except DialogueUpdateError as exc:
+            return {**update_error(exc), 'accepted': False}
         except ValueError as exc:
             return {"error": str(exc), "accepted": False}
+        if 'answer_updates' in args or 'scope_update' in args:
+            from backend.core.loop.main_dialogue import apply_answer_updates, DialogueUpdateError, update_error
+            try:
+                apply_answer_updates(process, args.get('answer_updates', []), args.get('scope_update'))
+            except DialogueUpdateError as exc:
+                return {**update_error(exc), 'accepted': False}
         process.completion_claim = claim
-        return {"accepted": True, "claim": claim.to_dict()}
+        from backend.core.loop.main_dialogue import owns_dialogue, bind_candidate
+        if owns_dialogue(process.read_context_snapshot()[0].get('alignment_runtime') or {}):
+            bind_candidate(process, claim.result, list(claim.files))
+        result = {"accepted": True, "claim": claim.to_dict()}
+        if args.get('answer_updates'):
+            result['decision_recording'] = {
+                'accepted_values': 'actual_source_words_or_listed_selections',
+                'agent_paraphrases': 'unverified_proposals_not_user_acceptance'}
+        return result
 
 
     tools["complete_task"] = AgentTool(

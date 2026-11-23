@@ -242,7 +242,7 @@ def read_trace_events(
     }
 
 
-def read_trace_summary(self: ObservabilityPort, trace_id: str, *, process_id: str = "") -> dict:
+def read_trace_summary(self: ObservabilityPort, trace_id: str, *, process_id: str = "", include_recent: bool = True) -> dict:
     """Return exact semantic-event counts without materializing a verbose trace."""
     self._ensure_open()
     where = "trace_id=?"
@@ -267,7 +267,7 @@ def read_trace_summary(self: ObservabilityPort, trace_id: str, *, process_id: st
             f"""SELECT record_json FROM trace_events WHERE {where}
                  ORDER BY sequence DESC LIMIT 8""",
             parameters,
-        ).fetchall()
+        ).fetchall() if include_recent else []
     return {
         "trace_id": trace_id,
         "event_count": int(totals[0] or 0),

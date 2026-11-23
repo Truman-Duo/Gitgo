@@ -76,6 +76,33 @@ class PublishQueue:
         with self._lock:
             self._pending.pop(key, None)
 
+    def submit_release(self, project, arguments, admit):
+        from backend.core.publish.release_journal import ACTIVE_RELEASE
+        key = ("release", project.workspace_path, arguments["request_id"])
+        with self._lock:
+            if self._closed.is_set():
+                raise PublishError("PUBLISH_RUNTIME_CLOSED")
+            if key not in self._pending and len(self._pending) >= 16:
+                raise PublishError("PUBLISH_QUEUE_FULL")
+            result = admit()
+            new_job = result.pop("_new_release_job", False)
+            item = result.get("item", {})
+            job = item.get("release_controller", {}).get("job", {})
+            if result.get("error") or new_job is not True or job.get("state") != "queued" or key in self._pending:
+                return result
+            repo = Repository(project.workspace_path, get_storage(project.workspace_path))
+            saved, _ = repo.load()
+            fresh = find_item(saved, item["id"]).get("release_controller", {}).get("job", {})
+            if fresh.get("id") != job["id"] or fresh.get("state") not in ACTIVE_RELEASE:
+                return result
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="publish-runtime")
+            from .release_queue import drive_release_job
+            future = self._pool.submit(drive_release_job, project, item["id"], job["id"], self._closed.is_set)
+            self._pending[key] = future
+        future.add_done_callback(lambda _: self._forget(key))
+        return result
+
     def _local_drive(self, project, item_id, run_id):
         from backend.core.application.services import ApplicationServices
         from backend.core.tools.publish_service import invoke_local_publish

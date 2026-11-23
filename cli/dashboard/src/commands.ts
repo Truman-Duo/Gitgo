@@ -8,6 +8,8 @@ import { getCommands, REGISTRY, type CommandDef } from "./keybindings.js";
 export { getCommands };
 
 import { formatNotice } from "./notices.js";
+import type {FeedbackTone} from "./hooks/useFeedback.js";
+import type {Copy} from "./ui/pageContract.js";
 
 import {
   lessonVerify,
@@ -17,6 +19,7 @@ import {
   archiveProject,
   resumeRecovery, discardRecovery,
   previewUndo,
+  llmEffortOptions,
 } from "./backend/tools.js";
 
 export type CommandContext = {
@@ -42,8 +45,12 @@ export type CommandOutcome = {
   refreshTrigger?: boolean;
   exitApp?: boolean;
   navigateTo?: Scene;
-  showPanel?: { overlay: OverlayType; props?: Record<string, any> };
+  showPanel?: CommandPanel;
+  loadPanel?: () => Promise<CommandPanel | CommandFeedback>;
 };
+
+type CommandPanel = {overlay: OverlayType; props?: Record<string, any>};
+export type CommandFeedback = {message: Copy; tone: FeedbackTone};
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -224,7 +231,25 @@ const HANDLERS: Record<string, (ctx: CommandContext, args: string[]) => Promise<
   "config.llm": async (ctx) => ({ resultText: "", showPanel: { overlay: "configPanel", props: { project: resolveProject(ctx), initialTab: "providers" } } }),
   "config.llm.default": async (ctx) => ({ resultText: "", showPanel: { overlay: "configPanel", props: { project: resolveProject(ctx), initialTab: "providers" } } }),
   "provider.model": async () => ({resultText:"",showPanel:{overlay:"modelPicker"}}),
-  "provider.effort": async () => ({resultText:"",showPanel:{overlay:"effortPicker"}}),
+  "provider.effort": async ({client}) => ({
+    resultText: "",
+    loadPanel: async () => {
+      try {
+        const options = await llmEffortOptions(client);
+        if (options.levels.length) return {overlay: "effortPicker", props: {options}};
+        const message = options.state === "unconfigured"
+          ? {en: "Configure an API and models first", zh: "请先配置 API 和模型"}
+          : options.state === "unsupported"
+            ? {en: "This model does not support effort adjustment", zh: "此模型不支持思考强度调节"}
+            : {en: "No effort levels declared", zh: "未声明可选档位"};
+        return {message, tone: "warning"};
+      } catch (error) {
+        const detail = error as {code?: string; message?: string};
+        const reason = detail?.code || detail?.message || "EFFORT_READ_FAILED";
+        return {message: {en: `Unable to read effort settings · ${reason}`, zh: `无法读取思考强度配置 · ${reason}`}, tone: "error"};
+      }
+    },
+  }),
   "config.bin": async () => ({ resultText: "", showPanel: { overlay: "binPanel" } }),
   "config.bin.delete_delay": async (ctx) => ({ resultText: "", showPanel: { overlay: "configPanel", props: { project: resolveProject(ctx), initialTab: "general" } } }),
 

@@ -4,13 +4,17 @@ export type Model={id:string;name:string;limits:{context_window?:number;max_outp
 export type Profile={model_id:string;protocol:string;context_window:number;max_output_tokens:number;request_preferences:Preferences;context_source:string;output_source:string;model_receipt?:string;probe_receipt?:string;deployment?:Model;verification?:unknown};
 export type Connection=Record<string,string>;
 export const protocols=["openai_chat","openai_responses","anthropic_messages","auto"];
+export const contextBudgets=[256000,512000,1000000] as const;
+export function defaultContextBudget(capacity?:number):number{
+ return capacity&&capacity>0?Math.min(capacity,capacity>=1000000?1000000:512000):512000;
+}
 export function loadedProfiles(seed?:LLMProvider):Profile[]{
  const raw=seed?.configuration?.models || (seed?.model_id?[{...seed,...seed.configuration}]:[]);
  return raw.map((p:any)=>({...p,request_preferences:p.request_preferences || {},context_source:p.sources?.context_window || p.context_source || "user",output_source:p.sources?.max_output_tokens || p.output_source || "user"}));
 }
 export function defaultProfile(model_id:string,protocol:string,deployment?:Model,receipt?:string):Profile{
- const context=deployment?.limits.context_window || 128000,capacity=deployment?.limits.max_output_capacity || 4096;
- return {model_id,protocol,context_window:context,max_output_tokens:Math.max(1,Math.min(4096,capacity,context-1)),request_preferences:{},context_source:deployment?.limits.context_window?(deployment.field_sources?.context_window==="https://models.dev/api.json"?"reference":"discovered"):"default",output_source:"default",deployment,model_receipt:receipt};
+ const context=defaultContextBudget(deployment?.limits.context_window),capacity=deployment?.limits.max_output_capacity || 4096;
+ return {model_id,protocol,context_window:context,max_output_tokens:Math.max(1,Math.min(4096,capacity,context-1)),request_preferences:{},context_source:"default",output_source:"default",deployment,model_receipt:receipt};
 }
 export function configurationJson(connection:Connection,profiles:Profile[]){
  return JSON.stringify({name:connection.name,preset_id:connection.preset,base_url:connection.base_url,protocol:connection.protocol,models:profiles.map(p=>({model_id:p.model_id,protocol:p.protocol,context_window:p.context_window,max_output_tokens:p.max_output_tokens,request_preferences:{reasoning_effort:p.request_preferences.reasoning_effort || "",body:p.request_preferences.body || {}}}))},null,2);
@@ -33,9 +37,12 @@ export function parseConfiguration(text:string,current:Connection,profiles:Profi
   if(typeof row.model_id!=="string"||!row.model_id.trim()||row.model_id!==row.model_id.trim()||row.model_id.length>512||/[\x00-\x1f]/.test(row.model_id)||seen.has(row.model_id))throw Error("INVALID_OR_DUPLICATE_MODEL_ID: "+path+".model_id");
   seen.add(row.model_id);
   const old=profiles.find(p=>p.model_id===row.model_id),base=old || defaultProfile(row.model_id,raw.protocol);
-  const protocol=row.protocol ?? raw.protocol,context=row.context_window ?? base.context_window,output=row.max_output_tokens ?? base.max_output_tokens;
+  const presets:Record<string,number>={"256k":256000,"512k":512000,"1M":1000000};
+  const contextValue=row.context_window ?? base.context_window;
+  const protocol=row.protocol ?? raw.protocol,context=typeof contextValue==="string"?presets[contextValue]:contextValue,output=row.max_output_tokens ?? base.max_output_tokens;
   if(!protocols.includes(protocol))throw Error("INVALID_PROVIDER_PROTOCOL: "+path+".protocol");
   if(!Number.isInteger(context)||context<1024)throw Error("INVALID_CONTEXT_LIMIT: "+path+".context_window");
+  if(typeof contextValue==="string"&&base.deployment?.limits.context_window&&context>base.deployment.limits.context_window)throw Error("CONTEXT_BUDGET_EXCEEDS_CAPACITY: "+path+".context_window");
   if(!Number.isInteger(output)||output<1||output>=context)throw Error("INVALID_OUTPUT_BUDGET: "+path+".max_output_tokens");
   const prefs=row.request_preferences ?? {},body=prefs?.body ?? {},effort=prefs?.reasoning_effort ?? "";
   if(!prefs||typeof prefs!=="object"||Array.isArray(prefs)||Object.keys(prefs).some(k=>!["reasoning_effort","body"].includes(k))||typeof effort!=="string"||!body||typeof body!=="object"||Array.isArray(body))throw Error("INVALID_REQUEST_PREFERENCES: "+path+".request_preferences");

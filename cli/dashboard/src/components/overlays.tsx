@@ -71,6 +71,7 @@ export interface OverlayCtx {
   sendChat: (text: string) => void;
   verbose: boolean;
   onBrowseParent?: (delta:number)=>number;
+  parentBrowseRevision?:number;
   language?: "en" | "zh";
   onSettingSaved?: (key: string) => Promise<string | void>;
   onUpdateExit?: () => Promise<void>;
@@ -99,7 +100,7 @@ function renderOverlayContent(
     case "modelPicker":
       return <ModelPicker client={ctx.client} onFooter={ctx.setFooterOverride} onDismiss={ctx.popOverlay} onSelected={()=>{ctx.dispatch({type:"bump_refresh_key"});ctx.refresh();}}/>;
     case "effortPicker":
-      return <EffortPicker client={ctx.client} onFooter={ctx.setFooterOverride} onDismiss={ctx.popOverlay} onSelected={()=>{ctx.dispatch({type:"bump_refresh_key"});ctx.refresh();ctx.dispatch({type:"set_cmd_result",text:ctx.language==="zh"?"思考强度已保存，将从下一次模型请求生效。":"Effort saved; applies from the next model request."});}}/>;
+      return <EffortPicker client={ctx.client} options={overlay.props?.options} onFooter={ctx.setFooterOverride} onDismiss={ctx.popOverlay} onSelected={()=>{ctx.dispatch({type:"bump_refresh_key"});ctx.refresh();ctx.dispatch({type:"set_cmd_result",text:ctx.language==="zh"?"思考强度已保存，将从下一次模型请求生效。":"Effort saved; applies from the next model request."});}}/>;
     case "undoPanel":
       return <UndoPanel client={ctx.client}
         project={overlay.props?.project || ctx.activeProject || ""}
@@ -245,7 +246,7 @@ function renderOverlayContent(
       return ctx.scene === "projects"
         ? <UpdatePanel language={ctx.language} client={ctx.client} cols={ctx.w} onDismiss={ctx.popOverlay} onUpdateExit={ctx.onUpdateExit} /> : null;
     case "btwPanel":
-      return <BtwPanel client={ctx.client} cols={ctx.w} maxBodyRows={Math.max(2,Math.floor(ctx.h/2)-6)} onBrowseParent={ctx.onBrowseParent}
+      return <BtwPanel parentBrowseRevision={ctx.parentBrowseRevision} client={ctx.client} cols={ctx.w} maxBodyRows={Math.max(2,Math.floor(ctx.h/2)-6)} onBrowseParent={ctx.onBrowseParent}
         project={String(overlay.props?.project || ctx.activeProject || "")}
         processId={String(overlay.props?.processId || "")}
         question={String(overlay.props?.question || "")}

@@ -9,22 +9,27 @@ from dataclasses import dataclass
 from pathlib import Path
 
 class SandboxDenied(RuntimeError):
-    def __init__(self, code: str, detail: str):
+    def __init__(self, code: str, detail: str, *, details: dict | None = None):
         super().__init__(detail)
         self.code = code
+        self.details = dict(details or {})
 
     def result(self) -> dict:
         from backend.core.errors import error_payload
+        if self.code == "NATIVE_OUTCOME_UNCONFIRMED":
+            return {**error_payload(self.code, message=str(self), next_actions=[
+                {"action": "inspect_effects_before_replanning", "effect": "Process cleanup is confirmed; verify the interrupted command outcome without automatic replay."}]),
+                "effect_state": "ambiguous"}
         if self.code == "INVOCATION_JOURNAL_UNAVAILABLE":
             return {**error_payload(self.code, message=str(self), next_actions=[
                 {"action": "inspect_project_storage", "effect": "Restore reliable invocation evidence before native execution; do not replay unknown calls."}]),
                 "effect_state": "not_committed"}
         if self.code == "SANDBOX_CLEANUP_PENDING":
-            return {**error_payload(self.code, message=str(self), next_actions=[
+            return {**error_payload(self.code, message=str(self), details=self.details, next_actions=[
                 {"action": "inspect_native_ownership", "effect": "Inspect retained launch and cleanup facts. New approval, elapsed time and deleting records do not prove native retirement."}]),
                 "effect_state": getattr(self, "effect_state", "not_committed")}
         return {
-            **error_payload(self.code, message=str(self), next_actions=[
+            **error_payload(self.code, message=str(self), details=self.details, next_actions=[
                 {"action": "inspect_native_execution",
                  "effect": "Use the recorded preparation, launch and cleanup facts. Internal runtime failures are Gitgo bugs, not user goal choices. Request permission only when the actual resource scope requires it; never retry unsandboxed."},
             ]),
@@ -118,11 +123,14 @@ def sandbox_environment(source: dict[str, str]) -> dict[str, str]:
     return env
 
 
-def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
+def sandbox_popen(argv: list[str], policy: SandboxPolicy, *, launch_deadline=None, launch_check=None, **kwargs):
     validate_runtime_separation(policy.workspace, trusted_runtime_roots())
+    if sys.platform == "darwin":
+        from backend.core.sandbox_macos import popen
+        return popen(argv, policy, **kwargs)
     if sys.platform == "win32":
         from backend.core.sandbox_windows import WindowsSandboxProcess
-        return WindowsSandboxProcess(argv, policy=policy, **kwargs)
+        return WindowsSandboxProcess(argv, policy=policy, launch_deadline=launch_deadline, launch_check=launch_check, **kwargs)
     if sys.platform == "linux":
         from backend.core.sandbox_linux import LinuxCgroup, LinuxSandboxProcess, trusted_bwrap
         if kwargs.get('pass_fds') or kwargs.get('close_fds') is False:
@@ -153,34 +161,59 @@ def sandbox_popen(argv: list[str], policy: SandboxPolicy, **kwargs):
         for root in policy.read_roots:
             command += ["--ro-bind", str(root), str(root)]
         cgroup = LinuxCgroup(policy)
-        command += ["--dir", "/run",
-                    "--bind", str(cgroup.path / "cgroup.procs"), "/run/gitgo-cgroup.procs",
-                    "--bind", str(policy.workspace), str(policy.workspace),
-                    "--chdir", str(kwargs.pop("cwd")), "--"]
-        # Set limits inside the new PID namespace before loading tool code.
-        bootstrap = (
-            "import os,resource,sys;"
-            # This is the only cgroup file exposed: it can move a visible
-            # process INTO this invocation, never change limits or move out.
-            "f=os.open('/run/gitgo-cgroup.procs',os.O_WRONLY);os.write(f,b'0');os.close(f);"
-            f"resource.setrlimit(resource.RLIMIT_AS,({policy.memory_bytes},{policy.memory_bytes}));"
-            f"resource.setrlimit(resource.RLIMIT_CPU,({policy.cpu_seconds},{policy.cpu_seconds}));"
-            "resource.setrlimit(resource.RLIMIT_CORE,(0,0));"
-            "os.execv(sys.argv[1],sys.argv[1:])"
-        )
-        # The packaged Host exposes a private Python role; do not treat its
-        # executable as a general system interpreter.
-        command += python_command(["-I", "-c", bootstrap, *argv])
-        from backend.core.sandbox_seccomp import socket_filter
+        process = None
         try:
+            procs_fd = cgroup.procs_fd
+            command += ["--dir", "/run",
+                        "--bind-fd", str(procs_fd), "/run/gitgo-cgroup.procs",
+                        "--bind", str(policy.workspace), str(policy.workspace),
+                        "--chdir", str(kwargs.pop("cwd")), "--"]
+            # Set limits inside the new PID namespace before loading tool code.
+            bootstrap = (
+                "import os,resource,sys;"
+                # This is the only cgroup file exposed: it can move a visible
+                # process INTO this invocation, never change limits or move out.
+                "f=os.open('/run/gitgo-cgroup.procs',os.O_WRONLY);os.write(f,b'0');os.close(f);"
+                f"resource.setrlimit(resource.RLIMIT_AS,({policy.memory_bytes},{policy.memory_bytes}));"
+                f"resource.setrlimit(resource.RLIMIT_CPU,({policy.cpu_seconds},{policy.cpu_seconds}));"
+                "resource.setrlimit(resource.RLIMIT_CORE,(0,0));"
+                "os.execv(sys.argv[1],sys.argv[1:])"
+            )
+            # The packaged Host exposes a private Python role; do not treat its
+            # executable as a general system interpreter.
+            command += python_command(["-I", "-c", bootstrap, *argv])
+            from backend.core.sandbox_seccomp import socket_filter
             with socket_filter(policy.workspace) as program:
                 # bubblewrap consumes/closes this descriptor before tool exec.
                 # No Host descriptor other than the three stdio pipes survives.
                 command[1:1] = ['--seccomp', str(program.fileno())]
-                kwargs.update(pass_fds=(program.fileno(),), close_fds=True)
-                return LinuxSandboxProcess(command, cgroup=cgroup, cpu_seconds=policy.cpu_seconds, **kwargs)
+                kwargs.update(pass_fds=(program.fileno(), procs_fd), close_fds=True)
+                process = LinuxSandboxProcess(command, cgroup=cgroup, **kwargs)
+                try:
+                    cgroup.watch(process.pid, policy.cpu_seconds)
+                except (OSError, RuntimeError) as exc:
+                    raise SandboxDenied('SANDBOX_LAUNCH_DENIED',
+                        f'Native resource accounting monitor could not start: {exc}') from exc
+            return process
         except BaseException as exc:
-            exc.cleanup = cgroup.close()
+            if process is None:
+                exc.cleanup = cgroup.close()
+            else:
+                exc.effect_state = "ambiguous"
+                exc.started_pid = process.pid
+                try:
+                    exc.cleanup = process.abort_sandbox()
+                    exc.exit_code = process.returncode
+                except Exception:
+                    exc.cleanup = {"complete": False, "mode": "linux-cgroup",
+                                   "issues": ["native_cleanup_failed"]}
+                finally:
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
             raise
     raise SandboxDenied("SANDBOX_UNAVAILABLE", "No native sandbox backend is available on this platform.")
 
@@ -201,6 +234,8 @@ def prepare_child_environment(workspace: str) -> None:
         folder.mkdir(parents=True, exist_ok=True)
     os.environ.update({key: str(value) for key, value in folders.items()})
     os.environ["PSModuleAnalysisCachePath"] = str(home / "Local" / "ModuleAnalysisCache")
+    from .windows_python_temp import install_private_mkdir
+    install_private_mkdir()
 
 
 def child_environment_paths(root: Path) -> dict[str, Path]:

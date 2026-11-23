@@ -1,2 +1,5 @@
-Record A's structured review of a terminal owned B outcome. Approval is required before any required delegated outcome can satisfy the supervisor completion gate. The Host automatically links the child's qualifying receipts; do not copy internal receipt IDs.
+Record a review decision for a terminal owned child. For a sealed handoff use result_ref, verdict and summary. For other outcomes use process_id. The Host links qualifying receipts automatically.
 For a child that asked the user, inspect wait_agents.user_decisions for the child task, not only A's own current pending card. A completed/answered card is no longer pending; a review-published decision need not increment original function execution counts. Use the canonical question/answer evidence, and distinguish received text from its semantic interpretation.
+Trace a relevant unverified consumer or output boundary when it changes the verdict. State whether review relied on inspection, the worker's recorded checks or an independently reproduced result.
+If the worker offered a draft or was reassigned from one, approve after inspecting the sealed result. Use its result_ref or the explicit process_id, draft_id and result_commit fields.
+If you are also ready to deliver this exact result, use promote_agent_changes with its review field to record approval and delivery together.

@@ -8,7 +8,7 @@ from __future__ import annotations
 from backend.core.storage import StorageReferenceMissing
 
 
-def _save_session_checkpoint(daemon_ctx: dict, process) -> None:
+def _save_session_checkpoint(daemon_ctx: dict, process, *, record_asset_versions=False) -> None:
     """Save session checkpoint after agent_step completes or errors."""
     store = daemon_ctx.get("session_store")
     if store is None:
@@ -21,7 +21,10 @@ def _save_session_checkpoint(daemon_ctx: dict, process) -> None:
         process.lifecycle_finalized = True
     try:
         # State, revision, immutable fact and terminal barrier commit together.
-        store.save_process_checkpoint(process)
+        if record_asset_versions:
+            store.save_process_checkpoint(process, record_asset_versions=True)
+        else:
+            store.save_process_checkpoint(process)
     except BaseException:
         process.lifecycle_finalized = previous
         raise

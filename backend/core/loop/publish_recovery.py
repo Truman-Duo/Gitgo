@@ -57,40 +57,11 @@ def retire_native(recovery_id, location):
     if location != resource_location(recovery_id):
         raise PublishError("PUBLISH_RUNTIME_ENVIRONMENT_CHANGED")
     if sys.platform == "win32":
-        import ctypes as C
-        from ctypes import wintypes as W
-        from backend.core.sandbox_windows import WindowsApi, NativeJobHandle, _PENDING_JOBS
-        for job in tuple(_PENDING_JOBS.values()):
-            if getattr(job, "recovery_id", "") == recovery_id and not job.close()["complete"]:
-                return False
-        api = WindowsApi()
-        function = api.kernel.OpenJobObjectW
-        function.argtypes, function.restype = [W.DWORD, W.BOOL, W.LPCWSTR], W.HANDLE
-        C.set_last_error(0)
-        handle = function(0x0004 | 0x0008, False, location["name"])
-        if not handle:
-            if C.get_last_error() == 2:
-                return True  # Named kernel boundary no longer exists.
-            raise C.WinError(C.get_last_error())
-        job = NativeJobHandle(handle, api)
-        job.recovery_id = recovery_id
-        return job.close()["complete"] is True
+        from backend.core.windows_sandbox_native import recover
+        return recover(recovery_id)
     if sys.platform == "linux":
-        from backend.core.sandbox_linux import LinuxCgroup, _PENDING_CGROUPS
-        root = Path(location["root"]).resolve(strict=True)
-        if not root.is_relative_to(Path("/sys/fs/cgroup")) or root == Path("/sys/fs/cgroup"):
-            raise PublishError("PUBLISH_RUNTIME_ENVIRONMENT_CHANGED")
-        path = root / ("gitgo-" + recovery_id)
-        for group in tuple(_PENDING_CGROUPS.values()):
-            if group.path == path:
-                return group.close()["complete"] is True
-        if not path.exists():
-            return True
-        if path.is_symlink() or path.resolve().parent != root:
-            raise PublishError("PUBLISH_RUNTIME_RECORD_UNAVAILABLE")
-        group = LinuxCgroup.__new__(LinuxCgroup)
-        group.path, group.cleanup = path, {"complete": False, "mode": "linux-cgroup", "issues": []}
-        return group.close()["complete"] is True
+        from backend.core.sandbox_linux import recover_cgroup
+        return recover_cgroup(location["root"], recovery_id)
     raise PublishError("PUBLISH_RUNTIME_RECOVERY_UNAVAILABLE")
 
 
@@ -119,16 +90,16 @@ def recover_check(storage, operation):
                 raise PublishError("SANDBOX_CLEANUP_PENDING")
             if sys.platform == "win32":
                 from backend.core.sandbox_access import revoke_record
-                from backend.core.sandbox_access_records import MAX_RECORD_BYTES
+                from backend.core.sandbox_access_records import load_scoped_access_record
                 journal = storage.paths.project_root / "sandbox_access" / (stage.name + ".json")
                 if journal.exists():
                     if journal.resolve().parent != journal.parent.resolve() or journal.is_symlink():
                         raise PublishError("PUBLISH_RUNTIME_RECORD_UNAVAILABLE")
-                    with journal.open("rb") as stream:
-                        raw = stream.read(MAX_RECORD_BYTES + 1)
-                    payload = json.loads(raw) if len(raw) <= MAX_RECORD_BYTES else {}
-                    if (payload.get("version") != 1 or payload.get("kind") != "scoped_workspace_access"
-                            or payload.get("workspace") != str(stage)):
+                    try:
+                        payload = load_scoped_access_record(journal)
+                    except (OSError, ValueError) as exc:
+                        raise PublishError("PUBLISH_RUNTIME_RECORD_UNAVAILABLE") from exc
+                    if payload.get("workspace") != str(stage):
                         raise PublishError("PUBLISH_RUNTIME_RECORD_UNAVAILABLE")
                     # A revoked receipt can outlive the disposable workspace.
                     if payload.get("phase") != "revoked":

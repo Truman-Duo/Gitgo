@@ -53,6 +53,7 @@ def _delegated_outcome_metadata(process: AgentProcess) -> list[dict]:
                 if isinstance(item, dict)
             ],
             "superseded_by": contract.get("superseded_by", ""),
+            **({"returned_assignment": contract["returned_assignment"]} if contract.get("returned_assignment") else {}),
             "supervisor_review": dict(reviews.get(child_id, {})),
             "completion_claim": (
                 child.completion_claim.to_dict()
@@ -70,6 +71,7 @@ def _delegated_outcome_metadata(process: AgentProcess) -> list[dict]:
 def _make_result(process: AgentProcess, session: "AgentSession",
                  response: str, *, duration_ms: float = 0.0,
                  error_code: str = "", error_message: str = "",
+                 error_details: dict | None = None, error_retryable: bool | None = None,
                  outcome_status: OutcomeStatus | None = None,
                  doom_loop: bool = False,
                  window_action: str = "none",
@@ -112,8 +114,10 @@ def _make_result(process: AgentProcess, session: "AgentSession",
     error = None
     if error_code:
         from backend.core.errors import ERROR_CATALOG, error_payload
-        details = error_payload(error_code, message=error_message).get("error_info", {}) if error_code in ERROR_CATALOG else {}
-        error = TaskError(code=error_code, message=error_message or error_code, details=details)
+        details = error_payload(error_code, message=error_message, details=error_details).get("error_info", {}) if error_code in ERROR_CATALOG else {"details": dict(error_details or {})}
+        retryable = details.get("retryable", False) if error_retryable is None else error_retryable
+        details["retryable"] = bool(retryable)
+        error = TaskError(code=error_code, message=error_message or error_code, details=details, retryable=bool(retryable))
     from backend.core.loop.completion_protocol import HostCompletionEvidence
     completion_evidence = (
         HostCompletionEvidence.collect(process).to_dict()
@@ -249,11 +253,25 @@ def _budget_exhausted_result(process: AgentProcess, session: "AgentSession",
         process, session, response, duration_ms=duration_ms,
         error_code=str(getattr(exc, "code", "TASK_TREE_BUDGET_EXHAUSTED")),
         error_message=str(exc),
+        error_details=getattr(exc, 'details', None),
         outcome_status=(OutcomeStatus.TIMED_OUT if timed_out else OutcomeStatus.FAILED),
     )
 
 
 def _status_result(process: AgentProcess, session: "AgentSession") -> dict:
+    if ((process.recovery or {}).get('checkpoint_commit') == 'unknown' and process.status not in (
+            ProcessStatus.CANCELLING, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
+            ProcessStatus.TIMED_OUT)):
+        # A peer delivery checkpoint can become uncertain while this runner
+        # waits at a safe boundary. Stop the turn without consuming/rejecting
+        # its retained mailbox or disguising recovery as cancellation.
+        result = TaskOutcome.failed(task_id=process.active_task_id or process.process_id,
+            process_id=process.process_id, process_status=process.status.value,
+            code='PROCESS_RECOVERY_REQUIRED', message='Inspect the retained checkpoint before resuming this execution.',
+            steps_used=process.steps_used, metadata={'automatic_replay_suppressed': True,
+                'recovery': dict(process.recovery)}).to_dict()
+        process.result = result
+        return result
     if process.status == ProcessStatus.COMPLETED and isinstance(process.result, dict):
         return process.result
     if process.status in (

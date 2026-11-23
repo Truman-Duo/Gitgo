@@ -16,7 +16,7 @@ def contract_view(value):
     # inventories and provenance journals are not instructions to the Agent.
     return select(value, ('revision', 'goal', 'execution_mode', 'delegation_required',
         'minimum_delegated_outcomes', 'deliverables', 'acceptance_criteria',
-        'uncertainties', 'required_tool_calls', 'adopt_process_ids', 'requires_user_decision',
+        'uncertainties', 'required_tool_calls', 'required_workbench_claims', 'adopt_process_ids', 'requires_user_decision',
         'user_requested_delegation', 'independent_workstreams', 'target_files', 'required_test_ids',
         'depends_on', 'input_interfaces', 'output_interfaces', 'interface_contract',
         'relationship_policy', 'agent_required_delegation', 'handoff_summary'))
@@ -24,7 +24,7 @@ def contract_view(value):
 
 def instance_view(value):
     result = select(value, ('id', 'instance_id', 'definition_id', 'definition_revision',
-        'epoch', 'phase', 'program_digest', 'version_policy', 'behavior_active', 'user_control', 'control_effect', 'error'))
+        'epoch', 'phase', 'program_digest', 'version_policy', 'behavior_active', 'user_control', 'control_effect', 'error', 'maintenance'))
     if value.get('inbox'):
         items = list(value['inbox'].values())
         actionable = [item for item in items if item['status'] in {'candidate', 'pending_adoption'}]
@@ -54,7 +54,8 @@ def instance_view(value):
 
 
 def task_view(value):
-    result = select(value, ('task_id', 'process_id', 'source_refs', 'catalog_version', 'authority_granted'))
+    result = select(value, ('task_id', 'process_id', 'source_refs', 'catalog_version', 'authority_granted',
+                            'work_item_links', 'assignment_handoffs'))
     result['contract'] = contract_view(value.get('contract') or {})
     result['advancement'] = select(value.get('advancement') or {}, ('mode', 'phase', 'user_control'))
     state = value.get('state') or {}
@@ -112,7 +113,8 @@ def task_feedback(args, data):
 def contract_feedback(args, data):
     if data.get('accepted') is not True:
         return data
-    result = select(data, ('accepted', 'host_validated', 'authority_granted', 'routing_advice', 'maintenance_status'))
+    result = select(data, ('accepted', 'host_validated', 'authority_granted', 'routing_advice', 'routing_compilation',
+                          'maintenance_status', 'maintained_assets', 'asset_routing_next', 'asset_routing_unavailable'))
     result['contract_revision'] = data['contract']['revision']
     result['execution_mode'] = data['contract'].get('execution_mode')
     result['activation'] = select(data.get('activation') or {}, ('phase', 'status', 'revision', 'error'))
@@ -127,8 +129,58 @@ def contract_feedback(args, data):
 def completion_feedback(args, data):
     if data.get('accepted') is not True or data.get('error'):
         return data
-    return {**select(data, ('accepted', 'verdict', 'target_process_id')),
+    return {**select(data, ('accepted', 'verdict', 'target_process_id', 'decision_recording')),
         'runtime_next': 'The submitted claim is retained. Runtime evaluates the existing completion boundary; acceptance is not a delivery or correctness certificate.'}
+
+
+def child_results_feedback(_args, data):
+    agents = data.get("agents")
+    if data.get("error") or not isinstance(agents, (list, dict)):
+        return data
+    waiting = isinstance(agents, dict)
+    rows = agents.items() if waiting else ((row["process_id"], row) for row in agents)
+    ready = []
+    visible = {}
+    for process_id, row in rows:
+        item = select(row, ("process_id", "display_name", "session_id", "actor_kind", "status",
+                            "lifecycle_finalized", "closeout_state", "outcome_ref", "task", "target_files",
+                            "superseded_by", "returned_assignment", "review_target_id", "depends_on", "error",
+                            "handoff", "asset_recovery_call"))
+        review = row.get("handoff_review_target") or {}
+        call = row.get("delivery_call") or {}
+        reference = row.get("result_ref") or (call.get("arguments") or {}).get("result_ref")
+        worktree = row.get("worktree") or {}
+        if worktree:
+            item["worktree"] = select(worktree, ("state", "promoted", "snapshot_commit", "result_commit"))
+            if files := worktree.get("changed_files"):
+                item["worktree"]["changed_files"] = files[:16]
+                item["worktree"]["changed_files_total"] = len(files)
+        if reference and not worktree.get("promoted") and not row.get("already_promoted"):
+            ready.append({"process_id": process_id, **select(row, ("display_name", "target_files")),
+                          "result_ref": reference,
+                          "changed_files": review.get("changed_files", (worktree.get("changed_files") or [])[:16])[:16],
+                          "changed_files_total": review.get("changed_files_total", len(worktree.get("changed_files") or [])),
+                          **select(call, ("asset_delivery",))})
+        elif review:
+            item["handoff_review_target"] = select(review, ("draft_id", "result_commit"))
+        if excerpt := row.get("response_excerpt"):
+            item["response_excerpt"] = excerpt[:600]
+            item["response_truncated"] = len(excerpt) > 600 or row.get("response_truncated", False)
+        if (decisions := row.get("user_decisions")) and decisions.get("total"):
+            item["user_decisions"] = decisions
+        visible[process_id] = item
+    return {**select(data, ("interruption", "all_terminal", "state_version", "state_changed", "wait_mode")),
+            **({"ready_deliveries": ready} if ready else {}),
+            **({"delivery_review_tool": "promote_agent_changes"} if ready else {}),
+            "agents": visible if waiting else list(visible.values())}
+
+
+def promotion_feedback(_args, data):
+    if not data.get("promoted") or not data.get("asset_delivery"):
+        return data
+    return select(data, ("promoted", "asset_delivery", "changed_files", "files", "artifact_notices",
+                         "verification_basis", "dependency_graph", "cleanup_error", "completion_result",
+                         "after_delivery"))
 
 
 def harness_feedback(args, data):

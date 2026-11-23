@@ -295,6 +295,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
 
     def iter_stream(self, events: Iterable[tuple[str, dict]]) -> Iterator[ProviderEvent]:
         response_id = ""
+        message_phases = {}
         for event_name, data in events:
             event_type = str(data.get("type") or event_name)
             response = data.get("response", {}) or {}
@@ -305,10 +306,12 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     response_id=str(response.get("id", "")), raw=data,
                 )
             elif event_type == "response.output_text.delta":
+                index = int(data.get("output_index", -1))
+                message_id, phase = message_phases.get(index, (str(data.get("item_id", "")), ""))
                 yield ProviderEvent(
                     ProviderEventType.TEXT_DELTA,
                     text=str(data.get("delta", "")),
-                    output_index=int(data.get("output_index", -1)),
+                    output_index=index, response_id=response_id, message_id=message_id, phase=phase,
                 )
             elif event_type in {
                 "response.reasoning_summary_text.delta",
@@ -327,6 +330,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 )
             elif event_type == "response.output_item.added":
                 item = data.get("item", {}) or {}
+                if item.get("type") == "message":
+                    message_phases[int(data.get("output_index", -1))] = (str(item.get("id", "")), str(item.get("phase") or ""))
                 if item.get("type") == "function_call":
                     yield ProviderEvent(
                         ProviderEventType.TOOL_CALL_STARTED,
@@ -343,6 +348,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     )
             elif event_type == "response.output_item.done":
                 item = data.get("item", {}) or {}
+                if item.get("type") == "message":
+                    message_id, phase = message_phases.get(int(data.get("output_index", -1)), ("", ""))
+                    yield ProviderEvent(ProviderEventType.MESSAGE_COMPLETED, phase=str(item.get("phase") or phase),
+                        message_id=str(item.get("id") or message_id), response_id=response_id,
+                        output_index=int(data.get("output_index", -1)), raw=item)
                 item_status = str(item.get("status", "")).strip().lower()
                 # Responses may emit output_item.done for an item whose payload
                 # is nevertheless incomplete (for example when
@@ -411,8 +421,10 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 if part.get("type") == "output_text" and part.get("text"):
                     result.append(ProviderEvent(
                         ProviderEventType.TEXT_DELTA, text=str(part["text"]),
-                        output_index=index,
+                        output_index=index, phase=str(item.get("phase") or ""), message_id=str(item.get("id", "")),
                     ))
+            result.append(ProviderEvent(ProviderEventType.MESSAGE_COMPLETED, phase=str(item.get("phase") or ""),
+                message_id=str(item.get("id", "")), output_index=index, raw=item))
         elif item.get("type") == "function_call":
             result.append(ProviderEvent(
                 ProviderEventType.TOOL_CALL_DONE,

@@ -256,6 +256,53 @@ def test_one_pipeline_call_publishes_activates_and_projects_without_model_bookke
     assert app.context_sections()['harness.projections']['guidance']['note']['content'] == 'Preserve the public interface.'
 
 
+def test_registered_component_composes_and_named_revision_keeps_other_behavior(runtime):
+    from backend.core.mechanism_runtime.contracts import Element, Port
+    from backend.core.mechanism_runtime.runner import NodeResult
+    app, process, *_ = runtime
+    callbacks = []
+
+    def threshold(context, parameters, inputs):
+        callbacks.append((context.epoch, inputs["event"]["observed"]))
+        return NodeResult({"matched": inputs["event"]["observed"] >= parameters["minimum"]},
+                          state={"count": context.state.get("count", 0) + 1})
+
+    app.registry.register(Element("fixture.threshold", 1,
+        {"type": "object", "properties": {"minimum": {"type": "integer"}},
+         "required": ["minimum"], "additionalProperties": False},
+        (Port("go", "trigger"), Port("event", "record")), (Port("matched", "boolean"),),
+        ("before_context",), threshold))
+    _, execute = pipeline_tool(runtime)
+    value = {"id": "threshold", "intent": "Project an observation only above the threshold",
+        "on": ["before_context"], "calls": [
+            {"id": "measure", "use": "fixture.threshold", "parameters": {"minimum": 5}},
+            {"id": "matching", "use": "context.project", "parameters": {"content": "Threshold reached"},
+             "when": "measure.matched"},
+            {"id": "independent", "use": "context.project", "parameters": {"content": "Independent context"}}]}
+    _, preview = execute({"operation": "preview", "declaration": value})
+    assert not preview.is_error and not callbacks
+    _, applied = execute({"operation": "apply", "declaration": value})
+    assert not applied.is_error, applied.formatted
+    assert applied.data["instance"]["phase"] == "ready" and not callbacks
+    app.dispatch("before_context", "fixture-observation-1", {"observed": 7})
+    before = app.context_sections()["harness.projections"]["threshold"]
+    assert set(before) == {"matching", "independent"}
+    previous, _ = app.repo.definition("threshold")
+
+    process.session.append_user("The threshold is now nine. Keep the independent context.")
+    _, revised = execute({"operation": "revise", "definition_id": "threshold",
+        "revision": {"calls": [{"id": "measure", "parameters": {"minimum": 9}}]}})
+    assert not revised.is_error, revised.formatted
+    after, _ = app.repo.definition("threshold")
+    assert [n for n in previous["compiled"]["elements"] if n["id"] != "measure"] == [
+        n for n in after["compiled"]["elements"] if n["id"] != "measure"]
+    assert len(callbacks) == 1
+    app.dispatch("before_context", "fixture-observation-2", {"observed": 7})
+    assert len(callbacks) == 2 and callbacks[0][0] != callbacks[1][0]
+    assert set(app.context_sections()["harness.projections"]["threshold"]) == {"independent"}
+    assert app.repo.list_instances(app.task)[0]["states"]["measure"] == {"count": 2}
+
+
 def test_source_change_after_preparation_cannot_commit_unreviewed_meaning(runtime):
     app, p, *_ = runtime
     args = {'operation': 'apply', 'declaration': declaration()}

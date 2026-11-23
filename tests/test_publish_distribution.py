@@ -256,7 +256,12 @@ def test_real_native_build_pause_waits_for_retirement_and_does_not_publish(forma
         paused = _action(formal_setup, current, "pause", "pause-build")
         assert paused["item"]["distribution_operation"]["cancel_requested"] is True
         assert paused["item"]["distribution_operation"]["state"] == "intent"
-        finished = future.result(timeout=20)
+        try:
+            finished = future.result(timeout=20)
+        except concurrent.futures.TimeoutError:
+            import faulthandler
+            faulthandler.dump_traceback()
+            raise
     assert finished["item"]["distribution_operation"]["state"] == "failed"
     assert finished["item"]["distribution_operation"]["reason"] == "PUBLISH_BUILD_CANCELLED"
     assert finished["item"]["status"] == "integrated" and not finished["item"].get("packages")

@@ -3,7 +3,6 @@ import argparse
 import json
 from pathlib import Path
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -13,40 +12,17 @@ from scripts.release_control.downloads import acquire
 from scripts.release_control.evidence import Evidence, atomic
 from scripts.release_control.github import GitHub
 from scripts.release_control.plan import check_source, load, create
+from scripts.release_control.recipe import GitgoNativeRecipe
+from backend.core.publish.release_engine import ReleaseContext, ReleaseEngine
 
 
 def run(plan, evidence, remote, through='prepared', workers=4):
-    if through not in ('prepared', 'draft', 'published', 'verified') or not 1 <= workers <= 16:
-        raise ValueError('Invalid release phase or concurrency')
-    with evidence.locked():
-        started = time.monotonic()
-        evidence.record('run', 'running', through=through)
-        try:
-            result = advance(plan, evidence, remote, through, workers)
-        except BaseException as exc:
-            evidence.record('run', 'failed', through=through, error=type(exc).__name__, seconds=time.monotonic()-started)
-            raise
-        evidence.record('run', 'success', result=result, seconds=time.monotonic()-started)
-        return result
+    return ReleaseEngine(GitgoNativeRecipe()).run(ReleaseContext(plan, evidence, remote, workers), through)
 
 
 def advance(plan, evidence, remote, through, workers):
-    check_source(plan)
-    delivery.ci_gate(plan, evidence, remote)
-    acquire(plan, evidence, remote, workers)
-    run_checks(plan, evidence, workers)
-    prepared = assets.prepare(plan, evidence)
-    delivery.guard(plan, prepared)
-    if through == 'prepared':
-        return {'phase': 'prepared', 'remote_writes': False}
-    row = delivery.draft(plan, evidence, remote, prepared)
-    if through == 'draft':
-        return {'phase': 'draft', 'release_id': row['id']}
-    delivery.publish(plan, evidence, remote, prepared, row)
-    if through == 'verified':
-        delivery.verify_public(plan, evidence, prepared)
-    return {'phase': through, 'release_id': row['id'],
-            'native_managed_install_verified': False, 'formal_terminal_verified': False}
+    # Compatibility for existing callers that already own the evidence lease.
+    return ReleaseEngine(GitgoNativeRecipe()).advance(ReleaseContext(plan, evidence, remote, workers), through)
 
 
 def main(argv=None):

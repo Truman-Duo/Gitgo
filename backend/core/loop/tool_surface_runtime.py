@@ -31,11 +31,8 @@ class ToolSurfaceRuntime:
         # Present each exact effect/cancellation contract beside its tool
         # schema, through the existing reference-catalog delta mechanism.
         # This is not a lease; the live names and original pipeline own access.
-        def value(item):
-            return getattr(item, 'value', item)
-        snapshot['tool_behaviors'] = {name: {
-            'effect': value(self.tools[name].effect),
-            'cancellation': value(self.tools[name].cancellation)}
+        from .tool_context import tool_behavior
+        snapshot['tool_behaviors'] = {name: tool_behavior(self.tools[name])
             for name in sorted(active_names) if name in self.tools}
         return snapshot
 

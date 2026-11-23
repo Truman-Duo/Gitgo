@@ -88,7 +88,7 @@ def test_unbound_failed_delegation_does_not_manufacture_a_required_child_gate():
     assert not contract.get("delegation_attempts")
 
 
-def test_bounded_single_owner_contract_is_compiled_to_self_execution_without_reason():
+def test_explicit_bounded_delegation_preserves_choice_and_reports_advice():
     import threading
     from types import SimpleNamespace
     from backend.core.loop.task_contract import publish_contract
@@ -109,20 +109,20 @@ def test_bounded_single_owner_contract_is_compiled_to_self_execution_without_rea
         "deliverables": [{"kind": "workspace_file", "path": "answer.txt", "required": True}],
     }
     contract = publish_contract(process, proposal)
-    assert contract["execution_mode"] == "self_execute"
-    assert contract["delegation_required"] is False
-    assert contract["minimum_delegated_outcomes"] == 0
+    assert contract["execution_mode"] == "delegate"
+    assert contract["delegation_required"] is True
     assert contract["routing_compilation"] == {
         "requested": "delegate",
         "recommended": "self_execute",
+        "effective": "delegate",
         "reason": "bounded_single_owner",
-        "adjusted": True,
+        "adjusted": False,
         "authority_granted": False,
-        "next_action": "request_self_execute",
+        "next_action": "delegate_task",
     }
 
 
-def test_delegate_initial_is_compiled_before_the_model_spends_a_retry():
+def test_delegate_initial_does_not_require_a_complexity_justification():
     import threading
     from types import SimpleNamespace
     from backend.core.loop.task_contract import publish_contract
@@ -144,9 +144,10 @@ def test_delegate_initial_is_compiled_before_the_model_spends_a_retry():
         "deliverables": [{"kind": "workspace_file", "path": "answer.txt", "required": True}],
     }
     contract = publish_contract(process, proposal)
-    assert contract["execution_mode"] == "self_execute"
-    assert contract["routing_transition"] == "keep_supervisor"
-    assert contract["routing_compilation"]["adjusted"] is True
+    assert contract["execution_mode"] == "delegate"
+    assert contract["routing_transition"] == "delegate_initial"
+    assert contract["routing_compilation"]["effective"] == "delegate"
+    assert contract["routing_compilation"]["adjusted"] is False
     assert contract["routing_compilation"]["authority_granted"] is False
 
 

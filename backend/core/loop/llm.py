@@ -16,6 +16,7 @@ import socket
 import time
 import urllib.error
 import threading
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 from typing import Generator
@@ -81,6 +82,7 @@ class LLMProvider:
         transport: HttpProviderTransport | None = None,
         request_preferences: dict | None = None,
         request_preferences_source=None,
+        request_configuration_source=None,
     ):
         self._base = base_url.rstrip("/")
         self._key = api_key
@@ -100,6 +102,31 @@ class LLMProvider:
         from .provider_preferences import validate_preferences
         self.request_preferences = validate_preferences(request_preferences, self.protocol.value)
         self._request_preferences_source = request_preferences_source
+        self._request_configuration_source = request_configuration_source
+
+    def request_settings(self):
+        """One configuration snapshot for a request and all its wire retries."""
+        import copy
+        from .provider_preferences import validate_preferences
+        source = self._request_configuration_source
+        if source:
+            current = source()
+            capabilities = replace(self.capabilities, context_window=current["context_window"],
+                max_output_tokens=current["max_output_tokens"])
+            preferences = validate_preferences(current.get("request_preferences", {}), self.protocol.value)
+            return {"capabilities": capabilities, "preferences": preferences,
+                    "configuration": copy.deepcopy(current.get("observation", {}))}
+        return {"capabilities": self.capabilities, "preferences": self._preferences_snapshot(), "configuration": {}}
+
+    def request_observation(self, body, settings):
+        """Only actual transport fields and bounded provenance, never headers."""
+        protocol = self.protocol.value
+        effort = (body.get("reasoning") or {}).get("effort") if protocol == "openai_responses" else (
+            (body.get("output_config") or {}).get("effort") if protocol == "anthropic_messages" else body.get("reasoning_effort"))
+        return {"model": body.get("model", self._model), "protocol": protocol,
+            "effort": effort, "context_window": settings["capabilities"].context_window,
+            "max_output_tokens": body.get("max_output_tokens", body.get("max_tokens")),
+            "configuration": settings["configuration"], "state": "dispatching", "server_confirmed": False}
 
     def _preferences_snapshot(self):
         import copy
@@ -114,11 +141,11 @@ class LLMProvider:
 
     @property
     def context_window(self) -> int:
-        return max(1024, int(self.capabilities.context_window))
+        return max(1024, int(self.request_settings()["capabilities"].context_window))
 
     @property
     def max_output_tokens(self) -> int:
-        return max(1, int(self.capabilities.max_output_tokens))
+        return max(1, int(self.request_settings()["capabilities"].max_output_tokens))
 
     @property
     def route_key(self) -> str:
@@ -143,7 +170,7 @@ class LLMProvider:
              max_retries: int = 5,
              base_delay: float = 1.0,
              max_backoff: float = 10.0, *, purpose: str = "",
-             on_notice=None, before_generation_fallback=None) -> str | dict:
+             on_notice=None, before_generation_fallback=None, request_settings=None) -> str | dict:
         """同步 chat completion（带分类重试）。
 
         Retry strategy:
@@ -158,6 +185,7 @@ class LLMProvider:
         )
 
         current_max_tokens = max_tokens
+        settings = request_settings or self.request_settings()
         last_error: Exception | None = None
 
         for attempt in range(max_retries + 1):
@@ -170,6 +198,7 @@ class LLMProvider:
                     cancel_event=cancel_event,
                     purpose=purpose, on_notice=on_notice,
                     before_generation_fallback=before_generation_fallback,
+                    request_settings=settings,
                 )
             except StreamCancelledError:
                 raise
@@ -283,18 +312,20 @@ class LLMProvider:
         metadata: dict | None = None,
         max_attempts: int = 2,
         before_request=None,
+        request_settings=None,
     ) -> Generator[ProviderEvent, None, None]:
         """Yield protocol-neutral events; never replay after the first event."""
+        settings = request_settings or self.request_settings()
         request = ProviderRequest(
-            messages=tuple(messages), tools=tuple(tools or []),
-            max_output_tokens=min(max_tokens, self.max_output_tokens),
+            messages=tuple(deepcopy(messages)), tools=tuple(deepcopy(tools or [])),
+            max_output_tokens=min(max_tokens, settings["capabilities"].max_output_tokens),
             stream=True,
             cache_intent=cache_intent or CacheIntent(
                 mode=self.capabilities.prompt_cache,
             ),
             metadata=dict(metadata or {}),
         )
-        preferences = self._preferences_snapshot()
+        preferences = settings["preferences"]
         body = self._request_body(request, preferences)
         emitted = False
         hosted_fallback_used = False
@@ -304,11 +335,22 @@ class LLMProvider:
             if cancel_event is not None and cancel_event.is_set():
                 raise StreamCancelledError()
             request_timeout = before_request() if before_request else timeout
+            from .request_input import request_input_detail
+            input_detail = request_input_detail(request, body)
             if before_request:
                 yield ProviderEvent(ProviderEventType.ROUTING_NOTICE, artifact={
                     "event": "provider_request_started", "protocol": self.protocol.value,
                     "model": self._model, "route_key": self.route_key,
                     "idle_timeout_seconds": request_timeout,
+                    "request_parameters": self.request_observation(body, settings),
+                    "_trace_detail": input_detail,
+                })
+            else:
+                yield ProviderEvent(ProviderEventType.ROUTING_NOTICE, artifact={
+                    "event": "provider_request_parameters", "protocol": self.protocol.value,
+                    "model": self._model, "route_key": self.route_key,
+                    "request_parameters": self.request_observation(body, settings),
+                    "_trace_detail": input_detail,
                 })
             try:
                 wire_events = self.transport.stream_sse(
@@ -377,17 +419,18 @@ class LLMProvider:
                    timeout: int, tools: list[dict] | None,
                    *, preserve_provider_state: bool = False,
                    cancel_event: threading.Event | None = None, purpose="",
-                   on_notice=None, before_generation_fallback=None) -> str | dict:
+                   on_notice=None, before_generation_fallback=None, request_settings=None) -> str | dict:
         """Single chat call, no retry logic."""
         from .provider_generation import reasoning_effort, rejects_reasoning_preference
         from .provider_cache import prefix_intent
         effort = reasoning_effort(self.protocol, purpose, getattr(self, '_alignment_effort_unsupported', False))
-        preferences = self._preferences_snapshot()
+        settings = request_settings or self.request_settings()
+        preferences = settings["preferences"]
         if preferences.get("reasoning_effort") or {"reasoning", "reasoning_effort"} & set(preferences.get("body", {})):
             effort = None  # Explicit user preferences never silently negotiate away.
         request = ProviderRequest(
-            messages=tuple(messages), tools=tuple(tools or []),
-            max_output_tokens=min(max_tokens, self.max_output_tokens),
+            messages=tuple(deepcopy(messages)), tools=tuple(deepcopy(tools or [])),
+            max_output_tokens=min(max_tokens, settings["capabilities"].max_output_tokens),
             stream=False,
             cache_intent=prefix_intent(messages, tools, mode=self.capabilities.prompt_cache,
                                       purpose=purpose or 'main'),
@@ -396,6 +439,11 @@ class LLMProvider:
         body = self._request_body(request, preferences)
         for preference_attempt in range(2):
             try:
+                if on_notice:
+                    from .request_input import request_input_detail
+                    on_notice({"event": "provider_request_parameters", "purpose": purpose,
+                        "route_key": self.route_key, "request_parameters": self.request_observation(body, settings),
+                        "_trace_detail": request_input_detail(request, body)})
                 data = self.transport.post_json(
                     self.adapter.endpoint(self._base), body,
                     self.adapter.headers(self._key), timeout=timeout,
@@ -453,7 +501,8 @@ class LLMProvider:
         except ProviderTransportCancelled as e:
             raise StreamCancelledError() from e
         except (socket.timeout, OSError, ValueError, RuntimeError) as e:
-            raise StreamInterruptedError() from e
+            from .provider_failure import classify_provider_failure
+            raise StreamInterruptedError(retryable=classify_provider_failure(e)["retryable"]) from e
 
     @staticmethod
     def _accumulate_events(events) -> dict:
@@ -461,12 +510,22 @@ class LLMProvider:
         reasoning: list[str] = []
         tool_calls: dict[int, dict] = {}
         artifacts: list[dict] = []
+        public_progress: dict[tuple, dict] = {}
         usage = None
         response_id = ""
+        finish_reason = None
         for event in events:
             response_id = event.response_id or response_id
             if event.type == ProviderEventType.TEXT_DELTA:
-                content.append(event.text)
+                if event.phase == "commentary":
+                    key = (response_id, event.message_id, event.output_index)
+                    update = public_progress.setdefault(key, {
+                        "response_id": response_id, "message_id": event.message_id,
+                        "output_index": event.output_index, "text": "",
+                    })
+                    update["text"] += event.text
+                else:
+                    content.append(event.text)
             elif event.type == ProviderEventType.REASONING_DELTA:
                 reasoning.append(event.reasoning)
             elif event.type in {ProviderEventType.TOOL_CALL_STARTED, ProviderEventType.TOOL_CALL_DELTA, ProviderEventType.TOOL_CALL_DONE}:
@@ -483,6 +542,12 @@ class LLMProvider:
                 artifacts.append(event.artifact)
             elif event.type == ProviderEventType.USAGE and event.usage:
                 usage = event.usage.to_dict()
+            elif event.type == ProviderEventType.RESPONSE_COMPLETED:
+                # Chat Completions keeps its terminal reason on the wire
+                # choice. Semantic review needs this even with empty content.
+                choices = (event.raw or {}).get('choices') or []
+                if choices and isinstance(choices[0], dict):
+                    finish_reason = choices[0].get('finish_reason')
         response = {
             "content": "".join(content),
             "tool_calls": list(tool_calls.values()),
@@ -492,14 +557,18 @@ class LLMProvider:
             response["reasoning_content"] = "".join(reasoning)
         if artifacts:
             response["provider_artifacts"] = artifacts
+        if public_progress:
+            response["public_progress"] = list(public_progress.values())
         if usage is not None:
             response["usage"] = usage
+        if finish_reason is not None:
+            response["finish_reason"] = finish_reason
         return response
 
     @staticmethod
     def _event_to_chat_chunk(event: ProviderEvent) -> dict | None:
         delta: dict = {}
-        if event.type == ProviderEventType.TEXT_DELTA:
+        if event.type == ProviderEventType.TEXT_DELTA and event.phase != "commentary":
             delta["content"] = event.text
         elif event.type == ProviderEventType.REASONING_DELTA:
             delta["reasoning_content"] = event.reasoning

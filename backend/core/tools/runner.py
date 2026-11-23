@@ -98,8 +98,11 @@ def main() -> None:
             _emit_success(exc.result())
             return
         except OSError as exc:
-            _emit_success(SandboxDenied("SANDBOX_LAUNCH_DENIED",
-                f"Cannot prepare private sandbox home: {exc}").result())
+            _emit_success(SandboxDenied(getattr(exc, 'code', 'SANDBOX_HOME_PREPARATION_FAILED'),
+                f"Cannot prepare private sandbox home: {exc}", details={
+                    'phase': getattr(exc, 'stage', 'create_private_home'),
+                    'errno': exc.errno, 'winerror': getattr(exc, 'winerror', None),
+                    'cause_type': type(exc).__name__}).result())
             return
 
     try:

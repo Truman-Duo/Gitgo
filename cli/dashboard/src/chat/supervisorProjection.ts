@@ -1,10 +1,12 @@
 import type { StreamEvent } from "../daemon/streamEvents.js";
 import { reduceStreamEvent, type StreamState } from "../daemon/streamReducer.js";
+import {childActorLabel} from "../daemon/agentLabels.js";
 
 const PRIVATE_CHILD_EVENTS = new Set([
   "reasoning_delta",
   "text_delta",
   "provider_request_started",
+  "provider_request_parameters",
   "stream_recovery",
 ]);
 
@@ -23,13 +25,14 @@ export function reduceSupervisorEvent(
   rootProcessId: string,
 ): StreamState {
   const processId = String(event.process_id || "");
-  if (!processId || !rootProcessId || processId === rootProcessId) {
+  const actor = childActorLabel(event, rootProcessId);
+  if (!processId || !actor || processId === rootProcessId) {
     return reduceStreamEvent(state, event);
   }
   if (PRIVATE_CHILD_EVENTS.has(event.event)) return state;
   const projected = {
     ...event,
-    actor_label: "Subprocess",
+    actor_label: actor,
   } as StreamEvent;
   return reduceStreamEvent(state, projected, {preservePendingText: true});
 }

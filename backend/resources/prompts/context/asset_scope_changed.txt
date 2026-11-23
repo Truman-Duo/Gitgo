@@ -1,0 +1,1 @@
+Maintenance responsibility was revised to revision ${revision}. Check the current paths and commitment in the work offer. Recorded basis: ${decision}

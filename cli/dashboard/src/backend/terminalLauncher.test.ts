@@ -14,6 +14,7 @@ import { mkdtempSync, writeFileSync, readFileSync, unlinkSync, rmdirSync } from 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID, createHash } from "node:crypto";
+import {DASHBOARD_TERMINAL_PROFILE} from './windowsTerminalProfile.js';
 
 describe("installed terminal launcher", () => {
   test("relaunch decisions need no parent-process probe", () => {
@@ -77,7 +78,7 @@ describe("installed terminal launcher", () => {
       "C:\\Gitgo\\gitgo.exe", ["5"], "C:\\WindowsApps\\wt.exe",
     )).toEqual({
       command: "C:\\WindowsApps\\wt.exe",
-      args: ["new-tab", "--", "C:\\Gitgo\\gitgo.exe", "--attached", "5"],
+      args: ["new-tab", "--profile",DASHBOARD_TERMINAL_PROFILE,"--", "C:\\Gitgo\\gitgo.exe", "--attached", "5"],
     });
     expect(terminalChildCommand(
       {terminal: "custom", command: "wezterm.exe", args: ["start", "--"]},
@@ -143,10 +144,13 @@ describe("installed terminal launcher", () => {
       expect(() => acceptTerminalHandoff(argv)).toThrow("expired");
       writeFileSync(path, JSON.stringify({token, status: "pending", expiresAt: Date.now() + 5000, environment: {
         GITGO_CONFIG_PATH: "isolated.json", GITGO_LAUNCH_SESSION: "session.json",
+        GITGO_OBSERVER_DIR: "private-capture", GITGO_OBSERVER_TRIAL_PLAN: "private-plan.json",
         GITGO_LAUNCH_SESSION_TOKEN: token, ATTACKER_SETTING: "ignored"}}));
       const acknowledge = acceptTerminalHandoff(argv);
       expect(process.env.GITGO_CONFIG_PATH).toBe("isolated.json");
       expect(process.env.GITGO_LAUNCH_SESSION).toBe("session.json");
+      expect(process.env.GITGO_OBSERVER_DIR).toBe("private-capture");
+      expect(process.env.GITGO_OBSERVER_TRIAL_PLAN).toBe("private-plan.json");
       expect(process.env.GITGO_LAUNCH_SESSION_TOKEN).toBe(token);
       expect(process.env.ATTACKER_SETTING).toBeUndefined();
       expect(JSON.parse(readFileSync(path, "utf8")).status).toBe("pending");

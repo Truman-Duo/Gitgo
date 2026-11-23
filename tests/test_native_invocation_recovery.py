@@ -183,6 +183,42 @@ def test_uncommitted_intent_never_enters_os(tmp_path_factory, monkeypatch, runne
     assert not result.started and result.data["error"] == "INVOCATION_JOURNAL_UNAVAILABLE"
 
 
+@pytest.mark.parametrize("pid", [None, 123])
+def test_launch_failure_keeps_resource_debt_after_store_reopen(tmp_path_factory, monkeypatch, pid):
+    from backend.core import sandbox
+    from backend.core.loop.process_tool_runner import ProcessToolRunner
+    from backend.core.storage import get_storage
+
+    cleanup = {"complete": False, "mode": "linux-cgroup", "issues": ["cgroup_retirement_unknown"]}
+
+    def fail_launch(*args, **kwargs):
+        denial = sandbox.SandboxDenied("SANDBOX_LAUNCH_DENIED", "injected launch failure")
+        denial.cleanup = cleanup
+        if pid is not None:
+            denial.started_pid, denial.exit_code, denial.effect_state = pid, -9, "ambiguous"
+        raise denial
+
+    monkeypatch.setattr(sandbox, "sandbox_popen", fail_launch)
+    workspace = tmp_path_factory
+    store = get_storage(workspace)
+    result = ProcessToolRunner().run("read_file", {"_workspace": str(workspace), "path": "note.txt"})
+    assert result.data["error"] == "SANDBOX_LAUNCH_DENIED"
+    assert result.started is (pid is not None)
+    assert result.launch_state == ("started" if pid is not None else "not_started")
+    assert result.cleanup == cleanup
+    state_home = store.paths.state_home
+    store.close()
+    with StorageRuntime(workspace, state_home=state_home) as reopened:
+        findings = pending_native_invocations(reopened)
+        assert len(findings) == 1 and findings[0]["code"] == "NATIVE_CLEANUP_UNCONFIRMED"
+        rows = reopened.list_state_refs(NAMESPACE, prefix="pending/")
+        saved = json.loads(reopened.read_blob(rows[0]["value_ref"]))
+        assert saved.get("pid") == pid
+        assert saved["exit_code"] == (-9 if pid is not None else None)
+        with pytest.raises(sandbox.SandboxDenied, match="Unsettled native"):
+            NativeInvocationRecord(reopened, workspace, invocation(workspace)).prepare()
+
+
 def test_finished_fact_survives_pending_retirement_failure(bound_store, monkeypatch):
     workspace, storage = bound_store
     record = NativeInvocationRecord(storage, workspace, invocation(workspace))
@@ -241,7 +277,10 @@ def test_old_external_journal_cleanup_is_not_filtered_as_observation(bound_store
     assert [item["code"] for item in findings] == ["NATIVE_CLEANUP_UNCONFIRMED"]
 
 
-def test_new_approval_cannot_bypass_debt_and_preflight_does_not_spend_it(bound_store):
+@pytest.mark.parametrize('earlier_cleanup_confirmed', [False, True])
+def test_new_approval_cannot_bypass_debt_and_preflight_does_not_spend_it(
+        bound_store, monkeypatch, earlier_cleanup_confirmed):
+    from backend.core import macos_broker_client
     from backend.core.loop.agent_tool import AgentTool, ApprovalMode
     from backend.core.loop.execution_context import ExecutionContext
     from backend.core.loop.execution_contract import NATIVE_PROCESS, HOST_COMPUTE
@@ -254,6 +293,11 @@ def test_new_approval_cannot_bypass_debt_and_preflight_does_not_spend_it(bound_s
     record = NativeInvocationRecord(storage, workspace, invocation(workspace))
     record.prepare()
     record.finish({"started": True, "cleanup": {"complete": False, "mode": "injected"}})
+    monkeypatch.setattr(macos_broker_client, 'active', lambda: earlier_cleanup_confirmed)
+    monkeypatch.setattr(macos_broker_client, 'recovered_cleanup', lambda item: {
+        'cleanup': {'complete': True, 'issues': [], 'invocation_id': item['invocation_id']},
+        'outcome': 'unknown',
+    })
     tool = AgentTool('native_fixture', 'fixture', {}, lambda _: pytest.fail('must not execute'),
         execution_contract=NATIVE_PROCESS, approval=ApprovalMode.ASK, approval_per_invocation=True)
     process = AgentProcess('new-process', 'worker', RingLevel.RING_3, active_task_id='new-task',
@@ -265,7 +309,21 @@ def test_new_approval_cannot_bypass_debt_and_preflight_does_not_spend_it(bound_s
     process.pending_decision = None
     ctx = ExecutionContext(process, process.session, str(workspace), storage=storage)
     result = ToolPipeline().execute({'name': tool.name, 'args': {}}, tool, ctx, 'new-call')
-    assert result.is_error and result.diagnostics["code"] == "SANDBOX_CLEANUP_PENDING"
+    code = "NATIVE_OUTCOME_UNCONFIRMED" if earlier_cleanup_confirmed else "SANDBOX_CLEANUP_PENDING"
+    assert result.is_error and result.diagnostics["code"] == code
+    recovery = result.diagnostics["native_recovery"]
+    assert recovery["launch_state"] == "not_started"
+    assert recovery["effect_state"] == "not_committed"
+    assert "invocation_id" not in recovery
+    earlier = recovery["earlier_invocations"][0]
+    assert earlier["invocation_id"] == record.record["invocation_id"]
+    assert earlier["effect_state"] == "ambiguous"
+    if earlier_cleanup_confirmed:
+        assert earlier["cleanup_state"] == "confirmed"
+        assert "Its business outcome is still unknown" in result.formatted
+    else:
+        assert earlier["cleanup_state"] == "unconfirmed"
+        assert "Inspect the earlier invocation" in result.formatted
     assert grant['remaining_uses'] == 1 and process.recovery['resume_forbidden']
     # Recovery inspection and Host computation do not inherit a native-process ban.
     inspect = AgentTool('inspection_fixture', 'inspect', {}, lambda _: {'observed': True},

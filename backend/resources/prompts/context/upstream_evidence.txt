@@ -1,0 +1,3 @@
+1. Use the supplied dependency version and workspace inputs for the current assignment.
+2. Check the recorded evidence and any limitations in the response tail before relying on the upstream result. The excerpts are from the identified process, task and result version. response_tail_range identifies the exact characters in its original report. For a missing or conflicting qualification, inspect the affected files or ask the supervisor for the source evidence.
+3. Report a missing prerequisite with the affected interface and observed evidence. Leave changes to the assigned scopes and their supervisor.

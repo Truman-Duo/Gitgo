@@ -167,6 +167,18 @@ def _build_current_turn_envelope(
     # unchanged map fields; it does not summarize or drop task requirements.
     if current is not None:
         sections['runtime.maintenance'] = current
+    from .task_execution_policy import projection as execution_policy
+    if (policy := execution_policy(process)):
+        sections['runtime.task_execution_policy'] = policy
     if snapshot is not None and snapshot['sheets']:
         sections['runtime.workbench'] = sheet_tail
+    from .dialogue_context import dialogue_view, GUIDANCE, reply_guidance
+    dialogue = dialogue_view(process)
+    if dialogue:
+        sections['runtime.dialogue_reference'] = dialogue
+        text += '\n' + GUIDANCE + json.dumps(dialogue, ensure_ascii=False, separators=(',', ':'))
+        instruction = reply_guidance(dialogue)
+        if instruction:
+            sections['runtime.reply_guidance'] = instruction
+            text += '\n' + instruction
     return ContextSections(text, sections, scope=process.active_task_id or process.process_id)

@@ -126,11 +126,16 @@ def _scalar_identity(value):
 
 
 def aggregate(text, *, selector, reducer, field="", null_policy="reject"):
-    if reducer not in {"count", "key_count", "sum", "min", "max", "distinct_count"}:
+    return aggregate_value(parse_json(text), selector=selector, reducer=reducer, field=field,
+                           null_policy=null_policy)
+
+
+def aggregate_value(value, *, selector, reducer, field="", null_policy="reject"):
+    if reducer not in {"count", "key_count", "sum", "min", "max", "distinct_count", "distinct"}:
         raise ValueError("unsupported reducer")
     if null_policy not in {"reject", "skip"}:
         raise ValueError("null_policy must be reject or skip")
-    rows = pointer(parse_json(text), selector)
+    rows = pointer(value, selector)
     if reducer == "key_count":
         if field:
             raise ValueError("key_count counts object members and does not accept field")
@@ -168,13 +173,20 @@ def aggregate(text, *, selector, reducer, field="", null_policy="reject"):
                 raise ValueError("null values require an explicit skip policy")
             result["skipped_null"] += 1
             continue
-        if reducer != "distinct_count" and not isinstance(value, Decimal):
+        if reducer not in {"distinct_count", "distinct"} and not isinstance(value, Decimal):
             raise ValueError("numeric reducers require JSON numbers; strings and booleans are not coerced")
         values.append(value)
     result["used_rows"] = len(values)
-    if reducer == "distinct_count":
-        return {**result, "value": len({_scalar_identity(v) for v in values}),
-                "duplicates": "collapsed by typed JSON scalar value; numeric 1 and 1.0 are equal"}
+    if reducer in {"distinct_count", "distinct"}:
+        unique = {_scalar_identity(value): value for value in values}
+        result["duplicates"] = "collapsed by typed JSON scalar value; numeric 1 and 1.0 are equal"
+        if reducer == "distinct_count":
+            return {**result, "value": len(unique)}
+        encoded = encode_json(list(unique.values()))
+        if len(unique) > 256 or len(encoded.encode("utf-8")) > 8_000:
+            raise ValueError("distinct sets may contain at most 256 values and 8000 UTF-8 bytes")
+        parse_json(encoded)
+        return {**result, "value": encoded, "value_type": "scalar_set_json"}
     if reducer != "sum" and not values:
         raise ValueError("min/max require at least one non-null selected number")
     with localcontext() as context:

@@ -31,6 +31,7 @@ import { registerLaunchSession } from "./backend/launchSession.js";
 import packageInfo from "../package.json";
 import {managedRoot, acquireManagedAdmission} from "./backend/managedAdmission.js";
 import {profilePublishStateStore} from "./state/publishLocalState.js";
+import {createFrontendObserver} from "./runtime/observer.js";
 
 if (process.argv.includes("--version")) {
   process.stdout.write(`Gitgo ${packageInfo.version}\n`);
@@ -203,16 +204,22 @@ async function main() {
 
   let terminals: TerminalInventory | undefined;
   let startupNotice = "";
+  const requestWindowsProfile=process.platform==='win32'&&process.argv.includes('--windows-terminal-profile')&&!process.argv.includes('--attached');
   if (!useMock) {
     try {
-      terminals = await startupTerminals(client, process.argv.includes("--attached")) as TerminalInventory;
+      terminals = await (requestWindowsProfile?detectTerminals(client):startupTerminals(client, process.argv.includes("--attached"))) as TerminalInventory;
+      if(requestWindowsProfile){
+        const selected=terminals.options.find(option=>option.id==='windows_terminal'&&option.available);
+        if(!selected)throw new Error('Windows Terminal is unavailable');
+        terminals={...terminals,configured:true,effective:selected};
+      }
       startupNotice = (terminals.warnings || []).join(" ");
     } catch {
       startupNotice = "Terminal detection unavailable; continuing here. Retry in /config → General.";
     }
   }
   if (terminals?.configured && shouldRelaunchInConfiguredTerminal({
-    compiled: COMPILED, platform: process.platform, argv: process.argv,
+    compiled: COMPILED||requestWindowsProfile, platform: process.platform, argv: process.argv,
     config: launcherFromInventory(terminals),
   })) {
     process.stderr.write("[gitgo-dashboard] Opening configured terminal…\n");
@@ -223,6 +230,9 @@ async function main() {
     startupNotice = handoff.message;
   }
   if (temporaryLaunch) startupNotice = ["Temporary terminal test · isolated chat history; settings and conversations are removed when this test closes.", startupNotice].filter(Boolean).join(" ");
+  if(!useMock && process.env.GITGO_OBSERVER_DIR)await client.callTool("observer.start",{},15);
+  const observer=createFrontendObserver(client,{enabled:!useMock&&Boolean(process.env.GITGO_OBSERVER_DIR),
+    viewport:()=>({columns:process.stdout.columns||0,rows:process.stdout.rows||0})});
 
   let shutdownPromise: Promise<void> | null = null;
   let renderer: ReturnType<typeof renderSync> | undefined;
@@ -230,8 +240,9 @@ async function main() {
     if (shutdownPromise) return shutdownPromise;
     renderer?.unmount();
     renderer?.cleanup();
-    shutdownPromise = Promise.resolve(client instanceof NativeHostClient ? client.close(exitCode === 75) : client.close())
-      .catch(() => { if (exitCode === 75) process.exit(1); })
+    const requireCleanExit = exitCode === 75 || (exitCode === 0 && Boolean(managed) && process.platform === "darwin");
+    shutdownPromise = Promise.resolve(observer?.close()).then(()=>client instanceof NativeHostClient ? client.close(requireCleanExit) : client.close())
+      .catch(() => { if (requireCleanExit) process.exit(1); })
       .then(() => { process.exit(exitCode); });
     return shutdownPromise;
   };
@@ -257,7 +268,7 @@ async function main() {
   configureTerminalWidths(terminals?.display_metrics?.kind === "windows_console" ? terminals.display_metrics.codepoint_widths : undefined);
   renderer = renderSync(
     <ScreenWrapper>
-      <InputProvider verificationInput={verificationInput()}><App
+      <InputProvider verificationInput={verificationInput()} observeInput={observer?.onInput}><App
         client={client}
         publishState={profilePublishStateStore()}
         refreshSec={REFRESH_SEC}
@@ -268,7 +279,7 @@ async function main() {
         onUpdateExit={managed && !useMock ? () => shutdown(75) : undefined}
       /></InputProvider>
     </ScreenWrapper>,
-    { exitOnCtrlC: false }
+    { exitOnCtrlC: false, ...(observer?{onFrame:observer.onFrame}:{}) }
   );
   // Child readiness is acknowledged only after the real Host and complete
   // renderer have started, never by a hidden smoke renderer or process spawn.
@@ -279,6 +290,7 @@ async function main() {
     await shutdownPromise;
     return;
   }
+  await observer?.close();
   await client.close();
   // Ink and terminal observers may retain timers after the renderer exits.
   // The backend is already closed, so make the CLI lifecycle deterministic.

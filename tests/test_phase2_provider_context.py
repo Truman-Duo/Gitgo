@@ -62,15 +62,19 @@ def test_prompt_data_updates_do_not_resend_unchanged_completion_rules(kind):
     latest = compile_into()
     assert process.session.messages[:len(history)] == history
     delta = '\n'.join(m['content'] for m in process.session.messages[len(history):])
+    from backend.core.loop.prompt_rule_updates import visible_sections
+    reconstructed = visible_sections(process.session.messages)
+    assert {name: value['content'] for name, value in reconstructed.items()} == {
+        name: content for name, content in latest.items() if name != 'Project governance context'}
     assert first['Completion protocol'] == latest['Completion protocol']
     assert first['Completion protocol'] not in delta
     if kind == 'answer':
-        assert latest['Adaptive routing'] in delta and first['Interaction contract'] == latest['Interaction contract']
+        assert first['Interaction contract'] == latest['Interaction contract']
         assert first['Interaction contract'] not in delta
     else:
         requirements = json.loads(latest['Task requirements'])
         assert requirements['acceptance_criteria'] == ['new required check'] and requirements['requires_user_decision']
-        assert latest['Task requirements'] in delta and first['Task contract'] not in delta
+        assert first['Task contract'] not in delta
     messages = deepcopy(process.session.messages)
     compile_into()
     assert process.session.messages == messages
@@ -663,8 +667,9 @@ def test_prompt_rom_update_contains_only_changed_sections():
     PromptCompiler.upsert(session, second_text, second)
 
     delta = session.messages[-1]["content"]
-    assert "[HOST TASK CONTRACT UPDATE]" in delta
-    assert "## Capabilities\nread_file, web_search" in delta
+    from backend.core.loop.prompt_rule_updates import HEADER, visible_sections
+    assert delta.startswith(HEADER)
+    assert visible_sections(session.messages)['Capabilities']['content'] == 'read_file, web_search'
     assert "stable identity" not in delta
     assert "current rule" not in delta
 

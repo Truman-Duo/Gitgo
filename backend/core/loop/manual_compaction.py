@@ -51,6 +51,7 @@ def compact_parked_session(session, provider, *, process_id: str, task_id: str,
     )
     if not choice and session.compaction_failure_count >= 3:
         pending = build_context_force_compaction_decision(process_id, task_id)
+        pending["display_template"] = "context_compaction_maintenance"
         pending["context_fingerprint"] = fingerprint
         # Maintenance leaves the old completed task alone; declining only
         # cancels this maintenance request, never relabels prior work as failed.

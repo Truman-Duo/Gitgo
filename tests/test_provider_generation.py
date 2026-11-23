@@ -62,7 +62,10 @@ def test_optional_parameter_rejection_notifies_and_accounts_one_fallback():
         before_generation_fallback=lambda: budget_attempts.append('fallback') or 30) == 'pong'
     assert len(transport.bodies) == 2
     assert 'reasoning' not in transport.bodies[1]
-    assert len(notices) == 1 and notices[0]['event'] == 'generation_profile_fallback'
+    fallback = [item for item in notices if item['event'] == 'generation_profile_fallback']
+    parameters = [item['request_parameters'] for item in notices if item['event'] == 'provider_request_parameters']
+    assert len(fallback) == 1
+    assert [item['effort'] for item in parameters] == ['low', None]
     assert budget_attempts == ['fallback']
     client.chat([], max_retries=0, purpose='alignment')
     assert 'reasoning' not in transport.bodies[2]

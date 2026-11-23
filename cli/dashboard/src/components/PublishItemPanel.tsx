@@ -696,7 +696,7 @@ function PublishWorkspace(props: Props) {
               </Box> : null}
             </Box>;
           })}
-          <Text dimColor>{pageStart.current + selected + 1}/{snapshot?.total ?? 0}{snapshot?.next_cursor ? t({en: " · /more for next page", zh: " · /more 下一页"}) : ""}</Text>
+          {snapshot?.next_cursor ? <Text dimColor>{t({en: "More items available", zh: "还有更多事项"})}</Text> : null}
         </Box> : !loading && !error ? <Text>{t({en: "No saved items. /prepare pins a committed source; uncommitted changes are not included.", zh: "尚无保存事项。/prepare 固定已提交来源；未提交变更不包含在内。"})}</Text> : null}
     </ScrollBox>
     <Box flexShrink={0}></Box>

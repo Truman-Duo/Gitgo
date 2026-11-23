@@ -1,4 +1,4 @@
-"""Build two real Linux update bundles in a disposable hosted CI checkout.
+"""Build two real Unix update bundles in a disposable hosted CI checkout.
 
 Only test reports leave the runner. No release, install or signing key is published.
 """
@@ -19,13 +19,14 @@ def run(command, cwd):
 
 
 def main():
-    if (sys.platform != "linux" or os.environ.get("GITHUB_ACTIONS") != "true"
+    if (sys.platform not in {"linux", "darwin"} or os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
-        raise SystemExit("Only a disposable GitHub-hosted Linux runner is supported")
+        raise SystemExit("Only a disposable GitHub-hosted Unix runner is supported")
+    target = "macos" if sys.platform == "darwin" else "linux"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bun", type=Path, required=True)
     args = parser.parse_args()
-    base = Path(tempfile.mkdtemp(prefix="gitgo-two-linux-")).resolve(strict=True)
+    base = Path(tempfile.mkdtemp(prefix=f"gitgo-two-{target}-")).resolve(strict=True)
     checkout = base / "source"
     run(["git", "clone", "--no-hardlinks", "--no-local", ROOT, checkout], ROOT)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -34,7 +35,7 @@ def main():
     previous, candidate = base / "previous", base / "candidate"
 
     def build(stage):
-        run(["bash", checkout / "packaging/build_linux.sh", "--python", sys.executable,
+        run(["bash", checkout / f"packaging/build_{target}.sh", "--python", sys.executable,
              "--bun", args.bun, "--ripgrep", os.environ["GITGO_RIPGREP_PATH"],
              "--ripgrep-notices", os.environ["GITGO_RIPGREP_NOTICES"],
              "--output", stage, "--archive", base / (stage.name + ".tar.gz"),
@@ -48,7 +49,7 @@ def main():
     product_path = checkout / "packaging/product.json"
     product = json.loads(product_path.read_bytes())
     old_version = product["version"]
-    product = ci_successor_product(product, "linux")
+    product = ci_successor_product(product, target)
     version = product["version"]
     product_path.write_text(json.dumps(product, indent=2) + "\n", encoding="utf-8")
     frontend_path = checkout / "cli/dashboard/package.json"
@@ -64,13 +65,13 @@ def main():
         raise RuntimeError("Unrecognized backend version declaration")
     backend_path.write_text(source.replace(marker, '__version__ = "' + version + '"'), encoding="utf-8")
     run(["git", "add", "packaging/product.json", "cli/dashboard/package.json", "backend/version.py"], checkout)
-    run(["git", "-c", "user.name=Linux CI", "-c", "user.email=linux-ci@local.invalid",
-         "commit", "-m", "test(runtime): independently build second Linux version"], checkout)
+    run(["git", "-c", "user.name=Unix CI", "-c", "user.email=unix-ci@local.invalid",
+         "commit", "-m", f"test(runtime): independently build second {target} version"], checkout)
     build(candidate)
     with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
         output.write("GITGO_UPDATE_PREVIOUS_STAGE=" + str(previous) + "\n")
         output.write("GITGO_UPDATE_CANDIDATE_STAGE=" + str(candidate) + "\n")
-    print("Two independently committed Linux test bundles built; no package published")
+    print("Two independently committed Unix test bundles built; no package published")
 
 
 if __name__ == "__main__":

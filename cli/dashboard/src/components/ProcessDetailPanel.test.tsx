@@ -25,6 +25,13 @@ test("detail retains budgets, full paths and all actual relationship types",()=>
  expect(rows.find(r=>r.label==="任务时限（秒）")?.value).toBe("未记录");
 });
 const wait=()=>new Promise(r=>setTimeout(r,80));
+test("execution allowance shows canonical renewal counts without inferring an extension",()=>{
+ const p={...processes.one,steps_used:180,max_steps:400,task_budget:{process_leases:{one:{step_schedule:[150,250,150,50],step_segment:1}}}};
+ const rows=processDetailSections(p,processes,t).flatMap(s=>s.rows);
+ expect(rows.find(r=>r.label==="已用步数 / 当前执行上限")?.value).toBe("180 / 400");
+ expect(rows.find(r=>r.label==="已续额次数 / 上限")?.value).toBe("1 / 3");
+ expect(rows.find(r=>r.label==="最多可用步数")?.value).toBe("600");
+});
 function io(){
  const stdin:any=new PassThrough();stdin.isTTY=true;stdin.setRawMode=()=>stdin;stdin.ref=()=>stdin;stdin.unref=()=>stdin;
  const stdout:any=new PassThrough();stdout.isTTY=true;stdout.columns=84;stdout.rows=24;stdout.on("data",()=>{});
@@ -71,7 +78,7 @@ test("project table keeps locations and uses Chinese headings; subprocess list n
   {...streams,patchConsole:false,exitOnCtrlC:false});
  try{
   await wait();const lines=frame(streams.stdout);
-  expect(lines[1]).toContain("项目名称");expect(lines[1]).toContain("项目位置");expect(lines[1]).toContain("进程");
+  expect(lines[1]).toContain("项目名称");expect(lines[1]).toContain("项目位置");expect(lines[1]).toContain("执行中");
   expect(lines.join("\n")).toContain("location-folder");
   const rows={one:processes.one,two:child("two","C:/two","awaiting_user")};
   root.rerender(<LanguageContext.Provider value="zh"><InputProvider><Box height={20} width={84}>
@@ -83,4 +90,15 @@ test("project table keeps locations and uses Chinese headings; subprocess list n
   expect(text).not.toContain("Selected subprocess");expect(text).not.toContain("PgUp");
   expect(status).toContain("1 个工作中");expect(status).toContain("1 个待答复");
  }finally{root.unmount();root.cleanup();Object.values(streams).forEach((s:any)=>s.destroy());}
+});
+
+test("closeout failure and continuation history do not masquerade as completion",()=>{
+ const first={...processes.one,session_id:"same",status:"completed",closeout_state:"pending"};
+ const second={...processes.two,session_id:"same",status:"completed",closeout_state:"failed",routing_compilation:{effective:"delegate"}};
+ const rows={one:first,two:second};
+ const values=(p:any)=>processDetailSections(p,rows,t).flatMap(s=>s.rows);
+ expect(values(first).find(r=>r.label==="状态")?.value).toBe("收尾中");
+ expect(values(second).find(r=>r.label==="状态")?.value).toBe("收尾失败");
+ expect(values(second).find(r=>r.label==="此会话的执行次数")?.value).toBe("2");
+ expect(values(second).find(r=>r.label==="执行分工")?.value).toBe("委派");
 });

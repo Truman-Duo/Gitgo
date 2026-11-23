@@ -93,6 +93,15 @@ def describe_instance(process, instance, *, observations=False):
             'completion_controls': completion_controls(process, instance),
             'reviews': review_observations(instance)}
         value['error'] = deepcopy(instance.get('error'))
+        maintenance = (instance.get('maintenance') or {}).get(instance.get('maintenance_head'))
+        if maintenance and ((maintenance.get('error') and instance['phase'] == 'blocked') or (
+                maintenance.get('status') in {'needs_review', 'inspect_required'}
+                and maintenance.get('target_ref') != instance.get('effective_ref'))):
+            status = maintenance.get('status')
+            action = ('inspect_unavailable_components' if maintenance.get('error') == 'MECHANISM_DEPENDENCY_UNAVAILABLE'
+                      else 'inspect_activation' if status == 'inspect_required' else 'review_changed_definition')
+            value['maintenance'] = {'affected_nodes': deepcopy(maintenance['affected_nodes']),
+                'error': maintenance.get('error'), 'next_action': action}
     return value
 
 
@@ -150,8 +159,12 @@ def snapshot(process, *, observations=False):
     if storage is None:
         app = getattr(process, '_harness_application', None)
         storage = app.repo.storage if app is not None else None
-    values = Repository(storage).list_instances(task, limit=100) if storage is not None else []
-    result={'task_id': task, 'instances': describe_instances(process, values, observations=observations), 'authority_granted': False}
+    repository = Repository(storage) if storage is not None else None
+    values = repository.list_instances(task, limit=100) if repository is not None else []
+    definition_probe = getattr(repository, 'definitions_present', None)
+    result={'task_id': task, 'state_available': storage is not None,
+        'definitions_present': definition_probe() if callable(definition_probe) else None,
+        'instances': describe_instances(process, values, observations=observations), 'authority_granted': False}
     app=getattr(process, '_harness_application', None)
     if app is not None:
         result['component_contracts']=component_contracts([value['compiled'] for value in values], app.registry)
@@ -166,7 +179,8 @@ def alignment_basis(process):
     fresh question/delivery assessment.
     """
     view = snapshot(process)
-    return {'task_id': view['task_id'], 'instances': [{key: item[key] for key in
+    return {'task_id': view['task_id'], 'state_available':view['state_available'],
+        'definitions_present':view['definitions_present'], 'instances': [{key: item[key] for key in
         ('id', 'definition_id', 'definition_revision', 'epoch', 'phase', 'effective_ref', 'desired_ref',
          'version_policy', 'managed_by', 'user_control', 'program_digest')} for item in view['instances']]}
 

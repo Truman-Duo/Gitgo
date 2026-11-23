@@ -35,6 +35,10 @@ def main():
     if native is not None and (sys.platform!='win32' or not native.is_file()):
         parser.error('Native storage acceptance requires an explicit Windows build')
     root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from backend.core.native_sandbox import get_native
+    get_native().call(op='capabilities')  # Build explicitly before the delegated/native scope.
     # Standalone acceptance remains complete. The main pipeline separately owns
     # one full suite per platform/architecture and repeats native-sensitive cases
     # here, in the delegated/native environment. This is not a cached success.
@@ -44,6 +48,7 @@ def main():
     extra = ['--hidden-import', 'resource'] if sys.platform == 'linux' else []
     subprocess.run([sys.executable, '-m', 'PyInstaller', *extra, '--noconfirm', '--clean', '--onedir',
         '--name', 'gitgo-host', '--paths', str(root), '--collect-submodules', 'backend',
+        '--additional-hooks-dir', str(root / 'packaging/pyinstaller-hooks'),
         '--hidden-import', 'backend.core.tools.registrations',
         '--add-data', str(root / 'backend/resources/keyboard') + os.pathsep + 'backend/resources/keyboard',
         '--add-data', str(root / 'backend/resources/prompts') + os.pathsep + 'backend/resources/prompts',
@@ -65,6 +70,7 @@ def main():
     # a passing source interpreter does not verify the frozen runtime.
     probe = (
         "import sqlite3;from backend.core.storage.runtime import validate_sqlite_runtime;"
+        "from backend.core.native_sandbox import get_native;assert get_native().call(op='capabilities')['abi']==1;"
         f"assert sqlite3.sqlite_version == {sqlite3.sqlite_version!r};"
         "validate_sqlite_runtime();print('Packaged SQLite',sqlite3.sqlite_version)"
     )

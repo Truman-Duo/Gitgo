@@ -1,0 +1,1 @@
+Find registered maintenance scopes by business name or path. Omit both filters to list responsibilities. Read a selected asset_id for the original registration decision, latest accepted version and inbox.

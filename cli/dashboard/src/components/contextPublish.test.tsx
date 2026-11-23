@@ -21,7 +21,7 @@ function mount(children:React.ReactNode){
    Array.from({length:screen.width},(_,x)=>cellAt(screen,x,y)?.char||"").join(""));},
   close(){root.unmount();root.cleanup();stdin.destroy();stdout.destroy();stderr.destroy();}};
 }
-test("context count and compact process choices remain grouped, unique and selectable after resize",async()=>{
+test("compact process choices omit position counts and remain unique and selectable after resize",async()=>{
  const a:any={process_id:"a",actor_kind:"supervisor",created_at:"1",model_id:"MODEL-A",context:{limit:10000,used_tokens:300}};
  const b:any={...a,process_id:"b",actor_kind:"worker",parent_id:"a",created_at:"2",display_name:"Long worker 中文名称",model_id:"MODEL-B"};
  const fixture=(width:number)=><LanguageContext.Provider value="zh"><Box width={width} height={24} flexDirection="column">
@@ -34,12 +34,13 @@ test("context count and compact process choices remain grouped, unique and selec
    io.resize(fixture(width),width);await wait();await wait();
    const lines=io.lines(),all=lines.join(" ");
    expect(all.match(/主进程/g)?.length).toBe(1);
-   const row=lines.find(line=>line.includes("1/2"))!;
+   const row=lines.find(line=>line.includes("主进程"))!;
+   expect(all).not.toContain("1/2");
    expect(row).toContain("主进程");expect(row.indexOf("主进程")).toBeLessThan(16);
    await io.send("\x1b[5~");
    expect(io.lines().join(" ")).toContain("MODEL-A");
    await io.send("\x1b[C");expect(io.lines().join(" ")).toContain("MODEL-B");
-   expect(io.lines().join(" ")).toContain("2/2");
+   expect(io.lines().join(" ")).not.toContain("2/2");
    await io.send("\x1b[D");
   }
  }finally{io.close();}

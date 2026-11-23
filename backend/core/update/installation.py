@@ -22,7 +22,7 @@ from .contracts import verify_bundle_contract, _metadata
 from .health import probe_managed_host
 from .bootstrap_contract import CURRENT_API, SUPPORTED_APIS
 from .manifest import DataCompatibility
-from .persistence import filesystem_identity, descriptor_identity, validate_device, sync_directory, read_control, open_readonly, pinned_initialization
+from .persistence import filesystem_identity, descriptor_identity, validate_device, sync_directory, read_control, open_readonly, pinned_initialization, private_namespace
 from .staging import _staging_parent
 from .transaction import InstallationStore, TransactionResult, _initialize_store, TERMINAL
 from .tree import inventory, tree_digest, sync_tree
@@ -49,6 +49,27 @@ def _windows_launcher(host):
     return ('@echo off\n@setlocal DisableDelayedExpansion\n'
             '@"%~dp0bootstrap\\gitgo-host\\gitgo-host.exe" --gitgo-internal-role managed-launch %*\n'
             '@exit /b %errorlevel%\n')
+
+
+def _windows_public_command(root):
+    host = str(root / "bootstrap/gitgo-host/gitgo-host.exe").replace("'", "''")
+    quote_function = r'''function ConvertTo-GitgoNativeArgument([string]$Value) {
+    '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+'''
+    return ("$ErrorActionPreference = 'Stop'\n" + quote_function +
+        "$nativeArguments = (@('--gitgo-internal-role', 'managed-launch') + $args | "
+        "ForEach-Object { ConvertTo-GitgoNativeArgument $_ }) -join ' '\n"
+        "$child = Start-Process -FilePath '" + host + "' -ArgumentList $nativeArguments "
+        "-NoNewWindow -Wait -PassThru\n"
+        "try { $childExit = $child.ExitCode } finally { $child.Dispose() }\nexit $childExit\n")
+
+
+def _native_entries_after_install(root, seed):
+    if not (seed / "native-entry.json").is_file():
+        return {}
+    from backend.core.native_entry import install_entries
+    return {"native_entry": install_entries(root)}
 
 
 class ManagedStore(InstallationStore):
@@ -300,7 +321,7 @@ def _create_private_directories(path: Path):
 
 
 def install_from_frozen_package(root_value: str, bin_value: str, protected_values: list[str]):
-    """Explicit initial-install role. No overwrite, PATH profile edits or adoption."""
+    """Initial install or exact-source retry; no PATH edits or unknown adoption."""
     if not _ownership_supported() or not getattr(sys, "frozen", False):
         reject("UPDATE_INSTALL_INVALID", "Managed installer requires a packaged Host with native ownership support")
     executable = Path(sys.executable)
@@ -309,6 +330,7 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
         reject("UPDATE_INSTALL_INVALID", "Initial installer must come from a complete extracted package")
     seed = executable.parents[2]
     root, bin_dir = _new_path(root_value), _new_path(bin_value)
+    if len(protected_values) > 128: reject("UPDATE_PROTECTED_PATHS", "Too many protected workspace paths")
     protected = tuple(dict.fromkeys((*protected_install_paths(), *(_new_path(p) for p in protected_values))))
     for other in (seed, bin_dir, *protected):
         if root == other or root.is_relative_to(other) or other.is_relative_to(root):
@@ -316,40 +338,48 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
     for other in (seed, *protected):
         if bin_dir == other or bin_dir.is_relative_to(other) or other.is_relative_to(bin_dir):
             reject("UPDATE_PROTECTED_PATHS", "Command directory overlaps package or protected data")
-    if root.exists() and (not root.is_dir() or any(root.iterdir())):
-        reject("UPDATE_INSTALL_INVALID", "Initial managed target must be new or empty")
     command = bin_dir / ("gitgo.ps1" if os.name == "nt" else "gitgo")
+    if root.exists() and (not root.is_dir() or any(root.iterdir())):
+        # Native entry publication follows final registration. An interrupted
+        # publication can retry only the same verified package and command.
+        if not (seed / "native-entry.json").is_file() or not root.is_dir():
+            reject("UPDATE_INSTALL_INVALID", "Initial managed target must be new or empty")
+        store = open_managed(root)
+        ledger = store._ledger()
+        if ledger["transaction"] is not None or ledger["current"]["tree_sha256"] != tree_digest(seed):
+            reject("UPDATE_INSTALL_INVALID", "Install retry source differs from the registered payload")
+        if os.name == "nt":
+            matches = (command.is_file() and not command.is_symlink()
+                       and command.read_bytes() == _windows_public_command(root).encode("utf-8-sig"))
+        else:
+            matches = command.is_symlink() and command.readlink() == root / "gitgo"
+        if not matches:
+            reject("UPDATE_INSTALL_INVALID", "Install retry command ownership differs")
+        return {"schema_version": 1, "managed": True, "version": ledger["current"]["version"],
+                "updates_enabled": False, **_native_entries_after_install(root, seed)}
     if command.exists() or command.is_symlink():
         reject("UPDATE_INSTALL_INVALID", "Public command already exists; choose a separate command directory")
-    if len(protected_values) > 128: reject("UPDATE_PROTECTED_PATHS", "Too many protected workspace paths")
     _create_private_directories(root)
     _create_private_directories(bin_dir)
     # Never publish a public symlink before final registration and validation.
     store = initialize_managed(root, seed, protected_paths=protected)
     _new_path(str(bin_dir))
     if os.name == "nt":
-        _staging_parent(bin_dir, protected)
-        host = str(root / "bootstrap/gitgo-host/gitgo-host.exe").replace("'", "''")
         # UTF-8 BOM is supported by Windows PowerShell 5.1 and PowerShell 7.
         # Do not rewrite the user's global execution policy or PATH profile.
         # No PowerShell parameter binding: preserve native switches such as
         # --version as argv, instead of treating them as script parameters.
-        quote_function = r'''function ConvertTo-GitgoNativeArgument([string]$Value) {
-    '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
-}
-'''
-        content = ("$ErrorActionPreference = 'Stop'\n" + quote_function +
-            "$nativeArguments = (@('--gitgo-internal-role', 'managed-launch') + $args | "
-            "ForEach-Object { ConvertTo-GitgoNativeArgument $_ }) -join ' '\n"
-            "$child = Start-Process -FilePath '" + host + "' -ArgumentList $nativeArguments "
-            "-NoNewWindow -Wait -PassThru\n"
-            "try { $childExit = $child.ExitCode } finally { $child.Dispose() }\nexit $childExit\n")
+        content = _windows_public_command(root)
         from .windows_storage import open_file
-        descriptor = open_file(command, create=True, write=True)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content.encode("utf-8-sig")); handle.flush(); os.fsync(handle.fileno())
+        # Retain the command directory and ancestor handles while publishing.
+        # A private leaf is safe even beneath an ordinary shared temp parent.
+        with private_namespace(bin_dir):
+            _staging_parent(bin_dir, protected)
+            descriptor = open_file(command, create=True, write=True)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content.encode("utf-8-sig")); handle.flush(); os.fsync(handle.fileno())
         return {"schema_version": 1, "managed": True, "version": store._ledger()["current"]["version"],
-                "updates_enabled": False}
+                "updates_enabled": False, **_native_entries_after_install(root, seed)}
     descriptor = os.open(bin_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         info = os.fstat(descriptor)
@@ -359,7 +389,7 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
         os.fsync(descriptor)
     finally: os.close(descriptor)
     return {"schema_version": 1, "managed": True, "version": store._ledger()["current"]["version"],
-            "updates_enabled": False}
+            "updates_enabled": False, **_native_entries_after_install(root, seed)}
 
 
 def physical_installation(executable: Path) -> tuple[Path, str] | None:
@@ -474,6 +504,8 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
         reject("UPDATE_BOOTSTRAP_ROLE", "Managed lifecycle requires the stable installed bootstrap")
     store = open_managed(physical[0])
     from .bootstrap_contract import ENGINE_DELEGATION_APIS
+    # The immutable launcher owns process scope; API 13 brokers bounded probes
+    # for the replaceable engine without permitting that engine to fork.
     delegated = store.registration["bootstrap_api"] in ENGINE_DELEGATION_APIS
     if delegated:
         from .coordinator import recover_if_pending
@@ -491,7 +523,8 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             return 0
     from backend.core.process_control import spawn_managed, finish_scope, terminate_tree
     from .handoff import launch_session, consume_request, SESSION_ENV, HANDOFF_EXIT
-    from .handoff import strategy
+    from .handoff import strategy, macos_update_on_exit, exit_scope_ready
+    update_on_quit = macos_update_on_exit(store)
     if strategy(store) == "after_reboot":
         if delegated:
             from .coordinator import dispatch
@@ -524,11 +557,17 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
             # All launcher leases close before the updater obtains exclusivity.
             exit_code = proc.returncode
             automatic_handoff = False
-            if exit_code == 0 and nonce is not None and getattr(proc, "_gitgo_cleanup", {}).get("complete") is True:
+            cleanup = getattr(proc, "_gitgo_cleanup", {})
+            if (exit_code == 0 and nonce is not None
+                    and (cleanup.get("complete") is True or (update_on_quit and exit_scope_ready(store, cleanup)))):
                 if delegated:
                     from .coordinator import dispatch
                     try:
                         result = dispatch(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None), automatic=True)
+                        if update_on_quit and result.status not in {"idle", "disabled", "up_to_date"}:
+                            from backend.core.protocol_io import dump_protocol_json
+                            print(dump_protocol_json({"update_status": result.status, "version": result.version,
+                                                      "error_code": result.error_code}), file=sys.stderr, flush=True)
                         if result.status not in {"idle", "committed", "up_to_date", "disabled"}:
                             print("Automatic update deferred: " + (result.error_code or result.status), file=sys.stderr, flush=True)
                     except Exception as error:
@@ -558,11 +597,24 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
                 result = consume_request(store, nonce, exit_code, getattr(proc, "_gitgo_cleanup", None))
             if result is None: return 2
             from backend.core.protocol_io import dump_protocol_json
-            print(dump_protocol_json({"update_status": result.status, "version": result.version,
-                                      "error_code": result.error_code}), flush=True)
+            report = {"update_status": result.status, "version": result.version,
+                      "error_code": result.error_code}
+            if update_on_quit and result.health_failure is not None:
+                report["health_failure"] = result.health_failure
+            if update_on_quit and result.status == "blocked" and result.error_code == "UPDATE_BUSY":
+                print("Close other Gitgo instances, then reopen Gitgo and confirm the prepared update again.",
+                      file=sys.stderr, flush=True)
+            print(dump_protocol_json(report),
+                  file=sys.stderr if update_on_quit and automatic_handoff else sys.stdout, flush=True)
             if result.status == "restart_required":
                 print("Confirmation saved. Restart macOS manually, then use the installed Gitgo command. Signature, package and exclusive runtime locks will be checked again before replacement.", file=sys.stderr, flush=True)
                 return 0
+            if update_on_quit:
+                # The transaction has already committed, rolled back, or
+                # reported a blocker. The next launch uses the same entry.
+                if result.status == "blocked":
+                    return 0 if automatic_handoff else 2
+                return 0 if result.status in {"committed", "rolled_back", "up_to_date"} else 2
             recovered = store.recover()
             if recovered.status not in {"idle", "committed", "rolled_back"}:
                 reject("UPDATE_RECOVERY_REQUIRED", "Update must recover before restarting")

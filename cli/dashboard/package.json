@@ -1,11 +1,13 @@
 {
   "name": "gitgo-dashboard",
-  "version": "1.0.0-alpha.3.1.1",
+  "version": "1.0.0-alpha.3.2",
   "module": "index.ts",
   "type": "module",
   "private": true,
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "build:icons": "bun scripts/build-icons.ts",
+    "verify:icons": "bun scripts/build-icons.ts --verify",
     "dev": "bun scripts/launch.mjs",
     "dev:node": "node scripts/launch.mjs --runtime node",
     "dev:trace": "bun scripts/launch.mjs --entry trace --project gitgo",

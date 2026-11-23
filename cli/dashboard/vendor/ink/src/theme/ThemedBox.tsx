@@ -4,6 +4,7 @@ import type { DOMElement } from '../core/dom.js';
 import type { ClickEvent } from '../core/events/click-event.js';
 import type { FocusEvent } from '../core/events/focus-event.js';
 import type { KeyboardEvent } from '../core/events/keyboard-event.js';
+import type { MouseActionEvent } from '../core/events/mouse-action-event.js';
 import type { Color, Styles } from '../core/styles.js';
 import { getTheme, type Theme } from './theme-types.js';
 import { useTheme } from './ThemeProvider.js';
@@ -36,6 +37,7 @@ export type Props = BaseStylesWithoutColors &
     tabIndex?: number;
     autoFocus?: boolean;
     onClick?: (event: ClickEvent) => void;
+    clickMode?: 'action' | 'text';
     onFocus?: (event: FocusEvent) => void;
     onFocusCapture?: (event: FocusEvent) => void;
     onBlur?: (event: FocusEvent) => void;
@@ -44,6 +46,9 @@ export type Props = BaseStylesWithoutColors &
     onKeyDownCapture?: (event: KeyboardEvent) => void;
     onMouseEnter?: () => void;
     onMouseLeave?: () => void;
+    onMouseDown?: (event: MouseActionEvent) => void;
+    onMouseDrag?: (event: MouseActionEvent) => void;
+    onMouseUp?: (event: MouseActionEvent) => void;
   };
 
 /**

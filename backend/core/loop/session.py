@@ -7,6 +7,7 @@ A Agent 通过 ContextBuilder 注入治理简报作为 system prompt。
 from __future__ import annotations
 
 from backend.core.prompt_templates import load_prompt
+from backend.core.provider_budget import DEFAULT_CONTEXT_BUDGET
 
 import json
 import re
@@ -25,10 +26,13 @@ _INTERNAL_USER_PREFIXES = (
 )
 
 
-def _looks_transport_corrupted(content: str) -> bool:
-    return bool(unicode_integrity_error(content)) or len(
-        _LITERAL_SURROGATE.findall(content)
-    ) >= 2
+def _looks_transport_corrupted(message: dict) -> bool:
+    content = str(message.get("content") or "")
+    # The literal markers were a legacy Dashboard input symptom. The same
+    # ASCII sequences are valid inside tool results, diffs and assistant text.
+    return bool(unicode_integrity_error(content)) or (
+        _is_conversation_user(message) and len(_LITERAL_SURROGATE.findall(content)) >= 2
+    )
 
 
 def _mark_legacy_unicode_chain(messages: list[dict]) -> list[dict]:
@@ -45,7 +49,7 @@ def _mark_legacy_unicode_chain(messages: list[dict]) -> list[dict]:
     for raw in messages:
         item = dict(raw)
         role = str(item.get("role") or "")
-        corrupted = _looks_transport_corrupted(str(item.get("content") or ""))
+        corrupted = _looks_transport_corrupted(item)
         if role == "user" and not corrupted:
             contaminated = False
         if corrupted:
@@ -94,7 +98,7 @@ class AgentSession:
     # function-call state does not.
     active_provider_route: str = ""
     context_epoch: int = 0
-    model_context_limit: int = 128000
+    model_context_limit: int = DEFAULT_CONTEXT_BUDGET
     context_flags: set[str] = field(default_factory=set, repr=False)
     context_memo: dict[str, dict] = field(default_factory=dict, repr=False)
     _context_memo_lock: threading.RLock = field(
@@ -115,6 +119,7 @@ class AgentSession:
     # Derived Provider presentation only; reset on scope/route/epoch change.
     provider_context_cache: dict = field(default_factory=dict, repr=False)
     provider_context_seed: dict = field(default_factory=dict, repr=False)
+    request_tool_contracts: set[tuple[str, str]] | None = field(default=None, repr=False)
     manual_compact_requested: bool = False
     force_compact_requested: bool = False
     context_abort_requested: bool = False
@@ -630,17 +635,9 @@ class AgentSession:
             index = end
         return result
 
-    def to_provider_messages(
-        self, *, dynamic_envelope: str = "", provider_route: str = "",
-    ) -> list[dict]:
-        """Return canonical history plus an optional ephemeral tail envelope.
-
-        The envelope is deliberately not appended to ``messages``.  It belongs
-        after the append-only history so changing current-turn operational
-        guidance does not invalidate the reusable prompt/history prefix or
-        pollute later conversation recall.
-        """
-        from .provider_history import complete_transactions
+    def provider_history(self, provider_route: str = "") -> list[dict]:
+        """Select replayable history, retaining the durable transcript."""
+        from .provider_history import complete_transactions, project_tool_history
         history, states = complete_transactions(_mark_legacy_unicode_chain(self.messages), self.provider_state,
             self.epoch_archive, self._provider_call_ids)
         result = []
@@ -671,7 +668,13 @@ class AgentSession:
                 if not str(wire.get("content") or "").strip():
                     continue
             result.append(wire)
-        result = self._ordered_tool_transactions(result)
+        return project_tool_history(self._ordered_tool_transactions(result))
+
+    def to_provider_messages(
+        self, *, dynamic_envelope: str = "", provider_route: str = "",
+    ) -> list[dict]:
+        """Combine replayable history with the current ephemeral envelope."""
+        result = self.provider_history(provider_route)
         from .provider_context import ContextSections, project
         if isinstance(dynamic_envelope, ContextSections):
             return project(self, result, dynamic_envelope, route=provider_route)
@@ -789,12 +792,11 @@ class AgentSession:
         })
         self.context_epoch += 1
         self.provider_context_cache = {}
-        prefix = [
-            item for item in self.messages
-            if item.get("message_type") in {
-                "compiled_system_prompt", "compiled_task_contract",
-            }
-        ][:2]
+        from .prompt_rule_updates import compact_prefix
+        prefix = compact_prefix(self)
+        retained_messages = [item for item in retained_messages if item.get('message_type') not in {
+            'compiled_system_prompt', 'compiled_task_contract'} and not (
+                item.get('host_authority') is True and item.get('steering_type') == 'prompt_contract_update')]
         checkpoint = {
             "role": "user",
             "content": f"[CONTEXT EPOCH {self.context_epoch} CHECKPOINT]\n{summary}",
@@ -823,6 +825,35 @@ class AgentSession:
         checkpoint: dict,
         token_threshold: int = 64000,
         retained_public_messages: int = 8,
+    ) -> bool:
+        """Publish a complete boundary or retain the original usable context.
+
+        Call only after exclusive execution admission. Compaction reads historic
+        rows and replaces context containers; stage those containers so a local
+        failure cannot partially clear the shared conversation/provider state.
+        Historical archive rows remain read-only and are not copied recursively.
+        """
+        from copy import copy
+        staged = copy(self)
+        fields = ('messages', 'provider_state', 'epoch_archive', 'context_flags',
+                  'provider_context_cache', 'compiled_prompt_sections',
+                  'compiled_prompt_hash', 'context_epoch')
+        for name in fields:
+            setattr(staged, name, copy(getattr(self, name)))
+        changed = staged._compact_completed_task_boundary(
+            checkpoint=checkpoint, token_threshold=token_threshold,
+            retained_public_messages=retained_public_messages)
+        if changed:
+            for name in fields:
+                setattr(self, name, getattr(staged, name))
+        return changed
+
+    def _compact_completed_task_boundary(
+        self,
+        *,
+        checkpoint: dict,
+        token_threshold: int,
+        retained_public_messages: int,
     ) -> bool:
         """Seal old execution mechanics before an unrelated root task starts.
 
@@ -878,6 +909,8 @@ class AgentSession:
                 "role": str(message.get("role")),
                 "content": content[:8000],
                 "message_type": "conversation",
+                "context_purpose": "retained_dialogue",
+                **{key: message[key] for key in ("message_id", "turn_id", "timestamp") if key in message},
             })
         retained_count = max(0, int(retained_public_messages))
         retained = public[-retained_count:] if retained_count else []
@@ -917,6 +950,11 @@ class AgentSession:
         migrated: list[dict] = []
         for message in self.messages:
             message_type = message.get("message_type")
+            if message.get('host_authority') is True and message.get('steering_type') == 'prompt_contract_update':
+                # The terminal task is archived and the next compiler refresh
+                # is mandatory below. Never apply old task patches after its
+                # new prefix, including unparseable legacy steering.
+                continue
             if message_type == "compiled_task_contract":
                 continue
             if message_type == "compiled_system_prompt":

@@ -60,7 +60,10 @@ export function useLLMConfig(client: BackendClient | null, project = "") {
       setFailoverRevision(result?.failover_revision || "");
       setError(result?.credential_cleanup?.pending
         ? "Configuration saved; old credential cleanup pending. Retry the operation or uninstall cleanup." : null);
-      if (project) {
+      // A background configuration refresh must not reread an entire project
+      // transcript just to finish the API switch. Existing runtime health
+      // remains an observation until the next normal project status read.
+      if (project && !background) {
         const status: any = await loopStatus(client, project);
         setHealth(Object.fromEntries((status?.providers || []).map((p: any) => [p.id, p])));
       }

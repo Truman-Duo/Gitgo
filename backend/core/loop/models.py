@@ -90,10 +90,13 @@ class AgentProcess:
     _checkpoint_lock: Any = field(default_factory=threading.RLock, repr=False)
     _context_lock: Any = field(default_factory=threading.RLock, repr=False)
     _coordination_lock: Any = field(default_factory=threading.RLock, repr=False)
+    _subagent_batch_lock: Any = field(default_factory=threading.Lock, repr=False)
     _child_sequence: int = field(default=0, repr=False)
     _run_lock: Any = field(default_factory=threading.Lock, repr=False)
     _step_history: list[dict] = field(default_factory=list, repr=False)
     _nudge_counters: dict[str, int] = field(default_factory=dict, repr=False)
+    _wait_feedback_notices: set[tuple[str, str, int, int]] = field(default_factory=set, repr=False)
+    _wait_maintenance_notice: tuple[str, int] | None = field(default=None, repr=False)
     _transcript_builder: Any = field(default=None, repr=False)  # v0.39: TaskTranscriptBuilder
     _dependency_observed_files: set[str] = field(default_factory=set, repr=False)
     pending_decision: dict | None = field(default=None, repr=False)

@@ -50,6 +50,7 @@ export type EffectAction =
   | { type: "scroll_chat_bottom" }
   | { type: "edit_prompt_external" }
   | { type: "previous_decision_question" }
+  | { type: "next_decision_question" }
   | { type: "report_notice"; code: number; params?: Record<string, any> };
 
 // ── InputAction (keymap output) ───────────────────────────
@@ -96,6 +97,7 @@ export type InputContext = {
   // Host-owned user decision currently rendered in the A workspace.
   decisionOptionLabels: string[];
   decisionRoundCanGoBack?: boolean;
+  decisionRoundCanSelectQuestion?: boolean;
   decisionAllowFreeForm: boolean;
   decisionSelection: number;
   decisionComposing: boolean;
@@ -237,6 +239,10 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
   // A pending decision is an explicit interaction mode. Keep the routing
   // identity in useChat/sendChat, while deterministic UI bookkeeping stays in
   // the host instead of consuming model turns.
+  if(isChatScene(ctx.scene) && ctx.decisionRoundCanSelectQuestion && !ctx.decisionSubmitting && !ctx.decisionComposing && (!ctx.chatInputFocused || ctx.textValue==="")){
+    if(matchChord("left",input,key))return [effect({type:"previous_decision_question"})];
+    if(matchChord("right",input,key))return [effect({type:"next_decision_question"})];
+  }
   if (isChatScene(ctx.scene) && ctx.decisionRoundCanGoBack && !ctx.decisionSubmitting && !ctx.decisionComposing && !ctx.chatInputFocused && matchChord("left", input, key)) {
     return [effect({type: "previous_decision_question"})];
   }
@@ -380,7 +386,7 @@ export function resolveSceneKey(ctx: InputContext, input: string, key: any): Inp
   }
 
   // P6: NORMAL text input — insert + auto-focus
-  if (input && input.length >= 1 && !key.ctrl && !key.meta) {
+  if (input && input.length >= 1 && !key.ctrl && !key.meta && !key.return) {
     const acts: InputAction[] = [text("text", { op: "insert", text: input, paste: Boolean(key.paste) })];
     if (!ctx.chatInputFocused && (ctx.scene === "projects" || ctx.scene === "workspace" || ctx.scene === "agent_detail")) {
       acts.push(state({ type: "set_chat_input_focused", focused: true }));

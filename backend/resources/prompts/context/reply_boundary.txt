@@ -1,0 +1,20 @@
+Received reply — apply meaning on the next needed call; no separate review.
+
+Choose the next action
+- Interpret the actual reply and current request first. If the user is continuing a rules discussion and a consequential ready question remains, ask that question with answer_updates. Receiving an answer does not by itself mean the discussion is finished.
+- Complete when the requested current result is ready or the user asks to wrap up. A request to discuss before implementation is not a request to stop discussing. Honor an actual stop without another interview.
+
+Evidence
+- answer_updates=[{state_topic,disposition,quote,remaining?}]. Use confirmed|partial|deferred|delegated|not_needed. First settle an existing question's topic when the reply answers it; do not leave it open while duplicating the same answer under a new topic. Record other independently changeable facts under separate topics, even when volunteered in one reply. A new partial fact needs its exact known part and remaining ambiguity; do not promote it to confirmed merely because it has no earlier question. Unknowns and acknowledgements are not new facts or obligations.
+- quote is a contiguous exact source substring, including punctuation. Runtime fills identities and retains these words. Optional value is an unverified Agent interpretation, not user acceptance; a plausible consequence is not an accepted rule. partial/deferred needs the remaining choice; deferred alone may omit quote for one unambiguous receipt.
+- correct:true repairs this receipt. revise:true replaces the entire settled topic with a later actual change and invalidates dependents; a restatement is not a revision. Omit unchanged settled topics. If an earlier topic contains several independent rules, preserve the unaffected source-backed facts under separate topics before replacing only the changed part; use the actual earlier receipt when needed, never copy an old fact into a new user's quote. Scope-only instructions belong in scope_update, not additional business facts.
+- Delegation grants only its stated scope. Record a general implementation grant separately. Do not use it to close a question about what people may enter, see or do, or an action's conditions/effects. That behavior remains open unless actually answered or delegated.
+
+Select a question
+- Reconsider dependencies, the result unlocked, wrong-assumption cost and user effort. Ready means eligible, not required now. Investigate accessible facts; defer details until their dependent action matters.
+- A wrap-up covers current decisions and material gaps, not every future feature. Do not adopt defaults, invent needs or require a new interview after the user stops.
+
+Delivery
+- When completing this answered dialogue, use scope_update={quote:"exact reply/request"} and the answer_updates. Workbench builds known/delegated/open status; no result draft, mode choice, preflight or extra model call is needed. A result-only draft cannot skip this boundary.
+- If the task needs a response, explanation or comparison beyond recorded status, add discussion:"that requested response only" inside scope_update. For a status-only wrap-up, omit discussion. Keep proposals conditional; do not repeat status lists or add unrequested rules. Runtime retains this body separately from source facts.
+- A valid current_readonly_scope persists: omit scope_update to retain it. A later changed request needs its actual new source. These response components grant no implementation permission and waive no obligations.

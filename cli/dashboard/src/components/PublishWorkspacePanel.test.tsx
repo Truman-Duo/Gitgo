@@ -739,9 +739,9 @@ test("Publish navigates actual query observations, returns to selection and neve
     await wait(); expect(io.text()).toContain("待核对"); expect(io.footer().hidden).toBe(true);
     await io.send("\r"); await io.send("\x1b[B"); await io.send("\x1b[C"); await io.send("\r");
     expect(io.text()).toContain("候选 🚀 1"); expect(io.text()).toContain("实际结果提交");
-    await io.send("\x1b"); expect(io.text()).toContain("[合入]"); expect(io.text()).toContain("2/3");
+    await io.send("\x1b"); expect(io.text()).toContain("[合入]"); expect(io.selected().join(" ")).toContain("候选 🚀 1"); expect(io.text()).not.toContain("2/3");
     await io.commandStart(); await io.send("refresh"); await io.send("\r");
-    expect(io.text()).toContain("2/3"); expect(io.text()).toContain("[合入]");
+    expect(io.selected().join(" ")).toContain("候选 🚀 1"); expect(io.text()).not.toContain("2/3"); expect(io.text()).toContain("[合入]");
     for (const width of [80, 40, 120]) { await io.resize(width); expect(io.text()).toContain("待核对"); }
     expect(calls).toEqual(["publish.items", "publish.items"]);
     await io.send("\x1b"); await io.send("\x1b"); expect(io.dismissed()).toBe(1);
@@ -804,7 +804,7 @@ test("long lists remain navigable in a narrow terminal without executing future 
   try {
     await wait(); await io.resize(40, 20); await io.send("\r");
     for (let index = 0; index < 12; index++) await io.send("\x1b[B");
-    expect(io.text()).toContain("TEST-12"); expect(io.text()).toContain("13/50");
+    expect(io.selected().join(" ")).toContain("TEST-12"); expect(io.text()).not.toContain("13/50");
     await io.send("\x1b[C"); await io.send("\x1b[C"); await io.send("\r");
     expect(io.text()).toContain("远端结果尚待核对"); expect(calls).toEqual(["publish.items"]);
   } finally { io.close(); }

@@ -16,7 +16,7 @@ from .llm import StreamCancelledError, StreamInterruptedError
 from .llm_adapter import parse_tool_calls
 from .models import ProcessStatus
 from .outcome import OutcomeStatus
-from .provider_protocol import ProviderEventType, ProviderResponseIncomplete
+from .provider_protocol import ProviderEvent, ProviderEventType, ProviderResponseIncomplete
 from .provider_response import ProviderResponse, ProviderResponseCollector
 from .provider_turn_protocol import (_iter_provider_events, _provider_idle_timeout,
     _provider_continuation, _filter_incomplete_response_artifacts,
@@ -59,22 +59,31 @@ class ProviderTurnRuntime:
         self.stream_recoveries = 0
 
     def before_attempt(self, _index, _client):
-        if self.process.task_budget is not None:
-            reserve_provider_call(self.process, self.emit)
+        reserve_provider_call(self.process, self.emit)
         return _provider_idle_timeout(self.process)
 
     def route_notice(self, artifact):
+        artifact = dict(artifact)
+        actual_input = artifact.pop('_trace_detail', None)
         self.route_changed(artifact)
         if artifact.get('event') == 'provider_request_started':
-            from backend.core.knowledge.feedback import observe_provider_input
-            observe_provider_input(self.process,self.session.to_provider_messages(
-                dynamic_envelope=self.envelope(),provider_route=self.route()))
-            self.emit({**self.request_observation, **artifact}, detail={
+            detail = actual_input or {
+                'representation': 'prepared_runtime_projection',
                 'messages': self.session.to_provider_messages(
                     dynamic_envelope=self.envelope(), provider_route=self.route()),
-                'tools': self.tools or []})
+                'tools': self.tools or [],
+            }
+            self.observe_input(detail['messages'])
+            self.emit({**self.request_observation, **artifact}, detail=detail)
         else:
-            self.emit(artifact, detail=artifact)
+            self.emit(artifact, detail=actual_input or artifact)
+
+    def observe_input(self, messages):
+        from backend.core.knowledge.feedback import observe_provider_input
+        from .tool_context import visible_tool_contracts
+
+        self.session.request_tool_contracts = visible_tool_contracts(messages, self.session.session_id)
+        observe_provider_input(self.process, messages)
 
     def run(self, tools, web_mode, protocol):
         self.tools, self.web_mode, self.protocol = tools, web_mode, protocol
@@ -91,22 +100,15 @@ class ProviderTurnRuntime:
             return self.failure(error)
 
     def prepare(self):
+        self.session.request_tool_contracts = None
         budget_call_index = 0
-        if self.process.task_budget is not None and (not hasattr(self.provider, 'stream_session_events')):
+        if not hasattr(self.provider, 'stream_session_events'):
             budget_call_index = reserve_provider_call(self.process, self.emit)
         self.budget_prefix = f'provider-{budget_call_index}:'
         self.idle_timeout = _provider_idle_timeout(self.process)
         self.output_limit = max(1, int(getattr(self.provider, 'max_output_tokens', 4096)))
         if self.process.task_kind == 'answer':
             self.output_limit = min(self.output_limit, 8192)
-        if self.process.steps_used == 0:
-            self.emit(
-                {
-                    'event': 'progress_summary',
-                    'message': 'Understanding the request and preparing the next action.',
-                    'phase': 'provider',
-                },
-            )
         self.cache_intent = self.session.cache_intent(
             self.tools,
             mode=getattr(getattr(self.provider, 'capabilities', None), 'prompt_cache', 'automatic'),
@@ -130,17 +132,14 @@ class ProviderTurnRuntime:
             'cache_intent': self.cache_intent.to_dict(),
         }
         if not hasattr(self.provider, 'stream_session_events'):
-            from backend.core.knowledge.feedback import observe_provider_input
-            observe_provider_input(self.process,self.session.to_provider_messages(
-                dynamic_envelope=self.envelope(),provider_route=self.route()))
+            messages = self.session.to_provider_messages(
+                dynamic_envelope=self.envelope(), provider_route=self.route())
+            self.observe_input(messages)
             self.emit(
                 self.request_observation,
                 detail={
                     'representation': 'canonical_provider_input',
-                    'messages': self.session.to_provider_messages(
-                        dynamic_envelope=self.envelope(),
-                        provider_route=self.route(),
-                    ),
+                    'messages': messages,
                     'tools': self.tools or [],
                 },
             )
@@ -186,7 +185,7 @@ class ProviderTurnRuntime:
         self.stream_recoveries = 0
         self.collector.decode_tool_calls()
         self.content = self.response.accumulated_text
-        if self.content or self.response.tool_calls or self.response.accumulated_reasoning or self.response.accumulated_reasoning_details:
+        if self.content or self.response.tool_calls or self.response.accumulated_reasoning or self.response.accumulated_reasoning_details or self.response.public_progress:
             replay_artifacts = self.response.provider_artifacts
             if self.response.provider_incomplete_reason or self.response.invalid_tool_calls:
                 replay_artifacts = _filter_incomplete_response_artifacts(
@@ -226,13 +225,22 @@ class ProviderTurnRuntime:
         )
 
     def failure(self, exc):
+        from .mailbox import MailboxRecoveryRequired
+        from .runtime_outcomes import _status_result
+        if getattr(self, "collector", None) is not None:
+            self.collector.finish_partial_progress()
         if self.process.task_budget is not None:
             self.process.task_budget.finish_output_fragments(
                 self.process.process_id,
                 prefix=self.budget_prefix,
             )
+        if isinstance(exc, MailboxRecoveryRequired):
+            return ProviderTurnBoundary(result=_status_result(self.process, self.session))
         from backend.core.loop.budget import TaskBudgetExceeded
         from backend.core.loop.llm import StreamCancelledError, StreamInterruptedError
+        if not isinstance(exc, (TaskBudgetExceeded, StreamCancelledError)) and not self.process.cancel_requested:
+            from .provider_failure import expired_task_budget, provider_diagnostic
+            exc = expired_task_budget(self.process, provider_diagnostic(exc, stage='main_response')) or exc
         if isinstance(exc, TaskBudgetExceeded):
             return ProviderTurnBoundary(
                 result=_budget_exhausted_result(
@@ -318,6 +326,8 @@ class ProviderTurnRuntime:
             return self.fallback()
         else:
             transition(self.process, ProcessStatus.FAILED)
+            from .provider_failure import provider_diagnostic, provider_failure_message
+            failure = provider_diagnostic(exc, stage="main_response")
             return ProviderTurnBoundary(
                 result=_make_result(
                     self.process,
@@ -325,7 +335,8 @@ class ProviderTurnRuntime:
                     '',
                     duration_ms=0,
                     error_code='LLM_STREAM_FAILED',
-                    error_message=str(exc),
+                    error_message=provider_failure_message(failure),
+                    error_details={'failure': failure}, error_retryable=failure['retryable'],
                     outcome_status=OutcomeStatus.FAILED,
                 ),
             )
@@ -333,7 +344,7 @@ class ProviderTurnRuntime:
     def fallback(self):
         try:
             routed_chat = hasattr(self.provider, 'stream_session_events')
-            if self.process.task_budget is not None and (not routed_chat):
+            if not routed_chat:
                 reserve_provider_call(self.process, self.emit)
             response = self.provider.chat(
                 (
@@ -364,6 +375,14 @@ class ProviderTurnRuntime:
             if isinstance(response, dict):
                 self.content = response.get('content', '') or ''
                 self.response.tool_calls = parse_tool_calls(response)
+                for update in response.get('public_progress', []):
+                    identity = {key: update.get(key, default) for key, default in (
+                        ('response_id', ''), ('message_id', ''), ('output_index', -1),
+                    )}
+                    self.collector.consume(ProviderEvent(ProviderEventType.TEXT_DELTA,
+                        text=update.get('text', ''), phase='commentary', **identity))
+                    self.collector.consume(ProviderEvent(ProviderEventType.MESSAGE_COMPLETED,
+                        phase='commentary', **identity))
             else:
                 self.content = response or ''
                 self.response.tool_calls = parse_tool_calls(self.content)
@@ -371,7 +390,7 @@ class ProviderTurnRuntime:
                 self.record_sync_usage(response['usage'])
             if self.process.task_budget is not None:
                 self.process.task_budget.consume_output(self.content, self.process.process_id)
-            if self.content or self.response.tool_calls:
+            if self.content or self.response.tool_calls or (isinstance(response, dict) and response.get('provider_artifacts')):
                 continuation = {}
                 if isinstance(response, dict) and response.get('reasoning_content'):
                     continuation['reasoning_content'] = response['reasoning_content']
@@ -393,10 +412,17 @@ class ProviderTurnRuntime:
             self.process.steps_used += 1
             self.stream_recoveries = 0
         except Exception as chat_exc:
+            from .mailbox import MailboxRecoveryRequired
+            from .runtime_outcomes import _status_result
+            if isinstance(chat_exc, MailboxRecoveryRequired):
+                return ProviderTurnBoundary(result=_status_result(self.process, self.session))
             if isinstance(chat_exc, ProviderResponseIncomplete) and chat_exc.usage:
                 self.record_sync_usage(chat_exc.usage)
                 self.emit({'event': 'provider_response_incomplete', 'phase': 'sync_fallback',
                            'reason': chat_exc.reason})
+            if not isinstance(chat_exc, (TaskBudgetExceeded, StreamCancelledError)) and not self.process.cancel_requested:
+                from .provider_failure import expired_task_budget, provider_diagnostic
+                chat_exc = expired_task_budget(self.process, provider_diagnostic(chat_exc, stage='main_response_fallback')) or chat_exc
             if isinstance(chat_exc, TaskBudgetExceeded):
                 return ProviderTurnBoundary(
                     result=_budget_exhausted_result(
@@ -417,6 +443,8 @@ class ProviderTurnRuntime:
                     ),
                 )
             transition(self.process, ProcessStatus.FAILED)
+            from .provider_failure import provider_diagnostic, provider_failure_message
+            failure = provider_diagnostic(chat_exc, stage="main_response_fallback")
             return ProviderTurnBoundary(
                 result=_make_result(
                     self.process,
@@ -424,7 +452,8 @@ class ProviderTurnRuntime:
                     '',
                     duration_ms=0,
                     error_code='STREAM_FALLBACK_FAILED',
-                    error_message=str(chat_exc),
+                    error_message=provider_failure_message(failure),
+                    error_details={'failure': failure}, error_retryable=failure['retryable'],
                     outcome_status=OutcomeStatus.FAILED,
                 ),
             )

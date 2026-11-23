@@ -7,7 +7,7 @@ comparison keys preserves inheritance provenance; it is not an access check.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import struct
 
 
@@ -94,6 +94,7 @@ class SecurityDescriptor:
     group: bytes | None
     sacl: bytes | None
     dacl: bytes | None
+    _comparison: tuple = field(init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.control) is not int or not 0 <= self.control <= 0xFFFF:
@@ -103,6 +104,7 @@ class SecurityDescriptor:
         if type(self.rm_control) is not int or not 0 <= self.rm_control <= 0xFF:
             raise ValueError('Resource manager control must be an 8-bit integer')
         total = _SD_HEADER.size
+        acl_keys = {}
         for name in ('owner', 'group', 'sacl', 'dacl'):
             component = getattr(self, name)
             if component is None:
@@ -115,12 +117,21 @@ class SecurityDescriptor:
                 present = SE_SACL_PRESENT if name == 'sacl' else SE_DACL_PRESENT
                 if not self.control & present:
                     raise ValueError(f'{name} bytes require its PRESENT control flag')
-                size, _, _ = _acl_parts(component, 0, name)
+                size, revision, aces = _acl_parts(component, 0, name)
+                acl_keys[name] = (revision, aces)
             if size != len(component):
                 raise ValueError(f'Unexpected bytes after {name} component')
             total += size
         if total > MAX_DESCRIPTOR_BYTES:
             raise ValueError('Security descriptor exceeds size limit')
+        # Components are immutable bytes. Reuse this pure representation;
+        # callers still query live kernel descriptors at every boundary.
+        sacl = acl_keys.get('sacl')
+        if sacl is not None and not sacl[1]:
+            sacl = None
+        control = self.control if sacl is not None else self.control & ~SE_SACL_PRESENT
+        object.__setattr__(self, '_comparison', (control, self.rm_control, self.owner,
+            self.group, sacl, acl_keys.get('dacl')))
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> SecurityDescriptor:
@@ -181,16 +192,4 @@ class SecurityDescriptor:
         flag, RM byte, ACL revision, and complete ordered ACE stays significant.
         In particular, neither AUTO_INHERITED nor INHERITED_ACE is normalized.
         """
-        control = self.control
-        sacl_key = None
-        if self.sacl is not None:
-            _, revision, aces = _acl_parts(self.sacl, 0, 'sacl')
-            if aces:
-                sacl_key = (revision, aces)
-        if sacl_key is None:
-            control &= ~SE_SACL_PRESENT
-        dacl_key = None
-        if self.dacl is not None:
-            _, revision, aces = _acl_parts(self.dacl, 0, 'dacl')
-            dacl_key = (revision, aces)
-        return control, self.rm_control, self.owner, self.group, sacl_key, dacl_key
+        return self._comparison

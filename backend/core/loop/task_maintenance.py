@@ -18,6 +18,41 @@ CONTROL_TOOLS = frozenset({"task_mechanism", "harness_mechanism", "declare_task_
     "request_permission", "decision_evidence", "capability_status", "configure_capability", "request_self_execute"})
 
 
+class TaskChangeError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+CHANGE_FIELDS = frozenset({'goal', 'deliverables', 'acceptance_criteria', 'uncertainties', 'engineering_workflow'})
+
+
+def bind_change_fields(previous, proposed, maintenance):
+    """Bind one Agent-selected change to its exact submitted field delta.
+
+    This neither selects a change nor interprets its meaning. Multiple change
+    resolutions still need explicit associations; an empty delta proves none.
+    """
+    update = deepcopy(maintenance)
+    resolutions = update.get('resolve_changes')
+    if isinstance(resolutions, list) and len(resolutions) == 1 and isinstance(resolutions[0], dict):
+        item = resolutions[0]
+        supplied = item.get('contract_fields')
+        if isinstance(supplied, list):
+            maintenance_fields = {key for key in ('plan', 'related_review') if update.get(key)}
+            semantic = [field for field in supplied if not isinstance(field, str) or field not in maintenance_fields]
+            if semantic != supplied:
+                if semantic:
+                    item['contract_fields'] = semantic
+                else:
+                    item.pop('contract_fields')
+        if 'contract_fields' not in item:
+            fields = sorted(key for key in CHANGE_FIELDS if key in proposed and previous.get(key) != proposed[key])
+            if fields:
+                item['contract_fields'] = fields
+    return update
+
+
 def task_id(process):
     return process.active_task_id or process.process_id
 
@@ -133,7 +168,13 @@ def _related(raw):
 def prepare_contract_state(process, contract, proposal, workflow):
     """Pure preparation, installed with the task contract's one checkpoint."""
     before = state_for(process)
-    if not before and not contract.get("mechanism") and not process.runtime_preferences.get("task_maintenance_enabled"):
+    update = proposal.get("maintenance") or {}
+    if not isinstance(update, dict):
+        raise ValueError("maintenance update must be an object")
+    from .task_contract import get_task_contract
+    update = bind_change_fields(get_task_contract(process), contract, update)
+    if not before and not contract.get("mechanism") and not (
+            process.runtime_preferences.get("task_maintenance_enabled") or update.get("plan")):
         return None
     state = before or _initial(process)
     definition = contract.get("mechanism") or state.get("definition")
@@ -158,9 +199,6 @@ def prepare_contract_state(process, contract, proposal, workflow):
         state["definition"] = deepcopy(definition)
         if proposal.get("mechanism"):
             state["detached"] = False
-    update = proposal.get("maintenance") or {}
-    if not isinstance(update, dict):
-        raise ValueError("maintenance update must be an object")
     if len(json.dumps(update, default=str).encode()) > 96000:
         raise ValueError("maintenance proposal exceeds task control-plane budget")
     if update and (type(update.get("expected_revision")) is not int or update["expected_revision"] != state["revision"]):
@@ -182,8 +220,12 @@ def prepare_contract_state(process, contract, proposal, workflow):
         state['plan_review'] = {**deepcopy(plan_review), 'plan_revision': state['plan']['revision'],
             'contract_revision': contract['revision'], 'maintenance_ids': list(update.get('resolve_maintenance') or [])}
     if update.get("plan") is not None:
+        epochs = state["plan"].get("evidence_revisions", {})
         state["plan"] = {**_plan(update["plan"]), "revision": state.get("plan", {}).get("revision", 0) + 1,
                          "contract_revision": contract["revision"]}
+        if epochs:
+            state["plan"]["evidence_revisions"] = {step["id"]: epochs[step["id"]]
+                for step in state["plan"]["steps"] if step["id"] in epochs}
     if update.get("related_review") is not None:
         review = _related(update["related_review"])
         previous_candidates = state.get("related", {}).get("candidates", {})
@@ -228,37 +270,107 @@ def prepare_contract_state(process, contract, proposal, workflow):
     resolutions = update.get("resolve_changes") or []
     if not isinstance(resolutions, list) or len(resolutions) > 64:
         raise ValueError("change resolutions must be bounded")
+    pending_changes = [change for change in state["changes"].values() if change["status"] == "pending"]
+    plan_ids = {step["id"] for step in state["plan"].get("steps", [])}
+    linked_ids = {node["work_item_id"] for node in ((workflow or {}).get("plan") or {}).get("nodes", [])
+                  if "work_item_id" in node}
+    renewed = set()
     for item in resolutions:
         change = state["changes"].get(item.get("id")) if isinstance(item, dict) else None
         withdraw_adopted = isinstance(item, dict) and item.get("disposition") == "withdraw" and change and change["status"] == "adopted"
         if not change or (change["status"] != "pending" and not withdraw_adopted) or change["target_task_id"] != task_id(process):
-            raise ValueError("change resolution must identify this task's pending adopted request")
+            raise TaskChangeError('TASK_CHANGE_REFERENCE_INVALID', "change resolution must identify this task's pending adopted request. "
+                "Call task_mechanism(operation='status'); for adoption, maintenance.resolve_changes uses a pending id "
+                "from this task's state.changes, not a message_id or a child's id in owned_scope_updates. "
+                'Withdrawal may also reference this task\'s adopted change from the full task state; '
+                'it requires newer user evidence, not a fabricated pending change. '
+                "For a child_scope update, inspect this task's state.maintenance_items and use the "
+                'corresponding pending id in maintenance.resolve_maintenance; do not invent an id if none exists.')
         if not str(item.get("reason") or "").strip() or not update.get("plan") or not contract.get("acceptance_criteria"):
-            raise ValueError("adoption requires a revised plan, acceptance criteria and reconciliation reason")
+            raise TaskChangeError('TASK_CHANGE_RECONCILIATION_INCOMPLETE', "adoption requires a revised plan, acceptance criteria and reconciliation reason. "
+                "Call task_mechanism(operation='status') to inspect this task's state.changes "
+                '(use the full task state reference for historical adopted changes when withdrawing); '
+                'submit maintenance.plan, the affected acceptance_criteria and a reason in each '
+                'maintenance.resolve_changes entry together in declare_task_contract. '
+                'plan_review retain cannot replace a revised plan for a scope change.')
         fields = item.get("contract_fields") or []
-        if not fields or any(f not in {"goal", "deliverables", "acceptance_criteria", "uncertainties", "engineering_workflow"} for f in fields):
-            raise ValueError("adoption must identify the actual contract fields reconciled by the Agent")
+        if not fields:
+            raise TaskChangeError('TASK_CHANGE_FIELDS_REQUIRED', "No unambiguous submitted field delta; identify contract_fields for each adopted change")
+        if not isinstance(fields, list) or any(not isinstance(f, str) or f not in CHANGE_FIELDS for f in fields):
+            raise TaskChangeError('TASK_CHANGE_FIELDS_INVALID',
+                "contract_fields must name submitted contract fields, not plan. For one change omit contract_fields "
+                "and the runtime binds the submitted delta. Valid fields: " + ", ".join(sorted(CHANGE_FIELDS)))
         questions = item.get("question_ids") or []
         known = {n["id"] for n in (workflow or {}).get("plan", {}).get("nodes", []) if n["kind"] == "decision"}
         if any(q not in known for q in questions):
-            raise ValueError("discussion links must reuse actual workflow decision ids")
+            raise TaskChangeError('TASK_CHANGE_QUESTION_REFERENCE_INVALID', "discussion links must reuse actual workflow decision ids")
         disposition = item.get("disposition", "adopt")
         if disposition not in {"adopt", "withdraw"}:
             raise ValueError("invalid change disposition")
         if disposition == "withdraw":
             _withdrawal_source(process, item, after=change.get("authority_sequence", 0))
+        if "assignment_scope" in item:
+            from .assignment_handoff import AssignmentHandoffError, prepare_scope_change
+            try:
+                if disposition != "adopt" or not {"deliverables", "acceptance_criteria"}.intersection(fields):
+                    raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_SCOPE_CHANGE_INVALID",
+                        "Adopt the new user change with an updated delivery or acceptance scope.")
+                scope = prepare_scope_change(process, contract, change, item["assignment_scope"])
+                scopes = state.setdefault("assignment_scope_changes", {})
+                if scope["source_process_id"] in scopes:
+                    raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_SCOPE_CHANGE_INVALID",
+                        "This source assignment already has a recorded withdrawal.")
+                scopes[scope["source_process_id"]] = scope
+            except AssignmentHandoffError as exc:
+                raise TaskChangeError(exc.code, str(exc)) from exc
+        named = item.get("work_item_ids")
+        if named is not None and (not isinstance(named, list) or not named or len(named) > 64
+                or any(not isinstance(name, str) or name not in plan_ids for name in named)):
+            raise TaskChangeError('TASK_CHANGE_WORK_ITEM_INVALID', "work_item_ids must name current plan steps for this actual change")
+        # Renewing evidence grants no authority and makes no user-consent claim.
+        # A raw update that the Agent adopts also needs fresh linked evidence.
+        # Keep user_adopted provenance unchanged; do not manufacture UI adoption.
+        if linked_ids:
+            renewed.update(named if named is not None else linked_ids & plan_ids)
         change.update(status="withdrawn" if disposition == "withdraw" else "adopted", resolution=deepcopy(item), contract_revision=contract["revision"],
                       plan_revision=state["plan"]["revision"])
+    if pending_changes and getattr(process, "_manager", None) and getattr(process, "delegated_contracts", None):
+        from .assignment_handoff import latest_draft, withdrawal_source, withdrawn_assignments
+        affected = withdrawn_assignments(process, contract)
+        if affected and any(withdrawal_source(process, change) for change in pending_changes):
+            scopes = state.get("assignment_scope_changes") or {}
+            missing = {child_id: paths for child_id, paths in affected.items()
+                       if not set(paths).issubset((scopes.get(child_id) or {}).get("retired", {}).get("target_files", []))}
+            if missing:
+                selections = [{"source_process_id": child_id, "retire_target_files": paths,
+                               **({"draft_id": draft["id"]} if (draft := latest_draft(process, child_id)) else {})}
+                              for child_id, paths in missing.items()]
+                raise TaskChangeError("ASSIGNMENT_HANDOFF_SCOPE_REQUIRED",
+                    "These required worker assignments still contain withdrawn deliverables. Attach assignment_scope "
+                    "to the matching maintenance.resolve_changes entry and select any withdrawn criteria/test IDs. "
+                    "Use the exact draft_id if present, otherwise register the source_process_id and ask for a draft. "
+                    "For one pending change, omit contract_fields; the runtime binds the submitted delta. "
+                    "Current selections: " + json.dumps(selections, ensure_ascii=False))
     for identifier in update.get("resolve_maintenance") or []:
         item = state["maintenance_items"].get(identifier)
         if item is None or item.get("status") != "pending":
-            raise ValueError("maintenance resolution requires an actual pending trigger id")
+            raise ValueError("maintenance resolution requires an actual pending trigger id. "
+                "Call task_mechanism(operation='status'); maintenance.resolve_maintenance uses a pending "
+                "id from this task's state.maintenance_items. For child_scope updates, use the local "
+                "trigger for that child, not the child's change.id from owned_scope_updates; "
+                'do not invent a trigger if none exists.')
         if not update.get("plan") and not plan_review:
             raise ValueError("maintenance requires a revised plan or plan_review={action:retain,reason:...} when the current plan still covers the trigger")
         source = item.get("source", "")
         retained = {dep["kind"] + ":" + dep["id"] for dep in state["plan"].get("dependencies", [])}
         if source in retained and str(state.get("dependency_versions", {}).get(source, "")).startswith("unavailable:"):
             raise ValueError("cannot mark an unavailable retained dependency as reconciled")
+        if linked_ids:
+            tools = set(item.get("affected_tools") or ([item["tool_name"]] if item.get("tool_name") else []))
+            matches = {step["id"] for step in state["plan"]["steps"] if tools.intersection(step.get("tools", []))}
+            matches.update(node["work_item_id"] for node in workflow["plan"]["nodes"] if "work_item_id" in node
+                           and (node.get("tool_name") in tools or tools.intersection(node.get("tools", []))))
+            renewed.update(matches or linked_ids & plan_ids)
         item.update(status="resolved", contract_revision=contract["revision"], attempts=item.get("attempts", 0) + 1)
     state["revision"] += 1
     state["epoch"] += 1
@@ -267,6 +379,7 @@ def prepare_contract_state(process, contract, proposal, workflow):
     needs_related = enabled(definition, "task.related_work") is not None and (not state.get("related", {}).get("summary") or state.get("review_requirements", {}).get("related", False)) and not update.get("related_review")
     # A changed goal/acceptance basis requires another semantic review, not a text append.
     from .task_contract import semantic_contract, get_task_contract
+    from .engineering_workflow import declared_plan
     def scope_basis(value):
         # Reconciliation commands are audit input, not new requirements. Their
         # changing plan/status must still invalidate Grill's delivery review,
@@ -274,9 +387,27 @@ def prepare_contract_state(process, contract, proposal, workflow):
         # Definition/control revisions have their own lifecycle validation.
         # They are not new business scope; newly enabled plan/related-work
         # elements are checked by needs_plan/needs_related above.
-        return digest({k: v for k, v in semantic_contract(value).items()
-                       if k not in {"maintenance_intent", "mechanism"}})
+        basis = {k: v for k, v in semantic_contract(value).items()
+                 if k not in {"maintenance_intent", "mechanism"}}
+        if basis.get("engineering_workflow"):
+            plan = declared_plan(basis["engineering_workflow"])
+            basis["engineering_workflow"] = {**{k: v for k, v in plan.items() if k not in {"nodes", "digest"}},
+                "nodes": [{k: (sorted(v) if k == "depends_on" else v) for k, v in node.items() if k != "work_item_id"}
+                          for node in sorted(plan["nodes"], key=lambda n: n["id"])]}
+        return digest(basis)
     previous_contract = get_task_contract(process)
+    if before and not renewed:
+        def obligation(value, key):
+            selected = value.get(key)
+            return sorted(digest(item) for item in selected) if isinstance(selected, list) else selected
+        fields = ("goal", "acceptance_criteria", "deliverables", "required_tool_calls", "required_workbench_claims")
+        if any(obligation(previous_contract, key) != obligation(contract, key) for key in fields):
+            renewed.update(linked_ids & plan_ids)
+        elif obligation(before.get("plan", {}), "dependencies") != obligation(state["plan"], "dependencies"):
+            renewed.update(linked_ids & plan_ids)
+    if renewed:
+        state["plan"].setdefault("evidence_revisions", {}).update(
+            {name: contract["revision"] for name in renewed})
     previous_basis = scope_basis(previous_contract) if before and previous_contract.get("revision") else None
     basis = scope_basis(contract)
     changed = bool(previous_basis and previous_basis != basis)
@@ -289,13 +420,17 @@ def prepare_contract_state(process, contract, proposal, workflow):
     state["contract_basis"] = basis
     state["phase"] = "needs_review" if pending or needs_plan or needs_related else "ready"
     state["review_requirements"] = {"plan": needs_plan, "related": needs_related}
+    return state
+
+
+def refresh_manifest(process, state, contract, workflow_plan):
+    from .task_contract import semantic_contract
     state["manifest"] = {"epoch": state["epoch"], "task_id": task_id(process), "contract_revision": contract["revision"],
         "contract_digest": digest(semantic_contract(contract)), "catalog_version": CATALOG_VERSION,
-        "definition_digest": (definition or {}).get("digest"), "plan_revision": state["plan"].get("revision", 0),
-        "workflow_digest": (workflow or {}).get("plan", {}).get("digest"), "phase": state["phase"],
+        "definition_digest": (state.get("definition") or {}).get("digest"), "plan_revision": state["plan"].get("revision", 0),
+        "workflow_digest": (workflow_plan or {}).get("digest"), "phase": state["phase"],
         "task_kind": process.task_kind, "capability_profile_id": process.capability_profile_id}
     state["manifest"]["digest"] = digest(state["manifest"])
-    return state
 
 
 def _withdrawal_source(process, resolution, *, after=0):
@@ -386,12 +521,23 @@ def guard(process, tool_name=None, *, inherited=False):
     manager = getattr(process, "_manager", None)
     parent = manager.get(process.parent_id) if manager and process.parent_id else None
     if parent is not None and tool_name not in CONTROL_TOOLS:
+        from .assignment_handoff import recorded_scope_change
+        if scope := recorded_scope_change(parent, process.process_id):
+            if not scope.get("draft_id"):
+                return "ASSIGNMENT_HANDOFF_DRAFT_PENDING", ("The supervisor adopted a scope withdrawal. Preserve your "
+                    "current files by offering a draft through escalate_to_supervisor with offer_draft=true. Do not continue editing or testing.")
+            return "ASSIGNMENT_HANDOFF_SCOPE_RETIRED", "The supervisor bound the withdrawn scope to your draft. Retain the evidence for closeout."
         parent_block = guard(parent, tool_name, inherited=True)
         if parent_block:
             from backend.core.mechanism_runtime.reviews import retained_report
             retained = (tool_name is None and parent_block[0] == "TASK_MAINTENANCE_REQUIRED"
                 and retained_report(process, parent))
             if not retained:
+                if parent_block[0] == "TASK_MAINTENANCE_REQUIRED":
+                    from .coordination import coordination_owner
+                    if coordination_owner(manager, process) is not None:
+                        return parent_block[0], ("The governing supervisor owns this prerequisite. Retain your evidence "
+                            "and send the following requirement to the supervisor using escalate_to_supervisor. " + parent_block[1])
                 return parent_block[0], "Shared supervisor requirement awaits reconciliation: " + parent_block[1]
     if not state or tool_name in CONTROL_TOOLS:
         return None
@@ -420,6 +566,17 @@ def guard(process, tool_name=None, *, inherited=False):
     return None
 
 
+def retained_execution_block(supervisor):
+    """A supervisor-wide prerequisite also fences a retained action assignment."""
+    state = state_for(supervisor)
+    if state.get("phase") != "needs_review" or not any(state.get("review_requirements", {}).values()):
+        return None
+    blocked = guard(supervisor, inherited=True)
+    if blocked and blocked[0] == "TASK_MAINTENANCE_REQUIRED":
+        return state["revision"], blocked[1]
+    return None
+
+
 def inspect(process):
     from .mechanism_lifecycle import fence
     with fence(process), process.session._mechanism_lock, process._context_lock:
@@ -428,7 +585,10 @@ def inspect(process):
 
 def _inspect_current(process):
     from .task_contract import get_task_contract
+    from .engineering_workflow import EngineeringWorkflow, work_item_links
     state = state_for(process)
+    workflow = EngineeringWorkflow(process)._load()
+    links = work_item_links(state.get("plan", {}), workflow.get("plan", {}).get("nodes", []))
     from .completion_protocol import _current_task_receipts
     from .operation_policy import is_effectful_mutation
     receipts = [r for r in _current_task_receipts(process) if r.get("committed") is True and r.get("succeeded") is True
@@ -443,6 +603,7 @@ def _inspect_current(process):
                 "state": "task_completed" if completed else "task_in_progress" if relevant else "awaiting_execution",
                 "receipt_ids": relevant}
     from .mechanisms import projection
+    from .assignment_handoff import handoff_status
     owned_updates = []
     manager = getattr(process, "_manager", None)
     if manager is not None:
@@ -457,6 +618,8 @@ def _inspect_current(process):
         "advancement": projection(process),
         "user_control_precedence": "Persisted advancement.user_control is a real user selection. Its authority_sequence supersedes earlier source receipts about advancement only. A pinned definition is not permission to reset a newer selection.",
         "state": state, "owned_scope_updates": owned_updates,
+        **({"assignment_handoffs": handoff_status(process, state)} if state.get("assignment_scope_changes") else {}),
+        **({"work_item_links": links} if links else {}),
         "source_refs": list(source_receipts(process)), "catalog_version": CATALOG_VERSION,
         "extensions": __import__("backend.core.mechanism_runtime.application", fromlist=["projection"]).projection(process),
         "consumer_projection": deepcopy(getattr(process, "_mechanism_projection", {})),
@@ -594,8 +757,10 @@ def observe_result(process, result):
                 or result.diagnostics.get("nature") in {"system", "governance"}
                 or result.diagnostics.get('code') in {
                     'INVALID_TOOL_ARGUMENTS', 'TASK_CONTRACT_REVISION_CONFLICT',
-                    'TOOL_RESULT_LOCATOR_INVALID',
-                })
+                    'TOOL_RESULT_LOCATOR_INVALID', 'CHILD_REVIEW_REQUIRED', 'ASSET_FOLLOW_UP_REQUIRED',
+                }
+                or (result.diagnostics.get("code") == "ASSIGNMENT_HANDOFF_VERSION_CHANGED"
+                    and result.receipt.get("effect_state") == "not_committed"))
     plan_failure = result.is_error and not internal
     if not diagnostic_lessons and not plan_failure:
         return

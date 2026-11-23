@@ -35,6 +35,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ChangesEnvironment=yes
+SetupIconFile={#StageDir}\assets\brand\gitgo.ico
 UninstallDisplayIcon={app}\{#PrimaryCommand}.exe
 WizardStyle=modern
 
@@ -42,8 +43,8 @@ WizardStyle=modern
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#ProductName}"; Filename: "{app}\{#PrimaryCommand}.exe"
-Name: "{group}\Uninstall {#ProductName}"; Filename: "{uninstallexe}"
+Name: "{group}\{#ProductName}"; Filename: "{app}\{#PrimaryCommand}.exe"; IconFilename: "{app}\assets\brand\gitgo.ico"
+Name: "{group}\Uninstall {#ProductName}"; Filename: "{uninstallexe}"; IconFilename: "{app}\assets\brand\gitgo.ico"
 
 [Registry]
 ; App Paths helps Windows shells find the product even before a newly changed
@@ -134,13 +135,31 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  EntryExit: Integer;
 begin
-  if CurStep = ssPostInstall then
+  if CurStep = ssPostInstall then begin
+    if FileExists(ExpandConstant('{app}\native-entry.json')) then begin
+      if not Exec(ExpandConstant('{app}\internal\gitgo-host\gitgo-host.exe'),
+        '--gitgo-internal-role native-entry --action install --shortcut-owner installer --root "' + ExpandConstant('{app}') + '"',
+        ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, EntryExit) or (EntryExit <> 0) then
+        RaiseException('Native entry registration failed; existing user terminal settings were preserved.');
+    end;
     AddUserPathEntry(ExpandConstant('{app}'));
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  EntryExit: Integer;
 begin
-  if CurUninstallStep = usUninstall then
+  if CurUninstallStep = usUninstall then begin
+    if FileExists(ExpandConstant('{app}\native-entry\owner.json')) then begin
+      if not Exec(ExpandConstant('{app}\internal\gitgo-host\gitgo-host.exe'),
+        '--gitgo-internal-role native-entry --action remove --root "' + ExpandConstant('{app}') + '"',
+        ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, EntryExit) or (EntryExit <> 0) then
+        RaiseException('Native entry ownership changed; uninstall was stopped to preserve user files.');
+    end;
     RemoveUserPathEntry(ExpandConstant('{app}'));
+  end;
 end;

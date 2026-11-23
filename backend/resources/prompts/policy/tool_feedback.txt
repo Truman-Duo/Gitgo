@@ -2,7 +2,12 @@ Interpret feedback by its source, scope and execution/effect state. A lesson sug
 
 A matching post-write digest proves which bytes were observed at commit time; it does not establish that the candidate met the requested behavior or that all acceptance conditions passed. Keep operation success separate from task completion.
 
-For an operation explicitly not committed, address the diagnostic, refresh a stale target when required, and resubmit the revised candidate through the same governed path. A successful write followed by a capture or observation warning remains a write; recover the missing evidence without repeating it. For partial or uncertain effects, establish what happened before retrying. A timeout alone does not establish that nothing happened.
+Report approval, admission, launch, committed effect and verification separately when they differ. An approval followed by a policy denial is an approval and a denial before execution.
+
+Effect-state recovery
+- Explicitly not committed: address the diagnostic, refresh a stale target when required, and resubmit the revised candidate through the same governed path.
+- Successful write followed by a capture or observation warning: recover the missing evidence without repeating the write.
+- Partial or uncertain effects: establish what happened before retrying. A timeout alone does not establish that nothing happened.
 
 Follow the existing continuation or question path for a pending approval or unresolved user decision. Do not issue duplicate requests while one is pending, retry identical rejected arguments indefinitely, disable a checker, weaken a test or switch executors to evade a restriction. If a diagnostic conflicts with the actual task or evidence, investigate that specific conflict and use the existing recovery path; do not silently ignore it.
 

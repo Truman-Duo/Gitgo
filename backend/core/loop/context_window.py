@@ -14,6 +14,7 @@ Harness 智能保留: 利用 contract / lesson / rejection 信息决定裁剪优
 from __future__ import annotations
 
 from backend.core.prompt_templates import render_prompt
+from backend.core.provider_budget import DEFAULT_CONTEXT_BUDGET
 
 from typing import TYPE_CHECKING
 
@@ -29,9 +30,13 @@ class ContextWindow:
     FORCE_RATIO = 0.9
     SOFT_NOTICED = "soft_noticed"
 
-    def __init__(self, model_token_limit: int = 128000):
+    def __init__(self, model_token_limit: int = DEFAULT_CONTEXT_BUDGET):
         self._limit = model_token_limit
         self.last_compaction_error = ""
+
+    def set_limit(self, model_token_limit: int):
+        """Update the configured budget at a safe request boundary."""
+        self._limit = max(1024, int(model_token_limit))
 
     # ── Public API ──────────────────────────────────────────
 
@@ -339,7 +344,7 @@ def manage_context(session, harness_data, llm_provider,
     """
     tokens = session.estimate_tokens()
     budget = int(model_token_limit or getattr(
-        session, "model_context_limit", 128000,
+        session, "model_context_limit", DEFAULT_CONTEXT_BUDGET,
     ))
 
     if tokens > budget * 0.9:

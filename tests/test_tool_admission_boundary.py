@@ -101,6 +101,32 @@ def test_typed_composite_catalog_resumes_exact_leaf_without_replaying_prefix(tmp
     assert process.approval_grants[0]["remaining_uses"] == 0
 
 
+def test_task_policy_blocks_resumed_composite_leaf_without_replaying_prefix(tmp_path_factory):
+    from tests.test_composite_continuation import setup, approve
+    from backend.core.loop.manager import SessionStore
+    from backend.core.loop.task_execution_policy import activate
+    from backend.core.loop.tool_pipeline import ToolPipeline
+
+    process, ctx, outer, leaf, calls = setup(tmp_path_factory)
+    catalog = ctx.artifacts.pop("tool_catalog")
+    ctx.tool_bindings = ToolBindings(catalog, catalog)
+    call = {"id": "typed-composition", "name": outer.name, "args": {}}
+    assert ToolPipeline().execute(call, outer, ctx, "restricted-boundary").suspended
+    approve(process, leaf)
+    store = SessionStore(tmp_path_factory, state_home=tmp_path_factory / "state")
+    try:
+        activate(process, process.active_task_id, {"include_children": False, "allow_only": None,
+            "rules": [{"tool": leaf.name, "action": "deny", "arguments": {"value": "derived"}}]}, 0, store)
+        result = ToolPipeline().execute(call, outer, ctx, "restricted-boundary")
+        assert result.is_error and calls == ["prefix"]
+        receipts = [item for item in process.tool_receipts if item.get("composite_step") == "approved"]
+        assert receipts[-1]["error_code"] == "TASK_EXECUTION_POLICY_DENIED"
+        assert receipts[-1]["execution_state"] == "not_started"
+        assert process.approval_grants[0]["remaining_uses"] == 1
+    finally:
+        store.close()
+
+
 def test_composed_before_tool_callback_cannot_substitute_callable_and_spend_old_approval(tmp_path_factory, monkeypatch):
     calls = []
     target = tool(approval=ApprovalMode.ASK, approval_per_invocation=True)

@@ -88,6 +88,7 @@ if [ -e "$STAGE" ] && { [ ! -d "$STAGE" ] || [ -n "$(ls -A "$STAGE")" ]; }; then
   exit 1
 fi
 mkdir -p "$STAGE/internal"
+"$BUN_BIN" "$ROOT/cli/dashboard/scripts/build-icons.ts" --stage "$STAGE/assets/brand"
 (
   cd "$ROOT/cli/dashboard"
   "$BUN_BIN" test src/input/runtime.test.tsx src/backend/client.test.ts src/components/config/KeybindingsTab.test.tsx
@@ -102,11 +103,14 @@ cp "$ROOT/cli/dashboard/scripts/launch.mjs" "$ROOT/cli/dashboard/scripts/runtime
 cp "$ROOT/cli/dashboard/dist/cli.js" "$ROOT/cli/dashboard/dist/trace.js" "$STAGE/dashboard/dist/"
 
 HOST_BUILD="$ROOT/build/terminal-host-linux-$ARCH"
+"$PYTHON_BIN" -B "$ROOT/scripts/build_sandbox_native.py"
 "$PYTHON_BIN" -B -m PyInstaller \
   --noconfirm --clean --onedir \
   --name gitgo-host \
   --paths "$ROOT" --collect-submodules backend \
+  --additional-hooks-dir "$ROOT/packaging/pyinstaller-hooks" \
   --hidden-import backend.core.tools.registrations \
+  --hidden-import csv --hidden-import fractions --hidden-import statistics \
   --add-data "$ROOT/backend/resources/keyboard:backend/resources/keyboard" \
   --add-data "$ROOT/backend/resources/prompts:backend/resources/prompts" \
   --distpath "$STAGE/internal" \
@@ -118,6 +122,11 @@ HOST_BUILD="$ROOT/build/terminal-host-linux-$ARCH"
   --binary "$RIPGREP_BIN" --notices "$RIPGREP_NOTICES" \
   --destination "$STAGE/internal/gitgo-host"
 
+if [ -n "${GITGO_CLOC_BUNDLE:-}" ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/stage_workbench_cloc.py" \
+    --bundle "$GITGO_CLOC_BUNDLE" --destination "$STAGE/internal/gitgo-host"
+fi
+
 "$PYTHON_BIN" -B "$ROOT/scripts/render_product_manifest.py" \
   --source "$SCRIPT_DIR/product.json" \
   --platform linux \
@@ -128,6 +137,7 @@ cp "$SCRIPT_DIR/linux/install.sh" "$STAGE/install.sh"
 cp "$SCRIPT_DIR/unix/installer-common.sh" "$STAGE/installer-common.sh"
 cp "$SCRIPT_DIR/linux/uninstall.sh" "$STAGE/uninstall.sh"
 cp "$ROOT/LICENSE.md" "$STAGE/LICENSE.md"
+"$PYTHON_BIN" -B "$ROOT/scripts/stage_native_entry.py" --stage "$STAGE"
 chmod 755 "$STAGE/gitgo" "$STAGE/internal/gitgo-host/gitgo-host" "$STAGE/install.sh" "$STAGE/uninstall.sh"
 chmod 644 "$STAGE/product.json" "$STAGE/product.env" "$STAGE/LICENSE.md"
 

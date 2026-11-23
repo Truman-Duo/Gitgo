@@ -1,10 +1,15 @@
 import { truncate, wrap } from "./theme/index.js";
+import {isTemporarySubagent} from "./daemon/agentLabels.js";
 
 export type TraceRecord = {
   seq: number;
   time: string;
   event: string;
   process_id?: string;
+  role?: string;
+  temporary_subagent?: boolean;
+  promotion?: unknown;
+  promotion_source?: unknown;
   parent_process_id?: string;
   step?: number;
   delta?: string;
@@ -24,6 +29,7 @@ function oneLine(value: unknown, max = 100): string {
 }
 
 export function eventSummary(event: TraceRecord): string {
+  const subagent = isTemporarySubagent(event);
   switch (event.event) {
     case "reasoning_delta": return `THINK ${oneLine(event.delta)}`;
     case "text_delta": return `TEXT  ${oneLine(event.delta)}`;
@@ -39,9 +45,9 @@ export function eventSummary(event: TraceRecord): string {
     case "completion_gate": return `GATE  ${event.accepted ? "accepted" : "rejected"}`;
     case "context_window_action": return `CTX   ${event.action || "window action"}`;
     case "context_compaction_completed": return `CTX   epoch ${event.context_epoch ?? "?"}`;
-    case "agent_started": return `AGENT started ${event.actor_kind || "worker"}`;
-    case "agent_terminal": return `AGENT terminal ${event.status || ""}`;
-    case "agent_complete": return "AGENT root task complete";
+    case "agent_started": return subagent ? "SUBAGENT started" : `AGENT started ${event.actor_kind || "worker"}`;
+    case "agent_terminal": return `${subagent ? "SUBAGENT" : "AGENT"} terminal ${event.status || ""}`;
+    case "agent_complete": return subagent ? "SUBAGENT execution complete" : "AGENT root task complete";
     case "task_bundle_delegated": return `BUNDLE ${event.shard_count ?? "?"} shards delegated`;
     default: return `${event.event} ${oneLine(event.status || "")}`;
   }
@@ -93,7 +99,7 @@ export function verboseEventLines(event: TraceRecord, width: number): string[] {
             ? "GOV"
             : "FLOW";
   const time = String(event.time || "").slice(11, 23);
-  const header = `${String(event.seq).padStart(5)} ${time} ${shortPid(event.process_id)} ${label} ${event.event}`;
+  const header = `${String(event.seq).padStart(5)} ${time} ${shortPid(event.process_id)} ${isTemporarySubagent(event) ? "SUBAGENT " : ""}${label} ${event.event}`;
   const body = wrap(payload(event), Math.max(20, width - 4));
   return [header, ...body.map(line => `  ${line}`)];
 }

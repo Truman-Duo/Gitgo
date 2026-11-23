@@ -5,15 +5,22 @@ from .llm import StreamCancelledError
 
 def reserve_provider_call(process, emit=None):
     budget = process.task_budget
-    if budget is None:
-        return 0
     waiting = False
     while True:
         if process.cancellation_event.is_set() or process.cancel_requested:
             raise StreamCancelledError("cancelled while waiting for task-tree capacity")
-        budget.check_deadline()
+        if budget is not None:
+            budget.check_deadline()
         try:
-            index = budget.begin_provider_call(process.process_id)
+            # Linearize new provider admission with peer feedback checkpoints.
+            # Release before any budget wait or model work: already admitted
+            # calls remain in flight; later attempts must check again.
+            from .mechanism_lifecycle import fence
+            from .mailbox import MailboxRecoveryRequired
+            with fence(process), process.session._mechanism_lock:
+                if (process.recovery or {}).get("checkpoint_commit") == "unknown":
+                    raise MailboxRecoveryRequired("PROCESS_RECOVERY_REQUIRED: reconcile the checkpoint before a new provider call")
+                index = budget.begin_provider_call(process.process_id) if budget is not None else 0
             if waiting and emit:
                 emit({"event": "budget_wait_completed", "process_id": process.process_id})
             return index

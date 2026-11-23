@@ -9,6 +9,27 @@ from backend.core.loop.agent_tool import AgentTool, ToolEffect
 from backend.core.loop.capabilities import CapabilityProfiles
 from backend.core.loop.completion_protocol import CompletionClaim
 
+
+def task_contract_help(args, *, revision):
+    """Select help from the submitted operation and explicit structured intent."""
+    operation = ("revise" if revision else "declare") if args is None else args.get("operation", "declare")
+    overview = load_prompt("tools/declare_task_contract")
+    if operation == "declare":
+        return overview + "\n" + load_prompt("tools/declare_task_contract_start")
+    if operation != "revise":
+        return overview
+    args = args or {}
+    parts = [overview, load_prompt("tools/declare_task_contract_revise")]
+    maintenance = args.get("maintenance")
+    resolutions = maintenance.get("resolve_changes") if isinstance(maintenance, dict) else None
+    if isinstance(resolutions, list) and any(isinstance(item, dict)
+            and ("assignment_scope" in item or item.get("disposition") == "withdraw") for item in resolutions):
+        parts.append(load_prompt("tools/declare_task_contract_withdraw"))
+    if args.get("routing_transition") == "handoff_to_worker":
+        parts.append(load_prompt("tools/declare_task_contract_handoff"))
+    return "\n".join(parts)
+
+
 def install(ctx):
     from backend.core.loop.engineering_workflow import plan_schema
     from backend.core.loop.mechanism_catalog import ELEMENTS, maintenance_schema
@@ -67,7 +88,10 @@ def install(ctx):
         current = get_task_contract(process)
         revision = int(current.get('revision') or 0)
         if revision == 0:
-            raise ValueError('TASK_CONTRACT_INITIAL_DECLARATION_REQUIRED: declare the initial task before revising it')
+            raise ValueError('TASK_CONTRACT_INITIAL_DECLARATION_REQUIRED: declare the initial task before revising it. '
+                "Call task_mechanism(operation='status'); use operation='declare' with the inherited "
+                'contract.acceptance_criteria and required contract.deliverables before operation=\'revise\'. '
+                'append is only available after the initial declaration.')
         expected = args.get('expected_revision', revision)
         if type(expected) is not int or expected != revision:
             raise TaskContractRevisionConflict('TASK_CONTRACT_REVISION_CONFLICT: reconcile the current contract before revising it')
@@ -82,6 +106,25 @@ def install(ctx):
         # do not replay an earlier maintenance transaction or private Host facts.
         inherited = {key: deepcopy(current[key]) for key in properties if key in current
             and key not in {'engineering_workflow', 'mechanism', 'maintenance', 'preview_digest', 'expected_revision'}}
+        resolutions = (edits.get("maintenance") or {}).get("resolve_changes") or []
+        if isinstance(resolutions, list):
+            from backend.core.loop.assignment_handoff import resolve_withdrawal_selection
+            for item in resolutions:
+                scope = item.get("assignment_scope") if isinstance(item, dict) else None
+                if not isinstance(scope, dict) or "assignment_ref" not in scope:
+                    continue
+                selected = resolve_withdrawal_selection(process, scope)
+                # Apply the same explicit choice to identical inherited entries.
+                # The maintenance transaction separately checks the user change
+                # and re-resolves the assignment before committing anything.
+                if "deliverables" not in edits:
+                    paths = selected.get("retire_target_files") or []
+                    inherited["deliverables"] = [entry for entry in inherited.get("deliverables", [])
+                        if entry.get("kind") != "workspace_file" or entry.get("path") not in paths]
+                if "acceptance_criteria" not in edits:
+                    criteria = selected.get("retire_acceptance_criteria") or []
+                    inherited["acceptance_criteria"] = [entry for entry in inherited.get("acceptance_criteria", [])
+                        if entry not in criteria]
         for key, values in additions.items():
             if key in edits:
                 raise ValueError('Cannot both replace and append the same field: ' + key)
@@ -104,9 +147,13 @@ def install(ctx):
         for item in args.get('deliverables', []):
             if isinstance(item, dict):
                 item.setdefault('required', True)
+        if isinstance(args.get('maintenance'), dict):
+            from backend.core.loop.task_maintenance import bind_change_fields
+            args['maintenance'] = bind_change_fields(get_task_contract(process), args, args['maintenance'])
         return args
 
-    APPEND_FIELDS = {'acceptance_criteria', 'deliverables', 'uncertainties', 'required_tool_calls', 'adopt_process_ids'}
+    APPEND_FIELDS = {'acceptance_criteria', 'deliverables', 'uncertainties', 'required_tool_calls',
+                     'required_workbench_claims', 'adopt_process_ids'}
     def proposal_for(args):
         args = bind_arguments(args)
         proposal = validate_contract_proposal(args, workspace_path or process.worktree_path)
@@ -116,12 +163,19 @@ def install(ctx):
                 raise ValueError("worker scope revision requires an explicit adopted user change")
             previous = get_task_contract(process)
             if not set(previous.get("acceptance_criteria") or []).issubset(proposal.get("acceptance_criteria") or []):
-                raise ValueError("worker revisions cannot remove supervisor-assigned acceptance obligations")
+                raise ValueError("worker revisions cannot remove supervisor-assigned acceptance obligations. "
+                    "Call task_mechanism(operation='status') and retain contract.acceptance_criteria verbatim; "
+                    "on operation='revise', use append.acceptance_criteria for additional requirements.")
+            if not set(previous.get("required_workbench_claims") or []).issubset(proposal.get("required_workbench_claims") or []):
+                raise ValueError("worker revisions cannot remove supervisor-assigned workbench checks")
             for required in previous.get("deliverables") or []:
                 if required.get("required", True) and not any(item.get("required", True)
                     and (item.get("kind"), item.get("path")) == (required.get("kind"), required.get("path"))
                     for item in proposal.get("deliverables") or []):
-                    raise ValueError("worker revisions cannot remove supervisor-assigned deliverables")
+                    raise ValueError("worker revisions cannot remove supervisor-assigned deliverables. "
+                        "Call task_mechanism(operation='status') and retain required contract.deliverables "
+                        "with their kind/path/required fields; on operation='revise', use append.deliverables "
+                        'for additional deliverables.')
             if proposal.get("execution_mode") in {"delegate", "either"} or proposal.get("adopt_process_ids"):
                 raise ValueError("worker scope revision cannot acquire supervisor delegation authority")
         if get_task_contract(process).get("revision", 0) and "expected_revision" not in proposal:
@@ -146,6 +200,7 @@ def install(ctx):
         return preview_contract(process, proposal_for(bound))
 
     def declare_task_contract(args: dict) -> dict:
+        from backend.core.loop.assignment_handoff import AssignmentHandoffError
         from backend.core.loop.task_contract import (
             publish_contract,
             validate_contract_proposal,
@@ -155,6 +210,10 @@ def install(ctx):
         except TaskContractRevisionConflict as exc:
             return {"error": "TASK_CONTRACT_REVISION_CONFLICT", "detail": str(exc),
                     "accepted": False, "effect_state": "not_committed", "contract": get_task_contract(process)}
+        except AssignmentHandoffError as exc:
+            from backend.core.errors import error_payload
+            return {**error_payload(exc.code, message=str(exc)), "accepted": False,
+                    "effect_state": "not_committed"}
         except (TypeError, ValueError) as exc:
             return {
                 "error": "INVALID_TASK_CONTRACT",
@@ -168,14 +227,19 @@ def install(ctx):
             return {"error": "TASK_CONTRACT_REVISION_CONFLICT", "detail": str(exc),
                     "accepted": False, "effect_state": "not_committed", "contract": get_task_contract(process)}
         except ValueError as exc:
+            from backend.core.loop.task_maintenance import TaskChangeError
+            if isinstance(exc, TaskChangeError):
+                from backend.core.errors import error_payload
+                return {**error_payload(exc.code, message=str(exc)), 'accepted': False,
+                        'effect_state': 'not_committed'}
             return {
                 "error": "INVALID_TASK_ROUTING",
                 "detail": str(exc),
                 "accepted": False,
                 "effect_state": "not_committed",
                 "routing_advice": {
-                    "recommended": "self_execute",
-                    "next_action": "request_self_execute",
+                    "recommended": "undecided",
+                    "next_action": "declare_task_contract",
                 },
             }
         except (OSError, RuntimeError) as exc:
@@ -194,9 +258,32 @@ def install(ctx):
             engineering.notice("TASK_CHANGE_ADOPTED", "新增要求已纳入当前任务的契约、计划与验收条件。", change_ids=adopted_changes,
                                contract_revision=contract["revision"])
         maintenance = state_for(process)
+        from backend.core.loop.assignment_handoff import handoff_status
+        closeouts = []
+        if manager is not None and adopted_changes and not process.cancellation_event.is_set():
+            for source_id, scope in (maintenance.get('assignment_scope_changes') or {}).items():
+                if not scope.get('close_source') or scope.get('change_id') not in adopted_changes:
+                    continue
+                try:
+                    requested = manager.kill(source_id, reason='assignment_handoff')
+                    closeouts.append({'source_process_id': source_id, 'status': requested['status']})
+                except (OSError, RuntimeError, ValueError) as exc:
+                    # Adoption has committed. Report only the cancellation request's uncertainty.
+                    closeouts.append({'source_process_id': source_id, 'status': 'check_closeout', 'error': str(exc)})
+        from backend.core.loop.asset_maintenance import maintenance_routes
+        storage = getattr(getattr(manager, "session_store", None), "_storage", None)
+        asset_routing = {}
+        try:
+            if routes := maintenance_routes(process, contract, storage):
+                asset_routing = {"maintained_assets": routes,
+                                 "asset_routing_next": load_prompt("routing/matched_asset").strip()}
+        except (OSError, RuntimeError, ValueError) as exc:
+            # A projection failure cannot undo an already accepted contract.
+            asset_routing = {"asset_routing_unavailable": getattr(exc, "code", type(exc).__name__)}
         return {
             "accepted": True,
             "contract": contract,
+            **asset_routing,
             "host_validated": True,
             "authority_granted": False,
             "activation": contract["activation"],
@@ -208,6 +295,8 @@ def install(ctx):
                 "review_requirements": dict(maintenance.get("review_requirements") or {}),
                 "pending_trigger_ids": [key for key, item in maintenance.get("maintenance_items", {}).items()
                                         if item.get("status") == "pending"],
+                **({"assignment_handoffs": handoff_status(process, maintenance)} if maintenance.get("assignment_scope_changes") else {}),
+                **({"handoff_closeouts": closeouts} if closeouts else {}),
                 "next_action": "reconcile_with_declare_task_contract" if maintenance.get("phase") == "needs_review" else "",
             } if maintenance else None,
             "budget_card": (
@@ -226,6 +315,7 @@ def install(ctx):
         description=(
             load_prompt('tools/declare_task_contract')
         ),
+        detail_description=lambda args: task_contract_help(args, revision=get_task_contract(process).get("revision")),
         parameters={
             "type": "object",
             "properties": {
@@ -283,10 +373,12 @@ def install(ctx):
                 "requires_user_decision": {"type": "boolean"},
                 "engineering_workflow": plan_schema(),
                 "estimated_complexity": {
-                    "type": "string", "enum": ["bounded", "moderate", "high"],
+                    "type": "string", "enum": ["unknown", "bounded", "moderate", "high"],
+                    "description": "Optional routing fact, not permission. Omission preserves the old fact on revise; unknown explicitly clears an earlier estimate.",
                 },
                 "independent_workstreams": {
-                    "type": "integer", "minimum": 1, "maximum": 8,
+                    "type": ["integer", "null"], "minimum": 1, "maximum": 8,
+                    "description": "Optional known independent workstream count. null means unknown; omission on revise retains the current fact.",
                 },
                 "delegation_rationale": {"type": "string"},
                 "user_requested_delegation": {"type": "boolean"},
@@ -300,6 +392,11 @@ def install(ctx):
                     ],
                 },
                 "handoff_summary": {"type": "string"},
+                "required_workbench_claims": {
+                    "type": "array", "maxItems": 12, "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "description": "Exact scope labels that must match pinned workbench results in the delivered answer.",
+                },
                 "required_tool_calls": {
                     "type": "array",
                     "description": (
@@ -367,6 +464,20 @@ def install(ctx):
         result = str(args.get("result", "")).strip()
         if not result:
             return {"accepted": False, "error": "result is required"}
+        requested = str(args.get("status") or "auto").strip().lower()
+        manager = getattr(process, "_manager", None)
+        _child_ids, contracts, reviews = process.coordination_snapshot()
+        if requested != "failed" and manager is not None:
+            from backend.core.errors import error_payload
+            from backend.core.loop.asset_maintenance import asset_recovery_call
+
+            recoveries = [call for child_id, contract in contracts.items()
+                          if contract.get("required_for_parent_completion", True)
+                          and (child := manager.get(child_id)) is not None
+                          and (call := asset_recovery_call(process, child, manager))]
+            if recoveries:
+                return {"accepted": False, **error_payload("ASSET_RECOVERY_REQUIRED", next_actions=[
+                    {"action": call["tool"], "arguments": call["arguments"]} for call in recoveries])}
         # Keep the public synthesis separate from process evidence even
         # though supervisor completion is checked from authoritative Host
         # child/review facts.  Persisting the structured claim makes the
@@ -384,13 +495,10 @@ def install(ctx):
             )
         except ValueError as exc:
             return {"accepted": False, "error": str(exc)}
-        requested = str(args.get("status") or "auto").strip().lower()
         terminal_status = "completed"
         if requested == "failed":
             terminal_status = "failed"
         elif requested == "auto":
-            manager = getattr(process, "_manager", None)
-            _child_ids, contracts, reviews = process.coordination_snapshot()
             for child_id, contract in contracts.items():
                 if not contract.get("required_for_parent_completion", True):
                     continue

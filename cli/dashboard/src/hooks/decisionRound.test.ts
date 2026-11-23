@@ -1,5 +1,5 @@
 import {expect, test} from "bun:test";
-import {answerRound, projectRound, previousRound} from "./decisionRound.js";
+import {answerRound, projectRound, previousRound, moveRoundQuestion} from "./decisionRound.js";
 import type {PendingDecision} from "../types.js";
 
 const round: PendingDecision = {task_id: "t", process_id: "p", decision_id: "d", question: "Round", why_user_must_decide: "Intent", options: [], allow_free_form: true,
@@ -28,4 +28,20 @@ test("single Host question submits immediately, including autonomy instructions"
   const next = answerRound(current, {}, reply);
   expect(JSON.parse(next.instruction!).answers).toEqual({scope: reply});
   expect(projectRound(current, {})?.round_position).toBeUndefined();
+});
+
+test("independent current questions submit the selected answer immediately and keep the published identity",()=>{
+  const current={...round,answer_mode:"incremental" as const};
+  const id=moveRoundQuestion(current,undefined,1);
+  const view=projectRound(current,{},id)!;
+  expect(view.active_question_id).toBe("audience");
+  expect(view.question).toBe("audience");
+  expect(view.round_position).toBeUndefined();
+  expect(view.questions).toHaveLength(2);
+  const sent=answerRound(current,{},"staff only; choose the remaining details",id);
+  expect(JSON.parse(sent.instruction!)).toEqual({answers:{audience:"staff only; choose the remaining details"}});
+  expect(sent.answers).toEqual({});
+  expect(view.decision_id).toBe("d");
+  expect(moveRoundQuestion(current,"audience",1)).toBe("audience");
+  expect(moveRoundQuestion(current,"scope",-1)).toBe("scope");
 });

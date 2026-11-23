@@ -7,7 +7,7 @@ import type {ScrollBoxHandle} from "@anthropic/ink";
 import type {ProcessInfo} from "../hooks/useLoopData.js";
 import {chordLabel, matchChord} from "../input/bindings.js";
 import {useManagedInput as useInput, useScrollInput} from "../input/runtime.js";
-import {colors, truncate, padEndWidth, displayWidth, usePanelSize} from "../theme/index.js";
+import {colors, truncate, padEndWidth, usePanelSize} from "../theme/index.js";
 
 type Props = {
   project: string;
@@ -29,7 +29,6 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
   const rows=useMemo(()=>contextSessions(Object.values(processes)),[processes]);
   const index = Math.max(0, rows.findIndex(row => (row.session_id||row.process_id) === selectedId));
   const selected = rows[index];
-  const count=t({en:"Process",zh:"进程"})+" "+(selected?index+1:0)+"/"+rows.length;
   useEffect(() => { scrollRef.current?.scrollTo(0); }, [selected?.session_id,selected?.process_id]);
 
   const menuHelp=useLocalHelpCommand("context",undefined,interactive);
@@ -95,10 +94,9 @@ export const RuntimeContextPanel = memo(function RuntimeContextPanel({
   return <Box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1} minHeight={0}>
     <Box height={1} minHeight={1} flexShrink={0}><Text bold wrap="truncate-end">{t({en:"Context Usage —",zh:"上下文用量 —"})} {project}</Text></Box>
     {selected?<Box marginTop={1} height={1} minHeight={1} flexShrink={0} flexDirection="row" gap={1}>
-      <Box width={displayWidth(count)} flexShrink={0}><Text dimColor>{count}</Text></Box>
       <InlineChoiceStrip items={rows.map(process=>({id:process.process_id,
         label:process.actor_kind==="supervisor"?t({en:"Main process",zh:"主进程"}):process.display_name||t({en:"Subprocess",zh:"子进程"})}))}
-        selected={index} width={Math.max(1,w-displayWidth(count)-1)} interactive={interactive}/>
+        selected={index} width={w} interactive={interactive}/>
     </Box>:null}
     <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1} minHeight={0}>
     {!selected ? <Text dimColor>{t({en:"No durable process context yet.",zh:"尚无持久化的进程上下文。"})}</Text> :

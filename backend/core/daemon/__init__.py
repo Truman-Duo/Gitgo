@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -85,22 +85,11 @@ def _background_llm_provider(daemon_ctx: dict):
     Requiring ``llm_configure``/task admission to have populated the in-memory
     slot makes automatic knowledge harvest silently dependent on that ordering.
     Resolve the encrypted active provider lazily at the safe event boundary and
-    cache only the runtime client; provider switches already retire idle daemons.
+    cache only the runtime client. Saved route changes are resolved at this
+    boundary without retiring the daemon or rebuilding its project state.
     """
-    current = daemon_ctx.get("llm")
-    if current is not None:
-        return current
-    from backend.core.llm_config import LLMConfigManager
-    from backend.core.loop.llm import LLMProvider as RuntimeLLMProvider
-
-    configured = LLMConfigManager.get_active()
-    if configured is None:
-        return None
-    from backend.core.daemon.policy_helpers import _runtime_llm_from_config
-    current = _runtime_llm_from_config((configured.base_url, configured.api_key, configured.model_id,
-                                        configured.protocol, configured.runtime_capabilities()))
-    daemon_ctx["llm"] = current
-    return current
+    from backend.core.daemon.policy_helpers import _refresh_runtime_llm
+    return _refresh_runtime_llm(daemon_ctx, str(daemon_ctx.get('workspace_path') or '.'))
 
 
 def _publish_governance_snapshot(
@@ -320,6 +309,27 @@ def run_daemon(
     trial_interval: float = 300.0,
     debounce_sec: float = 2.0,
 ) -> None:
+    """Run one registered project, optionally using its operator-selected grant."""
+    with ExitStack() as project_scope:
+        snapshot_commit = ""
+        selection = project.macos_worktree
+        if sys.platform == "darwin" and selection is not None:
+            from backend.core.macos_daemon_project import bind_project
+            try:
+                snapshot_commit = project_scope.enter_context(bind_project(project))
+            except (OSError, ValueError) as exc:
+                _emit_v2({
+                    "event": "worktree_unavailable",
+                    "severity": "warning",
+                    "reason": str(exc),
+                }, priority="immediate")
+        _run_daemon(cfg, project, trial_interval, debounce_sec, snapshot_commit)
+
+
+def _run_daemon(
+    cfg: Config, project: ProjectConfig, trial_interval: float,
+    debounce_sec: float, snapshot_commit: str,
+) -> None:
     """Main daemon loop — blocks until shutdown command or SIGTERM/SIGINT.
 
     Outputs line-delimited JSON events to stdout.
@@ -331,6 +341,10 @@ def run_daemon(
     atexit.register(lambda: _release_pid_file(project))
 
     workspace_path = Path(project.workspace_path or Path.cwd()).resolve()
+    if os.environ.get("GITGO_OBSERVER_CAPTURE_DIR"):
+        from backend.core.observer.recording import capture
+        # Start the optional writer at startup, before any model step or tool stream.
+        capture("runtime_started", {"project": project.name, "workspace": str(workspace_path), "pid": os.getpid()})
 
     # Refuse catastrophic repository roots before any broad initial scan.  A
     # non-git directory is only a warning during the staged migration, but a
@@ -432,6 +446,7 @@ def run_daemon(
         from backend.core.sandbox_access import WorktreeAccessService
         worktree_manager.sandbox_access = WorktreeAccessService(worktree_manager)
     apm = AgentProcessManager(worktree_manager=worktree_manager,
+                              project_snapshot_commit=snapshot_commit,
                               presentation=ProcessPresentation(storage_runtime))
     # Runtime services share the same authoritative project storage.  Binding
     # it once on the manager keeps tool spill, checkpoints and DAG state on one
@@ -484,6 +499,7 @@ def run_daemon(
         "status": AgentTool(
             execution_contract=data_broker("host.daemon.status"),
             name="status",
+            immediate_interface=True,
             description="获取工作区语义化状态摘要（文件变更、合同漂移、治理信号）。",
             parameters={"type": "object", "properties": {"semantic": {"type": "boolean", "description": "是否返回语义化摘要"}}, "required": []},
             execute=partial(_exec_status, daemon_ctx, session, project),
@@ -1063,7 +1079,7 @@ def run_daemon(
             # ── v0.44: 流式事件 + agent_complete 修复 ──
             elif event_type in ("text_delta", "reasoning_delta", "progress_summary",
                                 "toolcall_start", "toolcall_delta",
-                                "toolcall_done", "tool_progress",
+                                "toolcall_done", "tool_progress", "tool_context_prepared",
                                 "stream_recovery", "agent_started",
                                 "agent_terminal", "decision_required",
                                 "tool_result", "provider_request_started",
@@ -1185,3 +1201,7 @@ def run_daemon(
         if not storage_writers_alive:
             _cleanup_resources(str(session.workspace_path))
         _emit({"event": "daemon_stopped", "project": project.name})
+        if os.environ.get("GITGO_OBSERVER_CAPTURE_DIR"):
+            from backend.core.observer.recording import capture, close_process_recorder
+            capture("runtime_stopped", {"project": project.name})
+            close_process_recorder()

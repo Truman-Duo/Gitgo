@@ -1,9 +1,13 @@
 import {useLocalHelpCommand} from "../hooks/useLocalHelpCommand.js";
 import {SelectionText} from "./Selection.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
+import {ContentViewport} from "../ui/ContentViewport.js";
 import {pages} from "../ui/pageContract.js";
 
-import {MarkdownText} from "./MarkdownText.js";
+import {MessageRow} from "./MessageRow.js";
+import {StreamingMessage} from "./StreamingMessage.js";
+import {useFeedback} from "../hooks/useFeedback.js";
+import {FeedbackMessage} from "./FeedbackMessage.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, ScrollBox, Text, measureElement, type DOMElement, type ScrollBoxHandle } from "@anthropic/ink";
 import { useManagedInput as useInput } from "../input/runtime.js";
@@ -18,12 +22,12 @@ import {isBindingAction} from "../input/router.js";
 import { useTextInput } from "../hooks/useTextInput.js";
 import { colors } from "../theme/index.js";
 import { TextInput } from "./TextInput.js";
-import { ToolCallDisplay } from "./ToolCallDisplay.js";
 import type { ProcessInfo } from "../hooks/useLoopData.js";
 
 type Props = {
   client: BackendClient; project: string; processId: string;
   cols?: number; maxBodyRows?:number; onBrowseParent?: (delta:number)=>number;
+  parentBrowseRevision?:number;
   question: string; answer: string; reasoning?: string; sidecarId: string;
   processes: Record<string, ProcessInfo>;
   verbose?: boolean;
@@ -64,6 +68,10 @@ export function BtwPanel(props: Props) {
   const maximum=Math.max(2,props.maxBodyRows??10);
   const [selection, setSelection] = useState(0);
   const [focus, setFocus] = useState<"body" | "input" | "choices" | "parent">("body");
+  const parentRevision=useRef(props.parentBrowseRevision);
+  useEffect(()=>{if(parentRevision.current!==props.parentBrowseRevision){
+    parentRevision.current=props.parentBrowseRevision;setFocus('parent');
+  }},[props.parentBrowseRevision]);
   const choices = props.lessonProposal ? [t({en:"Return to review",zh:"返回审阅"})] : [
     t({en:"Close",zh:"关闭"}),t({en:"Keep note",zh:"保留笔记"}),t({en:"Apply at boundary",zh:"边界追加"}),t({en:"Interrupt & apply",zh:"中断并追加"})];
 
@@ -78,6 +86,9 @@ export function BtwPanel(props: Props) {
   const [stream, setStream] = useState<StreamState>(() => initStreamState());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [turnStartedAt,setTurnStartedAt]=useState(()=>new Date().toISOString());
+  const [processExpanded,setProcessExpanded]=useState(false);
+  const feedback=useFeedback({kind:"page",id:JSON.stringify(["btw",props.project,props.processId,props.sidecarId])});
   const initialStarted = useRef(false),alive=useRef(true),requestBusy=useRef(false),mutation=useRef(false);
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   const sources = useMemo(
@@ -96,8 +107,10 @@ export function BtwPanel(props: Props) {
     const clean = question.trim();
     if (!clean || busy || requestBusy.current) return;
     requestBusy.current=true;
+    feedback.clear();
     const prior = historyRef.current;
     setBusy(true);setBodyRows(2);setFocus("body");
+    setTurnStartedAt(new Date().toISOString());setProcessExpanded(false);
     setLatestQuestion(clean);
     body.current?.scrollTo(0);
     setError("");
@@ -130,7 +143,7 @@ export function BtwPanel(props: Props) {
       if(!alive.current)return;
       setError(caught instanceof Error ? caught.message : String(caught));
     }).finally(() => {requestBusy.current=false;if(alive.current)setBusy(false);});
-  }, [busy, props.client, props.project, props.lessonProposal, selectedSources, sidecarId]);
+  }, [busy, props.client, props.project, props.lessonProposal, selectedSources, sidecarId,feedback.clear]);
 
   useEffect(() => {
     if (initialStarted.current) return;
@@ -163,19 +176,13 @@ export function BtwPanel(props: Props) {
       if(alive.current)props.onDismiss();
     })().catch((caught: any) => {
       mutation.current=false;if(!alive.current)return;
-      setError(caught instanceof Error ? caught.message : String(caught));
+      feedback.show(caught instanceof Error ? caught.message : String(caught),{tone:"error"});
       setBusy(false);
     });
   }, [answer, stream.text, selection, props, sidecarId, latestQuestion, confirm, targetId, target, discussionRef, t]);
 
   const scrollDiscussion=(delta:number)=>{
-    if(delta<0){
-      const remainder=scrollViewport(body.current,delta);
-      if(remainder)props.onBrowseParent?.(remainder);
-    }else{
-      const remainder=props.onBrowseParent ? props.onBrowseParent(delta) : delta;
-      if(remainder)scrollViewport(body.current,remainder);
-    }
+    scrollViewport(body.current,delta);
   };
 
   const menuHelp=useLocalHelpCommand("btw",undefined,focus!=="input"&&!confirm);
@@ -203,6 +210,7 @@ export function BtwPanel(props: Props) {
     if (focus === "parent") {
       if(key.upArrow||key.pageUp||key.wheelUp)props.onBrowseParent?.(key.upArrow?-1:-10);
       else if(key.downArrow||key.pageDown||key.wheelDown)props.onBrowseParent?.(key.downArrow?1:10);
+      else if(input&&!key.ctrl&&!key.meta&&!key.return){setFocus('input');draft.insertText(input);}
       return;
     }
     if(key.pageUp||key.pageDown||key.wheelUp||key.wheelDown){
@@ -248,53 +256,41 @@ export function BtwPanel(props: Props) {
     if (!key.ctrl && !key.meta && input){setFocus("input");draft.insertText(input);}
   }, {bindingContext: "btw",clipboard:!confirm&&(focus==="input"||focus==="body"),inputTarget:confirm?"confirmation":focus});
 
-  const visibleAnswer = stream.text || answer;
+  const asking=busy && requestBusy.current;
+  const visibleAnswer = asking ? stream.text : answer || stream.text;
   const visibleReasoning = stream.reasoning || reasoning;
-  const latestTool = stream.tools[stream.tools.length - 1];
 
   useEffect(()=>{
     const timer=setTimeout(()=>{
       if(content.current)setBodyRows(Math.max(2,Math.min(maximum,measureElement(content.current).height)));
     },0);
     return()=>clearTimeout(timer);
-  },[visibleAnswer,visibleReasoning,props.cols,maximum,stream.tools.length,error]);
+  },[visibleAnswer,visibleReasoning,props.cols,maximum,stream.tools.length,error,processExpanded]);
 
   return (
-    <PageFrame page={pages.discussion}>
+    <Box flexDirection='column' minHeight={0} flexGrow={1} onClick={()=>{if(focus==='parent')setFocus('body');}}><PageFrame page={pages.discussion}>
       <Text bold color={colors.accent}>{t({en:"BTW",zh:"BTW"})}</Text>
       {confirm?<Text color={colors.warning}>{t({en:"Confirm target: ",zh:"确认目标："})}{targetName} · {selection===3?t({en:"interrupt and append",zh:"中断并追加"}):t({en:"append at boundary",zh:"边界追加"})}</Text>:null}
-      <ScrollBox ref={body} flexDirection="column" height={bodyRows} flexGrow={0} flexShrink={1} minHeight={1}>
+      <ContentViewport scrollRef={body}><ScrollBox ref={body} flexDirection="column" height={bodyRows} flexGrow={0} flexShrink={1} minHeight={1}>
       <Box ref={content} flexDirection="column" flexShrink={0} width={width}>
-      {latestQuestion?<Text dimColor>{t({en:"Question: ",zh:"问题："})}{latestQuestion}</Text>:null}
-      {visibleReasoning && props.verbose ? <Text dimColor>{visibleReasoning}</Text> : null}
-      {visibleAnswer ? <MarkdownText content={visibleAnswer} width={width}/> : (
-        <Text dimColor>{busy
-          ? t({en:"Working…",zh:"正在处理…"})+(latestTool ? " · "+latestTool.tool_name : "")
-          : t({en:"No answer",zh:"尚无回答"})}</Text>
-      )}
-      {latestTool && !props.verbose ? (
-        <Text dimColor>
-          {latestTool.is_running ? t({en:"Using",zh:"正在调用"}) : latestTool.allowed ? t({en:"Used",zh:"已调用"}) : t({en:"Tool failed",zh:"工具调用失败"})} · {latestTool.tool_name}
-        </Text>
-      ) : null}
-      {props.verbose && stream.tools.length > 0 ? (
-        <Box flexDirection="column">
-          {stream.tools.map((tool, index) => <ToolCallDisplay
-            key={tool.tool_call_id || index} tool={tool}
-            width={width} />)}
-        </Box>
-      ) : null}
-      {error ? <Text color={colors.danger}>{error}</Text> : null}
+      {latestQuestion ? <MessageRow msg={{role:"user",content:latestQuestion,timestamp:turnStartedAt}} contentWidth={width}/> : null}
+      {asking ? <StreamingMessage key={`live:${turnStartedAt}`} streaming={{...stream,timestamp:turnStartedAt,provider_usage:stream.providerUsage}} contentWidth={width} verbose={props.verbose} client={props.client} project={props.project}/>
+        : visibleAnswer || error ? <MessageRow key={`saved:${turnStartedAt}`} msg={{role:"assistant",content:error || visibleAnswer,
+          timestamp:turnStartedAt,status:error ? "failed" : "completed",reasoning:visibleReasoning,activity:stream.activity,
+          tools:stream.tools,notices:stream.notices,provider_usage:stream.providerUsage}}
+          contentWidth={width} verbose={props.verbose} expanded={processExpanded} onExpandedChange={setProcessExpanded}/>
+        : <Text dimColor>{t({en:"No answer",zh:"尚无回答"})}</Text>}
 
-      </Box></ScrollBox>
-      <Box flexShrink={0} flexDirection="row">
+      </Box></ScrollBox></ContentViewport>
+      <FeedbackMessage feedback={feedback.message}/>
+      <Box flexShrink={0} flexDirection="row" onClick={()=>setFocus('input')}>
         <Text color={focus === "input" ? colors.accent : undefined}>{colors.input.normal.glyph}</Text>
         <TextInput
           value={draft.value}
           cursorOffset={draft.cursor}
           placeholder={busy ? t({en:"Working…",zh:"正在处理…"}) : t({en:"Follow-up",zh:"继续提问"})}
-          focus={focus === "input"}
-          showCursor={focus === "input" && !busy}
+          focus={focus === "input" || focus === "body"}
+          showCursor={focus === "input" || focus === "body"}
           maxWidth={width}
         />
       </Box>
@@ -310,6 +306,6 @@ export function BtwPanel(props: Props) {
         })}
       </Box>
 
-    </PageFrame>
+    </PageFrame></Box>
   );
 }

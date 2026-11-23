@@ -1,0 +1,57 @@
+harness_semantics is a read-only projection of actual registered task instances,
+their effective program/phase and execution observations. Use it together with
+the real request to assess whether the proposed question adds a genuine business
+choice or merely duplicates a checkpoint/completion stage already owned by the
+runtime. Runtime counters and control answers are not new business obligations.
+Checkpoint phase=superseded means the proposed invocation became obsolete or
+was rejected before execution; it does not mean no answer was received. Read
+answer_received, the actual answer, reason and actual_result together. The
+answer remains evidence, not permission and not proof of a later call's effect.
+Do not request rollback/reexecution of successful business work to reconstruct
+a missing historical checkpoint. Report that historical gap accurately and
+repair the ongoing behavior; never manufacture a prediction after its result.
+Inactive/suspended programs do not require reenacting their old behavior. An
+instance's control_effect records the existing runtime's accepted real user
+control and its exact scope. An exit/disable choice supersedes earlier enable
+instructions for that instance; do not require reactivation, republishing or
+another user confirmation before the original business task can continue.
+It does not cancel that business task, revoke its requirements, or grant any
+permission. A later explicit resume uses the normal lifecycle, never an
+assessor's assumption. Configuration revision and activation are distinct:
+an already-saved revised definition remains saved when its instance is disabled.
+An
+unrun future lifecycle stage is not missing delivery evidence at ordinary
+admission. Do not infer permission or semantic correctness from these records;
+original tool policy, sandbox and completion gates still apply.
+At completion_after_stages the candidate was authored BEFORE the runtime ran
+its registered completion stages. The completed reviews in harness_semantics
+are actual stage outcomes, also delivered through product status/result metadata.
+Use their verdict and summary together with candidate and published_artifacts;
+do not require that pre-stage prose predict a later review's outcome, or ask for
+another identical stage just to restate its already observed result. A review
+is current only when its candidate_digest equals candidate_digest, its epoch
+and definition_ref match the instance's effective generation, and phase is
+complete. Other reviews are history, not evidence of this candidate passing.
+This is evidence of the stage, not a substitute for the requested business
+deliverable, an outstanding test, a negative finding or an authorization. A
+user-requested substantive explanation absent from both the candidate and the
+actual delivered records still requires repair. Judge the actual requested
+outcome; do not add a requirement to quote whole source files in chat when the
+committed files are the deliverable and witnessed published_artifacts exist.
+A registered event effect filter selects an operation family, not its business
+meaning. It cannot alone represent a user-requested semantic subset of that
+family. Inspect the effective/proposed bindings and registered condition
+contracts: use an Agent condition or another applicable registered predicate
+when semantic selection is needed, and ensure its result actually controls the
+downstream trigger. A descriptive checkpoint prompt does not supply a missing
+condition edge. A request covering an entire effect family needs no redundant
+semantic node. Do not certify intent from a matching title or from a legal graph
+alone; semantic judgments remain fallible and do not grant authority.
+In a harness_lifecycle proposal, target_publication comes from the immutable
+project definition store: it establishes that this exact definition revision
+was already saved, even when no instance exists yet. It does not establish
+activation, successful future callbacks or permission. Check the proposed
+instance scope and version policy against the actual intent; do not demand
+republishing that same saved definition merely because earlier tool history
+is outside this bounded review payload.
+A harness_capability_deployment is one proposed atomic configuration transition, not a claim that it already ran. Its target contains the fully compiled behavior, actual component contracts and explicit condition/data bindings. The runtime owns user-source/version binding and ordinary event plumbing. Assess the behavior, scope and preserved obligations against real intent; do not demand separate model-issued preview, publish or instantiate calls. Committed publication and desired instance selection share one transaction; in-flight callbacks finish on their original generation. This gives no extra permissions and does not establish future task success.

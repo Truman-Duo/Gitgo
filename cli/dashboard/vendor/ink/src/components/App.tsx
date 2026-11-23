@@ -42,7 +42,7 @@ import {
   parseMultipleKeypresses,
 } from '../core/parse-keypress.js';
 import reconciler from '../core/reconciler.js';
-import { finishSelection, hasSelection, type SelectionState, startSelection } from '../core/selection.js';
+import { clearSelection, finishSelection, hasSelection, type SelectionState, startSelection } from '../core/selection.js';
 import { isXtermJs, setXtversionName, supportsExtendedKeys } from '../core/terminal.js';
 import { getTerminalFocused, setTerminalFocused } from '../core/terminal-focus-state.js';
 import { TerminalQuerier, xtversion } from '../core/terminal-querier.js';
@@ -93,6 +93,10 @@ type Props = {
   // No-op (returns false) outside fullscreen mode (Ink.dispatchClick
   // gates on altScreenActive).
   readonly onClickAt: (col: number, row: number) => boolean;
+  readonly isActionAt?: (col: number, row: number) => boolean;
+  readonly captureActionAt?: (col: number, row: number) => ((col: number, row: number) => boolean) | undefined;
+  readonly captureMouseAt?: (col: number, row: number, button: number) =>
+    ((type: 'mousedrag' | 'mouseup', col: number, row: number, button: number) => void) | undefined;
   // Dispatch hover (onMouseEnter/onMouseLeave) as the pointer moves over
   // DOM elements. Called for mode-1003 motion events with no button held.
   // No-op outside fullscreen (Ink.dispatchHover gates on altScreenActive).
@@ -182,6 +186,8 @@ export default class App extends PureComponent<Props, State> {
   lastClickCol = -1;
   lastClickRow = -1;
   clickCount = 0;
+  actionPress: {col: number; row: number; dispatch: (col: number, row: number) => boolean; cancelled: boolean} | undefined;
+  mouseCapture: {col: number; row: number; dispatch: (type: 'mousedrag' | 'mouseup', col: number, row: number, button: number) => void} | undefined;
   // Deferred hyperlink-open timer — cancelled if a second click arrives
   // within MULTI_CLICK_TIMEOUT_MS (so double-clicking a hyperlink selects
   // the word without also opening the browser). DOM onClick dispatch is
@@ -599,6 +605,9 @@ function processKeysInBatch(app: App, items: ParsedInput[], _unused1: undefined,
       continue;
     }
     if (sequence === FOCUS_OUT) {
+      app.actionPress = undefined;
+      releaseMouseCapture(app);
+      app.props.onHoverAt(-1, -1);
       app.handleTerminalFocus(false);
       // Defensive: if we lost the release event (mouse released outside
       // terminal window — some emulators drop it rather than capturing the
@@ -637,6 +646,12 @@ function processKeysInBatch(app: App, items: ParsedInput[], _unused1: undefined,
   }
 }
 
+function releaseMouseCapture(app: App, col?: number, row?: number, button = 3): void {
+  const capture = app.mouseCapture;
+  app.mouseCapture = undefined;
+  capture?.dispatch('mouseup', col ?? capture.col, row ?? capture.row, button);
+}
+
 /** Exported for testing. Mutates app.props.selection and click/hover state. */
 export function handleMouseEvent(app: App, m: ParsedMouse): void {
   // Allow disabling click handling while keeping wheel scroll (which goes
@@ -651,6 +666,8 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
 
   if (m.action === 'press') {
     if ((m.button & 0x20) !== 0 && baseButton === 3) {
+      app.actionPress = undefined;
+      releaseMouseCapture(app, col, row, m.button);
       // Mode-1003 motion with no button held. Dispatch hover; skip the
       // rest of this handler (no selection, no click-count side effects).
       // Lost-release recovery: no-button motion while isDragging=true means
@@ -673,9 +690,21 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
     if (baseButton !== 0) {
       // Non-left press breaks the multi-click chain.
       app.clickCount = 0;
+      app.actionPress = undefined;
+      releaseMouseCapture(app, col, row, m.button);
       return;
     }
     if ((m.button & 0x20) !== 0) {
+      if (app.mouseCapture) {
+        app.mouseCapture.col = col; app.mouseCapture.row = row;
+        app.mouseCapture.dispatch('mousedrag', col, row, m.button);
+        return;
+      }
+      if (app.actionPress) {
+        if (Math.abs(col - app.actionPress.col) > 1 || Math.abs(row - app.actionPress.row) > 1)
+          app.actionPress.cancelled = true;
+        return;
+      }
       // Drag motion: mode-aware extension (char/word/line). onSelectionDrag
       // calls notifySelectionChange internally — no extra onSelectionChange.
       app.props.onSelectionDrag(col, row);
@@ -690,13 +719,30 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
       finishSelection(sel);
       app.props.onSelectionChange();
     }
+    app.actionPress = undefined;
+    releaseMouseCapture(app, col, row, m.button);
+    const captured = app.props.captureMouseAt?.(col, row, m.button);
+    if (captured) {
+      clearSelection(sel); app.clickCount = 0;
+      app.mouseCapture = {col, row, dispatch: captured};
+      app.props.onSelectionChange();
+      return;
+    }
+    const action = app.props.captureActionAt?.(col, row);
+    if (action) {
+      clearSelection(sel);
+      app.clickCount = 0;
+      app.actionPress = {col, row, dispatch: action, cancelled: false};
+      app.props.onSelectionChange();
+      return;
+    }
     // Fresh left press. Detect multi-click HERE (not on release) so the
     // word/line highlight appears immediately and a subsequent drag can
     // extend by word/line like native macOS. Previously detected on
     // release, which meant (a) visible latency before the word highlights
     // and (b) double-click+drag fell through to char-mode selection.
     const now = Date.now();
-    const nearLast =
+    const nearLast = !app.props.isActionAt?.(col, row) &&
       now - app.lastClickTime < MULTI_CLICK_TIMEOUT_MS &&
       Math.abs(col - app.lastClickCol) <= MULTI_CLICK_DISTANCE &&
       Math.abs(row - app.lastClickRow) <= MULTI_CLICK_DISTANCE;
@@ -732,6 +778,20 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
   // isDragging=true and leave drag-to-scroll's timer running until the
   // scroll boundary. Only act on non-left releases when we ARE dragging
   // (so an unrelated middle/right click-release doesn't touch selection).
+  if (app.mouseCapture) {
+    releaseMouseCapture(app, col, row, m.button);
+    app.props.onHoverAt(col, row);
+    return;
+  }
+  if (app.actionPress) {
+    const press = app.actionPress;
+    app.actionPress = undefined;
+    if ((baseButton === 0 || baseButton === 3) && !press.cancelled
+        && Math.abs(col - press.col) <= 1 && Math.abs(row - press.row) <= 1)
+      press.dispatch(col, row);
+    app.props.onSelectionChange();
+    return;
+  }
   if (baseButton !== 0) {
     if (!sel.isDragging) return;
     finishSelection(sel);

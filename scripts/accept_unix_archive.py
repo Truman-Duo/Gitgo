@@ -76,7 +76,12 @@ def accept(archive, commit):
             str(ROOT / 'scripts/check_native_credentials.py'), '--host', str(host),
             environment=credential_env)
         scope_env = dict(env, GITGO_SCOPE_TEST_HOST=str(host))
-        subprocess.run([sys.executable, '-B', '-m', 'pytest', str(ROOT / 'tests/test_unix_process_scope.py'),
+        scope_tests = [str(ROOT / 'tests/test_unix_process_scope.py')]
+        if sys.platform == 'darwin':
+            # These source tests intentionally skip without an actual frozen
+            # Host. Exercise the installed archive on this independent worker.
+            scope_tests.append(str(ROOT / 'tests/test_macos_forkless_scope.py'))
+        subprocess.run([sys.executable, '-B', '-m', 'pytest', *scope_tests,
                         '-q', '-k', 'frozen'], cwd=ROOT, env=scope_env, check=True, timeout=180)
         sentinel = home / 'state' / 'keep.txt'
         sentinel.parent.mkdir(parents=True, exist_ok=True)

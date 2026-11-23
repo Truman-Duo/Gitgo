@@ -1,0 +1,1 @@
+The command ran and its output is frozen. Publication is waiting for review. To continue with this output, submit the original business arguments with the returned candidate_ref and lesson_feedback_id. The pipeline still checks current authorization, input versions and output before publication.

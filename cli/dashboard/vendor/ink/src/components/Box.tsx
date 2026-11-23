@@ -4,6 +4,7 @@ import type { DOMElement } from '../core/dom.js';
 import type { ClickEvent } from '../core/events/click-event.js';
 import type { FocusEvent } from '../core/events/focus-event.js';
 import type { KeyboardEvent } from '../core/events/keyboard-event.js';
+import type { MouseActionEvent } from '../core/events/mouse-action-event.js';
 import type { Styles } from '../core/styles.js';
 import * as warn from '../core/warn.js';
 
@@ -27,6 +28,8 @@ export type Props = Except<Styles, 'textWrap'> & {
    * ancestors; call `event.stopImmediatePropagation()` to stop bubbling.
    */
   onClick?: (event: ClickEvent) => void;
+  /** Repeated action clicks stay clicks; ordinary text retains multi-click selection. */
+  clickMode?: 'action' | 'text';
   onFocus?: (event: FocusEvent) => void;
   onFocusCapture?: (event: FocusEvent) => void;
   onBlur?: (event: FocusEvent) => void;
@@ -42,6 +45,10 @@ export type Props = Except<Styles, 'textWrap'> & {
   onMouseEnter?: () => void;
   /** Fired when the mouse moves out of this Box's rendered rect. */
   onMouseLeave?: () => void;
+  /** A down handler captures subsequent drag/release until that gesture ends. */
+  onMouseDown?: (event: MouseActionEvent) => void;
+  onMouseDrag?: (event: MouseActionEvent) => void;
+  onMouseUp?: (event: MouseActionEvent) => void;
 };
 
 /**
@@ -57,12 +64,16 @@ function Box({
   tabIndex,
   autoFocus,
   onClick,
+  clickMode,
   onFocus,
   onFocusCapture,
   onBlur,
   onBlurCapture,
   onMouseEnter,
   onMouseLeave,
+  onMouseDown,
+  onMouseDrag,
+  onMouseUp,
   onKeyDown,
   onKeyDownCapture,
   ...style
@@ -92,12 +103,16 @@ function Box({
       tabIndex={tabIndex}
       autoFocus={autoFocus}
       onClick={onClick}
+      clickMode={clickMode}
       onFocus={onFocus as unknown as (event: React.FocusEvent<Element, Element>) => void}
       onFocusCapture={onFocusCapture as unknown as (event: React.FocusEvent<Element, Element>) => void}
       onBlur={onBlur as unknown as (event: React.FocusEvent<Element, Element>) => void}
       onBlurCapture={onBlurCapture as unknown as (event: React.FocusEvent<Element, Element>) => void}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
+      onMouseDown={onMouseDown}
+      onMouseDrag={onMouseDrag}
+      onMouseUp={onMouseUp}
       onKeyDown={onKeyDown as unknown as (event: React.KeyboardEvent<Element>) => void}
       onKeyDownCapture={onKeyDownCapture as unknown as (event: React.KeyboardEvent<Element>) => void}
       style={{

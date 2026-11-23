@@ -10,9 +10,10 @@ from __future__ import annotations
 from backend.core.prompt_templates import load_prompt
 from backend.core.prompt_profiles import with_prompt_profile
 
-from backend.core.loop.lifecycle import transition
+from backend.core.loop.lifecycle import TERMINAL, transition
 
 import json
+import sys
 import threading
 import traceback
 import uuid
@@ -27,6 +28,7 @@ from backend.core.daemon.emit import _emit as _emit_global
 from backend.core.daemon.persist import _save_session_checkpoint
 from backend.core.daemon.policy_helpers import (
     _snapshot_workspace, _harvest_from_rejection_chain, _resolve_llm_config, _runtime_llm_from_config,
+    _refresh_runtime_llm,
 )
 from backend.core.loop.models import ProcessStatus, RingLevel
 from backend.core.loop.tools import ToolRegistry
@@ -206,7 +208,7 @@ def _cmd_llm_configure(cmd, session, project, daemon_ctx, emit):
 
 
 def _cmd_llm_call(cmd, session, project, daemon_ctx, emit):
-    llm_provider = daemon_ctx.get("llm") if daemon_ctx else None
+    llm_provider = _refresh_runtime_llm(daemon_ctx, session.workspace_path)
     evq = daemon_ctx.get("evq") if daemon_ctx else None
     if llm_provider is None:
         emit({"event": "command_result", "cmd": "llm_call",
@@ -423,6 +425,7 @@ def _process_status_payload(proc, *, presentation: dict | None = None) -> dict:
         else dict(getattr(proc, "context_snapshot", {}) or {})
     )
     from backend.core.loop.provider_identity import recorded_model_id
+    from backend.core.loop.lifecycle import execution_closeout
     from backend.core.loop.coordination import coordination_summary_from_context
     return {
         "process_id": proc.process_id,
@@ -432,6 +435,9 @@ def _process_status_payload(proc, *, presentation: dict | None = None) -> dict:
         "session_id": str(getattr(proc_session, "session_id", "")),
         "ring_level": proc.ring_level.value,
         "status": proc.status.value,
+        "execution_active": bool(manager and getattr(manager, "is_executing", lambda _pid: False)(proc.process_id)),
+        **execution_closeout(proc, manager),
+        "routing_compilation": dict((process_context.get("task_contract") or {}).get("routing_compilation") or {}),
         "state_revision": int(getattr(proc, "durable_revision", 0)),
         "steps_used": proc.steps_used,
         "max_steps": proc.max_steps,
@@ -468,6 +474,7 @@ def _process_status_payload(proc, *, presentation: dict | None = None) -> dict:
         "coordination": coordination_summary_from_context(process_context),
         "pending_decision": dict(proc.pending_decision) if proc.pending_decision else None,
         "advancement": __import__("backend.core.loop.mechanisms", fromlist=["projection"]).projection(proc),
+        "task_execution_policy": __import__("backend.core.loop.task_execution_policy", fromlist=["projection"]).projection(proc),
         "task_contract_revision": int((process_context.get("task_contract") or {}).get("revision", 0)),
         "harness_mechanisms": __import__("backend.core.mechanism_runtime.application", fromlist=["projection"]).projection(proc),
         "task_maintenance": {key: (process_context.get("task_maintenance") or {}).get(key)
@@ -537,7 +544,12 @@ def _cmd_loop_status(cmd, session, project, daemon_ctx, emit):
             if storage is not None else None, {},
         )
         for pid, proc in apm._processes.items():
+            if getattr(proc, "role", None) == "subagent":
+                continue
             processes[pid] = _process_status_payload(proc, presentation=presentations.get(pid, {}))
+    # Stored running labels are recovery/history facts, not live execution.
+    for payload in processes.values():
+        payload.setdefault("execution_active", False)
     pending_question_rows = []
     for payload in processes.values():
         pending = payload.get("pending_decision")
@@ -672,6 +684,9 @@ def _cmd_task_result(cmd, session, project, daemon_ctx, emit):
     }
     turn_settled = bool(process.status == ProcessStatus.AWAITING_USER
                         and process.lifecycle_finalized and isinstance(process.result, dict))
+    execution_lock = getattr(process, '_run_lock', None)
+    turn_owned = execution_lock is not None and execution_lock.locked()
+    outcome_available = (terminal or turn_settled) and not turn_owned and isinstance(process.result, dict)
     emit({"event": "command_result", "cmd": "task_result",
           "result": {
               "task_id": str(process.active_task_id or task_id),
@@ -679,8 +694,8 @@ def _cmd_task_result(cmd, session, project, daemon_ctx, emit):
               "session_id": str(getattr(process.session, "session_id", "")),
               "status": process.status.value,
               "terminal": terminal,
-              "turn_settled": turn_settled,
-              "outcome": dict(process.result) if (terminal or turn_settled) and isinstance(process.result, dict) else None,
+              "turn_settled": turn_settled and not turn_owned,
+              "outcome": dict(process.result) if outcome_available else None,
           }})
 
 
@@ -708,6 +723,21 @@ def _cmd_trace(cmd, session, project, daemon_ctx, emit):
             result = {"traces": list_traces(
                 workspace, limit=100, storage=storage,
             )}
+        elif action in {"summary", "index", "block"}:
+            from backend.core.loop.trace import TraceJournal
+            trace_id = str(cmd.get("trace_id") or cmd.get("task_id") or "")
+            if not trace_id:
+                raise ValueError("trace_id is required")
+            with TraceJournal(workspace, trace_id, storage=storage) as journal:
+                if action == "summary":
+                    result = journal.read_summary(process_id=str(cmd.get("process_id") or ""),
+                                                  include_recent=cmd.get("include_recent", True) is not False)
+                elif action == "index":
+                    result = journal.read_index(process_id=str(cmd.get("process_id") or ""),
+                        after_seq=int(cmd.get("after_seq", -1)), limit=int(cmd.get("limit", 200)), snapshot=cmd.get("snapshot"))
+                else:
+                    result = journal.read_block(cmd.get("body_ref"),
+                        after_seq=int(cmd["after_seq"]) if "after_seq" in cmd else None, limit=int(cmd.get("limit", 500)))
         else:
             trace_id = str(cmd.get("trace_id") or cmd.get("task_id") or "")
             if not trace_id:
@@ -739,7 +769,8 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000, store=
         # Completed conversations need not be live processes after a daemon
         # restart. Read the existing atomic checkpoint, without restoring an
         # executor, granting a lease or registering a second process.
-        state = store.load_process_state(process_id) if store and process_id else None
+        reader = getattr(store, 'read_discussion_state', None) or getattr(store, 'load_process_state', None)
+        state = reader(process_id) if reader and process_id else None
         if not state or process_id in store.deleted_process_ids():
             return {"attached": False, "process_id": process_id}
         from types import SimpleNamespace
@@ -756,7 +787,13 @@ def _btw_parent_snapshot(apm, process_id: str, *, max_chars: int = 24000, store=
             session=SimpleNamespace(messages=(state.get("session") or {}).get("messages",[]),
                 host_ledger=(state.get("session") or {}).get("host_ledger",[])),
             read_context_snapshot=lambda: (context,int(raw.get("state_revision",0))))
-        return _btw_parent_snapshot(SimpleNamespace(get=lambda _id:proxy),process_id,max_chars=max_chars)
+        snapshot = _btw_parent_snapshot(SimpleNamespace(get=lambda _id:proxy),process_id,max_chars=max_chars)
+        if 'public_pending_question' in state:
+            snapshot['pending_question'] = state['public_pending_question']
+        snapshot['source_warnings'] = list(state.get('source_warnings') or [])
+        snapshot['partial'] = bool(snapshot['source_warnings'])
+        snapshot['projection'] = state.get('projection','saved-discussion-source')
+        return snapshot
 
     context, version = process.read_context_snapshot()
     contract = dict(context.get("task_contract") or {})
@@ -838,7 +875,7 @@ def _btw_scope_snapshot(apm, process_ids: list[str], *, max_chars: int = 32000, 
                       ("process_id","owner_process_id","depends_on","relationship_policy")})
     return {
         "attached": bool(sources),
-        "partial": len(set(process_ids)) > len(sources) or any(item.get("truncated") for item in sources),
+        "partial": len(set(process_ids)) > len(sources) or any(item.get("truncated") or item.get('partial') for item in sources),
         "focus_process_id": selected_ids[0],
         "source_process_ids": [str(item["process_id"]) for item in sources],
         "sources": sources,
@@ -995,6 +1032,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
         return
 
     if action == "btw":
+        llm_provider = _refresh_runtime_llm(daemon_ctx, session.workspace_path)
         if llm_provider is None:
             cfg = _resolve_llm_config(str(session.workspace_path))
             if cfg:
@@ -1146,6 +1184,11 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 if storage is not None and hasattr(storage, "commit_state_revision"):
                     from backend.core.loop.discussion_adoption import save_discussion
                     result.update(save_discussion(storage, sidecar_id, question, result, parent_snapshot.get("sources") or []))
+                # Completion publishes an idle boundary. Retire this worker
+                # before notifying clients so an immediate follow-up is valid.
+                with lock:
+                    if tasks.get(sidecar_id) is entry:
+                        tasks.pop(sidecar_id, None)
                 emit({"event": "btw_complete", "sidecar_id": sidecar_id,
                       "result": result})
                 # The immutable discussion is the source, never an instruction
@@ -1162,7 +1205,8 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                       "error": str(exc), "cancelled": cancel_event.is_set()})
             finally:
                 with lock:
-                    tasks.pop(sidecar_id, None)
+                    if tasks.get(sidecar_id) is entry:
+                        tasks.pop(sidecar_id, None)
 
         thread = threading.Thread(
             target=run_btw_sidecar,
@@ -1286,6 +1330,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
         from backend.core.loop.session import AgentSession
         from backend.core.loop.manual_compaction import compact_parked_session
         restored_session = AgentSession.from_durable_state(dict(state.get("session") or {}))
+        llm_provider = _refresh_runtime_llm(daemon_ctx, session.workspace_path)
         if llm_provider is None:
             cfg = _resolve_llm_config(str(session.workspace_path))
             if cfg:
@@ -1407,7 +1452,10 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             reason=str(cmd.get("reason") or "user_cancelled"),
             wait_timeout=max(0.0, min(float(cmd.get("wait_timeout", 0) or 0), 30.0)),
         )
+        persisted_parked = set(cancel_result.get("cancelled_parked", [])) if getattr(apm, "session_store", None) else set()
         for cancelled_id in cancel_result.get("process_ids", []):
+            if cancelled_id in persisted_parked:
+                continue
             cancelled_process = apm.get(cancelled_id)
             if cancelled_process is not None:
                 _save_session_checkpoint(daemon_ctx, cancelled_process)
@@ -1438,7 +1486,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             from backend.core.loop.task_contract import get_task_contract
             from backend.core.loop.task_maintenance import add_change
             from backend.core.loop.mechanism_catalog import digest
-            with fence(process), process.session._mechanism_lock, process._context_lock:
+            with fence(process), process.session._mechanism_lock, process._context_lock, process.mailbox.admission():
                 try:
                     message = process.mailbox.enqueue_instruction(instruction)
                     if store is not None:
@@ -1461,6 +1509,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             emit({"event": "command_result", "cmd": "task",
                   "error": str(exc)})
             return
+        apm.notify_state_changed(process_id)
         emit({"event": "command_result", "cmd": "task",
               "result": {
                   "status": "accepted",
@@ -1767,6 +1816,14 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             approval_grant = grant_from_decision(process, pending, selected_action)
             if isinstance(process.pending_tool_batch, dict):
                 process.pending_tool_batch["decision_action"] = selected_action
+        policy_proposal = None
+        if pending.get("kind") == "execution_policy":
+            action_choice = (selected_option or {}).get("action")
+            if action_choice not in {"apply", "cancel"} or pending.get("display_template") != "task_execution_policy":
+                emit({"event": "command_result", "cmd": "task", "error": "TASK_EXECUTION_POLICY_SELECTION_REQUIRED"})
+                return
+            if action_choice == "apply":
+                policy_proposal = pending["display_context"]
         if pending.get("kind") == "completion_exception":
             if selected_option is None:
                 emit({"event": "command_result", "cmd": "task",
@@ -1821,7 +1878,11 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
         # resumed effect or an admitted acknowledgement can reach the UI.
         store = (daemon_ctx or {}).get("session_store")
         try:
-            if store is not None:
+            if policy_proposal is not None:
+                from backend.core.loop.task_execution_policy import activate
+                activate(process, policy_proposal["task_id"], policy_proposal["parameters"],
+                    policy_proposal["revision"], store, decision_id=decision_id)
+            elif store is not None:
                 store.save_process_checkpoint(process)
         except StorageCommitUnknown:
             from backend.core.loop.lifecycle import block_uncertain_checkpoint
@@ -1935,7 +1996,18 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
         task_id = cmd.get("task_id", "") or str(uuid.uuid4())
         requested_process_id = cmd.get("process_id", "")
         process = None
+        direct_followup = None
+        boundary_compaction_failure = None
         continuation_id = str(requested_process_id or cmd.get("conversation_process_id") or "")
+        if not continuation_id and cmd.get("session_id"):
+            from backend.core.loop.conversation_continuation import require_root_session_for_implicit_continuation
+            try:
+                require_root_session_for_implicit_continuation(
+                    apm, (daemon_ctx or {}).get("session_store"), str(cmd["session_id"]))
+            except (ValueError, StorageReferenceMissing) as exc:
+                emit({"event": "command_result", "cmd": "task",
+                      "error": str(exc), "code": str(exc).split(":", 1)[0]})
+                return
         if continuation_id:
             from backend.core.loop.conversation_continuation import resolve_conversation_process
             try:
@@ -1946,6 +2018,22 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             except (ValueError, StorageReferenceMissing) as exc:
                 emit({"event": "command_result", "cmd": "task",
                       "error": str(exc), "code": str(exc).split(":", 1)[0]})
+                return
+        if (process is not None and process.parent_id and process.actor_kind != "supervisor"
+                and process.status.value in {"completed", "failed", "cancelled", "timed_out", "killed"}):
+            # The direct UI continuation creates a new user task/budget. It must
+            # not bypass the owner's unfinished contract or budget by reusing B's
+            # session. The supervisor's delegate_task path handles remaining work.
+            from backend.core.loop.continuation_contract import require_direct_followup
+            try:
+                direct_followup = require_direct_followup(process, apm,
+                    store=(daemon_ctx or {}).get("session_store"), workspace=session.workspace_path,
+                    adopted_change=bool(cmd.get("adopted_change_origin")))
+            except ValueError as exc:
+                emit({"event": "command_result", "cmd": "task", "error": str(exc),
+                      "code": getattr(exc, "code", "CONTINUATION_REJECTED"),
+                      "next_actions": getattr(exc, "next_actions", []),
+                      "owner_process_id": process.parent_id})
                 return
         if cmd.get("fresh_task_budget") and process is not None and not cmd.get("adopted_change_origin"):
             # A new user turn is adaptive, as for A: observation starts without
@@ -1972,7 +2060,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 return
 
         # Resolve LLM config
-        llm = llm_provider
+        llm = _refresh_runtime_llm(daemon_ctx, session.workspace_path)
         if llm is None:
             cfg = _resolve_llm_config(str(session.workspace_path))
             if cfg:
@@ -1985,8 +2073,8 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
         # resolution used to remain local to this task admission, leaving
         # event-driven background work (notably automatic lesson harvest)
         # permanently unable to run in the native Dashboard path.  Publish the
-        # resolved client at this safe boundary.  Provider switches retire idle
-        # daemons, so a client from an older provider cannot survive a switch.
+        # resolved client at this safe boundary. Subsequent task admissions
+        # revalidate its configuration without restarting the project daemon.
         if daemon_ctx is not None:
             daemon_ctx["llm"] = llm
 
@@ -2152,41 +2240,6 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                     if candidate.session_id == requested_session_id:
                         reuse_session = candidate
                         apm._sessions[candidate.session_id] = candidate
-        if (canonical_user_turn and reuse_session is not None and predecessor_process is not None
-                and not cmd.get("adopted_change_origin")):
-            previous_result = dict(predecessor_process.result or {})
-            child_outcomes = []
-            child_ids, contracts, reviews = predecessor_process.coordination_snapshot()
-            for child_id in child_ids[-16:]:
-                child = apm.get(child_id)
-                child_outcomes.append({
-                    "display_name": (
-                        child.session.display_name if child is not None else "unavailable"
-                    ),
-                    "status": child.status.value if child is not None else "missing",
-                    "target_files": list(
-                        dict(contracts.get(child_id) or {}).get("target_files") or []
-                    )[:16],
-                    "review": str(dict(reviews.get(child_id) or {}).get("verdict") or "not_reviewed"),
-                })
-            compacted = reuse_session.compact_completed_task_boundary(
-                checkpoint={
-                    "status": previous_result.get("status") or predecessor_process.status.value,
-                    "response": previous_result.get("response") or "",
-                    "deliverables": list(
-                        dict(previous_result.get("metadata") or {}).get("deliverables") or []
-                    ),
-                    "child_outcomes": child_outcomes,
-                },
-            )
-            if compacted:
-                emit({
-                    "event": "context_compaction_completed",
-                    "trigger": "completed_task_boundary",
-                    "forced": False,
-                    "context_epoch": reuse_session.context_epoch,
-                    "changed": True,
-                })
         transferred_maintenance = None
         if cmd.get("adopted_change_origin"):
             origin = cmd["adopted_change_origin"]
@@ -2211,6 +2264,11 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 if key in source_context:
                     context_snapshot[key] = deepcopy(source_context[key])
             task_description = source.task_description
+        adopted_root_continuation = (transferred_maintenance is not None and predecessor_process.parent_id is None
+                                     and predecessor_process.actor_kind == 'supervisor')
+        if adopted_root_continuation and (daemon_ctx or {}).get('session_store') is None:
+            emit({'event': 'command_result', 'cmd': 'task', 'error': 'BTW_ADOPTION_CHECKPOINT_UNAVAILABLE'})
+            return
         if process is None:
             # Fork new agent
             try:
@@ -2244,21 +2302,94 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                     runtime_preferences=dict(cmd.get("runtime_preferences") or {}),
                     session_id=("" if reuse_session is not None else str(cmd.get("session_id", ""))),
                     session=reuse_session,
+                    adopted_root_origin=(cmd.get('adopted_change_origin')
+                        if predecessor_process is not None and predecessor_process.parent_id is None
+                        and predecessor_process.actor_kind == 'supervisor' else None),
                 )
+                # fork serializes session admission. Do not mutate the shared
+                # history before it succeeds: another execution may own it.
+                if (canonical_user_turn and reuse_session is not None and predecessor_process is not None
+                        and not cmd.get("adopted_change_origin")):
+                    previous_result = dict(predecessor_process.result or {})
+                    child_outcomes = []
+                    child_ids, contracts, reviews = predecessor_process.coordination_snapshot()
+                    for child_id in child_ids[-16:]:
+                        child = apm.get(child_id)
+                        child_outcomes.append({
+                            "display_name": (
+                                child.session.display_name if child is not None else "unavailable"
+                            ),
+                            "status": child.status.value if child is not None else "missing",
+                            "target_files": list(
+                                dict(contracts.get(child_id) or {}).get("target_files") or []
+                            )[:16],
+                            "review": str(dict(reviews.get(child_id) or {}).get("verdict") or "not_reviewed"),
+                        })
+                    try:
+                        compacted = reuse_session.compact_completed_task_boundary(
+                            checkpoint={
+                                "status": previous_result.get("status") or predecessor_process.status.value,
+                                "response": previous_result.get("response") or "",
+                                "deliverables": list(
+                                    dict(previous_result.get("metadata") or {}).get("deliverables") or []
+                                ),
+                                "child_outcomes": child_outcomes,
+                            },
+                        )
+                    except Exception as exc:
+                        # Atomic staging leaves the old context intact. This is
+                        # optional context GC: retain the admitted execution and
+                        # budget, report the failure, then run without compaction.
+                        compacted = False
+                        from backend.core.errors import error_payload
+                        failure = error_payload("CONTEXT_COMPACTION_FAILED", details={
+                            "trigger": "completed_task_boundary", "reason": str(exc),
+                            "continuing_without_compaction": True})
+                        boundary_compaction_failure = {
+                            "event": "context_compaction_failed", "code": "CONTEXT_COMPACTION_FAILED",
+                            "process_id": process.process_id, "task_id": task_id,
+                            "session_id": reuse_session.session_id,
+                            "trigger": "completed_task_boundary", "changed": False,
+                            "reason": "Prior context retained; continuing without compaction.",
+                            "error": failure["error_info"]}
+                        emit(boundary_compaction_failure)
+                    if compacted:
+                        emit({
+                            "event": "context_compaction_completed",
+                            "trigger": "completed_task_boundary",
+                            "forced": False,
+                            "context_epoch": reuse_session.context_epoch,
+                            "changed": True,
+                        })
                 if predecessor_process is not None and process.parent_id is None:
                     if predecessor_process.actor_kind == "supervisor":
                         apm.inherit_terminal_coordination(process, predecessor_process)
                     elif logical_parent_id:
                         process.parent_id = str(logical_parent_id)
-                        parent = apm.get(process.parent_id)
-                        if parent is not None:
-                            with parent._coordination_lock:
-                                if process.process_id not in parent.child_ids:
-                                    parent.child_ids.append(process.process_id)
+                        # parent_id preserves conversation identity for presentation;
+                        # this new user task is independent of A's delegation/completion.
+                        # Only the successful Host gate above can mint this receipt.
+                        if direct_followup is not None:
+                            from backend.core.loop.mechanism_lifecycle import next_authority_sequence
+                            origin = direct_followup["direct_user_origin"]
+                            with process.session._mechanism_lock:
+                                process.session.host_ledger.append({
+                                    "event": "direct_user_task_admitted",
+                                    "process_id": process.process_id, "task_id": task_id,
+                                    "predecessor_process_id": predecessor_process.process_id,
+                                    "accepted_source_process_id": origin["accepted_source_process_id"],
+                                    "owner_process_id": origin["owner_process_id"],
+                                    "authority_sequence": next_authority_sequence(process.session),
+                                })
                         process.runtime_preferences["predecessor_process_id"] = predecessor_process.process_id
             except ValueError as e:
-                emit({"event": "command_result", "cmd": "task",
-                      "error": str(e)})
+                from backend.core.loop.manager import SessionExecutionActive
+                failure = {"error": str(e)}
+                if isinstance(e, SessionExecutionActive):
+                    from backend.core.errors import error_payload
+                    failure = error_payload(e.code, details={"process_id": e.process_id,
+                                                             "effect_state": "not_committed"})
+                emit({"event": "command_result", "cmd": "task", **failure})
                 return
         else:
             # Resume existing agent — update context
@@ -2314,6 +2445,7 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
 
         if canonical_user_turn:
             store = (daemon_ctx or {}).get("session_store")
+            admission_checkpointed = False
             try:
                 if not cmd.get("adopted_change_origin"):
                     from backend.core.loop.mechanism_catalog import digest
@@ -2328,16 +2460,36 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                         turn_id=task_id,
                         turn_preview=str(instruction),
                     )
+                    admission_checkpointed = True
                     evq.put({
                         "event": "session_lineage_checkpointed",
                         "process_id": process.process_id,
                         "session_id": process.session.session_id,
                         **checkpoint,
                     })
+                if adopted_root_continuation:
+                    # The complete successor, cumulative budget and Host
+                    # continuation receipt are durable before this audit write.
+                    apm._record_fork_history(process, str(session.workspace_path))
             except Exception as exc:
                 process._run_lock.release()
+                retained = {}
+                if adopted_root_continuation:
+                    # Admission already consumed an agent slot and bound a new
+                    # lease. Do not retry it as fresh work or erase old usage.
+                    from backend.core.loop.discussion_adoption import retain_failed_continuation, checkpoint_retained_continuation
+                    retain_failed_continuation(process, exc)
+                    retained = checkpoint_retained_continuation(apm, process)
                 emit({"event": "command_result", "cmd": "task",
-                      "error": f"SESSION_UNDO_CHECKPOINT_FAILED:{exc}"})
+                      "error": ('ADOPTED_CONTINUATION_ADMISSION_FAILED' if adopted_root_continuation
+                                else f"SESSION_UNDO_CHECKPOINT_FAILED:{exc}"),
+                      **({'code': 'ADOPTED_CONTINUATION_ADMISSION_FAILED', 'detail': str(exc),
+                          'admission_checkpointed': admission_checkpointed, **retained,
+                          # DaemonClient/NativeHost already preserve this
+                          # explicit details boundary, not arbitrary top-level fields.
+                          'error_info': {'name': 'ADOPTED_CONTINUATION_ADMISSION_FAILED',
+                              'details': {'admission_checkpointed': admission_checkpointed, **retained}}}
+                         if adopted_root_continuation else {})})
                 return
 
         # Run agent_step in background thread.  The trace journal is observer
@@ -2348,6 +2500,8 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
             session.workspace_path, task_id,
             storage=(daemon_ctx or {}).get("storage"),
         )
+        if boundary_compaction_failure is not None:
+            trace.append(boundary_compaction_failure)
         trace.append({
             "event": "task_admitted",
             "task_id": task_id,
@@ -2469,19 +2623,34 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                     process.mailbox.close(outcome["error"]["message"])
 
             try:
-                _save_session_checkpoint(daemon_ctx, process)
+                # Close this execution's account in the same durable terminal
+                # checkpoint. release_process retains resumable pause leases
+                # and never refunds calls or output already consumed.
+                if process.task_budget is not None:
+                    released = process.task_budget.release_process(process.process_id, status=process.status.value)
+                    if released is not None:
+                        process.budget_lease = released
+                _save_session_checkpoint(daemon_ctx, process, record_asset_versions=True)
+                asset_deliveries = ((process.result or {}).get("metadata") or {}).get("asset_deliveries")
+                if asset_deliveries:
+                    outcome["metadata"]["asset_deliveries"] = asset_deliveries
+                # The supported in-memory runner has no durable barrier. Mark
+                # its completed turn only after normal closeout reaches here.
+                if (daemon_ctx or {}).get("session_store") is None and process.status.value in TERMINAL:
+                    process.lifecycle_finalized = True
             except Exception as storage_exc:
                 # The user must see a terminal error even when the durable
                 # barrier itself cannot be written.  Do not fabricate an
                 # agent_complete record in SQLite; absence of that barrier is
                 # what makes the process conservatively recoverable.
+                from backend.core.loop.asset_maintenance import AssetMaintenanceError
                 from backend.core.loop.outcome import TaskOutcome
                 transition(process, ProcessStatus.FAILED)
                 outcome = TaskOutcome.failed(
                     task_id=task_id,
                     process_id=process.process_id,
                     process_status=process.status.value,
-                    code="SESSION_CHECKPOINT_FAILED",
+                    code=storage_exc.code if isinstance(storage_exc, AssetMaintenanceError) else "SESSION_CHECKPOINT_FAILED",
                     message=str(storage_exc),
                     retryable=False,
                     steps_used=process.steps_used,
@@ -2502,13 +2671,6 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                 })
             for pending_event in delta_coalescer.flush():
                 _persist_stream_event(pending_event)
-            _emit_stream_event({"event": "agent_complete",
-                                "actor_kind": process.actor_kind,
-                                "parent_id": process.parent_id,
-                                "task_id": task_id,
-                                "process_id": process.process_id,
-                                "session_id": process.session.session_id,
-                                "outcome": outcome})
             if (
                 process.actor_kind == "supervisor"
                 and process.status == ProcessStatus.COMPLETED
@@ -2523,11 +2685,13 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                                 "process_id": child.process_id,
                                 "reason": str(cleanup_exc),
                             })
+            return _emit_stream_event, outcome
 
         def _run_task_thread():
             deadline_stop = threading.Event()
             deadline_thread = None
             process.lifecycle_finalized = False
+            completion = None
             try:
                 if process.task_budget is not None:
                     def _enforce_deadline():
@@ -2552,18 +2716,40 @@ def _cmd_task_body(cmd, session, project, daemon_ctx, emit):
                         name=f"deadline-{process.process_id[:8]}",
                     )
                     deadline_thread.start()
-                _run_task_body()
+                completion = _run_task_body()
             finally:
                 deadline_stop.set()
-                process.lifecycle_finalized = True
-                apm.notify_state_changed(process.process_id)
+                # Terminal finality belongs to the successful checkpoint; a
+                # failed/unknown save must not become reliable in finally.
+                # Nonterminal user/mechanism pauses retain their turn boundary.
+                if process.status.value not in TERMINAL:
+                    process.lifecycle_finalized = True
                 process._run_lock.release()
-                from .mechanism_control import resume_waiters
-                resume_waiters(session, project, daemon_ctx or {})
+                try:
+                    apm.notify_state_changed(process.process_id)
+                    # A completion response can immediately trigger a new user
+                    # turn. Both delivery and reconciliation must agree that
+                    # the previous execution has released shared session state.
+                    if completion is not None:
+                        emit_completion, outcome = completion
+                        emit_completion({"event": "agent_complete",
+                                         "actor_kind": process.actor_kind,
+                                         "parent_id": process.parent_id,
+                                         "task_id": task_id,
+                                         "process_id": process.process_id,
+                                         "session_id": process.session.session_id,
+                                         "outcome": outcome})
+                finally:
+                    from .mechanism_control import resume_waiters
+                    resume_waiters(session, project, daemon_ctx or {})
 
         try:
+            thread_target = _run_task_thread
+            if sys.platform == "darwin":
+                from backend.core.macos_broker_client import bind_worker
+                thread_target = bind_worker(_run_task_thread)
             task_thread = threading.Thread(
-                target=_run_task_thread, daemon=True,
+                target=thread_target, daemon=True,
                 name=f"task-{process.process_id[:8]}",
             )
             apm.register_thread(process.process_id, task_thread)

@@ -16,5 +16,5 @@ def test_first_question_shortcut_does_not_skip_actual_current_work_dependencies(
     p.task_kind = 'answer'
     if receipt:
         p.tool_receipts.append({'receipt_id': 'unit-observation', 'effect': 'read', **receipt})
-    payload = AlignmentRuntime(p).payload(proposed_questions=[])
+    payload = AlignmentRuntime(p).payload(proposed_questions=[{'question': 'Which outcome?'}])
     assert review_reason(p, payload, 'question_proposal') == expected

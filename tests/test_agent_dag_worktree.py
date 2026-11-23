@@ -201,6 +201,60 @@ def test_real_worktree_dag_materializes_dirty_snapshot_and_promotes(tmp_path_fac
     storage.close()
 
 
+def test_follow_up_delegation_checks_exact_accepted_workspace(tmp_path_factory, monkeypatch, worktree_case):
+    from types import SimpleNamespace
+    from backend.core.loop import executor
+    from backend.core.tools.catalog import build_workspace_tools
+
+    repo = _repo(tmp_path_factory)
+    store, manager = worktree_case(repo, tmp_path_factory / "state")
+    manager.session_store = SessionStore(repo, storage=store)
+    root = _process(manager, task_id="follow-up")
+    original = _process(manager, parent_id=root.process_id, task_id="follow-up:publish")
+    checkout = Path(manager.materialize_process_worktree(original))
+    (checkout / "app.txt").write_text("accepted\n", encoding="utf-8")
+    original.status = ProcessStatus.COMPLETED
+    manager.seal_process_worktree(original)
+    root.child_reviews[original.process_id] = {"verdict": "approved"}
+    published = manager.promote_process_results(root, [original.process_id])
+    version = published["result_commit"]
+    (repo / "app.txt").write_text("unaccepted local edit\n", encoding="utf-8")
+    seen = {}
+
+    def validate(*, process, workspace_path, instruction, **_):
+        checkout = Path(workspace_path)
+        content = (checkout / "app.txt").read_text(encoding="utf-8")
+        seen[process.process_id] = (content, _git(checkout, "rev-parse", "HEAD"))
+        if content == "accepted\n":
+            (checkout / "test_app.py").write_text("# Verified the published workspace.\n", encoding="utf-8")
+        process.status = ProcessStatus.COMPLETED
+        process.result = {"status": "completed", "response": instruction}
+        return process.result
+
+    monkeypatch.setattr(executor, "agent_step", validate)
+    catalog = build_workspace_tools(repo)
+    tools = executor._build_internal_tools(root, catalog, str(repo), object(), SimpleNamespace(_executors=catalog), None)
+    request = {"task_description": "Verify the results.", "target_files": ["test_app.py"],
+               "acceptance_criteria": ["Read the assigned workspace version."]}
+    follow_up = tools["delegate_task"].execute(request)
+    assert follow_up.get("workspace_version") == version, follow_up
+    fixed = tools["delegate_task"].execute({**request, "depends_on": []})
+    assert "workspace_version" not in fixed
+    follow_up_id, fixed_id = follow_up["process_id"], fixed["process_id"]
+    _await_worktree_workers(manager, [follow_up_id, fixed_id])
+    assert seen[follow_up_id] == ("accepted\n", version)
+    assert seen[fixed_id] == ("base\n", original.worktree["snapshot_commit"])
+    assert store.load_worktree_state(follow_up_id)["accepted_commit"] == version
+    lease = manager.get(follow_up_id).worktree
+    assert lease["snapshot_commit"] == original.worktree["snapshot_commit"]
+    assert lease["changed_files"] == ["test_app.py"]
+    assert (repo / "app.txt").read_text(encoding="utf-8") == "unaccepted local edit\n"
+    (repo / "app.txt").write_text("accepted\n", encoding="utf-8")
+    root.child_reviews[follow_up_id] = {"verdict": "approved"}
+    next_delivery = manager.promote_process_results(root, [follow_up_id])
+    assert next_delivery["changed_files"] == ["test_app.py"]
+
+
 def test_worktree_git_does_not_inherit_nested_host_control_pipe(tmp_path_factory: Path):
     """A daemon grandchild must not consume or retain its host JSON stdin."""
     tmp_path = tmp_path_factory

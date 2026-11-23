@@ -4,6 +4,12 @@ import {isDeepStrictEqual} from "node:util";
 import type { InputContext } from "./keymap.js";
 import { resolveCommandInput, resolveSceneKey } from "./keymap.js";
 
+test('Enter with literal terminal CR submits once instead of inserting an empty line',()=>{
+ const actions=resolveSceneKey(context({textValue:'new input',textCursor:9,chatInputFocused:true}),'\r',{return:true});
+ assert(actions.some(action=>action.kind==='effect'&&action.effect.type==='send_chat'));
+ assert(!actions.some(action=>action.kind==='text'&&action.op.op==='insert'));
+});
+
 function context(patch: Partial<InputContext> = {}): InputContext {
   return {
     scene: "workspace",

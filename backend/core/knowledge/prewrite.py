@@ -44,7 +44,10 @@ def _load(workspace: Path, args: dict) -> list[Lesson]:
 
 def relevant_diagnostics(workspace: Path, path: Path, before: str, after: str,
                          operation: str, lessons: list[Lesson], *,
-                         read_range: tuple[int, int] | None = None, facts: dict | None = None) -> list[dict]:
+                         read_range: tuple[int, int] | None = None,
+                         read_ranges: list[tuple[int, int]] | None = None, facts: dict | None = None) -> list[dict]:
+    if read_range is not None:
+        read_ranges = [read_range]
     try:
         relative = path.relative_to(workspace).as_posix()
     except ValueError:
@@ -73,13 +76,12 @@ def relevant_diagnostics(workspace: Path, path: Path, before: str, after: str,
             continue
         raw_excerpts = evidence.get("workspace_excerpts") or []
         excerpts = [item for item in raw_excerpts if isinstance(item, dict) and item.get("path") == relative] if isinstance(raw_excerpts, list) else []
-        if lesson.source == "auto_harvested" and not is_registered(lesson) and excerpts and operation == "read_file" and read_range is not None:
+        if lesson.source == "auto_harvested" and not is_registered(lesson) and excerpts and operation == "read_file" and read_ranges is not None:
             from .excerpts import excerpt_location
-            offset, count = read_range
             spans = [excerpt_location(before, item) for item in excerpts]
             if all(span is not None for span in spans) and not any(
                     count > 0 and span["start_line"] <= offset + count and span["end_line"] > offset
-                    for span in spans):
+                    for offset, count in read_ranges for span in spans):
                 continue
         if lesson.source == "auto_harvested" and not is_registered(lesson) and excerpts and operation in {"edit_file", "write_file", "delete_file"}:
             from .excerpts import edit_touches_excerpts
@@ -222,13 +224,14 @@ def prepare_read_inventory(workspace: Path, args: dict) -> dict:
 
 
 def read_advisories(workspace: Path, path: Path, content: str, args: dict, *,
-                    read_range: tuple[int, int] | None = None) -> list[dict]:
+                    read_range: tuple[int, int] | None = None,
+                    read_ranges: list[tuple[int, int]] | None = None) -> list[dict]:
     inventory = args.get("_lesson_read_inventory")
     if inventory is not None:
         if inventory.get("state") not in {"completed", "partial"}:
             raise LessonInventoryUnavailable("Trusted read advice lookup failed")
         return relevant_diagnostics(workspace, path, content, content, "read_file",
             [Lesson.from_dict(row) for row in inventory["lessons"]],
-            read_range=read_range, facts=inventory["facts"])[:10]
+            read_range=read_range, read_ranges=read_ranges, facts=inventory["facts"])[:10]
     return relevant_diagnostics(workspace, path, content, content, "read_file",
-                                _load(workspace, args), read_range=read_range)[:10]
+                                _load(workspace, args), read_range=read_range, read_ranges=read_ranges)[:10]

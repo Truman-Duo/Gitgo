@@ -79,9 +79,14 @@ def execute_control(process):
         signals = [GovernanceSignal.from_dict(s) if isinstance(s, dict) else s for s in context.get("signals") or []]
         result = LoopGuard().check(process, "TASK_COMPLETE\n" + candidate, process.session,
             signals=signals)
-        if result.is_complete and result.degraded:
+        from backend.core.workbench.delivery import assess_delivery
+        checks = assess_delivery(process, context, candidate)
+        if result.is_complete and result.degraded and not any(check["blocking"] for check in checks):
             transition(process, ProcessStatus.COMPLETED)
-            return _make_result(process, process.session, candidate, outcome_status=OutcomeStatus.DEGRADED)
+            delivery = _make_result(process, process.session, candidate, outcome_status=OutcomeStatus.DEGRADED)
+            if checks:
+                delivery["workbench_checks"] = checks
+            return delivery
         transition(process, ProcessStatus.FAILED)
         return _make_result(process, process.session, "当前门禁已变化，部分交付决定未被沿用于新的缺失证据。",
             error_code="COMPLETION_EXCEPTION_STALE", error_message=result.nudge_text,

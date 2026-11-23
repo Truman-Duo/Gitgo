@@ -1,4 +1,4 @@
-import {label} from "../ui/runtimeLabels.js";
+import {label,processDisplayStatus} from "../ui/runtimeLabels.js";
 import {isFooterDrawer} from "../ui/overlayLayout.js";
 import {FooterDrawer} from "./FooterDrawer.js";
 import {copy,type Copy} from "../ui/pageContract.js";
@@ -14,13 +14,14 @@ import { colors, contextPct } from "../theme/index.js";
 import { useGitgoData } from "../hooks/useGitgoData.js";
 import { useLoopData, type ProcessInfo } from "../hooks/useLoopData.js";
 import {useAdvancement} from "../hooks/useAdvancement.js";
+import {useFeedback} from "../hooks/useFeedback.js";
 import {isBindingAction} from "../input/router.js";
 import { useLLMConfig } from "../hooks/useLLMConfig.js";
 import { createReducerStore, reducer, useStore, initialAppState, type AppState, type AppAction, type OverlayType, type Scene } from "../state/store.js";
 import { getCommands, type CommandContext } from "../commands.js";
 import { resolveSceneKey, type InputContext, type InputAction, type TextBuffer, type TextOp } from "../input/keymap.js";
 import type { ChatScrollHandle, PendingDecision } from "../types.js";
-import {projectRound, answerRound, previousRound} from "../hooks/decisionRound.js";
+import {projectRound, answerRound, previousRound, moveRoundQuestion} from "../hooks/decisionRound.js";
 import { enterProjectEffect, runCommandEffect, stopProcessEffect, type RunCommandDeps, type StopProcessDeps } from "../effects/run.js";
 import { noticeToActions } from "../notices.js";
 import { useTextInput, type UseTextInputReturn, applyTextOp as applyTextOpToBuf } from "../hooks/useTextInput.js";
@@ -46,7 +47,7 @@ export type StartupSmokeTask = {
 function processRuntimeStatus(process: ProcessInfo | undefined, t:(value:Copy)=>string): string {
   if (!process) return "";
   const parts: string[] = [];
-  parts.push(label(process.status,t));
+  parts.push(label(processDisplayStatus(process),t));
   return parts.filter(Boolean).join(" · ");
 }
 
@@ -95,6 +96,10 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   const decisionSubmitting = useStore(appStore, (s) => s.decisionSubmitting);
 
   const dispatch = appStore.dispatch;
+  const commandFeedback = useFeedback({kind: "page", id: JSON.stringify([scene, activeProject, activeAgentId])});
+  const showCommandFeedback = commandFeedback.show;
+  const clearCommandFeedback = commandFeedback.clear;
+  const inputRevision = useRef(0);
 
   // ── Text input hooks ─────────────────────────────────────
   const draftScope = scene==="agent_detail"
@@ -174,12 +179,13 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   const [screenStatusText, setScreenStatusText] = useState(startupNotice);
   const [footerOverride, setFooterOverride] = useState<FooterConfig | null>(null);
   const [rawDecision, setPendingDecision] = useState<PendingDecision | null>(null);
-  const [roundDraft, setRoundDraft] = useState<{id: string; answers: Record<string, string>}>({id: "", answers: {}});
+  const [roundDraft, setRoundDraft] = useState<{id: string; answers: Record<string, string>; nodeId?:string}>({id: "", answers: {}});
   const roundAnswers = roundDraft.id === rawDecision?.decision_id ? roundDraft.answers : {};
-  const pendingDecision = projectRound(rawDecision, roundAnswers);
+  const roundNodeId = roundDraft.id === rawDecision?.decision_id ? roundDraft.nodeId : undefined;
+  const pendingDecision = projectRound(rawDecision, roundAnswers, roundNodeId);
   const submitInput = (text: string) => {
     if (rawDecision?.questions?.length) {
-      const result = answerRound(rawDecision, roundAnswers, text);
+      const result = answerRound(rawDecision, roundAnswers, text, roundNodeId);
       if (!result.instruction) {
         setRoundDraft({id: rawDecision.decision_id, answers: result.answers});
         dispatch({type: "set_decision_submitting", submitting: false});
@@ -214,10 +220,14 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         dispatch({type: "set_cmd_result", text: String(event.message || t({en:"Configuration was not applied",zh:"配置未应用"}))});
         return;
       }
+      if (event.event === "worktree_unavailable" && event.project === activeProject) {
+        showCommandFeedback(String(event.reason || t({en:"Worktree unavailable",zh:"工作树不可用"})), {tone:"warning"});
+        return;
+      }
       if (event.event !== "deletion_status") return;
       dispatch({type:"set_cmd_result", text:String(event.message || t({en:"Deletion "+event.state,zh:"删除状态："+event.state}))});
     });
-  }, [client, dispatch, t]);
+  }, [activeProject, client, dispatch, showCommandFeedback, t]);
   useEffect(() => {
     const sample = () => {
       const next: Record<string, number | null> = {};
@@ -337,7 +347,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
 
   const previousDecisionId = useRef("");
   useEffect(() => {
-    const nextId = `${pendingDecision?.decision_id || ""}:${pendingDecision?.round_position || ""}`;
+    const nextId = `${pendingDecision?.decision_id || ""}:${pendingDecision?.active_question_id || pendingDecision?.round_position || ""}`;
     if (nextId === previousDecisionId.current) return;
     previousDecisionId.current = nextId;
     const recommended = pendingDecision?.options.findIndex((option) => option.recommended) ?? -1;
@@ -471,6 +481,16 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
   }, [startupSmokeTask, pendingDecision]);
 
   // ── Effect deps ──────────────────────────────────────────
+  const capturePanelTarget = useCallback(() => {
+    // A late read must not take focus from a draft or another command.
+    const started = appStore.getState();
+    const revision = inputRevision.current;
+    return () => {
+      const current = appStore.getState();
+      return inputRevision.current === revision && current.scene === started.scene
+        && current.activeProject === started.activeProject && current.overlayStack === started.overlayStack;
+    };
+  }, [appStore]);
   const runCommandDeps: RunCommandDeps = useMemo(() => ({
     dispatch,
     clearCmd: () => cmdInput.setValue(""),
@@ -478,7 +498,9 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     projectNames: projects.map((p: any) => p.name),
     sel,
     activeProject,
-  }), [dispatch, cmdCtx, projects, sel, activeProject, cmdInput]);
+    capturePanelTarget,
+    showCommandFeedback: ({message, tone}) => showCommandFeedback(t(message), {tone}),
+  }), [dispatch, cmdCtx, projects, sel, activeProject, cmdInput, capturePanelTarget, showCommandFeedback, t]);
 
   const stopProcessDeps: StopProcessDeps = useMemo(() => ({
     dispatch,
@@ -519,6 +541,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
 
   const projectEntryGeneration = useRef(0);
   const applyInputActions = useCallback((acts: InputAction[]) => {
+    if (acts.length) inputRevision.current++;
     const prepared = acts.map(a => a.kind === "effect" && a.effect.type === "send_chat"
       ? {...a, effect: {...a.effect, text: textInput.materialize(a.effect.text)}} as InputAction
       : a);
@@ -539,10 +562,19 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         applyTextOp(a.buffer, a.op);
       } else {
         const e = a.effect;
-        if (e.type === "run_command") void runCommandEffect(e.cmd, runCommandDeps);
+        if (e.type === "run_command") {
+          clearCommandFeedback();
+          void runCommandEffect(e.cmd, runCommandDeps);
+        }
         else if (e.type === "stop_process") void stopProcessEffect(e.pid, stopProcessDeps);
         else if (e.type === "send_chat") submitInput(e.text);
-        else if (e.type === "previous_decision_question" && rawDecision) setRoundDraft({id: rawDecision.decision_id, answers: previousRound(rawDecision, roundAnswers)});
+        else if ((e.type === "previous_decision_question" || e.type === "next_decision_question") && rawDecision) {
+          if(rawDecision.answer_mode==="incremental"){
+            setRoundDraft(current=>({id:rawDecision.decision_id,answers:{},nodeId:moveRoundQuestion(rawDecision,
+              current.id===rawDecision.decision_id?current.nodeId:undefined,e.type==="previous_decision_question"?-1:1)}));
+            dispatch({type:"set_decision_selection",index:0});
+          }else setRoundDraft({id: rawDecision.decision_id, answers: previousRound(rawDecision, roundAnswers)});
+        }
         else if (e.type === "scroll_chat") chatScrollRef.current?.scrollBy(e.delta);
         else if (e.type === "scroll_chat_bottom") chatScrollRef.current?.scrollToBottom();
         else if (e.type === "edit_prompt_external") {
@@ -555,7 +587,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         else if (e.type === "report_notice") for (const a of noticeToActions(e.code, e.params)) dispatch(a);
       }
     }
-  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput, client, scene, t]);
+  }, [dispatch, applyTextOp, runCommandDeps, stopProcessDeps, textInput, generalConfig.externalEditor, rawDecision, roundAnswers, submitInput, client, scene, t, clearCommandFeedback]);
 
   const decisionKeysActive = Boolean(pendingDecision?.options.length && !decisionComposing
     && !chatInputFocused && !statusBarFocused && mode !== "COMMAND");
@@ -591,6 +623,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       statusBarFocused,
       decisionOptionLabels: pendingDecision?.options.map((option) => option.label) || [],
       decisionRoundCanGoBack: Boolean(rawDecision?.questions?.length && Object.keys(roundAnswers).length),
+      decisionRoundCanSelectQuestion:rawDecision?.answer_mode==="incremental" && (rawDecision.questions?.length || 0)>1,
       decisionAllowFreeForm: Boolean(pendingDecision?.allow_free_form),
       decisionSelection,
       decisionComposing,
@@ -603,7 +636,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
       interruptTarget: resolveInterruptTarget(),
     };
     applyInputActions(resolveSceneKey(ctx, input, key));
-  }, { isActive: overlayStack.length === 0, bindingContext: decisionKeysActive ? "decision" : commandTriggerActive ? "scene" : "",inputTarget:`${scene}:${activeProject||""}:${draftScope}:${mode}:${rawDecision?.decision_id||""}:${decisionComposing}` });
+  }, { isActive: overlayStack.length === 0, bindingContext: decisionKeysActive ? "decision" : commandTriggerActive ? "scene" : "",inputTarget:`${scene}:${activeProject||""}:${draftScope}:${mode}:${rawDecision?.decision_id||""}:${pendingDecision?.active_question_id||pendingDecision?.round_position||""}:${decisionComposing}` });
 
   // ── Render ───────────────────────────────────────────────
   const w = Math.max(1, termCols || 80);
@@ -621,7 +654,10 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
     return null;
   }, [footerOverride, overlayStack]);
 
+  const [parentBrowseRevision,setParentBrowseRevision]=useState(0);
+  const selectParentReader=()=>setParentBrowseRevision(value=>value+1);
   const overlayCtx = {
+    parentBrowseRevision,
     publishState,
     client,
     scene,
@@ -664,7 +700,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
         <Box paddingLeft={1}><Text color={colors.danger}>{t({en:"Error: ",zh:"错误："})}{error}</Text></Box>
       ) : null}
 
-      <Box flexGrow={1} flexBasis={0} minHeight={0} overflow="hidden" display={scene === "workspace" && (!topOverlay || inlineOverlay) ? "none" : "flex"}>
+      <Box onClick={topOverlay?.type==='btwPanel'?selectParentReader:undefined} flexGrow={1} flexBasis={0} minHeight={0} overflow="hidden" display={scene === "workspace" && (!topOverlay || inlineOverlay) ? "none" : "flex"}>
       {overlayStack.length > 0 && !inlineOverlay ? (
         runtimeOwnsViewport
           ? <InputLayer priority={100} bindingContext={overlayBindingContext}>{renderOverlay(topOverlay, overlayCtx)}</InputLayer>
@@ -706,7 +742,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
 
       {/* Keep the project conversation controller alive while inspecting B or a
           modal. Presentation changes must not discard an in-flight A stream. */}
-      {activeProject ? <Box flexGrow={1} flexBasis={0} minHeight={0} overflow="hidden" display={scene === "workspace" && (!topOverlay || inlineOverlay) ? "flex" : "none"}>
+      {activeProject ? <Box onClick={topOverlay?.type==='btwPanel'?selectParentReader:undefined} flexGrow={1} flexBasis={0} minHeight={0} overflow="hidden" display={scene === "workspace" && (!topOverlay || inlineOverlay) ? "flex" : "none"}>
         <ProjectWorkspace
           key={activeProject}
           manualCreateRef={manualCreateRef}
@@ -748,6 +784,7 @@ export function App({ client, refreshSec = 5, startupSmokeTask, startupTerminalS
           ? t({en:`Task continuation paused: ${advancement.value.continuation_error}`,zh:`任务恢复已暂停：${advancement.value.continuation_error}`})
           : scene !== "projects" && !topOverlay && loopData.error ? t({en:`Runtime status unavailable: ${loopData.error}`,zh:`运行状态不可用：${loopData.error}`}) : "")}
         statusText={derivedStatus}
+        sceneFeedback={commandFeedback.message}
         suggestions={suggestions}
         suggestionIdx={suggestionIdx}
         scene={scene}

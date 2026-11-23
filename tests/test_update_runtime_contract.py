@@ -225,7 +225,14 @@ def test_probe_failures_are_bounded_and_sanitized(tmp_path_factory, monkeypatch,
         pytest.skip("Windows adapter reports Job authority instead of POSIX cleanup")
     with pytest.raises(UpdateError, match="UPDATE_HEALTH_FAILED") as error:
         probe_host(host, profile)
+    detail = error.value.diagnostic
+    assert detail["probe"] == "update-data-probe"
+    assert detail["reason"] == {
+        "exit": "exit_code", "overflow": "output_limit", "timeout": "collect_timeout",
+        "bad_nonce": "runtime_identity", "malformed": "invalid_report", "missing_cleanup": "cleanup",
+    }[failure]
     assert "private" not in str(error.value)
+    assert "private" not in json.dumps(detail)
 
 
 def test_evidence_write_failure_never_publishes_partial_contract(tmp_path_factory, monkeypatch):

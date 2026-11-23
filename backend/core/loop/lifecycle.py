@@ -8,6 +8,50 @@ RECOVERY = frozenset({"orphaned", "resume_available", "recovery_review_required"
 ACTIVE = frozenset({"running", "waiting", "awaiting_user"})
 
 
+def execution_closeout_from_state(status: str, runtime: dict, result=None) -> dict:
+    """Project durable closeout without treating a terminal label as a commit.
+
+    Older checkpoints without finality evidence remain pending until recovery
+    reconciles them.  A failed barrier ends execution, but is never durable
+    success and must not authorize consuming or promoting its output.
+    """
+    finalized = runtime.get("lifecycle_finalized") is True
+    outcome = result if isinstance(result, dict) else runtime.get("result") or {}
+    if status not in TERMINAL:
+        state = "active"
+    elif finalized:
+        state = "finalized"
+    elif outcome.get("code") == "SESSION_CHECKPOINT_FAILED":
+        state, finalized = "failed", False
+    else:
+        state = "finalized" if finalized else "pending"
+    return {"lifecycle_finalized": finalized, "closeout_state": state}
+
+
+def execution_closeout(process, manager=None) -> dict:
+    """Use the same finality boundary for observation, waiting and acceptance."""
+    manager = manager or getattr(process, "_manager", None)
+    thread = getattr(manager, "_threads", {}).get(process.process_id)
+    view = execution_closeout_from_state(
+        process.status.value,
+        {"lifecycle_finalized": bool(getattr(process, "lifecycle_finalized", False))},
+        getattr(process, "result", None),
+    )
+    if view["closeout_state"] == "pending":
+        if thread is not None and not thread.is_alive():
+            view["closeout_state"] = "failed"
+        elif (thread is None and not getattr(process, "durable_revision", 0)
+              and not getattr(process, "recovery", None)):
+            # Synchronous in-memory callers predate thread finality.  This
+            # compatibility path excludes every registered run and checkpoint.
+            view = {"lifecycle_finalized": True, "closeout_state": "finalized"}
+    return view
+
+
+def is_consumable_terminal(process, manager=None) -> bool:
+    return execution_closeout(process, manager)["closeout_state"] == "finalized"
+
+
 class InvalidTransition(ValueError):
     code = "PROCESS_TRANSITION_REJECTED"
 

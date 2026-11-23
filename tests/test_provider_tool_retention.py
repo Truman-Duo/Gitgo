@@ -1,6 +1,7 @@
 """Native transaction preservation; fixtures do not count as API acceptance."""
 from copy import deepcopy
 from contextlib import closing
+import json
 
 import pytest
 
@@ -84,6 +85,30 @@ def test_responses_native_call_items_retain_actual_pair():
     session.begin_context_epoch(summary='Still current', retained_messages=session.messages[-1:], reason='compact')
     wire = session.to_provider_messages(provider_route='responses')
     assert wire[-2]['provider_state']['response_output_items'][0]['call_id'] == wire[-1]['tool_call_id']
+
+
+@pytest.mark.parametrize('restore', [False, True])
+def test_native_write_receipt_keeps_literal_unicode_escapes(restore):
+    from backend.core.loop.provider_adapters import OpenAIResponsesAdapter
+    from backend.core.loop.provider_protocol import ProviderRequest
+
+    session = AgentSession()
+    session.active_provider_route = 'responses'
+    session.append_user('Add tests for invalid Unicode input.')
+    session.append_assistant_provider('', continuation_state={'response_output_items': [
+        {'type': 'function_call', 'id': 'item-1', 'call_id': 'write-call',
+         'name': 'write_file', 'arguments': '{}'}]})
+    original = json.dumps({'diff': r'+assert_rejected("\ud800", "\udc00")'})
+    session.append_tool_result(original, tool_name='write_file', tool_call_id='write-call',
+                               receipt={'receipt_id': 'saved-test', 'effect_state': 'committed'})
+    if restore:
+        session = AgentSession.from_durable_state({'messages': session.messages,
+            'provider_state': session.provider_state, 'active_provider_route': 'responses'})
+
+    request = ProviderRequest(tuple(session.to_provider_messages(provider_route='responses')))
+    items = OpenAIResponsesAdapter().build_body(request, 'fixture')['input']
+    assert items[-2]['call_id'] == 'write-call'
+    assert items[-1] == {'type': 'function_call_output', 'call_id': 'write-call', 'output': original}
 
 
 def test_recorded_transactions_survive_actual_session_store_reopen(tmp_path_factory):

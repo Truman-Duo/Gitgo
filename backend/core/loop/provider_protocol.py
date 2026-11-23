@@ -6,6 +6,7 @@ Chat Completions can share cancellation, retry, budgeting, and evidence logic.
 """
 
 from __future__ import annotations
+from backend.core.provider_budget import DEFAULT_CONTEXT_BUDGET
 
 
 class ProviderResponseIncomplete(RuntimeError):
@@ -40,6 +41,7 @@ class ProviderEventType(str, Enum):
     ROUTING_NOTICE = "routing_notice"
     RESPONSE_STARTED = "response_started"
     TEXT_DELTA = "text_delta"
+    MESSAGE_COMPLETED = "message_completed"
     REASONING_DELTA = "reasoning_delta"
     REASONING_ARTIFACT = "reasoning_artifact"
     TOOL_CALL_STARTED = "tool_call_started"
@@ -61,7 +63,7 @@ class ProviderCapabilities:
     parallel_tools: bool = True
     reasoning_continuation: bool = False
     prompt_cache: str = "automatic"  # automatic | explicit | unsupported
-    context_window: int = 128000
+    context_window: int = DEFAULT_CONTEXT_BUDGET
     max_output_tokens: int = 4096
     supports_store: bool = False
     hosted_web_search: bool = False
@@ -118,6 +120,8 @@ class ProviderEvent:
     arguments_delta: str = ""
     arguments: str = ""
     response_id: str = ""
+    message_id: str = ""
+    phase: str = ""
     output_index: int = -1
     usage: ProviderUsage | None = None
     artifact: Any = None

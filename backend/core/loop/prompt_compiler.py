@@ -18,7 +18,7 @@ from backend.core.loop.provider_protocol import deterministic_hash
 
 PROMPT_MESSAGE_TYPE = "compiled_system_prompt"
 TASK_CONTRACT_MESSAGE_TYPE = "compiled_task_contract"
-PROMPT_SCHEMA_VERSION = 11
+PROMPT_SCHEMA_VERSION = 17
 GOVERNANCE_MESSAGE_TYPE = 'compiled_governance_context'
 MIN_SPLIT_PREFIX_SCHEMA_VERSION = 6
 STABLE_SECTION_NAMES = frozenset({
@@ -127,23 +127,21 @@ class PromptCompiler:
         for raw in list(context.get("upstream_outcomes") or []):
             item = dict(raw or {})
             outcome = dict(item.get("outcome") or {})
-            metadata_text = json.dumps(
-                outcome.get("metadata", {}),
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-            )
+            metadata = dict(outcome.get("metadata") or {})
+            evidence = metadata.get("completion_evidence") or {}
+            response = str(outcome.get("response") or "")
+            head_end = min(len(response), 4000)
+            tail_start = max(head_end, len(response) - 1200)
             upstream.append({
-                "process_id": item.get("process_id", ""),
-                "task_id": item.get("task_id", ""),
-                "status": item.get("status", ""),
-                "result_commit": item.get("result_commit", ""),
-                "response": str(outcome.get("response") or "")[:4000],
+                **{key: item[key] for key in ("process_id", "task_id", "status", "result_commit",
+                                               "source_process_id", "draft_id", "changed_files") if key in item},
+                "completion_evidence": {key: evidence[key] for key in ("factual_ready", "required_test_ids",
+                                                                        "test_failures", "reasons") if key in evidence},
+                **({"response_tail": response[tail_start:],
+                    "response_tail_range": [tail_start, len(response)]} if tail_start < len(response) else {}),
+                "response_excerpt": response[:head_end],
+                "response_truncated": tail_start > head_end,
                 "error": outcome.get("error"),
-                # Upstream metadata may contain provider/tool diagnostics that
-                # grow without bound.  Preserve a deterministic evidence
-                # summary while keeping the task-pinned prompt cacheable.
-                "metadata_summary": metadata_text[:4000],
             })
         contract_payload = {
             "goal": str(task_contract.get("goal") or ""),
@@ -186,8 +184,14 @@ class PromptCompiler:
             "upstream_outcomes": upstream,
             "engineering_workflow": dict(task_contract.get("engineering_workflow") or {}),
         }
+        if task_contract.get("required_workbench_claims"):
+            contract_payload["required_workbench_claims"] = list(task_contract["required_workbench_claims"])
         from backend.core.loop.decision_support import confirmed_user_state
-        confirmed_state = confirmed_user_state(
+        from backend.core.loop.main_dialogue import owns_dialogue
+        # Main-owned current decisions travel in the bounded structural view,
+        # together with open decisions. Do not also encode this mutable data
+        # as character edits to a rule/instruction section.
+        confirmed_state = [] if owns_dialogue(context.get('alignment_runtime') or {}) else confirmed_user_state(
             list(getattr(process.session, "host_ledger", []) or []), task_id=process.active_task_id or process.process_id
         )
         sections = [
@@ -207,11 +211,7 @@ class PromptCompiler:
             ),
             PromptSection(
                 "Capabilities",
-                "The current runtime.capability.available_tools names the callable tools. "
-                "For each tool, runtime.tool_contracts contains its exact argument schema and "
-                "runtime_behavior (effect and cancellation). Retained descriptions are references, "
-                "not availability or permission; the original live registry, lease, policy and sandbox "
-                "still admit each call. Do not reconstruct or restate the capability inventory.",
+                load_prompt('policy/capability_use'),
                 "host:effective-tool-registry",
             ),
         ]
@@ -220,7 +220,7 @@ class PromptCompiler:
         ))
         if "task_mechanism" in tools and (process.runtime_preferences.get("task_maintenance_enabled") or context.get("task_maintenance")):
             sections.append(PromptSection("Task mechanism and maintenance",
-                load_prompt('tools/task_mechanism'), "runtime:task-maintenance"))
+                load_prompt('runtime/task_maintenance'), "runtime:task-maintenance"))
         if tools:
             sections.append(PromptSection(
                 "Tool use and feedback",
@@ -297,25 +297,54 @@ class PromptCompiler:
             ])
             sections.append(PromptSection("Task requirements",
                 json.dumps(contract_payload, ensure_ascii=False, separators=(',', ':')), "host:task-requirements"))
+            if upstream:
+                sections.append(PromptSection("Upstream evidence",
+                    load_prompt("context/upstream_evidence"), "host:task-requirements"))
         if actor == "supervisor" and getattr(process, "child_ids", None):
+            from .assignment_handoff import handoff_status, withdrawal_context
+
             child_ids, contracts, reviews = process.coordination_snapshot()
+            child_ids = [child_id for child_id in child_ids
+                         if not (contracts.get(child_id) or {}).get("subagent_owner_contract")]
             manager = getattr(process, "_manager", None)
+            maintenance = context.get("task_maintenance") or {}
+            handoffs = {row["source_process_id"]: row for row in handoff_status(process, maintenance)
+                        if row["phase"] != "reassigned"}
+            pending_feedback, issued = withdrawal_context(process, maintenance, child_ids[-16:], contracts)
             records = []
             for child_id in child_ids[-16:]:
                 child = manager.get(child_id) if manager else None
+                contract = contracts.get(child_id, {})
+                returned = contract.get("returned_assignment")
                 records.append({
                     "process_id": child_id,
                     "display_name": child.session.display_name if child else "unavailable",
                     "execution_status": child.status.value if child else "missing",
                     "outcome_status": (child.result or {}).get("status") if child else None,
                     "review": reviews.get(child_id, {}).get("verdict", "not_reviewed"),
-                    "target_files": contracts.get(child_id, {}).get("target_files", []),
-                    "superseded_by": contracts.get(child_id, {}).get("superseded_by", ""),
+                    "target_files": contract.get("target_files", []),
+                    "superseded_by": contract.get("superseded_by", ""),
+                    **({"returned_to": returned["owner_process_id"]} if returned else {}),
+                    **({"handoff": handoffs[child_id]} if child_id in handoffs else {}),
+                    **({"issued_scope": issued[child_id]} if child_id in issued else {}),
                 })
-            sections.append(PromptSection("Known agent executions", (
-                load_prompt('context/agent_executions')
-                + json.dumps(records, ensure_ascii=False, separators=(',', ':'))
-            ), "host:task-contract"))
+            if records:
+                sections.append(PromptSection("Known agent executions", (
+                    load_prompt('context/agent_executions')
+                    + json.dumps(records, ensure_ascii=False, separators=(',', ':'))
+                ), "host:task-contract"))
+            if issued:
+                sections.append(PromptSection("Pending user feedback for owned work", (
+                    "Interpret the user's feedback. If it removes a required file from an issued_scope above, "
+                    "revise the parent contract and include assignment_scope in the same maintenance.resolve_changes entry. "
+                    "Use assignment_ref from issued_scope. Select withdrawn files and test IDs and use "
+                    "retire_criterion_numbers for the one-based positions of withdrawn acceptance criteria. "
+                    "The runtime removes the matching entries from the inherited parent fields when omitted on revise. "
+                    "Use close_source=true if the user wants immediate replacement and the current files are ready to retain. "
+                    "For one feedback, omit contract_fields. Use the issued scope directly when sufficient. "
+                    "Keep every other obligation. Pending feedback IDs: "
+                    + json.dumps(pending_feedback, ensure_ascii=False, separators=(',', ':'))
+                ), "host:task-maintenance"))
         if actor == "supervisor" and task_kind != "answer":
             sections.append(PromptSection(
                 "Delegation economy",
@@ -341,12 +370,17 @@ class PromptCompiler:
                     ),
                     "host:coordination-events",
                 ))
+        if task_kind == "answer" and task_contract.get("required_workbench_claims"):
+            sections.append(PromptSection("Workbench delivery requirements",
+                json.dumps({"required_workbench_claims": task_contract["required_workbench_claims"]},
+                           ensure_ascii=False, separators=(',', ':')), "host:task-requirements"))
         if confirmed_state:
+            from .dialogue_context import grouped_decisions
             sections.append(PromptSection(
-                "Latest user-confirmed state",
+                "Current user decisions and delegation",
                 (
                     load_prompt('context/confirmed_user_state')
-                    + json.dumps(confirmed_state, ensure_ascii=False, separators=(",", ":"))
+                    + json.dumps(grouped_decisions(confirmed_state), ensure_ascii=False, separators=(",", ":"))
                 ),
                 "host:user-confirmed-state",
             ))
@@ -365,6 +399,7 @@ class PromptCompiler:
         reuse.  Sent prefixes are still never rewritten; later changes become
         append-only Host steering deltas.
         """
+        from .prompt_rule_updates import identity, record, render_sections, visible_sections, section_update, update_text
         session.messages[:] = [
             message for message in session.messages
             if message.get("message_type") != "governance_context_seed"
@@ -378,9 +413,7 @@ class PromptCompiler:
         task_sections = [item for item in sections if item.name not in stable_names | volatile_names]
 
         def render(items: list[PromptSection]) -> str:
-            return "\n\n".join(
-                f"## {section.name}\n{section.content}" for section in items
-            )
+            return render_sections([record(section) for section in items])[0]
 
         stable_text = render(stable_sections)
         task_text = render(task_sections)
@@ -402,7 +435,11 @@ class PromptCompiler:
             if message.get('message_type') == GOVERNANCE_MESSAGE_TYPE), None)
         governance_present = not volatile_sections or (
             latest_governance is not None and latest_governance.get('content') == render(volatile_sections))
-        if session.compiled_prompt_hash == prompt_hash and governance_present:
+        previous = visible_sections(session.messages)
+        ordinary = stable_sections + task_sections
+        visible_current = all(item.name in previous and identity(previous[item.name]) == identity(record(item))
+                              for item in ordinary)
+        if session.compiled_prompt_hash == prompt_hash and governance_present and visible_current:
             return
 
         section_hashes = {
@@ -443,6 +480,9 @@ class PromptCompiler:
             ],
             "prompt_hash": prompt_hash,
         }
+        # Exact source spans avoid duplicating section bodies in metadata.
+        stable_payload['content'], stable_payload['prompt_sections'] = render_sections([record(s) for s in stable_sections])
+        task_payload['content'], task_payload['prompt_sections'] = render_sections([record(s) for s in task_sections])
         stable_message = next((
             message for message in session.messages
             if message.get("message_type") == PROMPT_MESSAGE_TYPE
@@ -461,36 +501,34 @@ class PromptCompiler:
             session.messages.insert(stable_index + 1, task_payload)
             task_message = task_payload
 
+        # A newly inserted prefix can precede retained steering. Compare the
+        # actual final visible state, not merely the presence of a new seed.
+        previous = visible_sections(session.messages)
+
         updates = []
         previous_hashes = dict(
             getattr(session, "compiled_prompt_sections", {}) or {}
         )
 
         def changed(items: list[PromptSection]) -> list[PromptSection]:
-            if not previous_hashes:
-                return list(items)
             return [
                 item for item in items
-                if previous_hashes.get(item.name) != section_hashes.get(item.name)
+                if (item.name in volatile_names and previous_hashes.get(item.name) != section_hashes.get(item.name))
+                or (item.name not in volatile_names and (item.name not in previous
+                    or identity(previous[item.name]) != section_hashes.get(item.name)))
             ]
 
-        if not seeded_stable and stable_message.get("prompt_hash") != stable_hash:
-            stable_delta = changed(stable_sections)
-            if stable_delta:
-                updates.append("[HOST ROM UPDATE]\n" + render(stable_delta))
-        if not seeded_task and task_message.get("prompt_hash") != prompt_hash:
-            task_delta = changed(task_sections)
-            if task_delta:
-                updates.append("[HOST TASK CONTRACT UPDATE]\n" + render(task_delta))
-        removed = sorted(set(previous_hashes) - set(section_hashes))
+        stable_delta = changed(stable_sections)
+        updates.extend(section_update(previous.get(s.name), record(s)) for s in stable_delta)
+        task_delta = changed(task_sections)
+        updates.extend(section_update(previous.get(s.name), record(s)) for s in task_delta)
+        removed = sorted((set(previous_hashes) | set(previous)) - set(section_hashes))
         ordinary_removed = [name for name in removed if name not in volatile_names]
         if ordinary_removed:
-            updates.append(
-                load_prompt('context/withdrawal') + ", ".join(ordinary_removed)
-            )
+            updates.extend({'operation': 'remove', 'name': name} for name in ordinary_removed)
         if updates:
             session.append_host_steering(
-                "\n\n".join(updates),
+                update_text(updates),
                 steering_type="prompt_contract_update",
                 version=prompt_hash,
             )
