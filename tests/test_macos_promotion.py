@@ -224,7 +224,10 @@ def test_product_review_gates_protected_macos_publication(ready, monkeypatch, tm
             }, "rejected-review")
             assert result.data["accepted"], result.formatted
         blocked = call("promote_agent_changes", args, index)
-        assert not blocked.data.get("promoted") and "lacks supervisor approval" in blocked.formatted
+        assert blocked.is_error and blocked.diagnostics["code"] == "CHILD_REVIEW_REQUIRED"
+        assert blocked.data["promoted"] is False
+        assert blocked.data["effect_state"] == "not_committed"
+        assert blocked.data["execution_state"] == "not_started"
         assert target.read_bytes() == before and not queries
         assert not store.list_state_refs("agent_promotion", prefix="")
 
