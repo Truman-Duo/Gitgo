@@ -51,7 +51,8 @@ def reader_python_roots(prefix, handler, target, *, executable=None):
         path = Path(image).absolute()
         if path.is_relative_to(prefix):
             selected.append(checked(path))
-            shallow.append(path.parent)
+            if path.parent != prefix:
+                shallow.append(path.parent)
     configuration = prefix / 'pyvenv.cfg'
     if configuration.is_file():
         selected.append(checked(configuration))

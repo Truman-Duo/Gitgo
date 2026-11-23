@@ -179,7 +179,7 @@ def test_long_evidence_uses_existing_detail_reader_without_echoing_large_candida
     assert result["semantic_verdict"] == "not_assessed"
 
 
-@pytest.mark.parametrize("candidate", ["", None, "d" * 64001])
+@pytest.mark.parametrize("candidate", ["", None, "d" * 64001], ids=["empty", "missing", "over_limit"])
 def test_invalid_candidate_has_separate_typed_diagnostic(tmp_path_factory, candidate):
     p = process(tmp_path_factory)
     result = inspect_delivery(p, candidate)

@@ -113,6 +113,12 @@ def test_actual_windows_installer_and_unicode_powershell_command(actual_lab, she
     from backend.core.process_output import collect_output
     store, _, _, _, old, _, env = actual_lab
     base = store.root.parent
+    # The installer registers per-user Windows Terminal and Start Menu entries.
+    # Give that real installation path a complete, disposable Windows profile.
+    profile = Path(env["HOME"])
+    env = {**env, "USERPROFILE": str(profile),
+           "LOCALAPPDATA": str(profile / "AppData/Local"),
+           "APPDATA": str(profile / "AppData/Roaming")}
     root, bin_dir = base / "独立 安装", base / "独立 命令"
     seed = base / "seed"
     installer = spawn_managed([shell, "-NoProfile", "-File", str(seed / "install-managed.ps1"),
@@ -162,6 +168,8 @@ except Exception as error:
             "role_exit": role_proc.returncode, "role_output": role_output.strip(),
             "cleanup": proc._gitgo_cleanup}))
     assert open_managed(root).registration["bootstrap_api"] == WINDOWS_API
+    assert len(list((profile / "AppData/Local/Microsoft/Windows Terminal/Fragments/Gitgo").glob("*.json"))) == 1
+    assert len(list((profile / "AppData/Roaming/Microsoft/Windows/Start Menu/Programs").glob("Gitgo-*.lnk"))) == 1
     command = bin_dir / "gitgo.ps1"
     assert command.read_bytes().startswith(b"\xef\xbb\xbf")
     launch = subprocess.run([shell, "-NoProfile", "-File", str(command), "--version"], env=env,

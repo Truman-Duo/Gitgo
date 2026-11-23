@@ -162,6 +162,12 @@ test("undo shares the footer drawer, preserves conversation/editor/status, and o
  const root=renderSync(<InputProvider><App client={client}/></InputProvider>,{...io,patchConsole:false,exitOnCtrlC:false}),ink:any=instances.get(io.stdout);
  const send=async(text:string)=>{io.stdin.write(text);await new Promise(r=>setTimeout(r,110));};
  const commits=()=>calls.filter(c=>c[0]==='runtime.undo');
+ const drawerVisible=()=>rows(ink).some(line=>line.includes('会话撤回'));
+ const waitFor=async(predicate:()=>boolean)=>{
+  const deadline=performance.now()+2000;
+  while(!predicate()&&performance.now()<deadline)await Bun.sleep(20);
+  expect(predicate()).toBe(true);
+ };
  try{
   ink.setAltScreenActive(true);ink.onRender();await send('');await send('\r');await send('');
   expect(rows(ink).some(line=>line.includes('Retained conversation text'))).toBe(true);
@@ -179,7 +185,11 @@ test("undo shares the footer drawer, preserves conversation/editor/status, and o
    expectBetweenEditorAndStatus(ink,'会话撤回');expect(rows(ink).some(line=>line.includes('保留当前对话'))).toBe(true);
    await send('\x1b');expect(commits()).toHaveLength(0);
   }
-  await send('/');await send('undo');await send('\r');await send('\r');await send('\r');expect(commits()).toHaveLength(1);expect(commits()[0][1]).toMatchObject({project:'visible-project',process_id:'a',checkpoint_id:'checkpoint-1'});
+  await waitFor(()=>!drawerVisible());
+  await send('/');await send('undo');await send('\r');await waitFor(drawerVisible);
+  expect(commits()).toHaveLength(0);
+  await send('\r');await waitFor(()=>commits().length>0);await send('\r');
+  expect(commits()).toHaveLength(1);expect(commits()[0][1]).toMatchObject({project:'visible-project',process_id:'a',checkpoint_id:'checkpoint-1'});
   finish();await send('');expect(rows(ink).some(line=>line.includes('会话撤回'))).toBe(false);expect(rows(ink).some(line=>line.includes('Retained conversation text'))).toBe(true);
  }finally{root.unmount();root.cleanup();io.stdin.destroy();io.stdout.destroy();io.stderr.destroy();}
 },15000);
