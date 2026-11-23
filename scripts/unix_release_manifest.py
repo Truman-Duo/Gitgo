@@ -18,11 +18,13 @@ BASELINES = {('macos', 'arm64'): 'macOS 26',
              ('linux', 'x86_64'): 'Ubuntu 24.04 / glibc 2.39',
              ('linux', 'aarch64'): 'Ubuntu 24.04 ARM64 / glibc 2.39'}
 
-def inventory(stage):
+def inventory(stage, *, installed_entry_area=None):
     files = []
     for path in sorted(stage.rglob('*')):
         name = path.relative_to(stage).as_posix()
         if name in ('build-manifest.json', '.gitgo-install-owner', '.gitgo-path-bash', '.gitgo-path-zsh', '.gitgo-path-fish'):
+            continue
+        if installed_entry_area is not None and path.is_relative_to(installed_entry_area):
             continue
         if path.is_symlink():
             # Installer aliases and PyInstaller framework links must stay inside payload.
@@ -62,13 +64,21 @@ def write(stage, bun):
     (stage / 'build-manifest.json').write_text(json.dumps(result, indent=2) + '\n')
     return result
 
-def verify(stage, commit):
+def verify(stage, commit, *, installed=False):
     stage = stage.resolve(strict=True)
     manifest = json.loads((stage / 'build-manifest.json').read_text())
     source = manifest['source']
     if source['commit'] != commit or source['dirty'] or len(source['tree']) != 40:
         raise ValueError('Archive source identity is not the requested clean commit')
-    if manifest['files'] != inventory(stage):
+    entry_area = None
+    if installed and (stage / 'native-entry.json').is_file():
+        from backend.core.native_entry import AREA, remove_entries
+        entry_area = stage / AREA
+        if (entry_area.is_symlink() or not entry_area.is_dir()
+                or {path.name for path in entry_area.iterdir()} != {'owner.json', 'resources'}
+                or remove_entries(stage, check_only=True).get('state') != 'ready'):
+            raise ValueError('Installed native-entry ownership is missing or invalid')
+    if manifest['files'] != inventory(stage, installed_entry_area=entry_area):
         raise ValueError('Archive payload hashes or layout differ from build manifest')
     product = json.loads((stage / 'product.json').read_text())
     if any(manifest[k] != product[k] for k in ('version', 'platform', 'architecture')):

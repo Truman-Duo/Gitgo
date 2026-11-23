@@ -53,7 +53,7 @@ def accept(archive, commit):
         # Upgrade the same owned payload twice; unknown/older unmarked directories
         # intentionally cannot be adopted. Failure injection is tested separately.
         run(str(release / 'install.sh'), *arguments)
-        verify(installed, commit)
+        verify(installed, commit, installed=True)
         host = installed / 'internal/gitgo-host/gitgo-host'
         # The local test harness runs from source; its child uses only the installed
         # frozen Host and this deliberately build-free environment.

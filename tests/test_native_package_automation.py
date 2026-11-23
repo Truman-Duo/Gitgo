@@ -25,6 +25,39 @@ def test_installer_ownership_marker_does_not_change_payload_identity(tmp_path_fa
     (tmp_path_factory / '.gitgo-install-owner').write_text('fixture')
     verify(tmp_path_factory, 'a' * 40)
 
+
+def test_installed_native_entries_do_not_relax_archive_inventory(tmp_path_factory, monkeypatch):
+    from backend.core import native_entry
+
+    root = payload(tmp_path_factory)
+    entry_data = root / 'native-entry.json'
+    entry_data.write_text('{}')
+    manifest_file = root / 'build-manifest.json'
+    manifest = json.loads(manifest_file.read_text())
+    manifest['files'] = inventory(root)
+    manifest_file.write_text(json.dumps(manifest))
+
+    entry_area = root / native_entry.AREA
+    (entry_area / 'resources').mkdir(parents=True)
+    (entry_area / 'owner.json').write_text('{}')
+
+    def check_entry(stage, *, check_only):
+        assert stage == root and check_only
+        return {'state': 'ready'}
+
+    monkeypatch.setattr(native_entry, 'remove_entries', check_entry)
+    verify(root, 'a' * 40, installed=True)
+    with pytest.raises(ValueError, match='payload hashes or layout'):
+        verify(root, 'a' * 40)
+
+    (entry_area / 'unexpected').touch()
+    with pytest.raises(ValueError, match='native-entry ownership'):
+        verify(root, 'a' * 40, installed=True)
+    (entry_area / 'unexpected').unlink()
+    (root / 'gitgo').write_bytes(b'tampered executable')
+    with pytest.raises(ValueError, match='payload hashes or layout'):
+        verify(root, 'a' * 40, installed=True)
+
 @pytest.mark.parametrize('change', ['bytes', 'extra', 'commit', 'dirty'])
 def test_modified_payload_or_source_is_rejected(tmp_path_factory, change):
     payload(tmp_path_factory)
