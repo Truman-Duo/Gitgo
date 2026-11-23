@@ -44,7 +44,7 @@ def workspace_native_launcher(isolated_python, monkeypatch):
     monkeypatch.setattr("backend.core.sandbox_access.native_runtime_access", lambda: ([runtime], []))
     def read_access(handler, target):
         from backend.core.native_python_runtime import reader_python_roots
-        roots, parents = reader_python_roots(runtime, handler, target)
+        roots, parents = reader_python_roots(runtime, handler, target, executable=command[0])
         return [runtime / 'backend', *roots], parents
     monkeypatch.setattr("backend.core.sandbox_access.native_read_runtime_access", read_access)
     # native_box can already own an outer runtime registration. Restore this

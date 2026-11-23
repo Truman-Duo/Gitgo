@@ -31,6 +31,32 @@ from backend.core.tools.registrations import file_read
 pytestmark = pytest.mark.skipif(sys.platform not in {'linux', 'win32', 'darwin'}, reason='Native read backend required')
 
 
+def test_reader_runtime_checks_only_the_selected_executable(tmp_path_factory, monkeypatch):
+    from types import SimpleNamespace
+    from backend.core.native_python_runtime import reader_python_roots
+    from backend.core.sandbox import SandboxDenied
+
+    prefix = tmp_path_factory.resolve()
+    interpreter = prefix / 'python.exe'
+    alias = prefix / 'python3.exe'
+    interpreter.touch()
+    alias.touch()
+    lstat = Path.lstat
+
+    def reparse_alias(path):
+        info = lstat(path)
+        if path == alias:
+            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400)
+        return info
+
+    monkeypatch.setattr(Path, 'lstat', reparse_alias)
+    files, _parents = reader_python_roots(prefix, 'read_file', 'note.txt', executable=interpreter)
+    assert files == [interpreter]
+    with pytest.raises(SandboxDenied) as denied:
+        reader_python_roots(prefix, 'read_file', 'note.txt', executable=alias)
+    assert denied.value.code == 'SANDBOX_POLICY_INVALID'
+
+
 @pytest.fixture
 def fixture(tmp_path_factory):
     root = tmp_path_factory / 'project'

@@ -19,10 +19,10 @@ _DOCUMENT_MODULES = {
     '.xlsm': ('openpyxl', 'et_xmlfile', 'defusedxml', 'lxml', 'PIL'),
     '.xls': ('xlrd',),
 }
-_PYTHON_FILE_TYPES = {'.exe', '.dll', '.pyd', '.zip', '._pth'}
+_PYTHON_FILE_TYPES = {'.dll', '.pyd', '.zip', '._pth'}
 
 
-def reader_python_roots(prefix, handler, target):
+def reader_python_roots(prefix, handler, target, *, executable=None):
     prefix = Path(prefix).resolve(strict=True)
     selected, shallow = [], [prefix]
     def checked(path):
@@ -38,12 +38,20 @@ def reader_python_roots(prefix, handler, target):
     for path in prefix.iterdir():
         if path.is_file() and path.suffix.lower() in _PYTHON_FILE_TYPES:
             selected.append(checked(path))
-    # A regular Windows venv keeps its launcher in Scripts. Preserve that
-    # exact executable and interpreter configuration without exposing Scripts.
-    executable = Path(sys.executable).absolute()
-    if executable.is_relative_to(prefix) and executable not in selected:
-        selected.append(checked(executable))
-        shallow.append(executable.parent)
+    # Select the launched interpreter and CPython's base interpreter for venvs.
+    # Other executables in an installed prefix can be aliases (e.g. python3.exe).
+    # Required images still pass the same pinned-path checks.
+    images = (executable,) if executable is not None else (sys.executable, sys._base_executable)
+    if handler == 'search_text':
+        from .tools.workspace_search import resolve_ripgrep
+        engine = resolve_ripgrep()
+        if engine:
+            images += (engine,)
+    for image in dict.fromkeys(images):
+        path = Path(image).absolute()
+        if path.is_relative_to(prefix):
+            selected.append(checked(path))
+            shallow.append(path.parent)
     configuration = prefix / 'pyvenv.cfg'
     if configuration.is_file():
         selected.append(checked(configuration))
