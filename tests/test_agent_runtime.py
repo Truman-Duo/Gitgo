@@ -29,7 +29,7 @@ from backend.core.loop.executor import (
 )
 from backend.core.loop.manager import AgentProcessManager, SessionStore
 from backend.core.loop.mailbox import AgentMailbox, MailboxClosedError
-from backend.core.loop.models import ProcessStatus, RingLevel
+from backend.core.loop.models import AgentProcess, ProcessStatus, RingLevel
 from backend.core.loop.outcome import OutcomeStatus, TaskOutcome
 from backend.core.loop.runtime import AgentRuntimeFactory, RuntimeSpec
 from backend.core.loop.tools import ToolRegistry
@@ -93,11 +93,11 @@ class LoopStatusProjectionTests(unittest.TestCase):
             def maintain_cas(self):  # pragma: no cover
                 raise AssertionError("must not maintain CAS after a failed projection")
 
-        live_b = SimpleNamespace(
+        live_b = AgentProcess(
             process_id="live-b",
             role="worker",
-            ring_level=SimpleNamespace(value=3),
-            status=SimpleNamespace(value="running"),
+            ring_level=RingLevel.RING_3,
+            status=ProcessStatus.RUNNING,
             steps_used=1,
             max_steps=10,
             parent_id="root-a",
@@ -107,8 +107,7 @@ class LoopStatusProjectionTests(unittest.TestCase):
             worktree={},
             pending_decision=None,
             recovery=None,
-            session=None,
-            coordination_snapshot=lambda: ([], {}, {}),
+            session=AgentSession(),
         )
         emitted: list[dict] = []
         with patch("backend.core.history.HistoryManager.load", return_value=[]):
@@ -783,7 +782,7 @@ class PromptAndReasoningStateTests(unittest.TestCase):
         self.assertNotIn("web_search", selected)
         self.assertIn("delegate_task", selected)
 
-    def test_supervisor_prompt_routes_bounded_work_to_self_and_iterations_to_owner(self):
+    def test_supervisor_prompt_checks_maintenance_responsibility_and_delegation_value(self):
         process = AgentRuntimeFactory.create(RuntimeSpec(
             role="supervisor", actor_kind="supervisor",
             capability_profile_id="supervisor.control",
@@ -797,9 +796,9 @@ class PromptAndReasoningStateTests(unittest.TestCase):
             process=process, tools={}, workspace_path="C:/workspace",
         )
 
-        self.assertIn("default to self-execution for bounded one-owner work", prompt)
-        self.assertIn("continue that B by process_id under owner routing", prompt)
-        self.assertIn("Do not create a B merely because you are A", prompt)
+        self.assertIn("Check existing maintenance responsibility when routing follow-up work", prompt)
+        self.assertIn("Use B when the marginal value comes from genuine parallel work", prompt)
+        self.assertIn("For direct execution, use the task-scoped lease", prompt)
 
 
 class HostCompletionTests(unittest.TestCase):

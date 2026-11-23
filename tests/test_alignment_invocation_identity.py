@@ -31,7 +31,8 @@ def test_conflicting_outer_and_record_identity_cannot_choose_either_silently(tmp
     args[field]='different-identity'
     before=copy.deepcopy(w._load())
     result=w.invoke(args)
-    assert result.get('error') and 'conflict' in result['detail'].lower()
+    assert result['error']=='ALIGNMENT_REPLY_UPDATE_INVALID'
+    assert 'identities must agree' in result['detail'].lower()
     assert w._load()==before and not confirmed_user_state(p.session.host_ledger) and not p.approval_grants
 
 
