@@ -42,6 +42,7 @@ def main(argv=None):
     parser.add_argument('--private-key', type=Path)
     parser.add_argument('--ci-run', type=int)
     parser.add_argument('--baseline', type=Path)
+    parser.add_argument('--transition-evidence', type=Path, help='Native release-pair reports for channel publication')
     parser.add_argument('--notes', type=Path)
     parser.add_argument('--report', type=Path)
     args = parser.parse_args(argv)
@@ -53,7 +54,8 @@ def main(argv=None):
             if any(getattr(args, key) is None for key in ('repository', 'sequence', 'key_id', 'private_key', 'ci_run', 'baseline', 'notes')):
                 raise ValueError('init requires repository, sequence, key-id, private-key, ci-run, baseline and notes')
             create(args.plan, args.source, args.repository, args.sequence, args.key_id, args.private_key,
-                args.ci_run, args.baseline, args.notes, GitHub(args.repository, command))
+                args.ci_run, args.baseline, args.notes, GitHub(args.repository, command),
+                transition_evidence=args.transition_evidence)
             print('Release plan created. No remote changes made.')
             return 0
         plan = load(args.plan)

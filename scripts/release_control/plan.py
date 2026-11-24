@@ -43,6 +43,8 @@ def load(path):
             or type(release['sequence']) is not int or release['sequence'] < 1):
         raise ValueError('Version, tag, channel or sequence mismatch')
     plan['notes'] = resolve(plan['notes'])
+    if 'transition_evidence' in plan:
+        plan['transition_evidence'] = resolve(plan['transition_evidence'])
     plan['signing']['private_key'] = resolve(plan['signing']['private_key'])
     if Path(plan['signing']['private_key']).is_relative_to(plan['source']):
         raise ValueError('Private signing key must remain outside source')
@@ -100,7 +102,8 @@ def load(path):
     return plan
 
 
-def create(path, source, repository, sequence, key_id, private_key, ci_run, baseline, notes, remote):
+def create(path, source, repository, sequence, key_id, private_key, ci_run, baseline, notes, remote,
+           transition_evidence=None):
     """Read-only discovery produces a ready-to-review plan, not a release."""
     from backend.core.update.manifest import TARGETS
     from .evidence import atomic
@@ -122,6 +125,8 @@ def create(path, source, repository, sequence, key_id, private_key, ci_run, base
             'inputs': [str(Path(notes).resolve()), str(source/'packaging/requirements-build.lock')],
             'outputs': [str(path.parent/'local-preflight.json')]}],
         'targets': {}, 'artifacts': []}
+    if transition_evidence is not None:
+        value['transition_evidence'] = str(Path(transition_evidence).resolve())
     check_source(value)
     remote.ci(value['ci'][0], value['release'])
     remote.source(value['release'])

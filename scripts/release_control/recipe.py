@@ -7,6 +7,7 @@ from . import assets, delivery
 from .checks import run_checks
 from .downloads import acquire
 from .plan import check_source
+from .transition import verify_transition
 
 
 class GitgoNativeRecipe:
@@ -30,6 +31,7 @@ class GitgoNativeRecipe:
         return delivery.draft(context.plan, context.evidence, context.remote, prepared)
 
     def publish(self, context, prepared, draft):
+        verify_transition(context.plan, prepared, context.evidence)
         delivery.publish(context.plan, context.evidence, context.remote, prepared, draft)
 
     def verify(self, context, prepared):

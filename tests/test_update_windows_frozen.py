@@ -36,6 +36,7 @@ def test_real_windows_upgrade_rollback_keep_program_and_user_data(actual_lab, mo
     boot(new)
     water = store._ledger()["watermarks"]
     selection = store.rollback_selection()
+    assert selection is not None, store.rollback_blocker()
     with handoff.launch_session(store) as nonce:
         monkeypatch.setenv(handoff.SESSION_ENV, nonce)
         service.request_rollback(selection["rollback_id"], "d" * 32)

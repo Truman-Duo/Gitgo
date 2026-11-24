@@ -99,6 +99,62 @@ def synthetic_prepared(plan, evidence):
         inputs=assets.inputs(plan), manifests=[{'expires_at': (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}])
 
 
+def transition_fixture(plan):
+    from xml.etree import ElementTree
+    from scripts.release_control.transition import SUITES
+
+    directory = Path(plan['notes']).parent / 'transition'
+    directory.mkdir()
+    plan['transition_evidence'] = str(directory)
+    for name, target in plan['targets'].items():
+        previous = json.loads(Path(target['baseline_manifest']).read_bytes())
+        suite, names = SUITES[name]
+        report = ElementTree.Element('testsuite')
+        for case in names:
+            ElementTree.SubElement(report, 'testcase', name=case,
+                                   classname=suite.removesuffix('.py').replace('/', '.'))
+        xml = directory / (name + '.xml')
+        ElementTree.ElementTree(report).write(xml)
+        atomic(directory / (name + '.json'), {'schema_version': 1, 'target': name,
+            'previous': {key: previous[key] for key in ('version', 'source', 'sha256')},
+            'candidate': {'version': plan['release']['version'],
+                'source': {key: plan['release'][key] for key in ('commit', 'tree')},
+                'sha256': file_fact(target['archive'])['sha256']},
+            'tests': file_fact(xml)})
+    return directory
+
+
+def test_update_channel_requires_native_results_for_the_exact_archive_pair(release):
+    from scripts.release_control.recipe import GitgoNativeRecipe
+    from scripts.release_control.transition import verify_transition
+    from types import SimpleNamespace
+
+    plan, evidence, _ = release
+    for name, target in plan['targets'].items():
+        atomic(Path(target['baseline_manifest']), {'version': '1.0.0-alpha.8',
+            'source': {'commit': '1' * 40, 'tree': '2' * 40}, 'sha256': '3' * 64})
+    prepared = synthetic_prepared(plan, evidence)
+    remote = Remote(plan)
+    with pytest.raises(ValueError, match='Native upgrade and rollback evidence'):
+        GitgoNativeRecipe().publish(SimpleNamespace(plan=plan, evidence=evidence, remote=remote), prepared, {})
+    assert not remote.writes
+    directory = transition_fixture(plan)
+    verify_transition(plan, prepared, evidence)
+    assert set(evidence.read('release-transition')['targets']) == set(plan['targets'])
+    window = directory / 'windows-x86_64.json'
+    receipt = json.loads(window.read_bytes())
+    changed = deepcopy(receipt)
+    changed['previous']['sha256'] = '0' * 64
+    atomic(window, changed)
+    with pytest.raises(ValueError, match='different archive pair'):
+        verify_transition(plan, prepared, evidence)
+    atomic(window, receipt)
+    report = directory / 'windows-x86_64.xml'
+    report.write_text(report.read_text().replace(' />', '><skipped /></testcase>', 1))
+    with pytest.raises(ValueError, match='did not pass'):
+        verify_transition(plan, prepared, evidence)
+
+
 class Remote:
     """Persistent in-memory effects; optional failure AFTER an effect committed."""
     def __init__(self, plan):
@@ -534,6 +590,8 @@ def test_real_four_target_extraction_inventory_contract_signatures_and_resume(re
         raw = json.dumps(baseline).encode()
         Path(target['baseline_manifest']).write_bytes(raw)
         Path(target['baseline_signature']).write_bytes(sign_raw(raw, key))
+    transition_fixture(plan)
+    evidence = Evidence(evidence.root, plan)
     remote = Remote(plan)
     result = run(plan, evidence, remote)
     assert result == {'phase': 'prepared', 'remote_writes': False}

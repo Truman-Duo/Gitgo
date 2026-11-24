@@ -47,6 +47,10 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
     from datetime import datetime, timezone, timedelta
     base = tmp_path_factory.resolve()
     profile = base / "profile"; profile.mkdir(mode=0o700)
+    env = {**isolated_environment(profile), "HOME": str(profile)}
+    for name, value in env.items():
+        if name.startswith("GITGO_"):
+            monkeypatch.setenv(name, value)
     protected = base / "protected"; protected.mkdir(mode=0o700)
     sentinels = {name: ("keep-" + name).encode() for name in ("project", "worktree", "config", "db", "db-wal", "db-shm", "secrets")}
     for name, data in sentinels.items(): (protected / name).write_bytes(data)
@@ -115,7 +119,6 @@ def actual_lab(tmp_path_factory, signing, monkeypatch):
         selected = service.check("preview", "a" * 32)["candidate"]["candidate_id"]
         service.download("preview", selected, "b" * 32)
         return service, selected
-    env = {**isolated_environment(profile), "HOME": str(profile)}
     def boot_version(expected):
         command = ([str(root / "bootstrap/gitgo-host/gitgo-host.exe"), "--gitgo-internal-role", "managed-launch"]
                    if os.name == "nt" else [str(root / "gitgo")])
@@ -156,6 +159,7 @@ def test_actual_upgrade_and_explicit_rollback_keep_real_program_bootable(actual_
     boot(new_version)
     watermarks = store._ledger()["watermarks"]
     rollback = store.rollback_selection()
+    assert rollback is not None, store.rollback_blocker()
     with handoff.launch_session(store) as nonce:
         monkeypatch.setenv(handoff.SESSION_ENV, nonce)
         service.request_rollback(rollback["rollback_id"], "d" * 32)
@@ -296,7 +300,7 @@ def test_actual_dashboard_confirmation_exits_and_bootstrap_applies_then_rolls_ba
         # Read the same product service without mutating the fixture's ledger.
         # A missing retained program and a stale terminal frame are distinct.
         retained = service.status()["rollback"]
-        assert retained is not None and retained["version"] == old_version
+        assert retained is not None and retained["version"] == old_version, store.rollback_blocker()
         update_panel(new_version)
         wait_for("Retained version")
         activate_menu_item(screen, "Review rollback", send, pump)
