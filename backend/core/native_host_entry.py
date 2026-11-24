@@ -140,6 +140,9 @@ def _main(values: list[str]) -> int:
     if name == "windows-job-lease":
         from backend.core.windows_process_scope import lease_guardian
         return lease_guardian(role_argv)
+    if name == "portable-update":
+        from backend.core.update.portable import main
+        return main(role_argv)
     if name == "managed-install":
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("--root", required=True)

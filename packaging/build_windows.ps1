@@ -10,6 +10,7 @@ param(
     [switch]$BuildInstaller,
     [switch]$UpdateEvidence,
     [switch]$ManagedUpdate,
+    [switch]$BuildManagedEntries,
     [string]$UpdateReleasePolicy = ""
 )
 
@@ -23,6 +24,7 @@ $artifactDirectory = [System.IO.Path]::GetFullPath($ArtifactOutput)
 $productPath = Join-Path $PSScriptRoot "product.json"
 $product = Get-Content -LiteralPath $productPath -Raw | ConvertFrom-Json
 if ($ManagedUpdate -and $BuildInstaller) { throw 'Managed updates use a separate fresh installation, not an Inno installer' }
+if ($BuildManagedEntries -and -not $ManagedUpdate) { throw 'Windows Portable and Setup require the managed archive' }
 if ($UpdateReleasePolicy -and -not $ManagedUpdate) { throw 'Public release trust requires -ManagedUpdate' }
 if ($ManagedUpdate) { $UpdateEvidence = $true }
 if ($product.primary_command -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
@@ -278,3 +280,9 @@ $archiveArguments = @('--stage', $stage, '--output', $artifactDirectory)
 if ($ManagedUpdate) { $archiveArguments += '--managed-windows' }
 & $Python -B (Join-Path $root 'scripts\release_artifacts.py') @archiveArguments
 if ($LASTEXITCODE -ne 0) { throw "Release artifact packaging failed" }
+if ($BuildManagedEntries) {
+    $commit = ((Get-Content -Raw -LiteralPath (Join-Path $stage 'build-manifest.json') | ConvertFrom-Json).source.commit)
+    $archive = Join-Path $artifactDirectory "gitgo-$($product.version)-win-x64-$($commit.Substring(0,8)).zip"
+    & $Python -B (Join-Path $root 'scripts\build_windows_entries.py') --archive $archive --output $artifactDirectory
+    if ($LASTEXITCODE -ne 0) { throw "Windows managed entry compilation failed" }
+}

@@ -15,6 +15,7 @@ param(
     [switch]$BuildOnly,
     [switch]$BuildInstaller,
     [switch]$ManagedUpdate,
+    [switch]$BuildManagedEntries,
     [string]$UpdateReleasePolicy = "",
     [switch]$Sign,
     [string]$SigningKey = "",
@@ -35,6 +36,7 @@ if ($Sign -and ($BuildOnly -or $VerifyOnly -or $AllowDirty -or -not $ManagedUpda
     throw "Signing requires a clean managed release with full validation"
 }
 if ($ManagedUpdate -and $BuildInstaller) { throw "Managed releases use the complete ZIP and install-managed.ps1, not Inno" }
+if ($BuildManagedEntries -and -not $ManagedUpdate) { throw "Windows Portable and Setup require -ManagedUpdate" }
 if ($Sign -and -not $InitialRelease -and (-not $BaselineManifest -or -not $BaselineSignature)) {
     throw "Update signing requires the previous published manifest and signature"
 }
@@ -169,6 +171,7 @@ try {
         if ($Ripgrep) { $arguments += @("-Ripgrep", $Ripgrep) }
         if ($RipgrepNotices) { $arguments += @("-RipgrepNotices", $RipgrepNotices) }
         if ($ManagedUpdate) { $arguments += "-ManagedUpdate" }
+        if ($BuildManagedEntries) { $arguments += "-BuildManagedEntries" }
         if ($UpdateReleasePolicy) { $arguments += @("-UpdateReleasePolicy", $UpdateReleasePolicy) }
         if ($BuildInstaller) {
             $arguments += "-BuildInstaller"

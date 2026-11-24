@@ -118,6 +118,12 @@ class ManifestVerifier:
         return bool(self._keys)
 
     def verify(self, raw: bytes, detached: bytes) -> UpdateManifest:
+        return self._verify(raw, detached, portable=False)
+
+    def verify_portable(self, raw: bytes, detached: bytes) -> UpdateManifest:
+        return self._verify(raw, detached, portable=True)
+
+    def _verify(self, raw: bytes, detached: bytes, *, portable: bool) -> UpdateManifest:
         bounded_bytes(raw, MAX_MANIFEST_BYTES)
         envelope = json_object(detached, MAX_SIGNATURE_BYTES)
         fields(envelope, {"schema_version", "algorithm", "key_id", "signature"})
@@ -171,7 +177,8 @@ class ManifestVerifier:
         if (platform, architecture) not in TARGETS:
             reject("UPDATE_TARGET_INVALID", "Unsupported release target")
         archive_format = value["archive_format"]
-        if archive_format != ("zip" if platform == "windows" else "tar.gz"):
+        expected_format = "exe" if portable else ("zip" if platform == "windows" else "tar.gz")
+        if archive_format != expected_format or (portable and platform != "windows"):
             reject("UPDATE_SCHEMA_INVALID", "Unsupported archive format for target")
         published, expires = timestamp(value["published_at"]), timestamp(value["expires_at"])
         if not timedelta(0) < expires - published <= MAX_MANIFEST_LIFETIME:

@@ -8,6 +8,10 @@ Gitgo 的 Windows 产品包包含 Dashboard 与内部 Native Host，必须一起
 
 需要 Bun、Rust 1.90.0（含 Cargo）和通过 Gitgo SQLite WAL 安全检查的 Python。运行时由 `GITGO_PYTHON` 或用户级 Gitgo 安装位置选择；脚本不自动改用不安全系统 Python。PyInstaller 可以由 `-PyInstallerPackages` 指定构建依赖目录。安装器还需要已安装的 Inno Setup。
 
+`-ManagedUpdate -BuildManagedEntries` 会在最终 Windows ZIP 之外生成 `GitgoPortable-<version>-win-x64.exe` 和 `GitgoSetup-<version>-win-x64.exe`。二者从同一个验证过的 ZIP 编译，使用 Windows 自带的 .NET Framework C# 编译器。Setup 调用现有受管安装入口，Portable 直接从单个 EXE 启动，运行所需文件释放到当前用户的临时目录。
+
+Portable 的直接更新命令为 `--check-update`、`--update` 和 `--rollback`。原位更新要求 EXE 位于当前用户控制的本地 NTFS 目录，并正常关闭正在使用它的实例。发布工具 `scripts/sign_windows_portable.py` 为已审阅的 Portable 文件生成同渠道的 `windows-x86_64.portable.manifest.json` 和签名。Portable 按现有发布者信任验签，等待当前进程退出后替换原文件；数据兼容契约发生变化时由更新器阻止替换。普通 Windows 安装继续从原 ZIP 清单读取更新。
+
 搜索资产需要独立 ripgrep >=14 及匹配的完整第三方许可；可用 `-Ripgrep`、`-RipgrepNotices` 指定。终端验证参考资产通过既有构建参数提供，缺失不能用本机 PATH 掩盖。
 
 平台构建共用 `cli/dashboard/scripts/build-icons.ts`，从已接受的品牌 SVG 生成并核对 ICO、ICNS 和 PNG，匹配来源、转换器、渲染器及输出摘要时复用。Windows 主程序、Host、安装器及快捷方式使用该 ICO；Unix 包携带相同来源的图标资源。资源校验与原生系统入口的实际显示分别验收。
