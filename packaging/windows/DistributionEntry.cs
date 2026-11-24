@@ -76,6 +76,22 @@ internal static class DistributionEntry
     }
 
 #if SETUP
+    private static SetupResult RunCaptured(string program, string[] arguments, string launcher = null)
+    {
+        var info = new ProcessStartInfo(program, String.Join(" ", Array.ConvertAll(arguments, Quote))) {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
+            RedirectStandardError = true, StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8, WorkingDirectory = Environment.CurrentDirectory
+        };
+        using (var child = Process.Start(info))
+        {
+            var stdout = child.StandardOutput.ReadToEndAsync();
+            var stderr = child.StandardError.ReadToEndAsync();
+            child.WaitForExit();
+            return new SetupResult(child.ExitCode, stdout.Result, stderr.Result, launcher);
+        }
+    }
+
     private static SetupResult Install(string root, string desktop, string workspace, Action<string> report)
     {
         var package = Path.Combine(workspace, "package");
@@ -95,19 +111,7 @@ internal static class DistributionEntry
         if (!String.IsNullOrEmpty(desktop))
             arguments.AddRange(new[] { "--desktop-folder", desktop });
         report("install");
-        var info = new ProcessStartInfo(Host(package), String.Join(" ", arguments.ConvertAll(Quote))) {
-            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
-            RedirectStandardError = true, StandardOutputEncoding = System.Text.Encoding.UTF8,
-            StandardErrorEncoding = System.Text.Encoding.UTF8, WorkingDirectory = Environment.CurrentDirectory
-        };
-        using (var child = Process.Start(info))
-        {
-            var stdout = child.StandardOutput.ReadToEndAsync();
-            var stderr = child.StandardError.ReadToEndAsync();
-            child.WaitForExit();
-            return new SetupResult(child.ExitCode, stdout.Result, stderr.Result,
-                Path.Combine(install, "bootstrap", "gitgo-host", "gitgo-host.exe"));
-        }
+        return RunCaptured(Host(package), arguments.ToArray(), Path.Combine(install, "bootstrap", "gitgo-host", "gitgo-host.exe"));
     }
 
     private static int Execute(string[] args, string workspace, ref bool handoff)
@@ -123,7 +127,11 @@ internal static class DistributionEntry
             var result = Install(root, desktop, workspace, delegate { });
             Console.Out.Write(result.Output);
             Console.Error.Write(result.Errors);
-            return result.ExitCode == 0 ? Run(result.Launcher, "--gitgo-internal-role", "managed-launch", "--version") : result.ExitCode;
+            if (result.ExitCode != 0) return result.ExitCode;
+            var probe = RunCaptured(result.Launcher, new[] { "--gitgo-internal-role", "managed-launch", "--version" });
+            Console.Out.Write(probe.Output);
+            Console.Error.Write(probe.Errors);
+            return probe.ExitCode;
         }
         if (args.Length != 0)
             throw new ArgumentException("Unknown Gitgo Setup argument.");
