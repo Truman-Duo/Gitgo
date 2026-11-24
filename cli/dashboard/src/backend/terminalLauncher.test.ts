@@ -33,7 +33,6 @@ describe("installed terminal launcher", () => {
   test("a new packaged invocation from a shell uses the saved preference", () => {
     expect(shouldRelaunchInConfiguredTerminal({
       compiled: true, platform: "win32", argv: ["gitgo.exe"],
-      parentProcessName: "powershell.exe",
       config: {terminal: "auto", command: "", args: []},
     })).toBeTrue();
   });
@@ -56,7 +55,7 @@ describe("installed terminal launcher", () => {
     const origin = JSON.stringify({version: 1, terminal: "git_bash", platform: "win32", source: "terminal_handoff"});
     expect(currentFrontendOrigin({GITGO_FRONTEND_ORIGIN: origin, WT_SESSION: "stale"}, "win32")).toBe(origin);
     expect(shouldRelaunchInConfiguredTerminal({compiled: true, platform: "win32", argv: ["gitgo.exe", "--attached"],
-      parentProcessName: "cmd", config: {terminal: "git_bash", command: "any", args: []}})).toBeFalse();
+      config: {terminal: "git_bash", command: "any", args: []}})).toBeFalse();
   });
 
   test("relaunches an Explorer invocation exactly once", () => {
@@ -64,12 +63,30 @@ describe("installed terminal launcher", () => {
     expect(isShellLauncherProcess("explorer.exe")).toBeTrue();
     expect(shouldRelaunchInConfiguredTerminal({
       compiled: true, platform: "win32", argv: ["gitgo.exe"],
-      parentProcessName: "Explorer", config,
+      config,
     })).toBeTrue();
     expect(shouldRelaunchInConfiguredTerminal({
       compiled: true, platform: "win32", argv: ["gitgo.exe", "--attached"],
-      parentProcessName: "Explorer", config,
+      config,
     })).toBeFalse();
+  });
+
+  test("reuses an interactive Windows terminal and keeps deliberate profile switches", () => {
+    const config = {terminal: "windows_terminal" as const, command: "wt.exe", args: []};
+    const options = {compiled: true, platform: "win32" as const, argv: [], interactive: true, config};
+    const origin = currentFrontendOrigin({WT_SESSION: "session"}, "win32");
+    expect(shouldRelaunchInConfiguredTerminal({...options, origin})).toBeFalse();
+    expect(shouldRelaunchInConfiguredTerminal({...options, selected: "auto"})).toBeFalse();
+    expect(shouldRelaunchInConfiguredTerminal({...options, origin, interactive: false})).toBeTrue();
+    expect(shouldRelaunchInConfiguredTerminal({...options, origin, argv: ["--windows-terminal-profile"]})).toBeTrue();
+  });
+
+  test("managed switches launch the stable bootstrap and forward Dashboard flags", () => {
+    const config = {terminal: "windows_terminal" as const, command: "wt.exe", args: []};
+    const bootstrap = "C:/Gitgo/bootstrap/gitgo-host/gitgo-host.exe";
+    const result = terminalChildCommand(config, bootstrap, ["--runtime", "bun"], undefined,
+      ["--gitgo-internal-role", "managed-launch"]);
+    expect(result?.args.slice(-6)).toEqual([bootstrap, "--gitgo-internal-role", "managed-launch", "--attached", "--runtime", "bun"]);
   });
 
   test("builds Windows Terminal and configurable terminal child commands", () => {

@@ -97,6 +97,10 @@ internal sealed class SetupWizard : Form
     private SetupResult result;
     private Page page;
     private bool busy, failed;
+    private readonly Action<int> applyLayoutMetrics;
+    private Font bodyFont, headingFont;
+    private int currentDpi;
+    private const int WmDpiChanged = 0x02E0;
     public int ExitCode { get; private set; }
 
     private static string Local(string chinese, string english)
@@ -115,12 +119,73 @@ internal sealed class SetupWizard : Form
     }
 
     [DllImport("user32.dll")]
-    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    private static extern uint GetDpiForWindow(IntPtr window);
 
-    internal static void ConfigureTextScaling()
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeBounds { public int Left, Top, Right, Bottom; }
+
+    private static int Pixels(int logical, int dpi) { return (logical * dpi + 48) / 96; }
+
+    protected override void OnLoad(EventArgs args)
     {
-        try { SetThreadDpiAwarenessContext(new IntPtr(-5)); }  // DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED
-        catch (EntryPointNotFoundException) { }
+        int dpi;
+        try { dpi = (int)GetDpiForWindow(Handle); }
+        catch (EntryPointNotFoundException) { using (var graphics = CreateGraphics()) dpi = (int)graphics.DpiY; }
+        ApplyDpi(dpi, null);
+        base.OnLoad(args);
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        if (message.Msg == WmDpiChanged && applyLayoutMetrics != null)
+        {
+            var rect = (NativeBounds)Marshal.PtrToStructure(message.LParam, typeof(NativeBounds));
+            ApplyDpi((int)(message.WParam.ToInt64() & 0xffff), Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom));
+            message.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref message);
+    }
+
+    private void ApplyDpi(int dpi, Rectangle? suggested)
+    {
+        if (dpi <= 0 || dpi == currentDpi) return;
+        SuspendLayout();
+        try
+        {
+            currentDpi = dpi;
+            var oldBody = bodyFont;
+            var oldHeading = headingFont;
+            // Pixel fonts explicitly regenerated at the monitor's native DPI.
+            var family = Local("Microsoft YaHei UI", "Segoe UI");
+            bodyFont = new Font(family, 10f * dpi / 72f, FontStyle.Regular, GraphicsUnit.Pixel);
+            headingFont = new Font(family, 16f * dpi / 72f, FontStyle.Bold, GraphicsUnit.Pixel);
+            Font = bodyFont;
+            heading.Font = headingFont;
+            if (oldBody != null) oldBody.Dispose();
+            if (oldHeading != null) oldHeading.Dispose();
+            applyLayoutMetrics(dpi);
+            var work = (suggested.HasValue ? Screen.FromRectangle(suggested.Value) : Screen.FromHandle(Handle)).WorkingArea;
+            MinimumSize = Size.Empty;
+            if (!suggested.HasValue) ClientSize = new Size(Pixels(650, dpi), Pixels(488, dpi));
+            var desired = suggested ?? Bounds;
+            var width = Math.Min(desired.Width, work.Width);
+            var height = Math.Min(desired.Height, work.Height);
+            Bounds = new Rectangle(Math.Max(work.Left, Math.Min(desired.Left, work.Right - width)),
+                Math.Max(work.Top, Math.Min(desired.Top, work.Bottom - height)), width, height);
+            MinimumSize = new Size(Math.Min(Pixels(550, dpi), width), Math.Min(Pixels(440, dpi), height));
+        }
+        finally { ResumeLayout(true); }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing)
+        {
+            if (bodyFont != null) bodyFont.Dispose();
+            if (headingFont != null) headingFont.Dispose();
+        }
     }
 
     private static bool HasProfile()
@@ -161,9 +226,8 @@ internal sealed class SetupWizard : Form
         this.open = open;
         this.statusPath = statusPath;
         Text = Local("Gitgo 安装", "Gitgo Setup");
-        Font = new Font(Local("Microsoft YaHei UI", "Segoe UI"), 10f);
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-        AutoScaleMode = AutoScaleMode.Font;
+        AutoScaleMode = AutoScaleMode.None;
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(650, 488);
         MinimumSize = new Size(550, 440);
@@ -174,7 +238,6 @@ internal sealed class SetupWizard : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        heading.Font = new Font(Font.FontFamily, 16, FontStyle.Bold);
         heading.Margin = new Padding(0, 0, 0, 8);
         var actions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false, Dock = DockStyle.Fill, Padding = new Padding(0, 10, 0, 0) };
@@ -221,10 +284,22 @@ internal sealed class SetupWizard : Form
         path.Controls.Add(browse, 1, 0);
         desktop.Text = Local("创建桌面快捷方式", "Create a desktop shortcut");
         desktop.Margin = new Padding(0, 8, 0, 0);
-        options.Controls.Add(LabelText(Local("安装目录", "Installation folder")), 0, 0);
+        var folderLabel = LabelText(Local("安装目录", "Installation folder"));
+        options.Controls.Add(folderLabel, 0, 0);
         options.Controls.Add(path, 0, 1);
         options.Controls.Add(desktop, 0, 2);
         options.Controls.Add(installation, 0, 3);
+        applyLayoutMetrics = dpi => {
+            Func<int, int> px = value => Pixels(value, dpi);
+            layout.Padding = new Padding(px(22), px(18), px(22), px(14));
+            heading.Margin = new Padding(0, 0, 0, px(8));
+            actions.Padding = new Padding(0, px(10), 0, 0);
+            primary.MinimumSize = secondary.MinimumSize = new Size(px(92), px(30));
+            consent.Margin = desktop.Margin = new Padding(0, px(8), 0, 0);
+            installation.Margin = new Padding(0, px(12), 0, 0);
+            folderLabel.Margin = new Padding(0, px(10), 0, px(6));
+            progress.Height = px(23);
+        };
 
         consent.CheckedChanged += (sender, args) => UpdateInstallButton();
         directory.TextChanged += (sender, args) => UpdateInstallButton();

@@ -176,7 +176,6 @@ internal static class DistributionEntry
         }
         if (args.Length != 0)
             throw new ArgumentException("Unknown Gitgo Setup argument.");
-        SetupWizard.ConfigureTextScaling();
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         using (var license = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.License")))

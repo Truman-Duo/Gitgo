@@ -4,7 +4,7 @@ import {PassThrough} from "node:stream";
 import stripAnsi from "strip-ansi";
 import {Box, renderSync} from "@anthropic/ink";
 import {InputProvider} from "../input/runtime.js";
-import type {BackendClient} from "../backend/client.js";
+import {NativeOperationError, type BackendClient} from "../backend/client.js";
 import {UpdatePanel, updateSelectableRows} from "./UpdatePanel.js";
 
 const sample = {schema_version: 1, product_id: "gitgo-terminal", version: "1.0.0-alpha.2",
@@ -89,6 +89,35 @@ describe("software update panel", () => {
 const idle = {schema_version: 2, product_id: "gitgo-terminal", version: "1.0.0-alpha.2", status: "idle",
   enabled: false, automatic_check: false, channel: "stable", can_apply: false, can_check: true,
   can_download: false, blockers: ["UPDATE_HANDOFF_REQUIRED"], latest_version: null, candidate: null};
+
+test("expired feed leaves installed version and automatic preferences visible through refresh", async () => {
+  const status = {...idle, schema_version: 6, version: "1.0.0-alpha.3.2", channel: "preview",
+    automatic_check: true, automatic_install_available: true,
+    can_request_apply: false, rollback: null, can_request_rollback: false,
+    apply_strategy: "immediate", pending_restart: null,
+    preferences: {schema_version: 1, revision: 2, channel: "preview", automatic_check: true,
+      automatic_download: true, automatic_install: true},
+    automatic: {state: "error", last_attempt: 1795543111, next_attempt: 1795544011,
+      error_code: "UPDATE_FRESHNESS_INVALID"}};
+  const calls: unknown[][] = [];
+  const view = mount({ready: true, close() {}, async callTool(...args) {
+    calls.push(args);
+    if (args[0] === "update.check") throw new NativeOperationError("UPDATE_FRESHNESS_INVALID", "raw detail", {});
+    return status;
+  }}, () => {}, undefined, "zh");
+  try {
+    await wait();
+    expect(view.text()).toContain("1.0.0-alpha.3.2");
+    expect(view.text()).toContain("发行方的签名清单已过期或尚未生效。");
+    await view.select(4);
+    expect(view.text()).toContain("检查更新失败。");
+    expect(view.text()).toContain("以下为上次确认的状态");
+    expect(view.text()).not.toContain("未安装软件");
+    expect(view.text()).not.toContain("raw detail");
+    view.stdin.write("\r"); await wait();
+    expect(calls.at(-1)).toEqual(["update.status"]);
+  } finally {view.close();}
+});
 const candidate = {candidate_id: "a".repeat(64), version: "1.0.0-alpha.3", release_id: "release-3", bytes: 4096, channel: "stable"};
 const available = {...idle, status: "available", can_download: true, latest_version: candidate.version, candidate};
 const prepared = {...available, status: "downloaded", can_download: false};
@@ -107,7 +136,7 @@ describe("macOS reboot confirmation", () => {
       expect(fixture.text().replace(/\s+/g, " ")).toContain("manually restart macOS");
       fixture.stdin.write("\r"); await wait();
       expect(exits).toBe(0);
-      expect(fixture.text()).toContain("Update status unavailable");
+      expect(fixture.text()).toContain("Update operation could not be confirmed");
     } finally {fixture.close();}
   });
   test("pending cancellation needs its own confirmation and never shuts down", async () => {
@@ -284,7 +313,7 @@ describe("manual update preparation UI", () => {
       fixture.stdin.write("\x1b"); await new Promise(r=>setTimeout(r,100)); await wait();
       expect(calls[2][0]).toBe("update.cancel");
       expect(calls[2][1].operation_id).toBe(calls[1][1].operation_id);
-      expect(fixture.text()).toContain("No software was installed");
+      expect(fixture.text()).toContain("Update operation could not be confirmed");
       expect(fixture.text()).not.toContain("private-proxy-password");
     } finally {fixture.close();}
   });

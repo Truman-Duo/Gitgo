@@ -8,13 +8,15 @@ import React, {useEffect, useLayoutEffect, useRef, useState} from "react";
 import {randomUUID} from "node:crypto";
 import {Box, ScrollBox, Text, type DOMElement, type ScrollBoxHandle} from "@anthropic/ink";
 import {useManagedInput as useInput, useScrollInput} from "../input/runtime.js";
-import type {BackendClient} from "../backend/client.js";
+import {NativeOperationError, type BackendClient} from "../backend/client.js";
 import {configureUpdate, updateStatus, checkUpdate, downloadUpdate, requestApplyUpdate, requestRollbackUpdate, cancelUpdate, cancelPendingUpdate, type UpdateStatus} from "../backend/update.js";
 import {colors, usePanelSize} from "../theme/index.js";
 import {FormFieldRow, fieldLabelWidth} from "./FormFieldRow.js";
 import {SelectionRow, SelectionText} from "./Selection.js";
 
 import {updateChinese} from "./updateText.js";
+import {FeedbackMessage} from "./FeedbackMessage.js";
+import {useFeedback} from "../hooks/useFeedback.js";
 
 export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "en"}: {
   language?: "en" | "zh";
@@ -22,6 +24,15 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
 }) {
   const {w, h} = usePanelSize({minWidth: 20, widthOffset: 4});
   const t = (text: keyof typeof updateChinese) => keyHintText(language === "zh" ? updateChinese[text] : text);
+  const feedback = useFeedback({kind: "page", id: "software-update"});
+  const diagnostic = (code: string | null) => code === "UPDATE_FRESHNESS_INVALID"
+    ? t("The publisher's signed release metadata has expired or is not yet valid.") + " (" + code + ")"
+    : code;
+  const fail = (message: keyof typeof updateChinese, error: unknown) => {
+    const code = error instanceof NativeOperationError && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : null;
+    feedback.show([t(message), diagnostic(code)].filter(Boolean).join(" "), {tone: "error"});
+    setState("error");
+  };
   const [data, setData] = useState<UpdateStatus | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error" | "checking" | "downloading" | "requesting" | "cancelling" | "confirm" | "confirmApply" | "confirmRollback" | "confirmCancelPending" | "configuring">("loading");
   const [channel, setChannel] = useState<"stable" | "preview">("stable");
@@ -77,8 +88,9 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
       : downloadUpdate(client, channel, data.candidate!.candidate_id, current.id);
     promise.then(value => {
       if (alive.current && job.current === current) {setData(value); setState("ready");}
-    }).catch(() => {
-      if (alive.current && job.current === current) {setData(null); setState("error");}
+    }).catch(error => {
+      if (alive.current && job.current === current) fail(
+        kind === "check" ? "Update check failed." : "Update operation could not be confirmed.", error);
     }).finally(() => {if (job.current === current) job.current = null;});
   };
   const changeSetting = (row: number, value: string | boolean) => {
@@ -104,10 +116,12 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
       if (alive.current && job.current === current && value.schema_version !== 1) {
         setChannel(value.channel); setData(value); setState("ready");
       }
-    }).catch(() => {if (alive.current && job.current === current) setState("error");})
+    }).catch(error => {
+      if (alive.current && job.current === current) fail("Update settings could not be confirmed.", error);
+    })
       .finally(() => {if (job.current === current) job.current = null;});
   };
-  const availableRows = updateSelectableRows(data, Boolean(onUpdateExit));
+  const availableRows = updateSelectableRows(state === "error" ? null : data, Boolean(onUpdateExit));
   const navigateRows=useListNavigation(availableRows,selected,setSelected,scroll);
   const active = reconcileSelection(availableRows, selected);
   useLayoutEffect(() => { if (state !== "loading" && active !== undefined && active !== selected) setSelected(active); }, [active, selected, state]);
@@ -164,13 +178,14 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
   }, [client]);
   useEffect(() => {
     let current = true;
-    setData(null); setState("loading");
-    updateStatus(client, initialized ? channel : undefined).then(value => {
+    feedback.clear();
+    setState("loading");
+    updateStatus(client, initialized && data?.schema_version !== 6 ? channel : undefined).then(value => {
       if (current && alive.current) {
-        if (!initialized && value.schema_version !== 1) setChannel(value.channel);
+        setChannel(value.channel);
         setInitialized(true); setData(value); setState("ready");
       }
-    }).catch(() => {if (current && alive.current) setState("error");});
+    }).catch(error => {if (current && alive.current) fail("Update status unavailable. Select Refresh to retry.", error);});
     return () => {current = false;};
   // Initial status/configuration acknowledgements already carry the selected
   // channel's full status. Only an explicit refresh/legacy view change reloads.
@@ -197,7 +212,9 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
     {state === "downloading" ? <Text>{t("Downloading and verifying the selected full package\u2026")}</Text> : null}
     {state === "requesting" ? <Text>{t("Rechecking the confirmed program selection before safe shutdown\u2026")}</Text> : null}
     {state === "cancelling" ? <Text>{t("Cancelling; waiting for the bounded transfer to stop\u2026")}</Text> : null}
-    {state === "error" ? <Text color={colors.danger}>{t("Update status unavailable or preparation stopped. No software was installed. Select Refresh to retry.")}</Text> : null}
+    <FeedbackMessage feedback={feedback.message}/>
+    {state === "error" && data ? <Text dimColor>{t("Last verified status · Refresh before taking another action.")}</Text> : null}
+    {state === "error" && !data && !feedback.message ? <Text dimColor>{t("Update status is unknown.")}</Text> : null}
     {data ? <>
       <Text>{t("Current version   ")}{data.version}</Text>
       {setting(0, data.schema_version !== 1 ? channel : data.channel)}
@@ -205,7 +222,7 @@ export function UpdatePanel({client, cols, onDismiss, onUpdateExit, language = "
       {setting(2, data.schema_version !== 1 && Boolean(data.preferences?.automatic_download))}
       {setting(3, data.schema_version !== 1 && Boolean(data.preferences?.automatic_install))}
       {data.schema_version === 6 && !data.automatic_install_available ? <Text color={colors.warning}>{t("Automatic installation requires the current managed launcher. Checking/downloading remain separate capabilities.")}</Text> : null}
-      {data.schema_version !== 1 && data.automatic ? <Text dimColor>{t("Background: ")}{Object.hasOwn(updateChinese,data.automatic.state) ? t(data.automatic.state as keyof typeof updateChinese) : data.automatic.state}{data.automatic.error_code ? " · " + data.automatic.error_code : ""}</Text> : null}
+      {data.schema_version !== 1 && data.automatic ? <Text dimColor>{t("Background: ")}{Object.hasOwn(updateChinese,data.automatic.state) ? t(data.automatic.state as keyof typeof updateChinese) : data.automatic.state}{data.automatic.error_code ? " · " + diagnostic(data.automatic.error_code) : ""}</Text> : null}
       {data.schema_version === 1 ? <>
         <Text>{t("Software updates  Disabled")}</Text>
         <Text color={colors.warning}>{t("This is not a managed installation. Update settings, downloads and installation are unavailable; only local status refresh is available.")}</Text>

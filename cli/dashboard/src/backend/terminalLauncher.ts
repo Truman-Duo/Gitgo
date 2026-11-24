@@ -114,14 +114,24 @@ export function shouldRelaunchInConfiguredTerminal(options: {
   compiled: boolean;
   platform: NodeJS.Platform;
   argv: string[];
-  parentProcessName?: string;
+  interactive?: boolean;
+  origin?: string;
+  selected?: string;
   config: TerminalLauncherConfig;
 }): boolean {
   if (!options.compiled || options.platform !== "win32") return false;
   if (options.argv.includes("--attached") || options.argv.includes("--mock")) return false;
   if (options.config.terminal === "current") return false;
-  // A packaged launch uses the saved preference from Explorer or an existing
-  // shell alike. --attached is the explicit override and handoff loop guard.
+  // An explicit profile launch still asks Windows Terminal to apply that profile.
+  if (options.argv.includes("--windows-terminal-profile")) return true;
+  if (options.interactive) {
+    if (options.selected === "auto") return false;
+    let origin;
+    try { origin = options.origin ? JSON.parse(options.origin) : null; }
+    catch { return true; }
+    if (options.config.terminal === "windows_terminal" && origin?.terminal === "windows_terminal") return false;
+    if (options.config.terminal === "git_bash_console" && origin?.terminal === "git_bash_console") return false;
+  }
   return true;
 }
 
@@ -155,12 +165,13 @@ export function terminalChildCommand(
   executable: string,
   forwardedArgs: string[],
   windowsTerminalPath = "wt.exe",
+  launcherArgs: string[] = [],
 ): {command: string; args: string[]} | null {
   const args = forwardedArgs.filter((item, index) => item !== "--attached" &&
     item !== "--smoke-input-b64" && forwardedArgs[index - 1] !== "--smoke-input-b64");
   // In source mode Bun requires the entry point before Gitgo's flags.
   const source = /\.(?:tsx?|m?js)$/.test(args[0] || "") ? args.shift() : undefined;
-  const childArgs = [executable, ...(source ? [source] : []), "--attached", ...args];
+  const childArgs = [executable, ...launcherArgs, ...(source ? [source] : []), "--attached", ...args];
   if (config.terminal === "git_bash") {
     // MSYS accepts forward-slash Windows paths. Keep argument vectors intact;
     // the Bash program only execs positional parameters, never interpolated text.
@@ -226,9 +237,9 @@ export async function relaunchInConfiguredTerminal(
   config: TerminalLauncherConfig,
   executable = process.execPath,
   forwardedArgs = process.argv.slice(1),
-  options: {timeoutMs?: number} = {},
+  options: {timeoutMs?: number; launcherArgs?: string[]} = {},
 ): Promise<{launched: boolean; message: string}> {
-  const child = terminalChildCommand(config, executable, forwardedArgs);
+  const child = terminalChildCommand(config, executable, forwardedArgs, undefined, options.launcherArgs);
   if (!child) return {launched: false, message: "Continuing in the current terminal."};
   try {
     // The Host resolves candidates. Never search cwd/PATH again at launch.

@@ -198,13 +198,21 @@ async function main() {
     : new NativeHostClient(PYTHON, GITGO_DIR, INTERNAL_HOST);
   if (client instanceof NativeHostClient) {
     await client.start();
-    process.stderr.write("[gitgo-dashboard] Native host mode\n");
   }
   setBackendClient(client);
 
   let terminals: TerminalInventory | undefined;
   let startupNotice = "";
   const requestWindowsProfile=process.platform==='win32'&&process.argv.includes('--windows-terminal-profile')&&!process.argv.includes('--attached');
+  const launchInTerminal = (config: ReturnType<typeof launcherFromInventory>) =>
+    managed && process.platform === "win32"
+      ? relaunchInConfiguredTerminal(config, resolve(managed, "bootstrap/gitgo-host/gitgo-host.exe"),
+          process.argv.slice(2), {launcherArgs: ["--gitgo-internal-role", "managed-launch"]})
+      : relaunchInConfiguredTerminal(config);
+  const terminalContext = {
+    interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    origin: process.env.GITGO_FRONTEND_ORIGIN,
+  };
   if (!useMock) {
     try {
       terminals = await (requestWindowsProfile?detectTerminals(client):startupTerminals(client, process.argv.includes("--attached"))) as TerminalInventory;
@@ -220,12 +228,12 @@ async function main() {
   }
   if (terminals?.configured && shouldRelaunchInConfiguredTerminal({
     compiled: COMPILED||requestWindowsProfile, platform: process.platform, argv: process.argv,
-    config: launcherFromInventory(terminals),
+    ...terminalContext, selected: terminals.selected, config: launcherFromInventory(terminals),
   })) {
     process.stderr.write("[gitgo-dashboard] Opening configured terminal…\n");
     const handoff = client instanceof NativeHostClient
-      ? await transferTerminalOwner(client, () => relaunchInConfiguredTerminal(launcherFromInventory(terminals!)))
-      : await relaunchInConfiguredTerminal(launcherFromInventory(terminals));
+      ? await transferTerminalOwner(client, () => launchInTerminal(launcherFromInventory(terminals!)))
+      : await launchInTerminal(launcherFromInventory(terminals));
     if (handoff.launched) { await client.close(); process.exit(0); }
     startupNotice = handoff.message;
   }
@@ -256,10 +264,12 @@ async function main() {
   const completeTerminalSetup = async () => {
     const selected = await detectTerminals(client) as TerminalInventory;
     const config = launcherFromInventory(selected);
-    if (config.terminal === "current") return {completed: true, message: "Saved · continuing in the current terminal"};
+    if (config.terminal === "current" || (process.platform === "win32" && !shouldRelaunchInConfiguredTerminal({
+      compiled: true, platform: process.platform, argv: [], ...terminalContext, selected: selected.selected, config,
+    }))) return {completed: true, message: "Saved · continuing in the current terminal"};
     const handoff = client instanceof NativeHostClient
-      ? await transferTerminalOwner(client, () => relaunchInConfiguredTerminal(config))
-      : await relaunchInConfiguredTerminal(config);
+      ? await transferTerminalOwner(client, () => launchInTerminal(config))
+      : await launchInTerminal(config);
     if (handoff.launched) {
       await shutdown(0);
     }
