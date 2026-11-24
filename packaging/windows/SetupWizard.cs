@@ -221,8 +221,13 @@ internal sealed class SetupWizard : Form
                     : Local("正在安装程序并注册快捷方式…", "Installing the program and registering shortcuts…")))));
             if (result.ExitCode != 0)
             {
-                var code = Regex.Match(result.Errors, @"\b(?:UPDATE|NATIVE_ENTRY)_[A-Z0-9_]+\b(?:: [^\r\n]{1,220})?");
+                var code = Regex.Match(result.Output + "\n" + result.Errors, @"\b(?:UPDATE|NATIVE_ENTRY)_[A-Z0-9_]+\b");
                 var detail = code.Success ? code.Value : Local("退出码 ", "Exit code ") + result.ExitCode;
+                if (detail == "UPDATE_ACL_INVALID")
+                    detail += Local("\r\n现有配置或安装文件的访问权限未通过校验。请检查所选目录及配置文件的权限。",
+                        "\r\nAccess checks failed for the configuration or installation files. Check permissions for the selected folder and configuration file.");
+                if (detail == "UPDATE_INSTALL_INVALID" || detail == "UPDATE_PROTECTED_PATHS")
+                    detail += Local("\r\n请选择新的本机安装目录，且与项目和配置分开。", "\r\nChoose a new local installation folder outside project and configuration locations.");
                 ShowFailure(detail);
                 return;
             }

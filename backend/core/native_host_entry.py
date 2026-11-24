@@ -151,9 +151,17 @@ def _main(values: list[str]) -> int:
         parser.add_argument("--protected-path", action="append", default=[])
         parser.add_argument("--desktop-folder", type=Path)
         args = parser.parse_args(role_argv)
+        from backend.core.native_entry import NativeEntryError
         from backend.core.update.installation import install_from_frozen_package
+        from backend.core.update.validation import UpdateError
         from backend.core.protocol_io import dump_protocol_json
-        receipt = install_from_frozen_package(args.root, args.bin_dir, args.protected_path, desktop_folder=args.desktop_folder)
+        try:
+            receipt = install_from_frozen_package(args.root, args.bin_dir, args.protected_path, desktop_folder=args.desktop_folder)
+        except (UpdateError, NativeEntryError, OSError) as error:
+            code = (error.code if isinstance(error, UpdateError) else
+                    str(error) if isinstance(error, NativeEntryError) else "UPDATE_INSTALL_IO")
+            print(dump_protocol_json({"type": "install_rejected", "code": code}), flush=True)
+            return 2
         print(dump_protocol_json(receipt), flush=True)
         return 0
     if name == "native-entry":
