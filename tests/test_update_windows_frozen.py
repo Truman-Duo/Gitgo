@@ -177,11 +177,19 @@ except Exception as error:
     assert launch.returncode == 0, launch.stderr
     assert launch.stdout.strip() == "Gitgo " + old
     before = (root / "control/ledger.json").read_bytes()
-    duplicate = subprocess.run([shell, "-NoProfile", "-File", str(seed / "install-managed.ps1"),
-        "-Root", str(root), "-BinDir", str(bin_dir)], env=env,
-        cwd=base, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-    assert duplicate.returncode != 0
+    command_before = command.read_bytes()
+    install_args = ["-Root", str(root), "-BinDir", str(bin_dir), "-ProtectedPath", str(base / "protected")]
+    retry = subprocess.run([shell, "-NoProfile", "-File", str(seed / "install-managed.ps1"), *install_args],
+        env=env, cwd=base, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    assert retry.returncode == 0, retry.stderr
     assert (root / "control/ledger.json").read_bytes() == before
+    assert command.read_bytes() == command_before
+
+    foreign = subprocess.run([shell, "-NoProfile", "-File", str(base / "candidate/install-managed.ps1"), *install_args],
+        env=env, cwd=base, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    assert foreign.returncode != 0
+    assert (root / "control/ledger.json").read_bytes() == before
+    assert command.read_bytes() == command_before
 
 def test_real_windows_bootstrap_automatically_applies_prepared_update_on_clean_exit(actual_lab):
     store, prepare, boot, _, old, new, env = actual_lab

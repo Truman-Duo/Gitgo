@@ -192,7 +192,11 @@ test("Update uses standard field colors, label-only blink and bounded selection 
     await wait(450);expect(io.line(io.locate("预览版").y)).not.toContain("更新渠道");
     expect(io.locate("预览版").x).toBe(draftValue.x);expect(writes).toBe(0);
     await io.send("\x1b[C");expect(io.line(draftValue.y)).toContain("正式版");expect(writes).toBe(0);
-    await io.send("\x1b");expect(io.line(draftValue.y)).toContain("预览版");expect(io.line(draftValue.y)).toContain("更新渠道");
+    await io.send("\x1b");
+    const deadline=performance.now()+2000;
+    const restored=()=>{const line=io.line(draftValue.y);return line.includes("更新渠道")&&line.includes("预览版");};
+    while(!restored()&&performance.now()<deadline)await wait(20);
+    expect(io.line(draftValue.y)).toContain("预览版");expect(io.line(draftValue.y)).toContain("更新渠道");
     expect(calls).toEqual(["update.status"]);
     for(let y=0;y<16;y++)expect(io.line(y)).not.toContain("›");
   }finally{io.close();}

@@ -160,33 +160,13 @@ def test_output_budget_terminates_capture_without_claiming_rollback():
             stream.close()
 
 
-@contextmanager
-def _native_test_runtime_directory():
-    parent = Path(tempfile.gettempdir()).resolve(strict=True)
-    directory = tempfile.TemporaryDirectory(prefix="gitgo-native-runtime-", dir=parent)
-    root = Path(directory.name)
-    try:
-        yield root
-    finally:
-        deadline = time.monotonic() + 3
-        while True:
-            if root.resolve() != root:
-                raise RuntimeError("Native test runtime directory is no longer owned by the fixture")
-            try:
-                directory.cleanup()
-                break
-            except PermissionError as exc:
-                if getattr(exc, "winerror", None) != 32 or time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.1)
-
-
 @pytest.fixture(scope="module")
 def isolated_python():
     """Copy only stdlib and interpreter into a disposable ACL-test runtime."""
     if sys.platform != "win32":
         pytest.skip("Windows AppContainer integration")
-    with _native_test_runtime_directory() as root:
+    with tempfile.TemporaryDirectory(prefix="gitgo-native-runtime-") as raw:
+        root = Path(raw)
         base = Path(sys.base_prefix)
         # An embedded launcher may point _pth at its dedicated base runtime.
         # Resolve the actual interpreter/stdlib dependencies rather than the
