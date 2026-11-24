@@ -51,18 +51,22 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
     tools = {
         "run_test": AgentTool(
             name="run_test", description=load_prompt("tools/run_test"),
+            immediate_interface=True,
             execution_contract=data_broker("tests.workspace.run"),
             parameters={"type": "object", "properties": {
                 "test_id": {"type": "string"}, "target": {"type": "string"},
                 "seeds": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "integer"}},
                 "input_files": {"type": "array", "items": {"type": "string"},
                     "description": "Explicit local source/config/data dependencies; target is always included. Omit for bounded business-workspace coverage."},
-                "timeout": {"type": "integer", "minimum": 1, "maximum": 900}}, "required": ["test_id", "target"]},
+                "execution_files": {"type": "array", "maxItems": 4096, "items": {"type": "string"},
+                    "description": "Optional exact local dependencies, including helpers and fixtures. The test target, input_files and standard ancestor pytest configuration are included in this scoped execution view."},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": 900}}, "required": ["target"]},
             execute=_unreachable, read_only=False, effect=ToolEffect.PROCESS,
             cancellation=CancellationMode.COOPERATIVE,
             resources=["process:pytest", "filesystem:.gitgo/test_manifest.json"], timeout=900),
         "read_file": AgentTool(
             name="read_file",
+            immediate_interface=True,
             description=(
                 load_prompt('tools/read_file')
             ),
@@ -72,6 +76,11 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "minimum": 0},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+                    "ranges": {"type": "array", "minItems": 1, "maxItems": 8,
+                        "items": {"type": "object", "properties": {
+                            "offset": {"type": "integer", "minimum": 0},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 5000}},
+                            "required": ["offset", "limit"], "additionalProperties": False}},
                     "bind_dependency": {"type": "boolean", "description": "Pin this whole file as an important input to the task result; sealed-result promotion requires its version to remain applicable. Ordinary reads need no pin."},
                 },
                 "required": ["path"],
@@ -86,6 +95,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         ),
         "list_files": AgentTool(
             name="list_files",
+            immediate_interface=True,
             description=(load_prompt('tools/list_files')),
             parameters={
                 "type": "object",
@@ -93,6 +103,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "path": {"type": "string"},
                     "pattern": {"type": "string"},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 5000},
+                    "max_depth": {"type": "integer", "minimum": 1, "maximum": 64},
                     "include_hidden": {"type": "boolean"},
                     "respect_ignore": {"type": "boolean"},
                     "exclude": {"type": "array", "items": {"type": "string"}},
@@ -111,6 +122,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         ),
         "search_text": AgentTool(
             name="search_text",
+            immediate_interface=True,
             description=(
                 load_prompt('tools/search_text')
             ),
@@ -123,6 +135,7 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     "case_sensitive": {"type": "boolean"},
                     "include": {"type": "array", "items": {"type": "string"}},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 2000},
+                    "max_depth": {"type": "integer", "minimum": 1, "maximum": 64},
                     "output_mode": {"type": "string", "enum": ["content", "files", "count"]},
                     "context_lines": {"type": "integer", "minimum": 0, "maximum": 5},
                     "offset": {"type": "integer", "minimum": 0, "maximum": 10000},
@@ -331,7 +344,8 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
         "exec_command": AgentTool(
             name="exec_command",
             description=(
-                load_prompt('tools/exec_command')
+                render_prompt('tools/exec_command',
+                    native_publication=load_prompt('tools/native_workspace_publication').strip())
             ),
             parameters={
                 "type": "object",
@@ -363,8 +377,10 @@ def build_workspace_tools(workspace_path: str | Path) -> dict[str, AgentTool]:
                     'tools/shell_script',
                     auto_shell='powershell' if sys.platform == 'win32' else 'bash',
                     platform_guidance=load_prompt(
-                        'tools/shell_powershell' if sys.platform == 'win32' else 'tools/shell_posix',
+                        {'win32': 'tools/shell_powershell', 'darwin': 'tools/shell_macos'}.get(
+                            sys.platform, 'tools/shell_posix'),
                     ),
+                    native_publication=load_prompt('tools/native_workspace_publication').strip(),
                 )
             ),
             parameters={

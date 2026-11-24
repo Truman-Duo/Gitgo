@@ -1,0 +1,3 @@
+The native runner isolates the operation in a private view of project files. Changes in that view are candidates. The file service checks them before publishing to the project. Use the publication receipt to tell what changed.
+
+Use relative workspace paths. The private view excludes repository metadata and Gitgo state.

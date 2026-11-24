@@ -225,6 +225,10 @@ def _number(args, name, default, maximum, minimum=0):
     return value
 
 
+def read_max_depth(args):
+    return _number(args, "max_depth", None, 64, 1) if "max_depth" in args else None
+
+
 def _failure(code, detail, **facts):
     from backend.core.errors import error_payload
     return {**facts, **error_payload(code, message=detail, next_actions=[{
@@ -242,6 +246,7 @@ def search(args, workspace, root, ignored_dirs, *, listing=False):
         limit = _number(args, "max_results", 500 if listing else 200, 5000 if listing else 2000, 1)
         context = _number(args, "context_lines", 0, 5)
         timeout = _number(args, "timeout", 20, 30, 1)
+        depth = read_max_depth(args)
         includes = [args.get("pattern", "**/*")] if listing else args.get("include", [])
         excludes = args.get("exclude", [])
         if not isinstance(includes, list) or not isinstance(excludes, list) or any(not isinstance(p, str) or not p or p.startswith("!") for p in includes + excludes):
@@ -262,6 +267,7 @@ def search(args, workspace, root, ignored_dirs, *, listing=False):
     page.target = None if root.is_dir() else root
     page.scope = {"path": _relative(workspace, root), "include_hidden": args.get("include_hidden", False),
                   "respect_ignore": args.get("respect_ignore", True), "include": includes, "exclude": excludes,
+                  **({"max_depth": depth} if depth is not None else {}),
                   "generated_exclusions": sorted(ignored_dirs), "symlinks": "not followed",
                   "max_file_bytes": None if listing else MAX_FILE_BYTES}
     deadline = time.monotonic() + timeout
@@ -321,14 +327,20 @@ def _file_row(workspace, path):
 
 def _ripgrep(rg, args, workspace, root, ignored, listing, mode, pattern, includes, excludes, context, page, deadline):
     command = [rg, "--no-config", "--no-ignore-parent", "--no-ignore-global", "--sort=path", "--threads=1", "--color=never"]
+    if "max_depth" in page.scope:
+        command.append(f"--max-depth={page.scope['max_depth']}")
     if args.get("include_hidden", False):
         command.append("--hidden")
     if args.get("respect_ignore", True) is False:
         command.append("--no-ignore")
     for glob in includes:
         command.append("--glob=" + glob)
-    for glob in [*excludes, *(f"**/{d}/**" for d in sorted(ignored))]:
+    for glob in excludes:
         command.append("--glob=!" + glob)
+    for directory in sorted(ignored):
+        # Prune the directory itself before ripgrep tries to read it. The
+        # Windows read view intentionally never grants these directories.
+        command.append(f"--glob=!**/{directory}/")
     if not args.get("include_hidden", False):
         # Positive rg globs implicitly override its hidden-file filter. The
         # explicit Host option remains authoritative in both engines.
@@ -449,6 +461,7 @@ def _fallback(args, workspace, root, ignored, listing, mode, pattern, includes, 
     if any(any(ch in glob for ch in "{}[\\") for glob in includes + excludes):
         return _failure("SEARCH_ENGINE_REQUIRED", "Advanced globs require ripgrep.", **page.result("python", partial=True))
     boundary = page.boundary
+    depth = page.scope.get("max_depth")
     scanned, read_errors = 0, False
 
     def files(directory):
@@ -472,6 +485,8 @@ def _fallback(args, workspace, root, ignored, listing, mode, pattern, includes, 
             if getattr(path, "is_junction", lambda: False)():
                 continue
             if entry.is_dir(follow_symlinks=False):
+                if depth is not None and len(path.relative_to(boundary).parts) >= depth:
+                    continue
                 if not path.resolve().is_relative_to(boundary):
                     read_errors = True
                     page.warn("SEARCH_SCOPE_SKIPPED", "发现超出搜索范围的目录链接，已跳过。")

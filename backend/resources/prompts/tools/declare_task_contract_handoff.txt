@@ -1,0 +1,2 @@
+## Handoff after observation
+- For a handoff after observation, send execution_mode=delegate, routing_transition=handoff_to_worker and a short handoff_summary with findings and remaining work. Use delegate_initial before work starts. Include new obligations with append. Runtime uses actual observation/action receipts.

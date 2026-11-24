@@ -1,6 +1,7 @@
 """Real cross-process coordination of the operator-only ACL path."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 
@@ -9,6 +10,19 @@ import pytest
 from backend.core.windows_acl import management_lock, SecurityConflict
 
 pytestmark = pytest.mark.skipif(sys.platform != 'win32', reason='Native Windows operator mutex')
+
+
+def test_operator_lock_serializes_threads_in_one_process():
+    def claim():
+        with management_lock():
+            return True
+
+    with ThreadPoolExecutor(1) as pool:
+        with management_lock():
+            with pytest.raises(SecurityConflict, match='Another ACL configuration operation is active') as failure:
+                pool.submit(claim).result(timeout=5)
+            assert failure.value.code == 'SANDBOX_ACL_MANAGEMENT_BUSY'
+        assert pool.submit(claim).result(timeout=5)
 
 
 def test_operator_lock_serializes_distinct_processes():

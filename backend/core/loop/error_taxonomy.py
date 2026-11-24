@@ -181,6 +181,12 @@ def classify_tool_error(exception: Exception,
     Defaults to TOOL/CRASH — the caller (tool_pipeline) should override
     nature to BUSINESS when the tool completed but returned a business failure.
     """
+    from backend.core.windows_acl import SecurityConflict
+    from backend.core.sandbox import SandboxDenied
+    if isinstance(exception, (SecurityConflict, SandboxDenied)):
+        return ClassifiedError(source=ErrorSource.SYSTEM, severity=ErrorSeverity.ERROR,
+            retryability=Retryability.NON_RETRYABLE, nature=ErrorNature.CRASH,
+            code=exception.code, message=str(exception), original=exception)
     if timeout or isinstance(exception, TimeoutError):
         return ClassifiedError(
             source=ErrorSource.TOOL,

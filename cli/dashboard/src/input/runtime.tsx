@@ -3,7 +3,8 @@ import { useInput, useSelection, ScrollBox } from "@anthropic/ink";
 import type { ScrollBoxHandle } from "@anthropic/ink";
 import { InputRouter, applicationBindings, type InputKey, type BindingSettings } from "./router.js";
 import { readClipboard } from "../utils/clipboard.js";
-import {scrollViewport} from "./scrollViewport.js";
+import {scrollViewport,wheelPosition} from "./scrollViewport.js";
+import type {InputObservation} from "../runtime/observer.js";
 
 const RouterContext = createContext<InputRouter | null>(null);
 const PriorityContext = createContext(0);
@@ -19,9 +20,10 @@ export function useBindingSettings(settings: BindingSettings) {
 
 export type VerificationInput = {afterMs: number; input: string; key: InputKey};
 
-export function InputProvider({ children, settings, verificationInput, clipboardReader=readClipboard }: {
+export function InputProvider({ children, settings, verificationInput, clipboardReader=readClipboard, observeInput }: {
   children: React.ReactNode; settings?: BindingSettings; verificationInput?: VerificationInput[];
   clipboardReader?:()=>Promise<string>;
+  observeInput?:(event:InputObservation)=>void;
 }) {
   const router = useRef(new InputRouter(applicationBindings)).current;
   const [revision, setRevision] = useState(0);
@@ -51,16 +53,25 @@ export function InputProvider({ children, settings, verificationInput, clipboard
       return true; // Never let a clipboard shortcut reach task cancellation.
     } }), [router, selection]);
   useInput((input, key, event: any) => {
+    const observedAt=observeInput?performance.now():0;
     // A person taking over a verification window owns it from this point on.
     // Never let a later test timer type a command into their new field/scene.
     manualInput.current=true;verificationTimers.current.forEach(clearTimeout);verificationTimers.current=[];
     const owner = router.dispatch({
       input,
-      key: {...key, paste: Boolean(event?.keypress?.isPasted || (key as InputKey).paste)},
+      key: {...key, wheelPosition:wheelPosition(event?.keypress?.sequence || ""),
+        paste: Boolean(event?.keypress?.isPasted || (key as InputKey).paste)},
     });
     // The selected application owner also consumes renderer defaults. Raw
     // capture and rebound editor keys must not additionally suspend Unix.
     if (owner) event?.stopImmediatePropagation?.();
+    if(observeInput){
+      const classified=(key as InputKey).paste||event?.keypress?.isPasted?1:key.wheelUp||key.wheelDown?2:
+        (key as InputKey).mouse?3:key.upArrow||key.downArrow||key.leftArrow||key.rightArrow||key.pageUp||key.pageDown?4:
+        key.ctrl||key.return||key.escape?5:0;
+      // The observer receives numeric metadata; actual field contents never leave the input owner.
+      try{observeInput({atMs:observedAt,dispatchMs:performance.now()-observedAt,kind:classified,length:input.length,handled:owner?1:0});}catch{}
+    }
   });
   return <RouterContext.Provider value={router}><BindingsContext.Provider value={bindingsContext}><ClipboardReaderContext.Provider value={clipboardReader}>{children}</ClipboardReaderContext.Provider></BindingsContext.Provider></RouterContext.Provider>;
 }

@@ -25,7 +25,7 @@ _GOVERNANCE_TRACE_EVENTS = {
     "governance_snapshot", "completion_gate", "decision_required", "decision_resumed",
     "user_decision_requested", "user_decision_received", "context_compaction_requested",
     "context_compaction_completed", "context_compaction_failed", "context_window_action",
-    "context_window_exceeded", "task_bundle_delegated", "agent_dag_admitted",
+    "context_window_exceeded", "task_bundle_delegated", "agent_dag_admitted", "agent_dag_admission_failed",
     "deadline_extended", "repository_scope_blocked", "repository_scope_warning",
     "session_recovery_blocked", "session_recovery_resumed", "session_recovery_failed",
     "session_recovery_discarded", "storage_health", "worktree_leased", "worktree_sealed",
@@ -145,7 +145,8 @@ def _external_workspace(path):
 
 def _public_provider(provider: dict) -> dict:
     from backend.core.llm_config import LLMConfigManager
-    result = {k: v for k, v in provider.items() if k not in {"api_key", "secret_ref"}}
+    from backend.core.provider_budget import resolve_provider
+    result = {k: v for k, v in resolve_provider(provider).items() if k not in {"api_key", "secret_ref"}}
     key = str(provider.get("api_key", ""))
     result["api_key_present"] = bool(key)
     result["revision"] = LLMConfigManager.revision(provider)
@@ -239,11 +240,18 @@ class ApplicationServices:
             "publish.collaborate": lambda project, **args: self.publish_command("collaborate", project, args),
             "publish.collaborate.send": lambda project, **args: self.publish_command("collaborate_send", project, args),
             "publish.account.save": self.publish_account_save,
+            "publish.signing.save": self.publish_signing_save,
             "publish.link_task": lambda project, **args: self.publish_command("link_task", project, args),
             "publish.package": lambda project, **args: self.publish_command("package", project, args),
             "publish.export": lambda project, **args: self.publish_command("export", project, args),
             "publish.tag": lambda project, **args: self.publish_command("tag", project, args),
             "publish.release": lambda project, **args: self.publish_command("release", project, args),
+            "publish.release.plan": lambda project, **args: self.publish_command("release_plan", project, args),
+            "publish.release.run": lambda project, **args: self.publish_command("release_run", project, args),
+            "publish.release.cancel": lambda project, **args: self.publish_command("release_cancel", project, args),
+            "publish.release.reconcile": lambda project, **args: self.publish_command("release_reconcile", project, args),
+            "publish.release.status": self.publish_release_status,
+            "publish.release.sources": self.publish_release_sources,
             "publish.import_package": lambda project, **args: self.publish_command("import_package", project, args),
             "publish.distribution_reconcile": lambda project, **args: self.publish_command("distribution_reconcile", project, args),
             "publish.download": lambda project, **args: self.publish_command("download", project, args),
@@ -924,6 +932,23 @@ class ApplicationServices:
             code = "PUBLISH_REQUEST_CONFLICT" if str(exc) == "COMMAND_IDENTITY_CONFLICT" else "PUBLISH_OPERATION_UNCERTAIN"
             raise OperationError(code, "Read the saved item before retrying this request") from exc
 
+    def publish_release_sources(self, project, item_id, plan_binding, page=1):
+        from backend.core.publish.release_sources import release_sources
+        from backend.remote.publish_platform import PlatformError
+        from backend.core.publish.state import PublishError
+        try:
+            return release_sources(self._publish_project(project), item_id, plan_binding=plan_binding, page=page)
+        except (PublishError, PlatformError) as exc:
+            raise OperationError(exc.code, "Release sources could not be read") from exc
+
+    def publish_release_status(self, project, item_id, job_id="", after_sequence=0, limit=50):
+        from backend.core.publish.release_query import release_status
+        from backend.core.publish.state import PublishError
+        try:
+            return release_status(self._publish_project(project), item_id, job_id=job_id, after_sequence=after_sequence, limit=limit)
+        except PublishError as exc:
+            raise OperationError(exc.code, "Saved release observations could not be read") from exc
+
     def publish_shared_items(self, project, item_id, observation_id="", limit=20, cursor=""):
         from backend.core.publish.shared_query import shared_items
         from backend.core.publish.state import PublishError
@@ -1005,6 +1030,7 @@ class ApplicationServices:
             "authorship": dict(proj.authorship or {}),
             "repositories": {"workspace": proj.workspace_path, "trial": proj.trial_path or "", "formal": proj.backup_path or ""},
             "remote_url": str(remote or ""),
+            "platform_target": dict(proj.publish_platform or {}),
             "stages": {"trial_configured": bool(proj.trial_path),
                        "release_configured": bool(remote or proj.backup_path)},
         }
@@ -1021,6 +1047,19 @@ class ApplicationServices:
             raise OperationError(exc.code, "Publish account could not be saved") from exc
         return {**result, "request_id": request_id, "operation_id": "account-settings", "effect_state": "committed"}
 
+    def publish_signing_save(self, project: str, target: dict, key_id: str, token: str, request_id: str) -> dict:
+        # Credential input never enters the Publish command receipt/CAS path.
+        from backend.core.publish.release_signing_keys import provision
+        from backend.core.publish.state import PublishError
+        from backend.remote.publish_platform import PlatformError
+        from backend.core.storage import get_storage
+        current = self._publish_project(project)
+        try:
+            result = provision(get_storage(current.workspace_path),target,key_id,token)
+        except (PublishError,PlatformError) as exc:
+            raise OperationError(exc.code,"Publisher signing key could not be saved") from exc
+        return {**result,"request_id":request_id,"operation_id":"signing-settings","effect_state":"committed"}
+
     def publish_set(self, project: str, section: str, value: Any, expected_value: Any = None) -> dict:
         from backend.core.config import normalize_outbound_policy
         from backend.models import RemoteTarget
@@ -1029,10 +1068,18 @@ class ApplicationServices:
             cfg, proj = _project(project)
             current = {"privacy": dict(proj.outbound_policy or {}), "commit_format": dict(proj.commit_format or {}),
                 "privacy_authorship": {"privacy": dict(proj.outbound_policy or {}), "authorship": dict(proj.authorship or {})},
-                "checks": proj.publish_checks, "remote_url": str(proj.release.remote.url or "") if proj.release.remote else ""}
+                "checks": proj.publish_checks, "remote_url": str(proj.release.remote.url or "") if proj.release.remote else "",
+                "platform_target": dict(proj.publish_platform or {})}
             if expected_value is not None and expected_value != current.get(clean_section):
                 raise OperationError("PUBLISH_SETTINGS_CHANGED", "Settings changed; reload before saving this draft")
-            if clean_section == "privacy_authorship":
+            if clean_section == "platform_target":
+                from backend.remote.publish_platform import PlatformTarget, PlatformError
+                try:
+                    result = PlatformTarget.parse(value).descriptor()
+                except PlatformError as exc:
+                    raise OperationError(exc.code, "Invalid repository account target") from exc
+                proj.publish_platform = result
+            elif clean_section == "privacy_authorship":
                 if not isinstance(value, dict) or set(value) != {"privacy", "authorship"}:
                     raise OperationError("INVALID_OUTBOUND_POLICY", "Expected privacy and authorship")
                 try:
@@ -1641,15 +1688,19 @@ class ApplicationServices:
                       api_key: str = "", model_id: str = "",
                       retain_api_key: bool = False,
                       protocol: str = "openai_chat",
-                      context_window: int = 128000,
+                      context_window: int | None = None,
                       max_output_tokens: int = 4096,
                       kind: str = "remote", auth_mode: str = "api_key",
                       expected_revision: str = "", preset_id: str = "",
                       model_receipt: str = "", probe_receipt: str = "",
                       context_source: str = "user", output_source: str = "user", creation_id: str = "",
-                      request_preferences: dict | None = None, models: list[dict] | None = None) -> dict:
+                      request_preferences: dict | None = None, models: list[dict] | None = None,
+                      preserve_runtime_route: bool = False) -> dict:
         from backend.core.llm_config import LLMConfigManager, LLMProvider
         from backend.core.loop.provider_protocol import ProviderProtocol
+        from backend.core.provider_budget import DEFAULT_CONTEXT_BUDGET, resolve_profile
+        if context_window is None:
+            context_window, context_source = DEFAULT_CONTEXT_BUDGET, "default"
         if creation_id:
             import re
             if provider_id or not re.fullmatch(r"[a-f0-9]{12,32}", creation_id):
@@ -1729,12 +1780,16 @@ class ApplicationServices:
             raise OperationError("INVALID_PROVIDER_PRESET", "Unknown connection preset")
         configuration.update(preset_id=preset_id, preset_version=CATALOG_VERSION,
                              sources={"context_window": context_source, "max_output_tokens": output_source})
-        if context_source not in {"user", "default", "discovered", "reference"} or output_source not in {"user", "default", "discovered", "reference"}:
+        if context_source not in {"user", "default", "discovered", "reference", "legacy"} or output_source not in {"user", "default", "discovered", "reference", "legacy"}:
             raise OperationError("INVALID_PARAMETER_SOURCE", "Unknown parameter source")
         if discovered:
             deployment = next((m for m in discovered["models"] if m["id"] == model_id), None)
             if deployment:
                 configuration["deployment"] = deployment
+        resolved = resolve_profile({"model_id": model_id, "context_window": context_window,
+            "sources": configuration["sources"], **{key: configuration[key] for key in ("deployment", "budget") if key in configuration}}, base_url)
+        context_window = resolved["context_window"]
+        configuration.update({key: resolved[key] for key in ("deployment", "budget") if key in resolved})
         limits = configuration.get("deployment", {}).get("limits", {})
         warnings = []
         if max_output_tokens > limits.get("max_output_capacity", max_output_tokens) or context_window > limits.get("context_window", context_window):
@@ -1767,6 +1822,10 @@ class ApplicationServices:
             provider.configuration["models"] = compile_profiles(models, provider.to_dict(), existing.to_dict() if existing else None, self.provider_drafts)
         except (ValueError, TypeError) as exc:
             raise OperationError(str(exc) if isinstance(exc, ValueError) else "INVALID_PROVIDER_MODELS", "Check the API connection's configured models; draft retained") from None
+        if preserve_runtime_route:
+            fields = ("base_url", "api_key", "model_id", "protocol", "kind", "auth_mode")
+            if not existing or any(getattr(existing, key) != getattr(provider, key) for key in fields):
+                raise OperationError("PROVIDER_ROUTE_CHANGE_REQUIRED", "This edit changes the runtime route; wait for an idle boundary")
         try:
             saved = LLMConfigManager.update(provider, expected_revision) if existing else LLMConfigManager.add(provider)
         except ValueError as exc:
@@ -1916,7 +1975,8 @@ class ApplicationServices:
         except ValueError as exc:
             code = str(exc)
             raise OperationError(code if code.isupper() else "PROVIDER_PREVIEW_FAILED",
-                                 "Discovery/test unavailable; check connection or enter the model manually. Draft retained") from None
+                                 "Discovery/test unavailable; check connection or enter the model manually. Draft retained",
+                                 details={**getattr(exc, "details", {}), "request_id": request_id, "action": action}) from None
         except Exception:
             raise OperationError("PROVIDER_PREVIEW_FAILED", "Connection test failed; check URL, protocol, credentials and model. Draft retained") from None
 
@@ -1972,6 +2032,16 @@ class ApplicationServices:
         ).resolve(strict=False)
         if not target.suffix:
             target = target.with_suffix(suffixes[format_name])
+        return self._write_project_export(project, bundle, target, format_name, "minimal" if minimal else "full")
+
+    def export_execution_policy(self, project, policy):
+        _, entry = _project(project)
+        workspace = Path(entry.workspace_path)
+        name = f"execution-policy-v{policy['revision']}-{uuid.uuid4().hex[:8]}.json"
+        target = workspace / ".gitgo" / "exports" / name
+        return self._write_project_export(project, policy, target, "json", "task_execution_policy")
+
+    def _write_project_export(self, project, bundle, target, format_name, scope):
         if target.exists():
             raise OperationError(
                 "EXPORT_DESTINATION_EXISTS",
@@ -2006,7 +2076,7 @@ class ApplicationServices:
             "ok": True, "project": project, "path": str(target),
             "format": format_name, "size": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
-            "scope": "minimal" if minimal else "full",
+            "scope": scope,
         }
 
     @staticmethod

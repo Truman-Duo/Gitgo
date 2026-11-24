@@ -13,6 +13,33 @@ from .models import ProcessStatus
 from .outcome import OutcomeStatus
 
 
+class InvalidAlignmentAssessment(ValueError):
+    """A returned semantic proposal failed evidence compilation, not transport."""
+    def __init__(self, message, *, schema_error=None, validation_details=None):
+        super().__init__(message)
+        self.schema_error = schema_error
+        self.validation_details = validation_details
+        self.code = {
+            'invalid_json': 'ALIGNMENT_RESPONSE_JSON_INVALID',
+            'object_required': 'ALIGNMENT_RESPONSE_SCHEMA_INVALID',
+            'provider_response_incomplete': 'ALIGNMENT_RESPONSE_INCOMPLETE',
+            'delivery_check_required': 'ALIGNMENT_DELIVERY_CHECK_MISSING',
+        }.get(schema_error, 'ALIGNMENT_REQUEST_FRAME_MISSING' if schema_error and
+              schema_error.startswith('request_frame_required:') else
+              'ALIGNMENT_RESPONSE_SCHEMA_INVALID' if schema_error else 'ALIGNMENT_EVIDENCE_VALIDATION_FAILED')
+        if not schema_error and isinstance(validation_details, dict):
+            self.code = {
+                'RECEIVED_ANSWER_NOT_CONSUMED': 'ALIGNMENT_ANSWER_NOT_INTERPRETED',
+                'DEFAULT_REPLACES_FOUNDATIONAL_INTENT': 'ALIGNMENT_FOUNDATIONAL_DEFAULT_FORBIDDEN',
+                'QUESTION_RETIREMENT_INVALID': 'ALIGNMENT_QUESTION_RETIREMENT_INVALID',
+                'QUESTION_FRONTIER_SELECTION_MISSING': 'ALIGNMENT_QUESTION_SELECTION_MISSING',
+                'QUESTION_FRONTIER_SELECTION_BLOCKED': 'ALIGNMENT_QUESTION_SELECTION_BLOCKED',
+                'QUESTION_PROPOSAL_SELECTION_MISSING': 'ALIGNMENT_PROPOSAL_SELECTION_MISSING',
+                'QUESTION_PROPOSAL_SELECTION_AMBIGUOUS': 'ALIGNMENT_PROPOSAL_SELECTION_AMBIGUOUS',
+                'QUESTION_PROPOSAL_INDEX_INVALID': 'ALIGNMENT_PROPOSAL_INDEX_INVALID',
+            }.get(validation_details.get('code'), self.code)
+
+
 @dataclass(frozen=True)
 class AlignmentReviewHooks:
     emit: Callable
@@ -39,10 +66,9 @@ class AlignmentReview:
     def _check(self, instruction, candidate, proposed_questions, *, trigger, proposed_contracts, proposed_files, observation_only):
         process, llm_provider, hooks = self.process, self.provider, self.hooks
         if proposed_questions is not None:
-            from .decision_support import prepare_user_decision
+            from .question_surface import question_proposals
             try:
-                for question in proposed_questions:
-                    prepare_user_decision(process, question)
+                proposed_questions = question_proposals(process, proposed_questions, require_recommendation=True)
             except (ValueError, TypeError, AttributeError) as invalid:
                 # Original tool input must be repaired by its author. An
                 # assessor selecting that proposal cannot repair its schema.
@@ -78,7 +104,8 @@ class AlignmentReview:
             reused_outcome = reuse_unresolved(process, payload, runtime)
         except (ValueError, KeyError, TypeError) as invalid_cache:
             hooks.notice('ALIGNMENT_CACHE_INVALID', '旧解释不能用于当前问题，已回退到模型判断。',
-                         error_type=type(invalid_cache).__name__)
+                         error_type=type(invalid_cache).__name__, phase='requirement_review_reuse',
+                         review_state='fresh_review_required', reuse_state='rejected')
             reused_outcome = None
         if reused_outcome is not None:
             _emit_observation({'event': 'alignment_assessment_reused', 'stage': payload['stage'],
@@ -110,7 +137,8 @@ class AlignmentReview:
             if not process.runtime_preferences.get("alignment_unavailable_notified"):
                 process.runtime_preferences["alignment_unavailable_notified"] = True
                 hooks.notice(
-                    "ALIGNMENT_ASSESSOR_UNAVAILABLE", "当前模型接口未提供语义需求检查；已声明的问题仍受完成门禁约束。")
+                    "ALIGNMENT_ASSESSOR_UNAVAILABLE", "当前模型接口未提供语义需求检查；已声明的问题仍受完成门禁约束。",
+                    phase='requirement_review_capability', review_state='not_available')
             return None
         try:
             from .alignment_routing import reuse_assessment
@@ -124,8 +152,10 @@ class AlignmentReview:
                 # Retain the exact assessor input through the existing private
                 # Trace detail channel, including bounded repair attempts.
                 # The event/UI sees identity only, never this whole payload.
+                from .alignment_policy import selected_modules
                 _emit_observation({'event': 'alignment_assessment_input', 'stage': payload['stage'],
-                    'trigger': reason, 'attempt': attempt + 1}, detail=payload)
+                    'trigger': reason, 'attempt': attempt + 1,
+                    'configured_policy_modules':selected_modules(payload)}, detail=payload)
                 proposal = assessor(payload, before_attempt=before_attempt,
                                     on_notice=alignment_route_notice,
                                     cancel_event=process.cancellation_event)
@@ -165,13 +195,21 @@ class AlignmentReview:
                         # failure, never implicit readiness or another retry.
                         if (isinstance(invalid, ValueError) and not proposal.get('schema_error')
                                 and (proposed_questions is not None or proposed_contracts is not None)):
+                            diagnostic = InvalidAlignmentAssessment(str(invalid),
+                                validation_details=getattr(invalid, 'validation_details', None))
+                            failure = {'code':diagnostic.code, 'reason':'assessment_invalid',
+                                'stage':payload['stage'], 'execution_state':'review_not_applied',
+                                'effect_scope':'reviewed_calls', 'retryable':False,
+                                'validation_details':diagnostic.validation_details,
+                                'recovery_class':'correct_source_bound_proposal'}
                             _emit_observation({'event':'alignment_proposal_repair_required',
-                                'stage':payload['stage'],'reason':str(invalid)[:400]})
+                                'stage':payload['stage'],'reason':str(invalid)[:400], 'failure':failure})
                             return {'alignment_repair': 'The semantic review did not validate this proposal; no tool in the batch may execute. '
                                 + str(invalid)[:400] + '. Inspect the current decision identities and actual answers. '
                                 'Correct or withdraw the proposed scope/question using those facts; preserve accepted requirements. '
-                                'Do not treat this rejection as readiness, permission or a user answer.'}
-                        raise
+                                'Do not treat this rejection as readiness, permission or a user answer.', 'failure':failure}
+                        raise InvalidAlignmentAssessment(str(invalid), schema_error=proposal.get('schema_error'),
+                            validation_details=getattr(invalid, 'validation_details', None)) from invalid
                     # One compiler-style recovery, retaining source inputs and
                     # requirements. Invalid proposals never become user facts.
                     payload = {**payload, "host_validation_error": str(invalid)[:300], "rejected_proposal": proposal,
@@ -186,7 +224,8 @@ class AlignmentReview:
                 remember_unresolved(process, payload, proposal)
             except (ValueError, KeyError, TypeError) as invalid_cache:
                 hooks.notice('ALIGNMENT_CACHE_RECORD_FAILED', '本次解释已采用，但未能建立复用记录；后续仍可正常判断。',
-                             error_type=type(invalid_cache).__name__)
+                             error_type=type(invalid_cache).__name__, phase='requirement_review_reuse_record',
+                             review_state='applied', reuse_state='not_recorded')
             if outcome.get("decision"):
                 return self.pause(outcome)
             if outcome["status"] == "repair":
@@ -217,8 +256,49 @@ class AlignmentReview:
             return hooks.cancellation()
         if isinstance(exc, TaskBudgetExceeded):
             return hooks.budget_exhausted(exc)
-        hooks.notice('ALIGNMENT_REVIEW_FAILED', '需求语义检查未完成，已保留原任务和真实答案；请重试。', error_type=type(exc).__name__)
-        hooks.emit({'event': 'alignment_assessment_failed', 'error_type': type(exc).__name__}, detail={'reason': str(exc)[:400]})
+        from .provider_failure import provider_diagnostic, provider_failure_message
+        from .alignment_policy import AlignmentPolicyUnavailable
+        if isinstance(exc, AlignmentPolicyUnavailable):
+            failure = {'reason':'policy_resource_unavailable','code':'ALIGNMENT_POLICY_UNAVAILABLE',
+                'stage':'requirement_review_input','execution_state':'review_request_not_started',
+                'effect_scope':'reviewed_candidate','retryable':False,
+                'resource':exc.resource,'recovery_class':'restore_bundled_review_policy'}
+            message = '需求检查的指令资源不可用。'
+        elif isinstance(exc, InvalidAlignmentAssessment):
+            failure = {'reason': 'assessment_invalid', 'code': exc.code, 'retryable': False,
+                'exception_types': [type(exc).__name__], 'stage': 'requirement_review',
+                'execution_state': 'review_not_applied', 'effect_scope': 'reviewed_candidate',
+                'recovery_class': 'inspect_assessment_bindings', 'validation_message': str(exc)[:400],
+                'schema_error': exc.schema_error, 'validation_details': exc.validation_details}
+            message = {
+                'ALIGNMENT_RESPONSE_JSON_INVALID': '需求检查返回的 JSON 无效。',
+                'ALIGNMENT_RESPONSE_SCHEMA_INVALID': '需求检查返回的数据结构无效。',
+                'ALIGNMENT_RESPONSE_INCOMPLETE': '需求检查的模型输出未完整返回。',
+                'ALIGNMENT_DELIVERY_CHECK_MISSING': '需求检查缺少交付检查结果。',
+                'ALIGNMENT_REQUEST_FRAME_MISSING': '需求检查缺少有效的当前请求说明。',
+                'ALIGNMENT_ANSWER_NOT_INTERPRETED': '需求检查尚未解释已收到的真实答复。',
+                'ALIGNMENT_FOUNDATIONAL_DEFAULT_FORBIDDEN': '模型默认值不能替代仍待用户决定的要求。',
+                'ALIGNMENT_QUESTION_RETIREMENT_INVALID': '问题撤回缺少有效依据或超出适用范围。',
+                'ALIGNMENT_QUESTION_SELECTION_MISSING': '本轮尚未明确选择要发布的问题。',
+                'ALIGNMENT_QUESTION_SELECTION_BLOCKED': '本轮所选问题的前置条件尚未满足。',
+                'ALIGNMENT_PROPOSAL_SELECTION_MISSING': '需求检查未明确引用原提问，也未给出完整的新问题。',
+                'ALIGNMENT_PROPOSAL_SELECTION_AMBIGUOUS': '需求检查引用了多个可能的提问，需要明确选择。',
+                'ALIGNMENT_PROPOSAL_INDEX_INVALID': '需求检查引用的提问位置无效。',
+            }.get(exc.code, '需求检查的解释未通过真实答复或约束校验。')
+        else:
+            failure = provider_diagnostic(exc, stage="requirement_review")
+            message = provider_failure_message(failure)
+        from .provider_failure import expired_task_budget
+        deadline = expired_task_budget(process, failure)
+        if deadline is not None:
+            hooks.emit({'event':'alignment_assessment_deadline_exceeded','failure':failure})
+            return hooks.budget_exhausted(deadline)
+        hooks.notice('ALIGNMENT_REVIEW_FAILED', message + ' 待审调用尚未执行，原任务和真实答复已保留。',
+                     error_type=type(exc).__name__, failure=failure)
+        hooks.emit({'event': 'alignment_assessment_failed', 'error_type': type(exc).__name__, 'failure': failure},
+                   detail={'failure': failure})
         transition(process, ProcessStatus.FAILED)
-        return hooks.result('需求检查暂未完成，已保留任务和答案，未将其标记为完成。',
-            error_code='ALIGNMENT_REVIEW_FAILED', error_message=type(exc).__name__, outcome_status=OutcomeStatus.FAILED)
+        return hooks.result(message + ' 待审调用尚未执行，任务未标记为完成。',
+            error_code='ALIGNMENT_REVIEW_FAILED', error_message=message,
+            error_details={'failure': failure}, error_retryable=failure['retryable'],
+            outcome_status=OutcomeStatus.FAILED)

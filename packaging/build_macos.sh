@@ -13,6 +13,7 @@ CODESIGN_IDENTITY="-"
 SKIP_ARCHIVE=0
 UPDATE_EVIDENCE=0
 UPDATE_RELEASE_POLICY=""
+NODE_RUNTIME=""
 
 cleanup_bun_artifacts() {
   find "$ROOT" -maxdepth 1 -type f -name '.*.bun-build' -delete
@@ -31,6 +32,7 @@ Usage: packaging/build_macos.sh [options]
   --codesign-identity ID    codesign identity (default: ad-hoc '-')
   --skip-codesign           Do not sign local binaries
   --skip-archive            Stage files without creating a tarball
+  --node-runtime PATH       Explicit local Node/npm toolchain for sandbox acceptance
   --update-evidence         Add opt-in, frozen-runtime-verified data evidence
   --update-release-policy FILE  Pin publisher public keys and channel URLs (requires --update-evidence)
 EOF
@@ -47,6 +49,7 @@ while [ "$#" -gt 0 ]; do
     --codesign-identity) CODESIGN_IDENTITY="$2"; shift 2 ;;
     --skip-codesign) CODESIGN_IDENTITY=""; shift ;;
     --skip-archive) SKIP_ARCHIVE=1; shift ;;
+    --node-runtime) NODE_RUNTIME="$2"; shift 2 ;;
     --update-evidence) UPDATE_EVIDENCE=1; shift ;;
     --update-release-policy) UPDATE_RELEASE_POLICY="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -98,6 +101,7 @@ if [ -e "$STAGE" ] && { [ ! -d "$STAGE" ] || [ -n "$(ls -A "$STAGE")" ]; }; then
   exit 1
 fi
 mkdir -p "$STAGE/internal"
+"$BUN_BIN" "$ROOT/cli/dashboard/scripts/build-icons.ts" --stage "$STAGE/assets/brand"
 
 (
   cd "$ROOT/cli/dashboard"
@@ -114,11 +118,14 @@ cp "$ROOT/cli/dashboard/scripts/launch.mjs" "$ROOT/cli/dashboard/scripts/runtime
 cp "$ROOT/cli/dashboard/dist/cli.js" "$ROOT/cli/dashboard/dist/trace.js" "$STAGE/dashboard/dist/"
 
 HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
+"$PYTHON_BIN" -B "$ROOT/scripts/build_sandbox_native.py"
 "$PYTHON_BIN" -B -m PyInstaller \
   --noconfirm --clean --onedir \
   --name gitgo-host \
   --paths "$ROOT" --collect-submodules backend \
+  --additional-hooks-dir "$ROOT/packaging/pyinstaller-hooks" \
   --hidden-import backend.core.tools.registrations \
+  --hidden-import csv --hidden-import fractions --hidden-import statistics \
   --add-data "$ROOT/backend/resources/keyboard:backend/resources/keyboard" \
   --add-data "$ROOT/backend/resources/prompts:backend/resources/prompts" \
   --distpath "$STAGE/internal" \
@@ -130,6 +137,16 @@ HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
   --binary "$RIPGREP_BIN" --notices "$RIPGREP_NOTICES" \
   --destination "$STAGE/internal/gitgo-host"
 
+if [ -n "${GITGO_CLOC_BUNDLE:-}" ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/stage_workbench_cloc.py" \
+    --bundle "$GITGO_CLOC_BUNDLE" --destination "$STAGE/internal/gitgo-host"
+fi
+
+if [ -n "$NODE_RUNTIME" ]; then
+  "$PYTHON_BIN" -B "$ROOT/scripts/stage_macos_node.py" \
+    --node "$NODE_RUNTIME" --destination "$STAGE/internal/gitgo-host/developer-tools"
+fi
+
 "$PYTHON_BIN" -B "$ROOT/scripts/render_product_manifest.py" \
   --source "$SCRIPT_DIR/product.json" \
   --platform macos \
@@ -138,9 +155,15 @@ HOST_BUILD="$ROOT/build/terminal-host-macos-$ARCH"
 cp "$SCRIPT_DIR/macos/install.sh" "$STAGE/install.sh"
 cp "$SCRIPT_DIR/unix/installer-common.sh" "$STAGE/installer-common.sh"
 cp "$SCRIPT_DIR/macos/uninstall.sh" "$STAGE/uninstall.sh"
+cp "$SCRIPT_DIR/macos/sandbox-helper.sh" "$STAGE/sandbox-helper.sh"
+cp "$ROOT/scripts/manage_macos_sandbox_service.py" "$STAGE/manage_macos_sandbox_service.py"
 cp "$ROOT/LICENSE.md" "$STAGE/LICENSE.md"
+MACOS_ENTRY_LAUNCHER="$HOST_BUILD/gitgo-entry"
+command -v clang >/dev/null || { echo 'Clang is required for the Finder entry' >&2; exit 1; }
+clang -O2 -Wall -Wextra -Werror -arch "$ARCH" "$SCRIPT_DIR/macos/launcher.c" -o "$MACOS_ENTRY_LAUNCHER"
+"$PYTHON_BIN" -B "$ROOT/scripts/stage_native_entry.py" --stage "$STAGE" --launcher "$MACOS_ENTRY_LAUNCHER"
 chmod 755 "$STAGE/gitgo" "$STAGE/internal/gitgo-host/gitgo-host" \
-  "$STAGE/install.sh" "$STAGE/uninstall.sh"
+  "$STAGE/install.sh" "$STAGE/uninstall.sh" "$STAGE/sandbox-helper.sh"
 
 PRIMARY_COMMAND="$($PYTHON_BIN -B -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["primary_command"])' "$STAGE/product.json")"
 while IFS= read -r alias; do
@@ -152,8 +175,10 @@ if [ -n "$CODESIGN_IDENTITY" ]; then
   /usr/bin/codesign --force --deep --sign "$CODESIGN_IDENTITY" \
     "$STAGE/internal/gitgo-host/gitgo-host"
   /usr/bin/codesign --force --sign "$CODESIGN_IDENTITY" "$STAGE/gitgo"
+  /usr/bin/codesign --force --deep --sign "$CODESIGN_IDENTITY" "$STAGE/Gitgo.app"
   /usr/bin/codesign --verify --deep --strict "$STAGE/internal/gitgo-host/gitgo-host"
   /usr/bin/codesign --verify --strict "$STAGE/gitgo"
+  /usr/bin/codesign --verify --deep --strict "$STAGE/Gitgo.app"
 fi
 
 "$PYTHON_BIN" -B "$ROOT/scripts/smoke_packaged_runtime.py" \

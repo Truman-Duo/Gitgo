@@ -7,11 +7,12 @@ SessionStore persists authoritative session state through SQLite + CAS.
 
 from __future__ import annotations
 
-from backend.core.loop.lifecycle import transition
+from backend.core.loop.lifecycle import TERMINAL, transition, execution_closeout, is_consumable_terminal
 
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 from functools import wraps
@@ -36,6 +37,24 @@ def _serialized_admission(method):
     return admit
 
 
+class ForkAdmissionError(RuntimeError):
+    """A failed construction or an uncertain audit commit is not a runner."""
+
+    def __init__(self, message, *, retained_process_ids=()):
+        self.retained_process_ids = list(retained_process_ids)
+        self.code = ("FORK_ADMISSION_COMMIT_UNKNOWN" if self.retained_process_ids
+                     else "FORK_ADMISSION_FAILED")
+        super().__init__(f"{self.code}: {message}")
+
+
+class SessionExecutionActive(ValueError):
+    code = 'SESSION_EXECUTION_ACTIVE'
+
+    def __init__(self, process_id):
+        self.process_id = process_id
+        super().__init__(self.code)
+
+
 class AgentProcessManager:
     """进程树管理器。daemon 之上的调度层。"""
 
@@ -43,11 +62,14 @@ class AgentProcessManager:
     # 定期调 reap 回收孤儿
     MAX_FORK_DEPTH = 2
 
-    def __init__(self, max_concurrency: int = 4, *, worktree_manager=None, presentation=None):
+    def __init__(self, max_concurrency: int = 4, *, worktree_manager=None, presentation=None,
+                 project_snapshot_commit: str = ""):
         self.presentation = presentation
         self._processes: dict[str, AgentProcess] = {}
         self._sessions: dict[str, "AgentSession"] = {}
         self._slots = threading.BoundedSemaphore(max(1, max_concurrency))
+        # A subprocess keeps its execution slot while awaiting helpers.
+        self._subagent_slots = threading.BoundedSemaphore(max(5, max_concurrency))
         self._resource_condition = threading.Condition()
         # process_id -> (resources, mode).  Read-only workers may share the
         # same source paths; writers and snapshot reviewers remain exclusive.
@@ -60,6 +82,7 @@ class AgentProcessManager:
         self._state_condition = threading.Condition()
         self._state_version = 0
         self.worktree_manager = worktree_manager
+        self.project_snapshot_commit = project_snapshot_commit
         self._worktree_lock = threading.RLock()
 
     @_serialized_admission
@@ -82,7 +105,8 @@ class AgentProcessManager:
              runtime_preferences: dict | None = None,
              child_budget_request: dict | None = None,
              session_id: str = "",
-             session: "AgentSession | None" = None) -> AgentProcess:
+             session: "AgentSession | None" = None,
+             adopted_root_origin: dict | None = None) -> AgentProcess:
         """创建子进程。parent_id=None 时为 A 级 Agent (ring 0)。
 
         B 级（parent_id 非 None）初始为 WAITING，agent_step 真正启动时转 RUNNING，
@@ -90,10 +114,13 @@ class AgentProcessManager:
         # Fork depth ≤ 2 检查
         if parent_id is not None:
             parent = self._processes.get(parent_id)
-            if parent and parent.parent_id is not None:
+            if parent and (parent.role == "subagent" or (parent.parent_id is not None and not (
+                    role == "subagent" and parent.actor_kind in {"worker", "reviewer"}
+                    and (owner := self.get(parent.parent_id)) is not None
+                    and owner.actor_kind == "supervisor" and not owner.parent_id))):
                 raise ValueError(
                     f"Fork depth exceeds {self.MAX_FORK_DEPTH}. "
-                    f"B-level agents cannot fork."
+                    "Only a project subprocess can launch a nested temporary helper."
                 )
 
         dependencies = list(dict.fromkeys(
@@ -118,16 +145,13 @@ class AgentProcessManager:
                 raise ValueError(f"Session not found: {session_id}")
 
         if session is not None:
-            terminal = {ProcessStatus.COMPLETED, ProcessStatus.FAILED,
-                        ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
-                        ProcessStatus.ORPHANED}
-            if any(p.session.session_id == session.session_id and
-                   (p.status not in terminal or (p.process_id in self._threads
-                    and self._threads[p.process_id].is_alive()))
-                   for p in self._processes.values()):
-                raise ValueError("SESSION_EXECUTION_ACTIVE: wait for the previous execution to finish before continuing this session")
+            self.validate_session_continuation(session)
 
         parent = self._processes.get(parent_id) if parent_id else None
+        retained = (getattr(parent, "recovery", None) or {}).get("fork_admission_unknown_process_ids", [])
+        if retained:
+            raise ForkAdmissionError("Inspect the retained admission before allocating more work.",
+                                     retained_process_ids=retained)
         if parent is not None and child_budget_request and child_budget_request.get("steps") is not None:
             max_steps = max(1, min(max_steps, int(child_budget_request["steps"])))
         context_snapshot = dict(context_snapshot or {})
@@ -149,7 +173,20 @@ class AgentProcessManager:
             contract_snapshot = dict(context_snapshot.get("task_contract") or {})
             contract_snapshot.setdefault("relationship_policy", relation)
             context_snapshot["task_contract"] = contract_snapshot
-        if parent is not None and parent.task_budget is not None:
+        budget_source = None
+        if adopted_root_origin is not None:
+            from .discussion_adoption import root_budget_source
+            budget_source = root_budget_source(self, adopted_root_origin, task_id=task_id,
+                session=session, parent_id=parent_id, actor_kind=actor_kind)
+        if budget_source is not None:
+            task_budget = budget_source.task_budget
+            # Older root runners finalize without releasing the root account.
+            # The validated terminal barrier allows closing it exactly once;
+            # consumed calls/tokens remain charged and the lease never reopens.
+            budget_source.budget_lease = task_budget.release_process(
+                budget_source.process_id, status=budget_source.status.value)
+            task_budget.reserve_agent()
+        elif parent is not None and parent.task_budget is not None:
             task_budget = parent.task_budget
             task_budget.reserve_agent()
         else:
@@ -157,6 +194,20 @@ class AgentProcessManager:
             task_budget = TaskTreeBudget.create(
                 task_id or parent_id or "unscoped-task", task_budget_limits,
             )
+
+        process = None
+        def discard_unpublished():
+            # No caller can start this identity before fork publishes it. Keep
+            # earlier leases/usage intact and remove only this factory receipt.
+            released = None
+            if process is not None:
+                released = task_budget.release_process(process.process_id, status="cancelled")
+                with process.session._mechanism_lock:
+                    process.session.host_ledger[:] = [entry for entry in process.session.host_ledger
+                        if not (entry.get("event") == "runtime_admission"
+                                and entry.get("process_id") == process.process_id)]
+            if not (released or {}).get("temporary"):
+                task_budget.cancel_agent_reservation()
 
         try:
             # A child binds the task mechanism instance; never copy an effective
@@ -167,6 +218,11 @@ class AgentProcessManager:
                 from .mechanisms import owner
                 preferences.pop("mechanisms", None)
                 preferences.pop("manual_unit_ticket", None)
+                # A child keeps its existing admitted escrow; it cannot mint
+                # another root's 600-step schedule by inheriting preferences.
+                preferences.pop('execution_step_schedule', None)
+                preferences.pop("subagent_batches", None)
+                preferences.pop("asset_execution", None)
                 preferences["mechanism_owner_id"] = owner(parent).process_id
             process = AgentRuntimeFactory.create(
                 RuntimeSpec(
@@ -197,33 +253,88 @@ class AgentProcessManager:
                 actor_kind=actor_kind,
                 max_steps=max_steps,
                 request=child_budget_request,
+                temporary=role == "subagent",
             )
+            if preferences.get('execution_step_schedule'):
+                process.budget_lease = task_budget.configure_step_schedule(
+                    process.process_id, preferences['execution_step_schedule'])
         except Exception:
-            task_budget.cancel_agent_reservation()
+            discard_unpublished()
             raise
         process.depends_on = dependencies
         process.workspace_root = (
             str(Path(workspace_path).resolve()) if workspace_path else ""
         )
+        process._manager = self
+        from backend.core.storage import StorageCommitUnknown
+        try:
+            # Ordinary forks keep pre-publication History and its failure
+            # protection. Adopted root History waits for dispatch's complete
+            # admission checkpoint, before any execution starts.
+            if workspace_path and budget_source is None:
+                history_workspace = (str(self.worktree_manager.repo_root)
+                    if role == "subagent" and parent is not None and parent.parent_id
+                    and self.worktree_manager is not None else workspace_path)
+                self._record_fork_history(process, history_workspace)
+        except StorageCommitUnknown as exc:
+            # The history write may exist. Retain a visible, non-runnable
+            # identity and its escrow; never claim that this admission rolled
+            # back or retire the predecessor's obligation.
+            from .lifecycle import block_uncertain_checkpoint
+            block_uncertain_checkpoint(process)
+            process.result = {"status": "failed", "code": "FORK_ADMISSION_COMMIT_UNKNOWN",
+                "error": str(exc), "execution_state": "not_started",
+                "metadata": {"automatic_replay_suppressed": True}}
+            self._processes[process.process_id] = process
+            self._sessions[process.session.session_id] = process.session
+            if parent is not None:
+                contract = dict((process.context_snapshot or {}).get("task_contract") or {})
+                contract.update(task_kind=process.task_kind, allowed_tools=tool_registry.list_all(),
+                    budget_lease=dict(process.budget_lease), admission_commit="unknown")
+                parent.register_child_contract(process.process_id, contract)
+                block_uncertain_checkpoint(parent)
+                parent.recovery["fork_admission_unknown_process_ids"] = [process.process_id]
+            self.notify_state_changed(process.process_id)
+            raise ForkAdmissionError(str(exc), retained_process_ids=[process.process_id]) from exc
+        except Exception as exc:
+            discard_unpublished()
+            raise ForkAdmissionError(str(exc)) from exc
+
         self._processes[process.process_id] = process
         self._sessions[process.session.session_id] = process.session
-        process._manager = self
+        if budget_source is not None:
+            from .discussion_adoption import record_continuation
+            record_continuation(process, budget_source)
+            task_budget.resume_from_user()
 
         if parent is not None and not process.session.display_name:
             with parent.session._context_memo_lock:
                 parent.session.worker_sequence += 1
                 process.session.display_name = f"B{parent.session.worker_sequence}"
-
-        from backend.core.history import HistoryManager
-        if workspace_path:
-            HistoryManager.set_workspace(workspace_path)
-            HistoryManager.add_operation(
-                "system", "agent_forked", "success",
-                {"process_id": process.process_id, "role": role,
-                 "ring_level": ring_level.value, "parent_id": parent_id},
-                correlation_id=process.process_id,
-            )
         return process
+
+    def validate_session_continuation(self, session) -> None:
+        """One validation shared by direct admission and complete DAG preflight."""
+        terminal = {ProcessStatus.COMPLETED, ProcessStatus.FAILED,
+                    ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED, ProcessStatus.KILLED,
+                    ProcessStatus.ORPHANED}
+        for process in self._processes.values():
+            if process.session.session_id != session.session_id:
+                continue
+            # The runner may still be delivering its completion notice after
+            # releasing the execution lock. That thread no longer owns a turn.
+            if process.status not in terminal or process._run_lock.locked():
+                raise SessionExecutionActive(process.process_id)
+
+    @staticmethod
+    def _record_fork_history(process, workspace_path):
+        from backend.core.history import HistoryManager
+        HistoryManager.set_workspace(workspace_path)
+        HistoryManager.add_operation(
+            'system', 'agent_forked', 'success',
+            {'process_id': process.process_id, 'role': process.role,
+             'ring_level': process.ring_level.value, 'parent_id': process.parent_id},
+            correlation_id=process.process_id)
 
     def start(self, process_id: str, target, *, resources: list[str] | None = None,
               resource_mode: str = "exclusive", on_terminal=None, resume_target=None) -> None:
@@ -261,7 +372,7 @@ class AgentProcessManager:
                         "code": "TASK_CANCELLED" if cancelled else "UPSTREAM_DEPENDENCY_FAILED",
                     }
                     return
-                with self._slots:
+                with (self._subagent_slots if process.role == "subagent" else self._slots):
                     if not self._acquire_resources(process, claims, resource_mode):
                         transition(process, ProcessStatus.CANCELLED)
                         process.result = {"process_id": process.process_id, "status": "cancelled",
@@ -280,30 +391,42 @@ class AgentProcessManager:
             finally:
                 try:
                     self._release_resources(process.process_id)
-                    if process.task_budget is not None:
-                        released = process.task_budget.release_process(process.process_id, status=process.status.value)
-                        if released is not None:
-                            process.budget_lease = released
-                    # The callback invokes the existing durable checkpoint
-                    # barrier before dependencies or UI can observe finality.
-                    if on_terminal is not None:
-                        on_terminal()
-                    process.lifecycle_finalized = True
+                    while True:
+                        with process._coordination_lock:
+                            if process.status == ProcessStatus.CANCELLING:
+                                self._mark_cancelled(process)
+                            self._release_terminal_budget(process)
+                        # A cancellation can arrive while a parked outcome is
+                        # being checkpointed. Publish a second, cancelled state
+                        # if it arrived before this execution became idle.
+                        if on_terminal is not None:
+                            on_terminal()
+                        with process._coordination_lock:
+                            if process.status != ProcessStatus.CANCELLING:
+                                process.lifecycle_finalized = True
+                                break
                 except Exception as exc:
                     process.lifecycle_finalized = False
                     transition(process, ProcessStatus.FAILED)
-                    if process.task_budget is not None:
-                        process.budget_lease = process.task_budget.release_process(
-                            process.process_id, status=process.status.value) or {}
+                    self._release_terminal_budget(process)
                     process.result = {"process_id": process.process_id, "status": "failed",
                         "code": "SESSION_CHECKPOINT_FAILED", "error": str(exc),
                         "metadata": {"durable_terminal_barrier": False, "automatic_replay_suppressed": True}}
                 finally:
                     try:
+                        if process.parent_id and process.lifecycle_finalized and process.status.value in TERMINAL:
+                            owner = self.get(process.parent_id)
+                            if owner is not None:
+                                from .assignment_handoff import preserve_closed_scope
+                                try:
+                                    preserve_closed_scope(self, owner, process)
+                                except Exception as exc:
+                                    process.runtime_preferences["draft_preservation_error"] = {
+                                        "code": getattr(exc, "code", "ASSIGNMENT_HANDOFF_DRAFT_UNAVAILABLE"),
+                                        "message": str(exc)}
                         self.notify_state_changed(process.process_id)
                     finally:
                         process._run_lock.release()
-                    from .lifecycle import TERMINAL
                     if process.status.value in TERMINAL:
                         with self._continuation_lock:
                             self._continuations.pop(process_id, None)
@@ -314,8 +437,12 @@ class AgentProcessManager:
                             process.runtime_preferences["mechanism_resume_blocked"] = str(exc)
                             self.notify_state_changed(process.process_id)
 
+        thread_target = run
+        if sys.platform == "darwin":
+            from backend.core.macos_broker_client import bind_worker
+            thread_target = bind_worker(run)
         thread = threading.Thread(
-            target=run, name=f"gitgo-agent-{process_id[:8]}", daemon=True,
+            target=thread_target, name=f"gitgo-agent-{process_id[:8]}", daemon=True,
         )
         self._threads[process_id] = thread
         try:
@@ -363,7 +490,11 @@ class AgentProcessManager:
                         self._resume_queued.discard(process_id)
 
         try:
-            threading.Thread(target=resume, name=f"gitgo-resume-{process_id[:8]}", daemon=True).start()
+            thread_target = resume
+            if sys.platform == "darwin":
+                from backend.core.macos_broker_client import bind_worker
+                thread_target = bind_worker(resume)
+            threading.Thread(target=thread_target, name=f"gitgo-resume-{process_id[:8]}", daemon=True).start()
         except Exception:
             with self._continuation_lock:
                 self._resume_queued.discard(process_id)
@@ -372,6 +503,11 @@ class AgentProcessManager:
     def register_thread(self, process_id: str, thread: threading.Thread) -> None:
         """Register a root task thread so recursive cancellation can await it."""
         self._threads[process_id] = thread
+
+    def is_executing(self, process_id: str) -> bool:
+        """Observe owned execution, separately from a persisted lifecycle label."""
+        thread = self._threads.get(process_id)
+        return bool(thread is not None and thread.is_alive())
 
     def register_restored(self, process: AgentProcess) -> None:
         """Publish a checkpoint-rebuilt process without creating new authority."""
@@ -432,7 +568,7 @@ class AgentProcessManager:
         child_ids, contracts, reviews = predecessor.coordination_snapshot()
         direct_child_ids = [
             child_id for child_id in child_ids
-            if (
+            if not (contracts.get(child_id) or {}).get("subagent_owner_contract") and (
                 (self.get(child_id) is not None
                  and self.get(child_id).parent_id == predecessor.process_id)
                 or not dict(contracts.get(child_id) or {}).get("inherited_from_process_id")
@@ -474,48 +610,96 @@ class AgentProcessManager:
             if upstream.parent_id != parent_id:
                 raise ValueError("DAG dependencies must share one supervisor owner")
 
+    def resolve_retained_dependencies(self, owner: AgentProcess, dependencies: list[str]) -> list[str]:
+        """Resolve existing obligations through Host-admitted remaining-work successors.
+
+        This changes execution references, not the logical dependency. A new
+        follow-up is unrelated work and cannot substitute for its predecessor.
+        Readiness still belongs to _wait_for_dependencies and worktree sealing.
+        """
+        _, contracts, _ = owner.coordination_snapshot()
+        resolved = []
+        for dependency_id in dependencies:
+            current_id = dependency_id
+            seen = set()
+            while True:
+                if current_id in seen:
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: supersession cycle")
+                seen.add(current_id)
+                current = self.get(current_id)
+                contract = contracts.get(current_id)
+                if not self.owns_child(owner, current) or contract is None:
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: retained dependency must remain owned")
+                next_id = contract.get("superseded_by")
+                if not next_id:
+                    break
+                successor = self.get(next_id)
+                next_contract = contracts.get(next_id) or {}
+                provenance = next_contract.get("continuation") or {}
+                if (not self.owns_child(owner, successor)
+                        or next_contract.get("supersedes_process_id") != current_id
+                        or provenance.get("source_process_id") != current_id
+                        or provenance.get("source_task_id") != (current.active_task_id or current_id)):
+                    raise ValueError("CONTINUATION_DEPENDENCY_INVALID: successor lacks matching owned Host provenance")
+                if provenance.get("mode") != "remaining" or provenance.get("retained_obligations") is not True:
+                    break  # A follow-up does not retire this dependency's original result.
+                if not is_consumable_terminal(current, self):
+                    raise ValueError("CONTINUATION_DEPENDENCY_CLOSEOUT_PENDING: predecessor has not reliably closed")
+                current_id = next_id
+            if current_id not in resolved:
+                resolved.append(current_id)
+        return resolved
+
     def _wait_for_dependencies(self, process: AgentProcess) -> str:
         """Wait at a Host boundary without consuming an Agent concurrency slot."""
         if not process.depends_on:
             return ""
+        from .assignment_handoff import dependency_handoff
+        from .coordination import coordination_block_reason
         active = {
             ProcessStatus.RUNNING, ProcessStatus.WAITING,
             ProcessStatus.AWAITING_USER, ProcessStatus.CANCELLING,
             ProcessStatus.RESUME_AVAILABLE,
             ProcessStatus.RECOVERY_REVIEW_REQUIRED, ProcessStatus.RECOVERING,
         }
-        with self._state_condition:
-            while True:
-                if process.cancellation_event.is_set():
-                    return "cancelled while waiting for upstream dependencies"
-                upstream = [self._processes.get(item) for item in process.depends_on]
-                missing = [
-                    process.depends_on[index]
-                    for index, item in enumerate(upstream) if item is None
-                ]
+        owner = self._processes.get(process.parent_id or "")
+        while True:
+            with self._state_condition:
+                state_version = self._state_version
+            if process.cancellation_event.is_set():
+                return "cancelled while waiting for upstream dependencies"
+            # The owner's version approval may be mid-checkpoint. The scheduler
+            # notification lock must be available while that checkpoint settles.
+            try:
+                pinned = [dependency_handoff(self, owner, item) for item in process.depends_on]
+            except ValueError as exc:
+                return str(exc)
+            ready = not any(item and item.get("pending") for item in pinned)
+            if ready:
+                dependency_ids = [follow["process_id"] if follow else pid
+                                  for pid, follow in zip(process.depends_on, pinned)
+                                  if not follow or not follow.get("returned")]
+                upstream = [self._processes.get(pid) for pid in dependency_ids]
+                missing = [pid for pid, item in zip(dependency_ids, upstream) if item is None]
                 if missing:
                     return "upstream dependency disappeared: " + ", ".join(missing)
-                if any(
-                    item.status in active or (
-                        item.process_id in self._threads
-                        and not item.lifecycle_finalized
-                    )
-                    for item in upstream if item is not None
-                ):
-                    self._state_condition.wait(timeout=0.5)
-                    continue
-                failed = [
-                    item.process_id for item in upstream
-                    if item is not None and item.status != ProcessStatus.COMPLETED
+                failed_closeout = [
+                    item.process_id for item in upstream if item is not None
+                    and execution_closeout(item, self)["closeout_state"] == "failed"
                 ]
-                if failed:
-                    return "upstream dependency did not complete: " + ", ".join(failed)
-                # An upstream may have changed a declared interface after DAG
-                # admission.  The Host has already routed the versioned proposal
-                # to A and this worker; do not start on a stale contract while A
-                # is still deciding whether to accept, reject, or ask the user.
-                from backend.core.loop.coordination import coordination_block_reason
-                if coordination_block_reason(process):
+                if failed_closeout:
+                    return "upstream dependency closeout failed: " + ", ".join(failed_closeout)
+                ready = all(item.status not in active and is_consumable_terminal(item, self)
+                            for item in upstream)
+                if ready:
+                    failed = [item.process_id for item in upstream if item.status != ProcessStatus.COMPLETED]
+                    if failed:
+                        return "upstream dependency did not complete: " + ", ".join(failed)
+                    ready = not coordination_block_reason(process)
+            with self._state_condition:
+                if self._state_version != state_version:
+                    continue
+                if not ready:
                     self._state_condition.wait(timeout=0.5)
                     continue
                 return ""
@@ -545,24 +729,35 @@ class AgentProcessManager:
                 transition(process, ProcessStatus.RUNNING)
             self.notify_state_changed(process.process_id)
 
-    def dependency_order(self, process_ids: list[str]) -> list[AgentProcess]:
+    def dependency_order(self, process_ids: list[str], *, owner=None) -> list[AgentProcess]:
         """Return deterministic topological order or reject an invalid graph."""
         selected = set(process_ids)
         nodes = {item: self._processes.get(item) for item in selected}
         missing = sorted(item for item, value in nodes.items() if value is None)
         if missing:
             raise ValueError("process not found: " + ", ".join(missing))
-        indegree = {
-            item: sum(1 for dep in nodes[item].depends_on if dep in selected)
-            for item in selected
-        }
+        edges = {}
+        for item, node in nodes.items():
+            deps = list(node.depends_on)
+            if owner is not None:
+                from .assignment_handoff import dependency_handoff
+                resolved = []
+                for dep in deps:
+                    handoff = dependency_handoff(self, owner, dep)
+                    if handoff and handoff.get("pending"):
+                        raise ValueError("ASSIGNMENT_HANDOFF_DELIVERY_PENDING: upstream version needs durable acceptance")
+                    if not handoff or not handoff.get("returned"):
+                        resolved.append(handoff["process_id"] if handoff else dep)
+                deps = resolved
+            edges[item] = set(deps) & selected
+        indegree = {item: len(deps) for item, deps in edges.items()}
         ready = sorted(item for item, degree in indegree.items() if degree == 0)
         ordered: list[AgentProcess] = []
         while ready:
             current = ready.pop(0)
             ordered.append(nodes[current])
             for downstream in sorted(selected):
-                if current not in nodes[downstream].depends_on:
+                if current not in edges[downstream]:
                     continue
                 indegree[downstream] -= 1
                 if indegree[downstream] == 0:
@@ -573,10 +768,19 @@ class AgentProcessManager:
         return ordered
 
     def dependency_closure(self, process: AgentProcess) -> list[AgentProcess]:
+        from .assignment_handoff import dependency_handoff
         selected: set[str] = set()
         stack = list(process.depends_on)
+        owner = self._processes.get(process.parent_id or "")
         while stack:
             process_id = stack.pop()
+            handoff = dependency_handoff(self, owner, process_id)
+            if handoff:
+                if handoff.get("pending"):
+                    raise ValueError("ASSIGNMENT_HANDOFF_DELIVERY_PENDING: upstream version needs durable acceptance")
+                if handoff.get("returned"):
+                    continue
+                process_id = handoff["process_id"]
             if process_id in selected:
                 continue
             upstream = self._processes.get(process_id)
@@ -584,7 +788,41 @@ class AgentProcessManager:
                 raise ValueError(f"dependency process not found: {process_id}")
             selected.add(process_id)
             stack.extend(upstream.depends_on)
-        return self.dependency_order(list(selected)) if selected else []
+        return self.dependency_order(list(selected), owner=owner) if selected else []
+
+    def returned_dependency_outcomes(self, process: AgentProcess, upstream: list[AgentProcess]) -> list[dict]:
+        from .assignment_handoff import dependency_handoff
+        owner = self._processes.get(process.parent_id or "")
+        outcomes = []
+        dependencies = dict.fromkeys(dependency for node in [*upstream, process] for dependency in node.depends_on)
+        for dependency_id in dependencies:
+            handoff = dependency_handoff(self, owner, dependency_id) or {}
+            if result := handoff.get("returned"):
+                outcomes.append({
+                    "process_id": handoff["process_id"],
+                    "source_process_id": dependency_id,
+                    "task_id": owner.active_task_id,
+                    "status": "accepted",
+                    "result_commit": result["commit"],
+                    "draft_id": result["draft_id"],
+                })
+        return outcomes
+
+    def accepted_workspace_basis(self, owner: AgentProcess) -> dict:
+        """Resolve the immutable workspace already promoted for the current task."""
+        if self.worktree_manager is None:
+            return {}
+        from .promotion import read_promotion
+        from .worktree import WorktreeError
+
+        _, record = read_promotion(self.worktree_manager, owner.active_task_id or owner.process_id)
+        if not record:
+            return {}
+        snapshot = record.get("snapshot_commit")
+        commit = record.get("result_commit")
+        if record.get("state") != "committed" or not snapshot or not commit:
+            raise WorktreeError("Reconcile the pending workspace promotion before using it for follow-up work.")
+        return {"snapshot_commit": snapshot, "result_commit": commit} if commit != snapshot else {}
 
     def materialize_process_worktree(
         self, process: AgentProcess, *, review_target_id: str = "",
@@ -615,30 +853,76 @@ class AgentProcessManager:
                 )
             else:
                 snapshot = str((owner.worktree or {}).get("snapshot_commit") or "")
+                nested_helper = process.role == "subagent" and bool(owner.parent_id)
+                if nested_helper and (not owner.worktree.get("isolated") or owner.worktree.get("state") != "leased"
+                        or owner.worktree_path != owner.worktree.get("path")):
+                    raise WorktreeError("A nested patch requires the subprocess's live isolated checkout.")
                 upstream = self.dependency_closure(process)
-                commits = [
+                commits = [item["result_commit"] for item in self.returned_dependency_outcomes(process, upstream)]
+                commits.extend(
                     str((item.worktree or {}).get("own_commit") or "")
                     for item in upstream
-                ]
+                )
                 previous = self._processes.get(continue_process_id) if continue_process_id else None
+                if (owner.delegated_contracts.get(continue_process_id) or {}).get("returned_assignment"):
+                    raise WorktreeError("ASSIGNMENT_HANDOFF_STALE: the supervisor owns the remaining assignment")
                 if continue_process_id and (
                     not self.owns_child(owner, previous) or previous.session is not process.session
                     or previous.status not in {ProcessStatus.FAILED, ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED}
                     or (self._threads.get(previous.process_id) and self._threads[previous.process_id].is_alive())
                 ):
                     raise WorktreeError("CONTINUATION_EXECUTION_ACTIVE: retained work requires an owned, finished execution of this session")
+                assignment = owner.delegated_contracts.get(process.process_id) or {}
+                accepted_basis = assignment.get("accepted_workspace_basis") or {}
+                base_snapshot = snapshot or self.project_snapshot_commit
+                if accepted_basis and (accepted_basis["snapshot_commit"] != base_snapshot or commits):
+                    raise WorktreeError("The pinned accepted workspace version does not match the task snapshot or dependencies.")
+                draft = assignment.get("assignment_draft")
+                continuation = assignment.get("continuation") or {}
+                targets = None
+                if previous and continuation.get("scope_change_id"):
+                    prior = owner.delegated_contracts.get(previous.process_id) or {}
+                    prior_lineage = prior.get("continuation") or {}
+                    if (prior.get("superseded_by") != process.process_id or
+                            not is_consumable_terminal(previous, self) or
+                            any(continuation.get(key) != prior_lineage.get(key) for key in ("draft_id", "scope_change_id")) or
+                            assignment.get("target_files") != prior.get("target_files")):
+                        raise WorktreeError("ASSIGNMENT_HANDOFF_BASIS_CHANGED: the resumed execution lost its retained scope")
+                    targets = list(assignment["target_files"])
+                elif previous and previous.worktree.get("state") == "scope_blocked":
+                    from .asset_maintenance import AssetMaintenance, asset_retry_scope
+
+                    prior = owner.delegated_contracts.get(previous.process_id) or {}
+                    binding = process.runtime_preferences.get("asset_execution")
+                    targets = asset_retry_scope(previous, binding, prior)
+                    if (not targets or assignment.get("target_files") != targets
+                            or prior.get("superseded_by") != process.process_id
+                            or continuation.get("mode") != "remaining"
+                            or not is_consumable_terminal(previous, self)):
+                        raise WorktreeError("CONTINUATION_SCOPE_MISMATCH: the previous asset scope could not be retained")
+                    assets = AssetMaintenance(self.worktree_manager.storage)
+                    _, records = assets.load()
+                    assets.require_binding(assets.asset(records, binding["asset_id"]), process, binding)
+                if draft:
+                    from .assignment_handoff import verify_reassignment
+                    with owner._context_lock, owner._coordination_lock:
+                        verify_reassignment(self, owner, process, draft)
                 lease = self.worktree_manager.create(
                     process_id=process.process_id,
                     task_id=process.active_task_id,
-                    snapshot_commit=snapshot,
+                    snapshot_commit="" if nested_helper else base_snapshot,
                     upstream_commits=[item for item in commits if item],
+                    accepted_commit=accepted_basis.get("result_commit", ""),
                     mode="write",
                     resume_from=WorktreeLease.from_dict(previous.worktree) if previous else None,
+                    assignment_draft=draft,
+                    **({"snapshot_source": Path(owner.worktree_path)} if nested_helper else {}),
+                    **({"continuation_target_files": targets} if targets is not None else {}),
                     context_refs=dict(
                         process.read_context_snapshot()[0].get("context_refs", {}) or {}
                     ),
                 )
-                if not snapshot:
+                if not snapshot and not nested_helper:
                     owner.worktree = {
                         **dict(owner.worktree or {}),
                         "snapshot_commit": lease.snapshot_commit,
@@ -667,7 +951,8 @@ class AgentProcessManager:
                     or Path(lease.root_workspace).resolve() != manager.repo_root.resolve()
                     or Path(lease.path).resolve() != manager._target_path(manager._safe_id(process.process_id)).resolve()
                     or any(state.get(key) != previous.get(key)
-                           for key in ("worktree_id", "process_id", "path", "mode", "snapshot_commit", "base_commit"))):
+                            for key in ("worktree_id", "process_id", "path", "mode", "snapshot_commit", "base_commit"))
+                    or (state.get("accepted_commit") or "") != (previous.get("accepted_commit") or "")):
                 raise WorktreeError("parked worktree lease is missing or changed")
             if not manager.verify(lease).get("valid"):
                 raise WorktreeError("parked worktree is no longer valid")
@@ -675,11 +960,14 @@ class AgentProcessManager:
             # creation precedes the first session checkpoint. The same live
             # process and its original lease still own the stable task id.
             lease.task_id = process.active_task_id
-            common = manager._git_text(Path(lease.path), "rev-parse", "--git-common-dir")
-            expected = manager._git_text(manager.repo_root, "rev-parse", "--git-common-dir")
-            if ((Path(lease.path) / common).resolve()
-                    != (manager.repo_root / expected).resolve()):
-                raise WorktreeError("parked worktree belongs to a different repository")
+            # The macOS verifier pins the repository and its worktree metadata
+            # directly. The generic Git command backend is unavailable there.
+            if not lease.macos_binding:
+                common = manager._git_text(Path(lease.path), "rev-parse", "--git-common-dir")
+                expected = manager._git_text(manager.repo_root, "rev-parse", "--git-common-dir")
+                if ((Path(lease.path) / common).resolve()
+                        != (manager.repo_root / expected).resolve()):
+                    raise WorktreeError("parked worktree belongs to a different repository")
             process.worktree = lease.to_dict()
             process.worktree_path = lease.path
             return lease.path
@@ -696,7 +984,13 @@ class AgentProcessManager:
                 from .validation_evidence import pinned_inputs
                 lease = WorktreeLease.from_dict(process.worktree)
                 lease.input_dependencies = pinned_inputs(process)
-                lease = self.worktree_manager.seal(lease)
+                owner = self.get(process.parent_id) if process.parent_id else None
+                contract = (owner.delegated_contracts.get(process.process_id) or {}) if owner else {}
+                bounded = (process.role == "subagent" or process.runtime_preferences.get("asset_execution")
+                           or (contract.get("continuation") or {}).get("scope_change_id"))
+                targets = contract["target_files"] if bounded else None
+                lease = self.worktree_manager.seal(lease, target_files=targets) if targets is not None else (
+                    self.worktree_manager.seal(lease))
             except Exception:
                 # seal() persists privacy_blocked/failed before raising.  Keep
                 # the live DTO aligned with that authoritative row so the
@@ -712,7 +1006,7 @@ class AgentProcessManager:
 
     def read_sealed_artifact(
         self, supervisor: AgentProcess, process_id: str, path: str, *,
-        sha256: str = "", offset: int = 0, max_chars: int = 24000,
+        sha256: str = "", offset: int = 0, max_chars: int = 24000, expected_commit: str = "",
     ) -> dict:
         """Read an owned child's immutable result without exposing worktree paths."""
         if self.worktree_manager is None:
@@ -726,6 +1020,9 @@ class AgentProcessManager:
         commit = str(worktree.get("result_commit") or "")
         if not commit:
             raise ValueError("child result commit is missing")
+        if expected_commit and expected_commit != commit:
+            from .assignment_handoff import AssignmentHandoffError
+            raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_VERSION_CHANGED", "Select the current sealed result.")
         return {
             "process_id": child.process_id,
             **self.worktree_manager.read_artifact(
@@ -761,16 +1058,39 @@ class AgentProcessManager:
                 raise ValueError("promotion may reference only owned child tasks")
             selected.add(process_id)
             selected.update(item.process_id for item in self.dependency_closure(child))
-        ordered = self.dependency_order(list(selected))
+        ordered = self.dependency_order(list(selected), owner=supervisor)
         from backend.core.loop.worktree import WorktreeLease
+        from .assignment_handoff import (
+            AssignmentHandoffError, current_versioned_review, recorded_scope_change, requires_versioned_review, subagent_scope_digest,
+        )
         code_nodes = []
         evidence_nodes = []
         for item in ordered:
+            if recorded_scope_change(supervisor, item.process_id):
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_SCOPE_RETIRED",
+                                             "Only the successor can deliver the still-authorized work.")
             if item.status != ProcessStatus.COMPLETED:
                 raise ValueError(f"process is not completed: {item.process_id}")
+            if not is_consumable_terminal(item, self):
+                raise ValueError(f"process closeout is not finalized: {item.process_id}")
             review = (supervisor.child_reviews or {}).get(item.process_id, {})
             if review.get("verdict") != "approved":
-                raise ValueError(f"process lacks supervisor approval: {item.process_id}")
+                raise AssignmentHandoffError(
+                    "CHILD_REVIEW_REQUIRED",
+                    "Inspect and explicitly approve the child's current result before applying its changes.",
+                    details={"process_id": item.process_id},
+                )
+            if item.role == "subagent":
+                if item.worktree.get("promoted"):
+                    raise AssignmentHandoffError("SUBAGENT_RESULT_ALREADY_APPLIED", "Use the existing delivery receipt.")
+                if supervisor.cancellation_event.is_set():
+                    raise AssignmentHandoffError("SUBAGENT_CANCELLED", "The parent task was cancelled.")
+                if (supervisor.delegated_contracts.get(item.process_id) or {}).get("subagent_owner_contract") != subagent_scope_digest(supervisor):
+                    raise AssignmentHandoffError("SUBAGENT_RESULT_STALE", "The helper's parent scope changed.")
+            if (requires_versioned_review(supervisor, item)
+                    and not current_versioned_review(supervisor, item, review)):
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_VERSION_CHANGED",
+                                             "Review the current sealed result and assignment before delivery.")
             worktree = dict(item.worktree or {})
             if not worktree.get("isolated") and not worktree.get("worktree_id"):
                 # Answer/plan/governance dependencies contribute reviewed
@@ -790,7 +1110,16 @@ class AgentProcessManager:
         if len(snapshots) != 1:
             raise ValueError("promotion nodes do not share one task snapshot")
         commits = [str(item.worktree.get("own_commit") or "") for item in code_nodes]
-        with self._worktree_lock:
+        from contextlib import nullcontext
+        from .asset_maintenance import AssetMaintenance, AssetMaintenanceError
+        asset_nodes = [item for item in code_nodes if item.runtime_preferences.get("asset_execution")]
+        if asset_nodes and len(code_nodes) != 1:
+            raise AssetMaintenanceError("ASSET_DELIVERY_REQUIRED", "Apply the maintained asset in its own delivery.")
+        assets = AssetMaintenance(self.worktree_manager.storage) if asset_nodes else None
+        with self._worktree_lock, (assets.fence() if assets else nullcontext()):
+            from .assignment_handoff import verify_returned_inputs
+            for item in code_nodes:
+                verify_returned_inputs(self, supervisor, item)
             snapshot, _ = supervisor.read_context_snapshot()
             service_args = {"_lesson_context": {"project_name": str(snapshot.get("project_name") or ""),
                 "state_home": str(self.worktree_manager.storage.paths.state_home),
@@ -798,7 +1127,7 @@ class AgentProcessManager:
                 "session_id": supervisor.session.session_id,
                 "feedback_in_provider_input": __import__("backend.core.knowledge.feedback", fromlist=["exposed_ids"]).exposed_ids(supervisor)},
                 **(file_service_args or {})}
-            result = self.worktree_manager.promote(
+            promotion_args = dict(
                 file_service_args=service_args,
                 snapshot_commit=next(iter(snapshots)),
                 ordered_commits=[item for item in commits if item],
@@ -810,6 +1139,8 @@ class AgentProcessManager:
                 artifact_paths=[path for item in code_nodes
                                 for path in supervisor.delegated_contracts.get(item.process_id, {}).get("target_files", [])],
             )
+            result = (assets.promote(asset_nodes[0], self.worktree_manager, **promotion_args)
+                      if assets else self.worktree_manager.promote(**promotion_args))
             try:
                 from backend.core.dependency_graph import (
                     build_dependency_graph, dependency_graph_affected_by,
@@ -840,18 +1171,55 @@ class AgentProcessManager:
                 if item.worktree.get("promoted"):
                     continue
                 lease = self.worktree_manager.mark_promoted(
-                    WorktreeLease.from_dict(item.worktree)
+                    WorktreeLease.from_dict(item.worktree), result_commit=result["result_commit"],
                 )
                 item.worktree = lease.to_dict()
             return {**result, "process_ids": [item.process_id for item in code_nodes],
                     "verified_dependency_ids": [item.process_id for item in evidence_nodes]}
 
-    def send_instruction(self, process_id: str, content: str) -> dict:
+    def send_instruction(self, process_id: str, content: str, *, durable=False, message_id="", coordination=False) -> dict:
         process = self._processes.get(process_id)
         if process is None or process.mailbox is None:
             return {"accepted": False, "error": "process not found"}
+        enqueue = (process.mailbox.enqueue_coordination_update if coordination else process.mailbox.enqueue_instruction)
+        if durable:
+            store = getattr(self, "session_store", None)
+            if store is None:
+                return {"accepted": False, "error": "FEEDBACK_PERSISTENCE_UNAVAILABLE",
+                        "effect_state": "not_committed"}
+            from .mechanism_lifecycle import fence
+            from backend.core.storage import StorageCommitUnknown
+            message, previous = None, None
+            try:
+                with fence(process), process.session._mechanism_lock, process._coordination_lock, process.mailbox.admission():
+                    previous = process.mailbox.get(message_id) if message_id else None
+                    if (process.recovery or {}).get("checkpoint_commit") == "unknown":
+                        return {"accepted": False, "error": "FEEDBACK_RECOVERY_REQUIRED",
+                                "automatic_replay_suppressed": True}
+                    if previous is None and process.status not in {ProcessStatus.RUNNING, ProcessStatus.WAITING, ProcessStatus.AWAITING_USER}:
+                        return {"accepted": False, "error": "PROCESS_NOT_RUNNING:" + process.status.value}
+                    try:
+                        message = enqueue(content, message_id=message_id)
+                        if previous is None:
+                            store.save_process_checkpoint(process)
+                        # A known Host identity is already in the recipient's
+                        # durable mailbox. Do not turn a replay into another
+                        # write, or report that old delivery failed if storage
+                        # happens to be unavailable while returning its receipt.
+                    except Exception as exc:
+                        if message is not None and previous is None and not isinstance(exc, StorageCommitUnknown):
+                            process.mailbox.retract_uncommitted(message.message_id)
+                        raise
+                    return {"accepted": message.status in {"accepted", "applied"},
+                            **message.to_dict(), "persistence": "checkpoint"}
+            except StorageCommitUnknown as exc:
+                return {"accepted": False, "error": str(exc), "code": "FEEDBACK_COMMIT_UNKNOWN",
+                        "message_id": message.message_id if message else message_id,
+                        "effect_state": "ambiguous", "automatic_replay_suppressed": True}
+            except (ValueError, RuntimeError, OSError) as exc:
+                return {"accepted": False, "error": str(exc), "effect_state": "not_committed"}
         try:
-            message = process.mailbox.enqueue_instruction(content)
+            message = enqueue(content)
         except Exception as exc:
             return {"accepted": False, "error": str(exc)}
         return {"accepted": True, **message.to_dict()}
@@ -935,10 +1303,8 @@ class AgentProcessManager:
                 result[process_id] = {
                     "status": process.status.value if process else "not_found",
                     "result": process.result if process else None,
-                    "lifecycle_finalized": (
-                        (process.lifecycle_finalized or process_id not in self._threads)
-                        if process else True
-                    ),
+                    **(execution_closeout(process, self) if process else
+                       {"lifecycle_finalized": True, "closeout_state": "finalized"}),
                 }
             return result
 
@@ -947,7 +1313,7 @@ class AgentProcessManager:
                 item["status"] not in {
                     "running", "waiting", "cancelling", "awaiting_user",
                     "resume_available", "recovery_review_required", "recovering",
-                } and item.get("lifecycle_finalized", True)
+                } and item["closeout_state"] in {"finalized", "failed"}
                 for item in states.values()
             ]
             return (all(terminal) if return_when == "all_terminal" else any(terminal))
@@ -974,12 +1340,25 @@ class AgentProcessManager:
                     item["status"] not in {
                         "running", "waiting", "cancelling", "awaiting_user",
                         "resume_available", "recovery_review_required", "recovering",
-                    } and item.get("lifecycle_finalized", True)
+                    } and item["closeout_state"] in {"finalized", "failed"}
                     for item in states.values()
                 ),
                 "state_version": self._state_version,
                 "state_changed": self._state_version != initial_version,
             }
+
+    @staticmethod
+    def _mark_cancelled(process: AgentProcess) -> None:
+        transition(process, ProcessStatus.CANCELLED)
+        process.result = {"process_id": process.process_id, "task_id": process.active_task_id,
+                          "status": "cancelled", "error": process.cancellation_reason}
+
+    @staticmethod
+    def _release_terminal_budget(process: AgentProcess) -> None:
+        if process.task_budget is not None:
+            released = process.task_budget.release_process(process.process_id, status=process.status.value)
+            if released is not None:
+                process.budget_lease = released
 
     def kill(self, process_id: str, *, reason: str = "user_cancelled",
              wait_timeout: float = 0.0) -> dict:
@@ -994,14 +1373,17 @@ class AgentProcessManager:
         already_cancelling: list[str] = []
         terminal_before: list[str] = []
         for target in reversed(targets):
-            if target.status in (
-                ProcessStatus.RUNNING, ProcessStatus.WAITING,
-                ProcessStatus.AWAITING_USER,
-                ProcessStatus.RESUME_AVAILABLE,
-                ProcessStatus.RECOVERY_REVIEW_REQUIRED,
-                ProcessStatus.RECOVERING,
-            ):
+            with target._coordination_lock:
                 previous_status = target.status
+                if previous_status == ProcessStatus.CANCELLING:
+                    already_cancelling.append(target.process_id)
+                    continue
+                if previous_status not in (
+                    ProcessStatus.RUNNING, ProcessStatus.WAITING, ProcessStatus.AWAITING_USER,
+                    ProcessStatus.RESUME_AVAILABLE, ProcessStatus.RECOVERY_REVIEW_REQUIRED, ProcessStatus.RECOVERING,
+                ):
+                    terminal_before.append(target.process_id)
+                    continue
                 target.cancel_requested = True
                 target.cancellation_reason = reason
                 target.cancellation_event.set()
@@ -1020,27 +1402,25 @@ class AgentProcessManager:
                 parked = previous_status in {
                     ProcessStatus.AWAITING_USER, ProcessStatus.RESUME_AVAILABLE,
                     ProcessStatus.RECOVERY_REVIEW_REQUIRED,
-                } and (thread is None or not thread.is_alive())
+                } and (target.lifecycle_finalized or thread is None or not thread.is_alive())
                 if parked:
-                    transition(target, ProcessStatus.CANCELLED)
-                    target.result = {
-                        "process_id": target.process_id,
-                        "task_id": target.active_task_id,
-                        "status": "cancelled", "error": reason,
-                    }
-                    if target.task_budget is not None:
-                        target.budget_lease = target.task_budget.release_process(
-                            target.process_id, status=target.status.value) or {}
-                    target.lifecycle_finalized = True
-                    cancelled_parked.append(target.process_id)
+                    target.lifecycle_finalized = False
+                    self._mark_cancelled(target)
+                    self._release_terminal_budget(target)
                 else:
                     transition(target, ProcessStatus.CANCELLING)
                 requested.append(target.process_id)
-                self.notify_state_changed(target.process_id)
-            elif target.status == ProcessStatus.CANCELLING:
-                already_cancelling.append(target.process_id)
-            else:
-                terminal_before.append(target.process_id)
+            if parked:
+                try:
+                    store = getattr(self, "session_store", None)
+                    if store is not None:
+                        store.save_process_checkpoint(target, lifecycle_finalized=True)
+                    target.lifecycle_finalized = True
+                    cancelled_parked.append(target.process_id)
+                except (ValueError, RuntimeError, OSError) as exc:
+                    target.result.update(code="SESSION_CHECKPOINT_FAILED",
+                                         error=str(exc), metadata={"durable_terminal_barrier": False})
+            self.notify_state_changed(target.process_id)
 
         if requested:
             from backend.core.history import HistoryManager
@@ -1048,6 +1428,7 @@ class AgentProcessManager:
                 "system", "agent_tree_cancel_requested", "pending",
                 {"root_process_id": process_id, "process_ids": requested,
                  "reason": reason}, correlation_id=process_id,
+                storage=getattr(getattr(self, "session_store", None), "_storage", None),
             )
 
         deadline = time.time() + max(0.0, wait_timeout)
@@ -1142,6 +1523,7 @@ class AgentProcessManager:
                     {"process_id": p.process_id, "role": p.role,
                      "parent_id": p.parent_id},
                     correlation_id=p.process_id,
+                    storage=getattr(getattr(self, "session_store", None), "_storage", None),
                 )
         return orphans
 
@@ -1220,7 +1602,8 @@ class SessionStore:
     def process_revision(self, process_id: str) -> int:
         return self._storage.process_revision(process_id)
 
-    def save_process_checkpoint(self, process: AgentProcess, *, lifecycle_finalized: bool | None = None) -> str:
+    def save_process_checkpoint(self, process: AgentProcess, *, lifecycle_finalized: bool | None = None,
+                                record_asset_versions: bool = False) -> str:
         lock = getattr(process, "_checkpoint_lock", None)
         if lock is None:
             lock = threading.RLock()
@@ -1232,7 +1615,8 @@ class SessionStore:
                 if restored_source is not None and restored_source[0] == process.process_id:
                     process.durable_revision = restored_source[1]
                     del process.session._restored_checkpoint_source
-                ref = self._save_process_checkpoint(process, lifecycle_finalized=lifecycle_finalized)
+                ref = self._save_process_checkpoint(process, lifecycle_finalized=lifecycle_finalized,
+                                                    record_asset_versions=record_asset_versions)
                 process.durable_revision = ref.revision
                 return ref
         except StorageCommitUnknown:
@@ -1241,7 +1625,8 @@ class SessionStore:
             block_uncertain_checkpoint(process)
             raise
 
-    def _save_process_checkpoint(self, process: AgentProcess, *, lifecycle_finalized: bool | None = None) -> str:
+    def _save_process_checkpoint(self, process: AgentProcess, *, lifecycle_finalized: bool | None = None,
+                                 record_asset_versions: bool = False) -> str:
         """Persist process, task, messages and receipts in one SQLite commit."""
         session = process.session
         if session is None:
@@ -1255,7 +1640,7 @@ class SessionStore:
             process.task_budget.snapshot()
             if process.task_budget is not None else None
         )
-        return self._storage.save_agent_checkpoint({
+        snapshot = {
             "process_id": process.process_id,
             "expected_revision": int(getattr(process, "durable_revision", 0)),
             "causation_id": str((getattr(process, "runtime_preferences", {}) or {}).get("runtime_command_id") or ""),
@@ -1335,7 +1720,21 @@ class SessionStore:
                 },
                 "recovery": getattr(process, "recovery", None),
             },
-        })
+        }
+        if (record_asset_versions and snapshot["runtime_state"]["lifecycle_finalized"]
+                and snapshot["status"] == "completed" and (snapshot["result"] or {}).get("status") == "completed"
+                and process.actor_kind == "supervisor" and not process.parent_id):
+            from .asset_maintenance import AssetMaintenance
+            with AssetMaintenance(self._storage).workspace_delivery(process) as stage:
+                if stage is not None:
+                    expected, encoded, deliveries = stage
+                    result = {**process.result, "metadata": {**process.result.get("metadata", {}),
+                                                          "asset_deliveries": deliveries}}
+                    ref = self._storage.save_agent_checkpoint({**snapshot, "result": result},
+                                                             asset_revision=(expected, encoded))
+                    process.result = result
+                    return ref
+        return self._storage.save_agent_checkpoint(snapshot)
 
     def checkpoint_before_user_turn(
         self, process: AgentProcess, *, turn_id: str, turn_preview: str,
@@ -1406,6 +1805,9 @@ class SessionStore:
 
     def load_process_state(self, process_id: str) -> dict | None:
         return self._storage.load_agent_process_state(process_id)
+
+    def read_discussion_state(self, process_id: str) -> dict | None:
+        return self._storage.read_discussion_state(process_id)
 
     def deleted_process_ids(self) -> set[str]:
         return self._storage.read_deleted_process_ids()

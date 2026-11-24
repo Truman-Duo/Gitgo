@@ -5,7 +5,6 @@ The worker comes from the exact admitted application tree, copied out of the
 active slot so its image cannot block replacement. Recovery uses that SAME
 retained worker; it never replays a queued UI request after interruption.
 """
-from dataclasses import asdict
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +12,7 @@ import sys
 import tempfile
 
 from .persistence import atomic_control, filesystem_identity, lock_file, read_control, pinned_registration
+from contextlib import ExitStack
 from .staging import _staging_parent
 from .tree import tree_digest, sync_tree
 from .transaction import TransactionResult
@@ -21,17 +21,34 @@ from .validation import fields, reject, text
 TICKET = "engine-request.json"
 
 
+def result_wire(result):
+    """Keep the immutable API 10/11 receiver contract, including nulls.
+
+    Transaction diagnostics belong to the local transaction evidence. Adding a
+    dataclass field must never implicitly extend an installed launcher's wire.
+    """
+    return {name: getattr(result, name) for name in ("status", "version", "error_code")}
+
+
 def _read(store):
-    value = fields(read_control(store.root / "control" / TICKET),
-        {"schema_version", "installation_id", "nonce", "engine", "tree_sha256", "exit_code", "cleanup_complete", "automatic", "deferred"})
-    if (type(value["schema_version"]) is not int or value["schema_version"] != 1
+    value = read_control(store.root / "control" / TICKET)
+    version = value.get("schema_version") if type(value) is dict else None
+    fields(value, {"schema_version", "installation_id", "nonce", "engine", "tree_sha256", "exit_code", "cleanup_complete", "automatic", "deferred"}
+           | ({"cleanup"} if version == 2 else set()))
+    if (type(version) is not int or version not in (1, 2)
             or value["installation_id"] != store.registration["installation_id"]
             or type(value["exit_code"]) is not int or value["exit_code"] not in (0, 75)
             or type(value["cleanup_complete"]) is not bool or type(value["automatic"]) is not bool
             or type(value["deferred"]) is not bool):
         reject("UPDATE_ENGINE_INVALID", "Updater dispatch ticket is invalid")
-    from .handoff import strategy
-    if not value["cleanup_complete"] and strategy(store) != "after_reboot":
+    from .handoff import strategy, exit_scope_ready
+    if version == 2:
+        from .bootstrap_contract import MACOS_PROBE_BROKER_API
+        if (store.registration.get("bootstrap_api") != MACOS_PROBE_BROKER_API
+                or not exit_scope_ready(store, value["cleanup"])
+                or value["cleanup_complete"] != value["cleanup"]["complete"]):
+            reject("UPDATE_ENGINE_INVALID", "Updater cleanup capability is invalid")
+    elif not value["cleanup_complete"] and strategy(store) != "after_reboot":
         reject("UPDATE_ENGINE_INVALID", "Immediate updates require complete application cleanup")
     text(value["nonce"], r"[0-9a-f]{32}", 32)
     text(value["tree_sha256"], r"[0-9a-f]{64}", 64)
@@ -81,16 +98,29 @@ def _invoke(store, program, arguments):
     from .health import cleanup_report
     from .validation import json_object
     proc, job = None, None
-    with tempfile.TemporaryDirectory(prefix="engine-profile-", dir=store.root / "control") as raw:
+    with tempfile.TemporaryDirectory(prefix="engine-profile-", dir=store.root / "control") as raw, ExitStack() as scope:
         profile = Path(raw).resolve()
         try:
             command = [str(program), "--gitgo-internal-role", "update-coordinator", "--root", str(store.root), *arguments]
+            from .bootstrap_contract import MACOS_PROBE_BROKER_API
+            broker = None
+            options = {}
+            if sys.platform == "darwin" and store.registration.get("bootstrap_api") == MACOS_PROBE_BROKER_API:
+                from .probe_broker import ProbeServer
+                broker = scope.enter_context(ProbeServer(store))
+                descriptor = broker.child.fileno()
+                command.extend(["--probe-fd", str(descriptor)])
+                options["pass_fds"] = (descriptor,)
             proc = spawn_managed(command, cwd=str(profile), env=_environment(profile), stdin=-3,
-                stdout=-1, stderr=-1, text=True, encoding="utf-8", errors="strict", macos_forkless=sys.platform == "darwin")
+                stdout=-1, stderr=-1, text=True, encoding="utf-8", errors="strict", macos_forkless=sys.platform == "darwin", **options)
+            if broker is not None:
+                broker.child.close()
             job = attach_kill_job(proc)
+            collect_options = {"on_poll": broker.poll} if broker is not None else {}
             output, _, _ = collect_output(proc, timeout=600, limit=65536, reject_overflow=True,
-                                          terminate=lambda: terminate_tree(proc, job))
-            if proc.returncode != 0 or cleanup_report(proc, job).get("complete") is not True:
+                                          terminate=lambda: terminate_tree(proc, job), **collect_options)
+            if (proc.returncode != 0 or cleanup_report(proc, job).get("complete") is not True
+                    or (broker is not None and broker.cleanup_complete is not True)):
                 reject("UPDATE_ENGINE_FAILED", "Updater process or cleanup failed; recovery record retained")
             result = fields(json_object(output.encode("utf-8"), 65536), {"status", "version", "error_code"})
             if result["status"] not in {"idle", "exit_required", "disabled", "up_to_date", "failed", "blocked", "busy", "committed", "rolled_back", "restart_required", "recovery_required"}:
@@ -130,9 +160,9 @@ def recover_if_pending(store):
 @pinned_registration
 def dispatch(store, nonce, exit_code, cleanup, *, automatic=False, deferred=False):
     from backend.core.installation_lease import runtime_descriptors
-    from .handoff import _session, strategy
+    from .handoff import _session, strategy, exit_scope_ready
     if (runtime_descriptors() or type(cleanup) is not dict or type(cleanup.get("complete")) is not bool
-            or (cleanup["complete"] is not True and strategy(store) != "after_reboot")
+            or not exit_scope_ready(store, cleanup)
             or exit_code not in (0, 75) or (automatic and exit_code != 0)):
         reject("UPDATE_SCOPE_UNAVAILABLE", "Updater dispatch requires a clean retired application")
     with _lock(store):
@@ -166,10 +196,14 @@ def dispatch(store, nonce, exit_code, cleanup, *, automatic=False, deferred=Fals
                 sync_tree(cache)
             if tree_digest(cache) != digest or tree_digest(active) != digest:
                 reject("UPDATE_ENGINE_INVALID", "Updater copy differs from the admitted application")
-        atomic_control(store.root / "control" / TICKET, {"schema_version": 1,
+        ticket = {"schema_version": 1,
             "installation_id": store.registration["installation_id"], "nonce": nonce,
             "engine": "engines/" + digest, "tree_sha256": digest, "exit_code": exit_code,
-            "cleanup_complete": cleanup["complete"], "automatic": automatic, "deferred": deferred})
+            "cleanup_complete": cleanup["complete"], "automatic": automatic, "deferred": deferred}
+        from .bootstrap_contract import MACOS_PROBE_BROKER_API
+        if store.registration.get("bootstrap_api") == MACOS_PROBE_BROKER_API:
+            ticket.update(schema_version=2, cleanup=cleanup)
+        atomic_control(store.root / "control" / TICKET, ticket)
         return _run(store, recovering=False)
 
 
@@ -183,8 +217,21 @@ def main(arguments):
     parser.add_argument("--recover", action="store_true")
     parser.add_argument("--propose", action="store_true")
     parser.add_argument("--nonce")
+    parser.add_argument("--probe-fd", type=int)
     args = parser.parse_args(arguments)
     store = open_managed(Path(args.root))
+    from .bootstrap_contract import MACOS_PROBE_BROKER_API
+    needs_broker = sys.platform == "darwin" and store.registration.get("bootstrap_api") == MACOS_PROBE_BROKER_API
+    if needs_broker != (args.probe_fd is not None):
+        reject("UPDATE_PROBE_CHANNEL", "Updater probe capability does not match its launcher")
+    from .probe_broker import engine_client
+    with engine_client(args.probe_fd):
+        return _execute_main(store, args)
+
+
+def _execute_main(store, args):
+    from .handoff import _consume_request
+    from backend.core.protocol_io import dump_protocol_json
     if args.propose:
         expected = store.root / "active/internal/gitgo-host" / ("gitgo-host.exe" if os.name == "nt" else "gitgo-host")
         if args.recover or not getattr(sys, "frozen", False) or Path(sys.executable).resolve() != expected.resolve():
@@ -192,7 +239,7 @@ def main(arguments):
         from .automatic import queue_on_clean_exit
         from .preparation_service import UpdatePreparationService
         queued = queue_on_clean_exit(UpdatePreparationService(store_loader=lambda: store), args.nonce or "")
-        print(dump_protocol_json(asdict(TransactionResult("exit_required" if queued else "idle"))), flush=True)
+        print(dump_protocol_json(result_wire(TransactionResult("exit_required" if queued else "idle"))), flush=True)
         return 0
     value, cache = _read(store)
     expected = cache / "internal/gitgo-host" / ("gitgo-host.exe" if os.name == "nt" else "gitgo-host")
@@ -204,7 +251,7 @@ def main(arguments):
         from .deferred import _consume_after_reboot
         answer = _consume_after_reboot(store) or TransactionResult("idle")
     else:
-        answer = _consume_request(store, value["nonce"], value["exit_code"], {"complete": value["cleanup_complete"]})
+        answer = _consume_request(store, value["nonce"], value["exit_code"], value.get("cleanup", {"complete": value["cleanup_complete"]}))
     if answer is None: reject("UPDATE_ENGINE_FAILED", "Updater request produced no result")
-    print(dump_protocol_json(asdict(answer)), flush=True)
+    print(dump_protocol_json(result_wire(answer)), flush=True)
     return 0

@@ -65,14 +65,24 @@ def decision_evidence(process, *, limit=8):
     task = process.active_task_id or process.process_id
     cards = [card for card in decision_timeline(process.session.host_ledger)
              if card['decision'].get('task_id') == task]
+    return project_decision_evidence(cards, task_id=task, process_id=process.process_id,
+                                    owner_process_id=root_process(process).process_id, limit=limit)
+
+
+def project_decision_evidence(cards, *, task_id, process_id, owner_process_id, limit=8):
+    """Read-only question evidence shared by live and saved public cards.
+
+    This projection cannot restore a pending authorization or accept an answer.
+    """
+    cards = [card for card in cards if card['decision'].get('task_id') == task_id]
     items = []
     for card in cards[-limit:]:
         request = card['decision']
         answer = card.get('decision_answer')
         items.append({
-            'decision_id': request['decision_id'], 'task_id': task,
-            'source_process_id': request.get('source_process_id') or process.process_id,
-            'owner_process_id': request.get('owner_process_id') or root_process(process).process_id,
+            'decision_id': request['decision_id'], 'task_id': task_id,
+            'source_process_id': request.get('source_process_id') or process_id,
+            'owner_process_id': request.get('owner_process_id') or owner_process_id,
             'kind': request.get('kind'), 'status': card['status'],
             'question': str(request.get('question') or '')[:800],
             'options': [{'label': str(option.get('label') or '')[:240]}

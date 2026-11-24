@@ -33,6 +33,9 @@ class TrialMixin:
         if not trial_node or not trial_node.file_access.path:
             self.on_log("未配置 Trial 仓库，跳过")
             return []
+        if self.protected_worktree_mode:
+            self.on_log("Trial history is unavailable in macOS protected worktree mode")
+            return []
 
         self.trial_adapter, self.trial_git_runner = create_adapters_for_node(trial_node)
         if not self.trial_git_runner.is_git_repo():

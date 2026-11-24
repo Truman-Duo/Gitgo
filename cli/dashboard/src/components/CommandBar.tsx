@@ -8,6 +8,8 @@ import {copy,type Copy} from "../ui/pageContract.js";
 import React, { memo, useState, useEffect } from "react";
 import { Box, Text, Ansi } from "@anthropic/ink";
 import { TextInput } from "./TextInput.js";
+import {FeedbackMessage} from "./FeedbackMessage.js";
+import type {Feedback} from "../hooks/useFeedback.js";
 import {SuggestionRow} from "./Selection.js";
 import { isChatScene, type Scene, type Mode } from "../state/store.js";
 import type { UseTextInputReturn } from "../hooks/useTextInput.js";
@@ -47,6 +49,7 @@ type Props = {
   textInput: UseTextInputReturn;
   cmdInput: UseTextInputReturn;
   cmdResult: string;
+  sceneFeedback?: Feedback;
   statusText: string;
   suggestions: Suggestion[];
   suggestionIdx: number;
@@ -64,7 +67,7 @@ type Props = {
 };
 
 export const CommandBar = memo(function CommandBar({
-  width, mode, advancement, advancementPending = false, textInput, cmdInput, cmdResult,
+  width, mode, advancement, advancementPending = false, textInput, cmdInput, cmdResult, sceneFeedback,
   statusText, suggestions, suggestionIdx, scene, footerOverride,
   runningB, runningBSelIdx, statusBarFocused, contextPct, cachePct,
   footerDrawer, editorHidden = false, editorFocused = true,
@@ -83,6 +86,7 @@ export const CommandBar = memo(function CommandBar({
   // Use overlay values when overridden
   const activeCmdInput = isOverridden ? footerOverride.cmdInput : cmdInput;
   const activeCmdResult = isOverridden ? footerOverride.cmdResult : cmdResult;
+  const activeFeedback = footerOverride ? undefined : sceneFeedback;
   const sceneStatus = !isOverridden || footerOverride.preserveStatus;
   const activeStatusText = sceneStatus ? statusText : footerOverride.statusText;
   const activeSuggestions: Suggestion[] = isOverridden
@@ -164,9 +168,9 @@ export const CommandBar = memo(function CommandBar({
       )}
 
       {/* Command result — below the input box */}
-      {showInput && !footerDrawer && activeCmdResult ? (
+      {showInput && !footerDrawer && (activeFeedback || activeCmdResult) ? (
         <Box flexDirection="row" paddingLeft={2} marginTop={1}>
-          <Text color={colors.input.result.fg}>{activeCmdResult}</Text>
+          {activeFeedback ? <FeedbackMessage feedback={activeFeedback}/> : <Text color={colors.input.result.fg}>{activeCmdResult}</Text>}
         </Box>
       ) : null}
 

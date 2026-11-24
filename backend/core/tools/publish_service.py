@@ -88,9 +88,26 @@ SCHEMAS = {
 SCHEMAS["migrate"] = ({"legacy_id": _STRING, **{key: value for key, value in SCHEMAS["prepare"][0].items()
     if key not in {"item_id", "expected_revision", "title", "base_oid"}}},
     ["legacy_id", "source_role", "source_ref", "target_branch", "owner"])
+SCHEMAS.update({
+    "release_plan": ({"item_id": _STRING, "expected_revision": _REVISION, "package_id": _STRING,
+                      "target": _PLATFORM_TARGET, "notes": {"type":"string", "maxLength":16000},
+                      "delivery_recipe":{"type":"string","enum":["project","gitgo.native"]},
+                      "signing_key_id":_STRING,"upgrade_route":{"type":"string","enum":["direct","legacy-repair"]},
+                      "ci_artifacts":{"type":"array", "maxItems":16, "items":{"type":"object", "additionalProperties":False,
+                          "properties":{key:{"type":"integer", "minimum":1} for key in ("run_id", "attempt", "artifact_id")},
+                          "required":["run_id", "attempt", "artifact_id"]}}},
+                     ["item_id", "expected_revision", "package_id", "target"]),
+    "release_run": ({"item_id": _STRING, "expected_revision": _REVISION,
+                     "through": {"type":"string", "enum":["prepared", "draft", "published", "verified"]}},
+                    ["item_id", "expected_revision"]),
+    "release_cancel": ({"item_id": _STRING, "expected_revision": _REVISION, "job_id": _STRING},
+                       ["item_id", "expected_revision", "job_id"]),
+    "release_reconcile": ({"item_id": _STRING, "expected_revision": _REVISION, "job_id": _STRING},
+                          ["item_id", "expected_revision", "job_id"]),
+})
 
 
-def build_publish_tools(project):
+def build_publish_tools(project, *, operator_controls=False):
     result = {}
     def current_project():
         from backend.core.application.services import ApplicationServices
@@ -99,6 +116,9 @@ def build_publish_tools(project):
             raise PublishError("PUBLISH_CONTEXT_UNAVAILABLE")
         return current
     for operation, (properties, required) in SCHEMAS.items():
+        from backend.core.publish.release_controller import CONTROLLER_COMMANDS
+        if operation in CONTROLLER_COMMANDS and not operator_controls:
+            continue
         def prepare(args, operation=operation):
             current = current_project()
             prepared = {**args, "_workspace": str(project.workspace_path)}
@@ -191,7 +211,7 @@ def build_publish_tools(project):
             read_only=False, resources=["governance:publish"], timeout=300,
             cancellation=CancellationMode.COOPERATIVE if operation in {"verify", "run", "package"} else CancellationMode.NON_INTERRUPTIBLE,
             execution_contract=data_broker("governance.publish"))
-        if operation in {"share_publish", "collaborate_send", "tag", "release", "download", "branch_apply"}:
+        if operation in {"share_publish", "collaborate_send", "tag", "release", "download", "branch_apply", "release_run"}:
             tool.effect, tool.approval, tool.approval_per_invocation = ToolEffect.EXTERNAL, ApprovalMode.ASK, True
             tool.resources = ["publish://" + operation]
         result[tool.name] = tool
@@ -247,7 +267,7 @@ def build_publish_tools(project):
 
 
 def invoke_local_publish(project, operation, arguments, *, queue=None, cancelled=lambda: False, operator_authorized=False):
-    tool = build_publish_tools(project)["publish_" + operation]
+    tool = build_publish_tools(project, operator_controls=True)["publish_" + operation]
     # This native UI is the local operator, not an Agent-selected identity.
     # Use the same declared policy; future ASK/DENY operations must route through
     # the existing permission broker instead of introducing a second grant DB.
@@ -282,6 +302,10 @@ def invoke_local_publish(project, operation, arguments, *, queue=None, cancelled
         if queue is None:
             raise PublishError("PUBLISH_RUNTIME_UNAVAILABLE")
         return queue.submit(project, arguments, lambda: tool.execute(prepared))
+    if operation in {"release_run", "release_reconcile"}:
+        if queue is None:
+            raise PublishError("PUBLISH_RUNTIME_UNAVAILABLE")
+        return queue.submit_release(project, arguments, lambda: tool.execute(prepared))
     if operation in {"verify", "execute", "package"}:
         from backend.core.loop.publish_runtime import local_check_runtime
         from backend.core.loop.service_runtime import tool_service_scope

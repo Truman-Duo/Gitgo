@@ -11,18 +11,20 @@ import {FormFieldRow, fieldLabelWidth} from "../components/FormFieldRow.js";
 import {SelectionText} from "../components/Selection.js";
 import {cycleChoiceIndex} from "../input/choice.js";
 import {useLocalHelpCommand} from "./useLocalHelpCommand.js";
+import type {HelpTopic} from "../ui/moduleHelp.js";
 
 type Form = ReturnType<typeof usePublishForm>;
 /** A form owns one footer only while a text field is explicitly being edited. */
-export function usePublishFormEditor(form: Form, {busy, onFooter, onDismiss, onSave, choices = {}, actions = {}, isActive = true}: {
+export function usePublishFormEditor(form: Form, {busy, onFooter, onDismiss, onSave, choices = {}, optionLabels = {}, actions = {}, isActive = true,helpTopic="publish.settings"}: {
   busy: boolean; onFooter: (footer: FooterConfig | null) => void; onDismiss: () => void;
-  onSave: (values: Record<string, string>) => void | Promise<void>; choices?: Record<string, string[]>; actions?: Record<string, () => void>; isActive?: boolean;
+  onSave: (values: Record<string, string>) => void | Promise<void>; choices?: Record<string, string[]>;
+  optionLabels?: Record<string, Record<string,string>>; actions?: Record<string, () => void>; isActive?: boolean;helpTopic?:HelpTopic;
 }) {
   const {values, setValues, fields, index, setIndex, field, input, stale, reset} = form;
   const t = useCopy(), {w} = usePanelSize({minWidth: 20, widthOffset: 4});
   const [editing, setEditing] = useState(false), [option, setOption] = useState<number | null>(null);
   const saving = useRef(false);
-  const help=useLocalHelpCommand("publish.settings",onFooter,isActive&&!editing&&option===null&&!saving.current);
+  const help=useLocalHelpCommand(helpTopic,onFooter,isActive&&!editing&&option===null&&!saving.current);
   useEffect(() => {
     if(help.active)return;
     onFooter(editing && isActive ? {kind: "normal", cmdInput: field === "token" ? {...input, value: "•".repeat(input.value.length)} : input,
@@ -82,7 +84,7 @@ export function usePublishFormEditor(form: Form, {busy, onFooter, onDismiss, onS
       const value = active && option !== null ? choices[field]![option]! : selected ? input.value : values[name] ?? "";
       return <FormFieldRow key={name} label={label(name)} labelWidth={fieldLabelWidth(fields.map(label), Math.max(1, w - 10))} selected={active} editing={active && (editing || option !== null)}>
         <SelectionText wrap="truncate-end">
-          {value ? name === "token" ? "•".repeat(value.length) : value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ") : "—"}
+          {value ? name === "token" ? "•".repeat(value.length) : (optionLabels[name]?.[value]??value).replace(/[\x00-\x1f\x7f-\x9f]/g, " ") : "—"}
         </SelectionText>
       </FormFieldRow>;
     })}

@@ -106,10 +106,8 @@ export const ProjectWorkspace = memo(function ProjectWorkspace({
 
   return (
     <Box flexDirection="column" width={cols} paddingTop={1} flexGrow={1}>
-      {loading ? (
-        <Box paddingLeft={1}><Text dimColor>{t({en:"Loading loop data…",zh:"正在读取会话数据…"})}</Text></Box>
-      ) : null}
       <ChatPanel
+        loading={loading}
         client={client}
         messages={messages}
         streaming={streaming}

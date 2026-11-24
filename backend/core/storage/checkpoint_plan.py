@@ -209,9 +209,13 @@ class CheckpointObjectBuilder:
         self._sealed = False
 
     def prepare(self, value):
+        return self.prepare_encoded(self._encode(value))
+
+    def prepare_encoded(self, data: bytes):
         if self._sealed:
             raise RuntimeError("checkpoint manifest already sealed")
-        data = self._encode(value)
+        if type(data) is not bytes:
+            raise TypeError("checkpoint data must be immutable bytes")
         if len(data) > self._policy.max_cas_object_bytes:
             raise StorageBlocked("cas_object_too_large")
         digest = hashlib.sha256(data).hexdigest()

@@ -27,11 +27,13 @@ export function useDeclaredCursor({
   column,
   active,
   visible = true,
+  style,
 }: {
   line: number
   column: number
   active: boolean
   visible?: boolean
+  style?: 'blinking-bar'
 }): (element: DOMElement | null) => void {
   const setCursorDeclaration = useContext(CursorDeclarationContext)
   const nodeRef = useRef<DOMElement | null>(null)
@@ -56,7 +58,7 @@ export function useDeclaredCursor({
   useLayoutEffect(() => {
     const node = nodeRef.current
     if (active && node) {
-      setCursorDeclaration({ relativeX: column, relativeY: line, node, visible })
+      setCursorDeclaration({ relativeX: column, relativeY: line, node, visible,style })
     } else {
       setCursorDeclaration(null, node)
     }

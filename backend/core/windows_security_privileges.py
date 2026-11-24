@@ -41,6 +41,19 @@ def _check(ok, operation):
         raise C.WinError(error, operation + ': ' + C.FormatError(error).strip())
 
 
+def uses_process_token(kernel, advapi):
+    """Allow cross-thread opens only with a confirmed process identity."""
+    thread = _fn(kernel, 'GetCurrentThread', [], W.HANDLE)
+    close = _fn(kernel, 'CloseHandle', [W.HANDLE], W.BOOL)
+    open_thread = _fn(advapi, 'OpenThreadToken',
+        [W.HANDLE, W.DWORD, W.BOOL, C.POINTER(W.HANDLE)], W.BOOL)
+    token = W.HANDLE()
+    if open_thread(thread(), _TOKEN_QUERY, True, C.byref(token)):
+        _check(close(token), 'Cannot close the Windows thread token query')
+        return False
+    return C.get_last_error() == _ERROR_NO_TOKEN
+
+
 @contextmanager
 def security_privileges():
     """Enable existing operator privileges on a private impersonation token.

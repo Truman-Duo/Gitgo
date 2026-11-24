@@ -1,0 +1,8 @@
+${instruction}
+
+Saved maintenance context:
+${context}
+
+1. Start from the accepted version and its recorded path coverage. Check the current commitment and any newly added consumer or verification obligation before editing.
+2. Accept the work before editing. Write only the files in the current assignment. Check a consequential clue through existing tests or read-only inspection, and report out-of-scope findings with evidence to the supervisor before requesting an expansion.
+3. Read notices through asset_status. Acknowledging a notice is separate from accepting work. If current behavior satisfies the request, verify and report without a patch.

@@ -37,19 +37,19 @@ def receive(p, request, values):
 def test_round_uses_only_ready_frontier_and_real_answers(tmp_path_factory):
     p, w, _ = setup(tmp_path_factory)
     request = w.invoke({"operation": "ask_frontier"})
-    assert [q["node_id"] for q in request["questions"]] == ["scope"]
+    assert [q["node_id"] for q in request["questions"]] == ["scope", "audience"]
     assert request['question'] == request['questions'][0]['question']
     assert not w.status()["complete"]
     before = copy.deepcopy(p.context_snapshot)
     with pytest.raises(ValueError):
-        validate_round_answer(request, json.dumps({"answers": {"audience": "teams"}}))
+        validate_round_answer(request, json.dumps({"answers": {"detail": "teams"}}))
     assert p.context_snapshot == before
     assert p.pending_decision["decision_id"] == request["decision_id"]
     receive(p, request, {"scope": "large"})
     assert w.status()["question_frontier"] == ["audience", "detail"]
     audience = w.ask_frontier()
     assert audience['decision_id'] != request['decision_id']
-    assert [q['node_id'] for q in audience['questions']] == ['audience']
+    assert [q['node_id'] for q in audience['questions']] == ['audience', 'detail']
     receive(p, audience, {"audience": "teams"})
     assert w.status()["question_frontier"] == ["detail"]
     assert len(confirmed_user_state(p.session.host_ledger)) == 2

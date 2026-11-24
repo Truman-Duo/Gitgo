@@ -98,11 +98,12 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key, *, runtime_met
         if base is None or base is tool:
             return {"error": "DYNAMIC_COMPONENT_UNAVAILABLE", "failed_step": step_id}
         resolved = resolve_step_arguments(step.get("arguments", {}), inputs=inputs, steps=state["steps"])
-        policy = decide_tool_operation(base, resolved)
+        policy = decide_tool_operation(base, resolved, process=ctx.process)
         child_key = call_key({"id": step_id}, child_execution, index)
         resumed_child = state_for(ctx.process, child_key, base, resolved, catalog) if base.composite_spec else None
-        if policy.requires_user and resumed_child is None and matching_grant(ctx.process, name, resolved,
-                per_invocation=base.approval_per_invocation, tool=base) is None:
+        if policy.requires_user and (resumed_child is None or policy.task_approval) and matching_grant(
+                ctx.process, name, resolved, per_invocation=base.approval_per_invocation, tool=base,
+                task_approval=policy.task_approval) is None:
             ctx.artifacts["nested_permission"] = {"tool": base, "arguments": resolved}
             runtime_metadata["suspended"] = True
             return {"_suspended": True}

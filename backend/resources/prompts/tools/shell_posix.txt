@@ -1,1 +1,1 @@
-The PowerShell execution profile is currently unavailable on this platform; Bash must pass its executable-identity checks.
+Use Bash syntax and keep literal content out of interpolation. For example, quote a path containing spaces. Execution requires a verified Bash and the current native sandbox prerequisites.

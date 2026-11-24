@@ -24,19 +24,20 @@ function tree() {
     {oid: oid("a"), parents: [oid("b")], subject: "iteration two"},
     {oid: oid("b"), parents: [oid("c")], subject: "iteration one"}], formal_commits: [] as any[], formal_total: 0, next_cursor: null};
 }
-function mount(records = data(), workspace = tree(), initialView?: unknown) {
+function mount(records = data(), workspace = tree(), initialView?: unknown, platformTarget?:Record<string,string>) {
   const previousColor = chalk.level; chalk.level = 3;
   const stdin: any = new PassThrough(); Object.assign(stdin, {isTTY: true, setRawMode: () => stdin, ref: () => stdin, unref: () => stdin});
   const stdout: any = new PassThrough(); Object.assign(stdout, {isTTY: true, columns: 110, rows: 34}); stdout.on("data", () => {});
   const stderr: any = new PassThrough(); stderr.on("data", () => {});
   const calls: {name: string; args: any}[] = [], local = createPublishStateStore().scope("test"); let footer: any;
-  const configuration: any = {commit_format: {prefix: "TEST", number_start: 1}, privacy: {}, remote_url: ""};
+  const configuration: any = {commit_format: {prefix: "TEST", number_start: 1}, privacy: {}, remote_url: "",platform_target:platformTarget??{}};
   if (initialView) local.set("workbench.view", initialView);
   const client: any = {async callTool(name: string, args: any) {
     calls.push({name, args});
     if (name === "publish.items") return records;
     if (name === "publish.workspace") return workspace;
     if (name === "publish.get") return structuredClone(configuration);
+    if(name==="publish.platform_read")return {schema_version:1,read_only:true,id:"repository-list",binding:"read_only",target:args.target,resource:args.resource,page:args.page,documents:[{id:"7",number:7,title:"Configured repository PR"}],more:false};
     if (name === "publish.set") {configuration[args.section] = structuredClone(args.value); return {ok: true};}
     if (name === "publish.prepare") return {request_id: args.request_id, operation_id: "prepared", effect_state: "committed"};
     if (name === "publish.account.save") return {request_id: args.request_id, operation_id: "account-settings", effect_state: "committed"};
@@ -49,6 +50,7 @@ function mount(records = data(), workspace = tree(), initialView?: unknown) {
   }
   const root = renderSync(<InputProvider><Fixture/></InputProvider>, {stdin, stdout, stderr, patchConsole: false, exitOnCtrlC: false});
   return {calls, local, footer: () => footer,
+    async headerTab(index:number){for(let i=0;i<index;i++){stdin.write("\x1b[C");await wait();}},
     async send(value: string) {stdin.write(value); await wait();},
     async repeat(value: string, count: number) {for (let index = 0; index < count; index++) {stdin.write(value); await new Promise(resolve => setTimeout(resolve, 10));} await wait();},
     async resize(w: number, h: number) {stdout.columns = w; stdout.rows = h; stdout.emit("resize"); await wait();},
@@ -61,21 +63,61 @@ function mount(records = data(), workspace = tree(), initialView?: unknown) {
 test("four terminal pages browse real data with no idle editor, and held Down remains bounded", async () => {
   const io = mount();
   try {
-    await wait(); expect(io.text()).toContain("Workspace"); expect(io.text()).toContain("版本发布"); expect(io.footer().hidden).toBe(true);
+    await wait(); expect(io.text()).toContain("工作区"); expect(io.text()).toContain("版本发布"); expect(io.footer().hidden).toBe(true);
     await io.send("\r"); expect(io.footer().hidden).toBe(true); expect(io.text()).toContain("iteration two");
     for (let index = 0; index < 25; index++) await io.send("\x1b[B");
-    expect(io.selected().some(row => row.includes("进入协作"))).toBe(true); expect(io.text()).not.toContain("› "); expect(io.calls.map(c => c.name)).toEqual(["publish.items", "publish.workspace"]);
-    for (const width of [40, 80, 110]) {await io.resize(width, 24); expect(io.footer().hidden).toBe(true); expect(io.text()).toContain("进入协作");}
+    expect(io.selected().some(row => row.includes("本地正式 Git"))).toBe(true); expect(io.text()).not.toContain("› "); expect(io.calls.map(c => c.name)).toEqual(["publish.items", "publish.workspace"]);
+    for (const width of [40, 80, 110]) {await io.resize(width, 24); expect(io.footer().hidden).toBe(true); expect(io.text()).toContain("本地正式 Git");}
     await io.send("\x1b"); expect(io.text()).not.toContain("←/→ 页头"); await io.send("\x1b[C"); await io.send("\r");
     expect(io.text()).toContain("我的提交"); expect(io.text()).toContain("收到的 PR"); expect(io.footer().hidden).toBe(true);
   } finally {io.close();}
 });
 
+test("fresh Publish starts at Workspace despite a previously saved collaboration tab, and empty work has no duplicate actions",async()=>{
+ const workspace=tree();workspace.commits=[];
+ const io=mount(data(),workspace,{tab:1,sub:1});try{
+  await wait();expect(io.headerFocused()).toBe(true);expect(io.text()).not.toContain("收到的 PR");
+  expect(io.text()).not.toContain("Workspace");expect(io.text()).not.toContain("整理所选 0");expect(io.text()).not.toContain("进入协作");
+  expect(io.text().match(/过程 Git/g)).toHaveLength(1);expect(io.text().match(/本地正式 Git/g)).toHaveLength(1);
+ }finally{io.close();}
+});
+
+test("repository PR browsing directly reuses the saved account target without another form",async()=>{
+ const target={kind:"gitlab",instance:"https://git.example.com",repository:"team/repo",account:"reviewer"};
+ const io=mount(data(),tree(),undefined,target);try{
+  await wait();await io.headerTab(1);await io.send("\r");await io.send("\x1b[C");await io.send("\r");await io.send("\r");
+  expect(io.text()).toContain("Configured repository PR");expect(io.text()).not.toContain("账户登录名");expect(io.text()).not.toContain("读取对象");
+  expect(io.calls.filter(call=>call.name==="publish.platform_read")).toHaveLength(1);
+  expect(io.calls.find(call=>call.name==="publish.platform_read")?.args).toEqual({project:"test",target,resource:{kind:"pulls"},page:1});
+  expect(io.calls.every(call=>["publish.items","publish.workspace","publish.get","publish.platform_read"].includes(call.name))).toBe(true);
+ }finally{io.close();}
+});
+
+test("saving an existing repository target does not require re-entering its encrypted credential",async()=>{
+ const target={kind:"github",instance:"https://github.com",repository:"team/repo",account:"existing"};
+ const io=mount(data(),tree(),undefined,target);try{
+  await wait();await io.headerTab(3);await io.send("\r");await io.send("\x1b[C");await io.send("\r");await io.send("\x13");
+  expect(io.calls.some(call=>call.name==="publish.account.save")).toBe(false);
+  expect(io.calls.find(call=>call.name==="publish.set")?.args).toMatchObject({section:"platform_target",value:target,expected_value:target});
+  expect(io.text()).toContain("仓库账户已保存");
+ }finally{io.close();}
+});
+
+test("held workspace navigation coalesces presentation saves and performs no backend reads",async()=>{
+ const io=mount();let writes=0;const save=io.local.set;io.local.set=(key,value)=>{writes++;save(key,value);};
+ try{await wait();await io.send("\r");await new Promise(r=>setTimeout(r,180));writes=0;
+  const calls=io.calls.length;
+  for(let i=0;i<24;i++)await io.repeat(i%2?"\x1b[A":"\x1b[B",1);
+  await new Promise(r=>setTimeout(r,180));expect(writes).toBeLessThan(4);expect(io.calls).toHaveLength(calls);
+ }finally{io.close();}
+});
+
 test("Publish /help preserves graph selections and reading help starts no operation",async()=>{
  const io=mount();try{
   await wait();await io.send('\r');await io.send('\x1b[C');
+  await new Promise(resolve=>setTimeout(resolve,180));
   const saved=io.local.get<any>('workbench.view');const reads=io.calls.length;
-  await io.send('/help');await io.send('\r');expect(io.text()).toContain('Publish 使用说明');expect(io.text()).toContain('Workspace');
+  await io.send('/help');await io.send('\r');expect(io.text()).toContain('Publish 使用说明');expect(io.text()).toContain('工作区');
   expect(io.calls).toHaveLength(reads);await io.send('\x1b');expect(io.text()).toContain('过程 Git');
   expect(io.local.get<any>('workbench.view')?.source).toBe(saved?.source);
   expect(io.calls.some(call=>['publish.prepare','publish.execute','publish.set'].includes(call.name))).toBe(false);
@@ -117,7 +159,7 @@ test("source graph selection pre-fills the formal draft, while Enter never creat
 
 test("Publish form help retains staged fields and treats /help as literal text while editing",async()=>{
  const io=mount(data(),tree(),{tab:3});try{
-  await wait();await io.send('\r');await io.send('\x1b[C');await io.send('\x1b[C');await io.send('\r');await io.send('\r');
+  await wait();await io.headerTab(3);await io.send('\r');await io.send('\x1b[C');await io.send('\x1b[C');await io.send('\r');await io.send('\r');
   await io.send('\x15');await io.send('/help literal prefix');expect(io.footer().kind).toBe('normal');
   await io.send('\r');const reads=io.calls.length;await io.send('/help');await io.send('\r');
   expect(io.text()).toContain('Publish 使用说明');expect(io.calls).toHaveLength(reads);
@@ -140,15 +182,20 @@ test("a project with no candidates can open repository PR browsing without prepa
   const io = mount();
   try {
     await wait(); await io.send("\x1b[C"); await io.send("\r"); await io.send("\x1b[C"); await io.send("\r"); await io.send("\r");
-    expect(io.text()).toContain("读取对象"); expect(io.text()).toContain("pulls"); expect(io.footer().hidden).toBe(true);
-    expect(io.calls.map(call => call.name)).toEqual(["publish.items", "publish.workspace"]);
+    expect(io.text()).toContain("请先在配置的账户页保存仓库账户");expect(io.text()).not.toContain("前往账户配置");
+    expect(io.text()).not.toContain("读取对象"); expect(io.footer().hidden).toBe(true);
+    expect(io.calls.map(call => call.name)).toEqual(["publish.items", "publish.workspace","publish.get"]);
+    await io.send("\x1b[B");await io.send("\r");
+    expect(io.text()).toContain("请先在配置的账户页保存仓库账户");expect(io.text()).not.toContain("实例地址:");expect(io.text()).not.toContain("访问令牌:");
+    expect(io.calls.map(call => call.name)).toEqual(["publish.items", "publish.workspace","publish.get"]);
+    await io.send("\x1b");expect(io.text()).toContain("读取仓库 PR");
   } finally {io.close();}
 });
 
 test("configuration sections show their fields immediately, without a third menu or lower separator", async () => {
   const io = mount(data(), tree(), {tab: 3});
   try {
-    await wait(); await io.send("\r");
+    await wait(); await io.headerTab(3); await io.send("\r");
     expect(io.text()).toContain("远端仓库:");
     expect(io.text()).not.toContain("Enter 进入字段列表");
     expect(io.text().split("\n").filter(line => line.trim().startsWith("─"))).toHaveLength(1);
@@ -176,7 +223,7 @@ test("configuration sections show their fields immediately, without a third menu
 test("the inline account form masks its token and only Ctrl+S saves through the existing native account API", async () => {
   const io = mount(data(), tree(), {tab: 3});
   try {
-    await wait(); await io.send("\r"); await io.send("\x1b[C");
+    await wait(); await io.headerTab(3); await io.send("\r"); await io.send("\x1b[C");
     expect(io.text()).toContain("实例地址:"); expect(io.footer().hidden).toBe(true);
     await io.send("\r");
     await io.send("\x1b[B"); await io.send("\x1b[B"); await io.send("\r");
@@ -191,13 +238,14 @@ test("the inline account form masks its token and only Ctrl+S saves through the 
     expect(io.calls.find(call => call.name === "publish.account.save")!.args).toMatchObject({project: "test", token: "local-example-token",
       target: {kind: "github", instance: "https://github.com", repository: "demo-team/bookmarks", account: "demo-maintainer"}});
     expect(io.footer().hidden).toBe(true); expect(io.text()).toContain("凭据已保存");
+    expect(io.calls.find(call=>call.name==="publish.set")?.args).toMatchObject({section:"platform_target",expected_value:{},value:{repository:"demo-team/bookmarks",account:"demo-maintainer"}});
   } finally {io.close();}
 });
 
 test("a saved configuration rebinds its acknowledged revision before the next edit", async () => {
   const io = mount(data(), tree(), {tab: 3});
   try {
-    await wait(); await io.send("\r"); await io.send("\x1b[C"); await io.send("\x1b[C");
+    await wait(); await io.headerTab(3); await io.send("\r"); await io.send("\x1b[C"); await io.send("\x1b[C");
     for (const prefix of ["FIRST", "SECOND"]) {
       await io.send("\r"); await io.send("\r"); await io.send("\x15"); await io.send(prefix); await io.send("\x13");
       expect(io.text()).not.toContain("配置已变化");

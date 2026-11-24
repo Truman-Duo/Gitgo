@@ -1,13 +1,13 @@
 """Host decides whether a semantic assessment has new work to do."""
 from .alignment_evidence import alignment_input_digest, answer_digest
 
-POLICY_VERSION = 15
+POLICY_VERSION = 22
 REVIEW_POLICY = f'on_demand_v{POLICY_VERSION}'
 
 
 def uses_on_demand_review(state):
     """Keep persisted v2 tasks subject to the same boundary guards."""
-    return state.get('review_policy') in {'on_demand_v2', 'on_demand_v3', 'on_demand_v4', 'on_demand_v5', 'on_demand_v6', 'on_demand_v7', 'on_demand_v8', 'on_demand_v9', 'on_demand_v10', 'on_demand_v11', 'on_demand_v12', 'on_demand_v13', 'on_demand_v14', REVIEW_POLICY}
+    return state.get('review_policy') in {f'on_demand_v{version}' for version in range(2, POLICY_VERSION + 1)}
 
 
 def requires_business_readiness(tool):
@@ -65,12 +65,18 @@ def main_model_initial_question(process, payload):
     """
     context, _ = process.read_context_snapshot()
     contract = context.get('task_contract') or {}
+    questions = payload.get('proposed_questions') or []
     task = process.active_task_id or process.process_id
     performed_work = any(r.get('task_id') == task and r.get('committed') is True for r in process.tool_receipts)
     return (process.task_kind == 'answer' and process.actor_kind == 'supervisor' and not process.parent_id
+            # A composite proposal also asserts which facets are independent
+            # and worth asking now. Reuse the existing necessity review for
+            # that joint subject; keep an ordinary direct question lightweight.
+            and len(questions) == 1 and not questions[0].get('depends_on_topics')
             and not performed_work
             and not complex_delivery(process, payload)
             and not payload.get('workflow', {}).get('nodes')
+            and not payload.get('continuation_review')
             and not any(payload.get(k) for k in ('actual_answers', 'confirmed_answers', 'user_updates', 'questions_asked'))
             and not contract.get('requires_user_decision') and not contract.get('uncertainties'))
 
@@ -82,6 +88,25 @@ def complex_delivery(process, payload):
             or contract.get('estimated_complexity') in {'moderate', 'high'}
             or contract.get('execution_mode') in {'plan', 'review'}
             or int(contract.get('independent_workstreams') or 1) > 1)
+
+
+def candidate_question_hint(candidate):
+    """Bounded syntax hint to the existing semantic assessor, not a classifier.
+
+    Ignore fenced code and block quotes. Rhetorical questions and exercises may
+    still trigger a review; unpunctuated requests may be missed. The assessor
+    decides whether input is blocking, optional, or already answerable. This
+    hint neither publishes questions nor grants permission.
+    """
+    fence = None
+    for line in str(candidate or '').splitlines():
+        text = line.lstrip()
+        if text.startswith(('```', '~~~')):
+            mark = text[:3]
+            fence = None if fence == mark else mark if fence is None else fence
+        elif fence is None and not text.startswith('>') and any(c in text for c in '?？'):
+            return True
+    return False
 
 
 def review_reason(process, payload, trigger='admission'):
@@ -107,6 +132,10 @@ def review_reason(process, payload, trigger='admission'):
         return 'user_requirement_update'
     if payload.get('workflow', {}).get('nodes') and payload.get('stage') == 'delivery':
         return 'declared_workflow_dependencies'
+    if payload.get('stage') == 'delivery' and payload.get('continuation_review'):
+        return 'business_dialogue_continuation'
+    if payload.get('stage') == 'delivery' and candidate_question_hint(payload.get('candidate')):
+        return 'unstructured_question_candidate'
     # Reading evidence is not a new proposal or a delivery attempt. Workflow
     # revisions still invalidate cached readiness, but do not turn each status
     # read into a demand for a final answer. Contract/effect/question boundaries
@@ -121,6 +150,9 @@ def review_reason(process, payload, trigger='admission'):
 
 
 def reuse_assessment(process, payload):
+    if payload.get('stage') == 'delivery' and (payload.get('continuation_review')
+            or candidate_question_hint(payload.get('candidate'))):
+        return ''
     context, _ = process.read_context_snapshot()
     state = context.get("alignment_runtime") or {}
     ready = state.get("admission_review") or {}

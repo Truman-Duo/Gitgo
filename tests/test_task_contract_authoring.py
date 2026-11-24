@@ -1,6 +1,5 @@
 """Concise authoring follows canonical validation; examples must really compile."""
 import json
-import re
 from copy import deepcopy
 import pytest
 from jsonschema import Draft202012Validator
@@ -11,7 +10,12 @@ from backend.core.prompt_templates import load_prompt
 
 
 def examples():
-    return [json.loads(s) for s in re.findall(r'```json\s*(.*?)\s*```', load_prompt('tools/declare_task_contract'), re.S)]
+    decoder = json.JSONDecoder()
+    cases = []
+    for stage in ('start', 'revise'):
+        prompt = load_prompt(f'tools/declare_task_contract_{stage}')
+        cases.append(decoder.raw_decode('{' + prompt.split('Example: {', 1)[1])[0])
+    return cases
 
 
 def test_all_general_prompt_examples_pass_the_advertised_and_canonical_compilers(runtime):

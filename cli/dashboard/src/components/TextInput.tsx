@@ -11,7 +11,7 @@
 // long text; we compute the wrapped cursor position via wrapText() and declare
 // it to Ink so IME sees the correct screen position. No layout transitions =
 // IME stable.
-import React, { useEffect,useMemo } from "react";
+import React, { useMemo } from "react";
 import { Text, Box, Ansi, useDeclaredCursor, stringWidth, wrapText } from "@anthropic/ink";
 import type { Color } from "@anthropic/ink";
 import {highlightCode} from "../theme/syntax.js";
@@ -45,7 +45,7 @@ export const TextInput = function TextInput({
 }: Props) {
   const cursor = Math.max(0, Math.min(cursorOffset, value.length));
   const active = focus && (Boolean(document) || showCursor);
-  const visible = showCursor && (document?document.caret.row>=document.top&&document.caret.row<document.top+document.height:value.length>0);
+  const visible = showCursor && (document?document.caret.row>=document.top&&document.caret.row<document.top+document.height:true);
   const highlighted=useMemo(()=>syntaxLanguage?highlightCode(value,syntaxLanguage,false):value,[value,syntaxLanguage]);
 
   // Compute cursor (line, column) in the wrapped text layout.
@@ -71,17 +71,8 @@ export const TextInput = function TextInput({
     column: cursorColumn,
     active,
     visible,
+    style:'blinking-bar',
   });
-
-  // Direct stdout write: guarantee terminal cursor is visible when active.
-  useEffect(() => {
-    if (active && visible && process.stdout.isTTY) {
-      process.stdout.write("\x1b[?25h");
-      return () => {
-        process.stdout.write("\x1b[?25l");
-      };
-    }
-  }, [active, visible]);
 
   if(document){
     const logical=highlighted.split("\n"),shown=document.rows.slice(document.top,document.top+document.height);

@@ -78,3 +78,26 @@ def test_cold_checkpoint_preserves_the_issued_scope(tmp_path_factory):
         assert restored.tool_registry.list_all()==["read_file"]
     finally:
         store.close()
+
+
+def test_cold_checkpoint_restores_and_releases_task_execution_policy(tmp_path_factory):
+    from backend.core.loop.task_execution_policy import activate, projection, matches
+
+    workspace = tmp_path_factory / "policy"; workspace.mkdir()
+    store = SessionStore(str(workspace), state_home=tmp_path_factory / "policy-state")
+    process = AgentProcessManager().fork(parent_id=None, role="worker", actor_kind="worker",
+        capability_profile_id="development.workspace", tool_registry=ToolRegistry(["read_file", "write_file"]),
+        max_steps=6, ring_level=RingLevel.RING_3, workspace_path=str(workspace), task_id="scoped-test")
+    process.status = ProcessStatus.COMPLETED
+    process.lifecycle_finalized = True
+    try:
+        activate(process, "scoped-test", {"include_children": True, "allow_only": ["read_file"], "rules": []}, 0, store)
+        store.append_event(process.process_id, "agent_complete", {"status": "completed"})
+        cold = AgentProcessManager()
+        restored = resolve_conversation_process(cold, store, workspace, process.process_id)
+        assert projection(restored)["revision"] == 1
+        assert matches(restored, "write_file", {})[1] == {"deny"}
+        activate(restored, "scoped-test", {"include_children": False, "allow_only": None, "rules": []}, 1, store)
+        assert projection(restored)["revision"] == 2 and not matches(restored, "write_file", {})[1]
+    finally:
+        store.close()

@@ -47,6 +47,34 @@ export function hitTest(
  * fire. Stops when a handler calls stopImmediatePropagation(). Returns
  * true if at least one onClick handler fired.
  */
+export function isActionAt(root: DOMElement, col: number, row: number): boolean {
+  let target = hitTest(root, col, row)
+  while (target) {
+    if (target.attributes.clickMode === 'action' && target._eventHandlers?.onClick) return true
+    target = target.parentNode ?? null
+  }
+  return false
+}
+
+/** Bind a press to its real action owner. A release never activates a
+ * replacement row that moved under the pointer during asynchronous layout. */
+export function captureActionAt(root: DOMElement, col: number, row: number) {
+  const ownerAt = (x: number, y: number) => {
+    let node = hitTest(root, x, y);
+    while (node) {
+      if (node.attributes.clickMode === 'action' && node._eventHandlers?.onClick) return node;
+      node = node.parentNode ?? null;
+    }
+    return null;
+  };
+  const owner = ownerAt(col, row);
+  if (!owner) return undefined;
+  return (x: number, y: number): boolean => {
+    if (ownerAt(x, y) !== owner) return false;
+    return dispatchClick(root, x, y);
+  };
+}
+
 export function dispatchClick(
   root: DOMElement,
   col: number,
@@ -159,6 +187,11 @@ export function dispatchMouseAction(
     if (handler) {
       handledBy ??= target
       event.prepareForTarget(target)
+      const rect = nodeCache.get(target)
+      if (rect) {
+        event.localCol = col - rect.x
+        event.localRow = row - rect.y
+      }
       handler(event)
       if (event.didStopImmediatePropagation()) {
         return handledBy

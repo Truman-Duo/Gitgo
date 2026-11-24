@@ -25,6 +25,24 @@ def query(root, **args):
     return search_text({"_workspace": str(root), "pattern": "needle", "literal": True, **args})
 
 
+@pytest.mark.parametrize('engine', ['ripgrep', 'python'])
+def test_max_depth_is_shared_by_listing_and_search(tmp_path_factory, monkeypatch, engine):
+    if engine == 'python':
+        monkeypatch.setattr(adapter, 'resolve_ripgrep', lambda: None)
+    elif not adapter.resolve_ripgrep():
+        pytest.skip('real ripgrep is unavailable')
+    root = tmp_path_factory
+    (root / 'sub').mkdir()
+    (root / 'near.txt').write_text('needle', encoding='utf-8')
+    (root / 'sub' / 'far.txt').write_text('needle', encoding='utf-8')
+    listed = list_files({'_workspace': str(root), 'max_depth': 1})
+    searched = query(root, max_depth=1, output_mode='files')
+    assert listed['complete'] and searched['complete']
+    assert [row['path'] for row in listed['files']] == ['near.txt']
+    assert [row['path'] for row in searched['files']] == ['near.txt']
+    assert {row['path'] for row in query(root, output_mode='files')['files']} == {'near.txt', 'sub/far.txt'}
+
+
 def test_real_content_context_unicode_and_leading_dash(tmp_path_factory, rg_available):
     root = tmp_path_factory
     (root / "中文.txt").write_text("before\n--needle 中文\nafter\n", encoding="utf-8")

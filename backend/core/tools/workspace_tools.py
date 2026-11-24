@@ -54,14 +54,43 @@ def _text_diff(path: str, before: str, after: str) -> str:
     return rendered[:100_000] + "\n[diff truncated by Host]\n"
 
 
+def file_read_ranges(args):
+    if "ranges" not in args:
+        return [(max(0, int(args.get("offset", 0) or 0)),
+                 max(1, min(int(args.get("limit", 2000) or 2000), 5000)))]
+    ranges = args["ranges"]
+    if "offset" in args or "limit" in args:
+        raise ValueError("Use ranges by itself, or use offset and limit for a single window.")
+    if not isinstance(ranges, list) or not 1 <= len(ranges) <= 8:
+        raise ValueError("ranges must contain one to eight line windows.")
+    for item in ranges:
+        if (not isinstance(item, dict) or set(item) != {"offset", "limit"}
+                or type(item["offset"]) is not int or item["offset"] < 0
+                or type(item["limit"]) is not int or not 1 <= item["limit"] <= 5000):
+            raise ValueError("Each range needs a zero-based integer offset and a positive integer limit.")
+    if sum(item["limit"] for item in ranges) > 5000:
+        raise ValueError("The sum of range limits must be at most 5000 lines.")
+    return [(item["offset"], item["limit"]) for item in ranges]
+
+
+def _line_page(lines, offset, limit):
+    selected = lines[offset:offset + limit]
+    truncated = offset + limit < len(lines)
+    return {"content": "\n".join(selected), "offset": offset,
+            "returned_lines": len(selected), "truncated": truncated,
+            "next_offset": offset + len(selected) if truncated else None}
+
+
 def read_file(args: dict) -> dict:
+    try:
+        ranges = file_read_ranges(args)
+    except ValueError as exc:
+        return _read_failure("INVALID_TOOL_ARGUMENTS", str(args.get("path", "")), detail=str(exc))
     try:
         workspace, path, root, relative = _read_target(args)
     except FileNotFoundError:
         return _read_failure("FILE_NOT_FOUND", str(args.get("path", "")))
     label = str(path.relative_to(workspace)).replace("\\", "/") if path.is_relative_to(workspace) else str(path)
-    offset = max(0, int(args.get("offset", 0) or 0))
-    limit = max(1, min(int(args.get("limit", 2000) or 2000), 5000))
     try:
         # Reading the workspace itself is a directory request. Validate that
         # acquired root directly: opening its parent is unnecessary and may
@@ -88,17 +117,22 @@ def read_file(args: dict) -> dict:
         return _read_failure("BINARY_FILE", label)
     text = raw.decode("utf-8-sig", errors="replace")
     lines = text.splitlines()
-    selected = lines[offset:offset + limit]
+    pages = []
+    remaining = _MAX_OUTPUT
+    for offset, limit in ranges:
+        page = _line_page(lines, offset, limit)
+        if "ranges" in args:
+            remaining -= len(page["content"].encode("utf-8"))
+            if remaining < 0:
+                return _read_failure("SANDBOX_OUTPUT_LIMIT", label,
+                    detail="The selected line windows exceed 200000 UTF-8 bytes. Request fewer lines per call.")
+        pages.append(page)
     result = {
         "path": label,
-        "content": "\n".join(selected),
-        "offset": offset,
-        "returned_lines": len(selected),
         "total_lines": len(lines),
-        "truncated": offset + limit < len(lines),
-        "next_offset": offset + len(selected) if offset + limit < len(lines) else None,
         "sha256": hashlib.sha256(raw).hexdigest(),
         "size": len(raw),
+        **({"pages": pages} if "ranges" in args else pages[0]),
     }
     if args.get("bind_dependency") is True:
         try:
@@ -112,7 +146,7 @@ def read_file(args: dict) -> dict:
     from backend.core.knowledge.prewrite import read_advisories
     try:
         result["lesson_advisories"] = read_advisories(workspace, path, raw.decode("utf-8", errors="replace"),
-                                                     args, read_range=(offset, len(selected)))
+            args, read_ranges=[(page["offset"], page["returned_lines"]) for page in pages])
     except Exception as exc:
         result["warnings"] = [{"code": "LESSON_RECALL_UNAVAILABLE",
                                "message": f"File read succeeded; lesson recall unavailable: {exc}"}]
@@ -506,12 +540,19 @@ def shell_script(args: dict) -> dict:
     if "\x00" in script or len(script.encode("utf-8")) > 100_000:
         return {"error": "SCRIPT_INVALID", "detail": "script exceeds the 100KB boundary or contains NUL"}
     shell = str(args.get("shell") or "auto").lower()
+    default_shell = "powershell" if sys.platform == "win32" else "bash"
     if shell == "auto":
-        shell = "powershell" if sys.platform == "win32" else "bash"
+        shell = default_shell
     if shell not in {"bash", "powershell"}:
         return {"error": "SHELL_PROFILE_INVALID", "detail": "Choose bash, powershell or auto; scripts are never translated"}
-    if (sys.platform == "win32" and shell != "powershell") or (sys.platform != "win32" and shell != "bash"):
-        return {"error": "SANDBOX_CAPABILITY_UNSUPPORTED", "detail": "This native sandbox supports PowerShell on Windows and Bash on Linux; select that shell explicitly and use its syntax."}
+    if shell != default_shell:
+        if sys.platform == "darwin":
+            from backend.core.prompt_templates import load_prompt
+            detail = load_prompt("tools/shell_macos").strip()
+        else:
+            engine = "PowerShell" if default_shell == "powershell" else "Bash"
+            detail = f"Select {engine} on this platform and use its syntax when isolated execution is available."
+        return {"error": "SANDBOX_CAPABILITY_UNSUPPORTED", "detail": detail}
     resolution = {}
     if sys.platform == "win32":
         # MSYS Bash requires a shared global object namespace, incompatible

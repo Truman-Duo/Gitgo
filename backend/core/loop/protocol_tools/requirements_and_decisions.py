@@ -22,10 +22,42 @@ def install(ctx):
 
     engineering = EngineeringWorkflow(process, on_stream_event)
 
+    def report_progress(args):
+        from backend.core.loop.public_progress import record_progress
+        record, created = record_progress(process, args.get("message", ""), args.get("update_id", ""))
+        if created and on_stream_event:
+            on_stream_event({
+                "event": "progress_summary", "message": record["message"], "update_id": record["update_id"],
+                "process_id": process.process_id, "task_id": record["task_id"], "phase": "agent_update",
+            })
+        return {"status": "recorded", "update_id": record["update_id"]}
+
+    tools["report_progress"] = AgentTool(
+        execution_contract=data_broker("host.interaction.progress"), name="report_progress",
+        description=load_prompt("tools/report_progress"),
+        parameters={"type": "object", "properties": {
+            "message": {"type": "string", "minLength": 1, "maxLength": 8192},
+            "update_id": {"type": "string", "maxLength": 256},
+        }, "required": ["message"], "additionalProperties": False},
+        execute=report_progress, read_only=True, effect=ToolEffect.READ, idempotent=False,
+    )
+
     def task_mechanism(args):
+        if args.get('operation') == 'extend_execution':
+            from backend.core.loop.execution_allowance import request_extension
+            return request_extension(process, args)
         from backend.core.loop.task_maintenance import invoke
+        from backend.core.loop.task_execution_policy import InvalidPolicyTarget, projection, propose
         try:
-            return invoke(process, args)
+            if args.get("operation") == "propose_execution_policy":
+                return propose(process, args.get("execution_policy"), {**available_tools, **process.dynamic_tools, **tools})
+            result = invoke(process, args)
+            if args.get("operation") == "status":
+                result["execution_policy"] = projection(process)
+            return result
+        except InvalidPolicyTarget as exc:
+            from backend.core.errors import error_payload
+            return {**error_payload(exc.code, message=str(exc), details=exc.details), "authority_granted": False}
         except (ValueError, TypeError, KeyError, OSError) as exc:
             return {"error": "TASK_MECHANISM_UPDATE_REJECTED", "detail": str(exc), "authority_granted": False}
 
@@ -33,21 +65,29 @@ def install(ctx):
         execution_contract=data_broker("host.runtime.task_mechanism"), name="task_mechanism",
         description=load_prompt('tools/task_mechanism'),
         parameters={"type": "object", "properties": {
-            "operation": {"type": "string", "enum": ["catalog", "status", "preview", "interpret_update", "suspend", "resume", "detach"]},
+            "operation": {"type": "string", "enum": ["catalog", "status", "preview", "interpret_update", "suspend", "resume", "detach", "extend_execution", "propose_execution_policy"]},
+            "execution_policy": {"type": "object", "additionalProperties": False, "properties": {
+                "include_children": {"type": "boolean"},
+                "allow_only": {"type": ["array", "null"], "items": {"type": "string"}},
+                "rules": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                    "properties": {"tool": {"type": "string"}, "action": {"enum": ["deny", "ask", "manual_exempt"]},
+                        "arguments": {"type": "object"}}, "required": ["tool", "action"]}}}},
             "expected_revision": {"type": "integer", "minimum": 0}, "contract": {"type": "object"},
             "change_id": {"type": "string"}, "disposition": {"type": "string", "enum": ["information", "question", "scope_change"]},
-            "reason": {"type": "string"}, "source_ref": {"type": "string"}, "quote": {"type": "string"}},
+            "reason": {"type": "string"}, "remaining_work": {"type": "string", "maxLength": 4000},
+            "source_ref": {"type": "string"}, "quote": {"type": "string"}},
             "required": ["operation"], "additionalProperties": False},
         execute=task_mechanism, read_only=True, effect=ToolEffect.READ, idempotent=False)
     from backend.core.loop.model_feedback import task_feedback
     tools['task_mechanism'].model_result = task_feedback
     from copy import deepcopy
     task_surface = deepcopy(tools['task_mechanism'].parameters)
-    task_surface['properties']['operation']['enum'] = ['status', 'interpret_update', 'suspend', 'resume', 'detach']
+    task_surface['properties']['operation']['enum'] = ['status', 'interpret_update', 'suspend', 'resume', 'detach', 'extend_execution', 'propose_execution_policy']
     task_surface['properties'].pop('contract')
     tools['task_mechanism'].advertised_parameters = task_surface
 
 
+    from backend.core.loop.main_dialogue import RESPONSE_SCOPE_SCHEMA
     tools["engineering_workflow"] = AgentTool(
         execution_contract=data_broker("host.runtime.engineering_workflow"),
         name="engineering_workflow",
@@ -61,6 +101,8 @@ def install(ctx):
             "decision_id": {"type": "string", "description":"Actual reply ID; canonical content may carry it too."},
             "content": {"type": "object", "description":"Interpretation or report; use the operation's documented shape."},
             "request": {"type": "object"}, "reason": {"type": "string"},
+            "answer_updates": {"type": "array", "maxItems": 16, "items": {"type": "object"}},
+            "scope_update": RESPONSE_SCOPE_SCHEMA,
         }, "required": []},
         execute=engineering.invoke, read_only=True, effect=ToolEffect.READ,
         idempotent=False,
@@ -153,6 +195,7 @@ def install(ctx):
     tools["decision_evidence"] = AgentTool(
         execution_contract=data_broker("host.runtime.decision_evidence"),
         name="decision_evidence",
+        immediate_interface=True,
         description=(
             load_prompt('tools/decision_evidence')
         ),
@@ -176,6 +219,13 @@ def install(ctx):
 
     def capability_status(_args: dict) -> dict:
         from backend.core.loop.capability_negotiation import build_capability_snapshot
+        from backend.core.loop.tool_surface import admission_snapshot, _select_authorized_tools
+
+        catalog = {**available_tools, **process.dynamic_tools, **tools}
+        active, _missing = _select_authorized_tools(process, catalog, issue_protocol_scopes=False)
+        if _args.get('operation', 'status') != 'status':
+            from backend.core.loop.tool_discovery import discover
+            return discover(process, active, _args)
 
         protocol = str(process.runtime_preferences.get("provider_protocol") or "unknown")
         snapshot = build_capability_snapshot(
@@ -186,9 +236,6 @@ def install(ctx):
             available_tools=set(process.tool_registry.list_all()),
         )
         if _args.get('capability', 'all') == 'all':
-            from backend.core.loop.tool_surface import admission_snapshot, _select_authorized_tools
-            catalog = {**available_tools, **process.dynamic_tools, **tools}
-            active, _missing = _select_authorized_tools(process, catalog, issue_protocol_scopes=False)
             snapshot['tool_access'] = admission_snapshot(process, active, catalog)
             import sys
             from backend.core.loop.read_approval import native_cleanup_pending
@@ -211,6 +258,12 @@ def install(ctx):
         parameters={
             "type": "object",
             "properties": {
+                "operation": {"type": "string", "enum": ["status", "catalog", "search", "describe"]},
+                "name": {"type": "string", "maxLength": 256},
+                "group": {"type": "string", "maxLength": 64},
+                "query": {"type": "string", "maxLength": 240},
+                "cursor": {"type": "string", "maxLength": 100},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                 "capability": {
                     "type": "string", "enum": ["all", "web_access"],
                 },
@@ -448,54 +501,16 @@ def install(ctx):
 
 
     if process.actor_kind in {"supervisor", "worker", "reviewer"}:
+        from backend.core.loop.question_surface import question_schema
         tools["request_user_decision"] = AgentTool(
             execution_contract=data_broker("host.runtime.request_user_decision"),
             name="request_user_decision",
             description=(
                 load_prompt('tools/request_user_decision')
             ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": [
-                            "clarification", "preference", "direction", "verification",
-                            "choice", "recovery", "checkpoint",
-                        ],
-                    },
-                    "state_topic": {
-                        "type": "string",
-                        "description": (
-                            "Stable semantic topic used to replace stale confirmed state; "
-                            "required for preference/direction/verification/checkpoint."
-                        ),
-                    },
-                    "supersedes_decision_id": {"type": "string"},
-                    "question": {"type": "string"},
-                    "why_user_must_decide": {"type": "string"},
-                    "options": {
-                        "type": "array", "minItems": 0, "maxItems": 3,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "label": {"type": "string"},
-                                "description": {"type": "string"},
-                                "principle": {"type": "string"},
-                                "immediate_effect": {"type": "string"},
-                                "downstream_effect": {"type": "string"},
-                                "risks": {"type": "string"},
-                                "reversibility": {"type": "string"},
-                                "recommended": {"type": "boolean"},
-                            },
-                            "required": ["label"],
-                        },
-                    },
-                    "allow_free_form": {"type": "boolean"},
-                },
-                "required": ["question", "why_user_must_decide", "options"],
-            },
-            execute=lambda args: engineering.invoke({"operation": "ask_semantic", "request": args}),
+            parameters=question_schema(),
+            execute=lambda args: engineering.invoke({"operation": "ask_semantic", "request": args,
+                **({'answer_updates': args['answer_updates']} if 'answer_updates' in args else {})}),
             effect=ToolEffect.READ,
             idempotent=False,
         )
@@ -596,6 +611,7 @@ def install(ctx):
             if coordination_owner(manager, process) is None:
                 return ownership_error()
             from backend.core.loop.coordination import publish_coordination_event
+            from backend.core.loop.assignment_handoff import AssignmentHandoffError
             try:
                 event = publish_coordination_event(
                     manager,
@@ -613,9 +629,13 @@ def install(ctx):
                     ],
                     requires_supervisor_action=True,
                     block_affected=str(args.get("kind") or "") == "dependency_change",
+                    offer_draft=args.get("offer_draft") is True,
                 )
             except CoordinationOwnerUnavailable:
                 return ownership_error()
+            except AssignmentHandoffError as exc:
+                from backend.core.errors import error_payload
+                return {"accepted": False, **error_payload(exc.code, message=str(exc))}
             except ValueError as exc:
                 return {"accepted": False, "error": str(exc)}
             if on_stream_event is not None:
@@ -646,6 +666,7 @@ def install(ctx):
                     "proposed_action": {"type": "string"},
                     "requires_user_decision": {"type": "boolean"},
                     "user_question": {"type": "string"},
+                    "offer_draft": {"type": "boolean", "description": "Freeze the current assigned files for supervisor review."},
                 },
                 "required": ["kind", "summary", "evidence", "proposed_action"],
             },

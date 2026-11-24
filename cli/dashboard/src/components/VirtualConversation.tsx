@@ -11,8 +11,14 @@ import type { BackendClient } from "../backend/client.js";
 import type { ChatMessage, PendingDecision, StreamingRow } from "../types.js";
 import { TurnGuide } from "./TurnGuide.js";
 import { DecisionPanel } from "./DecisionPanel.js";
+import {DecisionSummary} from "./DecisionSummary.js";
 import { MessageRow } from "./MessageRow.js";
 import { StreamingMessage } from "./StreamingMessage.js";
+import {projectConversationRounds} from "../chat/conversationRounds.js";
+import {ContentViewport} from "../ui/ContentViewport.js";
+import {expandedValue, type ExpandedChange} from "../hooks/useDisclosureState.js";
+import {createDisclosureStore,DisclosureScope} from '../hooks/disclosureScope.js';
+import {ViewportScrollbar} from './ViewportScrollbar.js';
 
 type ConversationEntry =
   | { kind: "message"; key: string; message: ChatMessage; messageIndex: number }
@@ -35,6 +41,9 @@ type Props = {
   empty?: React.ReactNode;
 };
 
+const decisionKey=(decision:PendingDecision)=>"decision:"+JSON.stringify([decision.task_id,decision.process_id,decision.decision_id]);
+const sameDecision=(left:PendingDecision,right:PendingDecision|null|undefined):right is PendingDecision=>Boolean(right && decisionKey(left)===decisionKey(right));
+
 function messageKey(message: ChatMessage, index: number): string {
   return (
     message.message_id ||
@@ -56,6 +65,7 @@ function estimatedRows(entry: ConversationEntry, width: number): number {
     );
   }
   const message = entry.message;
+  if(message.kind==="decision_summary")return 5;
   const logicalLines = String(message.content || "").split("\n");
   const wrapped = logicalLines.reduce(
     (rows, line) => rows + Math.max(1, Math.ceil(line.length / usable)),
@@ -80,9 +90,15 @@ export function VirtualConversation({
   includeDescendants = false,
   empty = null,
 }: Props) {
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(
-    () => new Set(),
+  const bodyWidth=Math.max(1,contentWidth-1);
+  const [expandedKeys, setExpandedKeys] = useState<Map<string,boolean>>(
+    () => new Map(),
   );
+  const [disclosures]=useState(createDisclosureStore);
+  useEffect(()=>{
+    // Also retire private readers in virtual rows which are currently absent.
+    if(!verbose)disclosures.clearMatching(key=>key.slice(key.indexOf('/')+1).startsWith('timeline/context:'));
+  },[verbose,disclosures]);
   // UI aliases bridge optimistic-to-durable identities; they never rewrite stored messages.
   const replyAliases = useRef(new Map<string, string>());
   const liveReply = useRef<{
@@ -103,7 +119,7 @@ export function VirtualConversation({
     }
     let turnKey = "history",
       replyIndex = 0;
-    for (const [index, message] of messages.entries()) {
+    for (const [index, message] of projectConversationRounds(messages, streaming).entries()) {
       if ((message.turn_id && message.turn_id !== turnKey) || message.role === "user") {
         turnKey = message.turn_id || messageKey(message, index);
         replyIndex = 0;
@@ -111,7 +127,7 @@ export function VirtualConversation({
       const key =
         replyAliases.current.get(messageKey(message, index)) ||
         (message.decision
-          ? `decision:${message.decision.decision_id}`
+          ? decisionKey(message.decision)
           : message.role === "assistant"
             ? `reply:${turnKey}:${replyIndex++}`
             : `message:${messageKey(message, index)}`);
@@ -156,12 +172,12 @@ export function VirtualConversation({
       pendingDecision &&
       !messages.some(
         (message) =>
-          message.decision?.decision_id === pendingDecision.decision_id,
+          message.decision && sameDecision(message.decision,pendingDecision),
       )
     ) {
       result.push({
         kind: "decision",
-        key: `decision:${pendingDecision.decision_id}`,
+        key: decisionKey(pendingDecision),
         decision: pendingDecision,
         turnKey,
       });
@@ -171,8 +187,8 @@ export function VirtualConversation({
   const itemKeys = useMemo(() => entries.map((entry) => entry.key), [entries]);
   const estimateSize = useCallback(
     (_key: string, index: number) =>
-      estimatedRows(entries[index]!, contentWidth),
-    [entries, contentWidth],
+      estimatedRows(entries[index]!, bodyWidth),
+    [entries, bodyWidth],
   );
   const virtual = useVirtualScroll({
     scrollRef,
@@ -180,26 +196,26 @@ export function VirtualConversation({
     estimateSize,
     overscanRows: 20,
     minimumItems: 24,
-    stickToEnd: Boolean(streaming),
-    layoutKey: contentWidth,
+    stickToEnd: true,
+    layoutKey: bodyWidth,
   });
 
   useEffect(() => {
     const live = new Set(itemKeys);
+    disclosures.prune(itemKeys.map(key=>encodeURIComponent(key)));
     setExpandedKeys((previous) => {
-      const next = new Set([...previous].filter((key) => live.has(key)));
-      if (pendingDecision) next.add(`decision:${pendingDecision.decision_id}`);
+      const next = new Map([...previous].filter(([key]) => live.has(key)));
+      if (pendingDecision) next.set(decisionKey(pendingDecision),true);
       return next.size === previous.size &&
-        [...next].every((key) => previous.has(key))
+        [...next].every(([key,value]) => previous.get(key)===value)
         ? previous
         : next;
     });
   }, [itemKeys, pendingDecision?.decision_id]);
-  const setExpanded = (key: string, value: boolean) =>
+  const setExpanded = (key: string, value: ExpandedChange, defaultValue=false) =>
     setExpandedKeys((previous) => {
-      const next = new Set(previous);
-      if (value) next.add(key);
-      else next.delete(key);
+      const next = new Map(previous);
+      next.set(key,expandedValue(previous.get(key) ?? defaultValue,value));
       return next;
     });
 
@@ -213,27 +229,21 @@ export function VirtualConversation({
     });
     return result;
   }, [entries]);
-  if (entries.length === 0) {
   return (
-      <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>
-        {empty}
-      </ScrollBox>
-    );
-  }
-
-  return (
-    <ScrollBox
+    <ContentViewport scrollRef={scrollRef}><ViewportScrollbar scrollRef={scrollRef}><ScrollBox
       ref={scrollRef}
-      stickyScroll={Boolean(streaming)}
+      stickyScroll
       flexDirection="column"
       flexGrow={1}
+      minWidth={0}
     >
+      {entries.length===0?empty:null}
       {virtual.before > 0 ? (
         <Box height={virtual.before} flexShrink={0} />
       ) : null}
       {entries.slice(virtual.start, virtual.end).map((entry, localIndex) => {
         const index = virtual.start + localIndex;
-        const expanded = expandedKeys.has(entry.key);
+        const expanded = expandedKeys.get(entry.key) ?? entry.kind === "stream";
         const first =
           index === 0 || entries[index - 1]?.turnKey !== entry.turnKey;
         const terminal = turnEnds.get(entry.turnKey);
@@ -253,7 +263,7 @@ export function VirtualConversation({
             width="100%"
             flexShrink={0}
           >
-            <TurnGuide
+            <DisclosureScope store={disclosures} scope={encodeURIComponent(entry.key)}><TurnGuide
               first={first}
               active={!afterEnd || liveTurn}
               status={turnStatus}
@@ -261,10 +271,12 @@ export function VirtualConversation({
             >
               {entry.kind === "message" ? (
                 entry.message.decision ? (
+                  entry.message.kind==="decision_summary" && entry.message.decision_answer
+                  ? <DecisionSummary decision={entry.message.decision} answer={entry.message.decision_answer}/>
+                  :
                   <DecisionPanel
                     decision={
-                      entry.message.decision.decision_id ===
-                      pendingDecision?.decision_id
+                      sameDecision(entry.message.decision,pendingDecision)
                         ? pendingDecision
                         : entry.message.decision
                     }
@@ -273,8 +285,7 @@ export function VirtualConversation({
                     submitting={decisionSubmitting}
                     answer={entry.message.decision_answer}
                     active={
-                      entry.message.decision.decision_id ===
-                      pendingDecision?.decision_id
+                      sameDecision(entry.message.decision,pendingDecision)
                     }
                     expanded={expanded}
                     onExpandedChange={(value) => setExpanded(entry.key, value)}
@@ -282,7 +293,7 @@ export function VirtualConversation({
                 ) : (
                   <ReplyMessage
                     msg={entry.message}
-                    contentWidth={contentWidth - 2}
+                    contentWidth={Math.max(1,bodyWidth - 2)}
                     verbose={verbose}
                     client={client}
                     project={project}
@@ -294,8 +305,13 @@ export function VirtualConversation({
               ) : entry.kind === "stream" ? (
                 <ReplyMessage
                   streaming={entry.streaming}
-                  contentWidth={contentWidth - 2}
+                  client={client}
+                  project={project}
+                  contentWidth={Math.max(1,bodyWidth - 2)}
                   verbose={verbose}
+                  expanded={expanded}
+                  onExpandedChange={(value) => setExpanded(entry.key,value,true)}
+                  waiting={Boolean(pendingDecision)}
                 />
               ) : (
                 <DecisionPanel
@@ -310,12 +326,12 @@ export function VirtualConversation({
                   onExpandedChange={(value) => setExpanded(entry.key, value)}
                 />
               )}
-            </TurnGuide>
+            </TurnGuide></DisclosureScope>
           </Box>
         );
       })}
       {virtual.after > 0 ? <Box height={virtual.after} flexShrink={0} /> : null}
-    </ScrollBox>
+    </ScrollBox></ViewportScrollbar></ContentViewport>
   );
 }
 
@@ -324,6 +340,7 @@ function ReplyMessage(
   props: Omit<React.ComponentProps<typeof MessageRow>, "msg"> & {
     msg?: ChatMessage;
     streaming?: StreamingRow;
+    waiting?: boolean;
   },
 ) {
   const previousStream = useRef<StreamingRow | undefined>(props.streaming);
@@ -336,9 +353,14 @@ function ReplyMessage(
         streaming={props.streaming}
         contentWidth={props.contentWidth}
         verbose={props.verbose}
+        client={props.client}
+        project={props.project}
+        expanded={props.expanded}
+        onExpandedChange={props.onExpandedChange}
+        waiting={props.waiting}
       />
     );
-  const { msg, streaming: _streaming, ...rest } = props;
+  const { msg, streaming: _streaming, waiting: _waiting, ...rest } = props;
   return (
     <MessageRow {...rest} msg={msg!} streamSnapshot={previousStream.current} />
   );

@@ -23,6 +23,7 @@ type Props = {
   scrollChatRef: React.MutableRefObject<ChatScrollHandle | null>;
   verbose?: boolean;
   inputActive?: boolean;
+  loading?:boolean;
 };
 
 export function visibleConversationMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -48,6 +49,7 @@ export const ChatPanel = memo(function ChatPanel({
   scrollChatRef,
   verbose = false,
   inputActive = true,
+  loading=false,
 }: Props) {
   const t=useCopy();
   const { w: terminalWidth } = usePanelSize({ minWidth: 30 });
@@ -72,6 +74,7 @@ export const ChatPanel = memo(function ChatPanel({
       <Box flexShrink={0}>
         <Text bold>{t({en:"Chat — ",zh:"对话 — "})}{project || t({en:"Main process",zh:"主进程"})}</Text>
       </Box>
+      {loading?<Box flexShrink={0}><Text dimColor>{t({en:"Loading conversation data…",zh:"正在读取会话数据…"})}</Text></Box>:null}
 
       <VirtualConversation
         scrollRef={scrollRef}

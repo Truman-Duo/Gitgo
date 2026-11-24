@@ -99,7 +99,19 @@ def workspace_python_command(argv: list[str], cwd: Path) -> list[str]:
     if not remaining:
         return python_command(interpreter_flags)
 
-    bootstrap = f"import sys;sys.path.insert(0,{str(cwd)!r})\n"
+    # Import the trusted adapter before making workspace modules importable.
+    # The static import also binds this dependency into frozen distributions.
+    from backend.core import windows_python_temp  # noqa: F401
+    bootstrap = "import sys\n"
+    if not is_frozen_runtime():
+        bootstrap += f"sys.path.insert(0,{str(Path(__file__).resolve().parents[2])!r})\n"
+    bootstrap += (
+        "from backend.core.windows_python_temp import install_private_mkdir\n"
+        "install_private_mkdir()\n"
+    )
+    if not is_frozen_runtime():
+        bootstrap += "sys.path.pop(0)\n"
+    bootstrap += f"sys.path.insert(0,{str(cwd)!r})\n"
     mode = remaining[0]
     if mode == "-c" and len(remaining) >= 2:
         return python_command([

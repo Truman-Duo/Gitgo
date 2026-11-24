@@ -3,16 +3,17 @@ import type { StreamEvent } from "../daemon/streamEvents.js";
 import { runtimeNoticeFromEvent } from "../daemon/runtimeNotices.js";
 import type { TraceRecord } from "../traceView.js";
 import { formatDuration } from "../theme/typography.js";
+import type {Copy} from "../ui/pageContract.js";
 
 /** Saved failures expose the same trace without hiding or relabeling their error. */
-export function roundLabel(message: ChatMessage): string | null {
+export function roundLabel(message: ChatMessage, t: (copy: Copy) => string = copy => copy.en): string | null {
   if (message.role !== "assistant") return null;
   if (message.kind === "error" || ["failed", "degraded", "cancelled", "timed_out"].includes(message.status || "")) {
-    return message.trace_id ? "Failure details" : null;
+    return t({en:"Failed",zh:"失败"});
   }
-  if (message.status === "awaiting_user") return "Awaiting input";
-  if (message.status === "completed") return "Completed";
-  return null;
+  if (message.status === "awaiting_user") return t({en:"Awaiting input",zh:"等待回复"});
+  if (message.status === "completed") return t({en:"Completed",zh:"已完成"});
+  return t({en:"Process",zh:"过程记录"});
 }
 
 export function roundTraceEvents(events: TraceRecord[], processId?: string): TraceRecord[] {

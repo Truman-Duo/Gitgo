@@ -31,18 +31,18 @@ from backend.version import __version__ as HOST_VERSION
 
 @dataclass(frozen=True)
 class RuntimeLimits:
-    max_agent_steps: int = 50
+    max_agent_steps: int = 150
     max_daemon_start_seconds: int = 120
     max_task_seconds: int = 300
     max_task_hard_seconds: int = 0  # explicit RuntimeLimits retains fixed-budget compatibility
     max_tree_agents: int = 8
-    max_provider_calls: int = 100
+    max_provider_calls: int = 800
     max_output_tokens: int = 131_072
 
     @classmethod
     def from_environment(cls) -> "RuntimeLimits":
         return cls(
-            max_agent_steps=max(1, min(int(os.getenv("GITGO_MAX_AGENT_STEPS", "50")), 200)),
+            max_agent_steps=max(1, min(int(os.getenv("GITGO_MAX_AGENT_STEPS", "150")), 600)),
             max_daemon_start_seconds=max(
                 10, min(int(os.getenv("GITGO_MAX_DAEMON_START_SECONDS", "120")), 600)
             ),
@@ -50,7 +50,7 @@ class RuntimeLimits:
             max_task_hard_seconds=max(10, min(int(os.getenv("GITGO_MAX_TASK_HARD_SECONDS", "1800")), 86_400)),
             max_tree_agents=max(1, min(int(os.getenv("GITGO_MAX_TREE_AGENTS", "8")), 64)),
             max_provider_calls=max(
-                1, min(int(os.getenv("GITGO_MAX_PROVIDER_CALLS", "100")), 10_000)
+                1, min(int(os.getenv("GITGO_MAX_PROVIDER_CALLS", "800")), 10_000)
             ),
             max_output_tokens=max(
                 256, min(int(os.getenv("GITGO_MAX_OUTPUT_TOKENS", "131072")), 10_000_000)
@@ -92,6 +92,7 @@ class NativeHost:
         self._summary_lock = threading.RLock()
         self._summary_refresh_lock = threading.Lock()
         self._summary_cache: dict[str, dict] = {}
+        self._summary_identities: dict[str, tuple[str, str]] = {}
         # A timed-out thread cannot be force-cancelled safely.  Keep at most
         # one outstanding summary read per project and reuse it on the next
         # poll; otherwise a slow SQLite/UNC/daemon read would enqueue another
@@ -100,6 +101,7 @@ class NativeHost:
         self._summary_inflight: dict[str, Any] = {}
         self._projection_lock = threading.RLock()
         self._storage_projections: dict[str, Any] = {}
+        self._asset_projections: dict[str, tuple[str, list[dict]]] = {}
         self._storage_projection_inflight: dict[str, Any] = {}
         self._storage_projection_errors: dict[str, str] = {}
         self.limits = RuntimeLimits.from_environment()
@@ -107,6 +109,25 @@ class NativeHost:
                                             prepare_deletion=self._prepare_deletion)
         self._maintenance_thread = None
         self._config_fingerprint = self._read_config_fingerprint()
+        self._observer = None
+        if os.environ.get("GITGO_OBSERVER_DEFER_START") != "1":
+            self._start_observer()
+
+    def _start_observer(self):
+        with self._daemon_lock:
+            return self._start_observer_locked()
+
+    def _start_observer_locked(self):
+        if self._observer is not None:
+            return {"enabled": True, "instance_id": self._observer.instance}
+        observer_directory = os.environ.get("GITGO_OBSERVER_DIR", "")
+        if observer_directory:
+            from pathlib import Path
+            from backend.core.observer.bridge import ObserverBridge
+            plan = os.environ.get("GITGO_OBSERVER_TRIAL_PLAN", "")
+            self._observer = ObserverBridge(self, Path(observer_directory),
+                                            plan_path=Path(plan) if plan else None)
+        return {"enabled": self._observer is not None}
 
     @staticmethod
     def _read_config_fingerprint() -> tuple[int, int] | None:
@@ -184,6 +205,12 @@ class NativeHost:
     def _emit(self, payload: dict) -> None:
         envelope = {"protocol_version": PROTOCOL_VERSION, **payload}
         line = dump_protocol_json(envelope, separators=(",", ":"))
+        if self._observer is not None:
+            self._observer.recorder.submit("host_protocol", line, json_line=True)
+            event = payload.get("payload") or {}
+            if (self._observer.trial is not None and event.get("event") == "runtime_ack"
+                    and event.get("stage") == "admitted"):
+                self._observer.trial.admitted(str(payload.get("request_id") or ""), event)
         with self._write_lock:
             write_utf8_line(self.stdout, line)
 
@@ -271,11 +298,10 @@ class NativeHost:
     def _provider_change(self, operation: str, arguments: dict) -> dict:
         """Switch the global provider at a safe task boundary.
 
-        Daemons own concrete provider clients, so changing only the metadata
-        would leave already-running projects on the old API.  Reject an
-        in-flight switch, commit the new encrypted configuration, then retire
-        every idle daemon.  The next turn restores the same durable session
-        under the selected provider instead of silently creating a new chat.
+        Reject an in-flight switch and commit the selected configuration.
+        Task/background admission revalidates its cached model client against
+        that configuration. Watchers, sessions and public history stay live;
+        changing a request route does not require a project-process restart.
         """
         with self._daemon_lock:
             if operation == "provider.switch":
@@ -294,6 +320,23 @@ class NativeHost:
                     "runtime_reload": False,
                 }})
                 return {**result, "runtime_reload": False, "retired_projects": []}
+            if operation == "provider.save" and arguments.get("provider_id"):
+                # Compile and compare the real candidate before committing.
+                # A flag cannot authorize a changed route; the service checks
+                # endpoint, credential, model and protocol identity itself.
+                from backend.core.llm_config import LLMConfigManager
+                try:
+                    with LLMConfigManager._lock:
+                        result = self.services.provider_save(**{**arguments, "preserve_runtime_route": True})
+                except OperationError as exc:
+                    if exc.code != "PROVIDER_ROUTE_CHANGE_REQUIRED":
+                        raise
+                else:
+                    self._emit({"type": "event", "project": "", "payload": {
+                        "event": "provider_request_preferences_changed", "operation": operation,
+                        "provider_id": arguments["provider_id"], "runtime_reload": False,
+                    }})
+                    return {**result, "runtime_reload": False, "retired_projects": [], "effective_from": "next_model_request"}
             if self._root_admissions or self._active_processes or self._active_btw:
                 raise OperationError(
                     "PROVIDER_SWITCH_BUSY",
@@ -306,41 +349,38 @@ class NativeHost:
                 )
             result = (self.services.provider_switch(str(arguments.get("provider_id", "")))
                       if operation == "provider.switch" else self.services.invoke(operation, arguments))
-            clients = list(self._daemons.items())
-            self._daemons.clear()
-        stopped_projects: list[str] = []
-        stop_errors: list[dict[str, str]] = []
-        for project, client in clients:
-            try:
-                client.stop()
-                stopped_projects.append(project)
-            except Exception as exc:
-                stop_errors.append({"project": project, "message": str(exc)[:500]})
         self._emit({
             "type": "event", "project": "", "payload": {
                 "event": "provider_switched" if operation == "provider.switch" else "provider_configuration_changed",
                 "provider_id": str(arguments.get("provider_id", "")),
                 "operation": operation,
-                "runtime_reload": True,
-                "retired_projects": stopped_projects,
-                "stop_errors": stop_errors,
+                "runtime_reload": False,
+                "effective_from": "next_task",
+                "retired_projects": [],
             },
         })
         return {
             **result,
-            "runtime_reload": True,
-            "retired_projects": stopped_projects,
-            "stop_errors": stop_errors,
+            "runtime_reload": False,
+            "effective_from": "next_task",
+            "retired_projects": [],
+            "stop_errors": [],
         }
 
     def _on_daemon_event(self, project: str, event: dict) -> None:
         task_id = str(event.get("task_id") or event.get("process_id") or "")
         request_id = ""
         sidecar_id = str(event.get("sidecar_id") or "")
+        receipt = event.get("result") or {}
+        if event.get("event") == "command_result" and isinstance(receipt, dict) and receipt.get("accepted") is True:
+            sidecar_id = sidecar_id or str(receipt.get("sidecar_id") or "")
         if sidecar_id:
             request_id = self._btw_requests.get(sidecar_id, ("", ""))[0]
         if task_id:
             request_id = request_id or self._task_requests.get(task_id, ("", ""))[0]
+        if (sidecar_id and isinstance(receipt, dict) and receipt.get("accepted") is True
+                and self._observer is not None and self._observer.trial is not None):
+            self._observer.trial.admitted(request_id, receipt)
         self._emit({"type": "event", "project": project,
                     "request_id": request_id, "payload": event})
 
@@ -479,6 +519,33 @@ class NativeHost:
                     **live_agent_conversations,
                     **dict(durable.get("agent_conversations") or {}),
                 }
+        if storage is not None and isinstance(storage, StorageRuntime):
+            from backend.core.loop.asset_maintenance import AssetMaintenance
+            def asset_projection():
+                service = AssetMaintenance(storage)
+                ref = service.current_ref()
+                cached = self._asset_projections.get(project)
+                if cached is None or cached[0] != ref:
+                    cached = ref, [service.summary(asset) for asset in service.read(ref).values()
+                                   if not asset.get("retired")]
+                    self._asset_projections[project] = cached
+                return cached[1]
+            records = []
+            processes = result["processes"]
+            for record in read_projection("asset_maintenance", asset_projection, []):
+                owner = processes.get(record["process_id"], {})
+                # Only an offered or accepted assignment can execute for this
+                # asset. A historical process projection can outlive delivery.
+                active = record["work_state"] in {"offered", "accepted"} and bool(owner.get("execution_active"))
+                work_state = ("unaccepted" if record["work_state"] == "offered"
+                              and owner.get("closeout_state") == "finalized" else record["work_state"])
+                asset = {**record, "execution_active": active and work_state != "unaccepted", "work_state": work_state}
+                records.append(asset)
+                if owner:
+                    processes[asset["process_id"]] = {
+                        **owner, "maintained_assets": [*owner.get("maintained_assets", []), asset],
+                    }
+            result["asset_maintenance"] = records
         if storage_projection_errors:
             current_storage = dict(result.get("storage") or {})
             current_reasons = list(current_storage.get("reasons") or [])
@@ -517,24 +584,35 @@ class NativeHost:
 
     @staticmethod
     def _counts_from_statuses(statuses) -> dict:
-        values = [str(value or "") for value in statuses]
+        values = []
+        for value in statuses:
+            if isinstance(value, dict):
+                closeout = value.get("closeout_state")
+                values.append("closing" if closeout == "pending" else
+                              "closeout_failed" if closeout == "failed" else "" if value.get("status") in {"running", "cancelling"} and value.get("execution_active") is False
+                              else str(value.get("status") or ""))
+            else:
+                values.append(str(value or ""))
         return {
             "active_process_count": sum(
                 value in {"running", "cancelling"} for value in values
             ),
             "waiting_process_count": sum(
-                value in {"waiting", "awaiting_user", "recovering", "resume_available"}
+                value in {"waiting", "awaiting_user", "recovering", "resume_available",
+                          "recovery_review_required", "orphaned", "blocked", "closing"}
                 for value in values
             ),
             "finished_process_count": sum(
-                value in {"completed", "failed", "timed_out", "cancelled"}
+                value in {"completed", "failed", "timed_out", "cancelled", "killed", "closeout_failed"}
                 for value in values
             ),
         }
 
-    def _unavailable_summary(self, name: str, message: str) -> dict:
+    def _unavailable_summary(self, name: str, message: str, *, identity=None) -> dict:
         with self._summary_lock:
-            previous = dict(self._summary_cache.get(name) or {})
+            previous = dict(self._summary_cache.get(name) or {}) if (
+                identity is None or self._summary_identities.get(name) == identity
+            ) else {}
         observed_at = str(previous.get("observed_at") or "")
         return {
             **{
@@ -573,7 +651,13 @@ class NativeHost:
                 "state_available": True,
                 "summary_error": str(live_error)[:500],
                 "durable_status": status,
-                **self._counts_from_statuses([status]),
+                **self._counts_from_statuses(
+                    dict(latest["process_states"]).values() if latest and "process_states" in latest else
+                    dict(latest["process_statuses"]).values()
+                    if latest and "process_statuses" in latest else [status]),
+                "count_scope": "all_executions",
+                # Stored running labels do not prove that an executor is alive.
+                "active_process_count": 0,
                 "observed_at": observed_at,
                 "last_known_at": str((latest or {}).get("updated_at") or ""),
                 "stale": bool(live_error),
@@ -594,13 +678,26 @@ class NativeHost:
         try:
             status = client.send_command({"cmd": "loop_status"}, timeout=0.75)
             processes = dict(status.get("processes") or {})
+            from backend.core.storage import read_project_list_status
+            projection_error = ""
+            try:
+                durable = read_project_list_status(str(item.get("workspace") or "")) or {}
+            except Exception as exc:
+                # A damaged history must not hide still-running work. Explicitly
+                # mark this as a partial count rather than claiming reconciliation.
+                durable = {}
+                projection_error = str(exc)[:500]
+            statuses = {pid: {**(value if isinstance(value, dict) else {"status": value}),
+                              "execution_active": False}
+                        for pid, value in dict(durable.get("process_states")
+                            or durable.get("process_statuses") or {}).items()}
+            statuses.update(processes)
             return name, {
                 "daemon_online": True, "state_available": True,
-                "summary_error": "", "durable_status": "",
-                **self._counts_from_statuses(
-                    value.get("status") for value in processes.values()
-                ),
-                "observed_at": observed_at, "last_known_at": "", "stale": False,
+                "summary_error": projection_error, "durable_status": "",
+                **self._counts_from_statuses(statuses.values()),
+                "count_scope": "live_executions" if projection_error else "all_executions",
+                "observed_at": observed_at, "last_known_at": "", "stale": bool(projection_error),
             }, True
         except Exception as exc:
             return self._durable_project_summary(
@@ -619,6 +716,19 @@ class NativeHost:
         path.
         """
         projects = list(projects if projects is not None else self.services.project_list())
+        # A name can be reused after deletion or point at another workspace.
+        # Retire its old read before even the coalesced response uses a cache.
+        identities = {
+            str(item.get("name") or ""): (
+                str(item.get("project_id") or ""), str(item.get("workspace") or ""),
+            ) for item in projects
+        }
+        with self._summary_lock:
+            for name, identity in self._summary_identities.items():
+                if identities.get(name) != identity:
+                    self._summary_cache.pop(name, None)
+                    self._summary_inflight.pop(name, None)
+            self._summary_identities = identities
         started = time.perf_counter()
         # A little above one second covers first-open SQLite/schema setup on a
         # normal Windows disk while remaining one aggregate deadline. Twenty
@@ -629,14 +739,15 @@ class NativeHost:
             for item in projects:
                 name = str(item.get("name") or "")
                 with self._summary_lock:
-                    cached = dict(self._summary_cache.get(name) or {})
+                    cached = (dict(self._summary_cache.get(name) or {})
+                              if self._summary_identities.get(name) == identities[name] else {})
                 summaries[name] = cached or self._unavailable_summary(
-                    name, "project summary refresh is already running",
+                    name, "project summary refresh is already running", identity=identities[name],
                 )
             return {"projects": summaries, "refresh_coalesced": True,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2)}
         try:
-            def remember(future) -> None:
+            def remember(future, identity) -> None:
                 try:
                     name, summary, cacheable = future.result()
                 except Exception:
@@ -647,10 +758,15 @@ class NativeHost:
                     "waiting_process_count", "finished_process_count", "stale",
                 )
                 with self._summary_lock:
+                    if (self._summary_identities.get(name) != identity
+                            or self._summary_inflight.get(name) is not future):
+                        return
                     previous = dict(self._summary_cache.get(name) or {})
-                    if self._summary_inflight.get(name) is future:
-                        self._summary_inflight.pop(name, None)
-                    if cacheable:
+                    self._summary_inflight.pop(name, None)
+                    # A failed refresh is a current observation too. Returning
+                    # the previous healthy cache on the next poll would erase
+                    # its error before any successful read established recovery.
+                    if cacheable or summary.get("state_available") is False:
                         self._summary_cache[name] = dict(summary)
                 # Cold/offline SQLite projections may finish after the bounded
                 # overview response. Publish the completed read-model fact so
@@ -664,6 +780,7 @@ class NativeHost:
                         "payload": {
                             "event": "project_summary_updated",
                             "project": name,
+                            "project_id": identity[0],
                             "state_available": bool(summary.get("state_available", False)),
                             # This is the same safe read-model projection the
                             # overview endpoint returns, not a second status
@@ -679,6 +796,11 @@ class NativeHost:
             for item in projects:
                 name = str(item.get("name") or "")
                 with self._summary_lock:
+                    if self._summary_identities.get(name) != identities[name]:
+                        summaries[name] = self._unavailable_summary(
+                            name, "project changed during summary refresh", identity=identities[name],
+                        )
+                        continue
                     cached = dict(self._summary_cache.get(name) or {})
                     future = self._summary_inflight.get(name)
                     if future is None or future.done():
@@ -686,7 +808,9 @@ class NativeHost:
                             self._read_project_summary, item,
                         )
                         self._summary_inflight[name] = future
-                        future.add_done_callback(remember)
+                        future.add_done_callback(
+                            lambda done, identity=identities[name]: remember(done, identity),
+                        )
                 futures[future] = name
                 if cached:
                     summaries[name] = cached
@@ -702,12 +826,21 @@ class NativeHost:
                     _name, summary, _cacheable = future.result()
                     summaries[name] = summary
                 except Exception as exc:
-                    summaries[name] = self._unavailable_summary(name, str(exc))
+                    summaries[name] = self._unavailable_summary(name, str(exc), identity=identities[name])
             for future in pending:
                 name = cold_futures[future]
                 summaries[name] = self._unavailable_summary(
                     name, f"project summary exceeded the aggregate {deadline_seconds:g}s deadline",
+                    identity=identities[name],
                 )
+            # A coalesced request may replace an owner while this request waits
+            # for its cold read. Never join that old result to newer metadata.
+            with self._summary_lock:
+                for name in list(summaries):
+                    if self._summary_identities.get(name) != identities[name]:
+                        summaries[name] = self._unavailable_summary(
+                            name, "project changed during summary refresh", identity=identities[name],
+                        )
             return {
                 "projects": summaries, "refresh_coalesced": False,
                 "deadline_ms": int(deadline_seconds * 1000),
@@ -751,16 +884,55 @@ class NativeHost:
         action = str(arguments.get("action") or "read")
         if action == "detail":
             ref = str(arguments.get("ref", ""))
-            result = {"ref": ref, "detail": read_trace_detail(workspace, ref)}
+            view = arguments.get("view")
+            if view in {"input_sources", "input_source"}:
+                if view == "input_source" and "source_index" not in arguments:
+                    raise OperationError("INVALID_ARGUMENTS", "source_index is required")
+                from backend.core.loop.request_input import read_request_input_view
+                try:
+                    detail = read_request_input_view(lambda reference: read_trace_detail(workspace, reference), ref,
+                        **({"source_index": arguments.get("source_index"), "offset": arguments.get("offset", 0)}
+                           if view == "input_source" else {}))
+                except ValueError as exc:
+                    raise OperationError(str(exc), str(exc)) from exc
+            elif view in {"record_sources", "record_source"}:
+                if view == "record_source" and "source_index" not in arguments:
+                    raise OperationError("INVALID_ARGUMENTS", "source_index is required")
+                from backend.core.loop.trace_record import read_record_view
+                try:
+                    detail = read_record_view(lambda reference: read_trace_detail(workspace, reference), ref,
+                        **({"source_index": arguments.get("source_index"), "offset": arguments.get("offset", 0)}
+                           if view == "record_source" else {}))
+                except ValueError as exc:
+                    raise OperationError(str(exc), str(exc)) from exc
+            elif view:
+                raise OperationError("INVALID_ARGUMENTS", "Unknown trace detail view")
+            else:
+                detail = read_trace_detail(workspace, ref)
+            result = {"ref": ref, "detail": detail}
         elif action == "list":
             result = {"traces": list_traces(workspace, limit=100)}
-        elif action == "summary":
+        elif action in {"summary", "index", "block"}:
             trace_id = str(arguments.get("trace_id") or arguments.get("task_id") or "")
             if not trace_id:
                 raise OperationError("INVALID_ARGUMENTS", "trace_id is required")
-            result = get_storage(workspace).read_trace_summary(
-                trace_id, process_id=str(arguments.get("process_id") or ""),
-            )
+            from backend.core.loop.trace import TraceJournal
+            try:
+                with TraceJournal(workspace, trace_id) as journal:
+                    if action == "summary":
+                        result = journal.read_summary(process_id=str(arguments.get("process_id") or ""),
+                                                      include_recent=arguments.get("include_recent", True) is not False)
+                    elif action == "index":
+                        result = journal.read_index(process_id=str(arguments.get("process_id") or ""),
+                            after_seq=int(arguments.get("after_seq", -1)), limit=int(arguments.get("limit", 200)),
+                            snapshot=arguments.get("snapshot"))
+                    else:
+                        result = journal.read_block(arguments.get("body_ref"),
+                            after_seq=int(arguments["after_seq"]) if "after_seq" in arguments else None,
+                            limit=int(arguments.get("limit", 500)))
+            except ValueError as exc:
+                message = str(exc)
+                raise OperationError(message if message.startswith("TRACE_") else "INVALID_ARGUMENTS", message) from exc
         else:
             trace_id = str(arguments.get("trace_id") or arguments.get("task_id") or "")
             if not trace_id:
@@ -1071,6 +1243,10 @@ class NativeHost:
                 # durable duration matches what the user actually waited for,
                 # including cold daemon/session recovery before agent_step.
                 "request_started_at_utc": request_started_at,
+                # An explicit per-request/test ceiling is hard. Normal product
+                # admission uses the user's four bounded additional segments.
+                "execution_step_schedule": ([150, 250, 150, 50]
+                    if 'max_steps' not in arguments and self.limits.max_agent_steps == 150 else []),
             },
             "task_budget": {
                 "max_agents": self.limits.max_tree_agents,
@@ -1134,7 +1310,7 @@ class NativeHost:
                     )
                 elif "timed out" in str(exc).lower():
                     active = self._active_processes.get(request_id)
-                    cancellation = None
+                    cancellation = {}
                     if active is not None:
                         try:
                             cancellation = self._runtime_stop(
@@ -1151,10 +1327,20 @@ class NativeHost:
                                 "error_code": "CANCELLATION_COMMAND_FAILED",
                                 "message": str(cancel_exc),
                             }
+                    if cancellation.get("tree_terminal") is True:
+                        status = "The task tree reached a terminal state."
+                    elif cancellation.get("tree_terminal") is False and (
+                        cancellation.get("requested") or cancellation.get("already_cancelling")
+                    ):
+                        status = "Cancellation is still in progress."
+                    elif active is None:
+                        status = "No process admission was acknowledged. Cancellation is unconfirmed."
+                    else:
+                        status = "Cancellation is unconfirmed."
                     raise OperationError(
                         "AGENT_TASK_TIMEOUT",
-                        "Native Host task wait expired; recursive cancellation was requested",
-                        details={"cancellation": cancellation or {}},
+                        f"Native Host task wait expired. {status}",
+                        details={"cancellation": cancellation},
                     ) from exc
                 elif isinstance(exc, DaemonCommandError):
                     raise OperationError(
@@ -1305,9 +1491,12 @@ class NativeHost:
             "process_id": str(arguments.get("process_id") or ""),
             "task_id": str(arguments.get("task_id") or ""), "expected_revision": arguments.get("expected_revision"),
             **({'instance_id': str(arguments['instance_id'])} if arguments.get('instance_id') else {}),
-            "contract": arguments.get("contract")}, timeout=30)
+            "contract": arguments.get("contract"),
+            **({"execution_policy": arguments["execution_policy"]} if "execution_policy" in arguments else {})}, timeout=30)
         if result.get("error"):
             raise OperationError("TASK_MECHANISM_REJECTED", str(result["error"]))
+        if arguments.get("action") == "execution_policy_export":
+            return self.services.export_execution_policy(project, result["execution_policy"])
         return {"project": project, **result}
 
     def _runtime_compact(self, project: str, process_id: str = "", *,
@@ -1403,11 +1592,47 @@ class NativeHost:
         if result.get("error"):
             raise OperationError("BTW_ADOPTION_REJECTED", str(result["error"]))
         if arguments.get("mode") == "interrupt" and result.get("status") == "pending":
-            self._runtime_stop(project, process_id, reason="btw_interrupt_and_adopt", wait_timeout=30.0)
             change = result["change"]
-            continued = self._runtime_feedback(project, process_id,
-                "Continue the original task goal and reconcile the explicitly adopted BTW requirement recorded in task_mechanism status.",
-                request_id=request_id, adopted_change={"process_id": process_id, "task_id": change["target_task_id"], "change_id": change["id"]})
+            # Adoption has already committed. A later closeout/admission error
+            # must not make the caller mistake it for an unsaved request.
+            saved = {"saved": True, "status": "pending"}
+            for public, source in (("change_id", "id"), ("process_id", "target_process_id"),
+                                   ("task_id", "target_task_id"), ("source_ref", "source_ref")):
+                if isinstance(change.get(source), str):
+                    saved[public] = change[source]
+            stage = "stop"
+            try:
+                self._runtime_stop(project, process_id, reason="btw_interrupt_and_adopt", wait_timeout=30.0)
+                stage = "continue"
+                continued = self._runtime_feedback(project, process_id,
+                    "Continue the original task goal and reconcile the explicitly adopted BTW requirement recorded in task_mechanism status.",
+                    request_id=request_id, adopted_change={"process_id": process_id, "task_id": change["target_task_id"], "change_id": change["id"]})
+            except (OperationError, DaemonCommandError) as exc:
+                not_started = stage == "continue" and exc.code in {
+                    "CONTINUATION_ADOPTION_HANDOFF_REQUIRED", "CONTINUATION_CLOSEOUT_PENDING",
+                    "BTW_CANCELLATION_PENDING", "BTW_ADOPTION_CONTINUATION_CHANGED",
+                }
+                continuation = "not_started" if not_started else "unconfirmed"
+                progress = ("Continuation was not started." if not_started else
+                            f"Continuation has not been confirmed (stage: {stage}).")
+                message = exc.message if isinstance(exc, DaemonCommandError) else str(exc)
+                details = {**exc.details, "adoption": {**saved, "followup_stage": stage,
+                                                       "continuation_status": continuation}}
+                if isinstance(exc, DaemonCommandError):
+                    details["error_info"] = exc.error_info
+                raise OperationError(exc.code, f"The BTW adoption request was saved as pending. {progress} {message}",
+                                     details=details) from exc
+            except (RuntimeError, OSError) as exc:
+                # The real client raises plain exceptions on lost pipes and
+                # timeouts, including after admission. Preserve the confirmed
+                # adoption, but do not infer whether continuation started.
+                from backend.core.storage import StorageBlocked, StorageCorruptionDetected
+                if isinstance(exc, (StorageBlocked, StorageCorruptionDetected)):
+                    raise  # Keep the outer storage-specific code and recovery metadata.
+                raise OperationError("INTERNAL_ERROR",
+                    f"The BTW adoption request was saved as pending. Continuation has not been confirmed (stage: {stage}). {exc}",
+                    details={"adoption": {**saved, "followup_stage": stage,
+                                           "continuation_status": "unconfirmed"}}) from exc
             return {**continued, "adoption": result}
         return {"project": project, **result}
 
@@ -1439,6 +1664,9 @@ class NativeHost:
                 "instruction": message,
                 "actor_kind": "user",
             })
+            if (result.get("status") == "accepted" and self._observer is not None
+                    and self._observer.trial is not None):
+                self._observer.trial.admitted(request_id, result)
             return {"project": project, "process_id": process_id, **result}
 
         task_id = str(adopted_change["task_id"]) if adopted_change is not None else str(uuid.uuid4())
@@ -1456,7 +1684,7 @@ class NativeHost:
             "actor_kind": process.get("actor_kind") or "worker",
             "capability_profile_id": process.get("capability_profile_id") or "development.workspace",
             "task_kind": process.get("task_kind") or "action",
-            "max_steps": max(1, min(int(process.get("max_steps") or self.limits.max_agent_steps), self.limits.max_agent_steps)),
+            "max_steps": max(1, min(int(process.get("max_steps") or self.limits.max_agent_steps), 600)),
             "fresh_task_budget": True,
             "runtime_preferences": {
                 "task_maintenance_enabled": True,
@@ -1575,8 +1803,10 @@ class NativeHost:
         request_id = str(request.get("request_id", ""))
         if operation == "host.capabilities":
             return {"host_version": HOST_VERSION, "protocol_version": PROTOCOL_VERSION,
+                    "observer": {"enabled": self._observer is not None,
+                                 "frontend_metrics": self._observer is not None},
                     "operations": list(self.services.operations) + [
-                        "host.capabilities", "host.cancel", "runtime.status",
+                        "host.capabilities", "host.cancel", "runtime.status", "observer.start", "observer.frontend",
                         "project.overview", "runtime.summaries",
                         "runtime.usage",
                         "runtime.chat", "runtime.decision", "runtime.feedback", "runtime.stop", "runtime.advancement", "runtime.mechanism",
@@ -1599,6 +1829,12 @@ class NativeHost:
                                "max_tree_agents": self.limits.max_tree_agents,
                                "max_provider_calls": self.limits.max_provider_calls,
                                "max_output_tokens": self.limits.max_output_tokens}}
+        if operation == "observer.start":
+            return self._start_observer()
+        if operation == "observer.frontend":
+            if self._observer is None:
+                return {"captured": False, "disabled": True}
+            return self._observer.frontend(arguments)
         if operation == "host.cancel":
             return self._cancel(str(arguments.get("request_id", "")))
         if operation == "runtime.status":
@@ -1707,27 +1943,43 @@ class NativeHost:
                 with self._daemon_lock: self._update_requests.pop(request_id, None)
         return self.services.invoke(operation, arguments)
 
-    def _handle_request(self, request: dict) -> None:
+    def _handle_request(self, request: dict, *, response_callback=None, origin: str = "dashboard") -> None:
         request_id = str(request.get("request_id", ""))
         operation = str(request.get("operation") or "")
-        protected = operation in {"runtime.chat", "runtime.decision", "runtime.resume", "runtime.discard"}
+        def deliver(**reply):
+            if response_callback is None:
+                self._response(request_id, **reply)
+            else:
+                response = {"protocol_version": PROTOCOL_VERSION, "type": "response", "request_id": request_id,
+                            "ok": reply.get("error") is None, **reply}
+                if self._observer is not None:
+                    self._observer.recorder.submit("control_response", dump_protocol_json(response), json_line=True)
+                response_callback(response)
+        if self._observer is not None and operation != "observer.frontend":
+            self._observer.recorder.submit("host_request", dump_protocol_json({**request, "origin": origin}), json_line=True)
+        user_input = operation in {"runtime.chat", "runtime.decision", "runtime.feedback", "runtime.btw"}
+        protected = user_input or operation in {"runtime.recovery.resume", "runtime.recovery.discard"}
         if protected:
             try:
                 admitted, previous = self._request_memo.claim(request_id, operation, request.get("arguments") or {})
             except ValueError as exc:
-                self._response(request_id, error={"code": str(exc), "message": str(exc), "details": {}})
+                deliver(error={"code": str(exc), "message": str(exc), "details": {}})
                 return
             if not admitted:
                 previous = previous or {"error": {"code": "REQUEST_IN_PROGRESS",
                     "message": "The original request is still active; execution was not repeated.", "details": {}}}
-                self._response(request_id, **previous)
+                deliver(**previous)
                 return
         def respond(*, result=None, error=None):
             reply = {"error": error} if error is not None else {"result": result}
             if protected:
                 self._request_memo.complete(request_id, reply)
-            self._response(request_id, **reply)
+            if self._observer is not None and self._observer.trial is not None and user_input:
+                self._observer.trial.finished(request_id, reply)
+            deliver(**reply)
         try:
+            if self._observer is not None and self._observer.trial is not None and user_input:
+                self._observer.trial.before(request_id, request.get("arguments") or {}, origin, operation)
             result = self._dispatch(request)
             respond(result=result)
         except OperationError as exc:
@@ -1802,6 +2054,11 @@ class NativeHost:
         if self._stopping.is_set():
             return
         self._stopping.set()
+        if self._observer is not None:
+            try:
+                self._observer.close(flush=False)
+            except Exception as exc:
+                print(f"OBSERVER_SHUTDOWN_FAILED: {exc}", file=sys.stderr, flush=True)
         publish_runtime = getattr(self.services, "publish_runtime", None)
         if publish_runtime is not None: publish_runtime.close()
         updates = getattr(self.services, "updates", None)
@@ -1833,6 +2090,13 @@ class NativeHost:
                 pass
         self._pool.shutdown(wait=True, cancel_futures=True)
         self._summary_pool.shutdown(wait=True, cancel_futures=True)
+        if self._observer is not None:
+            try:
+                from backend.core.observer.recording import close_process_recorder
+                close_process_recorder()
+                self._observer.close()
+            except Exception as exc:
+                print(f"OBSERVER_FLUSH_FAILED: {exc}", file=sys.stderr, flush=True)
 
 
 def main() -> int:

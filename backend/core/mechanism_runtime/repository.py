@@ -34,6 +34,10 @@ class Repository:
         identifier(name)
         return self._read("definition/" + name + ("/head" if revision is None else "/revision/" + str(revision)))
 
+    def definitions_present(self):
+        """Conservative project presence check; read one KV key, no program body."""
+        return bool(self.storage.list_state_refs(NAMESPACE, prefix='definition/', after='', limit=1))
+
     def definition_ref(self, reference):
         raw = self.storage.read_blob(reference)
         if "sha256:" + digest_bytes(raw) != reference:

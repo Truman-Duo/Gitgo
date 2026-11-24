@@ -89,6 +89,11 @@ const guides={
     },
     "steps": [
       {
+        "en": "Request inputs lists model requests from the loaded turn. Enter opens the selected immutable record and its saved rules, memory, Lesson and parameter sources. Missing versions remain unknown; the current configuration never substitutes for historical input.",
+        "zh": "请求输入列出已载入轮次的模型请求。Enter 打开所选固定记录及保存的规则、记忆、Lesson 和参数来源。缺失版本仍显示未知，不用当前配置替代历史输入。",
+        "keys": true
+      },
+      {
         "en": "←/→ actions · Enter apply · Tab chart · Esc chart",
         "zh": "←/→ 操作 · Enter 执行 · Tab 图表 · Esc 图表",
         "keys": true
@@ -294,6 +299,11 @@ const guides={
       {
         "en": "Up/down selects a proposal, Enter opens details and R refreshes. Left/right selects a currently available action. Suspension or withdrawal does not remove obligations already accepted by the main task; changes require explicit confirmation.",
         "zh": "上下选择提案，Enter 打开详情，R 刷新；左右选择当前可用动作。暂停或撤回不移除主任务已接受的义务，变更仍需明确确认。",
+        "keys": true
+      },
+      {
+        "en": "Describe new or revised execution rules in the main conversation. This page shows the saved version and provides enable, disable, delete and export actions.",
+        "zh": "在主对话中说明要创建或修改的执行规则。本页查看已保存版本，并提供启用、停用、删除和导出。",
         "keys": true
       }
     ]

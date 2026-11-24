@@ -397,6 +397,11 @@ def test_actual_agent_loop_exposes_workflow_and_streams_recovery_notices(tmp_pat
         calls = 0
 
         def stream_events(self, *args, **kwargs):
+            # A progressive contract reply did not execute the intended
+            # operation. Resubmit that operation instead of advancing the
+            # scripted business sequence merely because a model call ran.
+            if self.calls and p.session.messages[-1].get('context_purpose') == 'tool_contract':
+                self.calls -= 1
             self.calls += 1
             from backend.core.loop.provider_tool_transport import CALL
             from backend.core.loop.provider_context import decode_records

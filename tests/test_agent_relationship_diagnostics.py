@@ -2,6 +2,7 @@
 from pathlib import Path
 import pytest
 from backend.core.dependency_graph import record_tool_observation
+from backend.core.loop.assignment_handoff import AssignmentHandoffError
 from backend.core.loop.manager import AgentProcessManager
 from backend.core.loop.models import ProcessStatus
 from backend.core.loop.worktree import AgentWorktreeManager
@@ -185,8 +186,9 @@ def test_approved_disposed_no_change_dependency_does_not_block_promotion(tmp_pat
             manager.seal_process_worktree(consumer)
             # Cleanup must not waive the requirement for actual A approval.
             root.child_reviews.pop(noop.process_id)
-            with pytest.raises(ValueError,match='lacks supervisor approval'):
+            with pytest.raises(AssignmentHandoffError) as rejected:
                 manager.promote_process_results(root,[consumer.process_id])
+            assert rejected.value.code == 'CHILD_REVIEW_REQUIRED'
             root.child_reviews[noop.process_id]={'verdict':'approved'}
             root.child_reviews[consumer.process_id]={'verdict':'approved'}
             result=manager.promote_process_results(root,[consumer.process_id])
@@ -267,8 +269,9 @@ def test_read_only_upstream_is_reviewed_evidence_not_a_code_worktree(tmp_path_fa
             (path/"output.txt").write_text("verified code",encoding="utf-8")
             child.status=ProcessStatus.COMPLETED;manager.seal_process_worktree(child)
             root.child_reviews[child.process_id]={"verdict":"approved"}
-            with pytest.raises(ValueError,match="lacks supervisor approval"):
+            with pytest.raises(AssignmentHandoffError) as rejected:
                 manager.promote_process_results(root,[child.process_id])
+            assert rejected.value.code == 'CHILD_REVIEW_REQUIRED'
             root.child_reviews[source.process_id]={"verdict":"approved"}
             result=manager.promote_process_results(root,[child.process_id])
             assert result["process_ids"]==[child.process_id]

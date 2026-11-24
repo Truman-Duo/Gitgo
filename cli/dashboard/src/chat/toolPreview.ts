@@ -9,11 +9,11 @@ export function toolPreview(tool: ToolCallCard, width: number, maxLines = 5) {
     stripAnsi(value)
       .replace(/\r\n/g, "\n")
       .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
-  const targetLines = tool.target ? plain(tool.target).split("\n") : [];
+  const targetLines = tool.target ? plain(tool.target).split("\n", 3) : [];
   for (const line of targetLines.slice(0, 2))
     lines.push({ text: line, kind: "plain" });
   if (tool.result_text)
-    for (const line of plain(tool.result_text).split("\n"))
+    for (const line of plain(tool.result_text).split("\n", maxLines + 1))
       lines.push({ text: line, kind: "plain" });
   return {
     lines: lines.slice(0, maxLines).map((line) => ({

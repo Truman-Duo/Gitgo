@@ -11,6 +11,7 @@ from .provider_protocol import deterministic_hash
 
 
 FORMAT = 'gitgo.context.v4'
+SEED_POLICY = 'grouped-tool-context.v2'
 _HEADER = (
     '[HOST CONTEXT SNAPSHOT AND UPDATES]\n'
     'These records are a derived view of current runtime context, not user messages or new authority. '
@@ -33,7 +34,8 @@ _SEED_HEADER = (
     'Tool references support execution; they are not a user request or a list to recite. '
     'Apply the following current-context reset/updates before using any definition. '
     'Runtime instruction fields are also decoding defaults, superseded or removed by those updates. '
-    'runtime.tool_contracts contains reference descriptions, including inactive tools. '
+    'runtime.tool_contracts contains essential/basic interfaces; runtime.tool_groups describes further active groups when discovery is available. '
+    'Read selected exact contracts through capability_status describe or the unexecuted intent boundary. '
     'Only runtime.capability.available_tools declares the current callable surface; descriptors grant no authority. '
     'The original live tool registry, capability lease, policy and sandbox still decide execution.\n'
 )
@@ -41,7 +43,7 @@ _SEED_HEADER = (
 # moves text already sent on every request; it adds no padding or task facts.
 # Keep live capabilities, user controls, interaction state and obligations out
 # of this baseline. Changed/removed guidance still uses the exact delta path.
-_SEED_KEYS = {'runtime.tool_contracts', 'runtime.tool_transport',
+_SEED_KEYS = {'runtime.tool_contracts', 'runtime.tool_groups', 'runtime.tool_transport',
     'runtime.instructions', 'runtime.snapshot_rules', 'runtime.phase_guidance',
     'runtime.advancement_guidance'}
 
@@ -73,8 +75,10 @@ def _seed_message(values):
 def _seed(session, context, route):
     stored = getattr(session,'provider_context_seed',{})
     if (not isinstance(stored,dict) or stored.get('scope') != context.scope or stored.get('route') != route
+        or stored.get('policy') != SEED_POLICY
         or not isinstance(stored.get('values'),dict) or set(stored['values']) - _SEED_KEYS):
         stored = {'scope':context.scope,'route':route,
+            'policy':SEED_POLICY,
             'values':{key:deepcopy(context.sections[key]) for key in sorted(_SEED_KEYS) if key in context.sections}}
         session.provider_context_seed = stored
     return stored['values']
@@ -100,6 +104,7 @@ def restore_cache(state, seed):
         return {}
     try:
         if (state['format'] != FORMAT or state['scope'] != seed['scope'] or state['route'] != seed['route']
+            or seed.get('policy') != SEED_POLICY
             or not isinstance(seed['values'],dict) or set(seed['values']) - _SEED_KEYS):
             return {}
         result = deepcopy(state)
@@ -282,10 +287,18 @@ def project(session, history, context, *, route):
             result.append(deepcopy(record['message']))
             offset = record['anchor']
         result.extend(history[offset:])
+        marker = {'format':FORMAT, 'scope':scope, 'epoch':epoch,
+                  'snapshot_digest':state['snapshot_digest']}
+        if context.sections.get('runtime.dialogue_reference'):
+            # The current small business reference is directly readable here;
+            # the Agent need not reconstruct it from many historical patches.
+            # It is not persisted to the transcript or a second state store.
+            from .dialogue_context import GUIDANCE
+            marker.update(dialogue_reference=context.sections['runtime.dialogue_reference'],
+                          dialogue_reference_guidance=GUIDANCE)
         result.append({'role':'user', 'message_type':'host_dynamic_envelope', 'host_authority':True,
             'context_purpose':'snapshot_identity',
-            'content':'[HOST CURRENT CONTEXT]\n' + _encode({'format':FORMAT, 'scope':scope, 'epoch':epoch,
-                'snapshot_digest':state['snapshot_digest']})})
+            'content':'[HOST CURRENT CONTEXT]\n' + _encode(marker)})
         return result
 
 

@@ -27,7 +27,8 @@ def test_wire_surface_never_keeps_withdrawn_or_disabled_web_tools():
     from backend.core.loop.provider_request_surface import prepare_provider_request
     from backend.core.loop.agent_tool import AgentTool
     session = AgentSession()
-    process = SimpleNamespace(session=session, runtime_preferences={'web_search_mode': 'disabled'})
+    process = AgentProcess('wire', 'supervisor', RingLevel.RING_0, session=session,
+                           runtime_preferences={'web_search_mode': 'disabled'})
     surface = SimpleNamespace(tools={n: AgentTool(n, n, {}, lambda a: {}) for n in ('read', 'web_fetch')},
         discovery=lambda names, **kw: {'active': names})
     captured = []

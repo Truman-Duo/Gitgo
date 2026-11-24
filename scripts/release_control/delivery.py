@@ -10,9 +10,7 @@ from .evidence import file_fact
 from .plan import check_source
 
 
-def matches(row, fact):
-    return (row.get('state') == 'uploaded' and row.get('size') == fact['bytes']
-            and row.get('digest') == 'sha256:' + fact['sha256'])
+from backend.core.publish.release_feed import matches
 
 
 def guard(plan, prepared):
@@ -83,48 +81,31 @@ def draft(plan, evidence, remote, prepared):
 
 
 def advance_feeds(plan, evidence, remote, prepared):
+    from backend.core.publish.release_feed import advance_feed
+    from backend.core.publish.state import PublishError
     tag = 'updates-' + plan['release']['channel']
-    feed = remote.release(tag)
-    if not feed or feed['draft']:
-        raise ValueError('Existing public channel feed is required')
     wanted = {}
     for name, target in plan['targets'].items():
         for suffix, baseline_key in (('.manifest.sig', 'baseline_signature'), ('.manifest.json', 'baseline_manifest')):
             path = evidence.root/'assets'/(name + suffix)
-            wanted[path.name] = (path, prepared['assets'][str(path)], file_fact(target[baseline_key]))
-    # Audit the entire feed before any removal. Both old and new are admissible
-    # so a partial prior update can resume without rolling back another target.
-    found = remote.assets(feed)
-    journal = evidence.read('feed-baseline')
-    if journal and journal['release_id'] != feed['id']:
-        raise ValueError('Feed release identity changed')
-    if journal is None:
-        journal = evidence.record('feed-baseline', 'observed', release_id=feed['id'],
-            assets={n: r['id'] for n, r in found.items() if n in wanted})
-    for name, (_, new, old) in wanted.items():
-        row = found.get(name)
-        if row is None:
-            if not evidence.read('remote-feed-delete-' + name):
-                raise ValueError('Feed asset absent without a recorded deletion intent: ' + name)
-        elif not matches(row, new) and not (matches(row, old) and row['id'] == journal['assets'].get(name)):
-            raise ValueError('Channel feed changed outside this release: ' + name)
-    # Signature first then manifest. GitHub does not support an atomic pair;
-    # clients fail closed during the short mismatch window. Never claim atomicity.
-    for name, (path, new, old) in wanted.items():
-        found = remote.assets(feed)
-        row = found.get(name)
-        if row and matches(row, new):
-            continue
-        if row:
-            if not matches(row, old) or row['id'] != journal['assets'].get(name):
-                raise ValueError('Feed changed before replacement: ' + name)
-            write(evidence, 'feed-delete-' + name,
-                lambda row=row: remote.api('releases/assets/' + str(row['id']), 'DELETE'), asset_id=row['id'])
-        write(evidence, 'feed-upload-' + name, lambda path=path: remote.upload(tag, path), expected=new)
-        current = remote.assets(feed).get(name)
-        if not current or not matches(current, new):
-            raise ValueError('Channel feed replacement not verified: ' + name)
-    evidence.record('feeds', 'success', release_id=feed['id'], assets=len(wanted))
+            wanted[path.name] = {'asset': path, 'new': prepared['assets'][str(path)], 'old': file_fact(target[baseline_key])}
+    class Remote:
+        def release(self, tag): return remote.release(tag)
+        def assets(self, row): return remote.assets(row)
+        def delete(self, identifier): return remote.api('releases/assets/' + str(identifier), 'DELETE')
+        def upload(self, row, path): return remote.upload(tag, path)
+    class Journal:
+        def baseline(self): return evidence.read('feed-baseline')
+        def save_baseline(self, value): return evidence.record('feed-baseline', 'observed', **value)
+        def delete_recorded(self, name): return bool(evidence.read('remote-feed-delete-' + name))
+        def write(self, name, action, **intent): return write(evidence, name, action, **intent)
+    try:
+        result = advance_feed(Remote(), tag, wanted, Journal())
+    except PublishError as error:
+        if error.code == 'PUBLISH_FEED_CHANGED_OUTSIDE_RELEASE':
+            raise ValueError('Channel feed changed outside this release') from error
+        raise
+    evidence.record('feeds', 'success', **result)
 
 
 def publish(plan, evidence, remote, prepared, row):
@@ -157,19 +138,9 @@ def validate_url(url):
 
 
 def download_fact(url, expected):
-    validate_url(url)
-    hasher, size = hashlib.sha256(), 0
-    deadline = time.monotonic() + 900
-    # Anonymous request, streamed and bounded by the actual signed asset size.
-    with build_opener(PublicRedirects()).open(url, timeout=90) as response:
-        while chunk := response.read(1024 * 1024):
-            if time.monotonic() > deadline:
-                raise ValueError('Public asset download exceeded its deadline')
-            size += len(chunk)
-            if size > expected['bytes']:
-                raise ValueError('Public asset exceeds signed size')
-            hasher.update(chunk)
-    return {'bytes': size, 'sha256': hasher.hexdigest()}
+    from backend.core.publish.public_delivery import download_fact as fetch
+    value = fetch(url, {'size':expected['bytes'], 'sha256':expected['sha256']})
+    return {'bytes':value['size'], 'sha256':value['sha256']}
 
 
 def verify_public(plan, evidence, prepared, fetch=download_fact):

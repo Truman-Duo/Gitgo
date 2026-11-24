@@ -27,7 +27,8 @@ def tree(tmp_path_factory):
 def test_read_uses_one_object_and_noninheritable_descriptor(tree):
     with ReadRoot(tree) as root, root.open('dir/note.txt') as opened:
         assert root.identity != opened.identity
-        assert not os.get_inheritable(opened._fd)
+        # Native unit test native_descriptors_are_not_inherited checks OS flags.
+        assert not hasattr(opened, '_fd')
         assert opened.read_bytes() == b'first\nsecond\n'
     with pytest.raises(ValueError):
         opened.read_bytes()
@@ -166,19 +167,22 @@ def test_read_limit_and_concurrent_growth_are_bounded(tree, monkeypatch):
     with ReadRoot(tree) as root, root.open('dir/note.txt') as opened:
         with pytest.raises(ReadBoundaryError):
             opened.read_bytes(max_bytes=2)
-    original = os.read
+    from backend.core import sandbox_read_native as bridge
+    original = bridge._call
     invoked = False
-    def growing(fd, count):
+    def growing(library, **request):
         nonlocal invoked
-        if not invoked:
+        response = original(library, **request)
+        if request['op'] == 'read_size' and not invoked:
             invoked = True
             with (tree / 'dir' / 'note.txt').open('ab') as stream:
                 stream.write(b'x' * 30)
-        return original(fd, count)
+        return response
     with ReadRoot(tree) as root, root.open('dir/note.txt') as opened:
-        monkeypatch.setattr(os, 'read', growing)
+        monkeypatch.setattr(bridge, '_call', growing)
         with pytest.raises(ReadBoundaryError):
             opened.read_bytes(max_bytes=16)
+    assert invoked
 
 
 def test_failed_open_releases_parent_handles(tree):
@@ -219,9 +223,12 @@ def test_unknown_backend_never_uses_ordinary_open(tree, monkeypatch):
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux kernel capability')
 def test_linux_missing_openat2_has_no_path_fallback(tree, monkeypatch):
-    import errno
-    def unavailable(*a, **kw):
-        raise OSError(errno.ENOSYS, 'openat2 unavailable')
-    monkeypatch.setattr('backend.core.sandbox_read._linux_openat2', unavailable)
+    from backend.core import sandbox_read_native as bridge
+    original = bridge._call
+    def unavailable(library, **request):
+        if request['op'] == 'read_root':
+            raise ReadBoundaryError('Native openat2 unavailable')
+        return original(library, **request)
+    monkeypatch.setattr(bridge, '_call', unavailable)
     result = read_file({'_workspace': str(tree), 'path': 'dir/note.txt'})
     assert result['error'] == 'READ_ERROR' and 'content' not in result

@@ -102,7 +102,7 @@ def requires_manual_unit(tool):
     return is_effectful_mutation(tool.effect) and spec.get("execution_mode") != "host_pipeline"
 
 
-def admit(process, tool, arguments, execution_id, call_index, call_id=""):
+def admit(process, tool, arguments, execution_id, call_index, call_id="", *, manual_exempt=False):
     """Called under owner's lock immediately before permission consumption.
 
     A non-null return suspends an unstarted invocation. Approval is an exact,
@@ -111,7 +111,7 @@ def admit(process, tool, arguments, execution_id, call_index, call_id=""):
     current = snapshot(process)
     if owner(process).session.mechanism_activation_blocked:
         raise ValueError("MECHANISM_ACTIVATION_BLOCKED")
-    if current["mode"] == "auto" or not requires_manual_unit(tool):
+    if current["mode"] == "auto" or manual_exempt or not requires_manual_unit(tool):
         return None
     unit = {"unit_id": unit_identity(process, tool, arguments, execution_id, call_index, call_id),
             "revision": current["revision"], "scope_id": current["scope_id"],

@@ -11,6 +11,7 @@ describe("process-scoped streams", () => {
     publishProcessStreamEvent(project, {
       event: "reasoning_delta", process_id: "child-b", delta: "B thinks",
     }, "2026-01-01T00:00:01Z");
+    expect(getProcessStream(project,"child-b")).toMatchObject({thinking:true,thinkingText:"B thinks"});
     publishProcessStreamEvent(project, {
       event: "text_delta", process_id: "child-b", delta: "B says",
       visibility: "public",
@@ -20,6 +21,7 @@ describe("process-scoped streams", () => {
     expect(getProcessStream(project, "root-a")?.reasoning).toBe("");
     expect(getProcessStream(project, "child-b")?.text).toBe("B says");
     expect(getProcessStream(project, "child-b")?.reasoning).toBe("B thinks");
+    expect(getProcessStream(project, "child-b")).toMatchObject({thinking:false,thinkingText:""});
   });
 
   test("seals a B transient stream at agent_terminal", () => {
@@ -32,6 +34,7 @@ describe("process-scoped streams", () => {
     }, "2026-01-01T00:00:01Z");
     const stream = getProcessStream(project, "child-terminal");
     expect(stream?.reasoning).toBe("");
+    expect(stream).toMatchObject({thinking:false,thinkingText:""});
     expect(stream?.notices.at(-1)?.label).toBe("Subprocess finished");
   });
 

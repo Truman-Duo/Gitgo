@@ -253,7 +253,7 @@ def test_session_store_blocks_process_and_retains_old_revision_on_unknown():
     from backend.core.loop.session import AgentSession
     process.session = AgentSession()
     store = SessionStore.__new__(SessionStore)
-    def lost(active, *, lifecycle_finalized=None):
+    def lost(active, *, lifecycle_finalized=None, record_asset_versions=False):
         raise StorageCommitUnknown('commit')
     store._save_process_checkpoint = lost
     process.durable_revision = 5

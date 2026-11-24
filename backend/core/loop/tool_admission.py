@@ -53,11 +53,13 @@ class AdmissionHold:
 
 
 class RuntimeToolAdmission:
-    def __init__(self, ctx, tool, raw_args, args, execution_id, call_index, call_id, metadata, alignment_check):
+    def __init__(self, ctx, tool, raw_args, args, execution_id, call_index, call_id, metadata, alignment_check,
+                 *, operation_policy):
         self.ctx, self.tool = ctx, tool
         self.raw_args, self.args = raw_args, args
         self.execution_id, self.call_index, self.call_id = execution_id, call_index, call_id
         self.metadata, self.alignment_check = metadata, alignment_check
+        self.operation_policy = operation_policy
         self.composition = None
 
     def prepare(self):
@@ -94,6 +96,26 @@ class RuntimeToolAdmission:
 
     def _check_current(self):
         ctx, tool = self.ctx, self.tool
+        from .operation_policy import decide_tool_operation, PolicyDisposition
+        policy = decide_tool_operation(tool, self.raw_args, process=ctx.process)
+        if policy.disposition == PolicyDisposition.DENY:
+            raise AdmissionError("TASK_EXECUTION_POLICY_DENIED", policy.reason, nature="governance")
+        if policy.task_approval != self.operation_policy.task_approval:
+            raise AdmissionError("TASK_EXECUTION_POLICY_CHANGED",
+                "The task policy changed before execution. Recheck the current rule and any required approval.",
+                nature="governance")
+        if policy.rule_revision:
+            self.metadata["task_execution_policy"] = {"task_id": policy.rule_task,
+                "revision": policy.rule_revision, "manual_exempt": policy.manual_exempt}
+        if (ctx.process.recovery or {}).get("checkpoint_commit") == "unknown":
+            # A peer checkpoint may have become uncertain after the provider
+            # started. Reject only new admission; a governance stop must not
+            # roll back an already executed batch prefix.
+            # Other recovery flags retain their own gates: native cleanup debt
+            # must still permit Host-only inspection of the retained evidence.
+            raise AdmissionError("PROCESS_RECOVERY_REQUIRED",
+                "Inspect the retained checkpoint before admitting another tool.",
+                nature="governance")
         if self.composition:
             for expected in self.metadata.get("harness_instances", []):
                 current, _ = self.composition.repo.instance(self.composition.task, expected["id"])
@@ -128,7 +150,8 @@ class RuntimeToolAdmission:
             raise AdmissionError("TOOL_IMPLEMENTATION_UNAVAILABLE" if isinstance(exc, (OSError, RuntimeError))
                 else "TOOL_EXECUTION_CONTRACT_INVALID", str(exc), subsystem="execution_contract") from exc
         from .mechanisms import admit, snapshot
-        unit = admit(ctx.process, tool, self.raw_args, self.execution_id, self.call_index, self.call_id)
+        unit = admit(ctx.process, tool, self.raw_args, self.execution_id, self.call_index, self.call_id,
+            manual_exempt=policy.manual_exempt)
         if unit is not None:
             return AdmissionHold("advancement", unit)
         self.metadata["mechanism_revision"] = snapshot(ctx.process)

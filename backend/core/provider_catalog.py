@@ -6,6 +6,8 @@ name heuristics, alternate hosts, redirects, or implicit configuration writes.
 from __future__ import annotations
 
 import json
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -17,6 +19,15 @@ from .loop.provider_transport import HttpProviderTransport, ProviderTransportCan
 
 CATALOG_VERSION = "2026-11-03.1"
 MAX_PROVIDER_MODELS = 10000
+
+
+class ModelListError(ValueError):
+    """Stable, redacted diagnostics; never attach response bodies or headers."""
+    def __init__(self, code, *, status_code=None, reason=""):
+        super().__init__(code)
+        self.details = {"phase": "model_discovery", "reason": reason or code.lower()}
+        if status_code is not None:
+            self.details["status_code"] = int(status_code)
 PRESETS = (
     {"id": "custom", "name": "Custom", "base_url": "", "protocol": "openai_chat", "source": "user"},
     {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com", "protocol": "openai_chat", "source": "https://api-docs.deepseek.com/api/list-models/"},
@@ -106,6 +117,7 @@ def discover(*, base_url, api_key="", protocol="openai_chat", kind="remote", aut
         headers["Authorization"] = "Bearer " + api_key
     deadline = time.monotonic() + max(1, min(float(timeout), 30))
     opener = open_url or safe_opener(kind)
+    last_status = None
     for url in models_urls(base_url, protocol):
         if cancel_event is not None and cancel_event.is_set():
             raise ProviderTransportCancelled()
@@ -123,15 +135,19 @@ def discover(*, base_url, api_key="", protocol="openai_chat", kind="remote", aut
                     raise ProviderTransportCancelled()
                 if len(raw) > 4 * 1024 * 1024:
                     raise ValueError("MODEL_LIST_TOO_LARGE")
-                result = json.loads(raw)
+                try:
+                    result = json.loads(raw)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    raise ModelListError("MODEL_LIST_INVALID", reason="invalid_json") from None
                 return {"models": parse_models(result, url), "source": url,
                         "partial": bool(result.get("has_more")), "manual_allowed": True}
         except urllib.error.HTTPError as exc:
             exc.close()
             if exc.code in (404, 405):
+                last_status = exc.code
                 continue
             # Never echo upstream bodies, which may include credentials.
-            raise ValueError(f"MODEL_LIST_HTTP_{exc.code}") from None
+            raise ModelListError(f"MODEL_LIST_HTTP_{exc.code}", status_code=exc.code, reason="http_error") from None
         except ProviderTransportCancelled:
             raise
         except (OSError, ValueError, urllib.error.URLError) as exc:
@@ -139,5 +155,11 @@ def discover(*, base_url, api_key="", protocol="openai_chat", kind="remote", aut
                 raise ProviderTransportCancelled() from None
             if isinstance(exc, ValueError) and str(exc).startswith("MODEL_LIST_"):
                 raise
-            raise ValueError("MODEL_LIST_CONNECTION_FAILED") from None
-    raise ValueError("MODEL_LIST_UNAVAILABLE")
+            reason = getattr(exc, "reason", exc)
+            code = "MODEL_LIST_TIMEOUT" if isinstance(reason, (TimeoutError, socket.timeout)) else (
+                "MODEL_LIST_TLS_FAILED" if isinstance(reason, ssl.SSLError) else
+                "MODEL_LIST_DNS_FAILED" if isinstance(reason, socket.gaierror) else "MODEL_LIST_CONNECTION_FAILED")
+            raise ModelListError(code) from None
+    if last_status:
+        raise ModelListError(f"MODEL_LIST_HTTP_{last_status}", status_code=last_status, reason="endpoint_unavailable")
+    raise ModelListError("MODEL_LIST_UNAVAILABLE")

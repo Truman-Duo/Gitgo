@@ -28,7 +28,7 @@ def policy(project):
             "publish_checks": normalize(project.publish_checks), "plugins": identities(capture(project))}
 
 
-def tree_files(git, oid):
+def tree_files(git, oid, *, allow_empty=False):
     """Read immutable blobs by full object identity, never from a checkout."""
     listing = git.binary(["ls-tree", "-r", "-l", "-z", oid])
     rows, total, names = [], 0, {}
@@ -59,6 +59,8 @@ def tree_files(git, oid):
         if total > MAX_TOTAL_BYTES:
             raise PublishError("PUBLISH_TREE_LIMIT")
         rows.append((name, mode.decode(), blob.decode(), count))
+    if not rows and allow_empty:
+        return []
     if not rows:
         raise PublishError("PUBLISH_EMPTY_TREE")
     raw = git.binary(["cat-file", "--batch"], b"".join(row[2].encode() + b"\n" for row in rows))

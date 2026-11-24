@@ -124,13 +124,17 @@ def _exec_assemble_context(daemon_ctx, session, project, args: dict) -> dict:
 
     # 预估 token
     estimated = len(str(needed)) // 4 + len(str(lessons)) // 4
+    from .policy_helpers import _resolve_llm_config
+    from backend.core.provider_budget import DEFAULT_CONTEXT_BUDGET
+    configured = _resolve_llm_config(ws)
+    context_limit = configured[4].get("context_window", DEFAULT_CONTEXT_BUDGET) if configured else DEFAULT_CONTEXT_BUDGET
 
     return {
         "needed": needed,
         "relevant": lessons[:10],
         "dependency": dependency,
         "transcript_tokens": estimated,
-        "context_utilization_ratio": round(estimated / 128000, 3),
+        "context_utilization_ratio": round(estimated / max(1024, context_limit), 3),
     }
 
 

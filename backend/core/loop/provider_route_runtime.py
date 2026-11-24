@@ -18,11 +18,10 @@ class ProviderRouteRuntime:
             self.discovery = discovery
         self.envelope = _build_current_turn_envelope(self.process, tools_param, self.discovery)
         from .provider_context import ContextSections
-        from .provider_tool_transport import reference_catalog, GUIDANCE
+        from .provider_tool_transport import reference_sections, GUIDANCE
         self.envelope = ContextSections(str(self.envelope), {**self.envelope.sections,
             'runtime.tool_transport':GUIDANCE,
-            'runtime.tool_contracts':reference_catalog(self.session, tools_param, scope=self.envelope.scope,
-                behaviors=(self.discovery or {}).get('tool_behaviors'))},
+            **reference_sections(tools_param, (self.discovery or {}).get('tool_behaviors'))},
             scope=self.envelope.scope)
         from backend.core.mechanism_runtime.application import bound_application
         composition = bound_application(self.process)

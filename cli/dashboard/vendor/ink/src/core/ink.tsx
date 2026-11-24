@@ -17,7 +17,7 @@ import { KeyboardEvent } from './events/keyboard-event.js';
 import { FocusManager } from './focus.js';
 import { emptyFrame, type Frame, type FrameEvent } from './frame.js';
 import { type Rectangle, unionRect } from './layout/geometry.js';
-import { dispatchClick, dispatchHover } from './hit-test.js';
+import { captureActionAt, dispatchClick, dispatchHover, dispatchMouseAction, hitTest, isActionAt } from './hit-test.js';
 import instances from './instances.js';
 import { LogUpdate } from './log-update.js';
 import {sameRasters, clearRasters, encodeSixel} from './raster.js';
@@ -237,6 +237,7 @@ export default class Ink {
   // screen readers / screen magnifiers track it — so parking at the text
   // input's caret makes CJK input appear inline and lets a11y tools follow.
   private cursorDeclaration: CursorDeclaration | null = null;
+  private declaredCursorVisible = false;
   // Main-screen: physical cursor position after the declared-cursor move,
   // tracked separately from frame.cursor (which must stay at content-bottom
   // for log-update's relative-move invariants). Alt-screen doesn't need
@@ -816,7 +817,9 @@ export default class Ink {
     // Preserve the empty-diff zero-write fast path: skip all cursor writes
     // when nothing rendered AND the park target is unchanged.
     const targetMoved = target !== null && (parked === null || parked.x !== target.x || parked.y !== target.y);
-    if (hasDiff || targetMoved || (target === null && parked !== null)) {
+    const declaredVisible=Boolean(target&&decl?.visible!==false);
+    const cursorVisibilityChanged=declaredVisible!==this.declaredCursorVisible;
+    if (hasDiff || targetMoved || cursorVisibilityChanged || (target === null && parked !== null)) {
       // Main-screen preamble: log-update's relative moves assume the
       // physical cursor is at prevFrame.cursor. If last frame parked it
       // elsewhere, move back before the diff runs. Alt-screen's CSI H
@@ -867,6 +870,13 @@ export default class Ink {
       }
     }
 
+    // Cursor appearance belongs to the active declaration and is emitted after
+    // frame patches, which can hide it. Empty inputs use the same native bar.
+    if(hasDiff||targetMoved||cursorVisibilityChanged){
+      if(declaredVisible&&decl?.style==='blinking-bar')optimized.push({type:'stdout',content:'\x1b[5 q'});
+      optimized.push({type:'stdout',content:declaredVisible?'\x1b[?25h':'\x1b[?25l'});
+      this.declaredCursorVisible=declaredVisible;
+    }
     const tWrite = performance.now();
     writeDiffToTerminal(this.terminal, optimized, this.altScreenActive && !SYNC_OUTPUT_SUPPORTED);
     const writeMs = performance.now() - tWrite;
@@ -1456,6 +1466,35 @@ export default class Ink {
     return dispatchClick(this.rootNode, col, row, blank);
   }
 
+  isActionAt(col: number, row: number): boolean {
+    return this.altScreenActive && isActionAt(this.rootNode, col, row);
+  }
+
+  captureActionAt(col: number, row: number) {
+    return this.altScreenActive ? captureActionAt(this.rootNode, col, row) : undefined;
+  }
+
+  captureMouseAt(col: number, row: number, button: number) {
+    if (!this.altScreenActive) return;
+    const owner = dispatchMouseAction(this.rootNode, col, row, button, 'mousedown');
+    if (!owner) return;
+    let moved = false;
+    return (type: 'mousedrag' | 'mouseup', x: number, y: number, b: number) => {
+      // Capture follows this mounted owner beyond its hit rectangle. It must
+      // never dispatch to a replacement node after an overlay/layout change.
+      let node: dom.DOMElement | undefined = owner;
+      while (node && node !== this.rootNode) node = node.parentNode;
+      if (!this.altScreenActive || !node) return;
+      if (type === 'mousedrag' && (x !== col || y !== row)) moved = true;
+      dispatchMouseAction(this.rootNode, x, y, b, type, owner);
+      if (type === 'mouseup' && !moved && (b & 3) === 0) {
+        let hit: dom.DOMElement | null | undefined = hitTest(this.rootNode, x, y);
+        while (hit && hit !== owner) hit = hit.parentNode;
+        if (hit === owner) this.dispatchClick(x, y);
+      }
+    };
+  }
+
   dispatchHover(col: number, row: number): void {
     if (!this.altScreenActive) return;
     dispatchHover(this.rootNode, col, row, this.hoveredNodes);
@@ -1654,11 +1693,14 @@ export default class Ink {
         selection={this.selection}
         onSelectionChange={this.notifySelectionChange}
         onClickAt={this.dispatchClick}
+        isActionAt={this.isActionAt}
+        captureActionAt={this.captureActionAt}
         onHoverAt={this.dispatchHover}
         getHyperlinkAt={this.getHyperlinkAt}
         onOpenHyperlink={this.openHyperlink}
         onMultiClick={this.handleMultiClick}
         onSelectionDrag={this.handleSelectionDrag}
+        captureMouseAt={this.captureMouseAt}
         onStdinResume={this.reassertTerminalModes}
         onCursorDeclaration={this.setCursorDeclaration}
         dispatchKeyboardEvent={this.dispatchKeyboardEvent}

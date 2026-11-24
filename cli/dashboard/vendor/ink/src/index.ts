@@ -110,6 +110,7 @@ export { Ansi } from './core/Ansi.js'
 export { stringWidth } from './core/stringWidth.js'
 export { default as wrapText } from './core/wrap-text.js'
 export { default as measureElement } from './core/measure-element.js'
+export { getElementRect } from './core/measure-element.js'
 export { supportsTabStatus } from './core/termio/osc.js'
 export {
   setClipboard,

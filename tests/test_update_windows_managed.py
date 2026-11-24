@@ -19,6 +19,51 @@ from tests.test_update_manifest import signing
 pytestmark = pytest.mark.skipif(not win.supported(), reason="Actual Windows managed ownership required")
 
 
+def test_initial_native_entry_publication_retries_only_the_same_registered_package(managed, monkeypatch):
+    """Real registration/files; a fake frozen probe is not packaged acceptance."""
+    import shutil
+    from backend.core import native_entry
+    from scripts.stage_native_entry import stage_entry
+    store, seed, protected = managed
+    base = store.root.parent
+    root, bins, home = base / "native-root", base / "native-bin", base / "native-home"
+    home.mkdir()
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData/Local"))
+    monkeypatch.setenv("APPDATA", str(home / "AppData/Roaming"))
+    source = Path(__file__).resolve().parents[1]
+    shutil.copytree(source / "assets/brand/generated", seed / "assets/brand")
+    stage_entry(seed)
+    refresh_build(seed, platform="windows", architecture="x86_64", version="1.0.0-alpha.2")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(seed / "internal/gitgo-host/gitgo-host.exe"))
+    monkeypatch.setattr(installation, "protected_install_paths", lambda: (protected,))
+    monkeypatch.setattr(native_entry, "_shortcut",
+        lambda path, target, arguments, icon: path.write_text(str(target) + arguments + str(icon)))
+    publish = native_entry._publish
+    attempted = []
+    def response_lost(resources, item):
+        publish(resources, item)
+        attempted.append(item["path"])
+        raise RuntimeError("injected publication response loss")
+    monkeypatch.setattr(native_entry, "_publish", response_lost)
+    with pytest.raises(RuntimeError, match="publication response loss"):
+        installation.install_from_frozen_package(str(root), str(bins), [str(protected)])
+    before = (root / "control/registration.json").read_bytes()
+    assert json.loads((root / "native-entry/owner.json").read_text())["state"] == "pending"
+    assert (bins / "gitgo.ps1").is_file()
+    first = Path(attempted[0]).lstat().st_mtime_ns
+    monkeypatch.setattr(native_entry, "_publish", publish)
+    result = installation.install_from_frozen_package(str(root), str(bins), [str(protected)])
+    assert result["native_entry"]["state"] == "ready"
+    assert (root / "control/registration.json").read_bytes() == before
+    assert Path(attempted[0]).lstat().st_mtime_ns == first
+    (seed / "changed-source").write_bytes(b"changed")
+    with pytest.raises(UpdateError, match="retry source differs"):
+        installation.install_from_frozen_package(str(root), str(bins), [str(protected)])
+    assert (protected / "sentinel").read_bytes() == b"project-kept"
+
+
 @pytest.fixture
 def managed(tmp_path_factory, monkeypatch, signing):
     base = tmp_path_factory.resolve() / "private"

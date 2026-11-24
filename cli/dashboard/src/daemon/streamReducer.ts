@@ -2,15 +2,23 @@
 // Extracted from useChat's inline onChunk so the event→(text + tool cards)
 // translation is testable and free of React/transport concerns. `toolIndex`
 // maps tool_call_id and tool_name to an index in `tools` (two keys, one entry).
-import type { ProviderUsageSummary, RuntimeNotice, StreamActivity, ToolCallCard } from "../types.js";
+import type { LiveStageDetail, ProviderUsageSummary, RuntimeNotice, StreamActivity, ToolCallCard } from "../types.js";
 import type { StreamEvent } from "./streamEvents.js";
 import { runtimeNoticeFromEvent } from "./runtimeNotices.js";
+import {updatePublicProgress, progressIdentity, isRuntimePreparation} from "../chat/publicProgress.js";
+import {withRequestContext} from "../chat/requestInputs.js";
 
 export type StreamState = {
+  stage?:LiveStageDetail;
+  stageSequence:number;
   text: string;
   reasoning: string;
+  thinking: boolean;
+  thinkingText: string;
+  thinkingStartedAt?:string;
   tools: ToolCallCard[];
   toolIndex: Map<string, number>;
+  publicProgressIndex: Map<string, number>;
   notices: RuntimeNotice[];
   activity: StreamActivity[];
   noticeKeys: Set<string>;
@@ -21,7 +29,8 @@ export type StreamState = {
 
 export function initStreamState(): StreamState {
   return {
-    text: "", reasoning: "", tools: [], toolIndex: new Map(),
+    stageSequence:0,
+    text: "", reasoning: "", thinking: false, thinkingText: "", tools: [], toolIndex: new Map(), publicProgressIndex: new Map(),
     notices: [], activity: [], noticeKeys: new Set(), visibility: "verbose", providerStep: 0,
   };
 }
@@ -30,6 +39,12 @@ type ReduceOptions = {
   /** Child events projected into A must not commit or clear A's response draft. */
   preservePendingText?: boolean;
 };
+
+const THINKING_ENDED_BY = new Set([
+  "text_delta", "progress_delta", "progress_summary", "provider_response_completed",
+  "toolcall_start", "toolcall_delta", "toolcall_done", "tool_result", "tool_progress",
+  "composite_step_result", "decision_required", "agent_terminal", "agent_complete", "stream_recovery",
+]);
 
 function eventActor(ev: StreamEvent): string | undefined {
   const actor = (ev as unknown as Record<string, unknown>).actor_label;
@@ -47,14 +62,14 @@ function findToolIndex(state: StreamState, ev: StreamEvent): number | undefined 
     ?? (name ? state.toolIndex.get(toolKey(ev, name)) : undefined);
 }
 
-/** Commit provider prose that preceded another step/tool as durable progress. */
+/** Preserve the producer's visibility when a draft becomes a completed step. */
 function commitProgress(state: StreamState): StreamState {
   const text = state.text.trim();
   if (!text) return {...state, text: ""};
   const hasDraft = state.activity.some(item => item.kind === "draft");
   return {...state, text: "", activity: hasDraft
-    ? state.activity.map(item => item.kind === "draft" ? {...item,kind: "progress" as const,visibility: "public" as const} : item)
-    : [...state.activity,{kind: "progress",text,visibility: "public"}]};
+    ? state.activity.map(item => item.kind === "draft" ? {...item,kind: "progress" as const} : item)
+    : [...state.activity,{kind: "progress",text,visibility: state.visibility}]};
 }
 
 function appendNotice(state: StreamState, ev: StreamEvent): StreamState {
@@ -76,14 +91,50 @@ export function reduceStreamEvent(
   ev: StreamEvent,
   options: ReduceOptions = {},
 ): StreamState {
+  if(isRuntimePreparation(ev))return state;
+  // A cycle owns its model output and following tools. A fresh request,
+  // pause, terminal event or recovery retires its transient detail. This is
+  // observed causal grouping, not semantic matching of adjacent prose.
+  if(!options.preservePendingText){
+    if(ev.event==='provider_request_started' && ev.phase!=='alignment'){
+      const sequence=state.stageSequence+1;
+      state={...state,stageSequence:sequence,stage:{id:`${ev.process_id||''}:${sequence}`,process_id:ev.process_id||'',reasoning:''}};
+    }else if(ev.event==='reasoning_delta'){
+      const stage=state.stage?.process_id===(ev.process_id||'')?state.stage:undefined;
+      const sequence=stage?state.stageSequence:state.stageSequence+1;
+      state={...state,stageSequence:sequence,stage:{id:stage?.id||`${ev.process_id||''}:${sequence}`,
+        process_id:ev.process_id||'',reasoning:(stage?.reasoning||'')+(ev.delta||'')}};
+    }else if(['decision_required','agent_terminal','agent_complete','stream_recovery'].includes(ev.event)){
+      state={...state,stage:undefined};
+    }
+  }
+  const observedAt="time" in ev && typeof ev.time==="string" ? ev.time : undefined;
+  // This is transient presentation state. Keep the original reasoning evidence,
+  // but never recycle it as a public stage explanation or revive an old thought.
+  // Projected child activity cannot change the main process's thinking phase.
+  if (!options.preservePendingText) {
+    if (ev.event === "provider_request_started" && ev.phase !== "alignment") {
+      state = {...state, thinking: true, thinkingText: "",thinkingStartedAt:observedAt};
+    } else if (ev.event === "reasoning_delta") {
+      state = {...state, thinking: true, thinkingText: (state.thinking ? state.thinkingText : "") + (ev.delta || ""),
+        thinkingStartedAt:state.thinking ? state.thinkingStartedAt : observedAt};
+    } else if (state.thinking && THINKING_ENDED_BY.has(ev.event)) {
+      state = {...state, thinking: false, thinkingText: "",thinkingStartedAt:undefined};
+    }
+  }
   switch (ev.event) {
     case "text_delta": {
-      const activity=state.activity.slice(), last=activity[activity.length-1];
+      const visibility = ev.visibility === "public" ? "public" : ev.visibility === "verbose" ? "verbose" : state.visibility;
+      // A channel change ends the old draft. The active response text must
+      // never inherit private fragments and merely adopt the latest label.
+      const current = visibility === state.visibility ? state : commitProgress(state);
+      const activity=current.activity.slice(), lastIndex=activity.findLastIndex(item=>item.kind!=="context"),last=activity[lastIndex];
       const actor=eventActor(ev), delta=ev.delta || "";
-      if(last?.kind === "draft" && last.process_id === ev.process_id && last.actor_label === actor) {
-        activity[activity.length-1]={...last,text:last.text+delta};
-      } else if(delta) activity.push({kind:"draft",text:delta,visibility:ev.visibility || state.visibility,process_id:ev.process_id,actor_label:actor});
-      return {...state,activity,text:state.text+delta,visibility:ev.visibility || state.visibility,providerStep:ev.step ?? state.providerStep};
+      if(last?.kind === "draft" && last.process_id === ev.process_id && last.actor_label === actor
+          && last.visibility === visibility) {
+        activity[lastIndex]={...last,text:last.text+delta};
+      } else if(delta) activity.push({kind:"draft",text:delta,visibility,process_id:ev.process_id,actor_label:actor});
+      return {...current,activity,text:current.text+delta,visibility,providerStep:ev.step ?? state.providerStep};
     }
 
     case "reasoning_delta":
@@ -106,20 +157,13 @@ export function reduceStreamEvent(
         };
       }
 
+    case "progress_delta":
     case "progress_summary": {
-      const message = String(ev.message || "").trim();
-      if (!message) return state;
-      const actor = eventActor(ev);
-      const previous = state.activity[state.activity.length - 1];
-      if (previous?.kind === "progress" && previous.text === message
-          && previous.process_id === ev.process_id) return state;
-      return {
-        ...state,
-        activity: [...state.activity, {
-          kind: "progress", text: message, visibility: "public",
-          process_id: ev.process_id, actor_label: actor,
-        }],
-      };
+      const publicProgressIndex = ev.update_id && !state.publicProgressIndex.has(progressIdentity(ev))
+        ? new Map(state.publicProgressIndex) : state.publicProgressIndex;
+      return {...state, publicProgressIndex,
+        activity: updatePublicProgress(state.activity, {...ev, actor_label: eventActor(ev),
+          stage_id:state.stage?.process_id===(ev.process_id||'')?state.stage.id:undefined}, publicProgressIndex)};
     }
 
     case "provider_usage": {
@@ -149,11 +193,15 @@ export function reduceStreamEvent(
         const noticed = appendNotice(committed, ev);
         return {
         ...noticed,
+        activity:withRequestContext(noticed.activity,ev,eventActor(ev)),
         text: preserveText ? state.text : "",
         visibility: ev.task_kind === "answer" ? "public" : "verbose",
         providerStep: ev.step ?? (state.providerStep + 1),
         };
       }
+
+    case "provider_request_parameters":
+      return ev.purpose==="alignment" ? state : {...state,activity:withRequestContext(state.activity,ev,eventActor(ev))};
 
     case "toolcall_start": {
       const committed = options.preservePendingText ? state : commitProgress(state);
@@ -182,6 +230,21 @@ export function reduceStreamEvent(
       };
     }
 
+    case "toolcall_done": {
+      const idx=findToolIndex(state,ev);
+      if(idx===undefined)return state;
+      const tools=state.tools.slice();
+      tools[idx]={...tools[idx],argument_preview:ev.argument_preview as Record<string,unknown>|undefined,
+        detail_ref:typeof ev.detail_ref==="string"?ev.detail_ref:tools[idx].detail_ref};
+      return {...state,tools};
+    }
+    case "tool_context_prepared": {
+      const idx=findToolIndex(state,ev);
+      if(idx===undefined)return state;
+      const tools=state.tools.slice();
+      tools[idx]={...tools[idx],context_only:true,is_running:false,state:"pending"};
+      return {...state,tools};
+    }
     case "toolcall_delta": {
       const idx = findToolIndex(state, ev);
       if (idx === undefined) return state;

@@ -15,6 +15,7 @@ import {BinWorkspace} from "./BinWorkspace.js";
 import {useTextInput} from "../hooks/useTextInput.js";
 import {TaskMechanismsPanel} from "./TaskMechanismsPanel.js";
 import {DecisionPanel} from "./DecisionPanel.js";
+import {SearchableChoiceScene} from "./SearchableChoiceScene.js";
 
 const wait=(ms=85)=>new Promise(resolve=>setTimeout(resolve,ms));
 // Production Ink rendering and input routing; no visible-terminal QA claim.
@@ -27,12 +28,42 @@ function mount(draw: (width:number,height:number)=>React.ReactNode,width:number,
   const root=renderSync(view(),{stdin,stdout,stderr,patchConsole:false,exitOnCtrlC:false});
   const ink:any=instances.get(stdout);ink.setAltScreenActive(true);ink.onRender();
   const line=(y:number)=>Array.from({length:ink.frontFrame.screen.width},(_,x)=>cellAt(ink.frontFrame.screen,x,y)?.char||"").join("");
-  return {line, async send(keys:string){stdin.write(keys);await wait();},
+  return {line, text:()=>Array.from({length:ink.frontFrame.screen.height},(_,y)=>line(y)).join("\n"), async send(keys:string){stdin.write(keys);await wait();},
     async resize(w:number,h:number){stdout.columns=w;stdout.rows=h;stdout.emit("resize");root.rerender(view());await wait();},
     locate(text:string){for(let y=0;y<ink.frontFrame.screen.height;y++){const row=line(y),at=row.indexOf(text);if(at>=0)return {x:displayWidth(row.slice(0,at)),y};}throw Error("Missing "+text+"\n"+Array.from({length:ink.frontFrame.screen.height},(_,y)=>line(y)).join("\n"));},
     styles(at:{x:number;y:number}){return ink.stylePool.get(cellAt(ink.frontFrame.screen,at.x,at.y)!.styleId).map((s:any)=>s.code) as string[];},
     close(){root.unmount();root.cleanup();stdin.destroy();stdout.destroy();stderr.destroy();chalk.level=previous;}};
 }
+
+for(const presentation of ["content","inline"] as const)for(const language of ["en","zh"] as const)
+test(`choice ${presentation} has no position counter through filtering, selection and resize (${language})`,async()=>{
+ const selections:string[]=[];
+ function Fixture(){
+  const input=useTextInput(),[selected,setSelected]=React.useState<string[]>([]);
+  return <LanguageContext.Provider value={language}><SearchableChoiceScene title="Models" presentation={presentation}
+   items={Array.from({length:14},(_,i)=>({id:`model-${i}`,title:`model-${i}`,disabled:i===1}))}
+   selectedIds={selected} input={input} onFooter={()=>{}} onSelect={id=>{selections.push(id);setSelected([id]);}} onCancel={()=>{}}/>
+   <Text>Configured models: 14</Text></LanguageContext.Provider>;
+ }
+ const io=mount(()=> <Fixture/>,64,20);
+ try{
+  await wait();expect(io.text()).not.toMatch(/\b\d+\/\d+\b/u);
+  await io.send("\x1b[B".repeat(40));await io.send("\r");expect(selections).toEqual(["model-13"]);
+  await io.resize(32,12);expect(io.locate("model-13")).toBeDefined();expect(io.text()).not.toMatch(/\b\d+\/\d+\b/u);
+  await io.send("\x1b[A".repeat(40));await io.send("\x1b[B");await io.send("\r");expect(selections.at(-1)).toBe("model-2");
+  await io.send("model-13");expect(io.locate("model-13")).toBeDefined();expect(io.text()).not.toContain("1/1");
+  await io.send("no-match");expect(io.locate(language==="zh"?"无匹配项":"No matches")).toBeDefined();expect(io.text()).not.toContain("0/0");
+  expect(io.locate("Configured models: 14")).toBeDefined();
+ }finally{io.close();}
+});
+
+for(const size of [0,1])test(`choice list with ${size} items omits position counts and remains escapable`,async()=>{
+ let cancelled=0;
+ function Fixture(){const input=useTextInput();return <SearchableChoiceScene title="Models" input={input}
+  items={size?[{id:"one",title:"one"}]:[]} onFooter={()=>{}} onSelect={()=>{}} onCancel={()=>cancelled++}/>;}
+ const io=mount(()=> <Fixture/>,40,12);
+ try{await wait();expect(io.text()).not.toMatch(/\b\d+\/\d+\b/u);await io.send("\x1b");expect(cancelled).toBe(1);}finally{io.close();}
+});
 
 for(const language of ["en","zh"] as const)test(`blocked extension reconciliation uses exact instance CAS and keeps failed evidence visible (${language})`,async()=>{
  const extension:any={id:"recoverable",phase:"blocked",epoch:1,revision:7,definition_revision:2,version_policy:"pinned",
@@ -70,6 +101,32 @@ for(const language of ["en","zh"] as const)test(`mechanism detail preserves reje
  try{await wait();await io.send("\r");
   for(const text of language==="zh"?["已拒绝","已撤回","受阻","已丢弃","待生效","固定版本"]:["Rejected","Withdrawn","Blocked","Discarded","Pending activation","Pinned version"])
    expect(io.locate(text)).toBeDefined();
+ }finally{io.close();}
+});
+
+test("execution rules management submits a lifecycle action for the displayed revision",async()=>{
+ const parameters={include_children:true,allow_only:null,rules:[{tool:"shell_script",action:"deny"}]};
+ const policy={task_id:"current-task",revision:2,phase:"effective",parameters};
+ const process:any={process_id:"root",active_task_id:"current-task",created_at:"2026-11-23",actor_kind:"supervisor",
+   status:"awaiting_user",task_execution_policy:policy};
+ const writes:any[]=[];
+ const client:any={async callTool(_operation:string,args:any){
+   if(args.action==="execution_policy_disable") { writes.push(args); return {execution_policy:{...policy,revision:3,
+    parameters:{...parameters,status:"disabled"}}}; }
+   return {state:{revision:0},execution_policy:policy};
+ }};
+ const io=mount(()=> <LanguageContext.Provider value="en"><TaskMechanismsPanel client={client} project="fixture"
+  processes={{root:process}} onDismiss={()=>{}}/></LanguageContext.Provider>,100,30);
+ try{
+   await wait();await io.send("\r");
+   expect(io.locate("Disable rules")).toBeDefined();
+   await io.send("\r");
+   expect(writes).toHaveLength(0);
+   await io.send("\r");await wait();
+   expect(writes).toEqual([{project:"fixture",process_id:"root",task_id:"current-task",action:"execution_policy_disable",
+     expected_revision:2}]);
+   expect(io.locate("Version 3")).toBeDefined();
+   expect(io.locate("Enable rules")).toBeDefined();
  }finally{io.close();}
 });
 
@@ -135,7 +192,11 @@ test("Update uses standard field colors, label-only blink and bounded selection 
     await wait(450);expect(io.line(io.locate("预览版").y)).not.toContain("更新渠道");
     expect(io.locate("预览版").x).toBe(draftValue.x);expect(writes).toBe(0);
     await io.send("\x1b[C");expect(io.line(draftValue.y)).toContain("正式版");expect(writes).toBe(0);
-    await io.send("\x1b");expect(io.line(draftValue.y)).toContain("预览版");expect(io.line(draftValue.y)).toContain("更新渠道");
+    await io.send("\x1b");
+    const deadline=performance.now()+2000;
+    const restored=()=>{const line=io.line(draftValue.y);return line.includes("更新渠道")&&line.includes("预览版");};
+    while(!restored()&&performance.now()<deadline)await wait(20);
+    expect(io.line(draftValue.y)).toContain("预览版");expect(io.line(draftValue.y)).toContain("更新渠道");
     expect(calls).toEqual(["update.status"]);
     for(let y=0;y<16;y++)expect(io.line(y)).not.toContain("›");
   }finally{io.close();}

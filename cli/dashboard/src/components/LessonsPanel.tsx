@@ -240,7 +240,7 @@ export const LessonsPanel = memo(function LessonsPanel({client, project, initial
     {busy ? <Text dimColor>{t({en:"Analyzing…",zh:"正在分析…"})}</Text> : null}{statusRow}
   </PageFrame>;
   if (mode === "confirm" && current) return <PageFrame page={pages.lessons} width={w}>
-    <Text bold>{t({en:"Review knowledge proposal · ",zh:"审阅知识提案 · "})}{candidateIndex + 1}/{reviews.length}</Text>
+    <Text bold>{t({en:"Review knowledge proposal",zh:"审阅知识提案"})}</Text>
     <Box gap={1}>{reviews.map((item, index) => {
 
       return <SelectionText selected={index === candidateIndex} variant="block" key={index}  > {item.action === "accept" ? "+" : "−"} {index + 1} </SelectionText>;

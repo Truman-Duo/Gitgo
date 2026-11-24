@@ -22,7 +22,7 @@ from .provider_transport import LocalProviderTransport, ProviderHttpError
 class ProviderRoutesUnavailable(RuntimeError):
     def __init__(self, attempts):
         self.attempts = list(attempts)
-        super().__init__("No configured provider route is available: " + ", ".join(
+        super().__init__("Configured provider routes are unavailable: " + ", ".join(
             f"{a['provider_id']} ({a['reason']})" for a in self.attempts))
 
 
@@ -122,19 +122,9 @@ def failure_kind(error):
         return False, "cancelled"
     if isinstance(error, StreamInterruptedError) and error.is_context_overflow:
         return False, "context_overflow"
-    cause = error
-    seen = set()
-    while cause is not None and id(cause) not in seen:
-        seen.add(id(cause))
-        status = getattr(cause, "status_code", None)
-        if status is not None:
-            return status in {401, 402, 403, 404, 408, 429} or status >= 500, f"HTTP_{status}"
-        cause = cause.__cause__
-    if isinstance(error, StreamInterruptedError):
-        return bool(error.retryable), "transport_failure"
-    if isinstance(error, RuntimeError) and ("connection failed" in str(error).lower() or "stream failed" in str(error).lower()):
-        return True, "transport_failure"
-    return False, "request_error"
+    from .provider_failure import classify_provider_failure
+    failure = classify_provider_failure(error)
+    return failure["failover"], failure["reason"]
 
 
 def runtime_client(configured, *, transport=None, live_preferences=False):
@@ -142,16 +132,20 @@ def runtime_client(configured, *, transport=None, live_preferences=False):
     key = configured.api_key if configured.auth_mode == "api_key" else ""
     if configured.auth_mode == "api_key" and not key:
         raise ValueError("Provider API key is unavailable")
-    def preferences_source():
+    def configuration_source():
         from backend.core.llm_config import LLMConfigManager
         current = next((p for p in LLMConfigManager.get_providers() if p.id == configured.id), None)
-        fields = ('base_url', 'api_key', 'model_id', 'protocol', 'kind', 'auth_mode', 'context_window', 'max_output_tokens')
+        fields = ('base_url', 'api_key', 'model_id', 'protocol', 'kind', 'auth_mode')
         if current is None or any(getattr(current, field) != getattr(configured, field) for field in fields):
             raise ValueError("PROVIDER_PREFERENCES_ROUTE_CHANGED")
-        return current.configuration.get("request_preferences", {})
+        return {"request_preferences": current.configuration.get("request_preferences", {}),
+            "context_window": current.context_window, "max_output_tokens": current.max_output_tokens,
+            "observation": {"sources": current.configuration.get("sources", {}),
+                "budget": current.configuration.get("budget", {}),
+                "effort_source": "user" if current.configuration.get("request_preferences", {}).get("reasoning_effort") else "service_default"}}
     client = LLMProvider(endpoint, key, configured.model_id,
                        request_preferences=configured.configuration.get("request_preferences", {}),
-                       request_preferences_source=preferences_source if live_preferences else None,
+                       request_configuration_source=configuration_source if live_preferences else None,
                        protocol=configured.protocol, capabilities=configured.runtime_capabilities(),
                        transport=transport or (LocalProviderTransport() if configured.kind == "local" else None))
     from backend.core.tools.web_tools import provider_search_transport
@@ -289,9 +283,11 @@ class RoutedProvider:
                 raise StreamCancelledError()
             client = self.clients.get(provider_id)
             reason = self.configuration_errors.get(provider_id)
+            settings = client.request_settings() if client is not None and hasattr(client, "request_settings") else None
+            capabilities = settings["capabilities"] if settings else getattr(client, "capabilities", None)
             if client is not None and tools and not client.capabilities.tools:
                 reason = 'tools_unsupported'
-            if client is not None and session.estimate_tokens() + min(max_tokens, client.max_output_tokens) > client.context_window:
+            if client is not None and session.estimate_tokens() + min(max_tokens, capabilities.max_output_tokens) > capabilities.context_window:
                 reason = 'context_capacity_insufficient'
             breaker = self.breakers.get(provider_id)
             permit = None if reason else breaker.acquire()
@@ -310,8 +306,8 @@ class RoutedProvider:
                 yield self.notice('provider_route_selected', provider_id=provider_id,
                                   model=client._model, protocol=client.protocol.value,
                                   route_key=client.route_key, previous_route=previous_route,
-                                  context_window=client.context_window, max_output_tokens=client.max_output_tokens,
-                                  capabilities=client.capabilities.to_dict(), attempt=len(attempts) + 1,
+                                  context_window=capabilities.context_window, max_output_tokens=capabilities.max_output_tokens,
+                                  capabilities=capabilities.to_dict(), attempt=len(attempts) + 1,
                                   hosted_search_transport=getattr(client, 'hosted_search_transport', 'unavailable'),
                                   message=f"Using {self.providers[provider_id].name}")
                 route_metadata = dict(metadata or {})
@@ -324,7 +320,8 @@ class RoutedProvider:
                     tools=tools, cancel_event=cancel_event,
                     cache_intent=session.cache_intent(tools, mode=client.capabilities.prompt_cache),
                     metadata=route_metadata, timeout=timeout, max_tokens=max_tokens, max_attempts=1,
-                    before_request=lambda: before_attempt(len(attempts), client) if before_attempt else timeout)
+                    before_request=lambda: before_attempt(len(attempts), client) if before_attempt else timeout,
+                    **({"request_settings": settings} if settings else {}))
                 terminal = False
                 for event in iterator:
                     if event.type == ProviderEventType.ROUTING_NOTICE:
@@ -348,10 +345,15 @@ class RoutedProvider:
             except Exception as exc:
                 provider_failure, reason = failure_kind(exc)
                 outcome = False if provider_failure else None
-                attempts.append({'provider_id': provider_id, 'reason': reason})
+                from .provider_failure import provider_diagnostic
+                failure = provider_diagnostic(exc, stage="provider_request",
+                    execution_state="provider_output_started" if observed else "not_started")
+                attempts.append({'provider_id': provider_id, 'reason': reason, 'failure': failure})
                 yield self.notice('provider_route_failed', provider_id=provider_id, reason=reason,
-                                  partial_output=observed, message=f"{self.providers[provider_id].name}: {reason}")
+                                  partial_output=observed, failure=failure, message=f"{self.providers[provider_id].name}: {reason}")
                 if observed or not provider_failure:
+                    if len(attempts) > 1:
+                        exc.attempts = list(attempts)
                     raise
             finally:
                 try:
@@ -415,14 +417,16 @@ class RoutedProvider:
             outcome = None
             try:
                 self.local.provider_id = provider_id
+                settings = client.request_settings() if hasattr(client, "request_settings") else None
+                capabilities = settings["capabilities"] if settings else client.capabilities
                 previous_route = session.active_provider_route if session is not None else ''
                 if session is not None:
                     session.bind_provider_route(client.route_key)
                 notify('provider_route_selected', provider_id=provider_id,
                        model=client._model, protocol=client.protocol.value,
                        route_key=client.route_key, previous_route=previous_route,
-                       context_window=client.context_window, max_output_tokens=client.max_output_tokens,
-                       capabilities=client.capabilities.to_dict(), attempt=len(attempts) + 1,
+                       context_window=capabilities.context_window, max_output_tokens=capabilities.max_output_tokens,
+                       capabilities=capabilities.to_dict(), attempt=len(attempts) + 1,
                        hosted_search_transport=getattr(client, 'hosted_search_transport', 'unavailable'),
                        message=f"Using {self.providers[provider_id].name}")
                 request_timeout = before_attempt(len(attempts), client) if before_attempt else timeout
@@ -435,7 +439,8 @@ class RoutedProvider:
                 result = client.chat(route_messages, max_tokens=max_tokens, tools=tools, cancel_event=cancel_event,
                                      timeout=request_timeout, preserve_provider_state=preserve_provider_state, max_retries=0,
                                      purpose=kwargs.get('purpose', ''), on_notice=on_notice,
-                                     before_generation_fallback=(lambda: before_attempt(len(attempts), client)) if before_attempt else None)
+                                     before_generation_fallback=(lambda: before_attempt(len(attempts), client)) if before_attempt else None,
+                                     **({"request_settings": settings} if settings else {}))
                 outcome = True
                 activated = self.activate(session, provider_id, initial_route=initial_route, attempt=len(attempts) + 1)
                 if on_notice is not None:
@@ -446,10 +451,14 @@ class RoutedProvider:
             except Exception as exc:
                 provider_failure, reason = failure_kind(exc)
                 outcome = False if provider_failure else None
-                attempts.append({'provider_id': provider_id, 'reason': reason})
+                from .provider_failure import provider_diagnostic
+                failure = provider_diagnostic(exc, stage="provider_request")
+                attempts.append({'provider_id': provider_id, 'reason': reason, 'failure': failure})
                 notify('provider_route_failed', provider_id=provider_id, reason=reason,
-                       message=f"{self.providers[provider_id].name}: {reason}")
+                       failure=failure, message=f"{self.providers[provider_id].name}: {reason}")
                 if scoped or not provider_failure:
+                    if len(attempts) > 1:
+                        exc.attempts = list(attempts)
                     raise
             finally:
                 breaker.finish(permit, outcome)

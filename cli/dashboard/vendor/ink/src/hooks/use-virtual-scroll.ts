@@ -1,6 +1,7 @@
 import {
   type RefObject,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useReducer,
@@ -33,10 +34,33 @@ type Options = {
   minimumItems?: number
   stickToEnd?: boolean
   layoutKey?: string | number
+  /** A virtual span inside the same ScrollBox, not another scroll owner. */
+  containerRef?: RefObject<DOMElement | null>
+  manageClampBounds?: boolean
 }
 
 type CachedSize = { layoutKey: string | number; rows: number }
 type LayoutAnchor = { key: string; offset: number; rows: number; layoutKey: string | number }
+// Descendant layout effects precede their ancestors. Within one commit the
+// deepest restored span owns the precise position; an ancestor must not replace
+// it with a message-sized estimate. This state never survives the commit batch.
+const restoredSpans = new WeakMap<ScrollBoxHandle, {top: number}>()
+function restoreSpan(handle: ScrollBoxHandle, top: number, nested: boolean) {
+  handle.scrollTo(top)
+  if (!nested) return
+  const entry = {top}
+  restoredSpans.set(handle, entry)
+  queueMicrotask(() => {if (restoredSpans.get(handle) === entry) restoredSpans.delete(handle)})
+}
+
+export function virtualContentOffset(element: DOMElement | null): number {
+  let offset = 0
+  for (let node = element; node; node = node.parentNode ?? null) {
+    if (node.style.overflowY === 'scroll' || node.style.overflow === 'scroll') break
+    offset += node.yogaNode?.getComputedTop() ?? 0
+  }
+  return Math.max(0, Math.round(offset))
+}
 
 function lowerBoundEnd(offsets: readonly number[], value: number): number {
   // First item whose end offset is strictly greater than value.
@@ -111,6 +135,8 @@ export function useVirtualScroll({
   minimumItems = 30,
   stickToEnd = false,
   layoutKey = 0,
+  containerRef,
+  manageClampBounds = !containerRef,
 }: Options): VirtualScrollResult {
   const [, invalidate] = useReducer((value: number) => value + 1, 0)
   const sizesRef = useRef(new Map<string, CachedSize>())
@@ -119,6 +145,7 @@ export function useVirtualScroll({
   const lastLayoutKeyRef = useRef<string | number>(layoutKey)
   const pendingLayoutAnchorRef = useRef<LayoutAnchor | null>(null)
   const previousSizesRef = useRef(new Map<string, number>())
+  const subscriptionRef = useRef<{handle: ScrollBoxHandle; unsubscribe: () => void} | null>(null)
 
   const estimate = useCallback((key: string, index: number): number => {
     const raw = typeof estimateSize === 'function' ? estimateSize(key, index) : estimateSize
@@ -128,19 +155,44 @@ export function useVirtualScroll({
   const readViewport = useCallback(() => {
     const handle = scrollRef.current
     const viewportHeight = Math.max(1, handle?.getViewportHeight() || 1)
-    const top = Math.max(0, handle?.getScrollTop() || 0)
+    const offset = containerRef ? virtualContentOffset(containerRef.current) : 0
+    const globalTop = Math.max(0, containerRef && handle?.isSticky()
+      ? handle.getFreshScrollHeight() - viewportHeight : handle?.getScrollTop() || 0)
+    const top = Math.max(0, globalTop - offset)
     const pending = handle?.getPendingDelta() || 0
     const sticky = handle?.isSticky() ?? stickToEnd
-    return { viewportHeight, top, pending, sticky }
-  }, [scrollRef, stickToEnd])
+    return { viewportHeight, top, pending, sticky, offset, globalTop }
+  }, [scrollRef, stickToEnd, containerRef])
 
-  useLayoutEffect(() => {
+  // A span may run before ScrollBox installs its imperative handle. Check
+  // after every commit, but subscribe only when the actual viewport changes.
+  // An unchanged ref object can point at a replacement ScrollBox after async
+  // empty -> history hydration; listening to the old handle freezes the window.
+  useEffect(() => {
     const handle = scrollRef.current
-    if (!handle) return
-    const notify = () => invalidate()
-    notify()
-    return handle.subscribe(notify)
-  }, [scrollRef])
+    if (subscriptionRef.current?.handle === handle) return
+    subscriptionRef.current?.unsubscribe()
+    subscriptionRef.current = null
+    if (handle) {
+      const stopScroll=handle.subscribe(() => invalidate())
+      let previousHeight=handle.getScrollHeight(),previousViewport=handle.getViewportHeight()
+      // Child-local disclosures and lazy bodies can change Yoga geometry
+      // without rendering their virtual parent. Reconcile cached row heights
+      // and clamp coverage after that paint, rather than waiting for another
+      // wheel/key event (which otherwise remains stuck at an old clamp).
+      const stopMetrics=handle.subscribeMetrics(()=>{
+        const height=handle.getScrollHeight(),viewport=handle.getViewportHeight()
+        if(height===previousHeight&&viewport===previousViewport)return
+        previousHeight=height;previousViewport=viewport;invalidate()
+      })
+      subscriptionRef.current = {handle, unsubscribe:()=>{stopScroll();stopMetrics();}}
+      invalidate()
+    }
+  })
+  useEffect(() => () => {
+    subscriptionRef.current?.unsubscribe()
+    subscriptionRef.current = null
+  }, [])
 
   const viewport = readViewport()
   // Width changes invalidate every measured row count. Capture the semantic
@@ -148,7 +200,7 @@ export function useVirtualScroll({
   // scrollTop cannot survive text reflow and a DOM ref may be unmounted by the
   // virtual window during the same commit.
   if (lastLayoutKeyRef.current !== layoutKey) {
-    if (!viewport.sticky && itemKeys.length > 0) {
+    if (!viewport.sticky && itemKeys.length > 0 && (!containerRef || viewport.globalTop >= viewport.offset)) {
       const previousLayoutKey = lastLayoutKeyRef.current
       const previousSizes = itemKeys.map((key, index) => {
         const cached = sizesRef.current.get(key)
@@ -163,7 +215,7 @@ export function useVirtualScroll({
         before = next
       }
       const key = itemKeys[anchorIndex]
-      if (key) pendingLayoutAnchorRef.current = {
+      if (key && (!containerRef || viewport.top < previousSizes.reduce((sum, value) => sum + value, 0))) pendingLayoutAnchorRef.current = {
         key, offset: Math.max(0, viewport.top - before), rows: previousSizes[anchorIndex] ?? 1, layoutKey,
       }
     }
@@ -179,7 +231,7 @@ export function useVirtualScroll({
   // ScrollBox owns the live sticky state. `stickToEnd` is only the cold-start
   // default before its handle exists; manual scrolling clears stickiness and
   // an explicit scrollToBottom restores it even after streaming completed.
-  const effectiveStickToEnd = viewport.sticky
+  const effectiveStickToEnd = !containerRef && viewport.sticky
   let effectiveTop = effectiveStickToEnd
     ? Math.max(0, estimatedTotal - viewport.viewportHeight)
     : viewport.top
@@ -223,13 +275,30 @@ export function useVirtualScroll({
 
   useLayoutEffect(() => {
     let changed = false
+    // A lazy body above the reading position may grow without a width change.
+    // Retain the first visible key and its line offset, rather than its old
+    // numeric position in the span.
+    let measuredAnchor: {index: number; offset: number} | undefined
+    if (containerRef && !viewport.sticky && viewport.pending === 0
+        && !pendingLayoutAnchorRef.current && viewport.globalTop >= viewport.offset
+        && viewport.top < estimatedTotal) {
+      let before = 0
+      for (let index = 0; index < sizes.length; index += 1) {
+        if (before + sizes[index]! > viewport.top) {
+          measuredAnchor = {index, offset: viewport.top - before}
+          break
+        }
+        before += sizes[index]!
+      }
+    }
     for (let index = window.start; index < window.end; index += 1) {
       const key = itemKeys[index]
       if (!key) continue
-      const measured = Math.max(
-        1,
-        Math.ceil(elementsRef.current.get(key)?.yogaNode?.getComputedHeight() ?? 0),
-      )
+      const height = elementsRef.current.get(key)?.yogaNode?.getComputedHeight() ?? 0
+      // A retained conversation underneath a full-screen overlay has zero
+      // Yoga height. It was not remeasured as one line: preserve its cache.
+      if (!Number.isFinite(height) || height <= 0) continue
+      const measured = Math.max(1, Math.ceil(height))
       const previous = sizesRef.current.get(key)
       if (!previous || previous.layoutKey !== layoutKey || previous.rows !== measured) {
         sizesRef.current.set(key, { layoutKey, rows: measured })
@@ -254,11 +323,11 @@ export function useVirtualScroll({
     }))
 
     const handle = scrollRef.current
-    if (virtualized && handle) {
+    if (manageClampBounds && virtualized && handle) {
       const viewportHeight = Math.max(1, handle.getViewportHeight() || viewport.viewportHeight)
       const mountedEnd = Math.max(window.before, window.total - window.after)
       handle.setClampBounds(window.before, Math.max(window.before, mountedEnd - viewportHeight))
-    } else {
+    } else if (manageClampBounds) {
       handle?.setClampBounds(undefined, undefined)
     }
     const pendingAnchor = pendingLayoutAnchorRef.current
@@ -271,15 +340,30 @@ export function useVirtualScroll({
         }, 0) + reflowOffset(pendingAnchor.offset, pendingAnchor.rows,
           sizesRef.current.get(pendingAnchor.key)?.rows ?? sizes[anchorIndex] ?? 1)
         pendingLayoutAnchorRef.current = null
-        handle.scrollTo(resolvedTop)
+        // A deeper span may already have restored a more precise anchor in
+        // this commit. Do not replace it with an ancestor's coarse estimate.
+        const restored = restoredSpans.get(handle)
+        if (!restored || Math.abs(handle.getScrollTop() - restored.top) >= 1) {
+          restoreSpan(handle, viewport.offset + resolvedTop, Boolean(containerRef))
+        }
       }
     }
-    if (changed) invalidate()
+    if (changed && handle && measuredAnchor && !handle.isSticky()
+        && Math.abs(handle.getScrollTop() - viewport.globalTop) < 1) {
+      const before = itemKeys.slice(0, measuredAnchor.index).reduce((sum, key, index) => {
+        const cached = sizesRef.current.get(key)
+        return sum + (cached?.layoutKey === layoutKey ? cached.rows : sizes[index]!)
+      }, 0)
+      const rows = sizesRef.current.get(itemKeys[measuredAnchor.index]!)?.rows ?? sizes[measuredAnchor.index]!
+      const resolved = before + Math.min(measuredAnchor.offset, rows - 1)
+      if (resolved !== viewport.top) restoreSpan(handle, viewport.offset + resolved, true)
+    }
+    if (changed || containerRef && virtualContentOffset(containerRef.current) !== viewport.offset) invalidate()
   })
 
   useLayoutEffect(() => () => {
-    scrollRef.current?.setClampBounds(undefined, undefined)
-  }, [scrollRef])
+    if (manageClampBounds) scrollRef.current?.setClampBounds(undefined, undefined)
+  }, [scrollRef, manageClampBounds])
 
   return useMemo(() => ({ ...window, virtualized, itemRef }), [window.start, window.end,
     window.visibleStart, window.visibleEnd, window.before, window.after, window.total,

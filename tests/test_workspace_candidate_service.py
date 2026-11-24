@@ -28,7 +28,9 @@ def fake_producer(monkeypatch, ws, change=None, *, output=None):
     def run(self, name, args, timeout, **kwargs):
         stage = Path(args["_workspace"])
         assert stage != ws and not stage.is_relative_to(ws)
-        assert not (stage / ".git").exists() and not (stage / ".gitgo").exists()
+        assert not (stage / ".git").exists()
+        assert {p.name for p in (stage / '.gitgo').iterdir()} == {'sandbox'}
+        assert (stage / '.gitgo/sandbox/home/Temp').is_dir()
         calls.append(stage)
         if change:
             change(stage)
@@ -74,6 +76,7 @@ def test_command_advice_freezes_output_across_model_roundtrip_and_storage_reopen
     first = call(args)
     assert first.data["error"] == "LESSON_FEEDBACK_REQUIRED", first.formatted
     assert first.receipt["effect_state"] == "not_committed" and not (ws / "report.txt").exists()
+    assert "The command ran and its output is frozen." in first.formatted
     resumed = {**args, "candidate_ref": first.data["candidate_ref"], "lesson_feedback_id": first.data["lesson_feedback"]["feedback_id"]}
     assert call(resumed, 1).is_error and len(calls) == 1
     ctx.session.append_tool_result(first.formatted, tool_name="exec_command", tool_call_id="c0", data=first.data, receipt=first.receipt)
@@ -84,6 +87,35 @@ def test_command_advice_freezes_output_across_model_roundtrip_and_storage_reopen
     assert final.data["candidate_source"] == "frozen" and len(calls) == 1
     assert (ws / "report.txt").read_text() == "report"
     assert "runtime_cleanup" not in final.receipt and "launch_state" not in final.receipt
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_same_launch_error_retains_different_recovery_advice(tmp_path_factory, monkeypatch, started):
+    from backend.core.sandbox import SandboxDenied
+
+    def deny(*args, **kwargs):
+        error = SandboxDenied("SANDBOX_LAUNCH_DENIED", "injected launch refusal")
+        error.cleanup = {"complete": True, "mode": "injected"}
+        if started:
+            error.started_pid, error.exit_code, error.effect_state = 123, -9, "ambiguous"
+        raise error
+
+    monkeypatch.setattr("backend.core.sandbox.sandbox_popen", deny)
+    monkeypatch.setattr("backend.core.sandbox_access.WorkspaceAccess.prepare", lambda self: self)
+    monkeypatch.setattr("backend.core.sandbox_access.WorkspaceAccess.close", lambda self: None)
+    _, call = make(tmp_path_factory)
+    result = call({"argv": ["python", "fixture.py"]})
+    assert result.is_error and result.data["error"] == "SANDBOX_LAUNCH_DENIED", result.formatted
+    recovery = result.diagnostics["native_recovery"]
+    assert recovery["launch_state"] == ("started" if started else "not_started")
+    assert recovery["cleanup_state"] == "confirmed" and recovery["invocation_id"]
+    assert recovery["formal_effect_state"] == "not_committed"
+    assert recovery["producer_completed"] is (None if started else False)
+    if started:
+        assert "Inspect this invocation's launch, effects and cleanup" in result.formatted
+        assert "This invocation did not start." not in result.formatted
+    else:
+        assert "This invocation did not start." in result.formatted
 
 
 def test_mandatory_output_check_blocks_every_file(tmp_path_factory, monkeypatch):
@@ -135,6 +167,37 @@ def test_failed_command_retains_output_but_does_not_publish_partial_files(tmp_pa
     assert result.is_error and result.data["producer_failed"] and result.data["stdout"] == "useful diagnostic"
     assert result.receipt["effect_state"] == "not_committed" and not (ws / "partial.txt").exists()
     assert len(calls) == 1
+
+
+def test_command_timeout_is_catalogued_and_withholds_partial_outputs(tmp_path_factory,monkeypatch):
+    ws=tmp_path_factory
+    fake_producer(monkeypatch,ws,lambda stage:(stage/'partial.txt').write_text('unfinished'),
+                  output={'error':'COMMAND_TIMEOUT','timeout':2,'argv':['python','task.py']})
+    ctx,call=make(ws)
+    result=call({'argv':['python','task.py'],'timeout':2})
+    assert result.is_error and result.data['error']=='TOOL_TIMEOUT',result.formatted
+    assert result.data['producer_failed'] and result.data['execution_state']=='timed_out'
+    assert result.receipt['effect_state']=='not_committed'
+    assert result.receipt['runtime_cleanup']['complete'] is True
+    assert not (ws/'partial.txt').exists()
+
+
+def test_typed_cancellation_survives_workspace_boundary(tmp_path_factory,monkeypatch):
+    from backend.core.loop.tool_pipeline import ToolExecutionCancelled
+    fake_producer(monkeypatch, tmp_path_factory)
+    def run(self,name,args,timeout,**kwargs):
+        (Path(args['_workspace'])/'partial.txt').write_text('unfinished')
+        kwargs['runtime_metadata'].update(launch_state='started',exit_code=-1,
+                                         cleanup={'complete':True,'mode':'test_fixture'})
+        raise ToolExecutionCancelled('tool cancelled',effect_state='ambiguous')
+    monkeypatch.setattr(ToolPipeline,'_execute_isolated',run)
+    ctx,call=make(tmp_path_factory)
+    result=call({'argv':['python','task.py']})
+    assert result.is_error and result.data['error']=='TOOL_CANCELLED',result.formatted
+    assert result.data['execution_state']=='cancelled'
+    assert result.receipt['effect_state']=='not_committed'
+    assert result.receipt['runtime_cleanup']['complete'] is True
+    assert not (tmp_path_factory/'partial.txt').exists()
 
 
 def test_stale_candidate_cannot_silently_regenerate(tmp_path_factory, monkeypatch):
@@ -207,6 +270,29 @@ def test_real_native_command_can_write_view_but_not_formal_workspace(tmp_path_fa
     assert result.data["candidate_render"]["launch_state"] == "started"
     assert result.data["candidate_render"]["access_retired"] is True
     assert result.receipt["runtime_cleanup"]["complete"] is True
+
+
+def test_real_native_command_tempfile_and_input_projection(tmp_path_factory, workspace_native_launcher):
+    ws = tmp_path_factory
+    (ws / 'input.txt').write_text('preserved', encoding='utf8')
+    ctx, call = make(ws)
+    code = '''
+import tempfile
+from pathlib import Path
+assert Path('input.txt').read_text(encoding='utf8') == 'preserved'
+with tempfile.TemporaryDirectory() as temporary:
+    sample=Path(temporary)/'sample.txt'
+    sample.write_text('private',encoding='utf8')
+    assert sample.read_text(encoding='utf8') == 'private'
+assert not Path(temporary).exists()
+Path('result.txt').write_text('tempfile-and-projection-ok',encoding='utf8')
+print('tempfile-and-projection-ok')
+'''
+    result = call({'argv': ['python', '-c', code], 'timeout': 60})
+    assert not result.is_error, result.formatted
+    assert (ws / 'result.txt').read_text() == 'tempfile-and-projection-ok'
+    assert (ws / 'input.txt').read_text() == 'preserved'
+    assert result.data['candidate_render']['access_retired']
 
 
 def test_real_native_powershell_output_uses_same_checked_commit(tmp_path_factory, workspace_native_launcher):

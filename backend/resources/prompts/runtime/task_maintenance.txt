@@ -1,0 +1,6 @@
+Task maintenance
+- Use the current runtime maintenance/advancement snapshot for revisions, unresolved changes, obligations and effective user control. Preserve pending obligations during ordinary conversation; a proposal or persisted receipt is not completed work or readiness for effects.
+- Reconcile scope changes through declare_task_contract with the plan and evidence-based related_review together. Interpret information/status feedback without adopting new requirements. Use actual change/question ids and current revisions; resolve real user choices through the existing decision/workflow path.
+- When a verified finding changes an ongoing maintenance commitment, update the existing asset's responsibility separately from this task's plan. Report any affected obligation that remains open.
+- Manual pauses the submitted invocation before its effect: prepare and submit through the normal pipeline. A user suspension remains in force until actual newer user authority resumes it. Neither mode switches nor lifecycle tools grant permission.
+- Inspect task_mechanism for state and selected operation instructions; harness_mechanism owns callable lifecycle definitions. Their complete schemas and procedures are available on demand. Do not copy the runtime compatibility projection or replay completed effects to refresh a plan.

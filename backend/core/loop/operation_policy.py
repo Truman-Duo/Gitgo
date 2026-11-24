@@ -26,13 +26,20 @@ class OperationPolicyDecision:
     reason: str
     risk: str
     grant_scope: str
+    rule_revision: int = 0
+    rule_task: str = ""
+    manual_exempt: bool = False
 
     @property
     def requires_user(self) -> bool:
         return self.disposition == PolicyDisposition.ASK
 
+    @property
+    def task_approval(self):
+        return f"{self.rule_task}/{self.rule_revision}" if self.risk == "task_rule" else ""
 
-def decide_tool_operation(tool, arguments: dict | None = None) -> OperationPolicyDecision:
+
+def decide_tool_operation(tool, arguments: dict | None = None, *, process=None) -> OperationPolicyDecision:
     """Classify one concrete call without guessing from keywords.
 
     Calling a model-visible tool is already the semantic compilation step.  A
@@ -40,7 +47,6 @@ def decide_tool_operation(tool, arguments: dict | None = None) -> OperationPolic
     Sensitive tools retain their declared ASK contract and exact/task-scoped
     grants continue to be enforced by the permission broker.
     """
-    del arguments  # Reserved for future resource-sensitive policy rules.
     approval = ApprovalMode(getattr(tool, "approval", ApprovalMode.ALLOW))
     effect = ToolEffect(getattr(tool, "effect", ToolEffect.READ))
     per_invocation = bool(getattr(tool, "approval_per_invocation", False))
@@ -50,22 +56,32 @@ def decide_tool_operation(tool, arguments: dict | None = None) -> OperationPolic
             PolicyDisposition.DENY, "tool contract denies this operation",
             "forbidden", "none",
         )
+    from .task_execution_policy import matches
+    state, actions = matches(process, tool.name, arguments or {})
+    rule = {"rule_revision": state["revision"], "rule_task": state["task_id"],
+            "manual_exempt": "manual_exempt" in actions} if state else {}
+    if "deny" in actions:
+        return OperationPolicyDecision(PolicyDisposition.DENY,
+            "This operation is blocked by the current task execution policy.", "forbidden", "none", **rule)
+    if "ask" in actions:
+        return OperationPolicyDecision(PolicyDisposition.ASK,
+            "The current task execution policy requires approval for this call.", "task_rule", "exact_invocation", **rule)
     if effect == ToolEffect.EXTERNAL_READ and approval == ApprovalMode.ALLOW:
         return OperationPolicyDecision(
             PolicyDisposition.ALLOW,
             "anonymous public-information retrieval is a low-risk read",
-            "low", "task",
+            "low", "task", **rule,
         )
     if approval == ApprovalMode.ASK:
         return OperationPolicyDecision(
             PolicyDisposition.ASK,
             "tool contract requires explicit authority",
             "high" if per_invocation else "sensitive",
-            "exact_invocation" if per_invocation else "task_or_invocation",
+            "exact_invocation" if per_invocation else "task_or_invocation", **rule,
         )
     return OperationPolicyDecision(
         PolicyDisposition.ALLOW, "tool contract allows this operation",
-        "low" if effect == ToolEffect.READ else "bounded", "task",
+        "low" if effect == ToolEffect.READ else "bounded", "task", **rule,
     )
 
 

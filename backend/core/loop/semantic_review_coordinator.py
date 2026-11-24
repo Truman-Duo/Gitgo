@@ -1,4 +1,8 @@
-"""Wire semantic review to billing, route state and observable outcomes."""
+"""Normal dialogue is owned by the main Agent, not a hidden LLM reviewer.
+
+Registered completion/review mechanisms retain their own explicit lifecycle.
+The legacy AlignmentReview remains readable for existing diagnostic consumers.
+"""
 from .alignment_review import AlignmentReview, AlignmentReviewHooks
 from .budget_runtime import reserve_provider_call
 from .budget import TaskBudgetExceeded
@@ -20,13 +24,12 @@ class SemanticReviewCoordinator:
         return _provider_idle_timeout(process)
 
     def check(self, candidate='', proposed_questions=None, *, trigger='admission', proposed_contracts=None, proposed_files=None, observation_only=False):
-        process, session = self.process, self.process.session
-        initial_route = self.route.route
-        hooks = AlignmentReviewHooks(emit=self.emit, frontend_emit=self.frontend, notice=self.workflow.notice,
-            refresh_prompt=self.refresh_prompt, before_attempt=self.before_attempt,
-            route_notice=lambda artifact: self.route.alignment_notice(artifact, initial_route, self.emit, self.workflow.notice),
-            result=lambda response, **options: _make_result(process, session, response, **options),
-            cancellation=lambda: _cancellation_result(process, session),
-            budget_exhausted=lambda error: _budget_exhausted_result(process, session, error))
-        return AlignmentReview(process, self.provider, hooks).check(self.instruction, candidate, proposed_questions,
-            trigger=trigger, proposed_contracts=proposed_contracts, proposed_files=proposed_files, observation_only=observation_only)
+        from .main_dialogue import activate, bind_candidate
+        activate(self.process, self.instruction)
+        if candidate:
+            bind_candidate(self.process, candidate, proposed_files)
+        # A normal main-model proposal already contains its semantic choice.
+        # The tool pipeline checks actual receipts, versions, graph readiness,
+        # effects and permission. This boundary neither calls assess_alignment
+        # nor fabricates a successful semantic/delivery review.
+        return None

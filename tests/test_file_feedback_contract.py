@@ -53,6 +53,9 @@ from pathlib import Path
 # This disposable source runtime contains only the interpreter, copied backend
 # and fixture dependencies; it is not a user's source checkout.
 access.native_runtime_access = lambda: ([Path(sys.executable).parent], [])
+# Both consumers use this explicitly registered, disposable combined image.
+# Production source readers keep their separately installed code/runtime scope.
+access.native_read_runtime_access = lambda handler, target: ([Path(sys.executable).parent], [])
 ctx.artifacts['tool_catalog'] = tools
 execution = ToolExecution(execution_id='read-recovery', ctx=ctx, tool_calls={calls!r})
 try:

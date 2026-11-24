@@ -33,12 +33,21 @@ def test_provider_receives_decodable_evidence_and_original_quote_is_preserved():
     class Provider:
         max_output_tokens=4096
         def chat(self,messages,**kwargs):
-            assert 'resolve text_bindings' in messages[0]['content']
+            assert '## Shared evidence values' in messages[0]['content']
+            assert 'text_bindings' not in messages[0]['content']
             assert decode(messages[1]['content'])==payload
             return {'content':json.dumps({'status':'ready','interpretations':[],'questions':[],
                 'request_frame':{'kind':'deliverable','source_quote':quote,'outcome':'Preserve the interface'}})}
     result=assess_with_provider(Provider(),payload)
     assert result['request_frame']['source_quote']==quote
+
+    class PlainProvider:
+        def chat(self, messages, **kwargs):
+            assert '## Shared evidence values' not in messages[0]['content']
+            assert json.loads(messages[1]['content']) == {'request': 'Check the signature'}
+            return {'content': ''}
+
+    assess_with_provider(PlainProvider(), {'request': 'Check the signature'})
 
 
 def test_later_duplicate_and_lexically_earlier_text_preserve_original_prefix():

@@ -1,0 +1,2 @@
+Review the sealed result and its evidence. If it satisfies the task, include completion_result in the delivery call. If integration tests are still due, keep the accepted assignment and use run_test with a verification lease from request_self_execute if needed.
+When a dependent user path could change the verdict, check it and state which paths the accepted version actually covers.

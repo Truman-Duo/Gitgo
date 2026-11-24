@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-CONTROL_DECISION_KINDS = frozenset({'permission', 'recovery', 'completion_exception', 'context_force_compaction', 'manual_execution', 'runtime_checkpoint'})
+CONTROL_DECISION_KINDS = frozenset({'permission', 'recovery', 'completion_exception', 'context_force_compaction', 'manual_execution', 'runtime_checkpoint', 'execution_policy'})
 
 
 def answer_digest(answer):
@@ -34,7 +34,8 @@ def alignment_input_digest(process, *, contract_override=None, boundary_subjects
                for m in process.session.messages[state.get('message_start', len(process.session.messages)):]
                if m.get('mailbox_message_id') and m.get('message_type') == 'conversation']
     return hashlib.sha256(json.dumps({'events': events, 'request': state.get('request'), 'scope': state.get('scope'),
-                                     'assumptions': state.get('assumptions'), 'constraints': process.task_constraints, 'updates': updates,
+                                     'assumptions': state.get('assumptions'), 'review_lineage': state.get('review_lineage'),
+                                     'constraints': process.task_constraints, 'updates': updates,
                                      'policy_version': POLICY_VERSION, 'contract': contract,
                                      'boundary_subjects': boundary_subjects or [],
                                      'task_maintenance': alignment_basis(process),
@@ -77,7 +78,9 @@ def source_answer(ledger, task_id, decision_id, source_node_id=''):
                   and e.get('task_id') == task_id and e.get('decision_id') == decision_id), None)
     if not event:
         return None
-    if event.get('kind') in CONTROL_DECISION_KINDS:
+    request = next((e for e in reversed(ledger) if e.get('event') == 'user_decision_requested'
+                    and e.get('task_id') == task_id and e.get('decision_id') == decision_id), {})
+    if event.get('kind') in CONTROL_DECISION_KINDS or request.get('kind') in CONTROL_DECISION_KINDS:
         return None
     if event.get('answers'):
         item = event['answers'].get(source_node_id)
@@ -145,6 +148,22 @@ def interpret_answer(process, node, answer, proposal, *, publish=True):
         raise ValueError('invalid answer disposition')
     quote = str(proposal.get('quote') or '').strip()
     value = str(proposal.get('value') or '').strip()
+    interpretation = None
+    value_basis = proposal.get('value_basis')
+    if value_basis is None and disposition in {'confirmed', 'delegated', 'partial'}:
+        from .main_dialogue import owns_dialogue
+        read = getattr(process, 'read_context_snapshot', None)
+        if read and owns_dialogue(read()[0].get('alignment_runtime') or {}):
+            # Cover explicit workflow/legacy tool aliases too, not just the
+            # compact answer_updates entry. Old stored events remain readable.
+            value_basis = 'source_quote'
+    if value_basis is not None:
+        if value_basis != 'source_quote' or not quote:
+            raise ValueError('a canonical source value requires an exact nonempty source quote')
+        interpretation = value if value and value != quote else None
+        # Actual listed selections remain their own literal branch values.
+        selected = (answer.get('selected_label') if answer.get('state_topic') == node['state_topic'] else None)
+        value, value_basis = (selected, 'user_selection') if selected else (quote, 'user_quote')
     if (quote and quote not in str(answer.get('answer', ''))) or (not quote and (value or disposition in {'confirmed', 'delegated'})):
         raise ValueError('interpretation requires an exact quote from the current user answer')
     if disposition in {'confirmed', 'delegated'} and not value:
@@ -156,6 +175,11 @@ def interpret_answer(process, node, answer, proposal, *, publish=True):
              'state_topic': node['state_topic'], 'node_id': node['id'],
              'answer_digest': answer_digest(answer['answer']), 'disposition': disposition,
              'value': value, 'quote': quote, 'remaining': str(proposal.get('remaining') or '')}
+    if value_basis:
+        event['value_basis'] = value_basis
+        if interpretation and interpretation != value:
+            event['agent_interpretation'] = interpretation
+            event['interpretation_status'] = 'unverified_proposal'
     if proposal.get('source_node_id'):
         event['source_node_id'] = proposal['source_node_id']
     if proposal.get('choice_key'):

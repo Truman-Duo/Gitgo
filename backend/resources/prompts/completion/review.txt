@@ -1,1 +1,1 @@
-Cite inspectable evidence and call complete_review with the verdict. If the Host accepts it, the call is terminal and no repeated final declaration is needed.
+Check important affected behavior and cite inspectable evidence. Distinguish observed failures, supported reasoning and unresolved concerns. Call complete_review with the verdict. If the Host accepts it, the call is terminal and no repeated final declaration is needed.

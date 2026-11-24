@@ -1,5 +1,7 @@
 import type { RuntimeNotice, RuntimeNoticeSeverity } from "../types.js";
 import type { StreamEvent, TraceLifecycleEvent } from "./streamEvents.js";
+import type { Copy } from "../ui/pageContract.js";
+import {isTemporarySubagent,promotionSource} from "./agentLabels.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -10,7 +12,7 @@ function percent(value: unknown): string {
   return Number.isFinite(number) ? `${Math.round(number * 100)}%` : "?";
 }
 
-function short(value: unknown, maximum = 120): string {
+function shortText(value: unknown, maximum = 120): string {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > maximum ? `${text.slice(0, Math.max(0, maximum - 1))}…` : text;
 }
@@ -26,27 +28,43 @@ function noticeKey(event: TraceLifecycleEvent, label: string, detail: string): s
 
 function makeNotice(
   event: TraceLifecycleEvent,
-  label: string,
+  copy: string | Copy,
   detail = "",
   severity: RuntimeNoticeSeverity = "info",
 ): RuntimeNotice {
+  const label = typeof copy === "string" ? copy : copy.en;
   return {
     key: noticeKey(event, label, detail),
     kind: event.event,
     label,
+    ...(typeof copy === "string" ? {} : {label_copy:copy}),
     detail: detail || undefined,
     severity,
     timestamp: typeof event.time === "string" ? event.time : undefined,
     process_id: event.process_id,
     detail_ref: typeof event.detail_ref === "string" ? event.detail_ref : undefined,
     actor_label: typeof event.actor_label === "string" ? event.actor_label : undefined,
+    ...(typeof event.decision_id === "string" ? {decision_id:event.decision_id} : {}),
   };
 }
 
+function subagentEndCopy(status: string): Copy {
+  switch (status) {
+    case "completed": return {en:"Subagent completed",zh:"子代理已完成"};
+    case "failed": return {en:"Subagent failed",zh:"子代理失败"};
+    case "cancelled": case "killed": return {en:"Subagent cancelled",zh:"子代理已取消"};
+    case "timed_out": return {en:"Subagent timed out",zh:"子代理超时"};
+    case "waiting": case "awaiting_user": return {en:"Subagent waiting",zh:"子代理等待中"};
+    case "degraded": return {en:"Subagent partially delivered",zh:"子代理已部分交付"};
+    default: return {en:"Subagent ended",zh:"子代理已结束"};
+  }
+}
+
 /** Project a verbose Host event into one compact, user-auditable trajectory row. */
-export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null {
+export function runtimeNoticeFromEvent(event: StreamEvent, fullDetail = false): RuntimeNotice | null {
   if (!("event" in event)) return null;
   const ev = event as TraceLifecycleEvent;
+  const short = fullDetail === true ? (value:unknown,_maximum?:number)=>String(value ?? "") : shortText;
   switch (ev.event) {
     case "architecture_warning":
       return makeNotice(ev, "Maintenance warning", short(ev.message), "warning");
@@ -141,20 +159,24 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
         ev, "Knowledge cleaned", `${Number(ev.count || 0)} invalid pending lesson${Number(ev.count || 0) === 1 ? "" : "s"}`, "info",
       );
     case "provider_switched":
-      return makeNotice(ev, "Provider switched", "Runtime will reload at the next safe turn", "success");
+      return makeNotice(ev, "Provider switched", "The next task uses the selected provider", "success");
     case "completion_gate":
       return ev.accepted ? null : makeNotice(
         ev, "Completion blocked", short(ev.reason || ev.source || ""), "warning",
       );
     case "agent_started":
-      return makeNotice(ev, "Subprocess started", `${short(ev.actor_kind || "worker")} · ${short(ev.capability_profile_id || "")}`);
-    case "agent_terminal":
+      return isTemporarySubagent(ev)
+        ? makeNotice({...ev,actor_label:undefined}, {en:"Subagent started",zh:"子代理已启动"}, short(ev.capability_profile_id || ""))
+        : makeNotice(ev, "Subprocess started", `${short(ev.actor_kind || "worker")} · ${short(ev.capability_profile_id || "")}`);
+    case "agent_terminal": {
+      const subagent = isTemporarySubagent(ev);
       return makeNotice(
-        ev,
-        "Subprocess finished",
-        short(ev.status || "unknown"),
+        subagent ? {...ev,actor_label:undefined} : ev,
+        subagent ? subagentEndCopy(String(ev.status || "unknown")) : "Subprocess finished",
+        short((subagent && asRecord(asRecord(ev.outcome).error).message) || ev.status || "unknown"),
         ev.status === "completed" ? "success" : "warning",
       );
+    }
     case "agent_complete": {
       const outcome = asRecord(ev.outcome);
       const status = String(outcome.status || ev.status || "unknown");
@@ -163,7 +185,9 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
       const label = status === "completed" ? "completed" : status === "failed" ? "failed"
         : status === "cancelled" ? "cancelled" : status === "timed_out" ? "timed out"
         : status === "awaiting_user" || status === "waiting" ? "waiting" : status === "degraded" ? "partially delivered" : "ended";
-      return makeNotice(ev, `${actor} ${label}`, short(asRecord(outcome.error).message || status),
+      const subagent = isTemporarySubagent(ev);
+      return makeNotice(subagent ? {...ev,actor_label:undefined} : ev,
+        subagent ? subagentEndCopy(status) : `${actor} ${label}`, short(asRecord(outcome.error).message || status),
         status === "completed" ? "success" : status === "failed" ? "error"
         : status === "unknown" || status === "waiting" || status === "awaiting_user" ? "info" : "warning");
     }
@@ -173,6 +197,12 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
       const nodes = asRecord(ev.nodes);
       const order = Array.isArray(ev.order) ? ev.order.map((item) => short(item, 24)).join(" → ") : "";
       return makeNotice(ev, "Process DAG admitted", `${Object.keys(nodes).length} nodes${order ? ` · ${order}` : ""}`);
+    }
+    case "agent_dag_admission_failed": {
+      const started = Array.isArray(ev.started_process_ids) ? ev.started_process_ids.length : 0;
+      const cancelled = Array.isArray(ev.cancelled_before_start_process_ids) ? ev.cancelled_before_start_process_ids.length : 0;
+      return makeNotice(ev, "Process DAG admission failed",
+        `${started} started · ${cancelled} cancelled before start · ${short(ev.error)}`, "error");
     }
     case "multi_agent_routed_to_supervisor":
       return makeNotice(ev, "Process request routed", "Main-process control plane");
@@ -203,21 +233,27 @@ export function runtimeNoticeFromEvent(event: StreamEvent): RuntimeNotice | null
       const worktree = asRecord(ev.worktree);
       return makeNotice(ev, "Worktree sealed", short(worktree.result_commit || worktree.own_commit || ev.process_id || ""), "success");
     }
-    case "worktree_promoted":
+    case "worktree_promoted": {
+      const source = promotionSource(ev);
+      const ids = asRecord(ev.promotion).process_ids;
       return makeNotice(
         ev,
-        "Subprocess changes promoted",
-        Array.isArray(asRecord(ev.promotion).process_ids)
-          ? `${(asRecord(ev.promotion).process_ids as unknown[]).length} DAG nodes`
+        source === "subagent" ? {en:"Subagent changes applied",zh:"子代理补丁已应用"}
+          : source === "subprocess" ? "Subprocess changes promoted" : {en:"Changes applied",zh:"改动已应用"},
+        Array.isArray(ids)
+          ? `${ids.length} ${source === "subprocess" ? "DAG nodes" : "results"}`
           : short(ev.process_id || ""),
         "success",
       );
+    }
     case "worktree_cleanup_failed":
       return makeNotice(ev, "Worktree cleanup failed", short(ev.reason || ev.process_id || ""), "error");
+    case "worktree_unavailable":
+      return makeNotice(ev, {en:"Protected worktree unavailable",zh:"受保护的工作树不可用"}, short(ev.reason), "warning");
     case "decision_required": {
       const decision = asRecord(ev.decision);
       const options = Array.isArray(decision.options) ? decision.options.length : 0;
-      const enriched = { ...ev, decision_id: decision.decision_id } as TraceLifecycleEvent;
+      const enriched = { ...ev, decision_id: decision.decision_id || ev.decision_id } as TraceLifecycleEvent;
       return makeNotice(enriched, "User decision required", `${options} options · ${short(decision.question || "")}`, "warning");
     }
     case "user_decision_received":

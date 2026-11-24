@@ -9,6 +9,7 @@ import {
   findRootScene,
   getCommands,
   type CommandContext,
+  type CommandFeedback,
   type CommandOutcome,
 } from "../commands.js";
 import { noticeToActions } from "../notices.js";
@@ -68,6 +69,8 @@ export type RunCommandDeps = {
   projectNames: string[];
   sel: number;
   activeProject: string | null;
+  capturePanelTarget: () => () => boolean;
+  showCommandFeedback: (feedback: CommandFeedback) => void;
 };
 
 export async function runCommandEffect(cmd: string, deps: RunCommandDeps): Promise<void> {
@@ -111,6 +114,14 @@ export async function runCommandEffect(cmd: string, deps: RunCommandDeps): Promi
   const acts = commandOutcomeToActions(outcome, scene, projectNames, sel, activeProject);
   for (const a of acts) dispatch(a);
   clearCmd();
+  if (outcome.loadPanel) {
+    const isCurrent = deps.capturePanelTarget();
+    const result = await outcome.loadPanel();
+    if (isCurrent()) {
+      if ("overlay" in result) dispatch({type: "push_overlay", ...result});
+      else deps.showCommandFeedback(result);
+    }
+  }
 }
 
 // ── stop_process effect ───────────────────────────────────

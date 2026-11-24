@@ -97,7 +97,10 @@ def _select_authorized_tools(
     if coordination_owner(getattr(process, "_manager", None), process) is None:
         # Profile membership describes possible capabilities, not an ownership
         # relationship. Apply the same condition to discovery and execution.
-        declared = [name for name in declared if name not in CapabilityProfiles._WORKER_COORDINATION]
+        worker_only = set(CapabilityProfiles._WORKER_COORDINATION)
+        if process.actor_kind == "supervisor":
+            worker_only.difference_update(("run_subagent", "read_child_artifact"))
+        declared = [name for name in declared if name not in worker_only]
     if (
         process.actor_kind == "supervisor"
         and process.capability_lease is None
@@ -109,8 +112,10 @@ def _select_authorized_tools(
         # Explicit self-execution remains available via a scoped lease.
         delegated_mode = {
             "context_open", "context_search", "artifact_read", "read_child_artifact", "workbench",
+            "capability_status",
             "decision_evidence", "task_mechanism", "harness_mechanism", "declare_task_contract", "prepare_task_bundle", "delegate_task",
-            "delegate_task_dag", "delegate_task_bundle", "list_agents", "wait_agents",
+            "run_subagent", "delegate_task_dag", "delegate_task_bundle", "list_agents", "wait_agents",
+            "asset_status", "asset_maintenance",
             "send_feedback", "cancel_agent", "request_review",
             "list_coordination_events", "resolve_coordination_event",
             "review_child_outcome", "request_user_decision", "request_permission",
@@ -125,12 +130,9 @@ def _select_authorized_tools(
         for name in declared
         if name in dispatcher_tools
     }
-    # The model has already supplied the semantic routing facts.  Once the
-    # compiled contract selects bounded single-owner execution, omit the three
-    # delegation entry points from the current provider surface.  A may revise
-    # the contract if the work genuinely grows; the next surface rebuild then
-    # exposes delegation again.  This avoids a reject/retry turn without using
-    # keyword intent rules or granting execution authority implicitly.
+    # Hide delegation only when the model explicitly selected self execution.
+    # Optional routing advice never removes a capability from an either/delegate
+    # contract. A concise revision can change the choice as the work evolves.
     if process.actor_kind == "supervisor":
         from backend.core.loop.task_contract import get_task_contract
         contract = get_task_contract(process)
@@ -213,13 +215,38 @@ def _select_authorized_tools(
         and "request_self_execute" in dispatcher_tools
     ):
         authorized["request_self_execute"] = dispatcher_tools["request_self_execute"]
-    if process.task_kind == "action" and "complete_task" in dispatcher_tools:
+    # A public-answer turn with an actual business reply may combine its
+    # source-bound interpretation and final response in one normal call.
+    # This read-only completion protocol does not promote the task to action,
+    # issue an execution lease, or waive any declared output/review obligation.
+    from .alignment_evidence import business_answer_receipts
+    from .elicitation_relevance import read_only_eligible
+    reply_completion = (read_only_eligible(process) and bool(business_answer_receipts(
+        process.session.host_ledger, process.active_task_id or process.process_id)))
+    if (process.task_kind == "action" or reply_completion) and "complete_task" in dispatcher_tools:
         # Host protocol tools are issued by task semantics rather than the
         # caller-selected capability profile.  Keep the provider surface and
         # RingGate's execution surface identical by recording that scoped grant.
         if issue_protocol_scopes:
             process.tool_registry.add_scoped("complete_task")
-        authorized["complete_task"] = dispatcher_tools["complete_task"]
+        completion_tool = dispatcher_tools["complete_task"]
+        if reply_completion:
+            from copy import copy, deepcopy
+            from backend.core.prompt_templates import load_prompt
+            completion_tool = copy(completion_tool)
+            completion_tool.parameters = deepcopy(completion_tool.parameters)
+            completion_tool.parameters['required'] = []
+            completion_tool.parameters['anyOf'] = [{'required': ['result']}, {'required': ['scope_update']}]
+            properties = completion_tool.parameters['properties']
+            properties['result'] = {'type': 'string', 'maxLength': 32000}
+            properties['verification'] = {'type': 'array', 'items': {'type': 'object'}}
+            from .main_dialogue import RESPONSE_SCOPE_SCHEMA, response_components_required
+            properties['scope_update'] = deepcopy(RESPONSE_SCOPE_SCHEMA)
+            if response_components_required(process):
+                completion_tool.parameters['required'] = ['scope_update']
+                completion_tool.parameters.pop('anyOf', None)
+            completion_tool.description = load_prompt('tools/complete_response')
+        authorized["complete_task"] = completion_tool
     if process.task_kind == "review" and "complete_review" in dispatcher_tools:
         if issue_protocol_scopes:
             process.tool_registry.add_scoped("complete_review")

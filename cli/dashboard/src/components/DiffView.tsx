@@ -2,7 +2,7 @@
 // Falls back to unified view when the panel is too narrow.
 // Column widths, ellipsis truncation, and line-number alignment live in
 // theme/diffLayout.ts so they are shared by every diff renderer.
-import React, { memo, useContext } from "react";
+import React, { memo, useContext, useMemo } from "react";
 import { Ansi, Box, Text } from "@anthropic/ink";
 import type { Color } from "@anthropic/ink";
 import {supportsLanguage} from "cli-highlight";
@@ -10,6 +10,7 @@ import {highlightCode} from "../theme/syntax.js";
 import {DiffLayoutContext} from "../theme/diffLayoutContext.js";
 import {useCopy} from "../ui/PageFrame.js";
 import type { FileDiff, DiffHunk, DiffLine, DiffLayout } from "../types.js";
+import {VirtualContent} from "./VirtualContent.js";
 import {
   colors,
   usePanelSize,
@@ -141,7 +142,9 @@ function SideLine({ lineNo, text, sign, style, digits, colW, language }: {
 }
 
 function SplitFile({ file, avail, maxRows }: { file: FileDiff; avail: number; maxRows: number }) {
-  const rows: Row[] = file.hunks.flatMap(alignHunk);
+  const rows: Row[] = useMemo(() => file.hunks.flatMap(alignHunk), [file.hunks]);
+  const visible = useMemo(() => rows.slice(0, maxRows), [rows, maxRows]);
+  const keys = useMemo(() => visible.map((_, index) => String(index)), [visible]);
   const maxLine = rows.reduce((m, r) => Math.max(m, r.oldLine ?? 0, r.newLine ?? 0), 0);
   const digits = String(maxLine).length;
   const colW = splitColWidth(avail, digits);
@@ -150,7 +153,8 @@ function SplitFile({ file, avail, maxRows }: { file: FileDiff; avail: number; ma
   return (
     <Box flexDirection="column">
       <FileHeader file={file} />
-      {rows.slice(0, maxRows).map((r, idx) => {
+      <VirtualContent itemKeys={keys} estimateRows={1} layoutKey={avail}>{idx => {
+        const r = visible[idx]!;
         const oldSign = r.type === "remove" || r.type === "change" ? "-" : " ";
         const newSign = r.type === "add" || r.type === "change" ? "+" : " ";
         return (
@@ -160,7 +164,7 @@ function SplitFile({ file, avail, maxRows }: { file: FileDiff; avail: number; ma
             <SideLine lineNo={r.newLine} text={r.newText} sign={newSign} style={newCellStyle(r.type)} digits={digits} colW={colW} language={language} />
           </Box>
         );
-      })}
+      }}</VirtualContent>
     </Box>
   );
 }
@@ -181,23 +185,29 @@ function UnifiedFile({ file, avail, maxRows }: { file: FileDiff; avail: number; 
   const digits = maxLineDigits(file);
   const colW = unifiedColWidth(avail, digits);
   const language = languageForPath(file.file);
-  let rowIndex = 0;
+  const rows = useMemo(() => {
+    const rows: {line: DiffLine; oldLine: number | null; newLine: number | null; sign: string}[] = [];
+    for (const hunk of file.hunks) {
+      let old = hunk.oldStart, next = hunk.newStart;
+      for (const line of hunk.lines) {
+        if (rows.length >= maxRows) return rows;
+        rows.push({line, oldLine: line.type === "add" ? null : old++,
+          newLine: line.type === "remove" ? null : next++, sign: line.type === "add" ? "+" : line.type === "remove" ? "-" : " "});
+      }
+    }
+    return rows;
+  }, [file.hunks, maxRows]);
+  const keys = useMemo(() => rows.map((_, index) => String(index)), [rows]);
 
   return (
     <Box flexDirection="column">
       <FileHeader file={file} />
-      {file.hunks.map((h, hi) => {
-        let o = h.oldStart, n = h.newStart;
-        return h.lines.map((l: DiffLine, li) => {
+      <VirtualContent itemKeys={keys} estimateRows={1} layoutKey={avail}>{index => {
+          const {line: l, oldLine, newLine, sign} = rows[index]!;
           const fg = l.type === "add" ? colors.diff.added : l.type === "remove" ? colors.diff.removed : undefined;
           const bg = l.type === "add" ? colors.diff.addedBg : l.type === "remove" ? colors.diff.removedBg : undefined;
-          let oldLine: number | null = null, newLine: number | null = null, sign: string;
-          if (l.type === "remove") { oldLine = o++; sign = "-"; }
-          else if (l.type === "add") { newLine = n++; sign = "+"; }
-          else { oldLine = o++; newLine = n++; sign = " "; }
-          if (rowIndex++ >= maxRows) return null;
           return (
-            <Box key={`${hi}-${li}`} flexDirection="row" gap={1}>
+            <Box flexDirection="row" gap={1}>
               <Box width={digits} flexShrink={0}><Text color={colors.diff.lineNumber}>{diffLineNo(oldLine, digits)}</Text></Box>
               <Box width={digits} flexShrink={0}><Text color={colors.diff.lineNumber}>{diffLineNo(newLine, digits)}</Text></Box>
               <Box width={colW} backgroundColor={bg} flexShrink={0}>
@@ -205,8 +215,7 @@ function UnifiedFile({ file, avail, maxRows }: { file: FileDiff; avail: number; 
               </Box>
             </Box>
           );
-        });
-      })}
+      }}</VirtualContent>
     </Box>
   );
 }

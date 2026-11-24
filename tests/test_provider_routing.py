@@ -114,6 +114,24 @@ def test_client_error_does_not_try_backup_or_damage_health(server):
     assert runtime.status()[0]['failures'] == 0
 
 
+@pytest.mark.parametrize('streaming', [False, True])
+def test_nonretryable_backup_preserves_prior_route_causes_and_original_exception(streaming, server):
+    from backend.core.loop.provider_failure import provider_diagnostic
+    url, calls, mode = server
+    mode['backup'] = 'bad_request'
+    runtime = RoutedProvider(config(url), registry=BreakerRegistry())
+    with pytest.raises(RuntimeError) as raised:
+        if streaming:
+            list(runtime.stream_session_events(AgentSession()))
+        else:
+            runtime.chat([{'role': 'user', 'content': 'ping'}])
+    assert [call['route'] for call in calls] == ['main', 'backup']
+    result = provider_diagnostic(raised.value, stage='requirement_review')
+    assert result['code'] == 'PROVIDER_ROUTES_MULTIPLE_FAILURES'
+    assert result['causes'] == ['HTTP_400', 'HTTP_503']
+    assert result['attempts'][1]['failure']['provider_response_excerpt'] == 'invalid request'
+
+
 def test_failover_uses_each_connections_own_request_preferences(server):
     url,calls,_=server
     raw=config(url)
@@ -178,7 +196,9 @@ def test_executor_recompiles_identity_before_backup_request(server):
     agent_step(process, runtime, instruction='Which model are you?')
     wire = json.dumps(next(c['body']['messages'] for c in reversed(calls) if c['body'].get('stream')))
     assert 'Current model: backup' in wire
-    assert '[HOST TASK CONTRACT UPDATE]' in wire
+    from backend.core.loop.prompt_rule_updates import HEADER, visible_sections
+    assert HEADER.splitlines()[0] in wire
+    assert "The active model is 'backup'" in visible_sections(process.session.messages)['Base identity']['content']
     assert process.model_id == 'backup'
     assert process.runtime_preferences['effective_provider_id'] == 'backup'
     assert process.provider_id == 'main'  # admission authority stays configured

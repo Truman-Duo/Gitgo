@@ -46,6 +46,9 @@ class ToolExecution:
     # Task Runtime schedules semantic work before an ordered call. Pipeline
     # remains the authority for effects, grants and final state validation.
     before_call: Callable | None = field(default=None, repr=False)
+    # Read-only information preparation may pause an untouched parallel group.
+    # Once prepared, the original group keeps its parallel execution behavior.
+    before_group: Callable | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if not self.idempotency_key:
@@ -141,6 +144,10 @@ class ToolExecution:
                         self.rollback(reason=f"Tool '{r.tool_name}' crashed: {r.error}")
                         break
             else:
+                prepared = self.before_group(group, self.execution_id) if self.before_group else None
+                if prepared is not None:
+                    results.append(prepared)
+                    break
                 with concurrent.futures.ThreadPoolExecutor(
                     max_workers=min(len(group), max_parallel)
                 ) as executor:

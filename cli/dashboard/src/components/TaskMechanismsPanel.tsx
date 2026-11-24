@@ -22,7 +22,9 @@ type Props = {client: BackendClient; project: string; processes: Record<string, 
 export function TaskMechanismsPanel({client, project, processes, onDismiss, interactive = true}: Props) {
   const t = useCopy();
   const {w} = usePanelSize({minWidth: 20, widthOffset: 6});
-  const rows = contextSessions(Object.values(processes)).filter(p => p.task_maintenance?.revision != null || p.harness_mechanisms?.length);
+  const active = (p: ProcessInfo) => ["running", "waiting", "awaiting_user"].includes(p.status);
+  const rows = contextSessions(Object.values(processes)).filter(p => p.task_maintenance?.revision != null
+    || p.harness_mechanisms?.length || p.task_execution_policy || (!p.parent_id && p.active_task_id && active(p)));
   const [selectedId, setSelectedId] = useState("");
   const index = Math.max(0, rows.findIndex(p => p.process_id === selectedId));
   const selected = rows[index];
@@ -30,6 +32,7 @@ export function TaskMechanismsPanel({client, project, processes, onDismiss, inte
   currentId.current = selected?.process_id;
   const [detail, setDetail] = useState(false), [data, setData] = useState<any>(null);
   const feedback = useFeedback({kind:"page",id:`mechanisms:${project}:${selected?.process_id || ""}`},{tone:"error"});
+  const exported = useFeedback({kind:"page",id:`mechanisms-export:${project}:${selected?.process_id || ""}`},{tone:"success"});
   const setError = feedback.show;
   const [busy, setBusy] = useState(false);
   const [actionIndex, setActionIndex] = useState(0), [confirm, setConfirm] = useState(false), [refresh, setRefresh] = useState(0);
@@ -37,6 +40,7 @@ export function TaskMechanismsPanel({client, project, processes, onDismiss, inte
   const alive = useRef(true);
   useEffect(() => () => {alive.current = false;}, []);
   const epoch = selected?.task_maintenance?.epoch;
+  const policyRevision = selected?.task_execution_policy?.revision;
   const extensionStamp = JSON.stringify(selected?.harness_mechanisms || []);
   useEffect(() => {
     let current = true;
@@ -45,13 +49,15 @@ export function TaskMechanismsPanel({client, project, processes, onDismiss, inte
     void taskMechanism(client, project, selected.process_id).then(value => {if (current) setData(value);})
       .catch(reason => {if (current) setError(String(reason?.message || reason));});
     return () => {current = false;};
-  }, [client, project, selected?.process_id, epoch, extensionStamp, refresh]);
-  useEffect(() => {setData(null); setDetail(false); scroll.current?.scrollTo(0);}, [selected?.process_id]);
+  }, [client, project, selected?.process_id, epoch, extensionStamp, refresh, policyRevision]);
+  useEffect(() => {setData(null); setDetail(false); setActionIndex(0); scroll.current?.scrollTo(0);}, [selected?.process_id]);
   useScrollInput(scroll, interactive && detail && !confirm);
 
   const state = data?.state;
+  const policy: ProcessInfo["task_execution_policy"] = data?.execution_policy ?? selected?.task_execution_policy;
+  const parameters = policy?.parameters;
   const hasTaskMechanism = Number.isInteger(state?.revision) && state.revision > 0;
-  const live = selected && ["running", "waiting", "awaiting_user"].includes(selected.status);
+  const live = selected && active(selected);
   const actions: {id:string;label:string;instance?:any}[] = live && hasTaskMechanism && !state?.detached ? [{id: state?.suspended ? "resume" : "suspend", label: state?.suspended
     ? t({en:"Resume",zh:"恢复"}) : t({en:"Suspend",zh:"暂停"})}, {id:"detach", label:t({en:"Detach",zh:"卸载"})}]
     : [];
@@ -59,16 +65,29 @@ export function TaskMechanismsPanel({client, project, processes, onDismiss, inte
     if (item.phase === "blocked" && item.error?.effect_state === "unknown") actions.push({id:`reconcile:${item.id}`,
       label:t({en:"Reconcile",zh:"核对恢复"}) + ` · ${item.id}`, instance:item});
   }
+  const hasPolicy = !!parameters && parameters.status !== "deleted";
+  if (hasPolicy && selected && !selected.parent_id && data && policy?.phase === "effective") {
+    if (parameters.status === "disabled") actions.push({id:"execution_policy_enable",label:t({en:"Enable rules",zh:"启用规则"})});
+    else actions.push({id:"execution_policy_disable",label:t({en:"Disable rules",zh:"停用规则"})});
+    actions.push({id:"execution_policy_delete",label:t({en:"Delete rules",zh:"删除规则"})},
+      {id:"execution_policy_export",label:t({en:"Export rules",zh:"导出规则"})});
+  }
   const action = actions[Math.min(actionIndex, Math.max(0, actions.length - 1))];
   const change = () => {
     if (mutation.current || !action || !selected) return;
-    if (!confirm) {setConfirm(true); return;}
+    const policyAction = action.id.startsWith("execution_policy_");
+    const exportPolicy = action.id === "execution_policy_export";
+    if (!confirm && !exportPolicy) {setConfirm(true); return;}
     mutation.current = true; setBusy(true); setError("");
-    void taskMechanism(client, project, selected.process_id, action.instance
+    void taskMechanism(client, project, selected.process_id, policyAction
+      ? {action:action.id,task_id:policy?.task_id,expected_revision:policy?.revision}
+      : action.instance
       ? {action:"reconcile",instance_id:action.instance.id,task_id:selected.active_task_id,expected_revision:action.instance.revision}
       : {action:action.id,task_id:state.task_id,expected_revision:state.revision})
       .then(value => {if (alive.current && currentId.current === selected.process_id) {
-        if (action.instance) {setRefresh(n=>n+1); if (!value.reconciled) setError(value.reason || t({en:"Evidence is still unavailable; the instance remains blocked.",zh:"证据仍不充分，实例继续阻塞。"}));}
+        if (exportPolicy) exported.show(value.path);
+        else if (policyAction) {setData((previous:any)=>({...previous,execution_policy:value.execution_policy}));setActionIndex(0);}
+        else if (action.instance) {setRefresh(n=>n+1); if (!value.reconciled) setError(value.reason || t({en:"Evidence is still unavailable; the instance remains blocked.",zh:"证据仍不充分，实例继续阻塞。"}));}
         else setData(value);
       }})
       .catch(reason => {if (alive.current) setError(String(reason?.message || reason));})
@@ -118,6 +137,19 @@ export function TaskMechanismsPanel({client, project, processes, onDismiss, inte
           <Text dimColor>{t({en:"Consumers: ",zh:"消费者："})}{data.consumer_projection?.epoch === state?.epoch
             ? t({en:"Synchronized",zh:"已同步"}) : t({en:"Refresh at the next execution boundary",zh:"在下一执行边界同步"})}</Text>
           <Text>{state?.plan?.summary}</Text>
+          {policy?.phase === "blocked" ? <Text color={colors.danger}>{policy.error}</Text> : null}
+          {hasPolicy ? <Box flexDirection="column">
+            <Text bold>{t({en:"Execution rules",zh:"执行规则"})} · {t({en:"Version",zh:"版本"})} {policy?.revision}</Text>
+            {parameters.status === "disabled" ? <Text dimColor>{t({en:"Disabled",zh:"已停用"})}</Text> : null}
+            {parameters.include_children ? <Text dimColor>{t({en:"Includes child tasks",zh:"包含子任务"})}</Text> : null}
+            {parameters.allow_only !== null ? <Text dimColor>{t({en:"Allowed tools",zh:"允许工具"})} · {parameters.allow_only.join(", ") || t({en:"None",zh:"无"})}</Text> : null}
+            {!parameters.rules.length && parameters.allow_only === null ? <Text dimColor>{t({en:"No active restriction",zh:"当前无限制"})}</Text> : null}
+            {parameters.rules.map((rule, index)=><Text key={index}>{rule.tool} · {t({
+              en:{deny:"Deny",ask:"Ask",manual_exempt:"Skip MANUAL confirmation"}[rule.action],
+              zh:{deny:"拒绝",ask:"执行前确认",manual_exempt:"免 MANUAL 推进确认"}[rule.action]})}
+              {rule.arguments && Object.keys(rule.arguments).length ? ` · ${truncate(JSON.stringify(rule.arguments), Math.max(12,w-26))}` : ""}</Text>)}
+          </Box> : null}
+          {parameters?.status === "deleted" ? <Text dimColor>{t({en:"Execution rules deleted",zh:"执行规则已删除"})}</Text> : null}
           {(data.extensions || []).length ? <Text bold>{t({en:"Harness extensions",zh:"Harness 扩展"})}</Text> : null}
           {(data.extensions || []).map((item:any) => <Box key={item.id} flexDirection="column" marginTop={1}>
             <Text>{item.id} · {label(item.phase,t)} · {t({en:"Generation",zh:"代际"})} {item.epoch}</Text>
@@ -160,7 +192,9 @@ export function TaskMechanismsPanel({client, project, processes, onDismiss, inte
         </>}
     </ScrollBox>
     <FeedbackMessage feedback={feedback.message}/>
+    <FeedbackMessage feedback={exported.message}/>
     {detail && actions.length ? <InlineChoiceStrip items={actions} selected={Math.min(actionIndex,actions.length-1)} width={w} interactive={interactive && !busy}/> : null}
-    {busy||confirm?<Text dimColor>{busy?t({en:"Saving…",zh:"正在保存…"}):t({en:"Accepted obligations remain",zh:"已接受的义务仍保留"})}</Text>:null}
+    {busy||confirm?<Text dimColor>{busy?t({en:"Working…",zh:"正在处理…"}):action?.id.startsWith("execution_policy_")
+      ? t({en:"Enter to confirm",zh:"Enter 确认"}) : t({en:"Accepted obligations remain",zh:"已接受的义务仍保留"})}</Text>:null}
   </Box>;
 }

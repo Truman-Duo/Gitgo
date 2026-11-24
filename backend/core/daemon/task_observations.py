@@ -24,8 +24,10 @@ class TaskObservations:
             "tool_result",
             "decision_required",
             "context_compaction_completed",
+            "progress_summary",
             "agent_started",
             "agent_dag_admitted",
+            "agent_dag_admission_failed",
             "worktree_leased",
             "worktree_sealed",
             "worktree_promoted",
@@ -41,7 +43,6 @@ class TaskObservations:
                 ) or self.process
                 if event.get("event") == "agent_terminal":
                     store.save_process_checkpoint(event_process, lifecycle_finalized=True)
-                    event_process.lifecycle_finalized = True
                 else:
                     store.save_process_checkpoint(event_process)
                 # Delegation mutates both the child row and A's durable
@@ -52,7 +53,7 @@ class TaskObservations:
                     owner = self.manager.get(event_process.parent_id)
                     if owner is not None:
                         store.save_process_checkpoint(owner)
-                if event.get("event") == "agent_dag_admitted":
+                if event.get("event") in {"agent_dag_admitted", "agent_dag_admission_failed"}:
                     for child_id in dict(event.get("nodes") or {}).values():
                         child = self.manager.get(str(child_id))
                         if child is not None:

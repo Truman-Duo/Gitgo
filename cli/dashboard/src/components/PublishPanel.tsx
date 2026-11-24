@@ -25,9 +25,10 @@ type Props = {
   localState?: PublishLocalState; client: BackendClient; project: string; cmdInput: UseTextInputReturn;
   onFooter: (config: FooterConfig | null) => void; onDismiss: () => void;
   onOpenTrial: () => void; onOpenFormal: () => void; onOpenAccount?: () => void;
+  initialSection?: "account";
 };
 type Data = {commit_format: Record<string, unknown>; privacy: Record<string, unknown>; authorship?: Record<string, unknown>;
-  remote_url: string; repositories?: Record<string, string>; checks?: PublishCheck[]};
+  remote_url: string; platform_target?: Record<string,string>; repositories?: Record<string, string>; checks?: PublishCheck[]};
 const tabs: Copy[] = [{en: "Repository / branches", zh: "仓库与分支"}, {en: "Account", zh: "账户"},
   {en: "Commit conventions", zh: "提交规范"}, {en: "Privacy / authorship", zh: "隐私与署名"}, {en: "Verification", zh: "验证检查"}];
 const labels: Record<string, Copy> = {
@@ -48,7 +49,7 @@ const fieldSets = [["remote_url", "trial", "formal"], ["account"], ["prefix", "n
 
 export function PublishPanel(props: Props) {
   const t = useCopy(), {w} = usePanelSize({minWidth: 20, widthOffset: 4});
-  const [tab, setTab] = useState(() => Math.max(0, Math.min(4, props.localState?.get<number>("settings.tab") ?? 0)));
+  const [tab, setTab] = useState(() => props.initialSection === "account" ? 1 : Math.max(0, Math.min(4, props.localState?.get<number>("settings.tab") ?? 0)));
   const [focus, setFocus] = useState<"header" | "body">("header"), [data, setData] = useState<Data | null>(null);
   const feedback = useFeedback({kind: "page", id: `${props.project}:publish/settings/${tab}`}, {tone: "error"});
   const error = feedback.text, setError = feedback.show;
@@ -68,18 +69,18 @@ export function PublishPanel(props: Props) {
     <HorizontalHeaderStrip items={tabs.map((label, index) => ({id: String(index), label: t(label)}))} selected={tab} width={w} contentFocused={focus !== "header"}/>
     <FeedbackMessage feedback={feedback.message}/>
     {!data ? <Text dimColor>{t({en: "Reading settings…", zh: "正在读取配置…"})}</Text> : tab === 1 ?
-      <AccountFields {...props} focused={focus === "body"} onDismiss={() => setFocus("header")}/> :
+      <AccountFields {...props} data={data} onSaved={setData} focused={focus === "body"} onDismiss={() => setFocus("header")}/> :
       <SettingFields key={tab} {...props} data={data} tab={tab} focused={focus === "body"} onDismiss={() => setFocus("header")} onSaved={value => setData(value)}/>}
 
   </Box>;
 }
 
 /** Account fields belong directly to the Account section, not a third menu. */
-function AccountFields(props: Props & {focused: boolean}) {
+function AccountFields(props: Props & {focused: boolean; data: Data; onSaved:(data:Data)=>void}) {
   const t = useCopy(), [busy, setBusy] = useState(false);
   const feedback = useFeedback({kind: "page", id: `${props.project}:publish/account`});
   const status = feedback.text, setStatus = feedback.show;
-  const defaults = {kind: "github", instance: "https://github.com", repository: "", account: "", token: ""};
+  const defaults = {kind: "github", instance: "https://github.com", repository: "", account: "", ...props.data.platform_target, token: ""};
   const form = usePublishForm(props.localState, "settings/account", defaults, props.project, () => Object.keys(defaults));
   const accountLabels: Record<string, Copy> = {kind: {en: "Platform", zh: "平台"}, instance: {en: "Instance", zh: "实例地址"},
     repository: {en: "Repository", zh: "仓库"}, account: {en: "Account", zh: "账户"}, token: {en: "Access token", zh: "访问令牌"}};
@@ -88,9 +89,12 @@ function AccountFields(props: Props & {focused: boolean}) {
       setBusy(true); setStatus("");
       try {
         const {token, ...target} = values;
-        await publishCommand(props.client, props.project, "account.save", {target, token}, randomUUID());
+        if(token)await publishCommand(props.client, props.project, "account.save", {target, token}, randomUUID());
+        await publishSet(props.client, props.project, "platform_target", target, props.data.platform_target ?? {});
+        props.onSaved(await publishGet(props.client, props.project) as Data);
         form.setValues({...values, token: ""}); if (form.field === "token") form.input.setValue("");
-        setStatus(t({en: "Credential saved. Repository access still verifies this account.", zh: "凭据已保存；读取仓库时仍会核对账户。"}));
+        setStatus(t(token?{en: "Credential saved. Repository access still verifies this account.", zh: "凭据已保存；读取仓库时仍会核对账户。"}:
+          {en:"Repository account saved; reads use the existing credential for this target.",zh:"仓库账户已保存；读取时使用这个目标已有的凭据。"}));
       } catch (error: any) {setStatus(String(error?.message || error), {tone: "error"});}
       finally {setBusy(false);}
     }});

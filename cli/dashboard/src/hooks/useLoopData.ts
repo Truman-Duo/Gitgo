@@ -11,13 +11,37 @@ import { loopStatus } from "../backend/tools.js";
 import { publishProcessStreamEvent } from "../daemon/processStreams.js";
 import type { StreamEvent } from "../daemon/streamEvents.js";
 
+export type MaintainedAsset = {
+  asset_id: string;
+  name: string;
+  paths: string[];
+  owner: string;
+  owner_name: string;
+  revision: number;
+  subscribed: boolean;
+  process_id: string;
+  execution_active: boolean;
+  work_state: string;
+  pending_notices: number;
+  queued_notices: number;
+  delivered_notices: number;
+  transfer_pending: boolean;
+};
+
 export type ProcessInfo = {
+  task_execution_policy?: {task_id?: string; revision?: number; phase: string; error?: string;
+    parameters?: {include_children: boolean; allow_only: string[] | null; status?: "enabled" | "disabled" | "deleted";
+      rules: Array<{tool: string; action: "deny" | "ask" | "manual_exempt"; arguments?: Record<string, unknown>}>}};
+  maintained_assets?: MaintainedAsset[];
   harness_mechanisms?: Array<{id:string;phase:string;epoch:number;revision:number;
     completion?: {return_counters:Record<string,number>;reviews:Array<{reviewer_process_id:string;epoch:number;phase:string;verdict?:string}>}}>;
   task_contract_revision?: number;
   task_maintenance?: {task_id?: string; revision?: number; epoch?: number; phase?: string; changes?: Record<string, unknown>};
   advancement?: Advancement;
   state_revision?: number;
+  lifecycle_finalized?: boolean;
+  closeout_state?: "active" | "pending" | "failed" | "finalized";
+  routing_compilation?: {requested?: string; recommended?: string; effective?: string; reason?: string};
   archived?: boolean;
   display_name?: string;
   session_id?: string;
@@ -138,6 +162,7 @@ export type RecoveryCandidate = {
 
 export type LoopData = {
   processes: Record<string, ProcessInfo>;
+  maintainedAssets?: MaintainedAsset[];
   toolEvents: ToolEvent[];
   providers: ProviderHealth[];
   daemonOnline: boolean;
@@ -158,6 +183,7 @@ export function useLoopData(
   refreshSec: number = 5,
 ): LoopData {
   const [processes, setProcesses] = useState<Record<string, ProcessInfo>>({});
+  const [maintainedAssets, setMaintainedAssets] = useState<MaintainedAsset[]>([]);
   const [toolEvents, setToolEvents] = useState<ToolEvent[]>([]);
   const [providers, setProviders] = useState<ProviderHealth[]>([]);
   const [daemonOnline, setDaemonOnline] = useState(false);
@@ -185,6 +211,7 @@ export function useLoopData(
   const pendingRef = useRef<{
     project: string;
     processes: Record<string, ProcessInfo>;
+    maintainedAssets: MaintainedAsset[];
     toolEvents: ToolEvent[];
     providers: ProviderHealth[];
     daemonOnline: boolean;
@@ -202,6 +229,7 @@ export function useLoopData(
     pendingRef.current = null;
     if (p.project !== projectRef.current) return;
     setProcesses(p.processes);
+    setMaintainedAssets(p.maintainedAssets);
     setToolEvents(p.toolEvents);
     setProviders(p.providers);
     setDaemonOnline(p.daemonOnline);
@@ -251,6 +279,7 @@ export function useLoopData(
       // appear to flicker even though no runtime fact changed.
       const fingerprint = JSON.stringify({
         processes: result?.processes || {},
+        maintainedAssets: result?.asset_maintenance || [],
         tools: result?.recent_tool_executed || [],
         providers: result?.providers || [],
         main: result?.main_conversation || [],
@@ -276,6 +305,7 @@ export function useLoopData(
       pendingRef.current = {
         project: requestedProject,
         processes: procs,
+        maintainedAssets: (result?.asset_maintenance || []) as MaintainedAsset[],
         toolEvents: (result?.recent_tool_executed || []) as ToolEvent[],
         providers: (result?.providers || []) as ProviderHealth[],
         daemonOnline: result?.daemon_online ?? false,
@@ -311,7 +341,7 @@ export function useLoopData(
     if (!client?.subscribeEvents || !project) return;
     const stateEvents = new Set([
       "runtime_ack", "task_admitted", "agent_started", "agent_terminal", "agent_complete",
-      "state_changed", "daemon_started", "daemon_stopped",
+      "state_changed", "daemon_started", "daemon_stopped", "agent_dag_admitted", "agent_dag_admission_failed",
       "provider_usage", "tool_result", "decision_required", "user_decision_received",
       "provider_route_activated", "provider_route_selected", "provider_route_failed", "provider_route_skipped",
       "decision_resumed", "context_compaction_requested", "context_compaction_completed",
@@ -368,6 +398,7 @@ export function useLoopData(
   const scopedError = project && errorProject.current === project ? error : null;
   return {
     processes: current ? processes : {},
+    maintainedAssets: current ? maintainedAssets : [],
     toolEvents: current ? toolEvents : [],
     providers: current ? providers : [],
     daemonOnline: current ? daemonOnline : false,

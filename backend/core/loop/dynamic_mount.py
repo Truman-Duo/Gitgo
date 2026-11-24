@@ -26,8 +26,9 @@ def mounted_tool(spec):
         if {"candidate_ref", "lesson_feedback_id"}.intersection(fields):
             raise ValueError("CUSTOM_TOOL_INVALID: candidate_ref and lesson_feedback_id are reserved native continuation parameters")
         fields.update(candidate_ref={"type": "string"}, lesson_feedback_id={"type": "string"})
-        from backend.core.prompt_templates import load_prompt
-        description += " " + load_prompt("tools/privileged_custom_output").strip()
+        from backend.core.prompt_templates import load_prompt, render_prompt
+        description += "\n\n" + render_prompt("tools/privileged_custom_output",
+            native_publication=load_prompt("tools/native_workspace_publication").strip()).strip()
 
     return AgentTool(spec["name"], description, parameters,
         lambda args: {"error": "DYNAMIC_TOOL_REQUIRES_PIPELINE"}, read_only=effect == ToolEffect.READ,

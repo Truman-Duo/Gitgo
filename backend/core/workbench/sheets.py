@@ -76,6 +76,16 @@ class SheetStore:
             raise ValueError("unsupported server-owned sheet scope")
         self.owner = hashlib.sha256(identity.encode()).hexdigest()
 
+    @classmethod
+    def _for_material_read(cls, storage, owner):
+        """Read only the owner recovered from a verified, persisted material."""
+        if not isinstance(owner, str) or not re.fullmatch(r"[0-9a-f]{64}", owner):
+            raise ValueError("invalid persisted material owner")
+        reader = cls.__new__(cls)
+        reader.storage, reader.owner, reader.process_id = storage, owner, None
+        reader._material_read_only = True
+        return reader
+
     def _head(self, sheet_id):
         return f"{self.owner}/head/{_identifier(sheet_id)}"
 
@@ -98,6 +108,8 @@ class SheetStore:
         return document, selected, head
 
     def _save(self, sheet_id, document, expected):
+        if getattr(self, "_material_read_only", False):
+            raise ValueError("material scope is read-only")
         if len(document["cells"]) > 100:
             raise ValueError("a sheet may have at most 100 cells")
         ids = [cell["id"] for cell in document["cells"]]

@@ -30,6 +30,18 @@ def _failure(code, detail):
 
 
 class WorkspaceCandidateRuntime(FileCandidateRuntime):
+    def is_current(self):
+        if not super().is_current():
+            return False
+        import sys
+        if sys.platform == "darwin":
+            from backend.core.macos_broker_client import project_binding
+            try:
+                project_binding(self.workspace)
+            except (OSError, ValueError):
+                return False
+        return True
+
     def execute(self, handler, args, timeout, *, diagnostics, runtime_metadata, trusted_arguments=None, result_kind="command"):
         if self.ctx.is_cancelled() or getattr(self.ctx.process, "cancel_requested", False):
             from .tool_pipeline import ToolExecutionCancelled
@@ -45,6 +57,12 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
         identity = {"owner": self.owner, "session_id": self.session_id,
             "workspace": str(root), "project_id": storage.paths.project_id,
             "handler": handler, "registration": self.registration, "arguments": public}
+        import sys
+        if sys.platform == "darwin":
+            from backend.core.macos_broker_client import project_binding
+            project_grant = project_binding(root)
+            if project_grant is not None:
+                identity["macos_project_grant"] = project_grant
         if self.trusted_arguments or result_kind != "command":
             identity.update(trusted_arguments=self.trusted_arguments, result_kind=result_kind)
         key = hashlib.sha256(_encode(identity)).hexdigest()
@@ -78,7 +96,7 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                 if record["producer"].get("cleanup", {}).get("complete") is not True or record["producer"].get("access_retired") is not True:
                     return _failure("SANDBOX_CLEANUP_PENDING", "Producer retirement is unconfirmed")
                 self.last_render = record["producer"] if source == "generated" else {}
-                result = self._commit(record, args)
+                result = self._commit(record, args, runtime_metadata)
             except Exception as exc:
                 # _commit handles effectful exceptions separately. Exceptions here
                 # can only precede a formal commit or follow a returned result.
@@ -119,8 +137,9 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                     # protocol result was lost. Empty output is not non-execution.
                     result["producer_completed"] = False if render.get("launch_state") == "not_started" else None
                 if render.get("launch_state") in {"started", "unknown"}:
-                    result["execution_state"] = ("completed" if record else "unknown" if result.get("error") == "SANDBOX_CLEANUP_PENDING" else
-                        "timed_out" if result.get("error") == "TOOL_TIMEOUT" else "cancelled" if result.get("error") == "TOOL_CANCELLED" else "failed")
+                    result["execution_state"] = ("timed_out" if result.get("error") == "TOOL_TIMEOUT" else
+                        "cancelled" if result.get("error") == "TOOL_CANCELLED" else "completed" if record else
+                        "unknown" if result.get("error") == "SANDBOX_CLEANUP_PENDING" else "failed")
                 info = result.get("error_info")
                 if isinstance(info, dict):
                     info["details"].update(formal_effect_state=result.get("effect_state"),
@@ -129,6 +148,12 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                 for action in result.get("next_actions", []):
                     if reference and action.get("action") == self.tool.name:
                         action["candidate_ref"] = reference
+            if (result.get("error") == "LESSON_FEEDBACK_REQUIRED"
+                    and result.get("output_publication") == "withheld"
+                    and result.get("producer_completed") is True and reference
+                    and (result.get("lesson_feedback") or {}).get("feedback_id")):
+                from backend.core.prompt_templates import load_prompt
+                result["continuation_guidance"] = load_prompt("tools/workspace_candidate_continue").strip()
             if reference and (not result.get("error") or result.get("producer_failed")):
                 try:
                     storage.release_state_ref(_NAMESPACE, key, expected_ref=reference)
@@ -137,25 +162,33 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                         "message": "Execution output was retained; inspect completed effects before any repeat."})
             return result
 
-    def preview(self, handler, inputs, timeout, *, trusted_arguments, copy_inputs, diagnostics, input_names=()):
+    def preview(self, handler, inputs, timeout, *, trusted_arguments, copy_inputs, diagnostics, input_names=(), input_image=None):
         """Disposable native execution; never stores or publishes output files."""
-        if handler not in {"authored_python", "authored_privileged_python", "authored_host_python", "run_test", "run_publish_plugins", "run_publish_build"} or any(
+        if handler not in {"authored_python", "authored_privileged_python", "authored_host_python", "run_test", "run_publish_plugins", "run_publish_build",
+                           "workbench_python", "workbench_cloc"} or any(
                 k not in {"_dynamic_spec", "_host_results"} for k in trusted_arguments):
             raise SandboxDenied("SANDBOX_POLICY_INVALID", "Unknown private self-test contract")
+        if input_image is not None and (handler not in {"workbench_cloc", "run_test"} or copy_inputs):
+            raise SandboxDenied("SANDBOX_POLICY_INVALID", "An explicit input image requires code analysis or registered tests")
         self.trusted_arguments = json.loads(_encode(trusted_arguments))
         self.result_kind, self.collect_outputs, self.copy_inputs = "authored", False, copy_inputs
         self.input_names = tuple(input_names)
+        self.input_image = input_image
         return self._produce(handler, inputs, timeout, diagnostics)
 
     def _produce(self, handler, public, timeout, diagnostics):
         from backend.core.sandbox_access import WorkspaceAccess, native_runtime_access
         from .execution_contract import NativeInvocation
-        from .read_approval import native_cleanup_pending, runtime_cleanup_report
-        if native_cleanup_pending(self.ctx.process):
+        from .read_approval import native_cleanup_findings, runtime_cleanup_report
+        if findings := native_cleanup_findings(self.ctx.process):
+            from .native_invocation_scope import retain_native_recovery
+            retain_native_recovery(self.ctx, findings)
             raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "Prior native resources require inspection")
         root = Path(self.workspace).resolve()
         from backend.core.tools.workspace_projection import WorkspaceImage
-        before = capture(root) if self.copy_inputs else WorkspaceImage((), ())
+        before = getattr(self, "input_image", None)
+        if before is None:
+            before = capture(root) if self.copy_inputs else WorkspaceImage((), ())
         project_root = self.storage.paths.project_root.resolve()
         from .candidate_workspace import allocate_candidate_workspace
         stages, stage = allocate_candidate_workspace(self.storage.paths, "workspace", workspace=self.workspace)
@@ -166,6 +199,8 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
         recovery_id = lifecycle("allocated", stage, {}) if lifecycle else ""
         try:
             before.materialize(stage)
+            from .candidate_workspace import prepare_candidate_home
+            prepare_candidate_home(stage)
             # No script rewriting. Only the declared cwd gets a relative mapping;
             # embedded absolute paths remain literal and have no formal-root ACL.
             command_args = dict(public)
@@ -176,7 +211,9 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                 runtimes, shallow = native_runtime_access()
                 journals = project_root / "sandbox_access"
                 journals.mkdir(parents=True, exist_ok=True)
-                access = WorkspaceAccess(stage, runtimes, journals / (stage.name + ".json"), shallow_runtimes=shallow, metadata_roots=[stage.parent])
+                access = WorkspaceAccess(stage, runtimes, journals / (stage.name + ".json"), shallow_runtimes=shallow,
+                    metadata_roots=[stage.parent], private_temp_roots=[stage / '.gitgo/sandbox/home/Temp'],
+                    reuse_runtime_pins=True)
                 access.prepare()
             if not self.is_current() or self.ctx.is_cancelled():
                 raise SandboxDenied("TOOL_CANCELLED", "Task changed or cancelled before producer launch")
@@ -187,17 +224,28 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                 invocation = replace(invocation, policy=replace(invocation.policy, recovery_id=recovery_id))
                 lifecycle("launching", stage, {})
             try:
-                result = self.pipeline._execute_isolated(handler, actual, timeout, cancellation_event=self.ctx.cancellation,
-                    diagnostics=diagnostics, runtime_metadata=metadata, native_invocation=invocation)
+                from contextlib import nullcontext
+                import sys
+                scope = nullcontext()
+                if sys.platform == "darwin":
+                    from backend.core.macos_broker_client import candidate_scope
+                    scope = candidate_scope(root, stage)
+                with scope:
+                    result = self.pipeline._execute_isolated(handler, actual, timeout, cancellation_event=self.ctx.cancellation,
+                        diagnostics=diagnostics, runtime_metadata=metadata, native_invocation=invocation)
             except Exception as exc:
                 from .error_taxonomy import classify_tool_error
-                raise SandboxDenied(classify_tool_error(exc, tool_name=self.tool.name).code, str(exc)) from exc
+                from .tool_pipeline import ToolExecutionCancelled
+                code = "TOOL_CANCELLED" if isinstance(exc, ToolExecutionCancelled) else classify_tool_error(exc, tool_name=self.tool.name).code
+                raise SandboxDenied(code, str(exc)) from exc
         finally:
             self.last_render.update({k: metadata[k] for k in ("launch_state", "exit_code", "execution_basis") if k in metadata})
             cleanup = runtime_cleanup_report(metadata.get("cleanup"))
             if cleanup is not None:
                 self.last_render["cleanup"] = cleanup
             if metadata.get("launch_state") in {"started", "unknown"} and (cleanup or {}).get("complete") is not True:
+                if access is not None:
+                    access.release_runtime_pins()
                 self.last_render["cleanup"] = {"complete": False, "mode": "unconfirmed"}
                 if lifecycle:
                     lifecycle("cleanup_pending", stage, self.last_render)
@@ -210,6 +258,8 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
                     if lifecycle:
                         lifecycle("cleanup_pending", stage, self.last_render)
                     raise SandboxDenied("SANDBOX_CLEANUP_PENDING", str(exc)) from exc
+                finally:
+                    self.last_render["sandbox_access"] = dict(access.timings)
             retired = True
             self.last_render["access_retired"] = True
             if lifecycle:
@@ -219,6 +269,14 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
             if "result" not in locals() and retired:
                 self._discard_stage(stage, stages)
         try:
+            if metadata.get("native_host_denial"):
+                raise SandboxDenied(result["error"], result["message"],
+                    details=(result.get("error_info") or {}).get("details"))
+            # A helper refusal has no producer output. Use that reason only
+            # when the launch journal confirms that the producer did not start.
+            if (metadata.get("launch_state") == "not_started" and isinstance(result, dict)
+                    and result.get("error") in {"HELPER_GRANT_INVALID", "HELPER_MAINTENANCE", "HELPER_UPGRADE_REQUIRED"}):
+                raise SandboxDenied(result["error"], result.get("message", result["error"]))
             if metadata.get("launch_state") != "started" or metadata.get("exit_code") != 0:
                 raise SandboxDenied("SANDBOX_EXECUTION_FAILED", "Native launch and protocol exit were not confirmed")
             if not self.collect_outputs:
@@ -262,7 +320,7 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
             raise SandboxDenied("WORKSPACE_CANDIDATE_UNAVAILABLE", "Private execution view changed identity; retain it for inspection")
         shutil.rmtree(stage)
 
-    def _commit(self, record, args):
+    def _commit(self, record, args, runtime_metadata):
         root = Path(self.workspace).resolve()
         output = record["result"]
         if self.ctx.is_cancelled() or getattr(self.ctx.process, "cancel_requested", False):
@@ -285,7 +343,12 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
             if not current():
                 return {**_failure("FILE_CHANGED", "Execution inputs changed; no formal output was submitted"), "input_applicability": "changed"}
             if output.get("error") or output.get("success") is False:
-                return {**_failure(str(output.get("error") or "COMMAND_EXIT_NONZERO"), "Native command failed; its private changes were not published"),
+                code = str(output.get("error") or "COMMAND_EXIT_NONZERO")
+                # The command handler's legacy result is not a catalog name.
+                # Preserve timeout semantics at the formal publication boundary.
+                if code == "COMMAND_TIMEOUT":
+                    code = "TOOL_TIMEOUT"
+                return {**_failure(code, "Native command failed; its private changes were not published"),
                         "producer_failed": True, "input_applicability": "current"}
             if not members:
                 return {"effect_state": "not_committed", "execution_state": "completed", "file_results": [], "input_applicability": "current"}
@@ -294,7 +357,15 @@ class WorkspaceCandidateRuntime(FileCandidateRuntime):
         service_args = {**args, "_mutation_lock_root": str(self.storage.paths.state_home / "mutation-locks")}
         # The same file locks cover all potentially read inputs. No second lock
         # authority is introduced for the formal filesystem.
-        with file_service_scope(lambda: self.ctx.is_cancelled() or getattr(self.ctx.process, "cancel_requested", False), self):
+        from .mechanism_lifecycle import fence
+        from .operation_policy import decide_tool_operation, PolicyDisposition
+        with fence(self.ctx.process), file_service_scope(lambda: self.ctx.is_cancelled() or getattr(self.ctx.process, "cancel_requested", False), self):
+            policy = decide_tool_operation(self.tool, runtime_metadata.get("task_policy_arguments", {}), process=self.ctx.process)
+            admitted = runtime_metadata.get("task_execution_policy") or {}
+            if policy.disposition == PolicyDisposition.DENY:
+                return _failure("TASK_EXECUTION_POLICY_DENIED", "The current task rule blocks publication of this frozen output.")
+            if policy.task_approval and policy.rule_revision != admitted.get("revision"):
+                return _failure("TASK_EXECUTION_POLICY_CHANGED", "Use the retained candidate under the current rule to confirm its publication.")
             try:
                 result = commit_file_batch(FileMutationBatch(root, tuple(members), operation=self.tool.name), service_args,
                     check_versions=current, guard_paths=[root / name for name in record["versions"]])

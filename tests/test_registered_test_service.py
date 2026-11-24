@@ -25,14 +25,77 @@ from tests.test_native_sandbox import isolated_python
 from tests.native_source_runtime import workspace_native_launcher
 
 
-def call(ws, ctx=None, **overrides):
+def call(ws, ctx=None, *, infer_id=False, **overrides):
     ctx = ctx or context(ws, ["run_test"])
     ctx.cancellation = ctx.process.cancellation_event
     tool = build_workspace_tools(ws)["run_test"]
     tool.timeout = 35  # Bound the real OS regression, including CreateProcess.
     args = {"test_id": "unit:sample", "target": "test_sample.py", "seeds": [11, 22], **overrides}
+    if infer_id:
+        args.pop("test_id")
     result = ToolPipeline().execute({"name": tool.name, "args": args}, tool, ctx, "registered-test")
     return ctx, result
+
+
+def test_test_id_binds_exact_target_without_model_input(tmp_path_factory, monkeypatch):
+    from backend.core.loop.test_manifest import TestRecord
+
+    workspace = tmp_path_factory
+    (workspace / "test_sample.py").write_text("def test_ok(): assert True\n", encoding="utf8")
+    protocol(monkeypatch)
+    ctx, first = call(workspace, infer_id=True)
+    assert not first.is_error, first.formatted
+    assert first.receipt["test_id"].startswith("pytest:auto:")
+    manifest = TestManifest(workspace)
+    manifest.register(TestRecord("existing", "./test_sample.py"))
+    _, registered = call(workspace, ctx, infer_id=True)
+    assert not registered.is_error, registered.formatted
+    assert registered.receipt["test_id"] == "existing"
+    manifest.register(TestRecord("another", "test_sample.py"))
+    _, ambiguous = call(workspace, ctx, infer_id=True)
+    assert ambiguous.diagnostics["code"] == "INVALID_TOOL_ARGUMENTS"
+    assert ambiguous.receipt["effect_state"] == "not_committed"
+    assert ambiguous.data["error_info"]["details"]["test_ids"] == ["another", "existing"]
+    ctx.process.required_test_ids = ["another"]
+    _, required = call(workspace, ctx, infer_id=True)
+    assert not required.is_error and required.receipt["test_id"] == "another"
+
+
+def test_inferred_test_id_does_not_overwrite_a_concurrent_registration(tmp_path_factory):
+    from backend.core.loop.test_manifest import TestRecord, run_registered_test
+
+    workspace = tmp_path_factory
+    for target in ("test_sample.py", "test_other.py"):
+        (workspace / target).write_text("def test_ok(): assert True\n", encoding="utf8")
+    manifest = TestManifest(workspace)
+    manifest.register(TestRecord("registered", "test_sample.py"))
+
+    def execute(_workspace, args, _validation):
+        assert args["test_id"] == "registered"
+        manifest.register(TestRecord("registered", "test_other.py"))
+        return {"seed_results": [{"seed": 42, "exit_code": 0, "duration_ms": 0, "output_tail": ""}]}
+
+    result = run_registered_test(workspace, {"target": "test_sample.py"}, execute=execute)
+    assert result["error"] == "VALIDATION_INPUT_CHANGED"
+    assert result["effect_state"] == "not_committed"
+    assert TestManifest.load(workspace).records["registered"].target == "test_other.py"
+
+
+def test_retained_exact_test_identity_is_reused_with_new_evidence(tmp_path_factory):
+    from backend.core.loop.test_manifest import run_registered_test
+
+    workspace = tmp_path_factory
+    (workspace / "test_sample.py").write_text("def test_ok(): assert True\n", encoding="utf8")
+    called = []
+
+    def execute(_workspace, args, _validation):
+        called.append(args["test_id"])
+        return {"seed_results": [{"seed": 42, "exit_code": 0, "duration_ms": 0, "output_tail": ""}]}
+
+    result = run_registered_test(workspace, {"target": "test_sample.py::test_ok"}, execute=execute,
+        required_test_ids=["original-proof"], retained_targets=[("original-proof", "./test_sample.py::test_ok")])
+    assert result["passed"] and result["test_id"] == "original-proof"
+    assert called == ["original-proof"]
 
 
 def protocol(monkeypatch, action=None, output=None):
@@ -62,6 +125,47 @@ def test_service_discards_test_files_and_only_parent_records_manifest(tmp_path_f
     assert result.receipt["runtime_cleanup"]["complete"]
     assert not (ws / "transient.txt").exists()
     assert TestManifest.load(ws).evaluate_required(["unit:sample"])[0]
+
+
+def test_declared_execution_view_excludes_large_unrelated_tree_and_versions_all_inputs(tmp_path_factory, monkeypatch):
+    ws = tmp_path_factory
+    (ws / 'fixtures').mkdir()
+    (ws / 'fixtures/data.txt').write_bytes(b'fixture')
+    (ws / 'pytest.ini').write_bytes(b'[pytest]\n')
+    (ws / 'test_sample.py').write_bytes(b'def test_ok(): assert True\n')
+    unrelated = ws / 'unrelated'
+    unrelated.mkdir()
+    for index in range(4):
+        (unrelated / f'{index}.txt').write_bytes(b'unrelated')
+    monkeypatch.setattr('backend.core.tools.workspace_projection.MAX_FILES', 3)
+
+    def inspect(stage, args):
+        assert 'execution_files' not in args
+        assert not (stage / 'unrelated').exists()
+        assert (stage / 'fixtures/data.txt').read_bytes() == b'fixture'
+        assert (stage / 'pytest.ini').is_file() and (stage / 'test_sample.py').is_file()
+
+    protocol(monkeypatch, inspect)
+    _, full = call(ws, input_files=['fixtures/data.txt'])
+    assert full.diagnostics['code'] == 'WORKSPACE_VIEW_LIMIT'
+    _, scoped = call(ws, input_files=['fixtures/data.txt'], execution_files=[])
+    assert not scoped.is_error, scoped.formatted
+    assert scoped.receipt['validation_version']['input_files'] == ['fixtures/data.txt', 'pytest.ini', 'test_sample.py']
+    manifest = TestManifest.load(ws)
+    (unrelated / '0.txt').write_bytes(b'changed outside the view')
+    assert manifest.evaluate_required(['unit:sample'])[0]
+    (ws / 'pytest.ini').write_bytes(b'[pytest]\naddopts = -q\n')
+    assert not manifest.evaluate_required(['unit:sample'])[0]
+
+
+@pytest.mark.parametrize('name', ['missing.txt', '../outside.txt', '.gitgo/test_manifest.json'])
+def test_invalid_declared_execution_inputs_do_not_start_tests(tmp_path_factory, monkeypatch, name):
+    ws = tmp_path_factory
+    (ws / 'test_sample.py').write_bytes(b'def test_ok(): assert True\n')
+    protocol(monkeypatch, lambda *_: pytest.fail('Invalid input must be rejected before native launch'))
+    _, result = call(ws, execution_files=[name])
+    assert result.diagnostics['code'] == 'TEST_EXECUTION_SCOPE_INVALID', result.formatted
+    assert not TestManifest.load(ws).records
 
 
 def test_completed_failing_test_is_known_failure_and_keeps_required_gate_closed(tmp_path_factory, monkeypatch):

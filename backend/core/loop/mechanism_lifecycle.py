@@ -39,22 +39,24 @@ def owner(process):
         process = target
 
 
-def snapshot(process, definition):
+def snapshot(process, definition, *, task_id=None):
     root = owner(process)
     with root.session._mechanism_lock:
         if root.session.mechanism_activation_blocked:
             raise ValueError("MECHANISM_ACTIVATION_BLOCKED")
-        record = root.session.mechanism_instances.get(definition.identifier)
+        key = definition.identifier if task_id is None else f"{definition.identifier}/{task_id}"
+        record = root.session.mechanism_instances.get(key)
         if record is None:
             return {"definition_id": definition.identifier, "definition_version": definition.version,
                     "scope_id": root.session.session_id, "revision": 0,
-                    "parameters": dict(definition.default_parameters), "phase": "effective"}
+                    "parameters": deepcopy(dict(definition.default_parameters)), "phase": "effective",
+                    **({"task_id": task_id} if task_id is not None else {})}
         if (record.get("definition_id") != definition.identifier or record.get("definition_version") != definition.version
                 or record.get("scope_id") != root.session.session_id
                 or record.get("phase") != "effective" or type(record.get("revision")) is not int
                 or record.get("activation_boundary") != definition.activation_boundary
                 or record["revision"] < 1 or record.get("dependencies") != dict(definition.dependencies)
-                or record.get("consumers") != list(definition.consumers)):
+                or record.get("consumers") != list(definition.consumers) or record.get("task_id") != task_id):
             raise ValueError("MECHANISM_DEFINITION_UNSUPPORTED")
         definition.validate(record.get("parameters"))
         return deepcopy(record)
@@ -82,7 +84,7 @@ def next_authority_sequence(session):
         return session.authority_sequence
 
 
-def activate(process, definition, parameters, expected_revision, store):
+def activate(process, definition, parameters, expected_revision, store, *, task_id=None, decision_id=""):
     root = owner(process)
     with root.session._mechanism_lock:
         # Persist through the current root, so changing a setting cannot make
@@ -91,17 +93,26 @@ def activate(process, definition, parameters, expected_revision, store):
         if manager is not None:
             roots = [p for p in manager.list_processes() if not p.parent_id and p.session is root.session]
             root = max(roots, key=lambda p: p.created_at or "") if roots else root
-        current = snapshot(root, definition)
+        if task_id is not None and (process is not root or root.active_task_id != task_id):
+            raise ValueError("MECHANISM_TARGET_CHANGED")
+        current = snapshot(root, definition, task_id=task_id)
         candidate = compile_revision(current, definition, parameters, expected_revision)
         if current["parameters"] == parameters:
+            if decision_id:
+                if store is None:
+                    raise ValueError("MECHANISM_CHECKPOINT_UNAVAILABLE")
+                store.save_process_checkpoint(root)
             return current
         if store is None:
             raise ValueError("MECHANISM_CHECKPOINT_UNAVAILABLE")
         candidate["control_sequence"] = next_authority_sequence(root.session)
         candidate["user_control"] = {"origin": "user_command", "authority_sequence": candidate["control_sequence"],
                                      "parameters": deepcopy(parameters)}
+        if decision_id:
+            candidate["user_control"].update(origin="user_decision", decision_id=decision_id)
         before = deepcopy(root.session.mechanism_instances)
-        root.session.mechanism_instances = {**before, definition.identifier: candidate}
+        key = definition.identifier if task_id is None else f"{definition.identifier}/{task_id}"
+        root.session.mechanism_instances = {**before, key: candidate}
         event = {"event": "mechanism_revision_activated", **candidate, "authority_sequence": candidate["control_sequence"]}
         commit_activation(root, event, store,
                           lambda: setattr(root.session, "mechanism_instances", before))

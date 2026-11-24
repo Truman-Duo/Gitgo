@@ -62,8 +62,10 @@ def run(pipeline, tool, args, ctx, execution_id, call_index, key, spec, *, timeo
         base = catalog[name]
         child_key = call_key({"id": str(index)}, child_execution, index)
         resuming = state_for(ctx.process, child_key, base, resolved, catalog) if base.composite_spec else None
-        if decide_tool_operation(base, resolved).requires_user and resuming is None and matching_grant(
-                ctx.process, name, resolved, per_invocation=base.approval_per_invocation, tool=base) is None:
+        policy = decide_tool_operation(base, resolved, process=ctx.process)
+        if policy.requires_user and (resuming is None or policy.task_approval) and matching_grant(
+                ctx.process, name, resolved, per_invocation=base.approval_per_invocation, tool=base,
+                task_approval=policy.task_approval) is None:
             ctx.artifacts["nested_permission"] = {"tool": base, "arguments": resolved}
             runtime_metadata["suspended"] = True
             return {"_suspended": True}

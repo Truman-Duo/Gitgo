@@ -35,8 +35,9 @@ test("model /help is scoped and preserves selection without refetching or switch
 },10000);
 test("effort /help retains its staged value and never creates a save while reading help",async()=>{
  const ui=mount();try{await ui.send('');await ui.send('/effort');await ui.send('\r');await ui.send('\x1b[D');
-  await ui.send('/help');await ui.send('\r');expect(ui.text()).toContain('Reasoning effort');expect(ui.text()).toContain('persists after restart');
-  expect(ui.calls.filter(c=>c[0]==='provider.effort.select')).toHaveLength(0);await ui.send('\x1b');await ui.send('\r');
+  await ui.send('/help');await ui.send('\r');expect(ui.text()).toContain('Reasoning effort');
+  await ui.send('\r');await ui.send('\x1b[6~');expect(ui.text()).toContain('persists after restart');
+  expect(ui.calls.filter(c=>c[0]==='provider.effort.select')).toHaveLength(0);await ui.send('\x1b');await ui.send('\x1b');await ui.send('\r');
   expect(ui.calls.filter(c=>c[0]==='provider.effort.select')[0][1].effort).toBe('low');expect(ui.calls.filter(c=>c[0]==='provider.effort.options')).toHaveLength(1);
  }finally{ui.close();}
 },10000);

@@ -190,19 +190,21 @@ from tests.test_registered_test_service import pytest_native_runtime
 
 
 def test_real_native_access_retirement_recovered_without_rerunning_test(formal_setup, pytest_native_runtime, monkeypatch):
-    from backend.core.sandbox_access import WorkspaceAccess
     from backend.core.sandbox import SandboxDenied
-    close = WorkspaceAccess.close
-    def fail_close(self):
+    from backend.core import windows_sandbox_native
+
+    def fail_retirement(_profile):
         raise SandboxDenied("SANDBOX_CLEANUP_PENDING", "injected access retirement interruption")
+
     item = prepare(formal_setup)
-    monkeypatch.setattr(WorkspaceAccess, "close", fail_close)
-    checking = command(formal_setup, "verify", item)["item"]
+    # Inject inside the retirement scope so production still releases its pinned handles.
+    with monkeypatch.context() as fault:
+        fault.setattr(windows_sandbox_native, "retire_profile_access", fail_retirement)
+        checking = command(formal_setup, "verify", item)["item"]
     assert checking["status"] == "checking"
     storage = get_storage(formal_setup[1].workspace_path)
     producer = read(storage, checking["operations"][-1])["producers"][0]
     assert producer["phase"] == "cleanup_pending" and producer["observation"]["launch_state"] == "started"
-    monkeypatch.setattr(WorkspaceAccess, "close", close)
     monkeypatch.setattr(PublishCheckRuntime, "verify_tree", lambda *a: pytest.fail("must not relaunch"))
     recovered = command(formal_setup, "reconcile", checking)["item"]
     assert recovered["status"] == "prepared" and not recovered["formal_eligible"]

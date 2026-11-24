@@ -17,19 +17,21 @@ def frame(session, tools, scope='task'):
     return session.to_provider_messages(dynamic_envelope=context)
 
 
-def test_descriptions_persist_while_availability_retires_and_reactivation_does_not_resend_schema():
+def test_current_interfaces_retire_and_reactivate_without_rewriting_the_decoding_baseline():
     session = AgentSession()
     a, b = tool('read'), tool('write')
     frame(session, [a, b])
+    baseline=deepcopy(session.provider_context_seed)
     session.append_assistant('actual prior model result')
     retired = frame(session, [a])
     current = decode_records(retired)
     assert current['runtime.capability']['available_tools'] == ['read']
-    assert set(current['runtime.tool_contracts']) == {'read', 'write'}
+    assert set(current['runtime.tool_contracts']) == {'read'}
     session.append_assistant('another actual result')
     restored = frame(session, [a, b])
     patch = session.provider_context_cache['records'][-1]['message']['context_snapshot']
-    assert not any('/runtime.tool_contracts' in item['path'] for item in patch['set'])
+    assert any('/runtime.tool_contracts/write' in item['path'] for item in patch['set'])
+    assert session.provider_context_seed == baseline
     assert decode_records(restored)['runtime.capability']['available_tools'] == ['read','write']
     saved = AgentSession.from_durable_state({'messages':deepcopy(session.messages),
         'provider_context_cache':durable_cache(session.provider_context_cache),
@@ -44,12 +46,12 @@ def test_descriptions_persist_while_availability_retires_and_reactivation_does_n
     assert reference_catalog(session, [a], scope='other-task') == {'read':a['function']}
 
 
-def test_inactive_descriptions_are_bounded_without_dropping_any_live_schema():
+def test_inactive_interfaces_leave_current_context_without_dropping_any_live_schema():
     session = AgentSession()
     old = [tool('old'+str(i)) for i in range(200)]
     frame(session, old)
     value = reference_catalog(session, [tool('live')], scope='task')
-    assert len(value) == 129 and 'live' in value
+    assert value == {'live':tool('live')['function']}
 
 
 def test_transport_error_is_not_reported_as_json_syntax_or_silently_executed():

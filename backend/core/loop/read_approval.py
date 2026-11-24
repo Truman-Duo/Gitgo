@@ -33,11 +33,16 @@ def runtime_cleanup_report(cleanup):
             "issues": [str(issue)[:120] for issue in issues[:16]]}
 
 
+def native_cleanup_findings(process):
+    return [reason for reason in (process.recovery or {}).get("reasons", [])
+            if isinstance(reason, dict) and reason.get("code") in {
+                   "NATIVE_CLEANUP_UNCONFIRMED", "NATIVE_LAUNCH_UNCONFIRMED", "INVOCATION_EVIDENCE_UNAVAILABLE", "NATIVE_OUTCOME_UNCONFIRMED"}
+            ]
+
+
 def native_cleanup_pending(process):
     """One recovery authority for native calls, including service-owned producers."""
-    return any(isinstance(reason, dict) and reason.get("code") in {
-                   "NATIVE_CLEANUP_UNCONFIRMED", "NATIVE_LAUNCH_UNCONFIRMED", "INVOCATION_EVIDENCE_UNAVAILABLE"}
-               for reason in (process.recovery or {}).get("reasons", []))
+    return bool(native_cleanup_findings(process))
 
 
 def requires_read_binding(tool):

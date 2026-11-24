@@ -120,7 +120,7 @@ def _has_remaining_uses(grant: dict) -> bool:
 
 @_locked_grants
 def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: bool,
-                   consume: bool = False, tool=None) -> dict | None:
+                   consume: bool = False, tool=None, task_approval: str = "") -> dict | None:
     """Find one task-bound grant using the same rule at preflight and execute.
 
     Keeping this match in one function prevents the Host suspension gate and
@@ -133,9 +133,10 @@ def matching_grant(process, tool_name: str, arguments: dict, *, per_invocation: 
         grant_is_current(item, process, tool)
         and item.get("tool_name") == tool_name
         and item.get("task_id") == task_id
+        and item.get("task_approval", "") == task_approval
         and (
             item.get("arguments_digest") == digest
-            if per_invocation or item.get("read_binding") is not None
+            if per_invocation or task_approval or item.get("read_binding") is not None
             else (item.get("scope") == "task" or item.get("arguments_digest") == digest)
         )
         and _has_remaining_uses(item)
@@ -158,6 +159,9 @@ def automatic_permission_request(process, tool, arguments: dict, workspace_path:
         str(item) for item in list(getattr(tool, "resources", []) or [])
         if str(item).strip()
     ]
+    if tool_name == "promote_agent_changes":
+        purpose = "publish the selected child changes into your project"
+        declared = [f"capability://project-publication/{Path(workspace_path).name}"]
     return create_permission_request(process, {
         "purpose": purpose,
         "tool_name": tool_name,
@@ -242,7 +246,9 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
     from backend.core.loop.operation_policy import (
         PolicyDisposition, decide_tool_operation,
     )
-    policy = decide_tool_operation(tool, dict(args.get("arguments") or {}))
+    policy = decide_tool_operation(tool, dict(args.get("arguments") or {}), process=process)
+    if policy.disposition == PolicyDisposition.DENY and policy.rule_revision:
+        raise ValueError("TASK_EXECUTION_POLICY_DENIED: " + policy.reason)
     if policy.disposition == PolicyDisposition.ALLOW and str(
         getattr(getattr(tool, "effect", ""), "value", getattr(tool, "effect", ""))
     ) == "external_read":
@@ -291,7 +297,7 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
     if isinstance(target, Path) and _is_within(target, effective) and not (bind_read and policy.requires_user):
         raise ValueError("resource is already inside the current execution scope")
     effect = getattr(getattr(tool, "effect", "read"), "value", str(getattr(tool, "effect", "read")))
-    invocation_only = bool(getattr(tool, "approval_per_invocation", False))
+    invocation_only = bool(getattr(tool, "approval_per_invocation", False) or policy.task_approval)
     request_id = str(uuid.uuid4())
     technical = {
         "request_id": request_id,
@@ -302,6 +308,7 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
         "resource": str(target),
         "arguments_digest": arguments_digest(invocation_args),
         "approval_scope": "exact_invocation" if invocation_only else "resource_or_task",
+        **({"task_approval": policy.task_approval} if policy.task_approval else {}),
     }
     from backend.core.loop.decision_support import create_user_decision
     decision_args = {
@@ -352,15 +359,20 @@ def create_permission_request(process, args: dict, tools: dict, workspace_path: 
             "arguments_preview": _arguments_preview(invocation_args),
         },
     }
+    if policy.task_approval:
+        decision_args["why_user_must_decide"] = policy.reason
+    def publish_permission(owner, request):
+        return create_user_decision(owner, request, display_template="permission",
+            display_context={"read_approval": bool(bind_read and _is_within(target, effective))})
     if not bind_read:
-        return create_user_decision(process, decision_args)
+        return publish_permission(process, decision_args)
     if _is_within(target, effective):
         decision_args["why_user_must_decide"] = "This tool requires approval for the displayed file read."
     from .read_approval import publish_read_request
     prepared = remap_project_paths(process, invocation_args, workspace_path, lexical=True)
     prepared = {**prepared, "_workspace": workspace_path,
                 "_allowed_roots": [str(target)] if isinstance(target, Path) else []}
-    return publish_read_request(process, decision_args, prepared, create_user_decision)
+    return publish_read_request(process, decision_args, prepared, publish_permission)
 
 
 @_locked_grants
@@ -390,6 +402,7 @@ def grant_from_decision(process, pending: dict, action: str) -> dict | None:
         "tool_contract_digest": str(request.get("tool_contract_digest") or ""),
         "expires_at": str(request.get("expires_at") or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
+        **({"task_approval": request["task_approval"]} if request.get("task_approval") else {}),
     }
     if request.get("read_binding") is not None:
         grant["resource"] = request["resource"]
@@ -439,7 +452,7 @@ def _arguments_preview(arguments: dict, *, limit: int = 1200) -> str:
 
 
 def _select_external_resources(process, tool_name: str, effect: str, arguments: dict,
-                                 resources: list[str], *, tool=None) -> tuple[list[str], list[dict], dict | None]:
+                                 resources: list[str], *, tool=None, task_approval="") -> tuple[list[str], list[dict], dict | None]:
     if not resources:
         return [], [], None
     digest = arguments_digest(arguments)
@@ -452,6 +465,7 @@ def _select_external_resources(process, tool_name: str, effect: str, arguments: 
             and item.get("task_id") == (process.active_task_id or process.process_id)
             and item.get("tool_name") == tool_name
             and item.get("effect") == effect
+            and item.get("task_approval", "") in {"", task_approval}
             and _is_within(target, Path(str(item.get("resource") or "")).resolve(strict=False))
             and (item.get("scope") == "task" or item.get("arguments_digest") == digest)
             and _has_remaining_uses(item)
@@ -488,7 +502,8 @@ def authorize_external_resources(process, tool_name: str, effect: str, arguments
 
 @_locked_grants
 def admit_invocation_grants(process, tool, raw_arguments: dict, prepared_arguments: dict,
-                            resources: list[str], *, require_explicit: bool, admission=None) -> tuple[list[str], dict | None]:
+                            resources: list[str], *, require_explicit: bool, admission=None,
+                            task_approval: str = "") -> tuple[list[str], dict | None]:
     """Recheck and spend the complete invocation selection under the grant lock.
 
     One grant may cover both explicit approval and several resource paths. All
@@ -500,13 +515,13 @@ def admit_invocation_grants(process, tool, raw_arguments: dict, prepared_argumen
     selected = []
     if require_explicit:
         grant = matching_grant(process, tool.name, raw_arguments,
-            per_invocation=bool(tool.approval_per_invocation), tool=tool)
+            per_invocation=bool(tool.approval_per_invocation), tool=tool, task_approval=task_approval)
         if grant is None:
             return [], {"name": "APPROVAL_GRANT_INVALID", "message": "approval is no longer available"}
         selected.append(grant)
     effect = getattr(tool.effect, "value", str(tool.effect))
     roots, resource_grants, error = _select_external_resources(
-        process, tool.name, effect, prepared_arguments, resources, tool=tool)
+        process, tool.name, effect, prepared_arguments, resources, tool=tool, task_approval=task_approval)
     if error is not None:
         return [], error
     selected.extend(resource_grants)

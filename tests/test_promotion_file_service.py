@@ -2,13 +2,15 @@
 import hashlib
 import json
 from pathlib import Path
+import sys
 import time
 from unittest.mock import patch
 
 import pytest
 
-from tests.test_agent_lifecycle_closeout import _promotion_tree, _cleanup
-from tests.test_agent_dag_worktree import _repo, _process
+from tests.test_agent_lifecycle_closeout import _cleanup
+from tests.test_agent_dag_worktree import _repo, _process, _git
+from tests.promotion_native_fixture import authorize_project, observe_formal_apply, fail_committed_ack
 from backend.core.knowledge.manager import LessonManager
 from backend.core.knowledge.models import Lesson
 from backend.core.knowledge.feedback import observe_provider_input
@@ -24,14 +26,44 @@ from backend.core.tools.catalog import build_workspace_tools
 
 
 @pytest.fixture
-def case(tmp_path_factory):
-    repo, store, manager, root, a, b = _promotion_tree(tmp_path_factory)
+def manager_factory(tmp_path_factory, monkeypatch, request):
+    def make(repo, store):
+        snapshot = ""
+        if sys.platform == "darwin":
+            authorize_project(repo, monkeypatch, request, tmp_path_factory / "broker-fixture")
+            snapshot = _git(repo, "rev-parse", "HEAD")
+        return AgentProcessManager(worktree_manager=AgentWorktreeManager(repo, store),
+                                   project_snapshot_commit=snapshot)
+    return make
+
+
+@pytest.fixture
+def case(tmp_path_factory, manager_factory):
+    repo = _repo(tmp_path_factory)
+    store = StorageRuntime(repo, state_home=tmp_path_factory / "state")
+    manager = manager_factory(repo, store)
+    root = _process(manager, task_id="root")
+    children = []
     LessonManager.bind_storage(repo, store)
     root.update_context_snapshot(lambda s: {**s, "project_name": "p"})
     try:
+        a = _process(manager, parent_id=root.process_id, task_id="a")
+        children.append(a)
+        path = Path(manager.materialize_process_worktree(a))
+        (path / "app.txt").write_text("upstream\n")
+        a.status = ProcessStatus.COMPLETED
+        manager.seal_process_worktree(a)
+        b = _process(manager, parent_id=root.process_id, task_id="b", depends_on=[a.process_id])
+        children.append(b)
+        path = Path(manager.materialize_process_worktree(b))
+        (path / "result.txt").write_text("consumer\n")
+        b.status = ProcessStatus.COMPLETED
+        manager.seal_process_worktree(b)
+        for child in children:
+            root.child_reviews[child.process_id] = {"verdict": "approved"}
         yield repo, store, manager, root, a, b
     finally:
-        _cleanup(store, manager, a, b)
+        _cleanup(store, manager, *children)
 
 
 def lesson(repo, path, *, required=False, literal="consumer"):
@@ -42,7 +74,7 @@ def lesson(repo, path, *, required=False, literal="consumer"):
     LessonManager.save(repo, value)
 
 
-def pipeline(case):
+def pipeline(case, *, approve=True):
     repo, store, manager, root, a, b = case
     root.tool_registry = ToolRegistry(["promote_agent_changes"])
     tools = build_internal_tools(root, build_workspace_tools(repo), str(repo), None, None, None)
@@ -50,8 +82,75 @@ def pipeline(case):
     ctx = ExecutionContext(root, root.session, str(repo), storage=store, cancellation=root.cancellation_event)
     ctx.artifacts["tool_catalog"] = tools
     def call(args, index=0):
+        if manager.project_snapshot_commit and approve:
+            from backend.core.loop.permission_broker import automatic_permission_request, grant_from_decision, matching_grant
+            if matching_grant(root, tool.name, args, per_invocation=True, tool=tool) is None:
+                automatic_permission_request(root, tool, args, str(repo))
+                grant_from_decision(root, root.pending_decision, "allow_once")
+                root.pending_decision = None
         return ToolPipeline().execute({"name": tool.name, "args": args}, tool, ctx, f"promotion-{index}")
     return ctx, call
+
+
+def native_advice_roundtrip(case, *, changed_group=False):
+    """Exercise internal file-service advice, separate from explicit approval.
+
+    Configured projects require user approval in ToolPipeline; approval is an
+    intentional override of known advice. This service-level test keeps that
+    boundary intact and supplies the Host receipt as a caller fixture.
+    """
+    repo, store, manager, root, a, b = case
+    args = {"process_ids": [a.process_id if changed_group else b.process_id]}
+    _, public_call = pipeline(case, approve=False)
+    unapproved = public_call(args)
+    assert unapproved.is_error and "SENSITIVE_TOOL_APPROVAL_REQUIRED" in unapproved.formatted
+    assert (repo / "app.txt").read_text() == "base\n" and not (repo / "result.txt").exists()
+
+    def service(arguments):
+        return manager.promote_process_results(root, arguments["process_ids"], file_service_args={
+            key: value for key, value in arguments.items() if key != "process_ids"
+        })
+
+    with pytest.raises(WorktreeError) as first:
+        service(args)
+    diagnostic = first.value.diagnostic
+    assert diagnostic["error"] == "LESSON_FEEDBACK_REQUIRED"
+    assert diagnostic["effect_state"] == "not_committed" and not a.worktree["promoted"]
+    assert not store.list_state_refs("agent_promotion", prefix="")
+    feedback_id = diagnostic["lesson_feedback"]["feedback_id"]
+    followup = {**args, "lesson_feedback_id": feedback_id}
+    with pytest.raises(WorktreeError) as hidden:
+        service(followup)
+    assert hidden.value.diagnostic["error"] == "LESSON_FEEDBACK_REQUIRED"
+    assert hidden.value.diagnostic["lesson_feedback"]["continuation_state"] == "reference_not_exposed"
+    content = json.dumps(diagnostic)
+    root.session.append_assistant("", tool_calls=[{"id": "c0", "type": "function", "function": {
+        "name": "promote_agent_changes", "arguments": json.dumps(args)}}])
+    root.session.append_tool_result(content, tool_name="promote_agent_changes", tool_call_id="c0",
+        data=diagnostic, receipt={
+            "tool_name": "promote_agent_changes", "task_id": root.active_task_id,
+            "process_id": root.process_id, "effect": "workspace_write",
+            "effect_state": "not_committed", "file_service_result": True,
+            "lesson_feedback_id": feedback_id,
+        })
+    projection = root.session.to_provider_messages()
+    assert any(m.get("role") == "tool" and m.get("content") == content for m in projection)
+    observe_provider_input(root, projection)
+    if changed_group:
+        with pytest.raises(WorktreeError) as different:
+            service({**followup, "process_ids": [b.process_id]})
+        assert different.value.diagnostic["error"] == "LESSON_FEEDBACK_REQUIRED"
+        assert different.value.diagnostic["lesson_feedback"]["continuation_state"] == "binding_changed"
+        assert (repo / "app.txt").read_text() == "base\n" and not (repo / "result.txt").exists()
+    else:
+        time.sleep(1.05)
+        final = service(followup)
+        assert final["promoted"] and final["effect_state"] == "committed"
+        assert final["lesson_feedback"]["advisory_state"] == "continuation_requested"
+        assert (repo / "app.txt").read_text() == "upstream\n" and (repo / "result.txt").read_text() == "consumer\n"
+        assert a.worktree["promoted"] and b.worktree["promoted"]
+        assert {r["path"] for r in final["file_results"]} == {"app.txt", "result.txt"}
+        assert final["knowledge_excerpts"]
 
 
 def test_late_formal_checker_blocks_the_whole_dag_before_prepared_record(case):
@@ -69,6 +168,8 @@ def test_late_formal_checker_blocks_the_whole_dag_before_prepared_record(case):
 def test_advice_roundtrip_reuses_complete_projection_without_timestamp_churn(case):
     repo, store, manager, root, a, b = case
     lesson(repo, "result.txt")
+    if manager.project_snapshot_commit:
+        return native_advice_roundtrip(case)
     ctx, call = pipeline(case)
     args = {"process_ids": [b.process_id]}
     first = call(args)
@@ -97,6 +198,8 @@ def test_advice_roundtrip_reuses_complete_projection_without_timestamp_churn(cas
 def test_feedback_for_a_subset_cannot_accept_the_complete_changed_group(case):
     repo, store, manager, root, a, b = case
     lesson(repo, "app.txt")
+    if manager.project_snapshot_commit:
+        return native_advice_roundtrip(case, changed_group=True)
     ctx, call = pipeline(case)
     first = call({"process_ids": [a.process_id]})
     root.session.append_assistant("", tool_calls=[{"id": "c0", "type": "function", "function": {
@@ -123,14 +226,11 @@ def test_inventory_failure_cannot_turn_into_an_empty_promotion_check(case, monke
 def test_promotion_holds_the_same_lock_as_file_tools(case, monkeypatch):
     repo, store, manager, root, a, b = case
     from backend.core.tools.workspace_tools import write_file
-    original = manager.worktree_manager._git_input
     observations = []
-    def apply(path, data, *args):
-        if path == repo:
-            observations.append(write_file({"_workspace": str(repo), "_mutation_lock_root": str(store.paths.state_home / "mutation-locks"),
-                "path": "app.txt", "content": "competing", "create_only": False, "expected_sha256": hashlib.sha256((repo / "app.txt").read_bytes()).hexdigest()}))
-        return original(path, data, *args)
-    monkeypatch.setattr(manager.worktree_manager, "_git_input", apply)
+    def competing_write():
+        observations.append(write_file({"_workspace": str(repo), "_mutation_lock_root": str(store.paths.state_home / "mutation-locks"),
+            "path": "app.txt", "content": "competing", "create_only": False, "expected_sha256": hashlib.sha256((repo / "app.txt").read_bytes()).hexdigest()}))
+    observe_formal_apply(manager.worktree_manager, monkeypatch, competing_write)
     result = manager.promote_process_results(root, [a.process_id])
     assert result["promoted"] and observations[0]["error"] == "FILE_MUTATION_BUSY"
     assert (repo / "app.txt").read_text() == "upstream\n"
@@ -152,10 +252,10 @@ def test_owner_rebinding_during_inspection_never_reaches_formal_apply(case, monk
 
 
 @pytest.mark.parametrize("required", [False, True])
-def test_binary_and_deletion_are_preserved_or_unknown_check_blocks_all(tmp_path_factory, required):
+def test_binary_and_deletion_are_preserved_or_unknown_check_blocks_all(tmp_path_factory, manager_factory, required):
     repo = _repo(tmp_path_factory)
     store = StorageRuntime(repo, state_home=tmp_path_factory / "state")
-    manager = AgentProcessManager(worktree_manager=AgentWorktreeManager(repo, store))
+    manager = manager_factory(repo, store)
     root = _process(manager, task_id="root")
     root.update_context_snapshot(lambda s: {**s, "project_name": "p"})
     child = _process(manager, parent_id=root.process_id, task_id="binary")
@@ -188,18 +288,15 @@ def test_binary_and_deletion_are_preserved_or_unknown_check_blocks_all(tmp_path_
 
 def test_two_service_instances_cannot_reconcile_the_same_inflight_head(case, monkeypatch):
     repo, store, manager, root, a, b = case
-    original = manager.worktree_manager._git_input
     other = AgentWorktreeManager(repo, store)
     observed = []
-    def apply(path, data, *args):
-        if path == repo:
-            try:
-                other.promote(snapshot_commit=a.worktree["snapshot_commit"], ordered_commits=[a.worktree["own_commit"]],
-                              promotion_id=root.active_task_id)
-            except WorktreeError as exc:
-                observed.append(exc.diagnostic)
-        return original(path, data, *args)
-    monkeypatch.setattr(manager.worktree_manager, "_git_input", apply)
+    def competing_promotion():
+        try:
+            other.promote(snapshot_commit=a.worktree["snapshot_commit"], ordered_commits=[a.worktree["own_commit"]],
+                          promotion_id=root.active_task_id)
+        except WorktreeError as exc:
+            observed.append(exc.diagnostic)
+    observe_formal_apply(manager.worktree_manager, monkeypatch, competing_promotion)
     result = manager.promote_process_results(root, [a.process_id])
     assert result["promoted"] and observed[0]["error"] == "FILE_MUTATION_BUSY"
     assert (repo / "app.txt").read_text() == "upstream\n"
@@ -224,23 +321,14 @@ def test_exact_user_grant_uses_existing_broker_for_a_known_formal_violation(case
 def test_pending_ack_preserves_verified_effect_and_retry_does_not_apply_twice(case, monkeypatch):
     repo, store, manager, root, a, b = case
     ctx, call = pipeline(case)
-    original_save = store.commit_state_revision
-    calls = []
-    def save(*args, **kwargs):
-        calls.append('save')
-        if len(calls) == 2:
-            raise RuntimeError("ack unavailable")
-        return original_save(*args, **kwargs)
-    with patch.object(store, "commit_state_revision", side_effect=save):
+    with patch.object(store, "commit_state_revision", side_effect=fail_committed_ack(store)):
         first = call({"process_ids": [a.process_id]})
     assert first.data["error"] == "PROMOTION_METADATA_PENDING"
     assert first.receipt["effect_state"] == "committed" and not a.worktree["promoted"]
     assert (repo / "app.txt").read_text() == "upstream\n"
-    original_apply = manager.worktree_manager._git_input
-    def no_reapply(path, data, *args):
-        assert path != repo, "reconciliation replayed the formal patch"
-        return original_apply(path, data, *args)
-    monkeypatch.setattr(manager.worktree_manager, "_git_input", no_reapply)
+    def no_reapply():
+        pytest.fail("reconciliation replayed the formal write")
+    observe_formal_apply(manager.worktree_manager, monkeypatch, no_reapply)
     final = call({"process_ids": [a.process_id]}, 1)
     assert not final.is_error and final.data["reconciled_effect"] is True, final.formatted
     assert a.worktree["promoted"] and (repo / "app.txt").read_text() == "upstream\n"
@@ -250,15 +338,12 @@ def test_incremental_promotion_also_locks_previously_accepted_outputs(case, monk
     repo, store, manager, root, a, b = case
     from backend.core.tools.workspace_tools import write_file
     manager.promote_process_results(root, [a.process_id])
-    original = manager.worktree_manager._git_input
     observations = []
-    def apply(path, data, *args):
-        if path == repo:
-            observations.append(write_file({"_workspace": str(repo), "_mutation_lock_root": str(store.paths.state_home / "mutation-locks"),
-                "path": "app.txt", "content": "competing", "create_only": False,
-                "expected_sha256": hashlib.sha256((repo / "app.txt").read_bytes()).hexdigest()}))
-        return original(path, data, *args)
-    monkeypatch.setattr(manager.worktree_manager, "_git_input", apply)
+    def competing_write():
+        observations.append(write_file({"_workspace": str(repo), "_mutation_lock_root": str(store.paths.state_home / "mutation-locks"),
+            "path": "app.txt", "content": "competing", "create_only": False,
+            "expected_sha256": hashlib.sha256((repo / "app.txt").read_bytes()).hexdigest()}))
+    observe_formal_apply(manager.worktree_manager, monkeypatch, competing_write)
     final = manager.promote_process_results(root, [b.process_id])
     assert final["promoted"] and observations[0]["error"] == "FILE_MUTATION_BUSY"
     assert (repo / "app.txt").read_text() == "upstream\n" and (repo / "result.txt").read_text() == "consumer\n"
@@ -270,28 +355,31 @@ def test_pinned_nonoutput_input_is_locked_during_formal_application(case, monkey
     source = repo / "reference.txt"
     source.write_bytes(b"pinned reference\n")
     a.worktree["input_dependencies"] = [{"path": "reference.txt", "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}]
-    original = manager.worktree_manager._git_input
     observations = []
-    def apply(path, data, *args):
-        if path == repo:
-            observations.append(write_file({"_workspace": str(repo), "_mutation_lock_root": str(store.paths.state_home / "mutation-locks"),
-                "path": "reference.txt", "content": "changed reference", "create_only": False,
-                "expected_sha256": hashlib.sha256(source.read_bytes()).hexdigest()}))
-        return original(path, data, *args)
-    monkeypatch.setattr(manager.worktree_manager, "_git_input", apply)
+    def competing_write():
+        observations.append(write_file({"_workspace": str(repo), "_mutation_lock_root": str(store.paths.state_home / "mutation-locks"),
+            "path": "reference.txt", "content": "changed reference", "create_only": False,
+            "expected_sha256": hashlib.sha256(source.read_bytes()).hexdigest()}))
+    observe_formal_apply(manager.worktree_manager, monkeypatch, competing_write)
     result = manager.promote_process_results(root, [a.process_id])
     assert result["promoted"] and observations[0]["error"] == "FILE_MUTATION_BUSY"
     assert source.read_bytes() == b"pinned reference\n"
 
 
 @pytest.mark.parametrize("ack_lost", [False, True])
-def test_crlf_delivery_freezes_the_actual_materialized_bytes(tmp_path_factory, ack_lost):
+def test_crlf_delivery_freezes_the_actual_materialized_bytes(tmp_path_factory, manager_factory, ack_lost):
     from tests.test_agent_dag_worktree import _git
     repo = _repo(tmp_path_factory)
     _git(repo, "config", "core.autocrlf", "true")
     (repo / "app.txt").write_bytes(b"base\r\n")
+    if sys.platform == "darwin":
+        # Protected worktrees start from an explicit immutable snapshot and do
+        # not run project filters. Commit the intended raw baseline in this
+        # test instead of pretending dirty-root capture is implemented.
+        _git(repo, "-c", "core.autocrlf=false", "add", "app.txt")
+        _git(repo, "commit", "-m", "raw CRLF snapshot")
     store = StorageRuntime(repo, state_home=tmp_path_factory / "state")
-    manager = AgentProcessManager(worktree_manager=AgentWorktreeManager(repo, store))
+    manager = manager_factory(repo, store)
     root = _process(manager, task_id="root")
     child = _process(manager, parent_id=root.process_id, task_id="crlf")
     try:
@@ -301,14 +389,7 @@ def test_crlf_delivery_freezes_the_actual_materialized_bytes(tmp_path_factory, a
         manager.seal_process_worktree(child)
         root.child_reviews[child.process_id] = {"verdict": "approved"}
         if ack_lost:
-            save = store.commit_state_revision
-            calls = []
-            def lose_ack(*args, **kwargs):
-                calls.append('save')
-                if len(calls) == 2:
-                    raise RuntimeError("lost acknowledgement")
-                return save(*args, **kwargs)
-            with patch.object(store, "commit_state_revision", side_effect=lose_ack):
+            with patch.object(store, "commit_state_revision", side_effect=fail_committed_ack(store)):
                 with pytest.raises(WorktreeError, match="METADATA_PENDING"):
                     manager.promote_process_results(root, [child.process_id])
             assert (repo / "app.txt").read_bytes() == b"next\r\n"
@@ -328,11 +409,11 @@ def test_crlf_delivery_freezes_the_actual_materialized_bytes(tmp_path_factory, a
 
 
 @pytest.mark.parametrize("guard_mode", ["none", "advice", "required"])
-def test_rename_checks_the_deleted_source_as_well_as_the_new_target(tmp_path_factory, guard_mode):
+def test_rename_checks_the_deleted_source_as_well_as_the_new_target(tmp_path_factory, manager_factory, guard_mode):
     repo = _repo(tmp_path_factory)
     original_bytes = (repo / "app.txt").read_bytes()
     store = StorageRuntime(repo, state_home=tmp_path_factory / "state")
-    manager = AgentProcessManager(worktree_manager=AgentWorktreeManager(repo, store))
+    manager = manager_factory(repo, store)
     root = _process(manager, task_id="root")
     root.update_context_snapshot(lambda s: {**s, "project_name": "p"})
     child = _process(manager, parent_id=root.process_id, task_id="rename")

@@ -89,6 +89,48 @@ test("effort and running-model interruption use the footer without replacing the
  }finally{root.unmount();root.cleanup();io.stdin.destroy();io.stdout.destroy();io.stderr.destroy();}
 },15000);
 
+test("unavailable effort stays out of the drawer, restores typing immediately and clears on its own", async () => {
+ const io=terminal();
+ let finish: (value: unknown) => void = () => {};
+ let optionReads=0;
+ const client:any={ready:true,close(){},async callTool(op:string){
+  if(op==='project.overview')return {projects:[{name:'visible-project',workspace:'C:/synthetic',runtime_summary:{state_available:true}}]};
+  if(op==='config.get')return {language:'zh'};
+  if(op==='provider.status')return {active_provider:'a',providers:[{id:'a',name:'API A',model_id:'one'}]};
+  if(op==='provider.effort.options'){
+   optionReads++;
+   if(optionReads===1)return {levels:[],state:'unknown',effort:'legacy'};
+   return new Promise(resolve=>{finish=resolve;});
+  }
+  if(op==='project.enter')return {ok:true,name:'visible-project'};
+  if(op==='runtime.status')return {state_available:true,daemon_online:true,processes:{},main_conversation:[]};
+  return {};
+ }};
+ const root=renderSync(<InputProvider><App client={client}/></InputProvider>,{...io,patchConsole:false,exitOnCtrlC:false});
+ const ink:any=instances.get(io.stdout);
+ const send=async(text:string)=>{io.stdin.write(text);await new Promise(r=>setTimeout(r,100));};
+ const screen=()=>rows(ink).join('\n');
+ try{
+  ink.setAltScreenActive(true);ink.onRender();await send('');await send('\r');await send('');
+  await send('/');await send('effort');await send('\r');
+  expect(screen()).toContain('未声明可选档位');
+  expect(screen()).not.toContain('▲');
+  await send('Normal draft');
+  expect(screen()).toContain('Normal draft');
+  await new Promise(r=>setTimeout(r,6100));
+  expect(screen()).not.toContain('未声明可选档位');
+  expect(screen()).toContain('Normal draft');
+  await send('\x15');
+  await send('/');await send('effort');await send('\r');
+  expect(optionReads).toBe(2);
+  await send('Another draft');
+  finish({provider_id:'a',model_id:'one',revision:'r',effort:'',levels:['low','high'],state:'declared'});
+  await send('');
+  expect(screen()).not.toContain('▲');
+  expect(screen()).toContain('Another draft');
+ }finally{root.unmount();root.cleanup();io.stdin.destroy();io.stdout.destroy();io.stderr.destroy();}
+},15000);
+
 test("the complete config tree returns API form to provider choices before returning to the provider tab",async()=>{
  const io=terminal();
  const client:any={ready:true,close(){},async callTool(op:string){if(op==='project.overview')return {projects:[{name:'visible-project',workspace:'C:/synthetic',runtime_summary:{state_available:true}}]};if(op==='config.get')return {language:'en'};if(op==='provider.status')return {active_provider:'a',providers:[{id:'a',name:'Existing',model_id:'one'}]};return {};}};
@@ -120,6 +162,12 @@ test("undo shares the footer drawer, preserves conversation/editor/status, and o
  const root=renderSync(<InputProvider><App client={client}/></InputProvider>,{...io,patchConsole:false,exitOnCtrlC:false}),ink:any=instances.get(io.stdout);
  const send=async(text:string)=>{io.stdin.write(text);await new Promise(r=>setTimeout(r,110));};
  const commits=()=>calls.filter(c=>c[0]==='runtime.undo');
+ const drawerVisible=()=>rows(ink).some(line=>line.includes('会话撤回'));
+ const waitFor=async(predicate:()=>boolean)=>{
+  const deadline=performance.now()+2000;
+  while(!predicate()&&performance.now()<deadline)await Bun.sleep(20);
+  expect(predicate()).toBe(true);
+ };
  try{
   ink.setAltScreenActive(true);ink.onRender();await send('');await send('\r');await send('');
   expect(rows(ink).some(line=>line.includes('Retained conversation text'))).toBe(true);
@@ -137,7 +185,11 @@ test("undo shares the footer drawer, preserves conversation/editor/status, and o
    expectBetweenEditorAndStatus(ink,'会话撤回');expect(rows(ink).some(line=>line.includes('保留当前对话'))).toBe(true);
    await send('\x1b');expect(commits()).toHaveLength(0);
   }
-  await send('/');await send('undo');await send('\r');await send('\r');await send('\r');expect(commits()).toHaveLength(1);expect(commits()[0][1]).toMatchObject({project:'visible-project',process_id:'a',checkpoint_id:'checkpoint-1'});
+  await waitFor(()=>!drawerVisible());
+  await send('/');await send('undo');await send('\r');await waitFor(drawerVisible);
+  expect(commits()).toHaveLength(0);
+  await send('\r');await waitFor(()=>commits().length>0);await send('\r');
+  expect(commits()).toHaveLength(1);expect(commits()[0][1]).toMatchObject({project:'visible-project',process_id:'a',checkpoint_id:'checkpoint-1'});
   finish();await send('');expect(rows(ink).some(line=>line.includes('会话撤回'))).toBe(false);expect(rows(ink).some(line=>line.includes('Retained conversation text'))).toBe(true);
  }finally{root.unmount();root.cleanup();io.stdin.destroy();io.stdout.destroy();io.stderr.destroy();}
 },15000);

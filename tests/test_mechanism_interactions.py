@@ -53,6 +53,171 @@ def checkpoint_program(process):
             {"kind": "data", "from": {"node": "after", "port": "event"}, "to": {"node": "compare", "port": "event"}}]}
 
 
+def test_task_execution_policy_rechecks_queued_calls_and_preserves_manual_permissions(runtime):
+    from backend.core.loop import mechanisms, task_execution_policy
+    from backend.core.loop.agent_tool import ApprovalMode
+    from backend.core.loop.permission_broker import grant_from_decision
+
+    _, process, effects, tool, ctx, batch, store = runtime
+    call = {"id": "queued", "name": "unit", "args": {"value": "allowed"}}
+    tool.approval, tool.approval_per_invocation = ApprovalMode.ASK, True
+    assert batch.execute_live_batch([call]).result
+    pending = process.pending_decision
+    saved = deepcopy(process.pending_tool_batch)
+    grant = grant_from_decision(process, pending, "allow_once")
+    assert grant
+    process.session.host_ledger.append({"event": "user_decision_received", "kind": "permission",
+        "decision_id": pending["decision_id"], "selected_action": "allow_once", "approval_grant_id": grant["grant_id"],
+        "process_id": process.process_id, "task_id": process.active_task_id})
+    saved["decision_action"] = "allow_once"
+    process.pending_decision = None
+    def apply(*rules, revision=0, allow_only=None):
+        return task_execution_policy.activate(process, process.active_task_id,
+            {"include_children": True, "allow_only": allow_only, "rules": list(rules)}, revision, store)
+
+    apply({"tool": "unit", "action": "deny"})
+    batch.execute_resumed_batch(saved)
+    assert not effects and "TASK_EXECUTION_POLICY_DENIED" in process.session.messages[-1]["content"]
+    assert "The user approved this queued invocation" in process.session.messages[-1]["content"]
+    facts = process.tool_receipts[-1]["approval_before_policy_denial"]
+    assert facts == {"decision_id": pending["decision_id"], "user_action": "allow_once",
+        "tool_call_id": "queued", "execution_state": "not_started", "policy_revision": 1,
+        "task_id": process.active_task_id}
+    from backend.core.workbench.expression import inspect_delivery
+    view = inspect_delivery(process, "The script was blocked before starting.")
+    assert view["approval_before_policy_denial"][0]["decision_id"] == pending["decision_id"]
+    batch.execute_live_batch([{**call, "id": "unrelated"}])
+    assert "approval_before_policy_denial" not in process.tool_receipts[-1]
+    child = process._manager.fork(process.process_id, "worker", ToolRegistry(["unit"]), 8, RingLevel.RING_3,
+        workspace_path=ctx.workspace_path, task_id="execution-policy-child")
+    child_ctx = ExecutionContext(child, child.session, ctx.workspace_path, storage=store._storage)
+    denied = ToolPipeline().execute(call, tool, child_ctx, "child")
+    assert denied.receipt["error_code"] == "TASK_EXECUTION_POLICY_DENIED" and not effects
+
+    apply({"tool": "unit", "action": "manual_exempt", "arguments": {"value": "allowed"}}, revision=1)
+    mechanisms.activate(process, "manual", 0, store)
+    result = ToolPipeline().execute(call, tool, ctx, "manual-exempt")
+    assert not result.is_error and not result.suspended and effects == ["allowed"]
+    assert result.receipt["task_execution_policy"]["manual_exempt"] is True
+    assert batch.missing_permission([call])  # Exact built-in approval was spent just once.
+
+    tool.approval, tool.approval_per_invocation = ApprovalMode.ALLOW, False
+    different = {**call, "args": {"value": "ordinary"}}
+    assert ToolPipeline().execute(different, tool, ctx, "ordinary-manual").suspended
+    assert effects == ["allowed"]
+
+
+def test_task_rule_activation_notifies_waiters_after_releasing_locks(runtime, monkeypatch):
+    from types import SimpleNamespace
+    from backend.core.daemon.mechanism_control import command
+
+    _, process, _, _, ctx, _, store = runtime
+    manager = process._manager
+    notifications = []
+
+    def notify(process_id):
+        # A wait_agents callback can hold the condition while reading context.
+        assert not process._context_lock._is_owned()
+        assert not process.session._mechanism_lock._is_owned()
+        notifications.append(process_id)
+
+    monkeypatch.setattr(manager, "notify_state_changed", notify)
+    events = []
+    command({"task_operation": "execution_policy", "process_id": process.process_id,
+        "task_id": process.active_task_id, "expected_revision": 0,
+        "execution_policy": {"allow_only": [], "include_children": True, "rules": []}},
+        SimpleNamespace(workspace_path=ctx.workspace_path), "fixture", {"apm": manager, "session_store": store}, events.append)
+    assert notifications == [process.process_id]
+    assert events[0]["result"]["execution_policy"]["revision"] == 1
+
+
+def test_task_rule_uses_exact_permission_from_its_current_revision(runtime):
+    from backend.core.loop.task_execution_policy import activate
+    from backend.core.loop.permission_broker import grant_from_decision
+
+    _, process, effects, tool, ctx, batch, store = runtime
+    rule = {"tool": tool.name, "action": "ask", "arguments": {"value": "review"}}
+    params = {"include_children": False, "allow_only": None, "rules": [rule]}
+    activate(process, process.active_task_id, params, 0, store)
+    call = {"id": "rule-ask", "name": tool.name, "args": {"value": "review"}}
+    assert batch.execute_live_batch([call]).result
+    old = process.pending_decision
+    saved = deepcopy(process.pending_tool_batch)
+    assert old["permission_request"]["approval_scope"] == "exact_invocation"
+    assert grant_from_decision(process, old, "allow_once")
+    process.pending_decision = None
+
+    revised = {**params, "include_children": True}
+    activate(process, process.active_task_id, revised, 1, store)
+    assert batch.execute_resumed_batch(saved) and not effects
+    new = process.pending_decision
+    assert new["decision_id"] != old["decision_id"]
+    assert new["permission_request"]["task_approval"].endswith("/2")
+    approved = grant_from_decision(process, new, "allow_once")
+    process.pending_decision = None
+    batch.execute_resumed_batch(deepcopy(process.pending_tool_batch))
+    assert effects == ["review"] and approved["remaining_uses"] == 0
+
+
+def test_conversation_rule_proposal_keeps_other_fields_and_binds_revision(runtime):
+    from backend.core.loop.task_execution_policy import activate, current, manage, matches, propose
+    from backend.core.loop.decision_support import create_user_decision
+
+    _, process, _, tool, _, _, store = runtime
+    process.actor_kind = "supervisor"
+    params = {"include_children": True, "allow_only": ["unit"], "rules": []}
+    activate(process, process.active_task_id, params, 0, store)
+    change = {"rules": [{"tool": "unit", "action": "deny"}]}
+    proposal = propose(process, change, {tool.name: tool})
+    assert proposal["status"] == "awaiting_user"
+    pending = process.pending_decision["display_context"]
+    assert pending["parameters"] == {**params, **change, "status": "enabled"}
+    assert pending["revision"] == current(process)["revision"] == 1
+    assert not matches(process, "unit", {})[1]
+
+    manage(process, process.active_task_id, "disable", 1, store)
+    with pytest.raises(ValueError, match="MECHANISM_REVISION_CONFLICT"):
+        activate(process, pending["task_id"], pending["parameters"], pending["revision"], store)
+    assert current(process)["parameters"]["status"] == "disabled"
+    assert not matches(process, "not_on_the_list", {})[1]
+    manage(process, process.active_task_id, "enable", 2, store)
+    assert matches(process, "not_on_the_list", {})[1] == {"deny"}
+    manage(process, process.active_task_id, "delete", 3, store)
+    assert current(process)["parameters"]["status"] == "deleted"
+    assert not matches(process, "not_on_the_list", {})[1]
+    with pytest.raises(ValueError, match="TASK_EXECUTION_POLICY_REVIEW_REQUIRED"):
+        create_user_decision(process, {"kind": "execution_policy"})
+
+
+def test_execution_rule_confirmation_uses_catalog_and_actual_before_after(runtime):
+    from dataclasses import replace
+    from backend.core.loop.task_execution_policy import InvalidPolicyTarget, activate, propose
+
+    _, process, _, tool, _, _, store = runtime
+    process.actor_kind = "supervisor"
+    catalog = {tool.name: tool, "other": replace(tool, name="other")}
+    for invalid, expected in [
+        ({"allow_only": ["unti"]}, "TASK_EXECUTION_POLICY_UNKNOWN_TOOL"),
+        ({"rules": [{"tool": "unit", "action": "deny", "arguments": {"vaule": "x"}}]},
+         "TASK_EXECUTION_POLICY_UNKNOWN_ARGUMENT"),
+        ({"rules": [{"tool": "unit", "action": "deny", "arguments": {"value": True}}]},
+         "TASK_EXECUTION_POLICY_INVALID_MATCH_VALUE"),
+    ]:
+        with pytest.raises(InvalidPolicyTarget) as error:
+            propose(process, invalid, catalog)
+        assert error.value.code == expected
+        assert process.pending_decision is None
+
+    activate(process, process.active_task_id, {"include_children": True, "allow_only": ["unit"], "rules": []}, 0, store)
+    candidate = {"allow_only": None, "rules": [{"tool": "other", "action": "deny", "arguments": {"value": "x"}}]}
+    assert propose(process, candidate, catalog)["status"] == "awaiting_user"
+    pending = process.pending_decision
+    assert "Allowed business tools: unit" in pending["question"]
+    assert "Allowed business tools: default tool range" in pending["question"]
+    assert pending["display_context"]["not_mounted_tools"] == ["other"]
+    assert pending["display_context"]["match_example"] == {"tool": "other", "arguments": {"value": "x"}}
+
+
 def enable(app, process, raw):
     preview = app.invoke({"operation": "preview", "program": raw})
     app.invoke({"operation": "publish", "program": raw, "expected_head": preview["expected_head"], "preview_digest": preview["preview_digest"]})
@@ -353,6 +518,39 @@ def test_grill_and_main_context_share_actual_composition_and_control_versions(ru
     assert inactive['control_effect']['business_scope_cancelled'] is False
     assert inactive['control_effect']['authority_granted'] is False
     assert inactive['program_digest'] in app.envelope() and 'program' not in inactive
+
+
+def test_question_guidance_reuses_context_boundary_and_retires_without_erasing_decisions(runtime):
+    import json
+    from backend.core.loop.alignment_runtime import AlignmentRuntime
+    from backend.core.loop.alignment_evidence import alignment_input_digest
+    app, process, *_ = runtime
+    advice = 'Prefer resolving consequential business choices before reversible refinements; investigate observable facts yourself.'
+    raw = {'schema_version': 2, 'id': 'question_guidance', 'intent': 'Fixture user-requested optional alignment guidance',
+        'source_refs': list(source_receipts(process)), 'elements': [
+            {'id': 'context', 'use': 'runtime.event', 'parameters': {'boundaries': ['before_context']}},
+            {'id': 'guide', 'use': 'context.project', 'parameters': {'content': advice}}],
+        'bindings': [{'kind': 'trigger', 'from': {'node': 'context', 'port': 'go'}, 'to': {'node': 'guide', 'port': 'go'}}]}
+    enabled = enable(app, process, raw)
+    start = alignment_input_digest(process)
+    app.dispatch('before_context', 'context:one', {})
+    first = app.context_sections()
+    assert advice in json.dumps(first)
+    assert alignment_input_digest(process) == start, 'A reminder is not a new business requirement'
+    app.dispatch('before_context', 'context:two', {})
+    assert len(app.context_sections()['harness.projections'][enabled['id']]) == 1
+    assert advice in json.dumps(AlignmentRuntime(process).payload()['harness_semantics'])
+    ledger_before = deepcopy(process.session.host_ledger)
+    # Use the existing lifecycle control, not a second guidance registry.
+    process.session.append_user('Unit fixture: suspend this optional guidance, preserving accepted decisions.')
+    current, _ = app.repo.instance(app.task, enabled['id'])
+    result = app.invoke({'operation': 'suspend', 'instance_id': enabled['id'], 'expected_revision': current['revision'],
+        'source_refs': list(source_receipts(process))})
+    assert result.get('error') is None
+    assert advice not in json.dumps(app.context_sections().get('harness.projections', {}))
+    assert alignment_input_digest(process) != start
+    assert all(item in process.session.host_ledger for item in ledger_before)
+    assert not process.pending_decision and not process.approval_grants
 
 
 def test_discussion_candidates_revise_merge_adopt_survive_detach_without_permission(runtime):

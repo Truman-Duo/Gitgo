@@ -133,10 +133,11 @@ def test_namespace_retains_no_host_fds_and_restricts_writes(repository):
 
 def test_old_helper_refuses_without_path_mount_fallback(repository, monkeypatch):
     from contextlib import ExitStack
+    from backend.core import sandbox_linux
     from backend.core.loop import git_linux
     repo, base, raw = repository
     scratch = base / 'scratch'; scratch.mkdir()
-    monkeypatch.setattr(git_linux.subprocess, 'run',
+    monkeypatch.setattr(sandbox_linux.subprocess, 'run',
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout='--ro-bind --bind', stderr=''))
     with ExitStack() as owners, pytest.raises(GitBoundaryError, match='0.11.1'):
         git_linux.LinuxPins(owners, scratch).wrap(['/usr/bin/git', 'status'], cwd=repo, writable=[repo])

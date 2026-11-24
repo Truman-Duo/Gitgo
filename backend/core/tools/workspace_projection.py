@@ -23,6 +23,10 @@ MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
 _RESERVED = PROTECTED_METADATA_PARTS
 
 
+class WorkspaceViewCapacity(ValueError):
+    """An execution input or output exceeds a workspace view limit."""
+
+
 @dataclass(frozen=True)
 class WorkspaceImage:
     # Immutable tuples prevent a producer from changing its source baseline.
@@ -58,7 +62,7 @@ def capture(root, *, output=False):
                 for entry in entries:
                     nodes += 1
                     if nodes > MAX_NODES:
-                        raise ValueError("Workspace view exceeds 8192 entries")
+                        raise WorkspaceViewCapacity("Workspace view exceeds 8192 entries")
                     name = prefix + entry.name
                     relative_parts(name)
                     if entry.name.casefold() in _RESERVED:
@@ -80,15 +84,41 @@ def capture(root, *, output=False):
                         stack.append((Path(entry.path), name + "/"))
                     elif stat.S_ISREG(info.st_mode):
                         if len(files) >= MAX_FILES:
-                            raise ValueError("Workspace view exceeds 4096 files")
+                            raise WorkspaceViewCapacity("Workspace view exceeds 4096 files")
                         with acquired.open(name) as opened:
                             raw = opened.read_bytes(max_bytes=MAX_FILE_BYTES)
                         used += len(raw)
                         if used > MAX_TOTAL_BYTES:
-                            raise ValueError("Workspace view exceeds 128 MiB")
+                            raise WorkspaceViewCapacity("Workspace view exceeds 128 MiB")
                         files.append((name, raw, stat.S_IMODE(info.st_mode)))
                     else:
                         raise ValueError("Workspace views require ordinary files: " + name)
+    return WorkspaceImage(tuple(sorted(files)), tuple(sorted(directories)))
+
+
+def capture_files(root, names):
+    """Collect only the declared regular files and their required parent directories."""
+    root = Path(root).resolve(strict=True)
+    if len(names) > MAX_FILES:
+        raise WorkspaceViewCapacity("Workspace view exceeds 4096 files")
+    files, directories = [], set()
+    used = 0
+    with ReadRoot(root) as acquired:
+        for name in names:
+            parts = relative_parts(name)
+            if any(part.casefold() in _RESERVED for part in parts):
+                raise ValueError("Execution inputs must be ordinary business files")
+            relative = Path(*parts)
+            directories.update(parent.as_posix() for parent in relative.parents if parent != Path('.'))
+            if len(directories) + len(names) > MAX_NODES:
+                raise WorkspaceViewCapacity("Workspace view exceeds 8192 entries")
+            with acquired.open(relative.as_posix()) as opened:
+                raw = opened.read_bytes(max_bytes=MAX_FILE_BYTES)
+                mode = (root / relative).stat(follow_symlinks=False).st_mode
+            used += len(raw)
+            if used > MAX_TOTAL_BYTES:
+                raise WorkspaceViewCapacity("Workspace view exceeds 128 MiB")
+            files.append((relative.as_posix(), raw, stat.S_IMODE(mode)))
     return WorkspaceImage(tuple(sorted(files)), tuple(sorted(directories)))
 
 

@@ -18,6 +18,16 @@ def validate_published_identity(manifest, commit, platform, architecture, versio
         or manifest.scope != ("gitgo-terminal", "preview", platform, architecture)):
         raise ValueError("Published identity mismatch")
 
+
+def validate_handoff_strategy(registration, observed):
+    """Compare the packaged projection with its pinned launcher's capability."""
+    from types import SimpleNamespace
+    from backend.core.update.handoff import strategy
+    expected = strategy(SimpleNamespace(registration=registration))
+    if observed != expected:
+        raise ValueError("Wrong update handoff strategy")
+    return expected
+
 def policy(source, target, architecture):
     if (target, architecture) not in TARGETS:
         raise ValueError("Unsupported Unix release target")
@@ -70,9 +80,12 @@ def native_check(source, release, commit, published):
                 raise ValueError("Installed preview trust unavailable: "+str(preview))
             if stable.get("can_check") or stable.get("status") != "unconfigured":
                 raise ValueError("Stable and preview feeds mixed")
-            strategy = "after_reboot" if build["platform"]=="macos" else "immediate"
-            if preview.get("apply_strategy") != strategy:
-                raise ValueError("Wrong update handoff strategy")
+            from backend.core.update.persistence import read_control
+            from backend.core.update.bootstrap_contract import CURRENT_API
+            registration = read_control(install / "control/registration.json")
+            if registration["bootstrap_api"] != CURRENT_API or registration["platform"] != build["platform"]:
+                raise ValueError("Installed launcher differs from the exact-source package")
+            strategy = validate_handoff_strategy(registration, preview.get("apply_strategy"))
             if published:
                 until=time.monotonic()+120
                 while preview.get("automatic",{}).get("state")!="up_to_date":

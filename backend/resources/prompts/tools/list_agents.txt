@@ -1,0 +1,1 @@
+List owned B processes and their durable execution states. The model view lists current sealed results under ready_deliveries. Use the exact result_ref for inspection and promotion. The full retained result contains detailed worktree and handoff evidence.

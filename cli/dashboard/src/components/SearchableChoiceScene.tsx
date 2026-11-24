@@ -22,12 +22,11 @@ export type ChoiceItem = {id: string; title: string; hint?: string; disabled?: b
 /** Content or bounded inline choice list. Search uses the shared NormalBar;
  * selection is bounded independently of the window. No private input or styles.
  */
-export function SearchableChoiceScene({title, items, input, onFooter, onSelect, onCancel, onSubmit,inlineEntry, busy=false, description, notice, currentId, selectedIds,presentation="content",showCount=true,helpTopic}: {
+export function SearchableChoiceScene({title, items, input, onFooter, onSelect, onCancel, onSubmit,inlineEntry, busy=false, description, notice, currentId, selectedIds,presentation="content",helpTopic}: {
   title: string; items: ChoiceItem[]; input: UseTextInputReturn; busy?: boolean;
   description?: string; notice?: InlineNoticeValue; currentId?:string;
   selectedIds?: readonly string[];
   presentation?: "content" | "inline";
-  showCount?: boolean;
   helpTopic?: HelpTopic;
   onFooter: (footer: FooterConfig | null) => void; onSelect: (id: string) => void; onCancel: () => void; onSubmit?:(inlineText?:string)=>void;
   inlineEntry?:{label:string;onConfirm:(value:string)=>void};
@@ -68,7 +67,7 @@ export function SearchableChoiceScene({title, items, input, onFooter, onSelect, 
     }
     return true;
   },{bindingContext:onSubmit||inlineEntry?"form":undefined,inputTarget:editing?"manual-ids":help.active?"help-command":"search"});
-  const count = Math.min(presentation==="inline"?geometry.choice.maxVisible:Infinity,Math.max(1, contentH - 1 - Number(showCount) - Number(presentation==="inline") - Number(busy) - Number(Boolean(description)) - Number(Boolean(notice))));
+  const count = Math.min(presentation==="inline"?geometry.choice.maxVisible:Infinity,Math.max(1, contentH - 1 - Number(presentation==="inline") - Number(busy) - Number(Boolean(description)) - Number(Boolean(notice))));
   const index = Math.max(0, filtered.findIndex(item => item.id === active));
   const start = Math.max(0, Math.min(index - Math.floor(count / 2), filtered.length - count));
   return <Box flexDirection="column" minHeight={0}>
@@ -81,6 +80,5 @@ export function SearchableChoiceScene({title, items, input, onFooter, onSelect, 
     </SelectionRow>)}
     {!filtered.length ? <Text dimColor>{t({en:"No matches",zh:"无匹配项"})}</Text> : null}
     <FeedbackMessage feedback={feedback.message}/>
-    {showCount?<Text dimColor>{filtered.length ? index + 1 : 0}/{filtered.length}</Text>:null}
   </Box>;
 }

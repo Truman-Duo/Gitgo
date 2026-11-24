@@ -18,6 +18,7 @@ from .sharing import SharingMixin
 from .collaboration import CollaborationMixin
 from .distribution import DistributionMixin
 from .branches import BranchesMixin
+from .release_controller import ReleaseControllerMixin, CONTROLLER_COMMANDS
 
 
 def now():
@@ -31,7 +32,7 @@ def text(value, maximum, *, required=True):
     return value.strip()
 
 
-class PublishService(FormalMixin, SharingMixin, CollaborationMixin, DistributionMixin, BranchesMixin):
+class PublishService(FormalMixin, SharingMixin, CollaborationMixin, DistributionMixin, BranchesMixin, ReleaseControllerMixin):
     def __init__(self, project, *, actor, task_id=""):
         self.project = project
         self.workspace = identity(project.workspace_path)
@@ -41,7 +42,7 @@ class PublishService(FormalMixin, SharingMixin, CollaborationMixin, Distribution
         args = dict(arguments)
         request_id = identifier(args.pop("request_id", None))
         if operation not in {"prepare", "plan", "adopt", "reconcile", "verify", "execute", "pause", "resume", "run", "migrate", "decide", "share", "share_publish", "collaborate", "collaborate_send",
-                              "link_task", "package", "export", "tag", "release", "download", "import_package", "distribution_reconcile", "branch", "branch_apply"}:
+                              "link_task", "package", "export", "tag", "release", "download", "import_package", "distribution_reconcile", "branch", "branch_apply", *CONTROLLER_COMMANDS}:
             raise PublishError("PUBLISH_INVALID_OPERATION")
         if any(str(key).startswith("_") for key in args):
             raise PublishError("PUBLISH_INVALID_ARGUMENTS")
@@ -79,6 +80,10 @@ class PublishService(FormalMixin, SharingMixin, CollaborationMixin, Distribution
                 if args.get("item_id"):
                     saved, _ = self.repo.load()
                     pending = find_item(saved, args["item_id"])
+                    from .release_journal import ACTIVE_RELEASE
+                    release_job = pending.get("release_controller", {}).get("job", {})
+                    if (release_job.get("state") in ACTIVE_RELEASE or release_job.get("pending_effect")) and operation not in {"release_cancel", "release_reconcile"}:
+                        raise PublishError("PUBLISH_RELEASE_RECONCILIATION_REQUIRED")
                     if pending.get("sharing", {}).get("state") == "pending" and operation not in {"share", "share_publish"}:
                         raise PublishError("PUBLISH_OPERATION_PENDING")
                     if (any(d.get("state") in {"sending", "unknown"} for d in pending.get("collaboration", {}).get("drafts", []))
@@ -95,8 +100,9 @@ class PublishService(FormalMixin, SharingMixin, CollaborationMixin, Distribution
             result = {"error": exc.code, "effect_state": "ambiguous" if self.effect_started else "not_committed"}
         result = {**result, "operation_id": self.operation_id, "request_id": request_id}
         new_run = result.pop("_new_run", False)
+        new_release = result.pop("_new_release_job", False)
         storage.complete_command(key, fingerprint, result)
-        return {**result, **({"_new_run": True} if new_run else {})}
+        return {**result, **({"_new_run": True} if new_run else {}), **({"_new_release_job": True} if new_release else {})}
 
     def _source(self, role):
         if role not in {"workspace", "trial"}:

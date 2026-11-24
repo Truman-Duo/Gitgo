@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from .provider_budget import DEFAULT_CONTEXT_BUDGET
 
 
 CONFIG_FILENAME = "llm_config.json"
@@ -35,7 +36,7 @@ class LLMProvider:
     model_id: str
     protocol: str = "openai_chat"
     capabilities: dict = field(default_factory=dict)
-    context_window: int = 128000
+    context_window: int = DEFAULT_CONTEXT_BUDGET
     max_output_tokens: int = 4096
     limits_source: str = "default"
     id: str = ""
@@ -55,6 +56,8 @@ class LLMProvider:
 
     @classmethod
     def from_dict(cls, d: dict) -> "LLMProvider":
+        from .provider_budget import resolve_provider
+        d = resolve_provider(d)
         return cls(
             id=d.get("id", ""),
             name=d.get("name", ""),
@@ -65,8 +68,8 @@ class LLMProvider:
             capabilities=dict(d.get("capabilities", {}) or {}),
             context_window=int(d.get(
                 "context_window",
-                (d.get("capabilities", {}) or {}).get("context_window", 128000),
-            ) or 128000),
+                (d.get("capabilities", {}) or {}).get("context_window", DEFAULT_CONTEXT_BUDGET),
+            ) or DEFAULT_CONTEXT_BUDGET),
             max_output_tokens=int(d.get(
                 "max_output_tokens",
                 (d.get("capabilities", {}) or {}).get("max_output_tokens", 4096),

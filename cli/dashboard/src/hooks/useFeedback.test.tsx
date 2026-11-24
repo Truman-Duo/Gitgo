@@ -27,6 +27,19 @@ test("page feedback is cleared on navigation and cannot return or arrive late", 
     await io.page({kind: "page", id: "collaboration"}); expect(io.feedback.text).toBe("");
     late("Old request failed"); await wait(); expect(io.feedback.text).toBe("");
     await io.page({kind: "page", id: "workspace"}); expect(io.feedback.text).toBe("");
+    late("Old request failed after returning"); await wait(); expect(io.feedback.text).toBe("");
+  } finally {io.close();}
+});
+
+test("warnings and errors always expire even when a caller requests unresolved retention", async () => {
+  const io = mount({kind: "page", id: "statistics"});
+  try {
+    for (const tone of ["warning", "error"] as const) {
+      const before = Date.now();
+      io.feedback.show("Read failed", {tone, retention: {kind: "until-resolved", reason: "blocking-state"}}); await wait();
+      expect(io.feedback.message!.expiresAt).toBeGreaterThanOrEqual(before + colors.feedback[`${tone}Ms`]);
+      expect(io.feedback.message!.expiresAt).toBeLessThan(Date.now() + colors.feedback[`${tone}Ms`] + 50);
+    }
   } finally {io.close();}
 });
 

@@ -139,6 +139,9 @@ def test_permission_decision_grants_one_exact_external_read(tmp_path_factory: Pa
         "resource": str(target),
     }, {"read_file": tool}, str(root))
     assert request["kind"] == "permission"
+    assert request["display_template"] == "permission"
+    assert request["permission_request"] == process.pending_decision["permission_request"]
+    assert [option["action"] for option in request["options"]] == ["allow_once", "allow_task", "deny"]
     grant = grant_from_decision(process, process.pending_decision, "allow_once")
     assert grant and grant["remaining_uses"] == 1
     process.pending_decision = None
@@ -150,6 +153,19 @@ def test_permission_decision_grants_one_exact_external_read(tmp_path_factory: Pa
     assert first.data["content"] == "approved external"
     assert second.is_error
     assert second.diagnostics["code"] == "RESOURCE_SCOPE_APPROVAL_REQUIRED"
+
+
+def test_model_arguments_cannot_assign_a_runtime_display_template(tmp_path_factory: Path):
+    root = tmp_path_factory / "display-is-not-authority"
+    root.mkdir()
+    process = _process(root)
+    request = create_user_decision(process, {
+        "kind": "clarification", "question": "Original user-facing question",
+        "why_user_must_decide": "Original business reason", "options": [],
+        "display_template": "permission", "display_context": {"read_approval": True},
+    })
+    assert "display_template" not in request and "display_context" not in request
+    assert request["question"] == "Original user-facing question"
 
 
 def test_sensitive_tool_requires_a_new_exact_grant_for_every_invocation(tmp_path_factory: Path):
@@ -409,6 +425,7 @@ def test_questions_can_be_incremental_and_latest_confirmed_topic_wins(tmp_path_f
     state = confirmed_user_state(process.session.host_ledger)
     assert state == [{
         "topic": "ui.visual_style", "kind": "verification", "value": "Revise", "disposition": "confirmed",
+        "value_origin": "user_selection", "selected_label": "Revise",
         "conditions": "Choose option 2: Revise", "decision_id": second["decision_id"],
         "confirmed_at": "2026-01-02T00:00:00Z",
         "supersedes_decision_id": first["decision_id"],
@@ -423,7 +440,7 @@ def test_host_rejects_a_fourth_business_option_and_missing_state_topic(tmp_path_
         "label": "One", "principle": "P", "immediate_effect": "Now",
         "downstream_effect": "Later", "risks": "Risk", "reversibility": "High",
     }
-    with pytest.raises(ValueError, match="2..3 business options"):
+    with pytest.raises(ValueError, match="at most 3 options.*2..3"):
         create_user_decision(process, {
             "question": "Choose", "why_user_must_decide": "Subjective",
             "options": [{**option, "label": str(index)} for index in range(4)],

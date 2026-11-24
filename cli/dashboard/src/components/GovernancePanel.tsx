@@ -117,7 +117,7 @@ export const GovernancePanel = memo(function GovernancePanel({
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} width={w} flexGrow={1}>
       <HorizontalHeaderStrip
-        items={TABS.map((label,index) => ({id: label, label:[t({en:"Quality",zh:"质量"}),t({en:"Patterns",zh:"模式"}),t({en:"Feed",zh:"动态"}),t({en:"Releases",zh:"发布"})][index]!}))}
+        items={TABS.map((label,index) => ({id: label, label:[t({en:"Quality",zh:"质量"}),t({en:"Patterns",zh:"模式"}),t({en:"Feed",zh:"动态"}),t({en:"Push history",zh:"推送记录"})][index]!}))}
         selected={tab} width={Math.max(10, w - 2)} contentFocused={!interactive}
       />
       <Text dimColor>{project}</Text>
@@ -125,7 +125,7 @@ export const GovernancePanel = memo(function GovernancePanel({
       <ScrollBox ref={scrollRef} marginTop={1} flexDirection="column" flexGrow={1}>
         {err ? <Text color={colors.danger}>{t({en:"Error: ",zh:"错误："})}{err}</Text>
           : !data ? <Text dimColor>{t({en:"Loading...",zh:"正在读取…"})}</Text>
-          : sections.length === 0 ? <Text dimColor>{tab === 2 ? t({en:"No governance activity recorded yet.",zh:"尚无治理活动记录。"}) : t({en:"No releases recorded yet.",zh:"尚无发布记录。"})}</Text>
+          : sections.length === 0 ? <Text dimColor>{tab === 2 ? t({en:"No governance activity recorded yet.",zh:"尚无治理活动记录。"}) : t({en:"No pushes recorded yet.",zh:"尚无推送记录。"})}</Text>
           : sections.map((section, index) => <Box key={index} flexDirection="column" marginBottom={1}>
               <Text bold>{section.title}</Text>
               {section.lines.length ? section.lines.map((line, i) => <Text key={i} wrap="wrap">{line}</Text>)

@@ -1,0 +1,8 @@
+Manage a registered maintenance scope. Use wake(asset_id, instruction) to offer work, notify(asset_id, version, message) to queue a change for a subscriber, or asset_status to inspect current responsibility and versions.
+
+1. Register a concrete workspace scope with its paths, decision and future commitment. To keep a subprocess responsible, select its process_id after its scoped result is accepted and promoted. Otherwise the main process holds responsibility.
+2. For new work, give wake an instruction. The maintenance process accepts the work before editing. If wait_agents or list_agents returns asset_recovery_call, use that call to retry the current assignment from its retained scope. A separate generic child leaves the original obligation open.
+3. For notify, put the update in message and identify its version. A notification grants no new work and keeps the accepted version. An already recorded delivery needs no duplicate notice.
+4. Offer a transfer through the main process. The named successor accepts it against the current responsibility revision.
+5. Revise an existing responsibility when evidence establishes a lasting change. Use revise with asset_id, expected_revision from asset_status, decision as the verified basis, and only the applicable add_paths, remove_paths or commitment. The responsible session stays the same and sees the revision on its next execution.
+6. Retire an obsolete responsibility with asset_id, expected_revision and decision once required work, delivery and transfer are settled. The original asset remains available by its ID as history.

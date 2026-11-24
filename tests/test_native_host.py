@@ -307,6 +307,30 @@ def test_task_result_exposes_parked_child_only_after_lifecycle_barrier(finalized
     assert result['outcome']==(outcome if finalized else None)
 
 
+def test_reconciled_completion_waits_for_the_execution_to_release_the_session(tmp_path_factory):
+    from backend.core.daemon.dispatch import _cmd_task_result
+    from backend.core.loop.manager import SessionExecutionActive
+    from backend.core.loop.models import ProcessStatus
+    from .test_task_contract_recovery import _supervisor
+
+    process, _ = _supervisor(tmp_path_factory)
+    process.status = ProcessStatus.COMPLETED
+    process.lifecycle_finalized = True
+    process.result = TaskOutcome(task_id=process.active_task_id, process_id=process.process_id,
+        status=OutcomeStatus.COMPLETED, process_status='completed', response='Saved result', llm_used=True).to_dict()
+    query = {'process_id': process.process_id, 'task_id': process.active_task_id}
+    context = {'apm': process._manager}
+    events = []
+    with process._run_lock:
+        _cmd_task_result(query, None, None, context, events.append)
+        assert events[-1]['result']['outcome'] is None
+        with pytest.raises(SessionExecutionActive, match='SESSION_EXECUTION_ACTIVE'):
+            process._manager.validate_session_continuation(process.session)
+    _cmd_task_result(query, None, None, context, events.append)
+    assert events[-1]['result']['outcome'] == process.result
+    process._manager.validate_session_continuation(process.session)
+
+
 def test_immediate_daemon_event_flushes_pending_protocol_events(monkeypatch):
     from backend.core.daemon import emit as daemon_emit
 
@@ -667,6 +691,7 @@ def test_native_host_binds_host_search_configuration_to_task_preferences():
     assert request_started_at.endswith("+00:00")
     assert preferences.pop("frontend_origin") == host.frontend_origin
     assert preferences == {
+        "execution_step_schedule": [150, 250, 150, 50],
         "task_maintenance_enabled": True,
         "auto_compact": True,
         "agent_routing": "owner",
@@ -677,7 +702,7 @@ def test_native_host_binds_host_search_configuration_to_task_preferences():
     host.close()
 
 
-def test_provider_switch_retires_idle_daemons_but_keeps_session_identity(monkeypatch):
+def test_provider_switch_keeps_idle_daemons_and_session_identity(monkeypatch):
     host = NativeHost(stdout=io.StringIO(), daemon_factory=FakeDaemon)
     daemon = host._get_daemon("demo", start=True)
     host._sessions["demo"] = "session-1"
@@ -689,10 +714,11 @@ def test_provider_switch_retires_idle_daemons_but_keeps_session_identity(monkeyp
 
     result = host._provider_switch("mimo")
 
-    assert result["runtime_reload"] is True
-    assert result["retired_projects"] == ["demo"]
-    assert daemon.running is False
-    assert host._daemons == {}
+    assert result["runtime_reload"] is False
+    assert result["effective_from"] == "next_task"
+    assert result["retired_projects"] == []
+    assert daemon.running is True
+    assert host._daemons == {"demo": daemon}
     assert host._sessions["demo"] == "session-1"
     assert host._conversation_processes["demo"] == "process-1"
     host.close()
@@ -777,6 +803,43 @@ def test_project_summary_reads_durable_terminal_state_without_starting_daemon(mo
     assert result["observed_at"] > 0
     assert host._daemons == {}
     host.close()
+
+
+def test_project_summary_counts_execution_not_stored_running_labels(monkeypatch):
+    host = NativeHost(stdout=io.StringIO(), daemon_factory=FakeDaemon)
+    processes = {'stale': {'status': 'running', 'execution_active': False},
+                 'active': {'status': 'running', 'execution_active': True},
+                 'waiting': {'status': 'awaiting_user', 'execution_active': False}}
+    host._daemons['p'] = SimpleNamespace(is_running=lambda: True,
+        send_command=lambda *a, **kw: {'processes': processes}, stop=lambda: None)
+    try:
+        result = host._read_project_summary({'name': 'p', 'workspace': 'C:/p'})[1]
+        assert result['active_process_count'] == 1
+        assert result['waiting_process_count'] == 1
+        processes['active']['execution_active'] = False
+        assert host._read_project_summary({'name': 'p', 'workspace': 'C:/p'})[1]['active_process_count'] == 0
+        monkeypatch.setattr('backend.core.storage.read_project_list_status',
+            lambda _: {'status': 'running', 'updated_at': 'old'})
+        assert host._durable_project_summary({'name': 'offline', 'workspace': 'C:/offline'}, 1)[1]['active_process_count'] == 0
+    finally:
+        host.close()
+
+
+def test_execution_observation_uses_owned_live_threads():
+    from backend.core.loop.manager import AgentProcessManager
+    manager = AgentProcessManager()
+    release = threading.Event()
+    thread = threading.Thread(target=lambda: release.wait(2))
+    assert not manager.is_executing('root')
+    manager.register_thread('root', thread)
+    assert not manager.is_executing('root')
+    thread.start()
+    try:
+        assert manager.is_executing('root')
+    finally:
+        release.set()
+        thread.join(2)
+    assert not manager.is_executing('root')
 
 
 def test_project_summary_surfaces_storage_failure_instead_of_claiming_new(monkeypatch):
@@ -1245,7 +1308,43 @@ def test_task_timeout_is_not_hidden_when_cancellation_ack_also_times_out():
     assert error["details"]["cancellation"]["error_code"] == (
         "CANCELLATION_COMMAND_FAILED"
     )
+    assert "cancellation is unconfirmed" in error["message"].lower()
     host.close()
+
+
+@pytest.mark.parametrize("cancellation, expected", [
+    ({"requested": True, "status": "cancelled", "tree_terminal": True},
+     "task tree reached a terminal state"),
+    ({"requested": False, "status": "cancelling", "already_cancelling": ["process-stuck"],
+      "tree_terminal": False}, "cancellation is still in progress"),
+    (None, "no process admission was acknowledged"),
+])
+def test_task_wait_timeout_reports_observed_cancellation(cancellation, expected):
+    class TimeoutDaemon(FakeDaemon):
+        def send_task(self, command, timeout=300, on_ack=None):
+            if cancellation is not None:
+                on_ack({"task_id": command["task_id"], "process_id": "process-stuck"})
+            raise RuntimeError("Agent task timed out after 255s")
+
+        def send_command(self, command):
+            if command.get("action") == "kill":
+                assert cancellation is not None
+                return cancellation
+            return super().send_command(command)
+
+    host = NativeHost(stdout=io.StringIO(), daemon_factory=TimeoutDaemon)
+    try:
+        with pytest.raises(OperationError) as exc:
+            host._runtime_chat("request-timeout", {"project": "demo", "message": "hi"})
+        error = exc.value.to_dict()
+        assert error["code"] == "AGENT_TASK_TIMEOUT"
+        assert expected in error["message"].lower()
+        for key, value in (cancellation or {}).items():
+            assert error["details"]["cancellation"][key] == value
+    finally:
+        host.close()
+
+
 def test_replace_existing_daemon_uses_windows_process_tree_termination(
     monkeypatch, tmp_path_factory,
 ):

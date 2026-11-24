@@ -78,9 +78,10 @@ class CapabilityProfiles:
     )
     _USER_BRIDGE = (
         "request_user_decision", "request_permission", "configure_capability",
-        "engineering_workflow",
+        "engineering_workflow", "report_progress",
     )
     _WORKER_COORDINATION = (
+        "run_subagent", "read_child_artifact",
         "publish_interface_update", "escalate_to_supervisor",
     )
     _TOOL_AUTHORING = ("define_tool", "author_tool")
@@ -93,6 +94,7 @@ class CapabilityProfiles:
         "web_search", "web_fetch",
         "workbench", "lesson_checker", "decision_evidence", "capability_status", "task_mechanism", "harness_mechanism",
         "acknowledge_governance_signal",
+        "asset_status", "asset_maintenance",
         "code_dossier",
         "publish_items", "publish_item", "publish_operation", "publish_shared_items", "publish_history", "publish_diff",
     ) + _CONTEXT
@@ -109,13 +111,13 @@ class CapabilityProfiles:
     )
     _DEVELOPMENT = _OBSERVE + (
         "edit_file", "write_file", "delete_file", "document_create", "apply_patch", "exec_command", "shell_script", "run_test",
-        "dependency_feedback", "rebuild_dependency_graph",
+        "dependency_feedback", "rebuild_dependency_graph", "workbench_compute",
     )
     _REVIEW = _OBSERVE + (
         "run_test", "dependency_feedback", "rebuild_dependency_graph",
     )
     _SUPERVISOR_COORDINATION = (
-        "declare_task_contract", "delegate_task", "delegate_task_dag",
+        "declare_task_contract", "run_subagent", "delegate_task", "delegate_task_dag",
         "list_agents", "wait_agents", "send_feedback",
         "cancel_agent", "request_review", "review_child_outcome",
         "read_child_artifact",
@@ -137,7 +139,7 @@ class CapabilityProfiles:
         "supervisor.answer": CapabilityProfile(
             profile_id="supervisor.answer",
             actor_kind=ActorKind.SUPERVISOR,
-            tool_names=_OBSERVE,
+            tool_names=_OBSERVE + ("run_subagent",),
             description=(
                 "A-level conversational supervisor: answer directly and use only "
                 "read-only inspection tools when the question genuinely requires them."
@@ -233,7 +235,7 @@ class CapabilityProfiles:
         """
         return tuple(dict.fromkeys(
             cls._OBSERVE
-            + ("request_user_decision", "request_permission", "declare_task_contract", "configure_capability", "engineering_workflow")
+            + ("run_subagent", "request_user_decision", "request_permission", "declare_task_contract", "configure_capability", "engineering_workflow")
         ))
 
     @classmethod

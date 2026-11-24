@@ -19,7 +19,10 @@ class ToolBindings:
     dossier_store: Any = None
     owned_child: Any = None
     spawn_child: Any = None
+    start_prepared_child: Any = None
+    cancel_prepared_child: Any = None
     delegate_task: Any = None
+    continue_owned_asset: Any = None
     prepare_task_bundle: Any = None
 
 
@@ -50,22 +53,29 @@ def install_factories(ctx, factories):
 def build_internal_tools(process, available_tools, workspace_path, llm_provider, dispatcher, on_stream_event):
     from . import (requirements_and_decisions, coordination, task_contracts,
         artifacts, child_execution, delegation, task_dag, bundle_preparation,
-        bundle_execution, child_review, dynamic_and_completion, workbench, harness_composition)
+        bundle_execution, child_review, dynamic_and_completion, workbench, harness_composition, subagent, assets)
     ctx = ToolBindings(process, available_tools or {}, workspace_path, llm_provider,
         dispatcher, on_stream_event, build_context_tools(process, workspace_path), getattr(process, "_manager", None))
     factories = [Factory(requirements_and_decisions, provides=("engineering",)), Factory(workbench), Factory(harness_composition),
                  Factory(task_contracts, requires=("engineering",))]
+    if process.actor_kind == "supervisor" or subagent.can_launch(process, ctx.manager):
+        factories.extend([
+            Factory(artifacts, provides=("owned_child",)),
+            Factory(child_execution, requires=("owned_child",), provides=("spawn_child", "start_prepared_child", "cancel_prepared_child")),
+            Factory(subagent, requires=("spawn_child", "start_prepared_child", "cancel_prepared_child")),
+        ])
     if process.actor_kind == "supervisor":
         factories.extend([
             Factory(coordination),
-            Factory(artifacts, provides=("owned_child",)),
-            Factory(child_execution, requires=("owned_child",), provides=("spawn_child",)),
             Factory(delegation, requires=("spawn_child",), provides=("delegate_task",)),
-            Factory(task_dag, requires=("delegate_task",)),
+            Factory(task_dag, requires=("delegate_task", "start_prepared_child", "cancel_prepared_child")),
             Factory(bundle_preparation, requires=("engineering",), provides=("prepare_task_bundle",)),
             Factory(bundle_execution, requires=("prepare_task_bundle", "spawn_child")),
             Factory(child_review, requires=("owned_child", "spawn_child")),
         ])
+    if process.role != "subagent":
+        factories.append(Factory(assets, requires=("delegate_task", "owned_child", "start_prepared_child", "cancel_prepared_child")
+                                  if process.actor_kind == "supervisor" else ()))
     factories.append(Factory(dynamic_and_completion))
     install_factories(ctx, factories)
     return ctx.tools

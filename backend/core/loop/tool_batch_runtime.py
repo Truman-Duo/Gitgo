@@ -4,6 +4,7 @@ All live/resumed calls share the normal ToolExecution/ToolPipeline. This
 controller owns no grants and cannot weaken the policy boundary.
 """
 from __future__ import annotations
+import json
 import time
 from dataclasses import dataclass
 from .loop_bookkeeping import _latest_error_code
@@ -30,6 +31,18 @@ class ToolBatchRuntime:
         self.workspace_path, self.turn_wall_started, self.emit = workspace_path, turn_wall_started, emit
         self.check_alignment = None
 
+    def prepare_observation_group(self, group, execution_id):
+        from .tool_context import required_tool_context
+        calls = [item[1] for item in group]
+        tools = {item[2].name: item[2] for item in group if item[2] is not None}
+        if not required_tool_context(self.process, calls, tools):
+            return None
+        from .tool_pipeline import ToolResult
+        self.ctx.artifacts['alignment_boundary_pause'] = {'context_refinement': True}
+        # No member has started; suspend from the first original group index.
+        return ToolResult(tool_name=calls[0]['name'], execution_id=execution_id,
+                          call_index=group[0][0], suspended=True)
+
     def review_call(self, call, tool, execution_id, call_index):
         """Reassess changed serial boundaries without asking the main model to replay.
 
@@ -37,10 +50,16 @@ class ToolBatchRuntime:
         A result stops the untouched suffix; no certificate or grant is minted
         here, and Pipeline still checks the exact subject immediately before use.
         """
-        if self.check_alignment is None or self.ctx.is_cancelled() or self.process.cancel_requested:
+        if self.ctx.is_cancelled() or self.process.cancel_requested:
             return None
         from .tool_boundary_preview import preview_tool_boundaries
         from .tool_pipeline import ToolResult
+        from .tool_context import required_tool_context
+        if required_tool_context(self.process, [call], {tool.name: tool}):
+            self.ctx.artifacts['alignment_boundary_pause'] = {'context_refinement': True}
+            return ToolResult(tool_name=tool.name, execution_id=execution_id, call_index=call_index, suspended=True)
+        if self.check_alignment is None:
+            return None
         boundary = preview_tool_boundaries([call], {tool.name: tool}, self.process)
         if not boundary.contracts and not boundary.effectful:
             return None
@@ -55,6 +74,11 @@ class ToolBatchRuntime:
         """Keep the already committed prefix; park only a real pending decision."""
         from .loop_bookkeeping import _inc_nudge_counter, _get_nudge_count
         from copy import deepcopy
+        if outcome.get('context_refinement'):
+            from .tool_context import required_tool_context, provide_tool_context
+            remaining = calls[index:]
+            return provide_tool_context(self.process, remaining,
+                required_tool_context(self.process, remaining, self.tools_dict), self.emit)
         decision = self.process.pending_decision
         if outcome.get('status') == 'awaiting_user' and isinstance(decision, dict):
             self.process.pending_tool_batch = {'execution_id': execution_id,
@@ -71,10 +95,13 @@ class ToolBatchRuntime:
             return outcome
         # A rejection, exhausted budget or cancellation never replays effects.
         # Pair every unstarted provider call before adding repair guidance.
+        from .review_feedback import review_feedback
+        _message, feedback = review_feedback(outcome, 'ALIGNMENT_BOUNDARY_REVIEWED')
+        failure = feedback.get('failure') or {}
         errors = [_host_tool_error_result(tool_name=call['name'], execution_id=execution_id,
             call_index=position, error_name='TOOL_NOT_STARTED',
-            details={'execution_state': 'not_started', 'reason': 'semantic_boundary_not_admitted'},
-            next_actions=[{'action': 'reconcile_current_requirements'}])
+            details={**feedback, 'reason': feedback['review_state']},
+            next_actions=[{'action': failure.get('recovery_class') or 'reconcile_current_requirements'}])
             for position, call in enumerate(calls) if position >= index]
         self.commit_results(calls, errors, rolled_back=False)
         if 'alignment_repair' not in outcome:
@@ -95,7 +122,46 @@ class ToolBatchRuntime:
         # Every live or resumed segment must use the current mounted catalog.
         return self.get_tools()
 
-    def commit_results(self, tool_calls: list[dict], results: list, *, rolled_back: bool):
+    def _record_approval_before_policy_denial(self, result, call, decision_id):
+        if (result.receipt.get("error_code") != "TASK_EXECUTION_POLICY_DENIED"
+                or result.receipt.get("execution_state") != "not_started"):
+            return
+        from .permission_broker import arguments_digest
+
+        answer = request = None
+        for event in reversed(self.session.host_ledger):
+            if (event.get("decision_id") != decision_id or event.get("kind") != "permission"
+                    or event.get("process_id") != self.process.process_id
+                    or event.get("task_id") != self.process.active_task_id):
+                continue
+            if event.get("event") == "user_decision_received" and answer is None:
+                answer = event
+            elif event.get("event") == "user_decision_requested":
+                request = event.get("permission_request") or {}
+                break
+        if not request or not answer or not answer.get("approval_grant_id"):
+            return
+        action = answer.get("selected_action")
+        if action not in {"allow_once", "allow_task"} or request.get("tool_name") != result.tool_name:
+            return
+        args = {key: value for key, value in (call.get("args") or {}).items() if not str(key).startswith("_")}
+        if request.get("arguments_digest") != arguments_digest(args):
+            return
+        facts = {"decision_id": decision_id, "user_action": action,
+                 "tool_call_id": str(call.get("id") or ""), "execution_state": "not_started",
+                 "policy_revision": result.diagnostics["details"]["rule_revision"],
+                 "task_id": self.process.active_task_id}
+        result.receipt["approval_before_policy_denial"] = facts
+        result.diagnostics["details"]["approval_before_policy_denial"] = facts
+        payload = json.loads(result.formatted)
+        payload["message"] = ("The user approved this queued invocation. The current task execution policy "
+                              "then denied it before it started.")
+        payload["error_info"]["message"] = payload["message"]
+        payload["error_info"]["details"] = result.diagnostics["details"]
+        result.diagnostics["error_info"] = payload["error_info"]
+        result.formatted = json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def commit_results(self, tool_calls: list[dict], results: list, *, rolled_back: bool, permission_resume=None):
         """One provider-continuity and audit path for live and resumed calls."""
         results.sort(key=lambda item: int(item.call_index))
         # A provider may issue several independent calls to the same tool in
@@ -108,6 +174,8 @@ class ToolBatchRuntime:
         recorded_storm_errors: set[tuple[str, str, str]] = set()
         for r in results:
             tool_call = tool_calls[r.call_index]
+            if permission_resume and tool_call is permission_resume[0]:
+                self._record_approval_before_policy_denial(r, tool_call, permission_resume[1])
             ref_files = _extract_referenced_files(
                 r.tool_name, r.data if r.data else {},
             )
@@ -120,6 +188,10 @@ class ToolBatchRuntime:
                 receipt=r.receipt,
                 referenced_files=ref_files,
             )
+            if (r.tool_name == 'capability_status' and not r.is_error and not r.truncated
+                    and (r.data or {}).get('definition')):
+                from .tool_discovery import mark_discovery_result
+                mark_discovery_result(self.process, self.session.messages[-1], self.get_tools())
             self.process.tool_receipts.append(dict(r.receipt or {}))
             from .task_maintenance import observe_result
             observe_result(self.process, r)
@@ -214,18 +286,18 @@ class ToolBatchRuntime:
                 continue  # Pipeline reports stale scope before asking for new authority.
             from .composite_runtime import call_key
             key = call_key(call, execution_id, call_index)
-            if key in self.process.runtime_preferences.get("composite_continuations", {}):
-                # Pipeline validates the saved definition, task and prefix
-                # receipts. Do not consume another wrapper grant on resume.
-                continue
             public_args = {
                 key: value for key, value in dict(call.get("args") or {}).items()
                 if not str(key).startswith("_")
             }
-            policy = decide_tool_operation(tool, public_args)
+            policy = decide_tool_operation(tool, public_args, process=self.process)
+            if (key in self.process.runtime_preferences.get("composite_continuations", {})
+                    and not policy.task_approval):
+                continue  # Reuse only the existing wrapper authorization.
             if policy.requires_user and matching_grant(
                 self.process, tool.name, public_args,
                 per_invocation=bool(getattr(tool, "approval_per_invocation", False)), tool=tool,
+                task_approval=policy.task_approval,
             ) is None:
                 return call_index, tool, public_args
         return None
@@ -260,13 +332,13 @@ class ToolBatchRuntime:
         return result
 
 
-    def pause_nested_results(self, calls, results, execution_id, *, denied_index=None):
+    def pause_nested_results(self, calls, results, execution_id, *, denied_index=None, permission_resume=None):
         suspended = next((r for r in results if r.suspended), None)
         if suspended is None:
             return None
         index = int(suspended.call_index)
         prefix = [r for r in results if int(r.call_index) < index]
-        self.commit_results(calls, prefix, rolled_back=False)
+        self.commit_results(calls, prefix, rolled_back=False, permission_resume=permission_resume)
         alignment_pause = self.ctx.artifacts.pop('alignment_boundary_pause', None)
         if alignment_pause is not None:
             _apply_host_task_transitions(self.process, prefix)
@@ -324,18 +396,19 @@ class ToolBatchRuntime:
             permission["tool"], permission["arguments"], nested=True)
 
 
-    def execute_approved_segment(self, calls: list[dict], execution_id: str, *, following_calls=(), denied_index=None):
+    def execute_approved_segment(self, calls: list[dict], execution_id: str, *, following_calls=(), denied_index=None,
+                                 permission_resume=None):
         """Execute and commit a permission-complete ordered batch segment."""
         if not calls:
             return []
         execution = ToolExecution(execution_id=execution_id, ctx=self.ctx, tool_calls=calls,
-                                  before_call=self.review_call)
+                                  before_call=self.review_call, before_group=self.prepare_observation_group)
         execution.begin()
         results = execution.execute_batch(self.tools_dict)
         if not execution._rolled_back:
             execution.commit()
         paused = self.pause_nested_results(calls + list(following_calls), results, execution_id,
-                                           denied_index=denied_index)
+                                           denied_index=denied_index, permission_resume=permission_resume)
         if paused is not None:
             return paused
         returned = {int(item.call_index) for item in results}
@@ -349,7 +422,7 @@ class ToolBatchRuntime:
                     details={"execution_state": "not_started"},
                     next_actions=[{"action": "inspect_then_retry"}],
                 ))
-        self.commit_results(calls, results, rolled_back=bool(execution._rolled_back))
+        self.commit_results(calls, results, rolled_back=bool(execution._rolled_back), permission_resume=permission_resume)
         if not execution._rolled_back:
             _apply_host_task_transitions(self.process, results)
         return results
@@ -358,11 +431,18 @@ class ToolBatchRuntime:
     def execute_resumed_batch(self, batch: dict):
         calls = [dict(item) for item in list(batch.get("tool_calls") or [])]
         execution_id = str(batch.get("execution_id") or "permission-resume")
+        from .feedback_identity import bind_calls
+        calls = bind_calls(self.process, calls, execution_id, resumed=True)
         action = str(batch.get("decision_action") or "")
         prior_denial = batch.get('prior_permission_denial')
         if prior_denial is not None:
             batch = {**batch, 'permission_call_index': int(prior_denial)}
             action = 'deny'
+        permission_resume = None
+        if action in {"allow_once", "allow_task"} and not batch.get("nested_permission"):
+            index = int(batch.get("permission_call_index") or 0)
+            if batch.get("decision_id") and 0 <= index < len(calls):
+                permission_resume = (calls[index], batch["decision_id"])
         checkpoint = batch.get('harness_checkpoint')
         if checkpoint:
             from backend.core.mechanism_runtime.application import bound_application
@@ -402,7 +482,7 @@ class ToolBatchRuntime:
             prefix_result = self.execute_approved_segment(calls[:denied_index], execution_id,
                 following_calls=calls[denied_index:], denied_index=denied_index)
             if isinstance(prefix_result, dict):
-                return None if 'alignment_repair' in prefix_result else prefix_result
+                return None if 'alignment_repair' in prefix_result or prefix_result.get('context_refinement') else prefix_result
             denied_call = calls[denied_index:denied_index + 1]
             if denied_call:
                 denied = _host_tool_error_result(
@@ -424,19 +504,19 @@ class ToolBatchRuntime:
             # Calls before the next approval boundary are already authorized;
             # commit them now, then pause before the first unapproved effect.
             prefix_result = self.execute_approved_segment(calls[:missing_index], execution_id,
-                following_calls=calls[missing_index:])
+                following_calls=calls[missing_index:], permission_resume=permission_resume)
             if isinstance(prefix_result, dict):
-                return None if 'alignment_repair' in prefix_result else prefix_result
+                return None if 'alignment_repair' in prefix_result or prefix_result.get('context_refinement') else prefix_result
             remaining = calls[missing_index:]
             return self.suspend_for_permission(
                 remaining, execution_id, 0, tool, public_args,
             )
-        segment_result = self.execute_approved_segment(calls, execution_id)
+        segment_result = self.execute_approved_segment(calls, execution_id, permission_resume=permission_resume)
         if checkpoint and isinstance(segment_result, list) and segment_result:
             first = segment_result[0]
             if not first.suspended and (not first.allowed or (first.data or {}).get('execution_state') == 'not_started'):
                 app.interactions.retire_unstarted(checkpoint['unit_id'], 'call_rejected_before_effect_admission')
-        return segment_result if isinstance(segment_result, dict) and 'alignment_repair' not in segment_result else None
+        return segment_result if isinstance(segment_result, dict) and 'alignment_repair' not in segment_result and not segment_result.get('context_refinement') else None
 
 
     def execute_live_batch(self, tool_calls):
@@ -449,6 +529,8 @@ class ToolBatchRuntime:
         # same path and wrapper/component checks are never duplicated.
         import uuid
         execution_id = str(uuid.uuid4())
+        from .feedback_identity import bind_calls
+        tool_calls = bind_calls(process, tool_calls, execution_id)
         missing_approval = _missing_permission(tool_calls, execution_id)
         if missing_approval is not None:
             permission_call_index, pending_tool, public_args = missing_approval
@@ -465,6 +547,7 @@ class ToolBatchRuntime:
                 ctx=ctx,
                 tool_calls=filtered_calls,
                 before_call=self.review_call,
+                before_group=self.prepare_observation_group,
             )
             execution.begin()
             executed_results = execution.execute_batch(tools_dict)
@@ -479,7 +562,7 @@ class ToolBatchRuntime:
         rolled_back = bool(execution and execution._rolled_back)
         nested_pause = _pause_nested_results(tool_calls, results, execution_id)
         if nested_pause is not None:
-            return (LiveBatchResult(retry=True) if 'alignment_repair' in nested_pause
+            return (LiveBatchResult(retry=True) if 'alignment_repair' in nested_pause or nested_pause.get('context_refinement')
                     else LiveBatchResult(result=nested_pause))
         returned_indexes = {int(result.call_index) for result in results}
         # A crash can cancel calls that were already emitted by the

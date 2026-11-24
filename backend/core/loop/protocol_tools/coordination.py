@@ -12,6 +12,13 @@ def install(ctx):
     manager = ctx.manager
     def list_coordination_events(args: dict) -> dict:
         from backend.core.loop.coordination import current_coordination_events
+        if draft_id := str(args.get("draft_id") or ""):
+            from backend.core.errors import error_payload
+            from backend.core.loop.assignment_handoff import AssignmentHandoffError, draft_event
+            try:
+                return {"events": [draft_event(process, draft_id)], "count": 1}
+            except AssignmentHandoffError as exc:
+                return {"events": [], "count": 0, **error_payload(exc.code, message=str(exc))}
         status_filter = str(args.get("status") or "pending")
         events = current_coordination_events(process.session.host_ledger)
         if status_filter == "pending":
@@ -39,12 +46,13 @@ def install(ctx):
         parameters={
             "type": "object",
             "properties": {
+                "draft_id": {"type": "string", "description": "Retrieve one exact draft, including older versions."},
                 "status": {
                     "type": "string",
                     "enum": [
                         "pending", "all", "awaiting_supervisor", "awaiting_user",
                         "rework_requested", "accepted", "resolved", "restored",
-                        "dismissed",
+                        "dismissed", "draft_adopted", "superseded",
                     ],
                 },
             },
@@ -61,6 +69,7 @@ def install(ctx):
         if manager is None:
             return {"accepted": False, "error": "AgentProcessManager is unavailable"}
         from backend.core.errors import error_payload
+        from backend.core.loop.assignment_handoff import AssignmentHandoffError
         from backend.core.loop.coordination import resolve_coordination_event
         try:
             event = resolve_coordination_event(
@@ -70,6 +79,8 @@ def install(ctx):
                 disposition=str(args.get("disposition") or ""),
                 note=str(args.get("note") or ""),
             )
+        except AssignmentHandoffError as exc:
+            return {"accepted": False, **error_payload(exc.code, message=str(exc))}
         except KeyError:
             return {"accepted": False, **error_payload(
                 "COORDINATION_EVENT_NOT_FOUND",
@@ -91,7 +102,15 @@ def install(ctx):
                 "_trace_detail": event,
             })
         response = {"accepted": True, **event}
-        if event.get("status") == "awaiting_user":
+        if event.get("returned_assignment"):
+            response["next_actions"] = [
+                {"action": "read_child_artifact", "effect": "Review any retained draft files worth keeping."},
+                {"action": "request_self_execute", "effect": "Use the existing task-scoped lease to finish and verify the returned work."},
+            ]
+            if event.get("draft"):
+                response["next_actions"].append({"action": "resolve_coordination_event",
+                    "effect": "Use complete_returned_work with this event ID after finishing and verifying the returned work."})
+        elif event.get("status") == "awaiting_user":
             response["next_actions"] = [{
                 "action": "request_user_decision",
                 "effect": "Ask the user with concrete options, principles, immediate effects and downstream effects, then resolve this event from the answer.",
@@ -116,7 +135,8 @@ def install(ctx):
                 "event_id": {"type": "string"},
                 "disposition": {"type": "string", "enum": [
                     "accept_revision", "request_rework", "ask_user",
-                    "acknowledge", "dismiss",
+                    "acknowledge", "dismiss", "take_remaining_work",
+                    "accept_draft", "complete_returned_work",
                 ]},
                 "note": {"type": "string"},
             },
@@ -125,5 +145,6 @@ def install(ctx):
         execute=resolve_coordination,
         read_only=True,
         effect=ToolEffect.READ,
+        resources=("host:process-tree",),
         idempotent=False,
     )

@@ -30,11 +30,14 @@ class DocumentCandidateRuntime(FileCandidateRuntime):
                     "registration": self.registration}
         self.last_render = {"producer": "native_document_render", "launch_state": "not_started", "cleanup": {"complete": True}, "access_retired": False}
         try:
+            from .candidate_workspace import prepare_candidate_home
+            prepare_candidate_home(stage)
             if os.name == "nt":
                 runtimes, shallow = native_runtime_access()
                 record = self.storage.paths.project_root / "sandbox_access" / (stage.name + ".json")
                 record.parent.mkdir(parents=True, exist_ok=True)
-                access = WorkspaceAccess(stage, runtimes, record, shallow_runtimes=shallow)
+                access = WorkspaceAccess(stage, runtimes, record, shallow_runtimes=shallow,
+                    private_temp_roots=[stage / '.gitgo/sandbox/home/Temp'])
                 access.prepare()
             args = {**specification, "path": "candidate" + suffix, "_workspace": str(stage)}
             invocation = NativeInvocation.compile("document_render", args, 120,

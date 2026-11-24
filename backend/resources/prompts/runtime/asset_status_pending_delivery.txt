@@ -1,0 +1,1 @@
+This lookup precedes the terminal checkpoint. The current task has committed file writes in the listed scopes. Successful completion verifies those versions and records them with the existing responsibilities. The registration decision remains historical. Continue to completion when the workflow evidence is sufficient.

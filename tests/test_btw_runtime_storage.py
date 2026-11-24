@@ -4,6 +4,24 @@ from backend.core.daemon import dispatch
 from backend.core.loop import executor
 
 
+def test_btw_completion_retires_only_its_own_worker_before_client_can_continue(tmp_path_factory, monkeypatch):
+    context={'apm':SimpleNamespace(storage=None),'llm':object(),'dispatcher':object()}
+    replacement=object()
+    monkeypatch.setattr(executor,'agent_step',lambda **kwargs:{'status':'completed','response':'done'})
+    class InlineThread:
+        def __init__(self, *, target, **kwargs):self.target=target
+        def start(self):self.target()
+    monkeypatch.setattr(dispatch.threading,'Thread',InlineThread)
+    def emit(event):
+        if event.get('event')=='btw_complete':
+            assert 'same-discussion' not in context['btw_tasks']
+            # The old worker's finally must not remove a newer follow-up.
+            context['btw_tasks']['same-discussion']=replacement
+    dispatch._cmd_task({'action':'btw','question':'test','sidecar_id':'same-discussion'},
+        SimpleNamespace(workspace_path=tmp_path_factory),None,context,emit)
+    assert context['btw_tasks']['same-discussion'] is replacement
+
+
 def test_btw_failure_retains_structured_error_and_notifies_user(tmp_path_factory, monkeypatch):
     storage = object()
     task_error = {"code": "CAPABILITY_TOOL_UNAVAILABLE", "message": "Unavailable result reader"}

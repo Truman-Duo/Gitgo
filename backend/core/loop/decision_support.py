@@ -19,7 +19,7 @@ from backend.core.workbench.calculation import safe_calculate
 
 DECISION_KINDS = {
     "clarification", "preference", "direction", "verification",
-    "choice", "permission", "recovery", "checkpoint", "runtime_checkpoint",
+    "choice", "permission", "recovery", "checkpoint", "runtime_checkpoint", "execution_policy",
 }
 STATEFUL_DECISION_KINDS = {
     "preference", "direction", "verification", "checkpoint", "runtime_checkpoint",
@@ -81,7 +81,7 @@ def collect_decision_evidence(process, focus: str = "all", *, identifier: str = 
         )
         result['outstanding_gates']['boundary'] = 'registered_completion_stage' if staged else 'final_delivery'
         if staged:
-            result['outstanding_gates']['runtime_next'] = 'Submit the candidate when current gates are satisfied. Runtime runs registered review stages and final alignment before delivery; no separate self-authored alignment report is required by this query.'
+            result['outstanding_gates']['runtime_next'] = 'Submit the candidate when current gates are satisfied. Runtime runs explicitly registered review stages and the existing evidence gates; ordinary dialogue has no hidden alignment LLM review. No separate self-authored alignment report is required.'
     if focus in {"all", "engineering"}:
         from .engineering_workflow import EngineeringWorkflow
         result["engineering"] = EngineeringWorkflow(process).status()
@@ -134,6 +134,10 @@ def collect_decision_evidence(process, focus: str = "all", *, identifier: str = 
     return result
 
 
+def decision_option_counts(kind):
+    return (0, 1, 2, 3) if kind in {'clarification', 'runtime_checkpoint'} else (2, 3)
+
+
 def prepare_user_decision(process, args: dict) -> dict:
     """Validate a request without publishing it or changing task state."""
     kind = str(args.get("kind") or "choice").strip()
@@ -146,9 +150,9 @@ def prepare_user_decision(process, args: dict) -> dict:
     raw_options = args.get("options", []) or []
     compact = kind in SEMANTIC_DECISION_KINDS or kind == 'runtime_checkpoint'
     open_question = kind in {'clarification', 'runtime_checkpoint'}
-    if not isinstance(raw_options, list) or not (0 <= len(raw_options) <= 3 if open_question else 2 <= len(raw_options) <= 3):
+    if not isinstance(raw_options, list) or len(raw_options) not in decision_option_counts(kind):
         raise ValueError(
-            "request_user_decision requires 2..3 business options; use the Host "
+            "request_user_decision accepts at most 3 options for open questions, or 2..3 for a fixed choice; use the Host "
             "free-form Discuss/Amend affordance instead of adding a defer option"
         )
     state_topic = str(args.get("state_topic") or "").strip()
@@ -203,6 +207,11 @@ def prepare_user_decision(process, args: dict) -> dict:
         "task_id": process.active_task_id or process.process_id,
         "process_id": process.process_id,
     }
+    if args.get('recommendation'):
+        recommendation = args['recommendation']
+        if not isinstance(recommendation, str) or len(recommendation) > 4000:
+            raise ValueError('recommendation must be at most 4000 characters')
+        request['recommendation'] = recommendation.strip()
     questions = args.get("questions")
     if questions is not None:
         if kind != "clarification" or not isinstance(questions, list) or not 1 <= len(questions) <= 8:
@@ -233,16 +242,27 @@ def prepare_user_decision(process, args: dict) -> dict:
             if len({o["label"] for o in choices}) != len(choices) or sum(bool(o.get("recommended")) for o in choices) > 1:
                 raise ValueError("round options must be unique with at most one recommendation")
         request["questions"] = questions
+        if args.get('answer_mode') == 'incremental':
+            request['answer_mode'] = 'incremental'
     return request
 
 
-def create_user_decision(process, args: dict) -> dict:
+def create_user_decision(process, args: dict, *, display_template: str = "", display_context: dict | None = None) -> dict:
     """Validate and publish one durable Agent-to-user decision request."""
+    if args.get("kind") == "execution_policy" and display_template != "task_execution_policy":
+        raise ValueError("TASK_EXECUTION_POLICY_REVIEW_REQUIRED")
     request = prepare_user_decision(process, args)
     from backend.core.loop.question_broker import route_question
     request = route_question(process, request)
     if isinstance(args.get("permission_request"), dict):
         request["permission_request"] = dict(args["permission_request"])
+    # Presentation metadata is supplied by the owning Runtime call site, never
+    # copied from model arguments. Labels/actions in the original card remain
+    # the authorization and answer binding, regardless of the current UI locale.
+    if display_template:
+        request["display_template"] = display_template
+        if display_context:
+            request["display_context"] = dict(display_context)
     with process._coordination_lock:
         if process.pending_decision is not None:
             raise RuntimeError("a user decision is already pending")
@@ -253,8 +273,24 @@ def create_user_decision(process, args: dict) -> dict:
     return {"status": "awaiting_user", **request}
 
 
+def _decision_value_source(resolution):
+    """A bound interpretation is not a verbatim statement by the user."""
+    if resolution.get('value_basis') in {'user_quote', 'user_selection'}:
+        source = ({'value_origin': 'user_quote', 'source_quote': resolution['quote']}
+                  if resolution['value_basis'] == 'user_quote'
+                  else {'value_origin': 'user_selection', 'selected_label': resolution['value']})
+        if resolution.get('agent_interpretation'):
+            source.update(agent_interpretation=resolution['agent_interpretation'],
+                          interpretation_status='unverified_proposal')
+        return source
+    if resolution.get('event') == 'user_decision_interpreted':
+        return {'value_origin': 'agent_interpretation',
+                **({'source_quote': resolution['quote']} if resolution.get('quote') else {})}
+    return {'value_origin': 'user_selection', 'selected_label': resolution['value']}
+
+
 def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> list[dict]:
-    """Project the newest user-confirmed value for each semantic topic."""
+    """Project current decisions with exact evidence and explicit value origin."""
     from .alignment_evidence import resolved_answer, source_answer
     if task_id is not None:
         ledger = [e for e in ledger if e.get('task_id') == task_id]
@@ -267,6 +303,8 @@ def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> l
     retired = set()
     cancelled = {e.get('decision_id') for e in ledger if e.get('event') == 'user_decision_cancelled'}
     for event in ledger:
+        if event.get('decision_id') in cancelled:
+            continue
         if event.get('event') == 'user_decision_requested':
             from .alignment_evidence import CONTROL_DECISION_KINDS
             if event.get('decision_id') not in cancelled and event.get('kind') not in CONTROL_DECISION_KINDS:
@@ -288,9 +326,11 @@ def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> l
             if resolution and topic:
                 latest[topic] = {'topic': topic, 'kind': source.get('kind', 'clarification'),
                     'value': resolution['value'], 'disposition': resolution['disposition'],
+                    **_decision_value_source(resolution),
                     'conditions': source['answer'], 'decision_id': source['decision_id'],
+                    **({'task_id': source['task_id']} if source.get('task_id') else {}),
                     'confirmed_at': source.get('created_at', ''),
-                    'supersedes_decision_id': requests.get(source['decision_id'], {}).get('supersedes_decision_id', '')}
+                    'supersedes_decision_id': resolution.get('supersedes_decision_id', requests.get(source['decision_id'], {}).get('supersedes_decision_id', ''))}
             elif topic:
                 latest.pop(topic, None)
             continue
@@ -306,7 +346,9 @@ def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> l
                 latest[item["state_topic"]] = {
                     "topic": item["state_topic"], "kind": item.get("kind", "clarification"),
                     "value": resolution['value'], 'disposition': resolution['disposition'],
+                    **_decision_value_source(resolution),
                     "conditions": response["answer"], "decision_id": event["decision_id"],
+                    **({'task_id': event['task_id']} if event.get('task_id') else {}),
                     "confirmed_at": str(event.get("created_at") or ""),
                     "supersedes_decision_id": item.get("supersedes_decision_id", ""),
                 }
@@ -330,8 +372,10 @@ def confirmed_user_state(ledger: list[dict], *, task_id: str | None = None) -> l
             "topic": topic,
             "kind": kind,
             "value": resolution['value'], 'disposition': resolution['disposition'],
+            **_decision_value_source(resolution),
             "conditions": str(event.get("answer") or ""),
             "decision_id": str(event.get("decision_id") or ""),
+            **({'task_id': event['task_id']} if event.get('task_id') else {}),
             "confirmed_at": str(event.get("created_at") or ""),
             "supersedes_decision_id": str(request.get("supersedes_decision_id") or ""),
         }
@@ -343,6 +387,7 @@ def build_context_force_compaction_decision(process_id: str, task_id: str) -> di
     request = {
         "decision_id": str(uuid.uuid4()),
         "kind": "context_force_compaction",
+        "display_template": "context_force_compaction",
         "question": "Ordinary compaction failed three times. Force a lossy compaction?",
         "why_user_must_decide": (
             "The Host can preserve the full prior epoch in the local audit archive, "
@@ -432,6 +477,7 @@ def create_completion_exception_decision(process, gate_status: dict) -> dict:
     request = {
         "decision_id": str(uuid.uuid4()),
         "kind": "completion_exception",
+        "display_template": "completion_exception",
         "question": "The task still cannot pass the same completion checks. How should Gitgo proceed?",
         "why_user_must_decide": (
             "The Host supplied the exact checklist and one bounded recovery attempt "
@@ -488,6 +534,8 @@ def format_decision_request(request: dict, *, details: bool = False) -> str:
     reason = str(request.get("why_user_must_decide") or "").strip()
     if reason:
         lines.append(reason)
+    if request.get('recommendation'):
+        lines.append('建议：' + request['recommendation'])
     permission = request.get("permission_request") or {}
     for title, field in (("用途", "purpose"), ("目标", "resource")):
         if permission.get(field):
@@ -508,14 +556,23 @@ def format_decision_request(request: dict, *, details: bool = False) -> str:
 
 
 def validate_round_answer(pending: dict, instruction: str) -> dict:
-    """Parse all answers before mutating pending state; identity comes from Host."""
+    """Validate submitted answers atomically; the next frontier is recomputed.
+
+    New rounds accept a nonempty subset so a real answer is never kept in UI
+    drafts. Legacy saved rounds retain their original all-answers protocol.
+    """
     raw = json.loads(instruction)
     answers = raw.get("answers") if isinstance(raw, dict) else None
     questions = pending.get("questions") or []
-    if not isinstance(answers, dict) or set(answers) != {q["node_id"] for q in questions}:
-        raise ValueError("answer every question in the current round")
+    ids = {q['node_id'] for q in questions}
+    partial = pending.get('answer_mode') == 'incremental'
+    if (not isinstance(answers, dict) or not answers or not set(answers).issubset(ids)
+            or (not partial and set(answers) != ids)):
+        raise ValueError('submit answers to current questions' if partial else 'answer every question in the current round')
     result = {}
     for q in questions:
+        if q['node_id'] not in answers:
+            continue
         value = answers[q["node_id"]]
         if not isinstance(value, str) or not value.strip() or len(value) > 8_000:
             raise ValueError("each round answer must be nonempty text of at most 8000 characters")

@@ -1,0 +1,4 @@
+## Withdraw or reassign scoped work
+1. For an adopted decision being withdrawn, submit disposition=withdraw with the exact newer user evidence. When the withdrawal affects required worker outputs, revise the parent deliverables, criteria and plan. In the same pending change resolution, add assignment_scope with retired paths and the exact affected child criteria or test IDs. Select the current draft_id, or source_process_id while the draft is still unavailable.
+2. For immediate replacement with valuable edits ready to preserve, set assignment_scope.close_source=true. Runtime commits the adoption before requesting cancellation and freezes the old scope. Otherwise use cancel_agent when ready to close it.
+3. Once the saved assignment is closed, use delegate_task with the selected draft_id, or supersedes_process_id if no draft is listed. The successor inherits the retained work and obligations. Reconcile any criterion that still calls for a withdrawn file.

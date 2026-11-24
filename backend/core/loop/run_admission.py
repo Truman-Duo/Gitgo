@@ -1,5 +1,6 @@
 """Composition root for one admitted Agent run; controllers retain their duties."""
 from dataclasses import dataclass
+from backend.core.provider_budget import DEFAULT_CONTEXT_BUDGET
 import time
 from .capability_negotiation import apply_provider_runtime, record_provider_changed
 from .context_window import ContextWindow
@@ -105,7 +106,7 @@ def admit_agent_run(process, provider, instruction, dispatcher, workspace, front
         return RunAdmission(result=_error_result(process, 'CAPABILITY_TOOL_UNAVAILABLE',
             'Capability references unavailable tools: ' + ', '.join(unavailable)))
     ctx = _create_tool_context(process, surface, observations, workspace)
-    session.model_context_limit = max(1024, int(getattr(provider, 'context_window', 128000)))
+    session.model_context_limit = max(1024, int(getattr(provider, 'context_window', DEFAULT_CONTEXT_BUDGET)))
     route = ProviderRouteRuntime(process, session, provider, provider_route,
         ContextWindow(session.model_context_limit), surface.refresh_prompt)
     if changed:

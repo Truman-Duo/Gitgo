@@ -38,6 +38,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14.7'
+      - uses: ./.github/actions/build-sandbox-native
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: '1.4.4'
@@ -60,6 +61,22 @@ jobs:
         run: >-
           python -B -m pytest tests/test_release_controller.py tests/test_prepare_update_release.py
           tests/test_update_staging.py -q --tb=short
+      - name: macOS stage four authority recovery and publication source regression
+        if: runner.os == 'macOS'
+        run: >-
+          python -B -m pytest tests/test_macos*.py tests/test_sandbox_macos.py
+          tests/test_promotion_file_service.py tests/test_read_approval.py
+          tests/test_decision_runtime.py tests/test_workspace_candidate_service.py
+          tests/test_native_read_runtime.py tests/test_native_source_runtime_fixture.py
+          -q --tb=short --junitxml="${RUNNER_TEMP}/macos-stage4-source.xml"
+      - name: Retain macOS stage four test outcomes including skips
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-stage4-source-${{ inputs.commit }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-stage4-source.xml
+          if-no-files-found: warn
+          retention-days: 14
       - name: Native installer, credentials and owned process source regressions
         run: python -B -m pytest tests/test_unix_install_transaction.py tests/test_uninstall_cleanup_order.py tests/test_secret_cleanup_failures.py tests/test_unix_process_scope.py -q
       - name: CAS format admission and process ordering foundations (not sandbox backend acceptance)
@@ -93,6 +110,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14.7'
+      - uses: ./.github/actions/build-sandbox-native
       - name: Install test harness only (no SQLite/ripgrep build provisioning)
         run: python -m pip install --require-hashes -r packaging/requirements-build.lock
       - if: runner.os == 'Linux'
@@ -154,6 +172,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.14.7'
+      - uses: ./.github/actions/build-sandbox-native
       - run: python -m pip install --require-hashes -r packaging/requirements-build.lock
       - if: runner.os == 'Linux'
         run: bash scripts/prepare_linux_update_ci.sh

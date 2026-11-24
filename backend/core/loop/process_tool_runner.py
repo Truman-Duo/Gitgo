@@ -40,6 +40,7 @@ class SubprocessResult:
     launch_state: str = "unknown"
     evidence_state: str = "not_required"
     invocation_id: str = ""
+    host_denial: bool = False
 
 
 class ProcessToolRunner:
@@ -144,27 +145,55 @@ class ProcessToolRunner:
             # Read views have a private writable execution home and a distinct
             # logical, read-only project. The admitted arguments remain sealed.
             input_data["args"] = {**args, "_workspace": str(args.get('_workspace') or policy.workspace)}
+            launch_options = {}
+            if sys.platform == 'win32':
+                from backend.core.windows_sandbox_native import require_retired_jobs
+                launch_deadline = start + effective_timeout
+
+                def check_launch():
+                    if cancellation_event is not None and cancellation_event.is_set():
+                        raise SandboxDenied("TOOL_CANCELLED", f"Tool '{tool_name}' cancelled before launch.")
+                    if time.monotonic() >= launch_deadline or (
+                        read_binding is not None and read_binding.remaining() <= 0
+                    ):
+                        raise SandboxDenied("TOOL_TIMEOUT", f"Tool '{tool_name}' reached its deadline before launch.")
+
+                require_retired_jobs(deadline=min(launch_deadline, time.monotonic() + 3))
+                check_launch()
+                launch_options = {"launch_deadline": launch_deadline, "launch_check": check_launch}
             from .native_invocation_scope import prepare_native_record
             # Commit intent before entering the OS launch window. A kill after
             # this point leaves unknown evidence, never permission to replay.
             observation["native_record"] = prepare_native_record(native_invocation)
-            proc = sandbox_popen(
-                tool_runner_command(), policy,
-                # DaemonClient starts ``python -m gitgo`` from the package's
-                # parent directory.  Relying on inherited cwd therefore makes
-                # the top-level ``backend`` module disappear only in real
-                # daemon runs.  Anchor the isolated runner at the package root.
-                cwd=str(owned_child_cwd(source_root)),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
-                env=child_env,
-                creationflags=creation_flags(),
-                start_new_session=sys.platform != "win32",
-            )
+            if sys.platform == "darwin":
+                from backend.core.macos_broker_client import active, run as run_broker
+                if active():
+                    return run_broker(native_invocation, input_data, observation,
+                                      cancellation_event, effective_timeout)
+            try:
+                proc = sandbox_popen(
+                    tool_runner_command(), policy,
+                    **({"invocation_id": observation["native_record"].record["invocation_id"]}
+                       if sys.platform == "darwin" else {}),
+                    # The daemon may start outside the package root.
+                    cwd=str(owned_child_cwd(source_root)),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="strict",
+                    env=child_env,
+                    creationflags=creation_flags(),
+                    start_new_session=sys.platform != "win32",
+                    **launch_options,
+                )
+            except BaseException as exc:
+                observation["cleanup"] = getattr(exc, "cleanup", None)
+                pid = getattr(exc, "started_pid", None)
+                if pid is not None:
+                    observation.update(started=True, pid=pid, exit_code=getattr(exc, "exit_code", None))
+                raise
             observation["started"] = True
             observation["native_record"].started(proc.pid)
             if not getattr(proc, "_gitgo_job_handle", None):
@@ -251,7 +280,7 @@ class ProcessToolRunner:
             if spawned is not None:
                 self._kill_tree(spawned)
             return SubprocessResult(
-                success=True, data=exc.result(),
+                success=True, data=exc.result(), host_denial=True,
                 stderr=communication.stderr_snapshot() if "communication" in locals() else "",
                 stderr_partial=True,
                 duration_ms=(time.monotonic() - start) * 1000,
@@ -263,7 +292,7 @@ class ProcessToolRunner:
             duration_ms = (time.monotonic() - start) * 1000
             from backend.core.errors import error_payload
             return SubprocessResult(
-                success=True, data={**error_payload('SANDBOX_LAUNCH_DENIED',
+                success=True, host_denial=True, data={**error_payload('SANDBOX_LAUNCH_DENIED',
                     message='The native launcher could not open a required path. The OS error does not identify a missing Python module.',
                     details={'error_type': type(exc).__name__, 'errno': exc.errno,
                              'winerror': getattr(exc, 'winerror', None), 'detail': str(exc)[:1500]},
@@ -287,6 +316,7 @@ class ProcessToolRunner:
                 error=f"subprocess spawn failed: {exc}",
                 stderr=communication.stderr_snapshot() if "communication" in locals() else "",
                 stderr_partial=True,
+                effect_state=getattr(exc, "effect_state", "ambiguous" if observation.get("started") else ""),
                 exit_code=-1,
                 duration_ms=duration_ms,
                 cleanup=getattr(spawned, "_gitgo_cleanup", None),

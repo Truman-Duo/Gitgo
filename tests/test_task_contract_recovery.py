@@ -302,7 +302,7 @@ def test_structured_routing_keeps_bounded_single_owner_work_with_a(tmp_path_fact
     assert routing_advice(contract)["recommended"] == "self_execute"
 
 
-def test_route_compiler_normalizes_bounded_delegation_without_granting_authority(
+def test_route_compiler_preserves_explicit_bounded_delegation_without_granting_authority(
     tmp_path_factory,
 ):
     proposal = validate_contract_proposal({
@@ -319,17 +319,18 @@ def test_route_compiler_normalizes_bounded_delegation_without_granting_authority
         {}, proposal, workflow_started=False,
     )
 
-    assert normalized["execution_mode"] == "self_execute"
-    assert normalized["delegation_required"] is False
-    assert normalized["minimum_delegated_outcomes"] == 0
-    assert normalized["routing_transition"] == "keep_supervisor"
+    assert normalized["execution_mode"] == "delegate"
+    assert normalized["delegation_required"] is True
+    assert normalized["minimum_delegated_outcomes"] == 1
+    assert normalized["routing_transition"] == "delegate_initial"
     assert compilation == {
         "requested": "delegate",
         "recommended": "self_execute",
+        "effective": "delegate",
         "reason": "bounded_single_owner",
-        "adjusted": True,
+        "adjusted": False,
         "authority_granted": False,
-        "next_action": "request_self_execute",
+        "next_action": "delegate_task",
     }
 
 

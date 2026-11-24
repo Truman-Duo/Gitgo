@@ -6,7 +6,7 @@ import React, { memo, useLayoutEffect, useRef } from "react";
 import { Box, Text, ScrollBox } from "@anthropic/ink";
 import type {DOMElement, ScrollBoxHandle} from "@anthropic/ink";
 import type { ProjectRow } from "../hooks/useGitgoData.js";
-import { colors, usePanelSize, truncate, padEndWidth } from "../theme/index.js";
+import { usePanelSize, truncate, padEndWidth } from "../theme/index.js";
 import {SelectionRow, SelectionText, TableHeaderText} from "./Selection.js";
 import { projectRuntimeCategory } from "../projectRuntimeState.js";
 
@@ -41,7 +41,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} flexGrow={1} minHeight={0}>
       <TableHeaderText>{padEndWidth(truncate(t({en:"Name",zh:"项目名称"}),nameW),nameW)}<Text dimColor>
-        {padEndWidth(t({en:"Procs",zh:"进程"}),procW)}{t({en:"Path",zh:"项目位置"})}
+        {padEndWidth(t({en:"Active",zh:"执行中"}),procW)}{t({en:"Path",zh:"项目位置"})}
       </Text></TableHeaderText>
 
       {projects.length === 0 ? (
@@ -63,8 +63,9 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
               const i = group.start + gi;
               const isSelected = i === sel;
 
-              const procBadge = p.activeProcessCount > 0 ? String(p.activeProcessCount) : "";
-              const procColor = p.activeProcessCount > 0 ? colors.accent : undefined;
+              const procBadge = p.daemonOnline && p.countScope === "live_executions"
+                ? "~" + String(p.activeProcessCount)
+                : projectRuntimeCategory(p) === "running" ? String(p.activeProcessCount) : "";
               const procStr = (procBadge || "-").padEnd(procW);
 
               const pathBase = p.workspace.split(/[\\/]/).filter(Boolean).pop() || p.workspace;
@@ -77,7 +78,7 @@ export const Overview = memo(function Overview({ projects, sel, mode, cols: _col
                   <SelectionText>
                     {paddedName}
                   </SelectionText>
-                  <SelectionText color={procColor} dimColor={!procBadge}>{procStr}</SelectionText>
+                  <SelectionText dimColor>{procStr}</SelectionText>
                   <SelectionText dimColor>{pathStr}</SelectionText>
                 </SelectionRow>
               );

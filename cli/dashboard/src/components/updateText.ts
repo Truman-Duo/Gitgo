@@ -64,5 +64,5 @@ export const updateChinese = {
   "Close this Gitgo session and save this exact update for after you manually restart macOS? No program is replaced now. On next boot, the fixed launcher reverifies signature/package and startup health; failures preserve or restore the old program.": "关闭本次会话，将此版本留待手动重启 macOS 后安装？现在不替换程序。下次启动会核验签名、安装包及健康，失败时保留或恢复旧程序。",
   "Close this Gitgo session and attempt the selected update? The stable launcher will reverify, switch and check health; failures restore the previous program. Other running instances block replacement.": "关闭本次会话并尝试更新？固定启动器会重新核验、替换并检查健康；失败恢复旧程序，其他运行实例会阻止替换。",
   "Confirmed replacement awaits a manual macOS restart; select Cancel pending restart to review cancellation.": "已确认替换，等待手动重启 macOS；重启前可选择取消待执行替换。",
-  "Close this session and roll back? The retained program must pass startup checks; other instances block replacement. Projects, settings and databases are not rolled back. macOS requires a manual restart.": "关闭会话并回滚？保留程序须通过启动检查，其他实例会阻止替换，项目、配置和数据库不回滚。macOS 须手动重启后执行。"
+  "Close this session and roll back? The retained program must pass startup checks; other instances block replacement. Projects, settings and databases are not rolled back.": "关闭会话并回滚？保留程序须通过启动检查，其他实例会阻止替换，项目、配置和数据库不回滚。"
 } as const;

@@ -728,8 +728,11 @@ function renderNodeToOutput(
         // spacer) making scrollTop >= prevMaxScroll true by artifact, not
         // because the user was at bottom.
         const grew = scrollHeight >= prevScrollHeight
+        // A short, non-scrollable record at scrollTop=0 is not a user
+        // choosing to follow its end. Lazy expansion must start at its top;
+        // live streaming still opts in through the explicit sticky flag.
         const atBottom =
-          !semanticAnchor && (sticky || (grew && scrollTopBeforeFollow >= prevMaxScroll))
+          !semanticAnchor && (sticky || (grew && prevMaxScroll > 0 && scrollTopBeforeFollow >= prevMaxScroll))
         if (atBottom && (node.pendingScrollDelta ?? 0) >= 0) {
           node.scrollTop = maxScroll
           node.pendingScrollDelta = undefined
@@ -796,6 +799,7 @@ function renderNodeToOutput(
           ? Math.max(cMin, Math.min(scrollTop, cMax))
           : scrollTop
         node.scrollTop = scrollTop
+        node.onScrollMetrics?.()
         // Clamp hitting top/bottom consumes any remainder. Set drainPending
         // only after clamp so a wasted no-op frame isn't scheduled.
         if (scrollTop !== cur) node.pendingScrollDelta = undefined

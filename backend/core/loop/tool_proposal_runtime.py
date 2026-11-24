@@ -6,10 +6,12 @@ from .models import ProcessStatus
 from .outcome import OutcomeStatus
 from .runtime_outcomes import _make_result
 from .loop_bookkeeping import _inc_nudge_counter, _get_nudge_count
+from .review_feedback import review_feedback
 
 class ToolProposalRuntime:
-    def __init__(self, process, session, get_tools, check_alignment):
+    def __init__(self, process, session, get_tools, check_alignment, emit=None):
         self.process, self.session, self.get_tools, self.check_alignment = process, session, get_tools, check_alignment
+        self.emit = emit
 
     def review(self, tool_calls, content):
         process, session, tools_dict = self.process, self.session, self.get_tools()
@@ -17,6 +19,11 @@ class ToolProposalRuntime:
         # A tool boundary makes prior public text commentary, not an
         # uninterrupted deliverable. A subsequent answer must stand alone.
         clear_answer_fragments(process)
+        from .tool_context import required_tool_context, provide_tool_context
+        required = required_tool_context(process, tool_calls, tools_dict)
+        if required:
+            provide_tool_context(process, tool_calls, required, self.emit)
+            return DeliveryBoundary(retry=True)
         from .decision_support import SEMANTIC_DECISION_KINDS
         question_calls = [tc for tc in tool_calls
             if (tc['name'] == 'request_user_decision'
@@ -29,36 +36,43 @@ class ToolProposalRuntime:
             if alignment_result is not None:
                 decision = (alignment_result.get('metadata') or {}).get('pending_decision')
                 published = alignment_result.get('status') == 'awaiting_user' and isinstance(decision, dict)
+                message, feedback = review_feedback(alignment_result, 'ALIGNMENT_QUESTION_REVIEWED')
                 for tc in tool_calls:
                     session.append_tool_result(
                         'Requirement review published this real user decision; the original tool batch was not separately executed.'
-                        if published else 'Host assessed question necessity before execution; no tool in this batch ran.',
+                        if published else message,
                         tool_name=tc['name'], tool_call_id=tc.get('id', ''), is_error=not published,
-                        data={'error_code': 'ALIGNMENT_QUESTION_REVIEWED', 'executed': False,
+                        data={**feedback,
                               'decision_published': published, **({'decision': decision} if published else {})})
                 if 'alignment_repair' not in alignment_result:
                     return DeliveryBoundary(result=alignment_result)
                 _inc_nudge_counter(process, 'alignment_question_review')
                 if _get_nudge_count(process, 'alignment_question_review') >= 3:
                     transition(process, ProcessStatus.FAILED)
-                    return DeliveryBoundary(result=_make_result(process, session, '模型反复提出不必要的问题，任务已保留，尚未交付。',
-                                        error_code='ALIGNMENT_QUESTION_REJECTED', error_message=alignment_result['alignment_repair'][:600], outcome_status=OutcomeStatus.FAILED))
+                    return DeliveryBoundary(result=_make_result(process, session, '提问提案连续三次未通过检查，任务和真实答复已保留，尚未交付。',
+                        error_code='ALIGNMENT_QUESTION_REJECTED', error_message=alignment_result['alignment_repair'][:600],
+                        error_details={'failure':alignment_result['failure']} if alignment_result.get('failure') else None,
+                        outcome_status=OutcomeStatus.FAILED))
                 session.append_user('[HOST REQUIREMENT CHECK] ' + alignment_result['alignment_repair'],
                                     message_type='host_alignment_repair')
                 return DeliveryBoundary(retry=True)
-        completion_call = next((tc for tc in tool_calls if tc['name'] in {'complete_task', 'complete_supervision'}), None)
+        completion_call = next((tc for tc in tool_calls
+            if tc['name'] in {'complete_task', 'complete_supervision'}
+            or (tc['name'] == 'promote_agent_changes' and (tc.get('args') or {}).get('completion_result'))), None)
         from backend.core.mechanism_runtime.application import bound_application
         composition = bound_application(process)
         staged_completion = composition is not None and composition.has_completion_stages()
         if completion_call and not staged_completion:
-            proposed = str(completion_call.get('args', {}).get('result') or content)
+            completion_args = completion_call.get('args') or {}
+            proposed = str(completion_args.get('completion_result') or completion_args.get('result') or content)
             alignment_result = _check_alignment(proposed, trigger='completion_claim',
                 proposed_files=completion_call.get('args', {}).get('files') or [])
             if alignment_result is not None:
+                message, feedback = review_feedback(alignment_result, 'ALIGNMENT_DELIVERY_BLOCKED')
                 for tc in tool_calls:
-                    session.append_tool_result('Host requirement check prevented execution; no tool in this batch ran.',
+                    session.append_tool_result(message,
                         tool_name=tc['name'], tool_call_id=tc.get('id', ''), is_error=True,
-                        data={'error_code': 'ALIGNMENT_DELIVERY_BLOCKED', 'executed': False})
+                        data=feedback)
                 if 'alignment_repair' not in alignment_result:
                     return DeliveryBoundary(result=alignment_result)
                 _inc_nudge_counter(process, 'alignment_repair')
@@ -82,10 +96,11 @@ class ToolProposalRuntime:
         alignment_result = _check_alignment(trigger='contract' if any(c.get('kind') != 'business_readiness' for c in declarations) else 'execution' if effectful else 'admission',
             proposed_contracts=declarations or None, observation_only=boundary.observation_only) if not question_calls and (not completion_call or declarations or effectful) else None
         if alignment_result is not None:
+            message, feedback = review_feedback(alignment_result, 'ALIGNMENT_BOUNDARY_REVIEWED')
             for tc in tool_calls:
-                session.append_tool_result('Host requirement boundary prevented this batch; no tool executed.',
+                session.append_tool_result(message,
                     tool_name=tc['name'], tool_call_id=tc.get('id', ''), is_error=True,
-                    data={'error_code': 'ALIGNMENT_BOUNDARY_REVIEWED', 'executed': False})
+                    data=feedback)
             if 'alignment_repair' not in alignment_result:
                 return DeliveryBoundary(result=alignment_result)
             _inc_nudge_counter(process, 'alignment_boundary_repair')

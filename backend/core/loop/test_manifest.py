@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import sys
 import errno
+import hashlib
 import os
 import tempfile
 import re
@@ -148,6 +151,15 @@ class TestManifest:
     @classmethod
     def load(cls, workspace_path: str | Path) -> "TestManifest":
         manifest = cls(workspace_path)
+        from backend.core import macos_broker_client
+        if sys.platform == 'darwin' and macos_broker_client.active():
+            from backend.core.storage.metadata_files import read_metadata_bytes
+            data = read_metadata_bytes(manifest.workspace, 'test_manifest.json', max_bytes=1024*1024)
+            manifest._loaded_sha256 = hashlib.sha256(data).hexdigest() if data is not None else ''
+            if data is not None:
+                from backend.core.macos_worktree_runtime import records
+                manifest.records = {r.test_id:r for r in records(data)}
+            return manifest
         if not manifest.path.exists():
             return manifest
         try:
@@ -167,6 +179,13 @@ class TestManifest:
             "updated_at": datetime.now().isoformat(),
             "tests": [self.records[key].to_dict() for key in sorted(self.records)],
         }
+        from backend.core import macos_broker_client
+        if sys.platform == 'darwin' and macos_broker_client.active():
+            from backend.core.storage.metadata_files import write_metadata_bytes
+            self._loaded_sha256 = write_metadata_bytes(self.workspace, 'test_manifest.json',
+                json.dumps(payload,ensure_ascii=False,indent=2,allow_nan=False).encode(),
+                expected_sha256=getattr(self,'_loaded_sha256',''),max_bytes=1024*1024)
+            return
         fd, tmp_name = tempfile.mkstemp(
             prefix="test_manifest.", suffix=".tmp", dir=str(self.path.parent),
         )
@@ -204,6 +223,7 @@ class TestManifest:
         with _manifest_lock(self.path):
             latest = type(self).load(self.workspace)
             self.records = latest.records
+            if hasattr(latest,"_loaded_sha256"):self._loaded_sha256=latest._loaded_sha256
             for record in records:
                 self._merge_record(record)
             self._save_unlocked()
@@ -249,7 +269,23 @@ class TestManifest:
         return not failures, failures
 
 
-def run_registered_test(workspace_path: str | Path, args: dict, *, execute, before_record=None) -> dict:
+def _test_ids_for_target(manifest: TestManifest, target: str, required_ids, retained_targets) -> list[str]:
+    def key(value):
+        path, separator, node = value.partition("::")
+        return os.path.normcase(os.path.abspath(manifest.workspace / path)), separator, node
+
+    expected = key(target)
+    matches = {record.test_id for record in manifest.records.values() if key(record.target) == expected}
+    matches.update(test_id for test_id, recorded_target in retained_targets
+                   if test_id in required_ids and test_id not in manifest.records and key(recorded_target) == expected)
+    matches = sorted(matches)
+    return ([test_id for test_id in matches if test_id in required_ids]
+            or [test_id for test_id in matches if not test_id.startswith("pytest:auto:")]
+            or matches)
+
+
+def run_registered_test(workspace_path: str | Path, args: dict, *, execute, before_record=None,
+                        required_test_ids=(), retained_targets=()) -> dict:
     """Record results from an explicit trusted executor, never choose a fallback."""
     from backend.core.errors import error_payload
     workspace = Path(workspace_path).resolve()
@@ -260,8 +296,6 @@ def run_registered_test(workspace_path: str | Path, args: dict, *, execute, befo
         return {"error": "seeds must contain between 1 and 20 integer values"}
     seeds = list(dict.fromkeys(seeds))
     timeout = max(1, min(int(args.get("timeout", 120)), 900))
-    if not test_id:
-        return {"error": "test_id is required"}
     if not target or target.startswith("-"):
         return {"error": "target must be a pytest file/node target"}
     target_path_text = target.split("::", 1)[0]
@@ -272,17 +306,67 @@ def run_registered_test(workspace_path: str | Path, args: dict, *, execute, befo
         return {"error": "test target escapes workspace"}
     if not target_path.exists() or not target_path.is_file():
         return {"error": f"test target not found: {target_path_text}"}
+    suffix = target[len(target_path_text):]
+    canonical_path = target_path.relative_to(workspace).as_posix()
+    canonical_target = canonical_path + suffix
+    inferred = not test_id
+    if inferred:
+        manifest = TestManifest.load(workspace)
+        candidates = _test_ids_for_target(manifest, canonical_target, required_test_ids, retained_targets)
+        if len(candidates) > 1:
+            return {**error_payload("INVALID_TOOL_ARGUMENTS",
+                message="This target is registered under multiple test IDs. Choose the intended test_id.",
+                details={"target": canonical_target, "test_ids": candidates[:32]}),
+                "effect_state": "not_committed", "execution_state": "not_started"}
+        if candidates:
+            test_id = candidates[0]
+        else:
+            target_key = os.path.normcase(canonical_path) + suffix
+            test_id = "pytest:auto:" + hashlib.sha256(target_key.encode()).hexdigest()[:24]
+            if test_id in required_test_ids or test_id in manifest.records:
+                return {**error_payload("INVALID_TOOL_ARGUMENTS",
+                    message="Select an explicit test_id for this target.",
+                    details={"target": canonical_target}), "effect_state": "not_committed",
+                    "execution_state": "not_started"}
 
-    from .validation_evidence import workspace_version, version_summary
+    from .validation_evidence import MAX_FILES, workspace_version, version_summary
     declared = args.get("input_files")
     if declared is not None:
         if not isinstance(declared, list) or not all(isinstance(p, str) and p for p in declared):
             return {"error": "input_files must be an explicit list of workspace files"}
         declared = list(dict.fromkeys([*declared, target_path.relative_to(workspace).as_posix()]))
+    execution_files = args.get("execution_files")
+    if execution_files is not None:
+        from backend.core.sandbox_read import relative_parts
+        from backend.core.tools.file_operations import PROTECTED_METADATA_PARTS
+        if not isinstance(execution_files, list) or len(execution_files) > MAX_FILES:
+            return error_payload("TEST_EXECUTION_SCOPE_INVALID")
+        selected = {}
+        try:
+            target_parts = relative_parts(target_path_text)
+            # Keep pytest's standard project configuration and ancestor hooks
+            # in the private view. Imported helpers and test data are explicit.
+            config_names = ('pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini',
+                            'pyproject.toml', 'tox.ini', 'setup.cfg', 'conftest.py')
+            configuration = [(directory / basename).as_posix()
+                             for directory in Path(*target_parts).parents for basename in config_names
+                             if (workspace / directory / basename).is_file()]
+            for name in [target_path_text, *execution_files, *(declared or []), *configuration]:
+                parts = relative_parts(name)
+                if any(part.casefold() in PROTECTED_METADATA_PARTS for part in parts):
+                    raise ValueError("Execution inputs must be ordinary business files")
+                relative = Path(*parts).as_posix()
+                selected.setdefault(os.path.normcase(relative), relative)
+        except (OSError, ValueError) as exc:
+            return error_payload("TEST_EXECUTION_SCOPE_INVALID", message=str(exc))
+        declared = list(selected.values())
     validation = workspace_version(workspace, input_files=declared)
-    suffix = "::" + target.split("::", 1)[1] if "::" in target else ""
-    public = {"test_id": test_id, "target": target_path.relative_to(workspace).as_posix() + suffix,
+    if execution_files is not None and validation.get("state") != "observed":
+        return error_payload("TEST_EXECUTION_SCOPE_INVALID", message=validation.get("reason"))
+    public = {"test_id": test_id, "target": canonical_target,
               "seeds": seeds, "timeout": timeout}
+    if execution_files is not None:
+        public["execution_files"] = declared
     executed = execute(workspace, public, validation)
     if not isinstance(executed, dict) or executed.get("error"):
         return executed if isinstance(executed, dict) else error_payload("TEST_PROTOCOL_INVALID")
@@ -304,19 +388,30 @@ def run_registered_test(workspace_path: str | Path, args: dict, *, execute, befo
     validation = version_summary(validation)
     record = TestRecord(
         test_id=test_id,
-        target=target,
+        target=canonical_target if inferred else target,
         seeds=seeds,
         results=results,
         last_run_at=datetime.now().isoformat(),
         validation_version=validation,
     )
-    if before_record is not None:
-        before_record()
-    manifest = TestManifest.load(workspace)
-    manifest.register(record)
+    manifest = TestManifest(workspace)
+    with _manifest_lock(manifest.path):
+        if inferred:
+            current = TestManifest.load(workspace)
+            current_ids = _test_ids_for_target(current, canonical_target, required_test_ids, retained_targets)
+            if current_ids not in (candidates, [test_id]) or (test_id not in current_ids and test_id in current.records):
+                return {**error_payload("VALIDATION_INPUT_CHANGED",
+                    message="The test registration changed during execution. Select the current test again.",
+                    details={"target": canonical_target, "test_ids": current_ids[:32]}),
+                    "effect_state": "not_committed", "execution_state": "completed"}
+            if test_id in current.records:
+                record.target = current.records[test_id].target
+        if before_record is not None:
+            before_record()
+        manifest.register(record)
     return {
         "test_id": test_id,
-        "target": target,
+        "target": record.target,
         "passed": record.passed,
         "exit_code": 0 if record.passed else 1,
         "seed_results": [result.to_dict() for result in results],

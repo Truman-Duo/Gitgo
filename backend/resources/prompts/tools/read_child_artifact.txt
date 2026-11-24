@@ -1,1 +1,3 @@
-Read a file produced by an owned completed subprocess before review. The Host uses its immutable sealed result in isolated Git worktrees and the current bounded workspace artifact in shared non-Git projects.
+Read a child artifact by path. For a sealed handoff pass result_ref from wait_agents or list_agents. Otherwise supply process_id. The Host uses its immutable sealed result in isolated Git worktrees and the current bounded workspace artifact in shared non-Git projects.
+For a returned assignment, use the matching child process ID and a path listed in returned_assignment.draft.files. The immutable retained draft is review evidence. Adopt any useful content through the owner workspace's ordinary write and verification tools.
+For a draft, pass its exact draft_id from list_coordination_events. You can keep inspecting an older version even after a newer offer. An omitted draft_id reads the normal sealed result, or the explicitly returned draft.

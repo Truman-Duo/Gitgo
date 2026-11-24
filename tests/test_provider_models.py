@@ -94,7 +94,7 @@ def test_entering_new_connection_reads_public_models_without_a_key_then_checks_a
 
 def test_new_keyless_authenticated_draft_does_not_probe_account_endpoint_when_reference_is_unavailable():
     service=ApplicationServices()
-    draft=dict(base_url="https://api.openai.com/v1",api_key="",protocol="openai_responses",kind="remote",auth_mode="api_key")
+    draft=dict(base_url="https://no-reference.example/v1",api_key="",protocol="openai_responses",kind="remote",auth_mode="api_key")
     with patch("backend.core.provider_metadata.catalogue",return_value=({},"unavailable")),patch("backend.core.provider_drafts.discover",side_effect=ValueError("MODEL_LIST_HTTP_401")) as discovery:
         listed=service.provider_models(draft,"empty-key-no-auth-request")
     discovery.assert_not_called()
@@ -173,7 +173,7 @@ def test_light_connection_check_is_one_request_and_not_a_full_capability_receipt
     with pytest.raises(OperationError,match="expired"):
         service.provider_save(name="Not a capability probe",base_url="https://api.test/v1",api_key="synthetic",model_id="v3",probe_receipt=receipt["receipt_id"])
 
-def test_native_model_switch_uses_existing_busy_boundary_and_retires_idle_daemon():
+def test_native_model_switch_uses_existing_busy_boundary_and_keeps_idle_daemon():
     from backend.core.native_host import NativeHost
     service=ApplicationServices();created=create(service)
     host=NativeHost();options=service.provider_model_options()
@@ -188,6 +188,8 @@ def test_native_model_switch_uses_existing_busy_boundary_and_retires_idle_daemon
     daemon=IdleDaemon();host._daemons["synthetic-project"]=daemon
     with patch.object(host,"_emit"),patch.object(host.services,"provider_model_select",wraps=host.services.provider_model_select):
         result=host._provider_change("provider.model.select",dict(provider_id=created["id"],model_id="b",expected_revision=options["revision"]))
-    assert result["runtime_reload"] and result["model_id"]=="b"
-    assert daemon.stopped and not host._daemons
+    assert not result["runtime_reload"] and result["model_id"]=="b"
+    assert result['effective_from']=='next_task'
+    assert not daemon.stopped and host._daemons['synthetic-project'] is daemon
+    host._daemons.clear()
     host.close()

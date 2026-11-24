@@ -5,6 +5,38 @@ epochs can recover their exact pair from the durable epoch archive; ambiguity
 or a missing source is an explicit error, not an invitation to replay effects.
 """
 from copy import deepcopy
+import json
+
+
+def project_tool_history(messages):
+    """Retain native receipts while hiding manuals from earlier user tasks."""
+    current_task = next((row["turn_id"] for row in reversed(messages)
+                         if row.get("role") == "user" and row.get("turn_id")), None)
+    if current_task is None:
+        return messages
+    projected = []
+    before_task = True
+    for row in messages:
+        if row.get("role") == "user" and row.get("turn_id") == current_task:
+            before_task = False
+        if row.get("host_authority") is True and row.get("context_purpose") == "tool_contract":
+            data = row.get("data") or {}
+            if not isinstance(data, dict):
+                projected.append(row)
+                continue
+            historical = data.get("task_id") != current_task if data.get("task_id") else before_task
+            if historical and data.get("kind") in {"tool_contract_details", "tool_contract_wait", "tool_discovery"}:
+                receipt = {key: data[key] for key in ("tool_name", "execution_state", "executed")
+                           if key in data}
+                receipt["kind"] = "historical_tool_context"
+                definition = data.get("definition")
+                if isinstance(definition, dict) and definition.get("name"):
+                    receipt["tool_name"] = definition["name"]
+                row = {**row, "content": json.dumps(receipt, ensure_ascii=False), "data": receipt}
+                row.pop("prompt_sections", None)
+                row.pop("context_purpose", None)
+        projected.append(row)
+    return projected
 
 
 def complete_transactions(messages, states, archives, call_ids):

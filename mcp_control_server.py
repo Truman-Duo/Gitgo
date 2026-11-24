@@ -18,6 +18,9 @@ from mcp_tools.control import register, shutdown
 mcp = FastMCP(
     "gitgo-control",
     instructions=(
+        "Attach to the existing formal Dashboard Host first. Read-only observation never "
+        "automatically replies, stops or repairs work. State-changing tools require an "
+        "explicit user instruction and confirm=true. "
         "Control Gitgo only through its canonical Native Host. Read status or "
         "Trace before guessing. Never fabricate a decision id, silently grant "
         "permissions, or treat MCP as the product UI. Use the formal Dashboard "

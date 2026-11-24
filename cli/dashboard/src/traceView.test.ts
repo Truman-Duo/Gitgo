@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { mergeTraceEvents, verboseEventLines } from "./traceView.js";
+import { eventSummary, mergeTraceEvents, verboseEventLines } from "./traceView.js";
 
 describe("trace live view", () => {
+  test("shows the explicit temporary role in compact and verbose views", () => {
+    const event = {seq:1,time:"",event:"agent_started",actor_kind:"worker",temporary_subagent:true};
+    expect(eventSummary(event)).toBe("SUBAGENT started");
+    expect(verboseEventLines({...event,event:"toolcall_start",tool_name:"read_file"}, 100)[0]).toContain("SUBAGENT TOOL");
+    expect(eventSummary({...event,temporary_subagent:false})).toBe("AGENT started worker");
+  });
+
   test("merges polling pages by monotonic sequence without duplicates", () => {
     const base = [{ seq: 1, time: "", event: "agent_started" }];
     const next = mergeTraceEvents(base, [

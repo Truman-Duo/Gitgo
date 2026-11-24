@@ -12,13 +12,13 @@ describe('scene-owned command registry', () => {
     for(const scene of ['projects','workspace'] as const){
       expect(getCommands(scene).map(item=>item.label)).toContain('/model');
       expect(getCommands(scene).map(item=>item.label)).toContain('/effort');
-      expect((await executeCommand('/effort',{...ctx,scene})).showPanel?.overlay).toBe('effortPicker');
+      expect((await executeCommand('/effort',{...ctx,scene})).loadPanel).toBeFunction();
       expect((await executeCommand('/model',{...ctx,scene})).showPanel?.overlay).toBe('modelPicker');
     }
     for(const scene of ['process_list','agent_detail'] as const){
       expect(getCommands(scene).map(item=>item.label)).not.toContain('/model');
       expect(getCommands(scene).map(item=>item.label)).not.toContain('/effort');
-      expect((await executeCommand('/effort',{...ctx,scene})).showPanel).toBeUndefined();
+      expect((await executeCommand('/effort',{...ctx,scene})).loadPanel).toBeUndefined();
       expect((await executeCommand('/model',{...ctx,scene})).showPanel).toBeUndefined();
     }
   });

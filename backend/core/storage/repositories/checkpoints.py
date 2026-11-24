@@ -18,7 +18,7 @@ from ..transactions import authoritative_transaction
 
 def plan_agent_checkpoint(
     self: CheckpointsPort, snapshot: dict, *, limits: CheckpointLimits | None = None,
-    registration: ProjectRegistration | None = None,
+    registration: ProjectRegistration | None = None, asset_revision: tuple[str, bytes] | None = None,
 ) -> CheckpointPublication:
     """Build the complete immutable publication without new file/SQL writes.
 
@@ -204,6 +204,12 @@ def plan_agent_checkpoint(
         barrier = prepare({"status": status, "task_status": task_status,
             "task_id": task_id, "state_revision": committed_revision,
             "steps_used": snapshot.get("steps_used", 0)})
+    asset_object = None
+    if asset_revision is not None:
+        if barrier is None or status != "completed" or task_status != "completed" or parent_process_id:
+            raise ValueError("asset publication requires a new successful root terminal checkpoint")
+        expected_asset_ref, encoded_assets = asset_revision
+        asset_object = builder.prepare_encoded(encoded_assets)
     objects = builder.seal()
     descriptors = {member.digest: member.descriptor for member in objects.members}
     logical_estimate = 2048 + 512 * (
@@ -214,6 +220,13 @@ def plan_agent_checkpoint(
         basis.registration.append(publication)
     for descriptor in descriptors.values():
         self._register_object(publication, descriptor)
+    if asset_object is not None:
+        from backend.core.loop.asset_maintenance import ASSET_NAMESPACE
+        publication.expect_one(
+            "UPDATE storage_kv SET value_ref=?,updated_at=? WHERE namespace=? AND key='current' AND value_ref=?",
+            (asset_object["ref"], now, ASSET_NAMESPACE, expected_asset_ref))
+        publication.execute("INSERT INTO storage_kv(namespace,key,value_ref,updated_at) VALUES(?,?,?,?)",
+            (ASSET_NAMESPACE, f"delivery:{process_id}:{committed_revision}", asset_object["ref"], now))
     # A checkpoint is one ownership unit.  Record the complete CAS
     # closure in the same transaction as the authoritative rows.
     # Historical facts keep their own closure when this one advances.
@@ -436,13 +449,13 @@ def plan_agent_checkpoint(
         barrier is not None, tuple(facts), limits, footprint)
 
 
-def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict) -> str:
+def save_agent_checkpoint(self: CheckpointsPort, snapshot: dict, *, asset_revision=None) -> str:
     """Publish the legacy path from the same closed repository-owned plan.
 
     Future batch admission consumes the plan without first creating CAS files.
     This wrapper still has the documented legacy lifetime/collector limitations.
     """
-    plan = plan_agent_checkpoint(self, snapshot)
+    plan = plan_agent_checkpoint(self, snapshot, asset_revision=asset_revision)
     self._reserve_authoritative_write(plan.estimated_sql_bytes)
     plan.objects.materialize_legacy(self._write_blob_file)
     with self._state_lock:

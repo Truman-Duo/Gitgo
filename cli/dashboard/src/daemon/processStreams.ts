@@ -34,6 +34,10 @@ export function publishProcessStreamEvent(
   if (previous) {
     state.text = previous.text;
     state.reasoning = previous.reasoning;
+    state.thinking = previous.thinking ?? false;
+    state.thinkingText = previous.thinkingText || "";
+    state.thinkingStartedAt=previous.thinkingStartedAt;
+    state.stage=previous.stage;state.stageSequence=previous.stageSequence||0;
     state.tools = previous.tools;
     state.notices = previous.notices;
     state.activity = previous.activity || [];
@@ -54,6 +58,10 @@ export function publishProcessStreamEvent(
     process_id: processId,
     text: next.text,
     reasoning: settled ? "" : next.reasoning,
+    thinking: next.thinking,
+    thinkingText: next.thinkingText,
+    thinkingStartedAt:next.thinkingStartedAt,
+    stage:next.stage,stageSequence:next.stageSequence,
     tools: settled ? finalizeTools(next.tools) : next.tools,
     notices: next.notices,
     activity: next.activity,

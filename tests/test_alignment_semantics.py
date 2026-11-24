@@ -195,7 +195,7 @@ def test_semantic_frontier_preserves_dependencies_and_simple_tasks_do_not_interv
     result = runtime.apply({'status': 'needs_input', 'interpretations': [], 'questions': [
         {'state_topic': 'destination', 'question': 'Where?', 'why_user_must_decide': 'Place', 'depends_on': []},
         {'state_topic': 'company', 'question': 'With whom?', 'why_user_must_decide': 'Walking', 'depends_on': []}]}, runtime.payload())
-    assert len(result['decision']['questions']) == 1
+    assert len(result['decision']['questions']) == 2
     assert len(EngineeringWorkflow(p).status()['question_frontier']) == 2
 
 
@@ -384,7 +384,7 @@ def test_child_does_not_inherit_parent_alignment_receipt_or_scope(tmp_path_facto
 
 
 @pytest.mark.parametrize('child', [False, True])
-def test_executor_first_question_routing_keeps_real_gates_and_worker_review(tmp_path_factory, child):
+def test_executor_main_and_worker_questions_keep_real_gates_without_hidden_review(tmp_path_factory, child):
     from backend.core.loop.executor import agent_step
     from backend.core.loop.provider_protocol import ProviderEvent, ProviderEventType
     from backend.core.loop.outcome import TaskOutcome, OutcomeStatus
@@ -410,32 +410,24 @@ def test_executor_first_question_routing_keeps_real_gates_and_worker_review(tmp_
         def stream_events(self, *args, **kwargs):
             self.invocations += 1
             if self.invocations == 1:
-                yield ProviderEvent(ProviderEventType.TOOL_CALL_STARTED, tool_call_id='unnecessary',
+                call_id = 'unnecessary' if child else 'question-intent'
+                yield ProviderEvent(ProviderEventType.TOOL_CALL_STARTED, tool_call_id=call_id,
                                     tool_name='request_user_decision', output_index=0)
-                yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id='unnecessary',
+                yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id=call_id,
                                     tool_name='request_user_decision', output_index=0,
-                                    arguments='{"kind":"clarification","state_topic":"format","question":"Which layout?","why_user_must_decide":"Layout","options":[]}')
+                                    arguments='{"kind":"clarification","state_topic":"format","question":"Which layout?","why_user_must_decide":"Layout","recommendation":"Use a simple layout.","options":[]}')
             else:
                 yield ProviderEvent(ProviderEventType.TEXT_DELTA, text='Clear sentence.\nTASK_COMPLETE')
             yield ProviderEvent(ProviderEventType.RESPONSE_COMPLETED)
     provider = Provider()
     outcome = TaskOutcome.from_dict(agent_step(p, provider, instruction='Rewrite the sentence clearly.', workspace_path=str(tmp_path_factory)))
-    if not child:
-        # An ordinary main Agent may make a poor semantic choice. Runtime does
-        # not pretend to prove necessity by adding a mandatory second judge;
-        # it still preserves the real request and unresolved completion gate.
-        assert outcome.status == OutcomeStatus.AWAITING_USER
-        assert provider.stages == []
-        assert p.pending_decision['question'] == 'Which layout?'
-        assert not HostCompletionEvaluator.evaluate(p, 'Clear sentence.').allowed
-        return
-    assert outcome.status == OutcomeStatus.COMPLETED, outcome.to_dict()
-    assert provider.stages == ['question_proposal']
-    assert p.context_snapshot['alignment_runtime']['delivery']['source'] == 'host_admission_reuse'
-    assert not p.pending_decision
-    assert not any(e.get('event') == 'user_decision_requested' for e in p.session.host_ledger)
-    result = next(m for m in p.session.messages if m.get('tool_call_id') == 'unnecessary' and m.get('message_type') == 'tool_result')
-    assert 'no tool in this batch ran' in result['content']
+    # Both A and B own semantic judgment. A poor question remains observable;
+    # Runtime never pretends a second judge proved its usefulness.
+    assert outcome.status == OutcomeStatus.AWAITING_USER
+    assert provider.stages == []
+    assert provider.invocations == 1
+    assert p.pending_decision['question'] == 'Which layout?'
+    assert not HostCompletionEvaluator.evaluate(p, 'Clear sentence.').allowed
 
 
 def test_semantic_calls_keep_actual_usage_without_borrowing_native_conversation_state():
@@ -482,7 +474,8 @@ def test_plain_response_needs_no_independent_model_but_still_binds_completion(tm
     assert not HostCompletionEvaluator.evaluate(p, result.response).allowed
 
 
-def test_actual_reply_reaches_main_model_before_combined_delivery_review(tmp_path_factory):
+def test_main_model_consumes_actual_reply_with_delivery_without_a_second_review(tmp_path_factory):
+    import json
     from backend.core.loop.executor import agent_step
     from backend.core.loop.provider_protocol import ProviderEvent, ProviderEventType
     from backend.core.loop.outcome import TaskOutcome, OutcomeStatus
@@ -490,7 +483,7 @@ def test_actual_reply_reaches_main_model_before_combined_delivery_review(tmp_pat
     p = process(tmp_path_factory)
     answer = 'Japan, April, two adults'
     workflow, request, node = pending_reply(p, answer)
-    p.tool_registry = ToolRegistry([])
+    p.tool_registry = ToolRegistry(['complete_task'])
     p.session.messages.append({'role': 'user', 'content': answer, 'message_type': 'conversation'})
     candidate = 'April Japan itinerary for two adults'
     order = []
@@ -501,34 +494,33 @@ def test_actual_reply_reaches_main_model_before_combined_delivery_review(tmp_pat
         context_window = 16384
 
         def assess_alignment(self, payload, **kwargs):
-            order.append(payload['stage'])
-            assert payload['stage'] == 'delivery'
-            assert payload['candidate'] == candidate
-            assert payload['actual_answers'][0]['answer'] == answer
-            return {'status': 'ready', 'questions': [],
-                'interpretations': [interpretation(node, request, answer)],
-                'delivery_check': {'complete': True, 'evidence': [candidate]}}
+            raise AssertionError('No hidden alignment request')
 
         def stream_events(self, *args, **kwargs):
             order.append('main')
             assert not workflow.status()['complete']
             assert not confirmed_user_state(p.session.host_ledger)
             assert not HostCompletionEvaluator.evaluate(p, candidate).allowed
-            yield ProviderEvent(ProviderEventType.TEXT_DELTA, text=candidate)
+            yield ProviderEvent(ProviderEventType.TOOL_CALL_STARTED, tool_call_id='deliver', tool_name='complete_task', output_index=0)
+            yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id='deliver', tool_name='complete_task', output_index=0,
+                arguments=json.dumps({'scope_update': {'quote': answer, 'discussion': candidate}, 'answer_updates': [
+                    {'state_topic': 'trip', 'disposition': 'confirmed', 'value': answer, 'quote': answer}]}))
             yield ProviderEvent(ProviderEventType.RESPONSE_COMPLETED)
 
     result = TaskOutcome.from_dict(agent_step(p, Provider(), instruction=answer,
         workspace_path=str(tmp_path_factory)))
-    assert result.status == OutcomeStatus.COMPLETED, result.to_dict()
-    assert order == ['main', 'delivery']
+    assert result.status == OutcomeStatus.COMPLETED, (result.response, result.error, p.pending_decision,
+        [(m.get('content'), m.get('data')) for m in p.session.messages if m.get('message_type') == 'tool_result'][:3])
+    assert order == ['main']
     assert workflow.status()['complete']
     assert confirmed_user_state(p.session.host_ledger)[0]['value'] == answer
-    assert HostCompletionEvaluator.evaluate(p, candidate).allowed
+    assert result.response.endswith('## Discussion\n\n' + candidate)
+    assert HostCompletionEvaluator.evaluate(p, result.response).allowed
     p.session.host_ledger = [e for e in p.session.host_ledger if e['event'] != 'user_decision_received']
-    assert not HostCompletionEvaluator.evaluate(p, candidate).allowed
+    assert not HostCompletionEvaluator.evaluate(p, result.response).allowed
 
 
-def test_reviewed_contract_preview_matches_actual_publication_without_repeated_review(tmp_path_factory):
+def test_contract_preview_matches_publication_without_hidden_review(tmp_path_factory):
     import json
     from backend.core.loop.executor import agent_step
     from backend.core.loop.provider_protocol import ProviderEvent, ProviderEventType
@@ -554,10 +546,14 @@ def test_reviewed_contract_preview_matches_actual_publication_without_repeated_r
             return {'status': 'ready', 'questions': [], 'interpretations': []}
         def stream_events(self, *args, **kwargs):
             self.calls += 1
-            if self.calls == 1:
-                yield ProviderEvent(ProviderEventType.TOOL_CALL_STARTED, tool_call_id='declare',
+            if self.calls <= 2:
+                call_id = 'declare-intent' if self.calls == 1 else 'declare'
+                if self.calls == 2:
+                    assert p.session.messages[-1]['data']['kind'] == 'tool_contract_details'
+                    assert not p.context_snapshot.get('task_contract')
+                yield ProviderEvent(ProviderEventType.TOOL_CALL_STARTED, tool_call_id=call_id,
                     tool_name='declare_task_contract', output_index=0)
-                yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id='declare',
+                yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id=call_id,
                     tool_name='declare_task_contract', output_index=0, arguments=json.dumps(proposal))
             else:
                 yield ProviderEvent(ProviderEventType.TEXT_DELTA, text='The supplied design.\nTASK_COMPLETE')
@@ -566,7 +562,7 @@ def test_reviewed_contract_preview_matches_actual_publication_without_repeated_r
     result = TaskOutcome.from_dict(agent_step(p, provider, instruction='Explain the supplied design',
         workspace_path=str(tmp_path_factory)))
     assert result.status == OutcomeStatus.COMPLETED, result.to_dict()
-    assert provider.reviews == 1
+    assert provider.reviews == 0
     receipt = next(m for m in p.session.messages if m.get('tool_call_id') == 'declare' and m.get('message_type') == 'tool_result')
     assert not receipt.get('is_error'), receipt
     assert p.context_snapshot['task_contract']['goal'] == proposal['goal']
@@ -592,10 +588,14 @@ def test_invalid_contract_is_reported_without_paid_semantic_review(tmp_path_fact
             raise AssertionError('Invalid compilation must not create semantic work')
         def stream_events(self, *args, **kwargs):
             self.calls += 1
-            if self.calls == 1:
-                yield ProviderEvent(ProviderEventType.TOOL_CALL_STARTED, tool_call_id='invalid',
+            if self.calls <= 2:
+                call_id = 'inspect-invalid' if self.calls == 1 else 'invalid'
+                if self.calls == 2:
+                    assert p.session.messages[-1]['data']['kind'] == 'tool_contract_details'
+                    assert not p.context_snapshot.get('task_contract')
+                yield ProviderEvent(ProviderEventType.TOOL_CALL_STARTED, tool_call_id=call_id,
                     tool_name='declare_task_contract', output_index=0)
-                yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id='invalid',
+                yield ProviderEvent(ProviderEventType.TOOL_CALL_DONE, tool_call_id=call_id,
                     tool_name='declare_task_contract', output_index=0,
                     arguments=arguments)
             else:
@@ -704,7 +704,9 @@ def test_provider_delivery_requires_explicit_complete_verdict():
     from backend.core.loop.alignment_runtime import assess_with_provider
     class Provider:
         def chat(self, *args, **kwargs):
-            return {'content': json.dumps({'status': 'ready', 'questions': [], 'interpretations': []}),
+            return {'content': json.dumps({'status': 'ready', 'questions': [], 'interpretations': [],
+                    'request_frame': {'kind': 'deliverable', 'source_quote': 'Give an introduction',
+                                      'outcome': 'An introduction'}}),
                     'usage': {'input_tokens': 10, 'output_tokens': 20}}
     result = assess_with_provider(Provider(), {'stage': 'delivery', 'candidate': 'Introduction'})
     assert result['schema_error'] == 'delivery_check_required'
@@ -784,7 +786,7 @@ def test_truncated_semantic_response_keeps_usage_and_has_bounded_recovery_allowa
     assert first['_provider_usage']['output_tokens'] == 8192
 
 
-def test_completed_provider_fragment_is_repaired_before_task_finality(tmp_path_factory):
+def test_provider_completion_does_not_schedule_an_unrequested_semantic_editor(tmp_path_factory):
     from backend.core.loop.executor import agent_step
     from backend.core.loop.provider_protocol import ProviderEvent, ProviderEventType
     from backend.core.loop.tools import ToolRegistry
@@ -792,9 +794,7 @@ def test_completed_provider_fragment_is_repaired_before_task_finality(tmp_path_f
     p.task_kind = 'answer'
     p.max_steps = 10
     p.tool_registry = ToolRegistry([])
-    workflow, request, node = pending_reply(p, 'Personal offline reader')
-    workflow.resolve_answer(node, request['decision_id'], {
-        'disposition': 'confirmed', 'value': 'Personal offline reader', 'quote': 'Personal offline reader'})
+    p.session.append_user('The proposal is for a personal offline reader.')
     partial = 'Introduction. The first module is'
     complete = 'Modules: loader and renderer. Data: immutable document. Tests: offline and read-only.'
     observed = []
@@ -804,12 +804,7 @@ def test_completed_provider_fragment_is_repaired_before_task_finality(tmp_path_f
         context_window = 16384
         calls = 0
         def assess_alignment(self, payload, **kwargs):
-            result = {'status': 'ready', 'questions': [], 'interpretations': []}
-            if payload['stage'] == 'delivery':
-                candidate = payload['candidate']
-                result['delivery_check'] = {'complete': candidate == complete,
-                    'reason': 'The first attempt is an unfinished introduction', 'evidence': [candidate]}
-            return result
+            raise AssertionError('No hidden semantic editor')
         def stream_events(self, *args, **kwargs):
             self.calls += 1
             yield ProviderEvent(ProviderEventType.TEXT_DELTA, text=partial if self.calls == 1 else complete)
@@ -818,11 +813,13 @@ def test_completed_provider_fragment_is_repaired_before_task_finality(tmp_path_f
     provider = Provider()
     result = agent_step(p, provider, instruction='Provide the complete modules, data and tests proposal.',
                         workspace_path=str(tmp_path_factory), on_stream_event=observed.append)
-    assert provider.calls == 2
+    assert provider.calls == 1
     assert result['status'] == 'completed'
-    assert result['response'] == complete
-    assert partial not in result['response']
-    assert any(e.get('event') == 'alignment_assessment_completed' and e.get('status') == 'repair' for e in observed)
+    # The endpoint's completed claim is not a technical/semantic correctness
+    # proof. Actual transport truncation still has its separate continuation
+    # tests; explicitly registered reviews keep their own completion gates.
+    assert result['response'] == partial
+    assert not any(e.get('event') == 'alignment_assessment_started' for e in observed)
 
 
 def test_public_fragments_do_not_cross_task_or_process_ownership(tmp_path_factory):
@@ -864,7 +861,7 @@ def test_substantive_incomplete_scope_is_still_rejected_atomically(tmp_path_fact
     assert (p.context_snapshot, p.session.host_ledger) == before
 
 
-def test_partial_facet_cannot_be_duplicated_under_a_new_label(tmp_path_factory):
+def test_bound_partial_facet_keeps_identity_under_a_new_label(tmp_path_factory):
     p = process(tmp_path_factory)
     w, request, node = pending_reply(p, 'Japan with family')
     runtime = AlignmentRuntime(p)
@@ -873,10 +870,8 @@ def test_partial_facet_cannot_be_duplicated_under_a_new_label(tmp_path_factory):
                 'why_user_must_decide': 'Changes transport', 'depends_on': []}
     proposal = {'status': 'needs_input', 'questions': [question],
         'interpretations': [interpretation(node, request, 'Japan with family', 'partial', 'Departure city')]}
-    before = copy.deepcopy(p.context_snapshot), copy.deepcopy(p.session.host_ledger)
-    with pytest.raises(ValueError, match='SAME node_id'):
-        runtime.apply(proposal, payload)
-    assert (p.context_snapshot, p.session.host_ledger) == before
+    # Semantic equivalence of arbitrary new labels belongs to the assessor.
+    # A supplied binding is mechanical and must never create a second node.
     question['node_id'] = node
     result = runtime.apply(proposal, payload)
     assert len(w.status()['nodes']) == 1

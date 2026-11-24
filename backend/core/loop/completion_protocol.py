@@ -116,6 +116,7 @@ class HostEvaluation:
     allowed: bool
     reasons: tuple[str, ...] = field(default_factory=tuple)
     gates: tuple[dict, ...] = field(default_factory=tuple)
+    workbench_checks: tuple[dict, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -138,8 +139,8 @@ class HostCompletionEvidence:
         }
 
     @classmethod
-    def collect(cls, process) -> "HostCompletionEvidence":
-        all_receipts = _current_task_receipts(process)
+    def collect(cls, process, *, receipts=None, required_test_ids=None) -> "HostCompletionEvidence":
+        all_receipts = _current_task_receipts(process) if receipts is None else receipts
         receipts = tuple(
             str(item.get("receipt_id"))
             for item in all_receipts
@@ -148,9 +149,9 @@ class HostCompletionEvidence:
             and item.get("committed") is True
             and is_effectful_mutation(str(item.get("effect", "read")))
         )
-        required = tuple(str(item) for item in (
-            getattr(process, "required_test_ids", []) or []
-        ) if str(item))
+        if required_test_ids is None:
+            required_test_ids = getattr(process, "required_test_ids", [])
+        required = tuple(str(item) for item in (required_test_ids or []) if str(item))
         failures: tuple[str, ...] = ()
         reasons: list[str] = []
         if not receipts:
@@ -252,8 +253,8 @@ class HostCompletionEvaluator:
                 "task_id": process.active_task_id or process.process_id}
 
     @classmethod
-    def evaluate(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
-        return cls._evaluate(process, response, signals, final_semantic_review=True)
+    def evaluate(cls, process, response: str, signals: list | None = None, *, exact_candidate=False) -> HostEvaluation:
+        return cls._evaluate(process, response, signals, final_semantic_review=True, exact_candidate=exact_candidate)
 
     @classmethod
     def evaluate_stage_entry(cls, process, response: str, signals: list | None = None) -> HostEvaluation:
@@ -270,7 +271,7 @@ class HostCompletionEvaluator:
         return cls._evaluate(process, response, signals, final_semantic_review=False)
 
     @classmethod
-    def _evaluate(cls, process, response: str, signals, *, final_semantic_review):
+    def _evaluate(cls, process, response: str, signals, *, final_semantic_review, exact_candidate=False):
         from .completion_gates import CompletionReasons
         reasons = CompletionReasons()
         from backend.core.mechanism_runtime.semantic_projection import unsettled_checkpoints
@@ -279,6 +280,32 @@ class HostCompletionEvaluator:
                 + ' (' + pending['phase'] + '); consume the canonical reply and settle or explicitly retire its exact invocation.')
         context, _ = process.read_context_snapshot() if getattr(process, 'read_context_snapshot', None) else ({}, 0)
         contract = context.get('task_contract') or {}
+        from .main_dialogue import owns_dialogue, require_response_components, DialogueUpdateError
+        dialogue = context.get('alignment_runtime') or {}
+        if (owns_dialogue(dialogue) and dialogue.get('task_id') == (process.active_task_id or process.process_id)
+                and dialogue.get('process_id') == process.process_id):
+            try:
+                require_response_components(process)
+            except DialogueUpdateError as exc:
+                with reasons.scope('dialogue_response'):
+                    reasons.append(str(exc), code=exc.code)
+        from backend.core.workbench.delivery import CONTEXT_KEY, assess_delivery
+        workbench_checks = []
+        if context.get(CONTEXT_KEY) or contract.get("required_workbench_claims"):
+            candidate = response
+            if not exact_candidate:
+                claim = getattr(process, "completion_claim", None)
+                review_claim = getattr(process, "review_claim", None)
+                if response.strip() == "TASK_COMPLETE" and (claim or review_claim):
+                    candidate = claim.result if claim else review_claim.get("summary", "")
+                else:
+                    candidate = CompletionClaim.from_response(response, step=process.steps_used).result
+            workbench_checks = assess_delivery(process, context, candidate)
+            with reasons.scope("workbench_delivery"):
+                for check in workbench_checks:
+                    if check["blocking"]:
+                        reasons.append(f'Workbench {check["scope"]} ({check["status"]}): {check["reason"]}',
+                                       **({"code": check["diagnostic_code"]} if check.get("diagnostic_code") else {}))
         # Accepted outputs survive plan/answer/action transitions. A process's
         # initial type is not permission to finish an amended implementation
         # contract before its first write (which promotes the runtime type).
@@ -300,6 +327,25 @@ class HostCompletionEvaluator:
                 reasons.append("output interface revision awaits supervisor decision: "
                                + ", ".join(pending_interfaces))
         alignment = context.get('alignment_runtime') or {}
+        from .main_dialogue import owns_dialogue
+        main_owned = (owns_dialogue(alignment)
+            and alignment.get('task_id') == (process.active_task_id or process.process_id)
+            and alignment.get('process_id') == process.process_id)
+        if final_semantic_review and main_owned:
+            from .alignment_evidence import alignment_input_digest, answer_digest
+            binding = alignment.get('delivery') or {}
+            if binding.get('source') == 'main_agent_candidate':
+                candidate = process.completion_claim.result if response.strip() == 'TASK_COMPLETE' and process.completion_claim else response
+                candidate = CompletionClaim.from_response(candidate, step=process.steps_used).result
+                if (binding.get('candidate_digest') != answer_digest(candidate)
+                        or binding.get('input_digest') != alignment_input_digest(process)
+                        or binding.get('task_kind') != process.task_kind):
+                    reasons.append('The actual delivery candidate or its current evidence changed; resubmit the current result through the normal completion boundary.',
+                                   code='ALIGNMENT_DELIVERY_BINDING_STALE')
+                if binding.get('artifact_manifest'):
+                    from .delivery_artifacts import verify_manifest
+                    if not process.completion_claim or not verify_manifest(process, binding['artifact_manifest'], process.completion_claim.files):
+                        reasons.append('published artifact evidence changed or is no longer in the completion claim')
         review_required = True
         from .alignment_routing import uses_on_demand_review
         if (final_semantic_review and uses_on_demand_review(alignment)
@@ -308,7 +354,7 @@ class HostCompletionEvaluator:
             from .alignment_routing import review_reason
             from .alignment_runtime import AlignmentRuntime
             review_required = bool(review_reason(process, AlignmentRuntime(process).payload(candidate=response)))
-        if (final_semantic_review and alignment.get('enforced') and alignment.get('task_id') == (process.active_task_id or process.process_id)
+        if (final_semantic_review and not main_owned and alignment.get('enforced') and alignment.get('task_id') == (process.active_task_id or process.process_id)
                 and alignment.get('process_id', process.process_id if not process.parent_id else '') == process.process_id):
             from .alignment_evidence import alignment_input_digest, answer_digest
             delivery = alignment.get('delivery') or {}
@@ -413,7 +459,7 @@ class HostCompletionEvaluator:
                     "delegated agents are still unresolved: " + ", ".join(unresolved)
                 )
 
-        return HostEvaluation(not reasons, tuple(reasons), tuple(reasons.gates))
+        return HostEvaluation(not reasons, tuple(reasons), tuple(reasons.gates), tuple(workbench_checks))
 
     @classmethod
     def _evaluate_supervisor(cls, process, response: str,
@@ -435,19 +481,40 @@ class HostCompletionEvaluator:
         )
         if root_contract.get('delegation_required') and required_minimum == 0 and not any(
             not contract.get('superseded_by') and manager is not None and manager.get(child_id) is not None
+            and (not (root_contract.get("host_requirements") or {}).get("manual_B_creation")
+                 or not contract.get("subagent_owner_contract"))
             for child_id, contract in contracts.items()
         ):
             reasons.append('[GITGO-E6101 REQUIRED_DELEGATION_UNSATISFIED] task requires an actual delegated agent; none exists')
         approved_required = 0
         for child_id, contract in contracts.items():
-            if not contract.get("required_for_parent_completion", True):
-                continue
             if contract.get("superseded_by"):
+                continue
+            returned = contract.get("returned_assignment")
+            if returned and returned["owner_task_id"] == (process.active_task_id or process.process_id):
+                cls._evaluate_returned_work(process, returned, reasons)
+                if returned["draft"].get("id") and not returned.get("accepted_result"):
+                    reasons.append("Record the accepted delivery of the versioned returned assignment.",
+                                   code="ASSIGNMENT_HANDOFF_DELIVERY_PENDING")
+                continue
+            if not contract.get("required_for_parent_completion", True):
+                if (contract.get("subagent_owner_contract") and required_minimum
+                        and not (root_contract.get("host_requirements") or {}).get("manual_B_creation")
+                        and manager is not None):
+                    from .assignment_handoff import current_versioned_review
+                    helper = manager.get(child_id)
+                    if (helper is not None and helper.worktree.get("promoted")
+                            and current_versioned_review(process, helper, reviews.get(child_id, {}))):
+                        approved_required += 1
                 continue
             child_reason_start = len(reasons)
             child = manager.get(child_id) if manager else None
             if child is None:
                 reasons.append(f"required delegated agent is missing: {child_id}")
+                continue
+            from .lifecycle import is_consumable_terminal
+            if not is_consumable_terminal(child, manager):
+                reasons.append(f"required delegated agent closeout is not finalized: {child_id}")
                 continue
             result = child.result if isinstance(child.result, dict) else {}
             if child.status.value != "completed" or result.get("status") != "completed":
@@ -512,6 +579,29 @@ class HostCompletionEvaluator:
                 f"outcome(s), Host observed {approved_required}"
             )
 
+    @classmethod
+    def _evaluate_returned_work(cls, process, returned: dict, reasons) -> None:
+        task_id = process.active_task_id or process.process_id
+        receipts = [receipt for receipt in process.tool_receipts[returned["owner_receipt_start"]:]
+                    if receipt.get("task_id") == task_id]
+        targets = set(returned["target_files"])
+        evidence = HostCompletionEvidence.collect(process, receipts=receipts,
+                                                   required_test_ids=returned["required_test_ids"])
+        changed = any(receipt.get("receipt_id") in evidence.action_receipt_ids
+                      and receipt.get("effect") == "workspace_write"
+                      and targets.intersection(receipt.get("files") or [])
+                      for receipt in receipts)
+        with reasons.scope("returned_assignment"):
+            if not changed:
+                reasons.append("The supervisor has no committed workspace effect in the returned target files.",
+                               code="ASSIGNMENT_HANDOFF_DELIVERY_PENDING")
+            for failure in evidence.test_failures:
+                reasons.append("Returned assignment requires a current passing test: " + failure,
+                               code="ASSIGNMENT_HANDOFF_DELIVERY_PENDING")
+            cls._evaluate_required_deliverables(process, returned, reasons)
+            cls._verify_required_tool_calls(process, reasons, requirements=returned["required_tool_calls"],
+                                            receipts=receipts)
+
     @staticmethod
     def _missing_required_deliverables(process, contract: dict) -> list[str]:
         workspace_text = str(
@@ -573,6 +663,7 @@ class HostCompletionEvaluator:
             (child_id, contract) for child_id, contract in contracts.items()
             if contract.get("required_for_parent_completion", True)
             and not contract.get("superseded_by")
+            and not contract.get("returned_assignment")
         ]
         from backend.core.loop.task_contract import get_task_contract
         root_contract = get_task_contract(process)
@@ -680,9 +771,12 @@ class HostCompletionEvaluator:
             if kind not in {"dynamic_definition", "component_step", "test"}:
                 continue
             if not receipt_id:
-                reasons.append(
-                    f"{kind} verification requires a concrete Host receipt_id"
-                )
+                if kind == "test":
+                    reasons.append("Test verification needs a current passing run_test receipt. "
+                                   "Supply the matching test_id in verification. If no current "
+                                   "receipt exists, first run the intended test with run_test.")
+                else:
+                    reasons.append(f"{kind} verification requires a concrete Host receipt_id")
                 continue
             receipt = known[receipt_id]
             if receipt.get("succeeded") is not True or receipt.get("committed") is not True:
@@ -721,16 +815,15 @@ class HostCompletionEvaluator:
                         reasons.append("test verification needs recheck: " + assessment["reason"])
 
     @staticmethod
-    def _verify_required_tool_calls(process, reasons: list[str]) -> None:
+    def _verify_required_tool_calls(process, reasons: list[str], *, requirements=None, receipts=None) -> None:
         """Enforce LLM-compiled task requirements with Host receipt counts."""
         from backend.core.loop.task_contract import get_task_contract
 
-        requirements = list(
-            get_task_contract(process).get("required_tool_calls") or []
-        )
+        if requirements is None:
+            requirements = get_task_contract(process).get("required_tool_calls") or []
         if not requirements:
             return
-        top_level = _current_task_receipts(process)
+        top_level = _current_task_receipts(process) if receipts is None else receipts
         for raw in requirements:
             requirement = dict(raw or {})
             name = str(requirement.get("tool_name") or "")
@@ -851,6 +944,7 @@ COMPLETE_TASK_PARAMETERS = {
         "files": {"type": "array", "items": {"type": "string"}},
         "diff_summary": {"type": "string"},
         "manual_evidence": {"type": "string"},
+        "answer_updates": {"type": "array", "maxItems": 16, "items": {"type": "object"}},
     },
     "required": ["result", "verification"],
 }

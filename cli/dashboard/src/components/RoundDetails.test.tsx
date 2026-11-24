@@ -1,50 +1,50 @@
 import React from "react";
-import {test, expect} from "bun:test";
+import {expect, test} from "bun:test";
 import {PassThrough} from "node:stream";
 import {Box, renderSync} from "@anthropic/ink";
 import instances from "../../vendor/ink/src/core/instances.js";
-import {RoundDetails} from "./RoundDetails.js";
+import {MessageRow} from "./MessageRow.js";
 import type {ChatMessage} from "../types.js";
-
-const wait = () => new Promise(resolve => setTimeout(resolve, 60));
-function text(node:any):string{return node.nodeValue || (node.childNodes||[]).map(text).join("");}
-function terminal(){
- const stdin:any = new PassThrough(); Object.assign(stdin,{isTTY:true,setRawMode(){},ref(){},unref(){}});
- const stdout:any = new PassThrough(); Object.assign(stdout,{isTTY:false,columns:90,rows:24});
- const stderr:any = new PassThrough(); stdout.on("data",()=>{});stderr.on("data",()=>{});
- return {stdin,stdout,stderr};
+import type {TraceSnapshot, TraceBodyRef} from "../chat/traceSource.js";
+const wait = (ms = 80) => new Promise(resolve => setTimeout(resolve, ms));
+const text = (node: any): string => node.nodeValue ?? (node.childNodes ?? []).map(text).join("");
+function mount(element: React.ReactNode) {
+  const stdin: any = new PassThrough(); Object.assign(stdin, {isTTY:true,setRawMode(){},ref(){},unref(){}});
+  const stdout: any = new PassThrough(); Object.assign(stdout, {isTTY:false,columns:90,rows:30}); stdout.on("data",()=>{});
+  const stderr: any = new PassThrough(); stderr.on("data",()=>{});
+  const root = renderSync(<Box width={90} flexDirection="column">{element}</Box>, {stdin,stdout,stderr,patchConsole:false,exitOnCtrlC:false});
+  return {root, tree:()=>(instances.get(stdout) as any).rootNode,
+    rerender(value:React.ReactNode){root.rerender(<Box width={90} flexDirection="column">{value}</Box>);},
+    close(){root.unmount();root.cleanup();stdin.destroy();stdout.destroy();stderr.destroy();}};
 }
-const message:ChatMessage={role:"assistant",content:"done",timestamp:"now",status:"completed",trace_id:"trace",process_id:"b"};
-
-test("closing retains the loaded trajectory and reopening/remounting reuses its bounded cache", async()=>{
- const io=terminal(); let calls=0;
- const client:any={async callTool(){calls++;return {events:[{seq:1,time:"now",event:"progress_summary",process_id:"b",message:"PINNED-CANDIDATE"}],has_more:false};}};
- const draw=(open:boolean)=><Box width={90}><RoundDetails message={message} client={client} project="sample" verbose={false} width={86} readTrace={open}/></Box>;
- let root=renderSync(draw(true),{...io,patchConsole:false,exitOnCtrlC:false});
- try{
-  await wait();expect(text((instances.get(io.stdout) as any).rootNode)).toContain("PINNED-CANDIDATE");
-  root.rerender(draw(false));await wait();
-  expect(text((instances.get(io.stdout) as any).rootNode)).toContain("PINNED-CANDIDATE");
-  root.rerender(draw(true));await wait();expect(calls).toBe(1);
-  root.unmount();root.cleanup();
-  root=renderSync(draw(true),{...io,patchConsole:false,exitOnCtrlC:false});await wait();
-  expect(text((instances.get(io.stdout) as any).rootNode)).toContain("PINNED-CANDIDATE");
-  expect(calls).toBe(1);
- }finally{root.unmount();root.cleanup();Object.values(io).forEach(s=>s.destroy());}
-});
-
-test("a late result for another process never overwrites the current trajectory",async()=>{
- const io=terminal();let finish:any;
- const client:any={async callTool(_op:any,args:any){
-  if(args.process_id==="old")return new Promise(resolve=>{finish=resolve;});
-  return {events:[{seq:1,time:"now",event:"progress_summary",process_id:"b",message:"CURRENT-PROCESS"}],has_more:false};
- }};
- const draw=(process_id:string)=><Box width={90}><RoundDetails message={{...message,process_id}} client={client} project="sample" verbose={false} width={86}/></Box>;
- const root=renderSync(draw("old"),{...io,patchConsole:false,exitOnCtrlC:false});
- try{
-  await wait();root.rerender(draw("b"));await wait();
-  finish({events:[{seq:1,time:"now",event:"progress_summary",process_id:"old",message:"STALE-PROCESS"}],has_more:false});
-  await wait();const value=text((instances.get(io.stdout) as any).rootNode);
-  expect(value).toContain("CURRENT-PROCESS");expect(value).not.toContain("STALE-PROCESS");
- }finally{root.unmount();root.cleanup();Object.values(io).forEach(s=>s.destroy());}
-});
+const snapshot: TraceSnapshot = {schema:1,trace_id:"turn",process_id:"A",first_seq:1,last_seq:60001,event_count:60001};
+const ref: TraceBodyRef = {schema:1,snapshot,first_seq:1,last_seq:60000,event:"text_delta",process_id:"A",event_count:60000,text_chars:60000};
+const message: ChatMessage = {role:"assistant",content:"FINAL",timestamp:"now",status:"completed",trace_id:"turn",process_id:"A"};
+test("opening a round reads public stage text beyond 50000 events without another disclosure", async () => {
+  const calls: any[] = [];
+  const client: any = {callTool: async (_name: string, args: any) => {
+    calls.push(args);
+    if (args.action === "summary") return {trace_id:"turn",event_count:60001,event_counts:{text_delta:60000}};
+    if (args.action === "index") return {snapshot,events:[
+      {seq:1,event:"text_delta",visibility:"public",process_id:"A",body_ref:ref},
+      {seq:60001,event:"provider_request_started",process_id:"A",task_kind:"answer",
+        body_ref:{...ref,first_seq:60001,last_seq:60001,event:"provider_request_started",event_count:1,text_chars:0}},
+    ],next_seq:60001,has_more:false};
+    const start = args.after_seq + 1, end = Math.min(60000, start + 499);
+    return {snapshot,events:Array.from({length:end-start+1},(_,index)=>({seq:start+index,time:"now",event:"text_delta",visibility:"public",process_id:"A",
+      delta:start+index===60000?"EXACT END e\u0301 中文":"x"})),next_seq:end,has_more:end<60000};
+  }};
+  const draw = (expanded = true) => <MessageRow msg={message} contentWidth={86} client={client} project="fixture" verbose={false} expanded={expanded}/>;
+  const io = mount(draw(false));
+  try {
+    await wait(100);expect(calls).toHaveLength(0);
+    io.rerender(draw());
+    for(let attempt=0;attempt<30 && !text(io.tree()).includes("EXACT END");attempt++)await wait(50);
+    expect(calls.slice(0,2).map(item=>item.action)).toEqual(["summary","index"]);
+    expect(text(io.tree())).not.toMatch(/Thinking|思考|Progress|阶段说明/);
+    expect(text(io.tree())).toContain("EXACT END e\u0301 中文");
+    expect(calls.filter(item=>item.action==="block" && item.body_ref.event==="text_delta").length).toBe(120);
+    io.rerender(draw(false)); await wait(250);
+    expect(text(io.tree())).not.toContain("EXACT END");
+  } finally {io.close();}
+}, 10000);

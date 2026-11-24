@@ -85,8 +85,12 @@ def test_a_different_card_cannot_supply_stale_control_or_confirmed_replacement(t
         later = create_user_decision(p, checkpoint('later'))
         receive(p, later, 'Wait again')
     before = copy.deepcopy(p.context_snapshot), copy.deepcopy(p.session.host_ledger)
-    with pytest.raises(ValueError, match='current question'):
+    with pytest.raises(ValueError) as raised:
         w.resolve_answer(node, direct['decision_id'], interpretation(node, direct, 'Implement now'))
+    if case == 'confirmed':
+        assert raised.value.code == 'ALIGNMENT_REPLY_REVISION_REQUIRED'
+    else:
+        assert 'current question' in str(raised.value)
     assert (p.context_snapshot, p.session.host_ledger) == before
 
 

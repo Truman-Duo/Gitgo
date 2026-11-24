@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -160,6 +161,12 @@ class TraceJournal:
             safe.pop("_trace_detail", None)
             now = datetime.now(timezone.utc).isoformat()
             monotonic_ns = time.monotonic_ns()
+            persisted_detail = _redact(detail) if detail is not None else None
+            if os.environ.get("GITGO_OBSERVER_CAPTURE_DIR"):
+                from backend.core.observer.recording import capture
+                capture("trace_source", {"workspace": str(self._workspace), "trace_id": self.trace_id,
+                    "time": now, "monotonic_ns": monotonic_ns, "event": safe,
+                    "detail": persisted_detail})
             # Argument fragments are needed by the live tool card, but the
             # completed call already stores the exact arguments once in CAS.
             # Writing both forms duplicates bytes and can consume the minute
@@ -184,7 +191,6 @@ class TraceJournal:
                 "monotonic_ns": monotonic_ns,
                 **safe,
             }
-            persisted_detail = _redact(detail) if detail is not None else None
             snapshot = None
             if safe.get("event") == "provider_request_started":
                 persisted_detail, snapshot = self._provider_request_delta(
@@ -265,6 +271,15 @@ class TraceJournal:
 
     def read_detail(self, ref: str) -> Any:
         return self._storage.read_trace_detail(ref)
+
+    def read_index(self, **options) -> dict:
+        return self._storage.read_trace_index(self.trace_id, **options)
+
+    def read_summary(self, **options) -> dict:
+        return self._storage.read_trace_summary(self.trace_id, **options)
+
+    def read_block(self, reference: dict, **options) -> dict:
+        return self._storage.read_trace_block(self.trace_id, reference, **options)
 
     def close(self) -> None:
         if self._owns_storage:

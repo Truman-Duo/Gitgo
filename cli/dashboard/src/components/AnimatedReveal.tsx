@@ -2,8 +2,10 @@ import React, { useLayoutEffect, useRef, useState } from "react";
 import { Box, measureElement, type DOMElement } from "@anthropic/ink";
 import { colors } from "../theme/index.js";
 import { animateNumber } from "../theme/motion.js";
+import {useContentViewport} from '../ui/ContentViewport.js';
 
-/** Keep content mounted while closing, so virtualization observes bounded height changes. */
+/** Animate explicit toggles. Open lazy/virtual content grows naturally, without
+ * restarting a clipping animation on every newly measured body page. */
 export function AnimatedReveal({
   expanded,
   children,
@@ -11,9 +13,16 @@ export function AnimatedReveal({
   expanded: boolean;
   children: React.ReactNode;
 }) {
+  const viewport=useContentViewport();
+  // Virtual readers restore semantic anchors when geometry changes. Height
+  // animation would repeatedly move the hit target and remeasure the virtual
+  // tree for one click. Commit reader geometry once; other scenes keep motion.
+  return viewport?<Box flexDirection='column' flexShrink={0}>{expanded?children:null}</Box>
+    :<MotionReveal expanded={expanded}>{children}</MotionReveal>;
+}
+function MotionReveal({expanded,children}:{expanded:boolean;children:React.ReactNode}){
   const inner = useRef<DOMElement>(null);
   const measured = useRef(0);
-  const [contentHeight, setContentHeight] = useState(0);
   const initial = useRef(true);
   const current = useRef<number | undefined>(expanded ? undefined : 0);
   const [height, setHeight] = useState<number | undefined>(current.current);
@@ -24,13 +33,7 @@ export function AnimatedReveal({
   useLayoutEffect(() => {
     if (inner.current) {
       const next = Math.max(0, Math.ceil(measureElement(inner.current).height));
-      if (next !== measured.current) {
-        const before = measured.current;
-        if (expanded && current.current === undefined && !initial.current && before > 0)
-          update(before);
-        measured.current = next;
-        setContentHeight(next);
-      }
+      measured.current = next;
     }
   });
   useLayoutEffect(() => {
@@ -58,7 +61,7 @@ export function AnimatedReveal({
         intervalMs: colors.animation.collapse.intervalMs,
       },
     );
-  }, [expanded, contentHeight]);
+  }, [expanded]);
   const present = expanded || height === undefined || height > 0;
   return (
     <Box

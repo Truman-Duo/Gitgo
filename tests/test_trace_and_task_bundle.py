@@ -424,6 +424,7 @@ def test_supervisor_bundle_shortcut_starts_deterministic_children(
 
 def test_completion_protocol_surface_tracks_current_task_kind():
     from backend.core.loop import executor as executor_module
+    from backend.core.loop.session import AgentSession
 
     def placeholder(name):
         return AgentTool(
@@ -440,7 +441,7 @@ def test_completion_protocol_surface_tracks_current_task_kind():
         max_steps=5, ring_level=RingLevel.RING_0,
         active_task_id="routing-surface", actor_kind="supervisor",
         capability_profile_id="supervisor.control", task_kind="answer",
-        tool_registry=registry,
+        tool_registry=registry, session=AgentSession(),
     )
     all_tools = {name: placeholder(name) for name in registry.list_all()}
 

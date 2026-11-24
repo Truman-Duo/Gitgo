@@ -132,3 +132,71 @@ def test_unknown_publication_is_not_retried(tmp_path_factory, monkeypatch):
     with pytest.raises(metadata.MetadataCommitUnknown):
         metadata.write_metadata_bytes(tmp_path_factory, 'cache.json', b'new', lock_timeout=5)
     assert len(calls) == 1
+
+
+@pytest.fixture
+def metadata_retry_clock(monkeypatch):
+    elapsed = [0.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(metadata.time, 'monotonic', lambda: elapsed[0])
+    monkeypatch.setattr(metadata.time, 'sleep', sleep)
+    return elapsed, sleeps
+
+
+def test_metadata_read_recovers_from_windows_sharing_violation(
+    tmp_path_factory, monkeypatch, metadata_retry_clock,
+):
+    sources(tmp_path_factory)
+    graphs.build_dependency_graph(tmp_path_factory)
+    original = metadata.ReadRoot.open
+    attempts = []
+
+    def busy_once(root, path, **kwargs):
+        if path == '.gitgo/' + graphs.GRAPH_FILE:
+            attempts.append(path)
+            if len(attempts) == 1:
+                error = PermissionError('sharing violation')
+                error.winerror = 32
+                raise error
+        return original(root, path, **kwargs)
+
+    monkeypatch.setattr(metadata.ReadRoot, 'open', busy_once)
+    graph = graphs.load_dependency_graph(tmp_path_factory)
+    assert any(edge['dependent'] == 'view.py' for edge in graph.get_dependents('feature.py'))
+    assert len(attempts) == 2
+    assert metadata_retry_clock[1] == [0.02]
+
+
+@pytest.mark.parametrize('winerror', [None, 5, 32, 33])
+def test_metadata_read_retry_is_bounded_and_specific(
+    tmp_path_factory, monkeypatch, metadata_retry_clock, winerror,
+):
+    error = PermissionError('cannot open cache')
+    error.winerror = winerror
+    attempts = []
+
+    def denied(*args, **kwargs):
+        attempts.append(True)
+        raise error
+
+    monkeypatch.setattr(metadata.ReadRoot, 'open', denied)
+    with pytest.raises(PermissionError) as caught:
+        metadata.read_metadata_bytes(tmp_path_factory, 'cache.json')
+    assert caught.value is error
+    elapsed, sleeps = metadata_retry_clock
+    if winerror == 32:
+        assert elapsed[0] == pytest.approx(5)
+        assert len(attempts) > 1
+        assert max(sleeps) <= 0.02
+    else:
+        assert len(attempts) == 1
+        assert sleeps == []
+
+
+def test_metadata_read_keeps_missing_file_semantics(tmp_path_factory):
+    assert metadata.read_metadata_bytes(tmp_path_factory, 'missing.json') is None

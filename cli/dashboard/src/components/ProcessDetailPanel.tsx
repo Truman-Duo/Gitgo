@@ -3,7 +3,7 @@ import {Box,ScrollBox,Text,type ScrollBoxHandle} from "@anthropic/ink";
 import type {ProcessInfo} from "../hooks/useLoopData.js";
 import {PageFrame,useCopy} from "../ui/PageFrame.js";
 import {pages,standardKey,type Copy} from "../ui/pageContract.js";
-import {label} from "../ui/runtimeLabels.js";
+import {assetMaintenanceLabel,label,processDisplayStatus} from "../ui/runtimeLabels.js";
 import {agentLabel} from "../daemon/agentLabels.js";
 import {useManagedInput as useInput,useScrollInput} from "../input/runtime.js";
 type Props={project:string;processId:string;processes:Record<string,ProcessInfo>;onDismiss:()=>void};
@@ -42,18 +42,27 @@ export function processDetailSections(process:ProcessInfo,processes:Record<strin
  const budget=process.task_budget||{};
  const limits=budget.limits as Record<string,unknown>|undefined;
  const deadline=budget.deadline as Record<string,unknown>|undefined;
+ const account=(budget.process_leases as Record<string,Record<string,unknown>>|undefined)?.[process.process_id];
+ const stepSegments=Array.isArray(account?.step_schedule)?account.step_schedule as number[]:null;
  const sections:Section[]=[
   {title:t({en:"Identity",zh:"身份"}),rows:[
    {label:t({en:"Name",zh:"名称"}),value:agentLabel(process)},
-   {label:t({en:"Status",zh:"状态"}),value:label(process.status,t)},
+   {label:t({en:"Status",zh:"状态"}),value:label(processDisplayStatus(process),t)},
    {label:t({en:"Role",zh:"角色"}),value:label(process.actor_kind||process.role,t)},
    {label:t({en:"Model",zh:"模型"}),value:value(process.model_id)},
    {label:t({en:"Process ID",zh:"进程 ID"}),value:process.process_id},
    {label:t({en:"Session ID",zh:"会话 ID"}),value:value(process.session_id)},
+   {label:t({en:"Executions in this conversation",zh:"此会话的执行次数"}),value:String(process.session_id
+    ? Object.values(processes).filter(p=>p.session_id===process.session_id).length : 1)},
+   ...(process.routing_compilation?.effective ? [{label:t({en:"Execution owner",zh:"执行分工"}),value:label(process.routing_compilation.effective,t)}] : []),
    {label:t({en:"Created",zh:"创建时间"}),value:value(process.created_at)},
   ]},
   {title:t({en:"Execution budget",zh:"执行预算"}),rows:[
    {label:t({en:"Steps used / current execution limit",zh:"已用步数 / 当前执行上限"}),value:value(process.steps_used)+" / "+value(process.max_steps)},
+   ...(stepSegments?[
+    {label:t({en:"Step renewals used / maximum",zh:"已续额次数 / 上限"}),value:value(account?.step_segment)+" / "+Math.max(0,stepSegments.length-1)},
+    {label:t({en:"Maximum admitted steps",zh:"最多可用步数"}),value:String(stepSegments.reduce((sum,n)=>sum+n,0))},
+   ]:[]),
    {label:t({en:"Task time limit (seconds)",zh:"任务时限（秒）"}),value:value(deadline?.allowance_seconds)},
    ...(limits?[
     {label:t({en:"Provider request limit",zh:"模型请求上限"}),value:value(limits.max_provider_calls)},
@@ -76,6 +85,8 @@ export function processDetailSections(process:ProcessInfo,processes:Record<strin
    {label:t({en:"Owned subprocesses",zh:"所属子进程"}),value:references(children)},
   ]},
  ];
+ if(process.maintained_assets?.length)sections.push({title:t({en:"Maintenance responsibilities",zh:"维护责任"}),
+  rows:process.maintained_assets.map(asset=>({label:asset.name,value:assetMaintenanceLabel(asset,t)}))});
  if(process.recovery)sections.push({title:t({en:"Recovery",zh:"恢复"}),rows:[
   {label:t({en:"Admission",zh:"恢复条件"}),value:process.recovery.resume_forbidden?t({en:"Resume forbidden",zh:"禁止恢复"}):process.recovery.requires_manual_verification?t({en:"Manual verification required",zh:"需要人工核验"}):t({en:"Explicit confirmation required",zh:"需要明确确认"})},
   {label:t({en:"Recovery command",zh:"恢复命令"}),value:"/runtime recovery "+(process.recovery.resume_forbidden?"discard":process.recovery.requires_manual_verification?"resume_verified":"resume")+" "+process.process_id},

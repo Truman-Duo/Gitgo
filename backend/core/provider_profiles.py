@@ -5,7 +5,7 @@ from .loop.provider_protocol import ProviderProtocol
 from .provider_catalog import MAX_PROVIDER_MODELS
 
 FIELDS = ("model_id", "protocol", "context_window", "max_output_tokens", "capabilities", "limits_source")
-CONFIG_FIELDS = ("request_preferences", "sources", "deployment", "verification", "warnings")
+CONFIG_FIELDS = ("request_preferences", "sources", "deployment", "verification", "warnings", "budget")
 
 
 def selected_profile(provider):
@@ -16,6 +16,8 @@ def selected_profile(provider):
 
 def profiles(provider):
     """Legacy connections acquire a single model without rewriting the original file."""
+    from .provider_budget import resolve_provider
+    provider = resolve_provider(provider)
     items = provider.get("configuration", {}).get("models")
     if isinstance(items, list) and items:
         return copy.deepcopy(items)
@@ -41,7 +43,7 @@ def compile_profiles(raw, provider, existing, receipts):
     if raw is None:
         result = list(old.values()) if same_connection else []
         result = [p for p in result if p["model_id"] != current["model_id"]]
-        return [*result, current]
+        return [*result, {**(copy.deepcopy(old.get(current["model_id"], {})) if same_connection else {}), **current}]
     if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_PROVIDER_MODELS:
         raise ValueError("INVALID_PROVIDER_MODELS")
     result, seen, discovery_indexes = [], set(), {}
@@ -54,20 +56,24 @@ def compile_profiles(raw, provider, existing, receipts):
             raise ValueError("INVALID_PROVIDER_MODEL_ID")
         seen.add(model)
         protocol = ProviderProtocol(item.get("protocol", provider["protocol"])).value
-        context, output = item.get("context_window", 128000), item.get("max_output_tokens", 4096)
+        from .provider_budget import DEFAULT_CONTEXT_BUDGET
+        context, output = item.get("context_window", DEFAULT_CONTEXT_BUDGET), item.get("max_output_tokens", 4096)
         if type(context) is not int or type(output) is not int or context < 1024 or not 1 <= output < context:
             raise ValueError("INVALID_PROVIDER_LIMITS")
         preferences = validate_preferences(item.get("request_preferences", {}), protocol)
         if model == current["model_id"]:
             if protocol == "auto" and item.get("probe_receipt"):
                 protocol = current["protocol"]  # The selected model's receipt was validated by provider_save.
+            from .provider_budget import default_context_budget
+            if item.get("context_source") == "default":
+                context = default_context_budget(current.get("deployment", {}).get("limits", {}).get("context_window"))
             if (protocol, context, output, preferences) != (current["protocol"], current["context_window"], current["max_output_tokens"], current.get("request_preferences", {})):
                 raise ValueError("SELECTED_MODEL_PROFILE_MISMATCH")
-            result.append(current)
+            result.append({**(copy.deepcopy(old.get(model, {})) if same_connection else {}), **current})
             continue
         previous = old.get(model, {}) if same_connection else {}
         unchanged = previous.get("protocol") == protocol and previous.get("request_preferences", {}) == preferences
-        profile = {"model_id": model, "protocol": protocol, "context_window": context, "max_output_tokens": output,
+        profile = {**copy.deepcopy(previous), "model_id": model, "protocol": protocol, "context_window": context, "max_output_tokens": output,
                    "limits_source": "configured", "request_preferences": preferences,
                    "capabilities": copy.deepcopy(previous.get("capabilities", {})) if unchanged else {}}
         draft = {k: provider[k] for k in ("base_url", "api_key", "kind", "auth_mode")}
@@ -81,7 +87,7 @@ def compile_profiles(raw, provider, existing, receipts):
         if deployment:
             profile["deployment"] = copy.deepcopy(deployment)
         sources = {"context_window": item.get("context_source", "user"), "max_output_tokens": item.get("output_source", "user")}
-        if any(v not in {"user", "default", "reference", "discovered"} for v in sources.values()):
+        if any(v not in {"user", "default", "reference", "discovered", "legacy"} for v in sources.values()):
             raise ValueError("INVALID_PARAMETER_SOURCE")
         limits = (deployment or {}).get("limits", {})
         profile["warnings"] = ["DECLARED_LIMIT_EXCEEDED"] if context > limits.get("context_window", context) or output > limits.get("max_output_capacity", output) else []
@@ -95,9 +101,12 @@ def compile_profiles(raw, provider, existing, receipts):
             profile["verification"] = {"checks": probe["checks"], "observations": probe["observations"], "at": probe["capabilities"]["probed_at"]}
         elif unchanged and previous.get("verification"):
             profile["verification"] = copy.deepcopy(previous["verification"])
+        else:
+            profile.pop("verification", None)
         if protocol == "auto":
             raise ValueError("PROTOCOL_PROBE_REQUIRED")
-        result.append(profile)
+        from .provider_budget import resolve_profile
+        result.append(resolve_profile(profile, provider["base_url"]))
     if current["model_id"] not in seen:
         raise ValueError("SELECTED_MODEL_NOT_CONFIGURED")
     return result

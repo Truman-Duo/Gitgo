@@ -11,6 +11,19 @@ from pathlib import Path
 from typing import Any
 
 
+def tool_argument_preview(arguments: dict) -> dict:
+    """Bounded original title fields; exact arguments remain in Trace CAS."""
+    if not isinstance(arguments, dict):
+        return {}
+    primary = next((key for key in ('path', 'url', 'query', 'command', 'question', 'operation', 'goal')
+                    if isinstance(arguments.get(key), str)), None)
+    preview = {primary: arguments[primary][:256]} if primary else {}
+    if primary == 'path':
+        preview.update({key: arguments[key] for key in ('offset', 'limit')
+                        if type(arguments.get(key)) is int})
+    return preview
+
+
 def compact_tool_summary(
     tool_name: str,
     data: dict | None,

@@ -187,6 +187,33 @@ def test_delivery_instance_reaches_all_task_completion_routes(instance_workspace
     assert "Delivery strategy selected for this run." not in baseline
 
 
+def test_worker_receives_pinned_upstream_evidence_and_can_recognize_incomplete_summary(instance_workspace):
+    limitation = ("A header-only export passes downstream acceptance. "
+                  "Evidence: test_empty_export.py::test_header_only.")
+    report = "Upstream report. " * 460 + limitation
+    context = {"upstream_outcomes": [{
+        "process_id": "producer", "task_id": "export-layout", "result_commit": "sealed-revision",
+        "changed_files": ["export.py"], "status": "completed",
+        "outcome": {"response": report, "metadata": {
+            "completion_evidence": {"factual_ready": False, "reasons": ["Import witness missing"]},
+            "provider_usage": {"marker": "An unrelated timing record"},
+        }},
+    }]}
+    process = AgentProcess("fixture", "worker", RingLevel.RING_0, actor_kind="worker",
+                           task_kind="action", session=AgentSession(), context_snapshot=context)
+    text, sections = PromptCompiler.compile(process=process, tools={}, workspace_path="fixture")
+    assert "sealed-revision" in text and "export.py" in text and "Import witness missing" in text
+    assert '"response_truncated":true' in text
+    assert "An unrelated timing record" not in text
+    assert any(section.name == "Upstream evidence" for section in sections)
+    from json import loads
+    requirements = next(section.content for section in sections if section.name == "Task requirements")
+    upstream = loads(requirements)["upstream_outcomes"][0]
+    start, end = upstream["response_tail_range"]
+    assert report[start:end] == upstream["response_tail"] and limitation in upstream["response_tail"]
+    assert upstream["task_id"] == "export-layout" and upstream["result_commit"] == "sealed-revision"
+
+
 def test_btw_assembly_and_execution_share_instance_when_config_changes(instance_workspace, monkeypatch):
     from types import SimpleNamespace
     from backend.core.daemon import dispatch
@@ -250,8 +277,8 @@ def test_review_method_is_pinned_without_replacing_role_or_completion(instance_w
 
 
 @pytest.mark.parametrize("platform,expected,other", [
-    ("win32", "auto selection on this platform is powershell", "profile is currently unavailable on this platform"),
-    ("linux", "auto selection on this platform is bash", "WindowsPowerShell/powershell.exe"),
+    ("win32", "The current default shell selection is powershell.", "profile is currently unavailable on this platform"),
+    ("linux", "The current default shell selection is bash.", "WindowsPowerShell/powershell.exe"),
 ])
 def test_shell_guidance_uses_execution_platform_without_changing_schema(instance_workspace, monkeypatch, platform, expected, other):
     from types import SimpleNamespace

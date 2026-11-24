@@ -67,7 +67,12 @@ def resume_waiters(session, project, ctx):
                     continue
                 maintenance = state_for(process)
                 requirements_changed = any(c.get("status") == "pending" for c in maintenance.get("changes", {}).values())
-                if (process.parent_id and (current["mode"] == "auto" or requirements_changed)
+                from backend.core.loop.task_execution_policy import matches
+                pending_unit = pending["manual_unit"]
+                _, actions = matches(process, pending_unit["tool_name"], pending_unit.get("arguments") or {})
+                policy_changes_admission = bool(actions & {"manual_exempt", "deny"})
+                should_resume = current["mode"] == "auto" or requirements_changed or policy_changes_admission
+                if (process.parent_id and should_resume
                         and not manager.has_continuation(process.process_id)):
                     process.runtime_preferences["mechanism_resume_blocked"] = "CHILD_CONTINUATION_UNAVAILABLE"
                     continue
@@ -75,7 +80,7 @@ def resume_waiters(session, project, ctx):
                 before = (process.status, process.pending_decision, process.result,
                           deepcopy(process.pending_tool_batch))
                 ledger_start = len(process.session.host_ledger)
-                if current["mode"] == "auto" or requirements_changed:
+                if should_resume:
                     process.pending_decision = None
                     process.result = None
                     process.pending_tool_batch["decision_action"] = "automatic"
@@ -88,9 +93,11 @@ def resume_waiters(session, project, ctx):
                     process.pending_tool_batch["manual_unit"] = unit
                 else:
                     continue
+                reason = ("requirements_changed" if requirements_changed else "task_execution_policy_changed"
+                          if policy_changes_admission else "mode_auto" if resume else "mechanism_revision_changed")
                 process.session.host_ledger.append({"event": "user_decision_cancelled",
                     "decision_id": pending["decision_id"], "task_id": process.active_task_id,
-                    "kind": "manual_execution", "reason": "requirements_changed" if requirements_changed else "mode_auto" if resume else "mechanism_revision_changed"})
+                    "kind": "manual_execution", "reason": reason})
                 try:
                     if store is None:
                         raise ValueError("MECHANISM_CHECKPOINT_UNAVAILABLE")
@@ -131,13 +138,35 @@ def command(cmd, session, project, ctx, emit):
     try:
         if cmd.get("task_operation"):
             operation = cmd["task_operation"]
-            if operation not in {"status", "catalog", "preview", "suspend", "resume", "detach", "reconcile"}:
+            policy_actions = {"execution_policy_enable": "enable", "execution_policy_disable": "disable", "execution_policy_delete": "delete"}
+            observations = {"status", "catalog", "execution_policy_export"}
+            if operation not in observations | {"preview", "suspend", "resume", "detach", "reconcile", "execution_policy"} | policy_actions.keys():
                 raise ValueError("TASK_MECHANISM_OPERATION_INVALID")
-            process = _resolve(cmd, session, ctx, create=False, observation=operation in {"status", "catalog"})
+            process = _resolve(cmd, session, ctx, create=False, observation=operation in observations)
             if process is None:
                 if operation != "status":
                     raise ValueError("TASK_MECHANISM_NOT_FOUND")
                 result = {"state": {}, "source_refs": [], "authority_granted": False}
+            elif operation == "execution_policy_export":
+                from backend.core.loop.task_execution_policy import projection
+                policy = projection(process)
+                if (not policy or policy.get("task_id") != cmd.get("task_id")
+                        or policy.get("revision") != cmd.get("expected_revision")
+                        or policy.get("parameters", {}).get("status") == "deleted"):
+                    raise ValueError("TASK_EXECUTION_POLICY_EXPORT_STALE")
+                result = {"execution_policy": policy}
+            elif operation == "execution_policy" or operation in policy_actions:
+                from backend.core.loop.task_execution_policy import activate, describe, manage
+                arguments = (cmd.get("expected_revision"), ctx.get("session_store"))
+                task = cmd.get("task_id")
+                if operation == "execution_policy":
+                    policy = describe(activate(process, task, cmd.get("execution_policy"), *arguments))
+                else:
+                    policy = manage(process, task, policy_actions[operation], *arguments)
+                result = {"execution_policy": policy, "authority_granted": False}
+                # wait_agents observes context under the condition lock. Notify
+                # after releasing the activation fence and without a context lock.
+                ctx["apm"].notify_state_changed(process.process_id)
             else:
                 from backend.core.loop.task_maintenance import invoke, task_id
                 from backend.core.loop.mechanism_lifecycle import fence
@@ -163,8 +192,11 @@ def command(cmd, session, project, ctx, emit):
                     else:
                         result = invoke(process, {"operation": operation, "expected_revision": cmd.get("expected_revision"),
                                                   "contract": cmd.get("contract")}, user_control=True)
+                        if operation == 'status':
+                            from backend.core.loop.task_execution_policy import projection
+                            result['execution_policy'] = projection(process)
             emit({"event": "command_result", "cmd": "mechanism", "result": result})
-            if operation == "resume":
+            if operation in {"resume", "execution_policy"} or operation in policy_actions:
                 try:
                     resume_waiters(session, project, ctx)
                 except Exception as exc:

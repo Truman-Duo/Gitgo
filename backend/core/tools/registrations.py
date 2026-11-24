@@ -81,6 +81,10 @@ def register_all(register) -> None:
     register("authored_privileged_python", execute_authored_privileged_python, NATIVE_WORKSPACE_PRODUCER)
     from backend.core.tools.authored_bridge import execute_authored_host_python
     register("authored_host_python", execute_authored_host_python, NATIVE_PROCESS)
+    from backend.core.workbench.python_compute import execute_python
+    from backend.core.workbench.code_size import execute_cloc
+    register("workbench_python", execute_python, NATIVE_PROCESS)
+    register("workbench_cloc", execute_cloc, NATIVE_PROCESS)
 
 
 # ── File Tools ─────────────────────────────────────────────

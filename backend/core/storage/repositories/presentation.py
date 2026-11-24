@@ -16,6 +16,8 @@ def _is_public_user_message(message: dict) -> bool:
     """
     if str(message.get("role") or "") != "user":
         return False
+    if message.get("context_purpose") == "retained_dialogue":
+        return False
     message_type = str(message.get("message_type") or "")
     if message_type and message_type != "conversation":
         return False
@@ -51,13 +53,15 @@ def _storage_projection_warning(
     }
 
 
-def _public_session_messages(self: PresentationPort, session_id: str) -> list[dict]:
+def _public_session_messages(self: PresentationPort, session_id: str, *, discussion_source=False) -> list[dict]:
     """Project one durable provider session into the canonical public chat.
 
     User turns come from the message journal.  Assistant turns come from the
-    terminal TaskOutcome, which is the sole completion authority.  Intermediate
-    provider prose remains available in traces/verbose mode but is deliberately
-    excluded here, avoiding the former duplicate-final-answer race.
+    terminal TaskOutcome, which is the sole completion authority. Explicit
+    public progress comes from the existing ledger. Unclassified intermediate
+    provider prose remains in traces/verbose mode. A low-authority discussion
+    source may additionally retain saved assistant prose; it is not a public
+    completion or an execution checkpoint.
     """
     with self._state_lock:
         message_rows = self._state.execute(
@@ -111,16 +115,22 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
             else:
                 unscoped.append(warning)
             continue
-        if not isinstance(loaded, dict) or not self._is_public_user_message(loaded):
+        if not isinstance(loaded, dict):
+            continue
+        public_user = self._is_public_user_message(loaded)
+        assistant_prose = (discussion_source and loaded.get('role') == 'assistant'
+                           and not loaded.get('host_authority') and loaded.get('provider_visible') is not False
+                           and isinstance(loaded.get('content'), str) and loaded['content'].strip())
+        if not public_user and not assistant_prose:
             continue
         projected = {
             "message_id": str(loaded.get("message_id") or row["message_id"]),
             "turn_id": message_task(row),
-            "role": "user",
+            "role": "user" if public_user else "assistant",
             "content": str(loaded.get("content") or ""),
             "timestamp": str(loaded.get("timestamp") or row["created_at"] or ""),
             "final": True,
-            "kind": "conversation",
+            "kind": "conversation" if public_user else "assistant_prose",
             "visibility": "public",
             "sequence": int(row["sequence"]),
         }
@@ -145,12 +155,29 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
                     unscoped.append(self._storage_projection_warning(exc))
                     ledger = []
                 from backend.core.loop.decision_timeline import decision_timeline
-                for card in decision_timeline(ledger if isinstance(ledger, list) else []):
+                from backend.core.loop.public_progress import progress_timeline
+                ledger = ledger if isinstance(ledger, list) else []
+                # Both projections retain the ledger's order at an equal
+                # provider-message sequence; no timestamp guesses are needed.
+                cards = decision_timeline(ledger) + progress_timeline(ledger)
+                positions = {}
+                for index, item in enumerate(ledger):
+                    positions.setdefault((item.get("event"), item.get("task_id"), item.get("process_id"),
+                                          item.get("decision_id") or item.get("update_id")), index)
+                def ledger_position(card):
+                    if card["kind"] == "decision":
+                        original = card["decision"]
+                        key = ("user_decision_requested", original["task_id"], original["process_id"], original["decision_id"])
+                    else:
+                        key = ("public_progress", card["turn_id"], card["process_id"], card["update_id"])
+                    return positions.get(key, 0)
+                for card in sorted(cards, key=ledger_position):
                     messages_by_task.setdefault(card["turn_id"], []).append(card)
         except StorageReferenceMissing as exc:
             unscoped.append(self._storage_projection_warning(exc))
     from ..conversation_history import restore_task_inputs
-    restore_task_inputs(self, task_rows, messages_by_task, metadata if isinstance(metadata, dict) else {})
+    restore_task_inputs(self, task_rows, messages_by_task, metadata if isinstance(metadata, dict) else {},
+                        session_id=session_id, journal_size=len(message_rows))
     public = list(unscoped)
     known_tasks: set[str] = set()
     for row in task_rows:
@@ -189,6 +216,10 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
             response = f"{report}\n\n{response}" if status == "degraded" and response else report
         if not response:
             continue
+        if discussion_source:
+            previous = messages_by_task.get(task_id, [])
+            if previous and previous[-1].get('role') == 'assistant' and previous[-1].get('content') == response:
+                continue
         public.append({
             "message_id": f"outcome:{task_id}",
             "turn_id": task_id,
@@ -202,11 +233,61 @@ def _public_session_messages(self: PresentationPort, session_id: str) -> list[di
             "duration_ms": float(loaded.get("duration_ms", 0.0) or 0.0),
             "trace_id": str((loaded.get("metadata") or {}).get("trace_id") or task_id),
             "process_id": str(loaded.get("process_id") or ""),
+            "public_progress_keys": [
+                f"{item['process_id']}:{item['update_id']}"
+                for item in messages_by_task.get(task_id, []) if item.get("kind") == "progress"
+            ],
         })
     for task_id, items in messages_by_task.items():
         if task_id not in known_tasks:
             public.extend(items)
     return public
+
+
+def read_discussion_state(self, process_id: str) -> dict | None:
+    """Low-authority public transcript for discussion, never a recovery image.
+
+    Missing historical material stays explicit. This projection does not read
+    Provider caches, runtime leases, receipts or pending authorization state.
+    """
+    from ..support import state_read_snapshot
+    with state_read_snapshot(self._state, self._state_lock):
+        row = self._state.execute(
+            'SELECT process_id,session_id,task_id,parent_process_id,role,status,state_revision FROM session_processes WHERE process_id=?',
+            (process_id,)).fetchone()
+        if row is None:
+            return None
+        messages = _public_session_messages(self, str(row['session_id']), discussion_source=True)
+        warnings = [{'code':'STORAGE_CAS_REFERENCE_MISSING','reference':item.get('storage_ref','')}
+                    for item in messages if item.get('storage_ref')]
+        prose = [dict(item) for item in messages
+                 if item.get('role') in {'user','assistant'}
+                 and item.get('kind') not in {'decision','error','progress'}
+                 and not item.get('storage_ref')]
+        from backend.core.loop.question_broker import project_decision_evidence
+        questions = project_decision_evidence(
+            [item for item in messages if item.get('kind') == 'decision'],
+            task_id=row['task_id'], process_id=process_id,
+            owner_process_id=row['parent_process_id'] or process_id, limit=32)
+        pending_question = next((item for item in reversed(questions['items'])
+                                 if item['status'] == 'awaiting_user'), None)
+        # Keep a readable task's recorded revision for discussion adoption's
+        # existing compare step, without loading its execution checkpoint.
+        task={'task_id':row['task_id']}
+        task_row=self._state.execute('SELECT contract_ref FROM tasks WHERE task_id=?',(row['task_id'],)).fetchone()
+        if task_row is not None and task_row['contract_ref']:
+            try:
+                contract=self._read_json_blob(str(task_row['contract_ref']))
+                if isinstance(contract,dict):task['contract']=contract
+            except StorageReferenceMissing as exc:
+                warnings.append({'code':exc.code,'reference':exc.ref})
+        dependencies=self._state.execute('SELECT depends_on_process_id,state FROM process_dependencies WHERE process_id=?',(process_id,)).fetchall()
+        return {'process':dict(row),'task':task,
+                'session':{'messages':prose,'host_ledger':[]},
+                'runtime_state':{'context_snapshot':{'task_contract':task.get('contract',{})}},
+                'dependencies':[dict(dependency) for dependency in dependencies],
+                'public_pending_question':pending_question,
+                'source_warnings':warnings,'projection':'public-discussion-only'}
 
 
 def read_latest_conversations(self, *, agent_conversations: dict | None = None) -> dict:
@@ -234,6 +315,7 @@ def read_latest_conversations(self, *, agent_conversations: dict | None = None) 
                    SELECT child.process_id, child.session_id
                      FROM session_processes child
                      JOIN tree parent ON child.parent_process_id=parent.process_id
+                    WHERE COALESCE(child.role, '') != 'subagent'
                ) SELECT process_id, session_id FROM tree""",
             (root_id,),
         ).fetchall()
@@ -359,9 +441,11 @@ def read_project_b_processes(self) -> dict[str, dict]:
                       role, actor_kind, capability_profile_id, status,
                       steps_used, max_steps, runtime_state_ref, created_at,
                       updated_at,
-                      (SELECT metadata_ref FROM sessions s WHERE s.session_id=session_processes.session_id) AS metadata_ref
+                      (SELECT metadata_ref FROM sessions s WHERE s.session_id=session_processes.session_id) AS metadata_ref,
+                      (SELECT outcome_ref FROM tasks t WHERE t.task_id=session_processes.task_id) AS outcome_ref
                FROM session_processes
                WHERE COALESCE(actor_kind, '') != 'supervisor'
+                 AND COALESCE(role, '') != 'subagent'
                  AND (parent_process_id IS NOT NULL OR actor_kind IN ('worker', 'reviewer'))
                ORDER BY created_at, process_id"""
         ).fetchall()
@@ -422,6 +506,7 @@ def read_project_b_processes(self) -> dict[str, dict]:
         )
         context_snapshot = dict(runtime.get("context_snapshot") or {})
         from backend.core.loop.coordination import coordination_summary_from_context
+        from backend.core.loop.lifecycle import execution_closeout_from_state
         display_name = ""
         identity_ledger = []
         if row["metadata_ref"]:
@@ -434,6 +519,12 @@ def read_project_b_processes(self) -> dict[str, dict]:
                         identity_ledger = self._read_json_blob(str(ref)) if ref else loaded_metadata.get("host_ledger", [])
             except StorageReferenceMissing as exc:
                 storage_error = storage_error or exc
+        outcome = {}
+        if runtime.get("lifecycle_finalized") is not True and row["outcome_ref"]:
+            try:
+                outcome = self._read_json_blob(str(row["outcome_ref"]), repair=False)
+            except StorageReferenceMissing as exc:
+                storage_error = storage_error or exc
         processes[process_id] = {
             "process_id": process_id,
             "session_id": str(row["session_id"]),
@@ -441,6 +532,8 @@ def read_project_b_processes(self) -> dict[str, dict]:
             "role": str(row["role"] or ""),
             "ring_level": int(runtime.get("ring_level", 3) or 3),
             "status": str(row["status"] or ""),
+            **execution_closeout_from_state(str(row["status"] or ""), runtime, outcome),
+            "routing_compilation": dict((context_snapshot.get("task_contract") or {}).get("routing_compilation") or {}),
             "steps_used": int(row["steps_used"] or 0),
             "max_steps": int(row["max_steps"] or 0),
             "parent_id": owner or None,
@@ -521,7 +614,7 @@ def read_latest_root_process(self) -> dict | None:
     # every provider continuation, historical message and receipt.
     with self._state_lock:
         selected = self._state.execute(
-            """SELECT sp.*, s.metadata_ref, t.contract_ref FROM session_processes sp
+            """SELECT sp.*, s.metadata_ref, t.contract_ref, t.outcome_ref FROM session_processes sp
                LEFT JOIN sessions s ON s.session_id=sp.session_id
                LEFT JOIN tasks t ON t.task_id=sp.task_id
                WHERE sp.parent_process_id IS NULL
@@ -533,6 +626,8 @@ def read_latest_root_process(self) -> dict | None:
     runtime = dict(self._read_json_blob(str(row["runtime_state_ref"])) or {}) if row.get("runtime_state_ref") else {}
     metadata = dict(self._read_json_blob(str(row["metadata_ref"])) or {}) if row.get("metadata_ref") else {}
     contract = dict(self._read_json_blob(str(row["contract_ref"])) or {}) if row.get("contract_ref") else {}
+    outcome = (self._read_json_blob(str(row["outcome_ref"]), repair=False)
+               if runtime.get("lifecycle_finalized") is not True and row.get("outcome_ref") else {})
     durable_session = metadata
     if not runtime.get("context") or not runtime.get("estimated_tokens"):
         durable_session = dict(self.load_agent_session_state(str(row["process_id"])) or metadata)
@@ -565,12 +660,15 @@ def read_latest_root_process(self) -> dict | None:
     )
     context_snapshot = dict(runtime.get("context_snapshot") or {})
     from backend.core.loop.coordination import coordination_summary_from_context
+    from backend.core.loop.lifecycle import execution_closeout_from_state
     return {
         "process_id": process_id,
         "session_id": str(row.get("session_id") or ""),
         "role": str(row.get("role") or "supervisor"),
         "ring_level": int(runtime.get("ring_level", 0) or 0),
         "status": str(row.get("status") or ""),
+        **execution_closeout_from_state(str(row.get("status") or ""), runtime, outcome),
+        "routing_compilation": dict(contract.get("routing_compilation") or {}),
         "steps_used": int(row.get("steps_used", 0) or 0),
         "max_steps": int(row.get("max_steps", 0) or 0),
         "parent_id": None,
@@ -650,6 +748,7 @@ def read_project_b_conversations(self) -> dict[str, list[dict]]:
         rows = self._state.execute(
             """SELECT process_id, session_id, updated_at FROM session_processes
                WHERE COALESCE(actor_kind, '') != 'supervisor'
+                 AND COALESCE(role, '') != 'subagent'
                  AND (parent_process_id IS NOT NULL OR actor_kind IN ('worker', 'reviewer'))
                ORDER BY created_at, process_id"""
         ).fetchall()

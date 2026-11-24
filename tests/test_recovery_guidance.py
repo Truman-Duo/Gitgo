@@ -51,6 +51,34 @@ def test_unknown_help_cannot_become_a_resource_path_or_guessed_recovery(identifi
     assert "instructions" not in result and "next_actions" not in result
 
 
+def test_file_errors_select_reconciliation_without_hiding_the_full_procedure():
+    conflict = lookup_guidance("FILE_CHANGED")
+    uncertain = lookup_guidance("FILE_CHANGED_AFTER_COMMIT")
+    assert conflict["instructions"].startswith("## Recompute against current bytes")
+    assert uncertain["instructions"].startswith("## Batch commits and recovery references")
+    assert "recompute" not in uncertain["instructions"]
+    full = lookup_guidance(conflict["full_guidance_ref"]["arguments"]["identifier"])
+    assert conflict["instructions"] in full["instructions"]
+    assert uncertain["instructions"] in full["instructions"]
+
+
+def test_sandbox_help_is_specific_and_recovery_reasons_do_not_register_new_errors():
+    full = lookup_guidance("sandbox")["instructions"]
+    result = lookup_guidance("SANDBOX_LAUNCH_DENIED")
+    assert not result["is_live_diagnostic"]
+    assert result["instructions"] in full
+    assert "If the receipt" in result["instructions"]
+    assert result["full_guidance_ref"]["arguments"]["identifier"] == "sandbox"
+    for definition in ERROR_CATALOG.values():
+        if definition.procedure == "sandbox":
+            assert lookup_guidance(definition.name)["instructions"].startswith("## " + definition.name + "\n")
+    for reason in ("NATIVE_LAUNCH_UNCONFIRMED", "NATIVE_CLEANUP_UNCONFIRMED", "INVOCATION_EVIDENCE_UNAVAILABLE"):
+        assert diagnostic_entry(reason) is None
+        result = lookup_guidance(reason)
+        assert result["diagnostic"]["kind"] == "recovery_reason"
+        assert result["instructions"].startswith("## " + reason + "\n")
+        assert not result["is_live_diagnostic"] and not result["authority_granted"]
+
 def test_registered_read_only_api_preserves_pending_decision_and_all_task_state(tmp_path_factory):
     p = process(tmp_path_factory)
     p.pending_decision = {"decision_id": "real-pending", "kind": "permission"}

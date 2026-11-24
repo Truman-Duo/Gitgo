@@ -146,10 +146,13 @@ def test_failed_production_review_cannot_reserve_an_unbounded_replacement():
     with pytest.raises(TaskBudgetExceeded):
         budget.begin_provider_call('reviewer-2')
     budget.release_process('reviewer-2', status='failed')
-    with pytest.raises(TaskBudgetExceeded, match="uncommitted task-tree budget"):
+    with pytest.raises(TaskBudgetExceeded) as blocked:
         budget.register_process(
             "reviewer-3", parent_id="root", actor_kind="reviewer", max_steps=12,
         )
+    assert blocked.value.code == "TASK_TREE_CHILD_ESCROW_UNAVAILABLE"
+    assert blocked.value.details["purpose"] == "verification"
+    assert blocked.value.details["available"]["provider_calls"] == 0
 
 
 def test_streaming_fragment_accounting_matches_cumulative_ascii_estimate():
@@ -198,9 +201,12 @@ def test_implicit_review_allocation_uses_remaining_pool_without_expanding_or_res
         budget.release_process(pid, status='completed')
     before = budget.snapshot()
     # An explicit request is a real admission constraint; never shrink it.
-    with pytest.raises(TaskBudgetExceeded, match='uncommitted task-tree budget'):
+    with pytest.raises(TaskBudgetExceeded) as blocked:
         budget.register_process('explicit', parent_id='root', actor_kind='reviewer', max_steps=14,
             request={'output_tokens': 16384})
+    assert blocked.value.code == 'TASK_TREE_CHILD_ESCROW_UNAVAILABLE'
+    assert blocked.value.details['requested']['output_tokens'] == 16384
+    assert blocked.value.details['available']['output_tokens'] == 15122
     assert budget.snapshot()['process_leases'] == before['process_leases']
     assert budget.snapshot()['used']['by_purpose'] == before['used']['by_purpose']
     lease = budget.register_process('next', parent_id='root', actor_kind='reviewer', max_steps=14)
@@ -214,5 +220,7 @@ def test_implicit_review_allocation_uses_remaining_pool_without_expanding_or_res
     with pytest.raises(TaskBudgetExceeded):
         restored.consume_output_estimate(1, 'next')
     restored.release_process('next', status='completed')
-    with pytest.raises(TaskBudgetExceeded, match='uncommitted task-tree budget'):
+    with pytest.raises(TaskBudgetExceeded) as blocked:
         restored.register_process('exhausted', parent_id='root', actor_kind='reviewer', max_steps=14)
+    assert blocked.value.code == 'TASK_TREE_CHILD_ESCROW_UNAVAILABLE'
+    assert blocked.value.details['available']['output_tokens'] == 0

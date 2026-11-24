@@ -55,6 +55,8 @@ install_transaction() {
   BIN_DIR="$(safe_path "$BIN_DIR")"
   [ ! -e "$SCRIPT_DIR/.gitgo-install-owner" ] && [ ! -L "$SCRIPT_DIR/.gitgo-install-owner" ] ||
     fail "Use an extracted release, not an installed directory"
+  [ ! -e "$SCRIPT_DIR/native-entry" ] && [ ! -L "$SCRIPT_DIR/native-entry" ] ||
+    fail "Release contains installation-owned native entry state"
   [ "$PRODUCT_ID" = gitgo-terminal ] || fail "Unexpected product identity"
   [ "$INSTALL_ROOT" != / ] && [ "$BIN_DIR" != / ] && [ "$BIN_DIR" != "$HOME" ] || fail "Unsafe target"
   contains_path "$INSTALL_ROOT" "$HOME" && fail "Install target contains HOME"
@@ -113,12 +115,16 @@ install_transaction() {
   fi
 
   CREATED_DIRS=(); CREATED_LINKS=(); TXN=""; LOCK=""; PROFILE_TEMP=""
-  PROFILE_TOUCHED=0; PROFILE_EXISTED=0; ROOT_PUBLISHING=0; COMMITTED=0
+  PROFILE_TOUCHED=0; PROFILE_EXISTED=0; ROOT_PUBLISHING=0; COMMITTED=0; NATIVE_CREATED=0
   rollback_install() {
     local status=$? item recovery_failed=0 i
     trap - EXIT INT TERM
     set +e
     if [ "$COMMITTED" -eq 0 ]; then
+      if [ "$NATIVE_CREATED" -eq 1 ] && [ -f "$INSTALL_ROOT/native-entry/owner.json" ]; then
+        "$INSTALL_ROOT/internal/gitgo-host/gitgo-host" --gitgo-internal-role native-entry \
+          --root "$INSTALL_ROOT" --action remove || recovery_failed=1
+      fi
       if [ "$PROFILE_TOUCHED" -eq 1 ]; then
         if [ "$PROFILE_EXISTED" -eq 1 ]; then
           mv "$TXN/profile.previous" "$PROFILE" || recovery_failed=1
@@ -131,7 +137,7 @@ install_transaction() {
           rm "$item" || recovery_failed=1
         fi
       done
-      if [ "$ROOT_PUBLISHING" -eq 1 ] && [ ! -e "$TXN/payload" ] && [ -e "$INSTALL_ROOT" ]; then
+      if [ "$recovery_failed" -eq 0 ] && [ "$ROOT_PUBLISHING" -eq 1 ] && [ ! -e "$TXN/payload" ] && [ -e "$INSTALL_ROOT" ]; then
         if owned_install; then rm -rf "$INSTALL_ROOT" || recovery_failed=1
         else echo "Target ownership changed; retaining recovery files" >&2; recovery_failed=1; fi
       fi
@@ -167,6 +173,11 @@ install_transaction() {
   mkdir "$TXN/payload"
   cp -pR "$SCRIPT_DIR/." "$TXN/payload/"
   owner_record > "$TXN/payload/.gitgo-install-owner"
+  if [ -d "$INSTALL_ROOT/native-entry" ]; then
+    "$INSTALL_ROOT/internal/gitgo-host/gitgo-host" --gitgo-internal-role native-entry \
+      --root "$INSTALL_ROOT" --action check
+    cp -pR "$INSTALL_ROOT/native-entry" "$TXN/payload/native-entry"
+  fi
   # Preserve ownership of PATH blocks written by earlier owned upgrades.
   for name in bash zsh fish; do
     if [ -f "$INSTALL_ROOT/.gitgo-path-$name" ] && [ ! -L "$INSTALL_ROOT/.gitgo-path-$name" ]; then
@@ -209,6 +220,11 @@ install_transaction() {
     PROFILE_TOUCHED=1
     mv "$PROFILE_TEMP" "$PROFILE"
     PROFILE_TEMP=""
+  fi
+  if [ -f "$INSTALL_ROOT/native-entry.json" ]; then
+    [ -f "$INSTALL_ROOT/native-entry/owner.json" ] || NATIVE_CREATED=1
+    "$INSTALL_ROOT/internal/gitgo-host/gitgo-host" --gitgo-internal-role native-entry \
+      --root "$INSTALL_ROOT" --action install
   fi
   COMMITTED=1
   echo "Gitgo installed at: $INSTALL_ROOT"

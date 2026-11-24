@@ -1,0 +1,1 @@
+Finish with existing evidence when the task is satisfied. Ordinary notices can remain queued.

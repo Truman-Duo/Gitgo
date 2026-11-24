@@ -146,10 +146,16 @@ class AgentTool:
     # A protocol migration may still accept saved calls while advertising only
     # its current signature. This changes discovery, never execution authority.
     advertised_parameters: dict | None = None
+    # The registered interface is usable on the first call. Full help is still
+    # discoverable. This changes presentation, never authorization.
+    immediate_interface: bool = False
     # Trusted presentation only: (validated args, full data) -> model view.
     # The full result is retained by the existing evidence store before use.
     model_result: Callable | None = None
     implementation_artifacts: tuple[ImplementationArtifact, ...] = ()
+    # Trusted presentation for an intended invocation. None requests the
+    # current default help for explicit discovery.
+    detail_description: Callable[[dict | None], str] | None = None
 
     def __post_init__(self) -> None:
         self._bound_executor = self.execute

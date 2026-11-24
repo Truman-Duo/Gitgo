@@ -1,5 +1,6 @@
 """child execution protocol tools."""
 from __future__ import annotations
+import json
 from pathlib import Path
 from backend.core.loop.capabilities import CapabilityProfiles
 from backend.core.loop.models import ProcessStatus, RingLevel
@@ -18,6 +19,23 @@ def install(ctx):
     manager = ctx.manager
     _owned_child = ctx.owned_child
     _spawn_child = ctx.spawn_child
+    prepared_children = {}
+
+    def start_prepared_child(child_id):
+        prepared = prepared_children.pop(child_id)
+        try:
+            prepared[0]()
+        except Exception:
+            thread = manager._threads.get(child_id)
+            if thread is None or thread.ident is None:
+                prepared_children[child_id] = prepared
+            raise
+
+    def cancel_prepared_child(child_id, *, preserve_obligation=False):
+        prepared = prepared_children.pop(child_id, None)
+        if prepared is not None:
+            prepared[1](preserve_obligation=preserve_obligation)
+
     def _spawn_child(
         *,
         task_description: str,
@@ -35,14 +53,24 @@ def install(ctx):
         output_interfaces: list[str] | None = None,
         interface_contract: dict | None = None,
         required_for_parent_completion: bool = True,
+        required_for_parent_completion_explicit: bool = False,
         supersedes_process_id: str = "",
         continue_process_id: str = "",
+        continuation_mode: str = "",
+        draft_id: str = "",
         display_name: str = "",
         actor_kind: str = "worker",
         review_target_id: str = "",
         budget_request: dict | None = None,
         retained_boundary: dict | None = None,
         review_evidence_source: dict | None = None,
+        validate_only: bool = False,
+        planned_dependency_ids: tuple[str, ...] = (),
+        start_immediately: bool = True,
+        temporary: bool = False,
+        asset_session=None,
+        asset_binding: dict | None = None,
+        use_accepted_workspace: bool = False,
     ):
         if manager is None:
             raise RuntimeError("AgentProcessManager is unavailable")
@@ -52,7 +80,10 @@ def install(ctx):
             str(item) for item in (depends_on or []) if str(item)
         ))
         for upstream_id in dependency_ids:
-            if _owned_child(upstream_id) is None:
+            if validate_only and upstream_id in planned_dependency_ids:
+                continue
+            upstream = _owned_child(upstream_id)
+            if upstream is None or getattr(upstream, "role", None) == "subagent":
                 raise PermissionError(
                     "depends_on must reference an owned sibling task"
                 )
@@ -73,9 +104,66 @@ def install(ctx):
                     or review_evidence_source.get('owner_process_id') != target.process_id
                     or review_evidence_source.get('owner_task_id') != (target.active_task_id or target.process_id)):
                 raise ValueError('REVIEW_EVIDENCE_SCOPE_MISMATCH')
+        requested_target_files = list(target_files)
         previous_contract = None
         continuation = None
         resume_partial = False
+        asset_scope_retry = []
+        continuation_info = {}
+        retained_workbench_claims = []
+        draft = None
+        scope = None
+        from backend.core.loop.assignment_handoff import (
+            AssignmentHandoffError, draft_event, latest_draft, recorded_scope_change, remaining_tool_calls, validate_draft,
+        )
+        if draft_id:
+            event = draft_event(process, draft_id)
+            _, _, assignment = validate_draft(manager, process, event, closeout=True, reassign=True)
+            if (not start_immediately or dependency_ids or input_interfaces or output_interfaces
+                    or not set(target_files).issubset(assignment["target_files"])):
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_SCOPE_UNSUPPORTED",
+                    "Reassign the pinned work directly, within its original file scope.")
+            draft = event["draft"]
+            scope = assignment.get("scope_change")
+            if scope:
+                retired = scope["retired"]
+                if (set(acceptance_criteria).intersection(retired["acceptance_criteria"])
+                        or set(required_test_ids or []).intersection(retired["required_test_ids"])):
+                    raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_SCOPE_RETIRED",
+                                                 "Omit acceptance criteria and tests retired by the recorded user change.")
+                draft = {**draft, "retained_target_files": list(assignment["target_files"])}
+                for name in ("files", "deleted_files"):
+                    draft[name] = [path for path in draft[name] if path in assignment["target_files"]]
+                draft["test_evidence"] = [row for row in draft["test_evidence"]
+                                          if row["test_id"] not in retired["required_test_ids"]]
+                assignment["required_tool_calls"] = remaining_tool_calls(assignment, draft, scope)
+                draft["remaining_acceptance"] = {**draft["remaining_acceptance"], **scope["remaining"],
+                                                  "required_tool_calls": assignment["required_tool_calls"]}
+            supersedes_process_id = event["source_process_id"]
+            continuation_mode = "remaining"
+            target_files = assignment["target_files"]
+            acceptance_criteria = list(dict.fromkeys([*assignment["acceptance_criteria"], *acceptance_criteria]))
+            required_test_ids = list(dict.fromkeys([*assignment["required_test_ids"], *(required_test_ids or [])]))
+            from backend.core.loop.continuation_contract import _tool_requirements
+            required_tool_calls = _tool_requirements(assignment["required_tool_calls"], required_tool_calls)
+            task_description += f"\n\nResume from immutable draft v{draft['version']} ({draft_id}). Validate the result again."
+            test_targets = [{"test_id": row["test_id"], "target": row["target"]}
+                            for row in draft["test_evidence"]
+                            if row["test_id"] in required_test_ids and row.get("target")]
+            if test_targets:
+                task_description += ("\nUse run_test with these previously observed targets for retained tests. "
+                                     "The old run is historical, so obtain current evidence on the retained files.\n"
+                                     + json.dumps(test_targets[:12], ensure_ascii=False))
+        elif predecessor := continue_process_id or supersedes_process_id:
+            if recorded_scope_change(process, predecessor):
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_SCOPE_RETIRED",
+                    "The original assignment is retired. Reassign from its bound draft_id or use "
+                    "supersedes_process_id after closeout to preserve and reassign the retained files.")
+            if latest_draft(process, predecessor):
+                raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_VERSION_CHANGED",
+                    "Select the exact draft ID to reassign this execution.")
+        if continuation_mode and not (continue_process_id or supersedes_process_id):
+            raise ValueError("continuation_mode requires continue_process_id or supersedes_process_id")
         if continue_process_id:
             from backend.core.loop.task_contract import get_task_contract
             requirements = get_task_contract(process).get("host_requirements") or {}
@@ -87,11 +175,24 @@ def install(ctx):
             if supersedes_process_id and supersedes_process_id != continue_process_id:
                 raise ValueError("continuation must supersede the same previous execution")
             previous_contract = process.delegated_contracts.get(continue_process_id) or {}
+            if previous_contract.get("returned_assignment"):
+                from backend.core.loop.continuation_contract import ContinuationAdmissionError
+                raise ContinuationAdmissionError("ASSIGNMENT_HANDOFF_STALE",
+                    "This assignment was already returned to its supervisor.", process_id=continue_process_id)
             if previous_contract.get("superseded_by"):
                 raise ValueError("CONTINUATION_ALREADY_SUPERSEDED: continue the latest execution of this session")
+            scoped = bool((previous_contract.get("continuation") or {}).get("scope_change_id"))
+            from backend.core.loop.asset_maintenance import asset_retry_scope
+            if continuation_mode == "remaining":
+                asset_scope_retry = asset_retry_scope(continuation, asset_binding, previous_contract)
+            if (continuation.runtime_preferences.get("asset_execution") and not asset_scope_retry
+                    and not continuation.worktree.get("promoted") and not scoped):
+                raise AssignmentHandoffError("ASSET_DELIVERY_REQUIRED",
+                    "Resume unfinished maintenance through asset_maintenance wake for its current asset.")
+            recoverable = {"leased", "scope_blocked"} if scoped or asset_scope_retry else {"leased"}
             resume_partial = bool(
                 continuation.worktree.get("isolated") and not continuation.worktree.get("promoted")
-                and continuation.worktree.get("state") == "leased"
+                and continuation.worktree.get("state") in recoverable
                 and continuation.status in {ProcessStatus.FAILED, ProcessStatus.TIMED_OUT, ProcessStatus.CANCELLED}
                 and actor_kind == "worker" and task_kind == "action"
                 and profile_id == continuation.capability_profile_id == "development.workspace"
@@ -116,12 +217,84 @@ def install(ctx):
             previous_contract = process.delegated_contracts.get(supersedes_process_id)
             if previous is None or previous_contract is None:
                 raise ValueError("supersedes_process_id is not an owned delegated task")
-            if previous.status in {
-                ProcessStatus.RUNNING, ProcessStatus.WAITING,
-                ProcessStatus.CANCELLING, ProcessStatus.AWAITING_USER,
-            }:
-                raise ValueError("cannot supersede a non-terminal delegated task")
+            from backend.core.loop.continuation_contract import compile_continuation
+            effective_previous = previous_contract if draft is None else {
+                **previous_contract, "output_interfaces": assignment["output_interfaces"],
+                "interface_contract": assignment["interface_contract"],
+            }
+            if scope:
+                effective_previous.update(scope["remaining"])
+                effective_previous["required_tool_calls"] = assignment["required_tool_calls"]
+            retained = compile_continuation(previous, effective_previous, process, {
+                "task_kind": task_kind, "profile_id": profile_id,
+                "acceptance_criteria": acceptance_criteria, "target_files": target_files,
+                "allowed_tools": allowed_tools, "required_test_ids": required_test_ids,
+                "required_tool_calls": required_tool_calls, "depends_on": dependency_ids,
+                "input_interfaces": input_interfaces, "output_interfaces": output_interfaces,
+                "interface_contract": interface_contract,
+                "required_for_parent_completion": required_for_parent_completion,
+                "required_for_parent_completion_explicit": required_for_parent_completion_explicit,
+            }, mode=continuation_mode)
+            acceptance_criteria = retained["acceptance_criteria"]
+            target_files = retained["target_files"]
+            allowed_tools = retained["allowed_tools"]
+            required_test_ids = retained["required_test_ids"]
+            required_tool_calls = retained["required_tool_calls"]
+            dependency_ids = retained["depends_on"]
+            input_interfaces, output_interfaces = retained["input_interfaces"], retained["output_interfaces"]
+            required_for_parent_completion = retained["required_for_parent_completion"]
+            continuation_info = retained["continuation"]
+            if draft is not None:
+                continuation_info["draft_id"] = draft_id
+            inherited = previous_contract.get("continuation") or {}
+            scope_id = (scope or {}).get("change_id") or inherited.get("scope_change_id")
+            if scope_id and continuation_info["retained_obligations"]:
+                retired = {key: list(dict.fromkeys([*(inherited.get("retired") or {}).get(key, []),
+                                                   *((scope or {}).get("retired") or {}).get(key, [])]))
+                           for key in ("target_files", "acceptance_criteria", "required_test_ids")}
+                targets = (scope or {}).get("remaining", {}).get("target_files", previous_contract["target_files"])
+                if (set(target_files) - set(targets) or set(acceptance_criteria).intersection(retired["acceptance_criteria"])
+                        or set(required_test_ids).intersection(retired["required_test_ids"])):
+                    raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_SCOPE_RETIRED",
+                                                "Keep the exact retained files, criteria and tests when continuing this assignment.")
+                if not draft and not resume_partial:
+                    raise AssignmentHandoffError("ASSIGNMENT_HANDOFF_DRAFT_UNAVAILABLE",
+                                                "Use the previous execution's retained checkout or its own immutable draft.")
+                if draft:
+                    draft = {**draft, "retained_target_files": targets}
+                continuation_info.update(scope_change_id=scope_id, retired=retired,
+                                         draft_id=draft_id or inherited["draft_id"])
+                # Only the revised description and retained criteria become
+                # instructions. The original full assignment stays historical.
+                continuation_info["retained_assignment"] = task_description
+            retained_workbench_claims = list(retained.get("required_workbench_claims") or [])
+            if continuation_info["retained_obligations"]:
+                old_dependencies = list(previous_contract.get("depends_on") or [])
+                resolved_dependencies = manager.resolve_retained_dependencies(process, old_dependencies)
+                dependency_ids = list(dict.fromkeys([
+                    *resolved_dependencies,
+                    *(item for item in dependency_ids if item not in old_dependencies),
+                ]))
+                if resume_partial and dependency_ids != continuation.depends_on:
+                    raise ValueError("CONTINUATION_BASE_MISMATCH: retained checkout pins its original dependency executions")
+                if old_dependencies != resolved_dependencies:
+                    continuation_info["dependency_rebinding"] = {
+                        "previous": old_dependencies, "effective": resolved_dependencies}
+            for upstream_id in dependency_ids:
+                if _owned_child(upstream_id) is None and not (validate_only and upstream_id in planned_dependency_ids):
+                    raise PermissionError("retained depends_on must reference an owned sibling task")
+            interface_contract = retained["interface_contract"]
+            if continuation_info["retained_obligations"] and not continuation_info.get("scope_change_id"):
+                task_description += "\n\nRetained unfinished assignment:\n" + continuation_info["retained_assignment"]
+            if continuation_info["retained_obligations"] and acceptance_criteria:
+                task_description += "\n\nEffective acceptance criteria:\n- " + "\n- ".join(acceptance_criteria)
+        if task_kind == "action" and continuation_info.get("retained_obligations"):
+            from backend.core.loop.task_maintenance import retained_execution_block
+            if blocked := retained_execution_block(process):
+                raise AssignmentHandoffError("TASK_MAINTENANCE_REQUIRED",
+                    "Resolve this supervisor prerequisite before starting the retained assignment. " + blocked[1])
         normalised_targets = []
+        requested_normalised_targets = []
         workspace_root = Path(workspace_path or process.worktree_path).resolve()
         for item in target_files:
             value = str(item).strip().replace("\\", "/")
@@ -129,6 +302,8 @@ def install(ctx):
                 value = value[2:]
             if value == "*":
                 normalised_targets.append("*")
+                if item in requested_target_files:
+                    requested_normalised_targets.append("*")
                 continue
             candidate = Path(value)
             if not candidate.is_absolute():
@@ -143,11 +318,15 @@ def install(ctx):
                 ) from exc
             if value and value not in normalised_targets:
                 normalised_targets.append(value)
+            if value and item in requested_target_files and value not in requested_normalised_targets:
+                requested_normalised_targets.append(value)
         if resume_partial:
             old_targets = {str(item).replace("\\", "/").removeprefix("./")
                            for item in previous_contract.get("target_files", [])}
-            if "*" not in normalised_targets and (not old_targets or not old_targets.issubset(normalised_targets)):
+            if requested_target_files and "*" not in requested_normalised_targets and (not old_targets or not old_targets.issubset(requested_normalised_targets)):
                 raise ValueError("CONTINUATION_SCOPE_MISMATCH: include the retained task's target files or choose a fresh task")
+            if asset_scope_retry and set(normalised_targets) != set(asset_scope_retry):
+                raise ValueError("CONTINUATION_SCOPE_MISMATCH: retry an asset on its original scoped paths")
         claims = [f"filesystem:{item}" for item in normalised_targets]
         if not claims and profile_id == "development.workspace":
             claims = ["filesystem:*"]
@@ -169,7 +348,11 @@ def install(ctx):
         tool_scope_mode = str(tool_scope_mode or "profile").strip().lower()
         if tool_scope_mode not in {"profile", "test_only"}:
             raise PermissionError("tool_scope_mode must be profile or test_only")
-        if requested_tools:
+        if continuation_info.get("retained_obligations"):
+            # Empty is an issued empty scope here, not the legacy profile default.
+            effective_tools = list(dict.fromkeys(requested_tools))
+            tool_scope_source = "retained_assignment"
+        elif requested_tools or temporary:
             effective_tools = list(dict.fromkeys(requested_tools))
             tool_scope_source = "supervisor_allowlist"
         elif tool_scope_mode == "test_only":
@@ -187,7 +370,7 @@ def install(ctx):
             # Exact target files make full-workspace scan/status/list calls
             # unnecessary.  Retain the bounded read and governance queries.
             bounded_observe = {
-                "read_file", "search_text", "artifact_read", "dependency_query",
+                "read_file", "search_text", "artifact_read", "dependency_query", "run_subagent", "read_child_artifact",
                 "context_open", "context_search", "contract_detect_drift",
                 "contract_get_impact", "contract_get_changed_symbols",
                 "lesson_search", "lesson_list", "workbench", "decision_evidence",
@@ -240,6 +423,9 @@ def install(ctx):
             ):
                 if claim not in claims:
                     claims.append(claim)
+        accepted_basis = (previous_contract.get("accepted_workspace_basis") or {}) if resume_partial or draft else {}
+        if use_accepted_workspace and task_kind == "action" and profile_id == "development.workspace":
+            accepted_basis = manager.accepted_workspace_basis(process)
         parent_context, _parent_context_version = process.read_context_snapshot()
         from backend.core.loop.context_policy import context_admission_policy
         from backend.core.loop.coordination import relationship_policy
@@ -261,11 +447,14 @@ def install(ctx):
             "context_policy": context_admission_policy(actor_kind, task_kind),
             "relationship_policy": relation,
             "task_contract": {
+                "task_kind": task_kind,
+                "required_for_parent_completion": bool(required_for_parent_completion),
                 "acceptance_criteria": acceptance_criteria,
                 "target_files": target_files,
                 "parent_process_id": process.process_id,
                 "required_test_ids": list(required_test_ids or []),
                 "required_tool_calls": normalized_required_calls,
+                **({"required_workbench_claims": retained_workbench_claims} if retained_workbench_claims else {}),
                 "allowed_tools": list(effective_tools),
                 "tool_scope_source": tool_scope_source,
                 "tool_scope_mode": tool_scope_mode,
@@ -274,11 +463,26 @@ def install(ctx):
                 "output_interfaces": list(output_interfaces or []),
                 "interface_contract": dict(interface_contract or {}),
                 "relationship_policy": relation,
+                **({"accepted_workspace_basis": accepted_basis} if accepted_basis else {}),
+                **({"continuation": continuation_info} if continuation_info else {}),
+                **({"assignment_draft": draft} if draft else {}),
             },
         }
+        if temporary:
+            for key in ("signals", "evidence_candidates", "brief", "context_refs"):
+                child_context.pop(key)
+        if continuation is not None:
+            manager.validate_session_continuation(continuation.session)
+        if asset_session is not None:
+            if continuation is not None or not asset_binding or not manager.worktree_manager:
+                raise ValueError("Asset work requires a fresh isolated execution in the maintainer's session.")
+            manager.validate_session_continuation(asset_session)
+        if validate_only:
+            return {"max_steps": max(1, min(max_steps, 200)),
+                    "budget_request": dict(budget_request or {})}
         child = manager.fork(
             parent_id=process.process_id,
-            role="reviewer" if actor_kind == "reviewer" else "executor",
+            role="subagent" if temporary else ("reviewer" if actor_kind == "reviewer" else "executor"),
             tool_registry=__import__(
                 "backend.core.loop.tools", fromlist=["ToolRegistry"]
             ).ToolRegistry(effective_tools),
@@ -296,8 +500,10 @@ def install(ctx):
             required_test_ids=list(required_test_ids or []),
             depends_on=dependency_ids,
             child_budget_request=dict(budget_request or {}),
-            session=continuation.session if continuation is not None else None,
+            session=asset_session or (continuation.session if continuation is not None else None),
         )
+        if asset_binding:
+            child.runtime_preferences["asset_execution"] = dict(asset_binding)
         if display_name:
             # A may name its worker; control characters cannot reach the TUI.
             name = " ".join("".join(c for c in display_name if c.isprintable()).split())[:48]
@@ -314,6 +520,7 @@ def install(ctx):
             "target_files": list(target_files),
             "required_test_ids": list(required_test_ids or []),
             "required_tool_calls": normalized_required_calls,
+            **({"required_workbench_claims": retained_workbench_claims} if retained_workbench_claims else {}),
             "allowed_tools": list(effective_tools),
             "tool_scope_source": tool_scope_source,
             "tool_scope_mode": tool_scope_mode,
@@ -325,23 +532,31 @@ def install(ctx):
             "interface_contract": dict(interface_contract or {}),
             "relationship_policy": relation,
             "budget_lease": dict(child.budget_lease or {}),
+            **({"accepted_workspace_basis": accepted_basis} if accepted_basis else {}),
+            **({"continuation": continuation_info} if continuation_info else {}),
+            **({"assignment_draft": draft} if draft else {}),
         }
-        process.register_child_contract(
-            child.process_id, contract,
-            supersedes_process_id=supersedes_process_id,
-        )
+        if temporary:
+            from backend.core.loop.assignment_handoff import subagent_scope_digest
+            contract["subagent_owner_contract"] = subagent_scope_digest(process)
+        scoped_retry = bool(continuation_info.get("scope_change_id") and not draft)
+        if not draft and not scoped_retry:
+            process.register_child_contract(
+                child.process_id, contract, supersedes_process_id=supersedes_process_id)
 
         def emit_child_event(event: dict) -> None:
             if on_stream_event is None:
                 return
             enriched = dict(event)
             enriched.setdefault("process_id", child.process_id)
-            enriched["parent_process_id"] = process.process_id
-            enriched["root_process_id"] = (
-                process.process_id if process.parent_id is None else process.parent_id
-            )
-            enriched["task_id"] = child.active_task_id
-            enriched["actor_kind"] = child.actor_kind
+            if enriched["process_id"] == child.process_id:
+                enriched["parent_process_id"] = process.process_id
+                enriched["root_process_id"] = process.parent_id or process.process_id
+                enriched["task_id"] = child.active_task_id
+                enriched["actor_kind"] = child.actor_kind
+                enriched["role"] = child.role
+                if temporary:
+                    enriched["temporary_subagent"] = True
             on_stream_event(enriched)
 
         def run_child(*, resuming=False, instruction=""):
@@ -373,6 +588,8 @@ def install(ctx):
                         child, review_target_id=review_target_id,
                         continue_process_id=continue_process_id if resume_partial else "",
                     )
+                    if temporary and not child.worktree.get("isolated"):
+                        raise RuntimeError("A patch subagent requires an isolated Git checkout.")
                     if access_service is not None:
                         from backend.core.loop.worktree import WorktreeLease
                         lifecycle_stage = "prepare_sandbox_access"
@@ -408,8 +625,9 @@ def install(ctx):
                     return result
                 lifecycle_stage = "assemble_upstream_context"
                 child_context_now, _ = child.read_context_snapshot()
-                upstream_context = []
-                for upstream in manager.dependency_closure(child):
+                dependencies = manager.dependency_closure(child)
+                upstream_context = manager.returned_dependency_outcomes(child, dependencies)
+                for upstream in dependencies:
                     upstream_context.append({
                         "process_id": upstream.process_id,
                         "task_id": upstream.active_task_id,
@@ -418,6 +636,7 @@ def install(ctx):
                         "result_commit": str(
                             (upstream.worktree or {}).get("result_commit") or ""
                         ),
+                        "changed_files": list((upstream.worktree or {}).get("changed_files") or []),
                     })
                 child_context_now["upstream_outcomes"] = upstream_context
                 if child.worktree:
@@ -506,7 +725,8 @@ def install(ctx):
                 child.result = {
                     "status": "failed",
                     "process_id": child.process_id,
-                    "code": "CHILD_LIFECYCLE_FAILED",
+                    "code": (exc.code if getattr(exc, "code", None) == "ASSIGNMENT_HANDOFF_DELIVERY_OUTSIDE_SCOPE"
+                             else "CHILD_LIFECYCLE_FAILED"),
                     "error": str(exc),
                     "metadata": {
                         "automatic_replay_suppressed": True,
@@ -533,11 +753,18 @@ def install(ctx):
                             result.clear(); result.update(failure)
                         child.result = failure
                         emit_child_event({"event": "worktree_cleanup_failed", "reason": str(cleanup_exc)})
-                if (actor_kind == "reviewer" and child.worktree.get("isolated")
+                if ((actor_kind == "reviewer" or temporary) and child.worktree.get("isolated")
                         and child.status != ProcessStatus.AWAITING_USER):
                     try:
-                        manager.dispose_process_worktree(child, keep_ref=False)
+                        keep_result = temporary and child.status == ProcessStatus.COMPLETED and child.worktree.get("state") == "sealed"
+                        manager.dispose_process_worktree(child, keep_ref=keep_result)
+                        if temporary and isinstance(child.result, dict):
+                            child.result.setdefault("metadata", {})["worktree"] = dict(child.worktree)
                     except Exception as cleanup_exc:
+                        if temporary:
+                            transition(child, ProcessStatus.FAILED)
+                            child.result = {"status": "failed", "code": "SUBAGENT_CLEANUP_FAILED",
+                                            "error": str(cleanup_exc)}
                         emit_child_event({
                             "event": "worktree_cleanup_failed",
                             "reason": str(cleanup_exc),
@@ -571,15 +798,78 @@ def install(ctx):
             # worktrees have distinct data planes, so unrelated writers
             # must not be serialized by their logical target paths.
             claims = [f"worktree:{child.process_id}"]
-        manager.start(
-            child.process_id,
-            run_child,
-            resources=claims,
-            resource_mode=resource_mode,
-            on_terminal=publish_terminal,
-            resume_target=lambda instruction: run_child(resuming=True, instruction=instruction),
-        )
+        def start_child():
+            child.runtime_preferences.pop("execution_prepared", None)
+            try:
+                manager.start(
+                    child.process_id, run_child, resources=claims,
+                    resource_mode=resource_mode, on_terminal=publish_terminal,
+                    resume_target=lambda instruction: run_child(resuming=True, instruction=instruction),
+                )
+            except Exception:
+                thread = manager._threads.get(child.process_id)
+                if not start_immediately and (thread is None or thread.ident is None):
+                    child.runtime_preferences["execution_prepared"] = True
+                raise
+
+        def cancel_prepared(*, preserve_obligation=False):
+            # Only a never-started runner may use this cancellation path. Keep
+            # admission history and consumed agent count; refund unused escrow.
+            thread = manager._threads.get(child.process_id)
+            if thread is not None and thread.ident is not None:
+                raise RuntimeError("DAG_PREPARED_CHILD_ALREADY_STARTED")
+            child.runtime_preferences.pop("execution_prepared", None)
+            child.cancellation_event.set()
+            transition(child, ProcessStatus.CANCELLED)
+            child.result = {"process_id": child.process_id, "status": "cancelled",
+                            "code": "DAG_ADMISSION_CANCELLED", "execution_state": "not_started"}
+            if child.task_budget is not None:
+                child.budget_lease = child.task_budget.release_process(child.process_id, status="cancelled") or {}
+            with process._coordination_lock:
+                contract = process.delegated_contracts[child.process_id]
+                if not preserve_obligation:
+                    contract["required_for_parent_completion"] = False
+                contract["admission_rolled_back"] = not preserve_obligation
+                contract["cancelled_before_start"] = True
+                previous = process.delegated_contracts.get(supersedes_process_id)
+                if (not preserve_obligation and previous is not None
+                        and previous.get("superseded_by") == child.process_id):
+                    previous.pop("superseded_by", None)
+            try:
+                publish_terminal()
+                child.lifecycle_finalized = True
+            except Exception as exc:
+                child.lifecycle_finalized = False
+                child.result.update(code="SESSION_CHECKPOINT_FAILED", error=str(exc),
+                    metadata={"durable_terminal_barrier": False, "automatic_replay_suppressed": True})
+                raise
+            finally:
+                manager.notify_state_changed(child.process_id)
+
+        if draft or scoped_retry:
+            from backend.core.loop.assignment_handoff import commit_reassignment
+            child.runtime_preferences["execution_prepared"] = True
+            try:
+                commit_reassignment(manager, process, child, event if draft else None, contract, previous=continuation)
+                start_child()
+            except Exception as exc:
+                from backend.core.loop.lifecycle import block_uncertain_checkpoint
+                thread = manager._threads.get(child.process_id)
+                if isinstance(exc, AssignmentHandoffError) and exc.code == "ASSIGNMENT_HANDOFF_COMMIT_UNKNOWN":
+                    block_uncertain_checkpoint(child)
+                elif thread is None or thread.ident is None:
+                    if child.process_id not in process.delegated_contracts:
+                        process.register_child_contract(child.process_id, contract)
+                    cancel_prepared()
+                raise
+        elif start_immediately:
+            start_child()
+        else:
+            child.runtime_preferences["execution_prepared"] = True
+            prepared_children[child.process_id] = (start_child, cancel_prepared)
         return child
 
 
     ctx.spawn_child = _spawn_child
+    ctx.start_prepared_child = start_prepared_child
+    ctx.cancel_prepared_child = cancel_prepared_child

@@ -16,9 +16,12 @@ def save_worktree_state(self: WorktreesPort, record: dict) -> None:
         for key in (
             "upstream_commits", "changed_files", "runtime_offsets", "error", "created_at",
             "updated_at", "isolated", "promoted", "promoted_at",
-            "resumed_from_process_id", "continuation_commit", "input_dependencies",
+            "resumed_from_process_id", "continuation_commit", "input_dependencies", "retained_result",
+            "macos_binding",
         )
     }
+    if record.get("accepted_commit"):
+        metadata["accepted_commit"] = record["accepted_commit"]
     descriptor = self._write_blob_file(
         self._encoded_object(metadata), media_type="application/json"
     )
@@ -58,7 +61,7 @@ def save_worktree_state(self: WorktreesPort, record: dict) -> None:
                     worktree_id, self.paths.project_id,
                     task_id if known_task is not None else None,
                     str(record.get("path") or ""),
-                    str(record.get("result_commit") or record.get("snapshot_commit") or ""),
+                    str(record.get("result_commit") or record.get("accepted_commit") or record.get("snapshot_commit") or ""),
                     str(record.get("state") or "unknown"),
                     str(record.get("created_at") or now), now, process_id,
                     str(record.get("mode") or "write"),

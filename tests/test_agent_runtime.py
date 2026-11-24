@@ -29,7 +29,7 @@ from backend.core.loop.executor import (
 )
 from backend.core.loop.manager import AgentProcessManager, SessionStore
 from backend.core.loop.mailbox import AgentMailbox, MailboxClosedError
-from backend.core.loop.models import ProcessStatus, RingLevel
+from backend.core.loop.models import AgentProcess, ProcessStatus, RingLevel
 from backend.core.loop.outcome import OutcomeStatus, TaskOutcome
 from backend.core.loop.runtime import AgentRuntimeFactory, RuntimeSpec
 from backend.core.loop.tools import ToolRegistry
@@ -93,11 +93,11 @@ class LoopStatusProjectionTests(unittest.TestCase):
             def maintain_cas(self):  # pragma: no cover
                 raise AssertionError("must not maintain CAS after a failed projection")
 
-        live_b = SimpleNamespace(
+        live_b = AgentProcess(
             process_id="live-b",
             role="worker",
-            ring_level=SimpleNamespace(value=3),
-            status=SimpleNamespace(value="running"),
+            ring_level=RingLevel.RING_3,
+            status=ProcessStatus.RUNNING,
             steps_used=1,
             max_steps=10,
             parent_id="root-a",
@@ -107,8 +107,7 @@ class LoopStatusProjectionTests(unittest.TestCase):
             worktree={},
             pending_decision=None,
             recovery=None,
-            session=None,
-            coordination_snapshot=lambda: ([], {}, {}),
+            session=AgentSession(),
         )
         emitted: list[dict] = []
         with patch("backend.core.history.HistoryManager.load", return_value=[]):
@@ -532,7 +531,8 @@ class PromptAndReasoningStateTests(unittest.TestCase):
             process=process, tools={}, workspace_path="C:/workspace",
         )
 
-        self.assertIn("Call request_self_execute now", text)
+        self.assertIn("If you keep the accepted self_execute route and need protected tools", text)
+        self.assertIn("revise before requesting the lease", text)
         self.assertIn("pre-lease surface lacks the tool", text)
         self.assertIn("is not evidence that command, file or test capability is unsupported", text)
 
@@ -582,7 +582,8 @@ class PromptAndReasoningStateTests(unittest.TestCase):
         ])
 
         self.assertIn("surface_phase: contract_admission", envelope)
-        self.assertIn("call declare_task_contract now", envelope)
+        self.assertIn("Declare the task before effectful execution", envelope)
+        self.assertIn("multiple reasoning steps alone do not require execution admission", envelope)
         self.assertIn("safe read-only evidence and public-research", envelope)
         self.assertIn("Host will rebuild the appropriate surface", envelope)
         self.assertNotIn("mimo-v2.5", envelope)
@@ -781,7 +782,7 @@ class PromptAndReasoningStateTests(unittest.TestCase):
         self.assertNotIn("web_search", selected)
         self.assertIn("delegate_task", selected)
 
-    def test_supervisor_prompt_routes_bounded_work_to_self_and_iterations_to_owner(self):
+    def test_supervisor_prompt_checks_maintenance_responsibility_and_delegation_value(self):
         process = AgentRuntimeFactory.create(RuntimeSpec(
             role="supervisor", actor_kind="supervisor",
             capability_profile_id="supervisor.control",
@@ -795,9 +796,9 @@ class PromptAndReasoningStateTests(unittest.TestCase):
             process=process, tools={}, workspace_path="C:/workspace",
         )
 
-        self.assertIn("default to self-execution for bounded one-owner work", prompt)
-        self.assertIn("continue that B by process_id under owner routing", prompt)
-        self.assertIn("Do not create a B merely because you are A", prompt)
+        self.assertIn("Check existing maintenance responsibility when routing follow-up work", prompt)
+        self.assertIn("Use B when the marginal value comes from genuine parallel work", prompt)
+        self.assertIn("For direct execution, use the task-scoped lease", prompt)
 
 
 class HostCompletionTests(unittest.TestCase):
@@ -942,6 +943,15 @@ class HostCompletionTests(unittest.TestCase):
                 process, "TASK_COMPLETE", [],
             ).allowed)
 
+    def test_missing_test_receipt_explains_how_to_use_formal_test_tool(self):
+        process = self._action_process()
+        process.completion_claim = CompletionClaim.from_args({
+            "result": "done", "verification": [{"kind": "test", "test_id": "unit:core"}],
+        }, step=2, process=process)
+        denied = HostCompletionEvaluator.evaluate(process, "TASK_COMPLETE", [])
+        self.assertFalse(denied.allowed)
+        self.assertTrue(any("run_test" in reason and "test_id" in reason for reason in denied.reasons))
+
     def test_structured_dynamic_evidence_requires_matching_host_receipts(self):
         process = self._action_process()
         process.tool_receipts.append({
@@ -1052,10 +1062,12 @@ class HostCompletionTests(unittest.TestCase):
         }
 
         class FailureReportingProvider:
+            calls = 0
             def stream_chat(self, *_args, **_kwargs):
+                self.calls += 1
                 yield {"choices": [{"delta": {"tool_calls": [{
                     "index": 0,
-                    "id": "call-failed-supervision",
+                    "id": f"call-failed-supervision-{self.calls}",
                     "function": {
                         "name": "complete_supervision",
                         "arguments": json.dumps({
@@ -1070,7 +1082,12 @@ class HostCompletionTests(unittest.TestCase):
         ))
         self.assertEqual(outcome.status, OutcomeStatus.FAILED)
         self.assertEqual(outcome.error.code, "SUPERVISED_DELIVERY_FAILED")
-        self.assertEqual(outcome.steps_used, 1)
+        # The deferred contract is read once, then the actual completion
+        # closes the failed delivery; there is no repeated completion loop.
+        self.assertEqual(outcome.steps_used, 2)
+        contexts = [m for m in supervisor.session.messages if m.get('context_purpose') == 'tool_contract']
+        self.assertEqual(len(contexts), 1)
+        self.assertFalse(contexts[0]['data']['executed'])
         self.assertIn("Host could not seal", outcome.response)
 
 

@@ -1,0 +1,4 @@
+## Shared evidence values
+1. Process value_bindings in order. Each key is a JSON Pointer to a null placeholder inside payload. The value is a pointer to the original string, object or array in that same payload.
+2. Substitute an exact copy. Expand earlier bindings before following a pointer through them.
+3. Quote exact resolved text and keep its original source and authority.
