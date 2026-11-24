@@ -8,9 +8,11 @@ import ctypes as C
 from ctypes import wintypes
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from uuid import uuid4
 
 from .checker import CurrentInstallation, ReplayState, check_for_update
@@ -130,13 +132,21 @@ def ready_candidate(current, policy, verifier, transport, previous=None):
 
 def _health_check(candidate, profile, version):
     ntfs.create_private_directory(profile)
+    env = isolated_environment(profile)
+    # The launcher creates its own private extraction directory. Use the same
+    # temporary root as a normal launch to avoid nesting the complete payload
+    # under a potentially long portable executable path.
+    temp = tempfile.gettempdir()
+    env.update(TEMP=temp, TMP=temp, TMPDIR=temp)
     try:
-        result = subprocess.run([str(candidate), "--version"], cwd=profile, env=isolated_environment(profile),
+        result = subprocess.run([str(candidate), "--version"], cwd=profile, env=env,
                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         if result.returncode or result.stdout.strip() != f"Gitgo {version}":
             reject("UPDATE_HEALTH_FAILED", "Portable candidate did not start as the signed version")
     except (OSError, subprocess.TimeoutExpired):
         reject("UPDATE_HEALTH_FAILED", "Portable candidate failed the startup check")
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
 
 
 def apply(target, state, original, current, policy, verifier, transport, *, health_check=_health_check):
