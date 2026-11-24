@@ -107,6 +107,26 @@ def test_unknown_matching_filename_is_not_adopted_or_removed(native_payload):
     assert path.is_symlink() if link_target else path.read_bytes() == data
 
 
+def test_desktop_shortcut_is_optional_owned_and_never_replaces_user_file(native_payload):
+    root, home, environment, shortcut = native_payload
+    if entry._context(root)[2] != "windows":
+        pytest.skip("Windows shortcut option")
+    desktop = home / "Desktop"
+    desktop.mkdir()
+    link = desktop / "Gitgo.lnk"
+    assert len(install(native_payload)["entries"]) == 2
+    assert not link.exists()
+    link.write_bytes(b"existing shortcut")
+    options = dict(home=home, environment=environment, shortcut_writer=shortcut, desktop_folder=desktop)
+    assert entry.install_entries(root, **options)["desktop_shortcut"]["state"] == "conflict"
+    assert link.read_bytes() == b"existing shortcut"
+    link.unlink()
+    result = entry.install_entries(root, **options)
+    assert result["desktop_shortcut"] == {"state": "ready", "path": str(link)}
+    assert link.is_file() and entry.install_entries(root, **options) == result
+    assert entry.remove_entries(root)["state"] == "removed" and not link.exists()
+
+
 def test_user_changes_block_cleanup_before_other_owned_files_are_deleted(native_payload):
     root, _, _, _ = native_payload
     result = install(native_payload)

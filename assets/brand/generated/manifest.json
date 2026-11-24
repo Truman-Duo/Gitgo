@@ -4,11 +4,11 @@
     "sha256": "ed24abd2ea22f97c2c3964dd0103be41006b80e9d3deaf2fcf11a5ee93b72d9a"
   },
   "recipe": {
-    "version": 2,
+    "version": 3,
     "renderer": "@resvg/resvg-wasm",
     "renderer_version": "2.6.2",
     "renderer_wasm_sha256": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
-    "converter_sha256": "60153a7ca1e891ec20dc17940682cf57be439742412cd5a616d10bd3f36da5bf",
+    "converter_sha256": "5dfb64e87757de702acf8823ab3ed65768ddd8fafad439f791a49a822c93592d",
     "sizes": [
       16,
       20,
@@ -22,7 +22,8 @@
       1024
     ],
     "geometry": "source-viewBox",
-    "background": "transparent"
+    "background": "transparent",
+    "windows_background": "warm-light-rounded-tile"
   },
   "files": [
     {
@@ -87,8 +88,8 @@
     },
     {
       "name": "gitgo.ico",
-      "sha256": "3fe832fd6f67900441c464dd325cafbd192709c4154ab1f9af46c5959faa459d",
-      "bytes": 130166
+      "sha256": "e0e2471f5717f7a8b660928e275e08e8c3fd49a0467e5495d398b4e8743c75df",
+      "bytes": 105039
     },
     {
       "name": "gitgo.icns",

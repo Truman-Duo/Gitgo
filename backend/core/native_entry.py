@@ -138,11 +138,14 @@ def _validate(root, record):
     token = _hash(str(root).encode())[:12]
     platform = record.get("platform")
     installer_shortcut = platform == "windows" and record.get("shortcut_owner") == "installer"
+    desktop_entries = [entry for entry in record["entries"] if entry.get("desktop") is True]
+    if desktop_entries and (platform != "windows" or installer_shortcut or len(desktop_entries) != 1):
+        raise NativeEntryError("NATIVE_ENTRY_OWNERSHIP_INVALID")
     expected_sources = ({"gitgo.desktop", *("brand/gitgo-" + str(size) + ".png"
         for size in (16, 20, 24, 32, 48, 64, 128, 256, 512, 1024))} if platform == "linux"
         else {"terminal-profile.json"} if installer_shortcut
         else {"terminal-profile.json", "Gitgo.lnk"} if platform == "windows" else set())
-    if (len(record["entries"]) != {"linux": 11, "windows": 1 if installer_shortcut else 2, "macos": 1}.get(platform)
+    if (len(record["entries"]) - len(desktop_entries) != {"linux": 11, "windows": 1 if installer_shortcut else 2, "macos": 1}.get(platform)
             or len({entry["path"] for entry in record["entries"]}) != len(record["entries"])
             or {entry.get("source") for entry in record["entries"] if entry["kind"] == "file"} != expected_sources):
         raise NativeEntryError("NATIVE_ENTRY_OWNERSHIP_INVALID")
@@ -150,7 +153,11 @@ def _validate(root, record):
         path = Path(entry["path"])
         if not path.is_absolute() or ".." in path.parts:
             raise NativeEntryError("NATIVE_ENTRY_OWNERSHIP_INVALID")
-        if entry["kind"] == "link":
+        if entry in desktop_entries:
+            if (entry["kind"] != "file" or entry.get("source") != "Gitgo.lnk"
+                    or path.name != "Gitgo.lnk" or path.is_relative_to(root)):
+                raise NativeEntryError("NATIVE_ENTRY_OWNERSHIP_INVALID")
+        elif entry["kind"] == "link":
             if (platform != "macos" or path.name != "Gitgo-" + token + ".app" or path.parent.name != "Applications"
                     or entry["target"] != str(resources / "Gitgo.app")):
                 raise NativeEntryError("NATIVE_ENTRY_OWNERSHIP_INVALID")
@@ -198,8 +205,37 @@ def _publish(resources, entry):
         temporary.unlink(missing_ok=True)
 
 
-def install_entries(root, *, home=None, environment=None, shortcut_writer=None, shortcut_owner="native"):
+def _install_desktop_shortcut(root, record_path, record, folder):
+    resources = root / AREA / "resources"
+    try:
+        path = _safe(folder / "Gitgo.lnk")
+        if path.is_relative_to(root) or not path.parent.is_dir():
+            return {"state": "unavailable"}
+    except (NativeEntryError, OSError):
+        return {"state": "unavailable"}
+    existing = next((item for item in record["entries"] if item.get("desktop") is True), None)
+    if existing:
+        return {"state": "ready", "path": str(path)} if existing["path"] == str(path) else {"state": "unavailable"}
+    if path.exists() or path.is_symlink():
+        return {"state": "conflict"}
+    entry = {"kind": "file", "path": str(path), "source": "Gitgo.lnk", "desktop": True,
+             "sha256": _hash((resources / "Gitgo.lnk").read_bytes())}
+    record["entries"].append(entry)
+    record["state"] = "pending"
+    _write_record(record_path, record)
+    try:
+        _publish(resources, entry)
+    except (NativeEntryError, OSError):
+        if not _matches(entry):
+            record["entries"].remove(entry)
+            return {"state": "conflict" if path.exists() else "unavailable"}
+    return {"state": "ready", "path": str(path)}
+
+
+def install_entries(root, *, home=None, environment=None, shortcut_writer=None, shortcut_owner="native", desktop_folder=None):
     root, payload, platform, argv = _context(Path(root))
+    if desktop_folder is not None and (platform != "windows" or shortcut_owner != "native"):
+        raise NativeEntryError("NATIVE_ENTRY_DESKTOP_UNSUPPORTED")
     area = root / AREA
     record_path = area / "owner.json"
     if record_path.exists():
@@ -281,9 +317,13 @@ def install_entries(root, *, home=None, environment=None, shortcut_writer=None, 
     _validate(root, record)
     for entry in record["entries"]:
         _publish(area / "resources", entry)
+    desktop = None if desktop_folder is None else _install_desktop_shortcut(root, record_path, record, Path(desktop_folder))
     record["state"] = "ready"
     _write_record(record_path, record)
-    return {"state": "ready", "entries": [entry["path"] for entry in record["entries"]]}
+    result = {"state": "ready", "entries": [entry["path"] for entry in record["entries"]]}
+    if desktop is not None:
+        result["desktop_shortcut"] = desktop
+    return result
 
 
 def remove_entries(root, *, check_only=False):

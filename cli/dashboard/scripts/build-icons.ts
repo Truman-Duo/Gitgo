@@ -17,9 +17,12 @@ if(/<(?:image|script|foreignObject)\b|(?:href\s*=|url\s*\()/i.test(svg))throw Er
 const version=JSON.parse(readFileSync(require.resolve("@resvg/resvg-wasm/package.json"),"utf8")).version;
 if(version!=="2.6.2")throw Error("ICON_RENDERER_VERSION_CHANGED");
 const wasm=readFileSync(require.resolve("@resvg/resvg-wasm/index_bg.wasm"));
-const recipe={version:2,renderer:"@resvg/resvg-wasm",renderer_version:version,
+const recipe={version:3,renderer:"@resvg/resvg-wasm",renderer_version:version,
  renderer_wasm_sha256:hash(wasm),converter_sha256:hash(readFileSync(import.meta.filename)),
- sizes,geometry:"source-viewBox",background:"transparent"};
+ sizes,geometry:"source-viewBox",background:"transparent",windows_background:"warm-light-rounded-tile"};
+const windowsSvg=svg.replace('<g id="hand-drawn-mark">',
+ '<rect x="237" y="237" width="792" height="792" rx="164" fill="#f3f0e7" stroke="#9e9d94" stroke-width="10"/>' +
+ '<g id="hand-drawn-mark" transform="translate(75.96 75.96) scale(0.88)">');
 const expectedNames=[...sizes.map(size=>`gitgo-${size}.png`),"gitgo.ico","gitgo.icns"].sort();
 const manifestPath=resolve(out,"manifest.json");
 function verify(){
@@ -48,24 +51,28 @@ if(process.argv.includes("--verify")){
    writeFileSync(temporary,data);renameSync(temporary,target);
    files.push({name,sha256:hash(data),bytes:data.length,...(size?{size}:{})});
   };
-  for(const size of sizes){
-   const renderer=new Resvg(svg,{font:{loadSystemFonts:false},fitTo:{mode:"width",value:size},shapeRendering:2});
+  const render=(design:string,size:number)=>{
+   const renderer=new Resvg(design,{font:{loadSystemFonts:false},fitTo:{mode:"width",value:size},shapeRendering:2});
    const image=renderer.render();
    try{
     if(image.width!==size||image.height!==size)throw Error("ICON_DIMENSION_MISMATCH");
-    const data=Buffer.from(image.asPng());pngs.set(size,data);write(`gitgo-${size}.png`,data,size);
+    return Buffer.from(image.asPng());
    }finally{image.free();renderer.free();}
+  };
+  for(const size of sizes){
+   const data=render(svg,size);pngs.set(size,data);write(`gitgo-${size}.png`,data,size);
   }
   const frames=sizes.filter(size=>size<=256),directory=Buffer.alloc(6+frames.length*16);
+  const windowsFrames=frames.map(size=>render(windowsSvg,size));
   directory.writeUInt16LE(1,2);directory.writeUInt16LE(frames.length,4);
   let offset=directory.length;
   frames.forEach((size,index)=>{
-   const data=pngs.get(size)!,entry=6+index*16;
+   const data=windowsFrames[index]!,entry=6+index*16;
    directory[entry]=directory[entry+1]=size===256?0:size;
    directory.writeUInt16LE(1,entry+4);directory.writeUInt16LE(32,entry+6);
    directory.writeUInt32LE(data.length,entry+8);directory.writeUInt32LE(offset,entry+12);offset+=data.length;
   });
-  write("gitgo.ico",Buffer.concat([directory,...frames.map(size=>pngs.get(size)!)]));
+  write("gitgo.ico",Buffer.concat([directory,...windowsFrames]));
   const chunks:[string,number][]=[["icp4",16],["icp5",32],["icp6",64],["ic07",128],["ic08",256],["ic09",512],["ic10",1024],
    ["ic11",32],["ic12",64],["ic13",256],["ic14",512]];
   const records=chunks.map(([type,size])=>{const data=pngs.get(size)!,header=Buffer.alloc(8);header.write(type);header.writeUInt32BE(data.length+8,4);return Buffer.concat([header,data]);});

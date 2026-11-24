@@ -19,6 +19,20 @@ from tests.test_update_manifest import signing
 pytestmark = pytest.mark.skipif(not win.supported(), reason="Actual Windows managed ownership required")
 
 
+def test_installation_protection_allows_shared_reads_but_rejects_writes(tmp_path_factory, monkeypatch):
+    from backend.core.config import ConfigManager
+
+    config = tmp_path_factory / "config.json"
+    config.write_text('{"projects": []}', encoding="utf-8")
+    monkeypatch.setattr(ConfigManager, "find_config", staticmethod(lambda: config))
+    subprocess.run(["icacls", str(config), "/grant:r", "*S-1-5-11:(RX)"], check=True, capture_output=True)
+    assert config.parent in installation.protected_install_paths()
+    subprocess.run(["icacls", str(config), "/grant:r", "*S-1-5-11:(W)"], check=True, capture_output=True)
+    with pytest.raises(UpdateError, match="UPDATE_ACL_INVALID"):
+        installation.protected_install_paths()
+    assert config.read_text(encoding="utf-8") == '{"projects": []}'
+
+
 def test_initial_native_entry_publication_retries_only_the_same_registered_package(managed, monkeypatch):
     """Real registration/files; a fake frozen probe is not packaged acceptance."""
     import shutil

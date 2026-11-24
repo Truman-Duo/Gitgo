@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import runpy
 import sys
 
@@ -148,10 +149,12 @@ def _main(values: list[str]) -> int:
         parser.add_argument("--root", required=True)
         parser.add_argument("--bin-dir", required=True)
         parser.add_argument("--protected-path", action="append", default=[])
+        parser.add_argument("--desktop-folder", type=Path)
         args = parser.parse_args(role_argv)
         from backend.core.update.installation import install_from_frozen_package
         from backend.core.protocol_io import dump_protocol_json
-        print(dump_protocol_json(install_from_frozen_package(args.root, args.bin_dir, args.protected_path)), flush=True)
+        receipt = install_from_frozen_package(args.root, args.bin_dir, args.protected_path, desktop_folder=args.desktop_folder)
+        print(dump_protocol_json(receipt), flush=True)
         return 0
     if name == "native-entry":
         from backend.core.native_entry import main as native_entry_main

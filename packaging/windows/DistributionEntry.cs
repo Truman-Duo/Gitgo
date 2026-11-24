@@ -76,28 +76,67 @@ internal static class DistributionEntry
     }
 
 #if SETUP
+    private static SetupResult Install(string root, string desktop, string workspace, Action<string> report)
+    {
+        var package = Path.Combine(workspace, "package");
+        var ready = Path.Combine(workspace, "extracted");
+        if (!File.Exists(ready))
+        {
+            report("extract");
+            if (Directory.Exists(package)) RemoveScratch(package);
+            Extract(workspace);
+            using (File.Create(ready)) { }
+        }
+        var install = Path.Combine(root, "program");
+        var arguments = new System.Collections.Generic.List<string> {
+            "--gitgo-internal-role", "managed-install", "--root", install,
+            "--bin-dir", Path.Combine(root, "commands")
+        };
+        if (!String.IsNullOrEmpty(desktop))
+            arguments.AddRange(new[] { "--desktop-folder", desktop });
+        report("install");
+        var info = new ProcessStartInfo(Host(package), String.Join(" ", arguments.ConvertAll(Quote))) {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
+            RedirectStandardError = true, StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8, WorkingDirectory = Environment.CurrentDirectory
+        };
+        using (var child = Process.Start(info))
+        {
+            var stdout = child.StandardOutput.ReadToEndAsync();
+            var stderr = child.StandardError.ReadToEndAsync();
+            child.WaitForExit();
+            return new SetupResult(child.ExitCode, stdout.Result, stderr.Result,
+                Path.Combine(install, "bootstrap", "gitgo-host", "gitgo-host.exe"));
+        }
+    }
+
     private static int Execute(string[] args, string workspace, ref bool handoff)
     {
         var quiet = args.Length > 0 && args[0] == "--install-only";
-        if ((quiet && args.Length > 2) || (!quiet && args.Length != 0))
-            throw new ArgumentException("Usage: GitgoSetup.exe [--install-only [directory]]");
-        var root = quiet && args.Length == 2 ? Path.GetFullPath(args[1])
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GitgoInstalled");
-        var install = Path.Combine(root, "program");
-        var commands = Path.Combine(root, "commands");
-        if (!quiet && MessageBox.Show("Install Gitgo for this Windows user?\r\n\r\n" + root,
-                "Gitgo Setup", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
-            return 0;
-        if (!File.Exists(Path.Combine(install, "control", "registration.json")))
+        var defaultRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GitgoInstalled");
+        if (quiet)
         {
-            var status = Run(Host(Extract(workspace)), "--gitgo-internal-role", "managed-install",
-                "--root", install, "--bin-dir", commands);
-            if (status != 0)
-                return status;
+            if (args.Length > 2 && (args.Length != 4 || args[2] != "--desktop-folder"))
+                throw new ArgumentException("Usage: GitgoSetup.exe [--install-only [directory [--desktop-folder directory]]]");
+            var root = args.Length >= 2 ? Path.GetFullPath(args[1]) : defaultRoot;
+            var desktop = args.Length == 4 ? Path.GetFullPath(args[3]) : null;
+            var result = Install(root, desktop, workspace, delegate { });
+            Console.Out.Write(result.Output);
+            Console.Error.Write(result.Errors);
+            return result.ExitCode == 0 ? Run(result.Launcher, "--gitgo-internal-role", "managed-launch", "--version") : result.ExitCode;
         }
-        var launcher = Path.Combine(install, "bootstrap", "gitgo-host", "gitgo-host.exe");
-        return quiet ? Run(launcher, "--gitgo-internal-role", "managed-launch", "--version")
-            : Run(launcher, "--gitgo-internal-role", "managed-launch");
+        if (args.Length != 0)
+            throw new ArgumentException("Unknown Gitgo Setup argument.");
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        using (var license = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.License")))
+        using (var wizard = new SetupWizard(defaultRoot, license.ReadToEnd(),
+            (root, desktop, report) => Install(root, desktop, workspace, report),
+            launcher => Start(launcher, "--gitgo-internal-role", "managed-launch").Dispose()))
+        {
+            Application.Run(wizard);
+            return wizard.ExitCode;
+        }
     }
 #else
     private static int Execute(string[] args, string workspace, ref bool handoff)
@@ -159,6 +198,10 @@ internal static class DistributionEntry
         catch (Exception error)
         {
             Console.Error.WriteLine("Gitgo: " + error.Message);
+#if SETUP
+            if (args.Length == 0)
+                MessageBox.Show(error.Message, "Gitgo Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+#endif
             return 1;
         }
         finally

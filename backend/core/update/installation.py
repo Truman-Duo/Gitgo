@@ -65,11 +65,12 @@ def _windows_public_command(root):
         "try { $childExit = $child.ExitCode } finally { $child.Dispose() }\nexit $childExit\n")
 
 
-def _native_entries_after_install(root, seed):
+def _native_entries_after_install(root, seed, desktop_folder=None):
     if not (seed / "native-entry.json").is_file():
         return {}
     from backend.core.native_entry import install_entries
-    return {"native_entry": install_entries(root)}
+    return {"native_entry": (install_entries(root) if desktop_folder is None
+                             else install_entries(root, desktop_folder=desktop_folder))}
 
 
 class ManagedStore(InstallationStore):
@@ -247,7 +248,14 @@ def protected_install_paths() -> tuple[Path, ...]:
     if config is not None:
         paths.append(config.parent.resolve())
         import stat
-        fd = open_readonly(config)
+        if os.name == "nt":
+            from .windows_storage import open_file
+            # An existing user configuration can grant read access to a
+            # sandbox group. The protected path inventory requires integrity,
+            # not exclusive read access, and denies concurrent writes.
+            fd = open_file(config, program=True, share=1)
+        else:
+            fd = open_readonly(config)
         with os.fdopen(fd, "rb") as handle:
             info = os.fstat(handle.fileno())
             if (not stat.S_ISREG(info.st_mode) or info.st_size > 256 * 1024 or info.st_nlink != 1
@@ -320,7 +328,7 @@ def _create_private_directories(path: Path):
     return missing
 
 
-def install_from_frozen_package(root_value: str, bin_value: str, protected_values: list[str]):
+def install_from_frozen_package(root_value: str, bin_value: str, protected_values: list[str], *, desktop_folder=None):
     """Initial install or exact-source retry; no PATH edits or unknown adoption."""
     if not _ownership_supported() or not getattr(sys, "frozen", False):
         reject("UPDATE_INSTALL_INVALID", "Managed installer requires a packaged Host with native ownership support")
@@ -356,7 +364,7 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
         if not matches:
             reject("UPDATE_INSTALL_INVALID", "Install retry command ownership differs")
         return {"schema_version": 1, "managed": True, "version": ledger["current"]["version"],
-                "updates_enabled": False, **_native_entries_after_install(root, seed)}
+                "updates_enabled": False, **_native_entries_after_install(root, seed, desktop_folder)}
     if command.exists() or command.is_symlink():
         reject("UPDATE_INSTALL_INVALID", "Public command already exists; choose a separate command directory")
     _create_private_directories(root)
@@ -379,7 +387,7 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(content.encode("utf-8-sig")); handle.flush(); os.fsync(handle.fileno())
         return {"schema_version": 1, "managed": True, "version": store._ledger()["current"]["version"],
-                "updates_enabled": False, **_native_entries_after_install(root, seed)}
+                "updates_enabled": False, **_native_entries_after_install(root, seed, desktop_folder)}
     descriptor = os.open(bin_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         info = os.fstat(descriptor)
