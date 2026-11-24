@@ -3,10 +3,24 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+
+internal sealed class SetupProgress
+{
+    public readonly string Stage;
+    public readonly int Completed, Total;
+
+    public SetupProgress(string stage, int completed = 0, int total = 0)
+    {
+        Stage = stage;
+        Completed = completed;
+        Total = total;
+    }
+}
 
 internal sealed class SetupResult
 {
@@ -35,6 +49,13 @@ internal sealed class SetupResult
             && receipt.TryGetValue("version", out version) && !String.IsNullOrWhiteSpace(version as string);
     }
 
+    public bool RepairedEntries()
+    {
+        var receipt = Receipt();
+        object action;
+        return receipt != null && receipt.TryGetValue("action", out action) && Equals(action, "repaired_entries");
+    }
+
     public string DesktopState()
     {
         var receipt = Receipt();
@@ -55,6 +76,8 @@ internal sealed class SetupResult
 
 internal sealed class SetupWizard : Form
 {
+    private enum Page { Welcome, License, Configuration, Progress }
+
     private readonly Panel content = new Panel { Dock = DockStyle.Fill };
     private readonly Label heading = new Label { AutoSize = true };
     private readonly Button primary = new Button { AutoSize = true };
@@ -63,13 +86,16 @@ internal sealed class SetupWizard : Form
     private readonly CheckBox consent = new CheckBox { AutoSize = true };
     private readonly CheckBox desktop = new CheckBox { AutoSize = true };
     private readonly Label message = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
+    private readonly Label welcome = new Label { Dock = DockStyle.Fill };
+    private readonly Label installation = new Label { AutoSize = true, Margin = new Padding(0, 12, 0, 0) };
     private readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Top, Style = ProgressBarStyle.Marquee };
-    private readonly TableLayoutPanel options;
-    private readonly Func<string, string, Action<string>, SetupResult> install;
+    private readonly TableLayoutPanel agreement, options;
+    private readonly Func<string, string, Action<SetupProgress>, SetupResult> install;
     private readonly Action<string> open;
     private readonly string statusPath;
     private string selectedRoot;
     private SetupResult result;
+    private Page page;
     private bool busy, failed;
     public int ExitCode { get; private set; }
 
@@ -88,8 +114,48 @@ internal sealed class SetupWizard : Form
         return new Label { Text = text, AutoSize = true, Margin = new Padding(0, 10, 0, 6) };
     }
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+    internal static void ConfigureTextScaling()
+    {
+        try { SetThreadDpiAwarenessContext(new IntPtr(-5)); }  // DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED
+        catch (EntryPointNotFoundException) { }
+    }
+
+    private static bool HasProfile()
+    {
+        var configured = Environment.GetEnvironmentVariable("GITGO_CONFIG_PATH");
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!String.IsNullOrWhiteSpace(configured))
+        {
+            var path = configured.Trim();
+            if (path.StartsWith("~/") || path.StartsWith("~\\")) path = Path.Combine(home, path.Substring(2));
+            return File.Exists(path);
+        }
+        return File.Exists(Path.Combine(home, ".gitgo", "config.json"))
+            || File.Exists(Path.Combine(home, ".vernier", "gitgo_config.json"))
+            || File.Exists(Path.Combine(Environment.CurrentDirectory, "gitgo_config.json"))
+            || File.Exists(Path.Combine(Environment.CurrentDirectory, "sync_config.json"));
+    }
+
+    private static bool HasRegistration(string root)
+    {
+        return root != null && File.Exists(Path.Combine(root, "program", "control", "registration.json"));
+    }
+
+    private static string LocalRoot(string value)
+    {
+        var selected = value.Trim();
+        if (selected.Length < 3 || selected[1] != ':' || (selected[2] != '\\' && selected[2] != '/')) return null;
+        try { return Path.GetFullPath(selected); }
+        catch (ArgumentException) { return null; }
+        catch (NotSupportedException) { return null; }
+        catch (PathTooLongException) { return null; }
+    }
+
     public SetupWizard(string defaultRoot, string license,
-        Func<string, string, Action<string>, SetupResult> install, Action<string> open, string statusPath = null)
+        Func<string, string, Action<SetupProgress>, SetupResult> install, Action<string> open, string statusPath = null)
     {
         this.install = install;
         this.open = open;
@@ -122,13 +188,28 @@ internal sealed class SetupWizard : Form
         AcceptButton = primary;
         CancelButton = secondary;
 
-        options = Grid(1);
-        for (int index = 0; index < 6; index++)
-            options.RowStyles.Add(new RowStyle(index == 1 ? SizeType.Percent : SizeType.AutoSize, index == 1 ? 100 : 0));
+        welcome.Text = Local("Gitgo 将安装到当前 Windows 用户的账户。向导会检查安装位置，并设置启动入口。",
+            "Gitgo will be installed for this Windows account. Setup checks the installation folder and registers launch entries.");
+        if (HasProfile())
+            welcome.Text += Local("\r\n\r\n已检测到以前的 Gitgo 配置。安装会保留这些设置。",
+                "\r\n\r\nExisting Gitgo configuration was detected. Setup preserves those settings.");
+        if (HasRegistration(defaultRoot))
+            welcome.Text += Local("\r\n\r\n默认目录已有受管安装。继续可检查并补全启动入口。",
+                "\r\n\r\nA managed installation exists in the default folder. Continue to verify and restore launch entries.");
+
+        agreement = Grid(1);
+        agreement.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        agreement.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var terms = new TextBox { Text = license, ReadOnly = true, Multiline = true,
             ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
         consent.Text = Local("我已阅读并同意 Apache 2.0 许可条款", "I have read and agree to the Apache 2.0 license terms");
         consent.Margin = new Padding(0, 8, 0, 0);
+        agreement.Controls.Add(terms, 0, 0);
+        agreement.Controls.Add(consent, 0, 1);
+
+        options = Grid(1);
+        for (int index = 0; index < 4; index++) options.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        options.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         directory.Text = defaultRoot;
         var path = Grid(2);
         path.AutoSize = true;
@@ -140,19 +221,17 @@ internal sealed class SetupWizard : Form
         path.Controls.Add(browse, 1, 0);
         desktop.Text = Local("创建桌面快捷方式", "Create a desktop shortcut");
         desktop.Margin = new Padding(0, 8, 0, 0);
-        options.Controls.Add(LabelText(Local("许可协议", "License agreement")), 0, 0);
-        options.Controls.Add(terms, 0, 1);
-        options.Controls.Add(consent, 0, 2);
-        options.Controls.Add(LabelText(Local("安装目录", "Installation folder")), 0, 3);
-        options.Controls.Add(path, 0, 4);
-        options.Controls.Add(desktop, 0, 5);
+        options.Controls.Add(LabelText(Local("安装目录", "Installation folder")), 0, 0);
+        options.Controls.Add(path, 0, 1);
+        options.Controls.Add(desktop, 0, 2);
+        options.Controls.Add(installation, 0, 3);
 
         consent.CheckedChanged += (sender, args) => UpdateInstallButton();
         directory.TextChanged += (sender, args) => UpdateInstallButton();
         primary.Click += (sender, args) => OnPrimary();
-        secondary.Click += (sender, args) => Close();
+        secondary.Click += (sender, args) => OnSecondary();
         FormClosing += (sender, args) => { if (busy) args.Cancel = true; };
-        ShowOptions();
+        ShowPage(Page.Welcome);
     }
 
     private void Browse()
@@ -164,38 +243,96 @@ internal sealed class SetupWizard : Form
         }
     }
 
-    private void ShowOptions()
+    private void ShowPage(Page next)
     {
+        page = next;
         failed = false;
-        heading.Text = Local("安装 Gitgo", "Install Gitgo");
-        secondary.Text = Local("取消", "Cancel");
-        primary.Text = Local("开始安装", "Install");
+        result = null;
         content.Controls.Clear();
-        content.Controls.Add(options);
-        ActiveControl = consent;
+        secondary.Text = next == Page.Welcome ? Local("取消", "Cancel") : Local("上一步", "Back");
+        primary.Text = Local("下一步", "Next");
+        if (next == Page.Welcome)
+        {
+            heading.Text = Local("安装 Gitgo", "Install Gitgo");
+            content.Controls.Add(welcome);
+            ActiveControl = primary;
+        }
+        else if (next == Page.License)
+        {
+            heading.Text = Local("许可协议", "License agreement");
+            content.Controls.Add(agreement);
+            ActiveControl = consent;
+        }
+        else
+        {
+            heading.Text = Local("安装选项", "Installation options");
+            content.Controls.Add(options);
+            ActiveControl = directory;
+        }
         UpdateInstallButton();
     }
 
     private void UpdateInstallButton()
     {
-        primary.Enabled = consent.Checked && !String.IsNullOrWhiteSpace(directory.Text);
+        if (page == Page.Welcome) primary.Enabled = true;
+        if (page == Page.License) primary.Enabled = consent.Checked;
+        if (page == Page.Configuration)
+        {
+            var root = LocalRoot(directory.Text);
+            var managed = HasRegistration(root);
+            primary.Enabled = root != null;
+            primary.Text = managed ? Local("检查并补全", "Verify and restore") : Local("开始安装", "Install");
+            installation.Text = managed
+                ? Local("已检测到安装记录。将检查程序，并补全缺失的启动入口。", "An installation was detected. Setup verifies it and restores missing launch entries.")
+                : Local("开始菜单和 Windows Terminal 入口将随安装创建。", "Setup creates Start menu and Windows Terminal entries.");
+        }
+    }
+
+    private void OnSecondary()
+    {
+        if (page == Page.License) ShowPage(Page.Welcome);
+        else if (page == Page.Configuration) ShowPage(Page.License);
+        else Close();
     }
 
     private void ShowStatus(Control detail)
     {
         var panel = Grid(1);
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var working = detail == progress;
+        message.AutoSize = working;
+        if (working)
+        {
+            panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        }
+        else panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         panel.Controls.Add(message, 0, 0);
         if (detail != null) panel.Controls.Add(detail, 0, 1);
         content.Controls.Clear();
         content.Controls.Add(panel);
     }
 
+    private void UpdateProgress(SetupProgress value)
+    {
+        if (value.Stage == "extract" && value.Total > 0)
+        {
+            progress.Style = ProgressBarStyle.Continuous;
+            progress.Maximum = value.Total;
+            progress.Value = value.Completed;
+            message.Text = String.Format(Local("解包 · {0} / {1} 项", "Extracting · {0} / {1} entries"), value.Completed, value.Total);
+            return;
+        }
+        progress.Style = ProgressBarStyle.Marquee;
+        message.Text = value.Stage == "repair" ? Local("正在检查安装并补全启动入口…", "Verifying the installation and restoring launch entries…")
+            : value.Stage == "install" ? Local("正在安装程序并注册启动入口…", "Installing the program and registering launch entries…")
+            : Local("正在校验安装包…", "Verifying the installation package…");
+    }
+
     private async void OnPrimary()
     {
         if (busy) return;
-        if (failed) { ShowOptions(); return; }
+        if (failed) { ShowPage(Page.Configuration); return; }
         if (result != null && result.ExitCode == 0)
         {
             try { open(result.Launcher); }
@@ -203,16 +340,14 @@ internal sealed class SetupWizard : Form
             Close();
             return;
         }
-        if (!consent.Checked) return;
-        string root;
-        try
+        if (page == Page.Welcome) { ShowPage(Page.License); return; }
+        if (page == Page.License)
         {
-            var selected = directory.Text.Trim();
-            if (!Path.IsPathRooted(selected) || selected.Length < 3 || selected[1] != ':' || (selected[2] != '\\' && selected[2] != '/'))
-                throw new ArgumentException();
-            root = Path.GetFullPath(selected);
+            if (consent.Checked) ShowPage(Page.Configuration);
+            return;
         }
-        catch (Exception)
+        var root = LocalRoot(directory.Text);
+        if (root == null)
         {
             MessageBox.Show(this, Local("请选择本机磁盘上的绝对路径。", "Choose a full path on a local drive."),
                 Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -223,16 +358,15 @@ internal sealed class SetupWizard : Form
         var desktopFolder = createDesktop ? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory) : null;
         selectedRoot = root;
         RecordAttempt("installing", null);
+        page = Page.Progress;
         busy = true;
         primary.Enabled = secondary.Enabled = false;
-        heading.Text = Local("正在安装 Gitgo", "Installing Gitgo");
-        message.Text = Local("正在校验安装包…", "Verifying the installation package…");
+        heading.Text = Local("安装进度", "Installation progress");
+        UpdateProgress(new SetupProgress("verify"));
         ShowStatus(progress);
         try
         {
-            result = await Task.Run(() => install(root, desktopFolder, phase => BeginInvoke((Action)(() =>
-                message.Text = phase == "extract" ? Local("正在校验并解包…", "Verifying and extracting…")
-                    : Local("正在安装程序并注册快捷方式…", "Installing the program and registering shortcuts…")))));
+            result = await Task.Run(() => install(root, desktopFolder, phase => BeginInvoke((Action)(() => UpdateProgress(phase)))));
             if (result.ExitCode != 0)
             {
                 var code = Regex.Match(result.Output + "\n" + result.Errors, @"\b(?:UPDATE|NATIVE_ENTRY)_[A-Z0-9_]+\b");
@@ -242,13 +376,15 @@ internal sealed class SetupWizard : Form
                         "\r\nAccess checks failed for the configuration or installation files. Check permissions for the selected folder and configuration file.");
                 if (detail == "UPDATE_INSTALL_INVALID" || detail == "UPDATE_PROTECTED_PATHS")
                     detail += Local("\r\n请选择新的本机安装目录，且与项目和配置分开。", "\r\nChoose a new local installation folder outside project and configuration locations.");
+                if (detail == "UPDATE_INSTALL_PAYLOAD_INCOMPLETE")
+                    detail += Local("\r\n现有程序文件缺失或已变更。请选择新目录安装。", "\r\nInstalled program files are incomplete or modified. Choose a new folder.");
                 ShowFailure(detail, code.Success ? code.Value : "SETUP_HOST_EXIT_" + result.ExitCode);
                 return;
             }
             var shortcut = createDesktop ? result.DesktopState() : null;
             ExitCode = 0;
-            RecordAttempt("installed", null);
-            heading.Text = Local("安装完成", "Installation complete");
+            RecordAttempt(result.RepairedEntries() ? "entries_restored" : "installed", null);
+            heading.Text = result.RepairedEntries() ? Local("检查与补全完成", "Verification and repair complete") : Local("安装完成", "Installation complete");
             message.Text = Local("安装位置\r\n", "Installed in\r\n") + root
                 + Local("\r\n\r\n可从开始菜单或 Windows Terminal 启动 Gitgo。", "\r\n\r\nOpen Gitgo from Start or Windows Terminal.");
             if (createDesktop && shortcut != "ready")

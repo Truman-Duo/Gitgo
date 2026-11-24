@@ -52,7 +52,7 @@ internal static class DistributionEntry
         return directory;
     }
 
-    private static string Extract(string workspace)
+    private static string Extract(string workspace, Action<int, int> progress = null)
     {
         var assembly = Assembly.GetExecutingAssembly();
         var package = Path.Combine(workspace, "package");
@@ -65,9 +65,40 @@ internal static class DistributionEntry
                 throw new InvalidDataException("Embedded Gitgo archive failed its integrity check.");
             stream.Position = 0;
             using (var zip = new ZipArchive(stream, ZipArchiveMode.Read))
-                zip.ExtractToDirectory(package);
+            {
+                if (progress == null) zip.ExtractToDirectory(package);
+                else ExtractWithProgress(zip, package, progress);
+            }
         }
         return package;
+    }
+
+    private static void ExtractWithProgress(ZipArchive zip, string package, Action<int, int> progress)
+    {
+        var root = Path.GetFullPath(package) + Path.DirectorySeparatorChar;
+        var total = zip.Entries.Count;
+        Directory.CreateDirectory(package);
+        progress(0, total);
+        for (int index = 0; index < total; index++)
+        {
+            var entry = zip.Entries[index];
+            if (entry.FullName.IndexOf(':') >= 0)
+                throw new InvalidDataException("Gitgo archive contains an invalid path.");
+            var path = Path.GetFullPath(Path.Combine(root, entry.FullName));
+            if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Gitgo archive contains an invalid path.");
+            if (String.IsNullOrEmpty(entry.Name))
+            {
+                if (entry.Length != 0) throw new InvalidDataException("Gitgo archive directory contains data.");
+                Directory.CreateDirectory(path);
+            }
+            else
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                entry.ExtractToFile(path);
+            }
+            if ((index + 1) % 12 == 0 || index + 1 == total) progress(index + 1, total);
+        }
     }
 
     private static string Host(string directory)
@@ -92,15 +123,15 @@ internal static class DistributionEntry
         }
     }
 
-    private static SetupResult Install(string root, string desktop, string workspace, Action<string> report)
+    private static SetupResult Install(string root, string desktop, string workspace, Action<SetupProgress> report)
     {
         var package = Path.Combine(workspace, "package");
         var ready = Path.Combine(workspace, "extracted");
         if (!File.Exists(ready))
         {
-            report("extract");
+            report(new SetupProgress("verify"));
             if (Directory.Exists(package)) RemoveScratch(package);
-            Extract(workspace);
+            Extract(workspace, (completed, total) => report(new SetupProgress("extract", completed, total)));
             using (File.Create(ready)) { }
         }
         var install = Path.Combine(root, "program");
@@ -110,12 +141,15 @@ internal static class DistributionEntry
         };
         if (!String.IsNullOrEmpty(desktop))
             arguments.AddRange(new[] { "--desktop-folder", desktop });
-        report("install");
+        var registration = Path.Combine(install, "control", "registration.json");
+        var repair = File.Exists(registration);
+        if (repair) arguments.Add("--repair-entries");
+        report(new SetupProgress(repair ? "repair" : "install"));
         var launcher = Path.Combine(install, "bootstrap", "gitgo-host", "gitgo-host.exe");
         var result = RunCaptured(Host(package), arguments.ToArray(), launcher);
         if (result.ExitCode == 0 && (!result.ManagedInstallConfirmed()
             || !File.Exists(launcher) || !File.Exists(Path.Combine(install, "active", "gitgo.exe"))
-            || !File.Exists(Path.Combine(install, "control", "registration.json"))))
+            || !File.Exists(registration)))
             return new SetupResult(2, "{\"code\":\"UPDATE_INSTALL_UNCONFIRMED\"}", result.Errors, launcher);
         return result;
     }
@@ -142,6 +176,7 @@ internal static class DistributionEntry
         }
         if (args.Length != 0)
             throw new ArgumentException("Unknown Gitgo Setup argument.");
+        SetupWizard.ConfigureTextScaling();
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         using (var license = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.License")))

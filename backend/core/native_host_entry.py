@@ -150,13 +150,17 @@ def _main(values: list[str]) -> int:
         parser.add_argument("--bin-dir", required=True)
         parser.add_argument("--protected-path", action="append", default=[])
         parser.add_argument("--desktop-folder", type=Path)
+        parser.add_argument("--repair-entries", action="store_true")
         args = parser.parse_args(role_argv)
         from backend.core.native_entry import NativeEntryError
-        from backend.core.update.installation import install_from_frozen_package
+        from backend.core.update.installation import install_from_frozen_package, repair_windows_installation_entries
         from backend.core.update.validation import UpdateError
         from backend.core.protocol_io import dump_protocol_json
         try:
-            receipt = install_from_frozen_package(args.root, args.bin_dir, args.protected_path, desktop_folder=args.desktop_folder)
+            if args.repair_entries:
+                receipt = repair_windows_installation_entries(args.root, args.bin_dir, desktop_folder=args.desktop_folder)
+            else:
+                receipt = install_from_frozen_package(args.root, args.bin_dir, args.protected_path, desktop_folder=args.desktop_folder)
         except (UpdateError, NativeEntryError, OSError) as error:
             code = (error.code if isinstance(error, UpdateError) else
                     str(error) if isinstance(error, NativeEntryError) else "UPDATE_INSTALL_IO")

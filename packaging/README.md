@@ -10,7 +10,7 @@ Gitgo 的 Windows 产品包包含 Dashboard 与内部 Native Host，必须一起
 
 `-ManagedUpdate -BuildManagedEntries` 会在最终 Windows ZIP 之外生成 `GitgoPortable-<version>-win-x64.exe` 和 `GitgoSetup-<version>-win-x64.exe`。二者从同一个验证过的 ZIP 编译，使用 Windows 自带的 .NET Framework C# 编译器。Setup 调用现有受管安装入口，Portable 直接从单个 EXE 启动，运行所需文件释放到当前用户的临时目录。
 
-双击 Setup 会打开安装向导。确认 Apache 2.0 许可后可以选择安装目录，默认是 `%LOCALAPPDATA%\GitgoInstalled`。开始菜单和 Windows Terminal 入口随安装注册，桌面快捷方式在安装时勾选。安装窗口会显示校验、安装和结果，失败时保留诊断。Windows 的程序与快捷方式使用同一份带浅底的 ICO。
+双击 Setup 会依次打开说明、Apache 2.0 许可、安装选项、安装进度四页。默认安装目录是 `%LOCALAPPDATA%\GitgoInstalled`。开始菜单和 Windows Terminal 入口随安装注册，桌面快捷方式在安装时勾选。向导提示现有配置。对已登记且程序完整的安装，可以检查并补建缺失的启动入口，原程序和配置会被保留。进度页显示实际解包项数，完成后可直接启动 Gitgo。最近一次安装结果保存在 `%LOCALAPPDATA%\GitgoSetup\last-attempt.json`。Windows 的程序与快捷方式使用同一份带浅底的 ICO。
 
 Portable 的直接更新命令为 `--check-update`、`--update` 和 `--rollback`。原位更新要求 EXE 位于当前用户控制的本地 NTFS 目录，并正常关闭正在使用它的实例。发布工具 `scripts/sign_windows_portable.py` 为已审阅的 Portable 文件生成同渠道的 `windows-x86_64.portable.manifest.json` 和签名。Portable 按现有发布者信任验签，等待当前进程退出后替换原文件；数据兼容契约发生变化时由更新器阻止替换。普通 Windows 安装继续从原 ZIP 清单读取更新。
 

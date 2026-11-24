@@ -328,6 +328,46 @@ def _create_private_directories(path: Path):
     return missing
 
 
+def _publish_windows_command(root, bin_dir, command, protected):
+    from .windows_storage import open_file
+    with private_namespace(bin_dir):
+        _staging_parent(bin_dir, protected)
+        descriptor = open_file(command, create=True, write=True)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(_windows_public_command(root).encode("utf-8-sig"))
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+def repair_windows_installation_entries(root_value, bin_value, *, desktop_folder=None):
+    """Restore entry files from a verified installed payload and its ownership receipt."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        reject("UPDATE_INSTALL_INVALID", "Entry repair requires a packaged Windows setup")
+    root, bins = _new_path(root_value), _new_path(bin_value)
+    store = open_managed(root)
+    protected = tuple(dict.fromkeys((*store.protected_paths, *protected_install_paths())))
+    for other in protected:
+        if any(path == other or path.is_relative_to(other) or other.is_relative_to(path) for path in (root, bins)):
+            reject("UPDATE_PROTECTED_PATHS", "Installation or command directory overlaps protected data")
+    if root == bins or bins.is_relative_to(root) or root.is_relative_to(bins):
+        reject("UPDATE_INSTALL_INVALID", "Installation and command directories must be separate")
+    with store.runtime_lease():
+        store._guard()
+        current = store._ledger()["current"]
+        active = root / "active"
+        if not (active / "native-entry.json").is_file() or tree_digest(active) != current["tree_sha256"]:
+            reject("UPDATE_INSTALL_PAYLOAD_INCOMPLETE", "Installed program differs from the registered version")
+        command = bins / "gitgo.ps1"
+        if command.exists() or command.is_symlink():
+            if command.is_symlink() or command.read_bytes() != _windows_public_command(root).encode("utf-8-sig"):
+                reject("UPDATE_INSTALL_INVALID", "Existing command file does not belong to this installation")
+        else:
+            _create_private_directories(bins)
+            _publish_windows_command(root, bins, command, protected)
+        return {"schema_version": 1, "managed": True, "version": current["version"], "action": "repaired_entries",
+                **_native_entries_after_install(root, active, desktop_folder)}
+
+
 def install_from_frozen_package(root_value: str, bin_value: str, protected_values: list[str], *, desktop_folder=None):
     """Initial install or exact-source retry; no PATH edits or unknown adoption."""
     if not _ownership_supported() or not getattr(sys, "frozen", False):
@@ -377,15 +417,9 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
         # Do not rewrite the user's global execution policy or PATH profile.
         # No PowerShell parameter binding: preserve native switches such as
         # --version as argv, instead of treating them as script parameters.
-        content = _windows_public_command(root)
-        from .windows_storage import open_file
         # Retain the command directory and ancestor handles while publishing.
         # A private leaf is safe even beneath an ordinary shared temp parent.
-        with private_namespace(bin_dir):
-            _staging_parent(bin_dir, protected)
-            descriptor = open_file(command, create=True, write=True)
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(content.encode("utf-8-sig")); handle.flush(); os.fsync(handle.fileno())
+        _publish_windows_command(root, bin_dir, command, protected)
         return {"schema_version": 1, "managed": True, "version": store._ledger()["current"]["version"],
                 "updates_enabled": False, **_native_entries_after_install(root, seed, desktop_folder)}
     descriptor = os.open(bin_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
