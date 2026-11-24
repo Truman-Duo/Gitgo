@@ -32,16 +32,16 @@ def test_portable_refuses_updates_that_need_data_migration(monkeypatch):
                         SimpleNamespace(fetch_bytes=None))
 
 
-def test_health_check_preserves_short_extraction_root_and_isolates_profile(monkeypatch, tmp_path):
-    profile = tmp_path / "health-profile"
-    candidate = tmp_path / "candidate.exe"
+def test_health_check_preserves_short_extraction_root_and_isolates_profile(monkeypatch, tmp_path_factory):
+    profile = tmp_path_factory / "health-profile"
+    candidate = tmp_path_factory / "candidate.exe"
     monkeypatch.setattr(portable.ntfs, "create_private_directory", lambda path: path.mkdir())
-    monkeypatch.setattr(portable.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(portable.tempfile, "gettempdir", lambda: str(tmp_path_factory))
 
     def start(argv, *, cwd, env, **_):
         assert argv == [str(candidate), "--version"]
         assert cwd == profile
-        assert env["TMP"] == env["TEMP"] == str(tmp_path)
+        assert env["TMP"] == env["TEMP"] == str(tmp_path_factory)
         assert env["GITGO_STATE_HOME"] == str(profile / "state")
         return SimpleNamespace(returncode=0, stdout="Gitgo 1.0.0-alpha.3.2\n")
 
