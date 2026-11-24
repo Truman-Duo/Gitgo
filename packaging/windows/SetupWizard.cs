@@ -158,6 +158,7 @@ internal sealed class SetupWizard : Form
         primary.Text = Local("安装", "Install");
         content.Controls.Clear();
         content.Controls.Add(options);
+        ActiveControl = consent;
         UpdateInstallButton();
     }
 
