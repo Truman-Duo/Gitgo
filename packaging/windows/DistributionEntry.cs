@@ -120,7 +120,12 @@ internal static class DistributionEntry
                 return 0;
             }
         }
-        return Run(Path.Combine(package, "gitgo.exe"), args);
+        // The launcher owns the temporary payload for the lifetime of this
+        // terminal. Prevent a detached dashboard handoff from outliving it.
+        var attached = new string[args.Length + 1];
+        attached[0] = "--attached";
+        Array.Copy(args, 0, attached, 1, args.Length);
+        return Run(Path.Combine(package, "gitgo.exe"), attached);
     }
 #endif
 

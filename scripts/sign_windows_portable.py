@@ -26,8 +26,10 @@ def main():
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_private_key
 
+    if args.private_key.resolve().is_relative_to(ROOT):
+        raise ValueError("Keep the publisher signing key outside the checkout")
     key = load_pem_private_key(args.private_key.read_bytes(), password=None)
-    if not isinstance(key, Ed25519PrivateKey) or args.private_key.resolve().is_relative_to(ROOT):
+    if not isinstance(key, Ed25519PrivateKey):
         raise ValueError("Use the publisher's Ed25519 signing key outside the checkout")
     verifier = ManifestVerifier({args.key_id: key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)})
     archive_raw = args.zip_manifest.read_bytes()
