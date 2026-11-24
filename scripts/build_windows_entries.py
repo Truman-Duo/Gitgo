@@ -35,15 +35,17 @@ def build(archive, output, compiler):
         icon.write_bytes(icon_bytes)
         license_file = scratch / "license.txt"
         license_file.write_bytes(license_bytes)
+        windows = ROOT / "packaging/windows"
         setup_flags = ["/define:SETUP", "/r:System.Drawing.dll", "/r:System.Web.Extensions.dll",
-                       f"/resource:{license_file},Gitgo.License", str(ROOT / "packaging/windows/SetupWizard.cs")]
+                       f"/win32manifest:{windows / 'Setup.manifest'}",
+                       f"/resource:{license_file},Gitgo.License", str(windows / "SetupWizard.cs")]
         for stem, target, flags in (("GitgoPortable", "exe", []), ("GitgoSetup", "winexe", setup_flags)):
             name = f"{stem}-{product['version']}-win-x64.exe"
             result = scratch / name
             subprocess.run([str(compiler), "/nologo", f"/t:{target}", "/platform:x64", "/optimize+", f"/win32icon:{icon}",
                 "/r:System.IO.Compression.dll", "/r:System.IO.Compression.FileSystem.dll", "/r:System.Windows.Forms.dll",
                 f"/resource:{archive},Gitgo.Payload", f"/resource:{checksum},Gitgo.PayloadSha256",
-                f"/out:{result}", *flags, str(ROOT / "packaging/windows/DistributionEntry.cs")], check=True)
+                f"/out:{result}", *flags, str(windows / "DistributionEntry.cs")], check=True)
             if stem == "GitgoPortable":
                 with result.open("ab") as stream:
                     stream.write(PORTABLE_FOOTER)

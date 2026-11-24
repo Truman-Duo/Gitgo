@@ -21,11 +21,23 @@ internal sealed class SetupResult
         Launcher = launcher;
     }
 
+    private Dictionary<string, object> Receipt()
+    {
+        try { return new JavaScriptSerializer().DeserializeObject(Output) as Dictionary<string, object>; }
+        catch (ArgumentException) { return null; }
+    }
+
+    public bool ManagedInstallConfirmed()
+    {
+        var receipt = Receipt();
+        object managed, version;
+        return receipt != null && receipt.TryGetValue("managed", out managed) && Equals(managed, true)
+            && receipt.TryGetValue("version", out version) && !String.IsNullOrWhiteSpace(version as string);
+    }
+
     public string DesktopState()
     {
-        Dictionary<string, object> receipt;
-        try { receipt = new JavaScriptSerializer().DeserializeObject(Output) as Dictionary<string, object>; }
-        catch (ArgumentException) { return null; }
+        var receipt = Receipt();
         object value;
         if (receipt != null && receipt.TryGetValue("native_entry", out value))
         {
@@ -50,12 +62,13 @@ internal sealed class SetupWizard : Form
     private readonly TextBox directory = new TextBox { Dock = DockStyle.Fill };
     private readonly CheckBox consent = new CheckBox { AutoSize = true };
     private readonly CheckBox desktop = new CheckBox { AutoSize = true };
-    private readonly CheckBox launch = new CheckBox { AutoSize = true };
     private readonly Label message = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
     private readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Top, Style = ProgressBarStyle.Marquee };
     private readonly TableLayoutPanel options;
     private readonly Func<string, string, Action<string>, SetupResult> install;
     private readonly Action<string> open;
+    private readonly string statusPath;
+    private string selectedRoot;
     private SetupResult result;
     private bool busy, failed;
     public int ExitCode { get; private set; }
@@ -76,12 +89,13 @@ internal sealed class SetupWizard : Form
     }
 
     public SetupWizard(string defaultRoot, string license,
-        Func<string, string, Action<string>, SetupResult> install, Action<string> open)
+        Func<string, string, Action<string>, SetupResult> install, Action<string> open, string statusPath = null)
     {
         this.install = install;
         this.open = open;
+        this.statusPath = statusPath;
         Text = Local("Gitgo 安装", "Gitgo Setup");
-        Font = SystemFonts.MessageBoxFont;
+        Font = new Font(Local("Microsoft YaHei UI", "Segoe UI"), 10f);
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         AutoScaleMode = AutoScaleMode.Font;
         StartPosition = FormStartPosition.CenterScreen;
@@ -155,7 +169,7 @@ internal sealed class SetupWizard : Form
         failed = false;
         heading.Text = Local("安装 Gitgo", "Install Gitgo");
         secondary.Text = Local("取消", "Cancel");
-        primary.Text = Local("安装", "Install");
+        primary.Text = Local("开始安装", "Install");
         content.Controls.Clear();
         content.Controls.Add(options);
         ActiveControl = consent;
@@ -184,11 +198,8 @@ internal sealed class SetupWizard : Form
         if (failed) { ShowOptions(); return; }
         if (result != null && result.ExitCode == 0)
         {
-            if (launch.Checked)
-            {
-                try { open(result.Launcher); }
-                catch (Exception error) { MessageBox.Show(this, error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
-            }
+            try { open(result.Launcher); }
+            catch (Exception error) { MessageBox.Show(this, error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
             Close();
             return;
         }
@@ -210,6 +221,8 @@ internal sealed class SetupWizard : Form
 
         var createDesktop = desktop.Checked;
         var desktopFolder = createDesktop ? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory) : null;
+        selectedRoot = root;
+        RecordAttempt("installing", null);
         busy = true;
         primary.Enabled = secondary.Enabled = false;
         heading.Text = Local("正在安装 Gitgo", "Installing Gitgo");
@@ -229,24 +242,23 @@ internal sealed class SetupWizard : Form
                         "\r\nAccess checks failed for the configuration or installation files. Check permissions for the selected folder and configuration file.");
                 if (detail == "UPDATE_INSTALL_INVALID" || detail == "UPDATE_PROTECTED_PATHS")
                     detail += Local("\r\n请选择新的本机安装目录，且与项目和配置分开。", "\r\nChoose a new local installation folder outside project and configuration locations.");
-                ShowFailure(detail);
+                ShowFailure(detail, code.Success ? code.Value : "SETUP_HOST_EXIT_" + result.ExitCode);
                 return;
             }
             var shortcut = createDesktop ? result.DesktopState() : null;
             ExitCode = 0;
+            RecordAttempt("installed", null);
             heading.Text = Local("安装完成", "Installation complete");
             message.Text = Local("安装位置\r\n", "Installed in\r\n") + root
                 + Local("\r\n\r\n可从开始菜单或 Windows Terminal 启动 Gitgo。", "\r\n\r\nOpen Gitgo from Start or Windows Terminal.");
             if (createDesktop && shortcut != "ready")
                 message.Text += shortcut == "conflict" ? Local("\r\n桌面已有 Gitgo 快捷方式，原快捷方式已保留。", "\r\nThe desktop already has a Gitgo shortcut. It was preserved.")
                     : Local("\r\n桌面快捷方式未能创建。", "\r\nThe desktop shortcut could not be created.");
-            launch.Text = Local("启动 Gitgo", "Launch Gitgo");
-            launch.Dock = DockStyle.Top;
-            primary.Text = Local("完成", "Finish");
-            secondary.Visible = false;
-            ShowStatus(launch);
+            primary.Text = Local("启动 Gitgo", "Launch Gitgo");
+            secondary.Text = Local("关闭", "Close");
+            ShowStatus(null);
         }
-        catch (Exception error) { ShowFailure(error.Message); }
+        catch (Exception error) { ShowFailure(error.Message, "SETUP_" + error.GetType().Name); }
         finally
         {
             busy = false;
@@ -254,12 +266,47 @@ internal sealed class SetupWizard : Form
         }
     }
 
-    private void ShowFailure(string detail)
+    private bool RecordAttempt(string state, string code)
+    {
+        if (statusPath == null) return false;
+        var temporary = statusPath + "." + Guid.NewGuid().ToString("N");
+        var temporaryCreated = false;
+        try
+        {
+            var directoryPath = Path.GetDirectoryName(statusPath);
+            Directory.CreateDirectory(directoryPath);
+            if ((File.GetAttributes(directoryPath) & FileAttributes.ReparsePoint) != 0
+                || (File.Exists(statusPath) && (File.GetAttributes(statusPath) & FileAttributes.ReparsePoint) != 0))
+                return false;
+            var receipt = new { at_utc = DateTime.UtcNow.ToString("o"), state, code, install_root = selectedRoot };
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream))
+            {
+                temporaryCreated = true;
+                writer.Write(new JavaScriptSerializer().Serialize(receipt));
+            }
+            if (File.Exists(statusPath)) File.Replace(temporary, statusPath, null);
+            else File.Move(temporary, statusPath);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        finally
+        {
+            try { if (temporaryCreated && File.Exists(temporary)) File.Delete(temporary); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private void ShowFailure(string detail, string code)
     {
         failed = true;
         ExitCode = 1;
         heading.Text = Local("安装未完成", "Installation did not complete");
-        message.Text = Local("安装器报告了以下错误：\r\n\r\n", "Setup reported the following error:\r\n\r\n") + detail;
+        message.Text = detail;
+        if (RecordAttempt("failed", code))
+            message.Text += Local("\r\n\r\n安装记录\r\n", "\r\n\r\nInstallation record\r\n") + statusPath;
         primary.Text = Local("返回", "Back");
         secondary.Text = Local("关闭", "Close");
         ShowStatus(null);

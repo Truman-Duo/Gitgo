@@ -111,13 +111,20 @@ internal static class DistributionEntry
         if (!String.IsNullOrEmpty(desktop))
             arguments.AddRange(new[] { "--desktop-folder", desktop });
         report("install");
-        return RunCaptured(Host(package), arguments.ToArray(), Path.Combine(install, "bootstrap", "gitgo-host", "gitgo-host.exe"));
+        var launcher = Path.Combine(install, "bootstrap", "gitgo-host", "gitgo-host.exe");
+        var result = RunCaptured(Host(package), arguments.ToArray(), launcher);
+        if (result.ExitCode == 0 && (!result.ManagedInstallConfirmed()
+            || !File.Exists(launcher) || !File.Exists(Path.Combine(install, "active", "gitgo.exe"))
+            || !File.Exists(Path.Combine(install, "control", "registration.json"))))
+            return new SetupResult(2, "{\"code\":\"UPDATE_INSTALL_UNCONFIRMED\"}", result.Errors, launcher);
+        return result;
     }
 
     private static int Execute(string[] args, string workspace, ref bool handoff)
     {
         var quiet = args.Length > 0 && args[0] == "--install-only";
-        var defaultRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GitgoInstalled");
+        var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var defaultRoot = Path.Combine(localData, "GitgoInstalled");
         if (quiet)
         {
             if (args.Length > 2 && (args.Length != 4 || args[2] != "--desktop-folder"))
@@ -140,7 +147,8 @@ internal static class DistributionEntry
         using (var license = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.License")))
         using (var wizard = new SetupWizard(defaultRoot, license.ReadToEnd(),
             (root, desktop, report) => Install(root, desktop, workspace, report),
-            launcher => Start(launcher, "--gitgo-internal-role", "managed-launch").Dispose()))
+            launcher => Start(launcher, "--gitgo-internal-role", "managed-launch").Dispose(),
+            Path.Combine(localData, "GitgoSetup", "last-attempt.json")))
         {
             Application.Run(wizard);
             return wizard.ExitCode;

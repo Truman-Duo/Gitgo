@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+  <assemblyIdentity type="win32" name="Gitgo.Setup" version="1.0.0.0" />
+  <asmv3:trustInfo>
+    <asmv3:security>
+      <asmv3:requestedPrivileges>
+        <asmv3:requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </asmv3:requestedPrivileges>
+    </asmv3:security>
+  </asmv3:trustInfo>
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <gdiScaling xmlns="http://schemas.microsoft.com/SMI/2017/WindowsSettings">true</gdiScaling>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+</assembly>
