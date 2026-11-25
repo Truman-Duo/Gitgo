@@ -8,6 +8,8 @@
 
 ## 准备计划
 
+推送发布候选前按 `commit-config.json` 检查候选 HEAD 的正式提交编号、类型和作用域。CI 在原生构建开始前验证这些字段。
+
 先等同一规范提交的 `ci.yml` 完成。它提供 Windows x64、Linux x64/ARM64 和 macOS ARM64 的验收结果。Windows 从同一个已验收的受管 ZIP 生成 Setup 和 Portable，三项一并保存在 `windows-final-zip` 产物中，Unix 各目标交付一个归档。保存公开频道各目标的已签名 manifest/signature；下一版签名会验证来源、递增序列及升级路径。
 
 ```sh

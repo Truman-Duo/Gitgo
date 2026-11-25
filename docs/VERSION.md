@@ -1,5 +1,9 @@
 # Gitgo 版本
 
+## Alpha 3.2.1
+
+产品、Dashboard 与 Native Host 版本为 `1.0.0-alpha.3.2.1`，Windows 文件版本为 `1.0.0.8`。这个预览版本更新了 Windows 安装向导的协议和配置选项，并统一三平台的卸载默认值。下载安装包和校验文件见 [GitHub Releases](https://github.com/Truman-Duo/Gitgo/releases)，现有程序如何切换和保留配置见 [安装与卸载](INSTALL.md)。
+
 ## Alpha 3.1（发布候选）
 
 产品、Dashboard 与 Native Host：`1.0.0-alpha.3.1`；Windows 文件版本：`1.0.0.5`。发布标签为 `v1.0.0-alpha.3.1`，属于 preview 渠道。版本整合在必需检查通过后合入 master；原 Alpha 3 标签与资产保留不变。平台范围、升级边界和未完成评估见 [Alpha 3.1](ALPHA_3_1.md)，确切提交、树和最终归档验证结果以 [Release](https://github.com/Truman-Duo/Gitgo/releases/tag/v1.0.0-alpha.3.1) 摘要为准。

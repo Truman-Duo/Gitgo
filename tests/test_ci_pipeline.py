@@ -125,6 +125,14 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue({'python-windows', 'windows-package'} <= set(jobs['gate']['needs']))
         self.assertNotIn('python-windows', jobs['managed-update-windows']['needs'])
 
+    def test_windows_final_artifact_requires_verified_setup_and_portable(self):
+        steps = workflow('ci.yml')['jobs']['windows-package']['steps']
+        builds = [i for i, step in enumerate(steps) if '-BuildManagedEntries' in step.get('run', '')]
+        self.assertEqual(len(builds), 1)
+        self.assertIn('scripts/verify_windows_entries.ps1', steps[builds[0]]['run'])
+        upload = next(i for i, step in enumerate(steps) if step.get('with', {}).get('name') == 'windows-final-zip')
+        self.assertGreater(upload, builds[0])
+
     def test_frozen_and_ntfs_branches_join_without_duplicate_installer_execution(self):
         jobs = workflow('windows-update.yml')['jobs']
         self.assertNotIn('needs', jobs['frozen'])

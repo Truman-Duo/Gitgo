@@ -101,11 +101,12 @@ build, checks bundled Dashboard/Host and Node companion files, and retains the
 source commit/tree, per-file hashes and archive checksum. Synthetic archive
 regressions do not replace Windows frozen-package acceptance.
 
-Run the installed `uninstall.sh` to remove the application. It removes only
-Gitgo-owned command links, marked PATH entries, global configuration, and
-provider credentials (including native Keychain items). Runtime databases and
-all project directories, repositories, worktrees, and project `.gitgo` data
-are preserved. `--keep-config` keeps global configuration and credentials too.
+Run the installed `uninstall.sh` to remove the application, its owned command
+links, and marked PATH entries. Configuration and Keychain credentials are
+kept by default. `--remove-config` clears the default profile and its
+credentials. Add `--remove-project-metadata` to clear verified `.gitgo`
+directories in registered projects. Project directories, source, Git metadata,
+worktrees, and external runtime databases are preserved.
 
 `packaging/release_macos.sh` is the fail-closed release entry point. It mirrors
 the Windows privacy, test, clean-tree, commit-message, and build gates and never
@@ -386,9 +387,11 @@ After extracting the archive, run `./install.sh`. The per-user installer does
 not use `sudo`: it installs under `${XDG_DATA_HOME:-~/.local/share}/gitgo/app`,
 creates owned command links in `~/.local/bin`, and adds one marked PATH block
 for bash or zsh (or a fish `conf.d` file). Re-running it is an atomic upgrade
-with rollback. The installed `uninstall.sh` removes only Gitgo-owned links,
-PATH entries, global configuration, credentials, and application files. XDG
-runtime databases and every project/repository remain untouched.
+with rollback. The installed `uninstall.sh` defaults to removing the
+application, its links, and marked PATH entries. Use `--remove-config` to
+also clean the default profile and credentials. Add `--remove-project-metadata`
+to remove verified `.gitgo` directories in registered projects. XDG runtime
+databases, project directories, and repositories are preserved.
 
 Provider credentials use the desktop Secret Service through `secret-tool` and
 are represented on disk only by opaque references. Debian/Ubuntu users can
