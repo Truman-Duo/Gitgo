@@ -30,7 +30,8 @@ internal static class SetupRegistration
 
     internal static bool SamePath(string left, string right)
     {
-        return String.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        return String.Equals(left == null ? null : left.TrimEnd('\\'),
+            right == null ? null : right.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
     }
 
     private static Dictionary<string, object> ReadObject(string file)
