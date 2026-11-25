@@ -260,6 +260,24 @@ def test_changed_feed_is_not_overwritten_or_rolled_back(release):
         assert not evidence.read('feeds')
 
 
+def test_download_page_uses_version_release_and_leaves_feed_alone(release):
+    from types import SimpleNamespace
+    from scripts.release_control.recipe import GitgoNativeRecipe
+
+    plan, evidence, _ = release
+    plan['publication'] = 'download-page'
+    remote = Remote(plan)
+    with evidence.locked():
+        prepared = synthetic_prepared(plan, evidence)
+        baseline_assets = remote.assets(remote.release('updates-preview'))
+        row = delivery.draft(plan, evidence, remote, prepared)
+        GitgoNativeRecipe().publish(SimpleNamespace(plan=plan, evidence=evidence, remote=remote), prepared, row)
+        published = delivery.verify_public(plan, evidence, prepared, fetch=lambda url, fact: fact)
+        assert all(item['tag'] == plan['release']['tag'] for item in published['assets'])
+        assert remote.assets(remote.release('updates-preview')) == baseline_assets
+        assert not evidence.read('feeds')
+
+
 @pytest.mark.parametrize('change', ['tag', 'asset', 'extra-asset', 'source', 'ci', 'archive'])
 def test_old_success_never_authorizes_changed_release(release, change):
     plan, evidence, _ = release
@@ -513,7 +531,9 @@ def test_init_discovers_matrix_and_refuses_missing_artifact_or_plan_overwrite(re
     assert not path.exists()
     remote.missing = False
     generated = generate()
-    assert len(load(path)['artifacts']) == len(generated['targets']) == 4
+    resolved = load(path)
+    assert len(resolved['artifacts']) == len(generated['targets']) == 4
+    assert sorted(Path(name).name.split('-')[0] for name in resolved['windows_entries']) == ['GitgoPortable', 'GitgoSetup']
     assert not remote.writes
     with pytest.raises(ValueError, match='overwrite'):
         generate()

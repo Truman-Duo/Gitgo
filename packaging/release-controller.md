@@ -8,7 +8,7 @@
 
 ## 准备计划
 
-先等同一规范提交的 `ci.yml` 完成。它提供 Windows、Linux x64/ARM64 和 macOS ARM64 的验收结果与最终归档。保存上一版各目标的已签名 manifest/signature；下一版签名会验证来源、递增序列及升级路径。
+先等同一规范提交的 `ci.yml` 完成。它提供 Windows x64、Linux x64/ARM64 和 macOS ARM64 的验收结果。Windows 从同一个已验收的受管 ZIP 生成 Setup 和 Portable，三项一并保存在 `windows-final-zip` 产物中，Unix 各目标交付一个归档。保存公开频道各目标的已签名 manifest/signature；下一版签名会验证来源、递增序列及升级路径。
 
 ```sh
 python -B scripts/release_controller.py init \
@@ -20,6 +20,8 @@ python -B scripts/release_controller.py init \
 ```
 
 `init` 自动读取当前提交、tree、版本、频道和完整目标矩阵，并通过只读 API 查找该次 CI 的产物 ID。它不会签名、上传或发布。文件路径按计划文件所在目录解析；生成器使用绝对路径，计划及原始证据不得上传。已有计划不被覆盖。
+
+只发布手动下载时，在 `init` 追加 `--download-page-only`，省略 `--transition-evidence`。这一计划仍要求同提交的四目标 CI、完整附件及签名校验。`published` 只发布版本页，`verified` 并行做匿名摘要核对。需要推进更新频道时，使用频道发布计划和真实跨版本回执，保留已签名版本及其可下载地址。
 
 ## 执行与恢复
 

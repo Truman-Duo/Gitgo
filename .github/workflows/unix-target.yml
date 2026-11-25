@@ -95,6 +95,7 @@ jobs:
         with:
           name: native-${{ inputs.target }}-${{ inputs.commit }}
           overwrite: true
+          compression-level: 0
           path: dist-installer/*
           if-no-files-found: error
           retention-days: 14

@@ -31,11 +31,12 @@ class GitgoNativeRecipe:
         return delivery.draft(context.plan, context.evidence, context.remote, prepared)
 
     def publish(self, context, prepared, draft):
-        verify_transition(context.plan, prepared, context.evidence)
+        if context.plan.get('publication', 'channel') == 'channel':
+            verify_transition(context.plan, prepared, context.evidence)
         delivery.publish(context.plan, context.evidence, context.remote, prepared, draft)
 
     def verify(self, context, prepared):
-        delivery.verify_public(context.plan, context.evidence, prepared)
+        delivery.verify_public(context.plan, context.evidence, prepared, workers=context.workers)
 
     def result(self, phase, draft):
         if phase == "prepared":

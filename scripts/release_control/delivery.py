@@ -1,6 +1,7 @@
 """Reconcile external effects before writing; immutable releases, resumable feeds."""
 import hashlib
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, build_opener
@@ -119,8 +120,10 @@ def publish(plan, evidence, remote, prepared, row):
     row = remote.release(plan['release']['tag'])
     if not row or row['draft']:
         raise ValueError('Publication not observed')
-    advance_feeds(plan, evidence, remote, prepared)
-    evidence.record('published', 'success', release_id=row['id'])
+    publication = plan.get('publication', 'channel')
+    if publication == 'channel':
+        advance_feeds(plan, evidence, remote, prepared)
+    evidence.record('published', 'success', release_id=row['id'], scope=publication)
 
 
 class PublicRedirects(HTTPRedirectHandler):
@@ -143,17 +146,25 @@ def download_fact(url, expected):
     return {'bytes':value['size'], 'sha256':value['sha256']}
 
 
-def verify_public(plan, evidence, prepared, fetch=download_fact):
+def verify_public(plan, evidence, prepared, fetch=download_fact, workers=4):
     release = plan['release']
     base = 'https://github.com/' + release['repository'] + '/releases/download/'
     evidence.record('public-downloads', 'running')
-    verified = []
+    targets = []
+    with_channel = plan.get('publication', 'channel') == 'channel'
     for path, fact in prepared['assets'].items():
         name = Path(path).name
-        for tag in [release['tag']] + (['updates-' + release['channel']] if '.manifest.' in name else []):
-            url = base + quote(tag, safe='') + '/' + quote(name, safe='')
-            if fetch(url, fact) != fact:
-                raise ValueError('Anonymous public download mismatch: ' + name)
-            verified.append({'tag': tag, 'name': name, **fact})
+        for tag in [release['tag']] + (['updates-' + release['channel']] if with_channel and '.manifest.' in name else []):
+            targets.append((tag, name, fact))
+
+    def verify(item):
+        tag, name, fact = item
+        url = base + quote(tag, safe='') + '/' + quote(name, safe='')
+        if fetch(url, fact) != fact:
+            raise ValueError('Anonymous public download mismatch: ' + name)
+        return {'tag': tag, 'name': name, **fact}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        verified = list(pool.map(verify, targets))
     return evidence.record('public-downloads', 'success', assets=verified,
         native_managed_install_verified=False, formal_terminal_verified=False)

@@ -207,7 +207,7 @@ jobs:
       audit_only: true
 
   windows-package:
-    name: Windows final ZIP and frozen continuity
+    name: Windows final ZIP, Setup, Portable and frozen continuity
     needs: [contract, privacy, dashboard]
     runs-on: windows-2022
     timeout-minutes: 35
@@ -235,13 +235,15 @@ jobs:
           "GITGO_FINAL_PACKAGE_ROOT=$private" >> $env:GITHUB_ENV
           "TEMP=$private" >> $env:GITHUB_ENV
           "TMP=$private" >> $env:GITHUB_ENV
-      - name: Build, archive, then unpack final Windows ZIP
+      - name: Build final ZIP, Setup, and Portable from the same checkout
         run: |
-          & packaging/build_windows.ps1 -Python (Get-Command python).Source -Bun (Get-Command bun).Source -Ripgrep $env:GITGO_RIPGREP_PATH -RipgrepNotices $env:GITGO_RIPGREP_NOTICES -ManagedUpdate -UpdateReleasePolicy packaging/release-trust/windows-x86_64.json -Output "$env:GITGO_FINAL_PACKAGE_ROOT/stage"
+          & packaging/build_windows.ps1 -Python (Get-Command python).Source -Bun (Get-Command bun).Source -Ripgrep $env:GITGO_RIPGREP_PATH -RipgrepNotices $env:GITGO_RIPGREP_NOTICES -ManagedUpdate -BuildManagedEntries -UpdateReleasePolicy packaging/release-trust/windows-x86_64.json -Output "$env:GITGO_FINAL_PACKAGE_ROOT/stage"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $archives = @(Get-ChildItem dist-installer/*.zip)
           if ($archives.Count -ne 1) { throw 'Expected exactly one final Windows archive from build_windows.ps1' }
           $archive = $archives[0]
+          & scripts/verify_windows_entries.ps1 -Archive $archive.FullName -Directory $archive.DirectoryName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked"
           python -B scripts/smoke_packaged_runtime.py --host "$env:GITGO_FINAL_PACKAGE_ROOT/unpacked/internal/gitgo-host/gitgo-host.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -256,6 +258,7 @@ jobs:
         with:
           name: windows-final-zip
           overwrite: true
+          compression-level: 0
           path: dist-installer/*
           if-no-files-found: error
           retention-days: 14

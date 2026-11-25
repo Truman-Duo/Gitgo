@@ -43,6 +43,7 @@ def main(argv=None):
     parser.add_argument('--ci-run', type=int)
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--transition-evidence', type=Path, help='Native release-pair reports for channel publication')
+    parser.add_argument('--download-page-only', action='store_true', help='Publish verified manual downloads without changing the update feed')
     parser.add_argument('--notes', type=Path)
     parser.add_argument('--report', type=Path)
     args = parser.parse_args(argv)
@@ -55,7 +56,8 @@ def main(argv=None):
                 raise ValueError('init requires repository, sequence, key-id, private-key, ci-run, baseline and notes')
             create(args.plan, args.source, args.repository, args.sequence, args.key_id, args.private_key,
                 args.ci_run, args.baseline, args.notes, GitHub(args.repository, command),
-                transition_evidence=args.transition_evidence)
+                transition_evidence=args.transition_evidence,
+                publication='download-page' if args.download_page_only else 'channel')
             print('Release plan created. No remote changes made.')
             return 0
         plan = load(args.plan)
@@ -74,6 +76,7 @@ def main(argv=None):
         if args.command == 'plan':
             print(json.dumps({'release': plan['release'], 'targets': sorted(plan['targets']),
                 'checks': [{k: s[k] for k in ('id', 'needs') if k in s} for s in plan['checks']],
+                'publication': plan.get('publication', 'channel'), 'windows_entries': len(plan.get('windows_entries', ())),
                 'default_phase': 'prepared', 'remote_writes': False}, indent=2))
             return 0
         if args.evidence is None:

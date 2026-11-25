@@ -42,6 +42,8 @@ def load(path):
             or (release['channel'] == 'preview') != bool(version.prerelease)
             or type(release['sequence']) is not int or release['sequence'] < 1):
         raise ValueError('Version, tag, channel or sequence mismatch')
+    if plan.get('publication', 'channel') not in ('channel', 'download-page'):
+        raise ValueError('Unknown release publication scope')
     plan['notes'] = resolve(plan['notes'])
     if 'transition_evidence' in plan:
         plan['transition_evidence'] = resolve(plan['transition_evidence'])
@@ -65,6 +67,12 @@ def load(path):
             target[key] = resolve(target[key])
         if target.get('upgrade_route', 'direct') not in ('direct', 'legacy-repair'):
             raise ValueError('Unknown update route')
+    if 'windows_entries' in plan:
+        folder = Path(targets['windows-x86_64']['archive']).parent
+        expected = [folder / f'{stem}-{release["version"]}-win-x64.exe' for stem in ('GitgoSetup', 'GitgoPortable')]
+        plan['windows_entries'] = [resolve(path) for path in plan['windows_entries']]
+        if list(map(Path, plan['windows_entries'])) != expected:
+            raise ValueError('Expected Setup and Portable from the final Windows CI artifact')
     names = set()
     check_outputs = set()
     for step in plan['checks']:
@@ -103,7 +111,7 @@ def load(path):
 
 
 def create(path, source, repository, sequence, key_id, private_key, ci_run, baseline, notes, remote,
-           transition_evidence=None):
+           transition_evidence=None, publication='channel'):
     """Read-only discovery produces a ready-to-review plan, not a release."""
     from backend.core.update.manifest import TARGETS
     from .evidence import atomic
@@ -114,7 +122,7 @@ def create(path, source, repository, sequence, key_id, private_key, ci_run, base
     commit, tree = git(source, 'rev-parse', 'HEAD'), git(source, 'rev-parse', 'HEAD^{tree}')
     from backend.core.update.version import Version
     channel = 'preview' if Version.parse(product['version']).prerelease else 'stable'
-    value = {'schema_version': 1, 'source': str(source), 'notes': str(Path(notes).resolve()),
+    value = {'schema_version': 1, 'source': str(source), 'notes': str(Path(notes).resolve()), 'publication': publication,
         'release': {'repository': repository, 'version': product['version'], 'tag': 'v' + product['version'],
             'commit': commit, 'tree': tree, 'channel': channel, 'sequence': sequence},
         'signing': {'private_key': str(Path(private_key).resolve()), 'key_id': key_id},
@@ -145,6 +153,9 @@ def create(path, source, repository, sequence, key_id, private_key, ci_run, base
         value['targets'][target] = {'archive': str(output/name),
             'baseline_manifest': str(Path(baseline).resolve()/(target + '.manifest.json')),
             'baseline_signature': str(Path(baseline).resolve()/(target + '.manifest.sig'))}
+        if platform == 'windows':
+            value['windows_entries'] = [str(output / f'{stem}-{product["version"]}-win-x64.exe')
+                                        for stem in ('GitgoSetup', 'GitgoPortable')]
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic(path, value)
     return value

@@ -8,8 +8,10 @@ from .evidence import atomic, atomic_bytes, file_fact, digest
 
 
 def inputs(plan):
-    return {plan['notes']: file_fact(plan['notes'])} | {path: file_fact(path) for target in plan['targets'].values()
-            for path in (target['archive'], target['baseline_manifest'], target['baseline_signature'])}
+    paths = [plan['notes'], *plan.get('windows_entries', ())]
+    for target in plan['targets'].values():
+        paths.extend((target['archive'], target['baseline_manifest'], target['baseline_signature']))
+    return {path: file_fact(path) for path in paths}
 
 
 def prepare(plan, evidence):
@@ -28,8 +30,8 @@ def prepare(plan, evidence):
         if not receipt or receipt['state'] != 'success':
             raise ValueError('CI artifact acquisition evidence missing')
         admitted.update(receipt['outputs'])
-    if plan.get('artifacts') and any(admitted.get(t['archive']) != before[t['archive']]
-                                    for t in plan['targets'].values()):
+    deliverables = [t['archive'] for t in plan['targets'].values()] + list(plan.get('windows_entries', ()))
+    if plan.get('artifacts') and any(admitted.get(path) != before[path] for path in deliverables):
         raise ValueError('Release archive changed after verified CI acquisition')
     binding = digest({'inputs': before, 'public_key': public.hex(), 'notes': file_fact(plan['notes'])})
     previous = evidence.read('prepared')
@@ -80,6 +82,11 @@ def prepare(plan, evidence):
             atomic_bytes(checksum, (assets[str(archive)]['sha256'] + '  ' + archive.name + '\n').encode('ascii'))
             assets[str(checksum)] = file_fact(checksum)
             manifests.append(json.loads(manifest))
+    for entry in map(Path, plan.get('windows_entries', ())):
+        assets[str(entry)] = before[str(entry)]
+        checksum = generated / (entry.name + '.sha256')
+        atomic_bytes(checksum, (assets[str(entry)]['sha256'] + '  ' + entry.name + '\n').encode('ascii'))
+        assets[str(checksum)] = file_fact(checksum)
     if inputs(plan) != before:
         raise ValueError('Archive/baseline changed during signing')
     summary = generated/'validation-summary.json'

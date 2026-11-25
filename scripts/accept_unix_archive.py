@@ -86,14 +86,32 @@ def accept(archive, commit):
         sentinel = home / 'state' / 'keep.txt'
         sentinel.parent.mkdir(parents=True, exist_ok=True)
         sentinel.write_text('preserve user state')
-        run(str(installed / 'uninstall.sh'), '--bin-dir', str(commands), '--keep-config')
-        if installed.exists() or sentinel.read_text() != 'preserve user state':
-            raise ValueError('Uninstall did not preserve data or remove owned payload')
+        from uuid import uuid4
+        profile = home / '.gitgo'
+        profile.mkdir(exist_ok=True)
+        workspace = root / 'project'
+        metadata = workspace / '.gitgo'
+        metadata.mkdir(parents=True)
+        project_source = workspace / 'keep.txt'
+        project_source.write_text('preserve project source')
+        config = profile / 'config.json'
+        for flags in ((), ('--remove-config',), ('--remove-config', '--remove-project-metadata')):
+            if not installed.exists():
+                run(str(release / 'install.sh'), *arguments)
+            (metadata / 'project-id').write_text(str(uuid4()))
+            config.write_text(json.dumps({'projects': [{'name': 'fixture', 'workspace_path': str(workspace)}]}))
+            run(str(installed / 'uninstall.sh'), '--bin-dir', str(commands), *flags)
+            if (installed.exists() or config.exists() != (not flags)
+                    or metadata.exists() != ('--remove-project-metadata' not in flags)
+                    or sentinel.read_text() != 'preserve user state'
+                    or project_source.read_text() != 'preserve project source'):
+                raise ValueError('Uninstall did not respect the selected cleanup scope')
         return {'source': manifest['source'], 'platform': manifest['platform'],
                 'architecture': manifest['architecture'], 'archive_sha256': expected,
                 'passed': ['digest', 'payload inventory', 'clean install', 'owned upgrade',
                            'frozen Host/daemon/search/storage', 'conversation continuity',
-                           'frozen owned scope', 'real CI keyring and frozen cleanup', 'keep-config uninstall'],
+                           'frozen owned scope', 'real CI keyring and frozen cleanup',
+                           'default, config, and opt-in project metadata uninstall'],
                 'linux_frozen_protected_git': sys.platform == 'linux',
                 'pending': ['desktop keyring interaction', 'physical IME and visible terminal',
                             'independent maintainer trigger/download'],
