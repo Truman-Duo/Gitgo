@@ -368,7 +368,8 @@ def repair_windows_installation_entries(root_value, bin_value, *, desktop_folder
                 **_native_entries_after_install(root, active, desktop_folder)}
 
 
-def install_from_frozen_package(root_value: str, bin_value: str, protected_values: list[str], *, desktop_folder=None):
+def install_from_frozen_package(root_value: str, bin_value: str, protected_values: list[str], *, desktop_folder=None,
+                                fresh_profile=False):
     """Initial install or exact-source retry; no PATH edits or unknown adoption."""
     if not _ownership_supported() or not getattr(sys, "frozen", False):
         reject("UPDATE_INSTALL_INVALID", "Managed installer requires a packaged Host with native ownership support")
@@ -380,6 +381,8 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
     root, bin_dir = _new_path(root_value), _new_path(bin_value)
     if len(protected_values) > 128: reject("UPDATE_PROTECTED_PATHS", "Too many protected workspace paths")
     protected = tuple(dict.fromkeys((*protected_install_paths(), *(_new_path(p) for p in protected_values))))
+    if fresh_profile:
+        protected = tuple(dict.fromkeys((*protected, (Path.home() / ".gitgo/setup-profiles").resolve())))
     for other in (seed, bin_dir, *protected):
         if root == other or root.is_relative_to(other) or other.is_relative_to(root):
             reject("UPDATE_PROTECTED_PATHS", "Installation target overlaps package, command directory or data")
@@ -393,6 +396,8 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
         if not (seed / "native-entry.json").is_file() or not root.is_dir():
             reject("UPDATE_INSTALL_INVALID", "Initial managed target must be new or empty")
         store = open_managed(root)
+        if fresh_profile != (root / "control/setup-profile.json").is_file():
+            reject("UPDATE_INSTALL_INVALID", "Install retry would change the selected profile")
         ledger = store._ledger()
         if ledger["transaction"] is not None or ledger["current"]["tree_sha256"] != tree_digest(seed):
             reject("UPDATE_INSTALL_INVALID", "Install retry source differs from the registered payload")
@@ -411,6 +416,9 @@ def install_from_frozen_package(root_value: str, bin_value: str, protected_value
     _create_private_directories(bin_dir)
     # Never publish a public symlink before final registration and validation.
     store = initialize_managed(root, seed, protected_paths=protected)
+    if fresh_profile:
+        from .persistence import atomic_control
+        atomic_control(root / "control/setup-profile.json", {"schema_version": 1, "profile": "fresh"})
     _new_path(str(bin_dir))
     if os.name == "nt":
         # UTF-8 BOM is supported by Windows PowerShell 5.1 and PowerShell 7.
@@ -536,6 +544,21 @@ def _inherited_probe_lease(store):
     reject("UPDATE_PROBE_LEASE", "Candidate probe lacks its installation's exclusive lease")
 
 
+def _select_windows_setup_profile(store):
+    path = store.root / "control/setup-profile.json"
+    if os.name != "nt" or (not path.exists() and not path.is_symlink()):
+        return
+    if read_control(path) != {"schema_version": 1, "profile": "fresh"}:
+        reject("UPDATE_CONTROL_INVALID", "Installed profile choice is invalid")
+    installation_id = store.registration["installation_id"]
+    text(installation_id, r"[0-9a-f]{32}", 32)
+    profile = Path.home() / ".gitgo/setup-profiles" / installation_id
+    os.environ.update(GITGO_CONFIG_PATH=str(profile / "config.json"),
+        GITGO_LLM_CONFIG_PATH=str(profile / "llm_config.json"),
+        GITGO_LLM_SECRET_PATH=str(profile / "provider_secrets.json"),
+        GITGO_STATE_HOME=str(profile / "state"))
+
+
 def bootstrap_main(role: str, arguments: list[str]) -> int:
     if role not in {"managed-launch", "managed-recover"} or (role == "managed-recover" and arguments):
         reject("UPDATE_BOOTSTRAP_ROLE", "Invalid managed lifecycle arguments")
@@ -545,6 +568,7 @@ def bootstrap_main(role: str, arguments: list[str]) -> int:
     if physical is None or physical[1] != "bootstrap":
         reject("UPDATE_BOOTSTRAP_ROLE", "Managed lifecycle requires the stable installed bootstrap")
     store = open_managed(physical[0])
+    _select_windows_setup_profile(store)
     from .bootstrap_contract import ENGINE_DELEGATION_APIS
     # The immutable launcher owns process scope; API 13 brokers bounded probes
     # for the replaceable engine without permitting that engine to fork.

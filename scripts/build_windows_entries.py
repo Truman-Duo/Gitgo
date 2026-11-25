@@ -36,9 +36,17 @@ def build(archive, output, compiler):
         license_file = scratch / "license.txt"
         license_file.write_bytes(license_bytes)
         windows = ROOT / "packaging/windows"
+        uninstaller = scratch / "GitgoUninstall.exe"
+        subprocess.run([str(compiler), "/nologo", "/t:winexe", "/platform:x64", "/optimize+",
+                        "/define:UNINSTALL", f"/win32icon:{icon}", "/r:System.Windows.Forms.dll",
+                        "/r:System.Web.Extensions.dll", f"/out:{uninstaller}",
+                        str(windows / "SetupRegistration.cs"), str(windows / "SafeRecycle.cs")], check=True)
         setup_flags = ["/define:SETUP", "/r:System.Drawing.dll", "/r:System.Web.Extensions.dll",
                        f"/win32manifest:{windows / 'Setup.manifest'}",
-                       f"/resource:{license_file},Gitgo.License", str(windows / "SetupWizard.cs")]
+                       f"/resource:{license_file},Gitgo.License",
+                       f"/resource:{windows / 'preview-notice.txt'},Gitgo.PreviewNotice",
+                       f"/resource:{uninstaller},Gitgo.Uninstaller",
+                       str(windows / "SetupRegistration.cs"), str(windows / "SetupWizard.cs")]
         for stem, target, flags in (("GitgoPortable", "exe", []), ("GitgoSetup", "winexe", setup_flags)):
             name = f"{stem}-{product['version']}-win-x64.exe"
             result = scratch / name

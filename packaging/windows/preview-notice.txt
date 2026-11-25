@@ -1,0 +1,13 @@
+Gitgo 预览版使用须知与免责声明
+
+1. 本版本用于试用。功能、数据格式和升级路径可能变化。对重要项目进行操作或升级前，请确认已有可恢复的备份。
+2. 请核对模型使用的服务和账户，以及授权执行的操作。发送给第三方模型的请求按所选服务的条款处理，费用由相应服务和账户决定。
+3. 模型输出可能有误。请检查重要结果。获准执行的工具可能读取或修改文件、运行命令或连接外部服务，具体范围以当前操作和授权为准。
+4. 预览版按现状提供。在适用法律允许的范围内，Gitgo 不承诺不中断、无错误或适合特定用途。本说明不改变随附开源许可，也不限制依法无法排除的权利和责任。
+
+Gitgo Preview Notice
+
+1. This build is for preview use. Features, data formats, and upgrade paths may change. Confirm you have a recoverable backup before upgrading or working on important projects.
+2. Review the model service, account, and operations you authorize. Third-party model requests are subject to the selected service's terms, and any charges depend on that service and account.
+3. Model output may be inaccurate. Review important results. Authorized tools may read or change files, run commands, or contact external services within the scope of the operation and its authorization.
+4. The preview is provided as is. To the extent permitted by applicable law, Gitgo makes no promise of uninterrupted or error-free operation or fitness for a particular purpose. This notice does not change the accompanying open-source licenses or limit rights or liabilities that cannot be excluded by law.

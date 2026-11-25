@@ -84,15 +84,19 @@ internal sealed class SetupWizard : Form
     private readonly Button secondary = new Button { AutoSize = true };
     private readonly TextBox directory = new TextBox { Dock = DockStyle.Fill };
     private readonly CheckBox consent = new CheckBox { AutoSize = true };
+    private readonly CheckBox acceptNotice = new CheckBox { AutoSize = true };
     private readonly CheckBox desktop = new CheckBox { AutoSize = true };
+    private readonly RadioButton reuseProfile = new RadioButton { AutoSize = true };
+    private readonly RadioButton newProfile = new RadioButton { AutoSize = true };
     private readonly Label message = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
     private readonly Label welcome = new Label { Dock = DockStyle.Fill };
     private readonly Label installation = new Label { AutoSize = true, Margin = new Padding(0, 12, 0, 0) };
     private readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Top, Style = ProgressBarStyle.Marquee };
     private readonly TableLayoutPanel agreement, options;
-    private readonly Func<string, string, Action<SetupProgress>, SetupResult> install;
+    private readonly Func<string, string, bool, Action<SetupProgress>, SetupResult> install;
     private readonly Action<string> open;
     private readonly string statusPath;
+    private readonly bool existingProfile;
     private string selectedRoot;
     private SetupResult result;
     private Page page;
@@ -192,13 +196,16 @@ internal sealed class SetupWizard : Form
     {
         var configured = Environment.GetEnvironmentVariable("GITGO_CONFIG_PATH");
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var provider = Environment.GetEnvironmentVariable("GITGO_LLM_CONFIG_PATH");
+        var profile = Path.Combine(home, ".gitgo");
+        if (File.Exists(provider) || File.Exists(Path.Combine(profile, "llm_config.json"))) return true;
         if (!String.IsNullOrWhiteSpace(configured))
         {
             var path = configured.Trim();
             if (path.StartsWith("~/") || path.StartsWith("~\\")) path = Path.Combine(home, path.Substring(2));
             return File.Exists(path);
         }
-        return File.Exists(Path.Combine(home, ".gitgo", "config.json"))
+        return File.Exists(Path.Combine(profile, "config.json"))
             || File.Exists(Path.Combine(home, ".vernier", "gitgo_config.json"))
             || File.Exists(Path.Combine(Environment.CurrentDirectory, "gitgo_config.json"))
             || File.Exists(Path.Combine(Environment.CurrentDirectory, "sync_config.json"));
@@ -219,12 +226,14 @@ internal sealed class SetupWizard : Form
         catch (PathTooLongException) { return null; }
     }
 
-    public SetupWizard(string defaultRoot, string license,
-        Func<string, string, Action<SetupProgress>, SetupResult> install, Action<string> open, string statusPath = null)
+    public SetupWizard(string defaultRoot, string license, string notice,
+        Func<string, string, bool, Action<SetupProgress>, SetupResult> install, Action<string> open, string statusPath = null,
+        string existingRoot = null)
     {
         this.install = install;
         this.open = open;
         this.statusPath = statusPath;
+        existingProfile = HasProfile();
         Text = Local("Gitgo 安装", "Gitgo Setup");
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         AutoScaleMode = AutoScaleMode.None;
@@ -253,32 +262,44 @@ internal sealed class SetupWizard : Form
 
         welcome.Text = Local("Gitgo 将安装到当前 Windows 用户的账户。向导会检查安装位置，并设置启动入口。",
             "Gitgo will be installed for this Windows account. Setup checks the installation folder and registers launch entries.");
-        if (HasProfile())
-            welcome.Text += Local("\r\n\r\n已检测到以前的 Gitgo 配置。安装会保留这些设置。",
-                "\r\n\r\nExisting Gitgo configuration was detected. Setup preserves those settings.");
-        if (HasRegistration(defaultRoot))
-            welcome.Text += Local("\r\n\r\n默认目录已有受管安装。继续可检查并补全启动入口。",
-                "\r\n\r\nA managed installation exists in the default folder. Continue to verify and restore launch entries.");
+        if (existingRoot != null)
+            welcome.Text = Local("此 Windows 账户已安装 Gitgo。安装向导可检查并补全现有安装的启动及卸载入口。\r\n\r\n",
+                "Gitgo is already installed for this Windows account. Setup can verify and restore its launch and uninstall entries.\r\n\r\n")
+                + existingRoot;
+        else if (existingProfile)
+            welcome.Text += Local("\r\n\r\n已检测到以前的 Gitgo 配置。请在安装选项中选择是否复用。",
+                "\r\n\r\nExisting Gitgo configuration was detected. Choose whether to reuse it in Installation options.");
 
         agreement = Grid(1);
         agreement.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         agreement.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var terms = new TextBox { Text = license, ReadOnly = true, Multiline = true,
-            ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
+        agreement.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var policies = new TabControl { Dock = DockStyle.Fill };
+        foreach (var item in new[] { Tuple.Create(Local("开源许可", "Open-source notices"), license),
+            Tuple.Create(Local("Gitgo 使用须知与免责声明", "Gitgo Preview Notice"), notice) })
+        {
+            var policy = new TabPage(item.Item1);
+            policy.Controls.Add(new TextBox { Text = item.Item2, ReadOnly = true, Multiline = true,
+                ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window });
+            policies.TabPages.Add(policy);
+        }
         consent.Text = Local("我已阅读并同意 Apache 2.0 许可条款", "I have read and agree to the Apache 2.0 license terms");
         consent.Margin = new Padding(0, 8, 0, 0);
-        agreement.Controls.Add(terms, 0, 0);
+        acceptNotice.Text = Local("我已阅读并同意 Gitgo 使用须知与免责声明", "I accept the Gitgo Preview Notice");
+        agreement.Controls.Add(policies, 0, 0);
         agreement.Controls.Add(consent, 0, 1);
+        agreement.Controls.Add(acceptNotice, 0, 2);
 
         options = Grid(1);
-        for (int index = 0; index < 4; index++) options.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (int index = 0; index < 5; index++) options.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         options.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        directory.Text = defaultRoot;
+        directory.Text = existingRoot ?? defaultRoot;
+        directory.ReadOnly = existingRoot != null;
         var path = Grid(2);
         path.AutoSize = true;
         path.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         path.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var browse = new Button { AutoSize = true, Text = Local("浏览…", "Browse…") };
+        var browse = new Button { AutoSize = true, Enabled = existingRoot == null, Text = Local("浏览…", "Browse…") };
         browse.Click += (sender, args) => Browse();
         path.Controls.Add(directory, 0, 0);
         path.Controls.Add(browse, 1, 0);
@@ -289,19 +310,30 @@ internal sealed class SetupWizard : Form
         options.Controls.Add(path, 0, 1);
         options.Controls.Add(desktop, 0, 2);
         options.Controls.Add(installation, 0, 3);
+        var profiles = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        profiles.Controls.Add(LabelText(Local("已有配置", "Existing configuration")));
+        reuseProfile.Text = Local("复用现有配置", "Reuse existing configuration");
+        newProfile.Text = Local("使用独立的新配置，保留旧配置", "Use a fresh profile and preserve the original");
+        profiles.Controls.Add(reuseProfile);
+        profiles.Controls.Add(newProfile);
+        options.Controls.Add(profiles, 0, 4);
         applyLayoutMetrics = dpi => {
             Func<int, int> px = value => Pixels(value, dpi);
             layout.Padding = new Padding(px(22), px(18), px(22), px(14));
             heading.Margin = new Padding(0, 0, 0, px(8));
             actions.Padding = new Padding(0, px(10), 0, 0);
             primary.MinimumSize = secondary.MinimumSize = new Size(px(92), px(30));
-            consent.Margin = desktop.Margin = new Padding(0, px(8), 0, 0);
+            consent.Margin = acceptNotice.Margin = desktop.Margin = new Padding(0, px(8), 0, 0);
             installation.Margin = new Padding(0, px(12), 0, 0);
             folderLabel.Margin = new Padding(0, px(10), 0, px(6));
             progress.Height = px(23);
         };
 
         consent.CheckedChanged += (sender, args) => UpdateInstallButton();
+        acceptNotice.CheckedChanged += (sender, args) => UpdateInstallButton();
+        reuseProfile.CheckedChanged += (sender, args) => UpdateInstallButton();
+        newProfile.CheckedChanged += (sender, args) => UpdateInstallButton();
         directory.TextChanged += (sender, args) => UpdateInstallButton();
         primary.Click += (sender, args) => OnPrimary();
         secondary.Click += (sender, args) => OnSecondary();
@@ -350,12 +382,14 @@ internal sealed class SetupWizard : Form
     private void UpdateInstallButton()
     {
         if (page == Page.Welcome) primary.Enabled = true;
-        if (page == Page.License) primary.Enabled = consent.Checked;
+        if (page == Page.License) primary.Enabled = consent.Checked && acceptNotice.Checked;
         if (page == Page.Configuration)
         {
             var root = LocalRoot(directory.Text);
             var managed = HasRegistration(root);
-            primary.Enabled = root != null;
+            var chooseProfile = existingProfile && !managed;
+            reuseProfile.Parent.Visible = chooseProfile;
+            primary.Enabled = root != null && (!chooseProfile || reuseProfile.Checked || newProfile.Checked);
             primary.Text = managed ? Local("检查并补全", "Verify and restore") : Local("开始安装", "Install");
             installation.Text = managed
                 ? Local("已检测到安装记录。将检查程序，并补全缺失的启动入口。", "An installation was detected. Setup verifies it and restores missing launch entries.")
@@ -418,7 +452,7 @@ internal sealed class SetupWizard : Form
         if (page == Page.Welcome) { ShowPage(Page.License); return; }
         if (page == Page.License)
         {
-            if (consent.Checked) ShowPage(Page.Configuration);
+            if (consent.Checked && acceptNotice.Checked) ShowPage(Page.Configuration);
             return;
         }
         var root = LocalRoot(directory.Text);
@@ -430,6 +464,7 @@ internal sealed class SetupWizard : Form
         }
 
         var createDesktop = desktop.Checked;
+        var fresh = !HasRegistration(root) && newProfile.Checked;
         var desktopFolder = createDesktop ? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory) : null;
         selectedRoot = root;
         RecordAttempt("installing", null);
@@ -441,7 +476,7 @@ internal sealed class SetupWizard : Form
         ShowStatus(progress);
         try
         {
-            result = await Task.Run(() => install(root, desktopFolder, phase => BeginInvoke((Action)(() => UpdateProgress(phase)))));
+            result = await Task.Run(() => install(root, desktopFolder, fresh, phase => BeginInvoke((Action)(() => UpdateProgress(phase)))));
             if (result.ExitCode != 0)
             {
                 var code = Regex.Match(result.Output + "\n" + result.Errors, @"\b(?:UPDATE|NATIVE_ENTRY)_[A-Z0-9_]+\b");
@@ -451,6 +486,9 @@ internal sealed class SetupWizard : Form
                         "\r\nAccess checks failed for the configuration or installation files. Check permissions for the selected folder and configuration file.");
                 if (detail == "UPDATE_INSTALL_INVALID" || detail == "UPDATE_PROTECTED_PATHS")
                     detail += Local("\r\n请选择新的本机安装目录，且与项目和配置分开。", "\r\nChoose a new local installation folder outside project and configuration locations.");
+                if (detail == "UPDATE_INSTALL_ALREADY_EXISTS")
+                    detail += Local("\r\n当前账户已有 Gitgo 安装。请关闭向导并打开或修复现有安装。",
+                        "\r\nGitgo is already installed for this account. Close Setup and open or repair the existing installation.");
                 if (detail == "UPDATE_INSTALL_PAYLOAD_INCOMPLETE")
                     detail += Local("\r\n现有程序文件缺失或已变更。请选择新目录安装。", "\r\nInstalled program files are incomplete or modified. Choose a new folder.");
                 ShowFailure(detail, code.Success ? code.Value : "SETUP_HOST_EXIT_" + result.ExitCode);

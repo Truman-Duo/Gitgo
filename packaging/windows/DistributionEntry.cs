@@ -123,8 +123,17 @@ internal static class DistributionEntry
         }
     }
 
-    private static SetupResult Install(string root, string desktop, string workspace, Action<SetupProgress> report)
+    private static SetupResult Install(string root, string desktop, bool freshProfile, string workspace, Action<SetupProgress> report)
     {
+        return SetupRegistration.Exclusive(() => InstallExclusive(root, desktop, freshProfile, workspace, report));
+    }
+
+    private static SetupResult InstallExclusive(string root, string desktop, bool freshProfile, string workspace, Action<SetupProgress> report)
+    {
+        var existing = SetupRegistration.ExistingRoot(SetupRegistration.DefaultRoot,
+            Path.Combine(SetupRegistration.Maintenance, "last-attempt.json"));
+        if (existing != null && !SetupRegistration.SamePath(root, existing))
+            return new SetupResult(2, "{\"code\":\"UPDATE_INSTALL_ALREADY_EXISTS\"}", "", null);
         var package = Path.Combine(workspace, "package");
         var ready = Path.Combine(workspace, "extracted");
         if (!File.Exists(ready))
@@ -144,6 +153,7 @@ internal static class DistributionEntry
         var registration = Path.Combine(install, "control", "registration.json");
         var repair = File.Exists(registration);
         if (repair) arguments.Add("--repair-entries");
+        else if (freshProfile) arguments.Add("--fresh-profile");
         report(new SetupProgress(repair ? "repair" : "install"));
         var launcher = Path.Combine(install, "bootstrap", "gitgo-host", "gitgo-host.exe");
         var result = RunCaptured(Host(package), arguments.ToArray(), launcher);
@@ -151,21 +161,29 @@ internal static class DistributionEntry
             || !File.Exists(launcher) || !File.Exists(Path.Combine(install, "active", "gitgo.exe"))
             || !File.Exists(registration)))
             return new SetupResult(2, "{\"code\":\"UPDATE_INSTALL_UNCONFIRMED\"}", result.Errors, launcher);
+        if (result.ExitCode == 0) SetupRegistration.Publish(root);
         return result;
     }
 
     private static int Execute(string[] args, string workspace, ref bool handoff)
     {
         var quiet = args.Length > 0 && args[0] == "--install-only";
-        var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var defaultRoot = Path.Combine(localData, "GitgoInstalled");
+        var defaultRoot = SetupRegistration.DefaultRoot;
+        var statusPath = Path.Combine(SetupRegistration.Maintenance, "last-attempt.json");
         if (quiet)
         {
-            if (args.Length > 2 && (args.Length != 4 || args[2] != "--desktop-folder"))
-                throw new ArgumentException("Usage: GitgoSetup.exe [--install-only [directory [--desktop-folder directory]]]");
-            var root = args.Length >= 2 ? Path.GetFullPath(args[1]) : defaultRoot;
-            var desktop = args.Length == 4 ? Path.GetFullPath(args[3]) : null;
-            var result = Install(root, desktop, workspace, delegate { });
+            var index = 1;
+            var root = index < args.Length && !args[index].StartsWith("--") ? Path.GetFullPath(args[index++]) : defaultRoot;
+            string desktop = null;
+            var fresh = false;
+            while (index < args.Length)
+            {
+                var option = args[index++];
+                if (option == "--desktop-folder" && desktop == null && index < args.Length) desktop = Path.GetFullPath(args[index++]);
+                else if (option == "--fresh-profile" && !fresh) fresh = true;
+                else throw new ArgumentException("Usage: GitgoSetup.exe --install-only [directory] [--desktop-folder directory] [--fresh-profile]");
+            }
+            var result = Install(root, desktop, fresh, workspace, delegate { });
             Console.Out.Write(result.Output);
             Console.Error.Write(result.Errors);
             if (result.ExitCode != 0) return result.ExitCode;
@@ -179,10 +197,11 @@ internal static class DistributionEntry
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         using (var license = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.License")))
-        using (var wizard = new SetupWizard(defaultRoot, license.ReadToEnd(),
-            (root, desktop, report) => Install(root, desktop, workspace, report),
+        using (var notice = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.PreviewNotice")))
+        using (var wizard = new SetupWizard(defaultRoot, license.ReadToEnd(), notice.ReadToEnd(),
+            (root, desktop, fresh, report) => Install(root, desktop, fresh, workspace, report),
             launcher => Start(launcher, "--gitgo-internal-role", "managed-launch").Dispose(),
-            Path.Combine(localData, "GitgoSetup", "last-attempt.json")))
+            statusPath, SetupRegistration.ExistingRoot(defaultRoot, statusPath)))
         {
             Application.Run(wizard);
             return wizard.ExitCode;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -151,7 +152,10 @@ def _main(values: list[str]) -> int:
         parser.add_argument("--protected-path", action="append", default=[])
         parser.add_argument("--desktop-folder", type=Path)
         parser.add_argument("--repair-entries", action="store_true")
+        parser.add_argument("--fresh-profile", action="store_true")
         args = parser.parse_args(role_argv)
+        if args.fresh_profile and (args.repair_entries or os.name != "nt"):
+            parser.error("--fresh-profile requires a new Windows installation")
         from backend.core.native_entry import NativeEntryError
         from backend.core.update.installation import install_from_frozen_package, repair_windows_installation_entries
         from backend.core.update.validation import UpdateError
@@ -160,7 +164,8 @@ def _main(values: list[str]) -> int:
             if args.repair_entries:
                 receipt = repair_windows_installation_entries(args.root, args.bin_dir, desktop_folder=args.desktop_folder)
             else:
-                receipt = install_from_frozen_package(args.root, args.bin_dir, args.protected_path, desktop_folder=args.desktop_folder)
+                receipt = install_from_frozen_package(args.root, args.bin_dir, args.protected_path,
+                    desktop_folder=args.desktop_folder, fresh_profile=args.fresh_profile)
         except (UpdateError, NativeEntryError, OSError) as error:
             code = (error.code if isinstance(error, UpdateError) else
                     str(error) if isinstance(error, NativeEntryError) else "UPDATE_INSTALL_IO")
@@ -181,7 +186,6 @@ def _main(values: list[str]) -> int:
         from backend.core.update.installation import frontend_lease
         return frontend_lease(args.nonce)
     if name == "managed-capabilities":
-        import os
         from backend.core.update.installation import _ownership_supported
         if not _ownership_supported():
             from backend.core.update.validation import reject
