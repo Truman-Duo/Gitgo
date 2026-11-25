@@ -154,6 +154,7 @@ fi
   --output "$STAGE/product.json"
 cp "$SCRIPT_DIR/macos/install.sh" "$STAGE/install.sh"
 cp "$SCRIPT_DIR/unix/installer-common.sh" "$STAGE/installer-common.sh"
+cp "$SCRIPT_DIR/uninstall-data.py" "$STAGE/uninstall-data.py"
 cp "$SCRIPT_DIR/macos/uninstall.sh" "$STAGE/uninstall.sh"
 cp "$SCRIPT_DIR/macos/sandbox-helper.sh" "$STAGE/sandbox-helper.sh"
 cp "$ROOT/scripts/manage_macos_sandbox_service.py" "$STAGE/manage_macos_sandbox_service.py"

@@ -76,7 +76,7 @@ internal sealed class SetupResult
 
 internal sealed class SetupWizard : Form
 {
-    private enum Page { Welcome, License, Configuration, Progress }
+    private enum Page { Welcome, License, PreviewNotice, Configuration, Progress }
 
     private readonly Panel content = new Panel { Dock = DockStyle.Fill };
     private readonly Label heading = new Label { AutoSize = true };
@@ -92,7 +92,7 @@ internal sealed class SetupWizard : Form
     private readonly Label welcome = new Label { Dock = DockStyle.Fill };
     private readonly Label installation = new Label { AutoSize = true, Margin = new Padding(0, 12, 0, 0) };
     private readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Top, Style = ProgressBarStyle.Marquee };
-    private readonly TableLayoutPanel agreement, options;
+    private readonly TableLayoutPanel licensePage, noticePage, options;
     private readonly Func<string, string, bool, Action<SetupProgress>, SetupResult> install;
     private readonly Action<string> open;
     private readonly string statusPath;
@@ -107,14 +107,30 @@ internal sealed class SetupWizard : Form
     private const int WmDpiChanged = 0x02E0;
     public int ExitCode { get; private set; }
 
+    internal static bool IsChinese { get { return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "zh"; } }
+
     private static string Local(string chinese, string english)
     {
-        return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "zh" ? chinese : english;
+        return IsChinese ? chinese : english;
     }
 
     private static TableLayoutPanel Grid(int columns)
     {
         return new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = columns, Padding = new Padding(0) };
+    }
+
+    private static TableLayoutPanel AgreementPage(string text, CheckBox confirmation)
+    {
+        var layout = Grid(1);
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        // The native edit control expects CRLF hard line breaks.
+        var content = text.Replace("\r\n", "\n").Replace('\r', '\n').Replace("\n", "\r\n");
+        var terms = new TextBox { Text = content, ReadOnly = true, Multiline = true,
+            ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
+        layout.Controls.Add(terms, 0, 0);
+        layout.Controls.Add(confirmation, 0, 1);
+        return layout;
     }
 
     private static Label LabelText(string text)
@@ -270,25 +286,10 @@ internal sealed class SetupWizard : Form
             welcome.Text += Local("\r\n\r\n已检测到以前的 Gitgo 配置。请在安装选项中选择是否复用。",
                 "\r\n\r\nExisting Gitgo configuration was detected. Choose whether to reuse it in Installation options.");
 
-        agreement = Grid(1);
-        agreement.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        agreement.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        agreement.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var policies = new TabControl { Dock = DockStyle.Fill };
-        foreach (var item in new[] { Tuple.Create(Local("开源许可", "Open-source notices"), license),
-            Tuple.Create(Local("Gitgo 使用须知与免责声明", "Gitgo Preview Notice"), notice) })
-        {
-            var policy = new TabPage(item.Item1);
-            policy.Controls.Add(new TextBox { Text = item.Item2, ReadOnly = true, Multiline = true,
-                ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window });
-            policies.TabPages.Add(policy);
-        }
         consent.Text = Local("我已阅读并同意 Apache 2.0 许可条款", "I have read and agree to the Apache 2.0 license terms");
-        consent.Margin = new Padding(0, 8, 0, 0);
         acceptNotice.Text = Local("我已阅读并同意 Gitgo 使用须知与免责声明", "I accept the Gitgo Preview Notice");
-        agreement.Controls.Add(policies, 0, 0);
-        agreement.Controls.Add(consent, 0, 1);
-        agreement.Controls.Add(acceptNotice, 0, 2);
+        licensePage = AgreementPage(license, consent);
+        noticePage = AgreementPage(notice, acceptNotice);
 
         options = Grid(1);
         for (int index = 0; index < 5; index++) options.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -366,9 +367,15 @@ internal sealed class SetupWizard : Form
         }
         else if (next == Page.License)
         {
-            heading.Text = Local("许可协议", "License agreement");
-            content.Controls.Add(agreement);
+            heading.Text = Local("开源许可协议", "Open-source license");
+            content.Controls.Add(licensePage);
             ActiveControl = consent;
+        }
+        else if (next == Page.PreviewNotice)
+        {
+            heading.Text = Local("Gitgo 使用须知与免责声明", "Gitgo Preview Notice");
+            content.Controls.Add(noticePage);
+            ActiveControl = acceptNotice;
         }
         else
         {
@@ -382,7 +389,8 @@ internal sealed class SetupWizard : Form
     private void UpdateInstallButton()
     {
         if (page == Page.Welcome) primary.Enabled = true;
-        if (page == Page.License) primary.Enabled = consent.Checked && acceptNotice.Checked;
+        if (page == Page.License) primary.Enabled = consent.Checked;
+        if (page == Page.PreviewNotice) primary.Enabled = acceptNotice.Checked;
         if (page == Page.Configuration)
         {
             var root = LocalRoot(directory.Text);
@@ -400,7 +408,8 @@ internal sealed class SetupWizard : Form
     private void OnSecondary()
     {
         if (page == Page.License) ShowPage(Page.Welcome);
-        else if (page == Page.Configuration) ShowPage(Page.License);
+        else if (page == Page.PreviewNotice) ShowPage(Page.License);
+        else if (page == Page.Configuration) ShowPage(Page.PreviewNotice);
         else Close();
     }
 
@@ -452,7 +461,12 @@ internal sealed class SetupWizard : Form
         if (page == Page.Welcome) { ShowPage(Page.License); return; }
         if (page == Page.License)
         {
-            if (consent.Checked && acceptNotice.Checked) ShowPage(Page.Configuration);
+            if (consent.Checked) ShowPage(Page.PreviewNotice);
+            return;
+        }
+        if (page == Page.PreviewNotice)
+        {
+            if (acceptNotice.Checked) ShowPage(Page.Configuration);
             return;
         }
         var root = LocalRoot(directory.Text);

@@ -107,6 +107,13 @@ internal static class DistributionEntry
     }
 
 #if SETUP
+    private static string ReadPreviewNotice()
+    {
+        var resource = SetupWizard.IsChinese ? "Gitgo.PreviewNotice.zh" : "Gitgo.PreviewNotice.en";
+        using (var notice = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream(resource)))
+            return notice.ReadToEnd();
+    }
+
     private static SetupResult RunCaptured(string program, string[] arguments, string launcher = null)
     {
         var info = new ProcessStartInfo(program, String.Join(" ", Array.ConvertAll(arguments, Quote))) {
@@ -197,8 +204,7 @@ internal static class DistributionEntry
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         using (var license = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.License")))
-        using (var notice = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.PreviewNotice")))
-        using (var wizard = new SetupWizard(defaultRoot, license.ReadToEnd(), notice.ReadToEnd(),
+        using (var wizard = new SetupWizard(defaultRoot, license.ReadToEnd(), ReadPreviewNotice(),
             (root, desktop, fresh, report) => Install(root, desktop, fresh, workspace, report),
             launcher => Start(launcher, "--gitgo-internal-role", "managed-launch").Dispose(),
             statusPath, SetupRegistration.ExistingRoot(defaultRoot, statusPath)))

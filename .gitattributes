@@ -1,3 +1,4 @@
 # The icon manifest hashes the exact design and converter bytes.
 assets/brand/gitgo-icon.svg -text
 cli/dashboard/scripts/build-icons.ts text eol=lf
+packaging/**/*.sh text eol=lf

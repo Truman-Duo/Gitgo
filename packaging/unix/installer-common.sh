@@ -22,6 +22,23 @@ safe_path() {
 
 contains_path() { case "$2/" in "$1/"*) return 0 ;; *) return 1 ;; esac; }
 
+prepare_uninstall() {
+  local project_marker
+  project_marker="$(find "$INSTALL_ROOT" \( -name .git -o -path '*/.gitgo/project-id' \) -print)" ||
+    fail "The installation folder could not be inspected."
+  [ -z "$project_marker" ] || fail "A project was found inside the installation folder and was kept."
+}
+
+remove_gitgo_data() {
+  local host="$INSTALL_ROOT/internal/gitgo-host/gitgo-host"
+  local helper="$INSTALL_ROOT/uninstall-data.py"
+  local options=()
+  [ -x "$host" ] && [ -f "$helper" ] && [ ! -L "$helper" ] ||
+    fail "Gitgo data cleanup is unavailable; the installation was kept."
+  if [ "$1" -eq 1 ]; then options+=(--project-metadata); fi
+  "$host" --gitgo-internal-role python "$helper" clean ${options[@]+"${options[@]}"}
+}
+
 owner_record() {
   printf 'gitgo-install-v1\n%s\n%s\n%s\n%s\n%s\n' \
     "$PRODUCT_ID" "$PLATFORM" "$(id -u)" "$INSTALL_ROOT" "$BIN_DIR"

@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Security.Principal;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -191,7 +193,101 @@ internal static class SetupRegistration
         }
     }
 
-    private static int Uninstall()
+    private static bool ChooseRemoval(string title, out bool removeConfig, out bool removeMetadata)
+    {
+        using (var form = new Form { Text = title, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false, MaximizeBox = false })
+        {
+            var content = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown,
+                WrapContents = false, Padding = new Padding(16) };
+            var keep = new RadioButton { AutoSize = true, Checked = true,
+                Text = Local("仅卸载软件，保留配置", "Remove software and keep settings") };
+            var clean = new RadioButton { AutoSize = true,
+                Text = Local("卸载软件并清除配置与已保存的凭据", "Remove software, settings, and saved credentials") };
+            var metadata = new CheckBox { AutoSize = true, Enabled = false, Margin = new Padding(24, 4, 3, 4),
+                Text = Local("同时清除已登记项目中可核验的 .gitgo 目录", "Also remove verified .gitgo folders in registered projects") };
+            clean.CheckedChanged += (sender, args) => {
+                metadata.Enabled = clean.Checked;
+                if (!clean.Checked) metadata.Checked = false;
+            };
+            var note = new Label { AutoSize = true, MaximumSize = new Size(420, 0),
+                Text = Local("两种方式都保留项目目录和源码。项目外的会话数据库也会保留。",
+                    "Both options preserve project folders and source files. Conversation databases outside projects are also kept.") };
+            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill };
+            var cancel = new Button { Text = Local("取消", "Cancel"), AutoSize = true, DialogResult = DialogResult.Cancel };
+            var next = new Button { Text = Local("继续", "Continue"), AutoSize = true, DialogResult = DialogResult.OK };
+            buttons.Controls.AddRange(new Control[] { cancel, next });
+            content.Controls.AddRange(new Control[] { keep, clean, metadata, note, buttons });
+            form.Controls.Add(content);
+            form.AcceptButton = next;
+            form.CancelButton = cancel;
+            var confirmed = form.ShowDialog() == DialogResult.OK;
+            removeConfig = clean.Checked;
+            removeMetadata = clean.Checked && metadata.Checked;
+            return confirmed;
+        }
+    }
+
+    private static Dictionary<string, object> RunDataCleanup(string host, string arguments)
+    {
+        string script;
+        using (var data = Assembly.GetExecutingAssembly().GetManifestResourceStream("Gitgo.UninstallData"))
+        using (var reader = new StreamReader(data)) script = reader.ReadToEnd();
+        var quotedScript = "exec(__import__('base64').b64decode('" + Convert.ToBase64String(Encoding.UTF8.GetBytes(script)) + "'))";
+        var start = new ProcessStartInfo(host, "--gitgo-internal-role python -c \"" + quotedScript + "\" " + arguments) {
+            UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(host),
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
+        };
+        start.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+        using (var child = Process.Start(start))
+        {
+            var output = child.StandardOutput.ReadToEndAsync();
+            var error = child.StandardError.ReadToEndAsync();
+            if (!child.WaitForExit(60000))
+                throw new InvalidOperationException(Local("配置清理仍未完成。请稍后重试。", "Settings cleanup has not finished. Try again later."));
+            if (child.ExitCode != 0)
+                throw new InvalidOperationException(Local("无法清除 Gitgo 配置。", "Could not remove Gitgo settings.") + "\r\n" + error.Result);
+            return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(output.Result);
+        }
+    }
+
+    private static IEnumerable<string> Paths(Dictionary<string, object> plan, string key)
+    {
+        return ((System.Collections.IEnumerable)plan[key]).Cast<string>();
+    }
+
+    private static string FormatPaths(IEnumerable<string> paths)
+    {
+        return String.Join("\r\n", paths.Select(path => "  " + path));
+    }
+
+    private static bool ConfirmCleanup(string title, string summary)
+    {
+        using (var form = new Form { Text = title, ClientSize = new Size(590, 300), MinimumSize = new Size(390, 230),
+            StartPosition = FormStartPosition.CenterScreen, MinimizeBox = false })
+        {
+            var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+                Padding = new Padding(16) };
+            content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            content.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var paths = new TextBox { Text = summary, ReadOnly = true, Multiline = true,
+                ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
+            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill };
+            var cancel = new Button { Text = Local("取消", "Cancel"), AutoSize = true, DialogResult = DialogResult.Cancel };
+            var remove = new Button { Text = Local("确认卸载", "Confirm uninstall"), AutoSize = true, DialogResult = DialogResult.OK };
+            buttons.Controls.AddRange(new Control[] { cancel, remove });
+            content.Controls.Add(paths, 0, 0);
+            content.Controls.Add(buttons, 0, 1);
+            form.Controls.Add(content);
+            form.ActiveControl = cancel;
+            form.CancelButton = cancel;
+            return form.ShowDialog() == DialogResult.OK;
+        }
+    }
+
+    private static int Uninstall(bool removeConfig, bool removeMetadata, string title)
     {
         var root = RegisteredValue("InstallLocation");
         var id = RegisteredValue("GitgoInstallationId");
@@ -210,12 +306,43 @@ internal static class SetupRegistration
                 var attributes = File.GetAttributes(path);
                 if ((attributes & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidOperationException("The installation contains a redirected item.");
+                if (Path.GetFileName(path).Equals(".git", StringComparison.OrdinalIgnoreCase)
+                    || (Path.GetFileName(path) == "project-id" && Path.GetFileName(Path.GetDirectoryName(path)) == ".gitgo"))
+                    throw new InvalidOperationException("A project was found inside the installation folder and was kept.");
                 if ((attributes & FileAttributes.Directory) != 0) folders.Push(path);
             }
         }
         AssertIdle(root);
         var program = Path.Combine(root, "program");
         var host = Path.Combine(program, "active", "internal", "gitgo-host", "gitgo-host.exe");
+        if (removeConfig)
+        {
+            var profilePath = Path.Combine(program, "control", "setup-profile.json");
+            var options = removeMetadata ? " --project-metadata" : "";
+            if (File.Exists(profilePath))
+            {
+                var profile = ReadObject(profilePath);
+                if (Field(profile, "profile") != "fresh")
+                    throw new InvalidOperationException("The installed Gitgo profile could not be verified.");
+                options += " --profile-id " + id;
+            }
+            var plan = RunDataCleanup(host, "preview" + options);
+            var token = Field(plan, "token");
+            if (token == null || !Regex.IsMatch(token, @"\A[0-9a-f]{64}\z"))
+                throw new InvalidOperationException("The verified Gitgo cleanup plan is unavailable.");
+            var files = Paths(plan, "files").Concat(Paths(plan, "metadata")).ToArray();
+            var skipped = Paths(plan, "skipped").ToArray();
+            if (files.Length != 0 || skipped.Length != 0)
+            {
+                var summary = Local("以下 Gitgo 数据将随软件删除。", "The following Gitgo data will be removed with the software.")
+                    + "\r\n" + FormatPaths(files);
+                if (skipped.Length != 0)
+                    summary += "\r\n\r\n" + Local("无法核验并会保留的项目元数据：", "Unverified project metadata will be kept:")
+                        + "\r\n" + FormatPaths(skipped);
+                if (!ConfirmCleanup(title, summary)) return 1;
+                RunDataCleanup(host, "clean" + options + " --expect " + token);
+            }
+        }
         using (var child = Process.Start(new ProcessStartInfo(host,
             "--gitgo-internal-role native-entry --action remove --root \"" + program + "\"")
             { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Maintenance }))
@@ -236,10 +363,15 @@ internal static class SetupRegistration
         var quiet = args.Length == 1 && args[0] == "--quiet";
         if (!quiet && args.Length != 0) return 2;
         var title = Local("卸载 Gitgo", "Gitgo Uninstall");
-        if (!quiet && MessageBox.Show(Local("卸载当前登记的 Gitgo 安装？配置、项目和会话数据将保留。",
-            "Remove the registered Gitgo installation? Your profiles, projects and conversations are kept."),
-            title, MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return 1;
-        try { return Exclusive(Uninstall); }
+        var removeConfig = false;
+        var removeMetadata = false;
+        if (!quiet)
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            if (!ChooseRemoval(title, out removeConfig, out removeMetadata)) return 1;
+        }
+        try { return Exclusive(() => Uninstall(removeConfig, removeMetadata, title)); }
         catch (Exception error)
         {
             if (!quiet) MessageBox.Show(error.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);

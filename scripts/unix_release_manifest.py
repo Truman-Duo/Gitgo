@@ -45,7 +45,7 @@ def write(stage, bun):
     if product != render_manifest(ROOT / 'packaging/product.json', *target):
         raise ValueError('Staged product contract differs from source')
     required = ('gitgo', 'internal/gitgo-host/gitgo-host', 'installer-common.sh',
-                'install.sh', 'uninstall.sh', 'dashboard/dist/cli.js', 'dashboard/dist/trace.js',
+                'install.sh', 'uninstall.sh', 'uninstall-data.py', 'dashboard/dist/cli.js', 'dashboard/dist/trace.js',
                 'dashboard/scripts/launch.mjs', 'dashboard/scripts/runtime.mjs')
     if any(not (stage / name).is_file() for name in required):
         raise ValueError('Incomplete native payload')

@@ -1,0 +1,11 @@
+1. Data Security and Ongoing Maintenance
+Gitgo is provided as a preview. Gitgo does not guarantee the security, integrity, or recoverability of data during use of the software, assumes no obligation to maintain the software on an ongoing basis, and makes no commitment to continue providing updates, bug fixes, or technical support.
+
+2. Generated Content and Rights
+Gitgo assumes no liability for content generated using the software or for the consequences of its use. Gitgo does not acquire or claim any copyright, ownership, or other rights or interests in such content by virtue of its generation through the software.
+
+3. Open-Source License and Fees
+Gitgo is released as open-source software under the Apache License 2.0. No third party may charge fees for this software in the name of its original author without that author's authorization.
+
+4. Revisions to These Terms
+Gitgo's original author reserves the right to revise these terms of use.

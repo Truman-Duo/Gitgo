@@ -135,6 +135,7 @@ fi
   --shell-output "$STAGE/product.env"
 cp "$SCRIPT_DIR/linux/install.sh" "$STAGE/install.sh"
 cp "$SCRIPT_DIR/unix/installer-common.sh" "$STAGE/installer-common.sh"
+cp "$SCRIPT_DIR/uninstall-data.py" "$STAGE/uninstall-data.py"
 cp "$SCRIPT_DIR/linux/uninstall.sh" "$STAGE/uninstall.sh"
 cp "$ROOT/LICENSE.md" "$STAGE/LICENSE.md"
 "$PYTHON_BIN" -B "$ROOT/scripts/stage_native_entry.py" --stage "$STAGE"

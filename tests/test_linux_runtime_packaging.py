@@ -45,7 +45,8 @@ def test_linux_uninstaller_preserves_xdg_runtime_and_project_state_by_contract()
         encoding="utf-8",
     )
 
-    assert "credential-cleanup" in uninstall
+    assert "REMOVE_CONFIG=0" in uninstall
+    assert 'remove_gitgo_data "$REMOVE_PROJECT_METADATA"' in uninstall
     assert "XDG runtime databases and every project directory are always preserved" in uninstall
     assert 'rm -rf "$INSTALL_ROOT"' in uninstall
     assert "XDG_STATE_HOME" not in uninstall
@@ -119,5 +120,7 @@ def test_linux_install_upgrade_and_safe_uninstall(tmp_path_factory):
     assert not command.exists()
     assert runtime_state.read_text(encoding="utf-8") == "keep"
     assert project_metadata.read_text(encoding="utf-8") == "keep"
-    assert not (config_root / "provider_secrets.json").exists()
+    assert all((config_root / name).exists() for name in (
+        "config.json", "commit-config.json", "llm_config.json", "provider_secrets.json",
+    ))
     assert "Gitgo managed PATH" not in (home / ".profile").read_text(encoding="utf-8")
