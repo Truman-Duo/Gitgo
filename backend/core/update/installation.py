@@ -26,7 +26,7 @@ from .persistence import filesystem_identity, descriptor_identity, validate_devi
 from .staging import _staging_parent
 from .transaction import InstallationStore, TransactionResult, _initialize_store, TERMINAL
 from .tree import inventory, tree_digest, sync_tree
-from .validation import UpdateError, digest, fields, json_object, number, reject
+from .validation import UpdateError, digest, fields, json_object, number, reject, text
 
 
 def _ownership_supported():
