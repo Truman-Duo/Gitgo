@@ -14,7 +14,16 @@ using Microsoft.Win32;
 internal static class SetupRegistration
 {
     private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\GitgoManaged";
-    internal static string LocalData { get { return Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData); } }
+    internal static string LocalData
+    {
+        get
+        {
+            var folder = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (String.IsNullOrEmpty(folder)) folder = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+            if (!LocalPath(folder)) throw new InvalidOperationException("Windows Local AppData is unavailable.");
+            return folder;
+        }
+    }
     internal static string Maintenance { get { return Path.Combine(LocalData, "GitgoSetup"); } }
     internal static string DefaultRoot { get { return Path.Combine(LocalData, "GitgoInstalled"); } }
     private static string Uninstaller { get { return Path.Combine(Maintenance, "GitgoUninstall.exe"); } }
@@ -120,7 +129,7 @@ internal static class SetupRegistration
 
     private static void AssertUnredirected(string path)
     {
-        for (var current = path; current != null; current = Path.GetDirectoryName(current))
+        for (var current = path; !String.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
             if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidOperationException("An installation path is redirected.");
     }
